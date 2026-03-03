@@ -14,6 +14,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_object::ObjectModule;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -1140,6 +1141,79 @@ pub(crate) struct RuntimeCallRefs {
     pub(crate) collection_i32_load: FuncRef,
     pub(crate) collection_i32_store: FuncRef,
     pub(crate) extern_calls: BTreeMap<ExternImportKey, FuncRef>,
+}
+
+pub(crate) struct AotDirectCallMode<'a> {
+    pub(crate) module: &'a mut ObjectModule,
+    pub(crate) self_function_id: FunctionId,
+    pub(crate) self_clif_func_id: FuncId,
+    pub(crate) imported_function_ids: HashMap<FunctionId, FuncId>,
+}
+
+pub(crate) enum InternalCallMode<'a> {
+    Jit,
+    AotDirect(AotDirectCallMode<'a>),
+}
+
+fn aot_symbol_name(function_id: FunctionId) -> String {
+    format!("aot_fn_{function_id}")
+}
+
+fn emit_aot_direct_call_for_signature(
+    builder: &mut FunctionBuilder<'_>,
+    mode: &mut AotDirectCallMode<'_>,
+    signature: &CallSignature,
+    arg_values: &[Value],
+    type_table: &TypeTable,
+) -> Result<Option<Value>, String> {
+    if signature.extern_symbol.is_some() {
+        return Err("direct call emission requested for extern signature".to_string());
+    }
+    let function_id = signature
+        .function_id
+        .ok_or_else(|| "direct call emission requested for missing function id".to_string())?;
+
+    let callee_func_id = if function_id == mode.self_function_id {
+        mode.self_clif_func_id
+    } else if let Some(existing) = mode.imported_function_ids.get(&function_id).copied() {
+        existing
+    } else {
+        let symbol = aot_symbol_name(function_id);
+        let mut import_signature = mode.module.make_signature();
+        for param_type in &signature.params {
+            import_signature.params.push(AbiParam::new(clif_type_for_type_id(
+                *param_type,
+                type_table,
+            )?));
+        }
+        if signature.return_type != TYPE_ID_VOID {
+            import_signature
+                .returns
+                .push(AbiParam::new(clif_type_for_type_id(
+                    signature.return_type,
+                    type_table,
+                )?));
+        }
+        let func_id = mode
+            .module
+            .declare_function(&symbol, Linkage::Import, &import_signature)
+            .map_err(|error| format!("failed to declare AOT import {symbol}: {error}"))?;
+        mode.imported_function_ids.insert(function_id, func_id);
+        func_id
+    };
+
+    let func_ref = mode
+        .module
+        .declare_func_in_func(callee_func_id, builder.func);
+    let call = builder.ins().call(func_ref, arg_values);
+    if signature.return_type == TYPE_ID_VOID {
+        Ok(None)
+    } else {
+        let value = builder.inst_results(call).first().copied().ok_or_else(|| {
+            "direct call expected value result but produced none".to_string()
+        })?;
+        Ok(Some(value))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2789,6 +2863,7 @@ pub(crate) fn snippet_from(source: &str, cursor: usize) -> String {
 pub(crate) fn emit_host_print_call_statement(
     builder: &mut FunctionBuilder<'_>,
     runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
     type_table: &TypeTable,
     target: &str,
     args: &[SimpleExpr],
@@ -2819,6 +2894,7 @@ pub(crate) fn emit_host_print_call_statement(
         &args[0],
         values_by_name,
         runtime_call_refs,
+        internal_calls,
         call_signatures,
         type_table,
         global_path_types,
@@ -2952,6 +3028,7 @@ pub(crate) fn ensure_no_variable_shadowing(
 pub(crate) fn try_emit_indexed_struct_copy_assignment(
     builder: &mut FunctionBuilder<'_>,
     runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
     type_table: &TypeTable,
     target: &AssignTarget,
     op: AssignOp,
@@ -2999,6 +3076,7 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
         target_index,
         values_by_name,
         runtime_call_refs,
+        internal_calls,
         call_signatures,
         type_table,
         global_path_types,
@@ -3012,6 +3090,7 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
         source_index,
         values_by_name,
         runtime_call_refs,
+        internal_calls,
         call_signatures,
         type_table,
         global_path_types,
@@ -3228,6 +3307,7 @@ pub(crate) fn try_emit_global_struct_copy_assignment(
 pub(crate) fn try_emit_struct_copy_from_indexed_to_global(
     builder: &mut FunctionBuilder<'_>,
     runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
     type_table: &TypeTable,
     target: &AssignTarget,
     op: AssignOp,
@@ -3309,6 +3389,7 @@ pub(crate) fn try_emit_struct_copy_from_indexed_to_global(
         source_index,
         values_by_name,
         runtime_call_refs,
+        internal_calls,
         call_signatures,
         type_table,
         global_path_types,
@@ -3344,6 +3425,7 @@ pub(crate) fn try_emit_struct_copy_from_indexed_to_global(
 pub(crate) fn try_emit_struct_copy_from_global_to_indexed(
     builder: &mut FunctionBuilder<'_>,
     runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
     type_table: &TypeTable,
     target: &AssignTarget,
     op: AssignOp,
@@ -3421,6 +3503,7 @@ pub(crate) fn try_emit_struct_copy_from_global_to_indexed(
         target_index,
         values_by_name,
         runtime_call_refs,
+        internal_calls,
         call_signatures,
         type_table,
         global_path_types,
@@ -3458,6 +3541,7 @@ pub(crate) fn emit_simple_statements(
     statements: &[SimpleStmt],
     values_by_name: &mut BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
     global_path_types: &GlobalPathTypeMap,
@@ -3488,6 +3572,7 @@ pub(crate) fn emit_simple_statements(
                     expression,
                     values_by_name,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -3534,6 +3619,7 @@ pub(crate) fn emit_simple_statements(
                 if try_emit_indexed_struct_copy_assignment(
                     builder,
                     runtime_call_refs,
+                    internal_calls,
                     type_table,
                     target,
                     *op,
@@ -3564,6 +3650,7 @@ pub(crate) fn emit_simple_statements(
                 if try_emit_struct_copy_from_indexed_to_global(
                     builder,
                     runtime_call_refs,
+                    internal_calls,
                     type_table,
                     target,
                     *op,
@@ -3581,6 +3668,7 @@ pub(crate) fn emit_simple_statements(
                 if try_emit_struct_copy_from_global_to_indexed(
                     builder,
                     runtime_call_refs,
+                    internal_calls,
                     type_table,
                     target,
                     *op,
@@ -3600,6 +3688,7 @@ pub(crate) fn emit_simple_statements(
                     expression,
                     values_by_name,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -3989,6 +4078,7 @@ pub(crate) fn emit_simple_statements(
                                 index,
                                 values_by_name,
                                 runtime_call_refs,
+                                internal_calls,
                                 call_signatures,
                                 type_table,
                                 global_path_types,
@@ -4022,6 +4112,7 @@ pub(crate) fn emit_simple_statements(
                             index,
                             values_by_name,
                             runtime_call_refs,
+                            internal_calls,
                             call_signatures,
                             type_table,
                             global_path_types,
@@ -4054,6 +4145,7 @@ pub(crate) fn emit_simple_statements(
                     source,
                     values_by_name,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -4128,6 +4220,7 @@ pub(crate) fn emit_simple_statements(
                             index,
                             values_by_name,
                             runtime_call_refs,
+                            internal_calls,
                             call_signatures,
                             type_table,
                             global_path_types,
@@ -4155,6 +4248,7 @@ pub(crate) fn emit_simple_statements(
                     let handled = emit_host_print_call_statement(
                         builder,
                         runtime_call_refs,
+                        internal_calls,
                         type_table,
                         target,
                         args,
@@ -4177,6 +4271,7 @@ pub(crate) fn emit_simple_statements(
                             arg,
                             values_by_name,
                             runtime_call_refs,
+                            internal_calls,
                             call_signatures,
                             type_table,
                             global_path_types,
@@ -4199,13 +4294,26 @@ pub(crate) fn emit_simple_statements(
                                 &arg_values,
                             )?;
                         } else {
-                            let _ = emit_indirect_call_for_signature(
-                                builder,
-                                runtime_call_refs,
-                                signature,
-                                &arg_values,
-                                type_table,
-                            )?;
+                            match internal_calls {
+                                InternalCallMode::Jit => {
+                                    let _ = emit_indirect_call_for_signature(
+                                        builder,
+                                        runtime_call_refs,
+                                        signature,
+                                        &arg_values,
+                                        type_table,
+                                    )?;
+                                }
+                                InternalCallMode::AotDirect(mode) => {
+                                    let _ = emit_aot_direct_call_for_signature(
+                                        builder,
+                                        mode,
+                                        signature,
+                                        &arg_values,
+                                        type_table,
+                                    )?;
+                                }
+                            }
                         }
                         continue;
                     }
@@ -4215,6 +4323,7 @@ pub(crate) fn emit_simple_statements(
                     expression,
                     values_by_name,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -4237,6 +4346,7 @@ pub(crate) fn emit_simple_statements(
                     expression,
                     values_by_name,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -4275,6 +4385,7 @@ pub(crate) fn emit_simple_statements(
                     condition,
                     values_by_name,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -4298,6 +4409,7 @@ pub(crate) fn emit_simple_statements(
                     then_statements,
                     &mut then_values,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -4322,6 +4434,7 @@ pub(crate) fn emit_simple_statements(
                         else_statements,
                         &mut else_values,
                         runtime_call_refs,
+                        internal_calls,
                         call_signatures,
                         type_table,
                         global_path_types,
@@ -4358,6 +4471,7 @@ pub(crate) fn emit_simple_statements(
                     init.as_ref(),
                     &mut loop_values,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -4385,6 +4499,7 @@ pub(crate) fn emit_simple_statements(
                     condition,
                     &loop_values,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -4404,6 +4519,7 @@ pub(crate) fn emit_simple_statements(
                     body_statements,
                     &mut loop_values,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -4426,6 +4542,7 @@ pub(crate) fn emit_simple_statements(
                     step.as_ref(),
                     &mut loop_values,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -4551,6 +4668,7 @@ pub(crate) fn emit_simple_statements(
                     body_statements,
                     &mut loop_values,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -4622,6 +4740,7 @@ pub(crate) fn emit_for_control_statement(
     statement: &SimpleStmt,
     values_by_name: &mut BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
     global_path_types: &GlobalPathTypeMap,
@@ -4643,6 +4762,7 @@ pub(crate) fn emit_for_control_statement(
                 std::slice::from_ref(statement),
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -5209,6 +5329,7 @@ pub(crate) fn emit_simple_expression(
     expression: &SimpleExpr,
     values_by_name: &BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
     global_path_types: &GlobalPathTypeMap,
@@ -5252,6 +5373,7 @@ pub(crate) fn emit_simple_expression(
                 condition,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -5364,6 +5486,7 @@ pub(crate) fn emit_simple_expression(
                     index,
                     values_by_name,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -5394,6 +5517,7 @@ pub(crate) fn emit_simple_expression(
                 index,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -5421,6 +5545,7 @@ pub(crate) fn emit_simple_expression(
                     arg,
                     values_by_name,
                     runtime_call_refs,
+                    internal_calls,
                     call_signatures,
                     type_table,
                     global_path_types,
@@ -5504,6 +5629,25 @@ pub(crate) fn emit_simple_expression(
                     runtime_call_refs,
                     signature,
                     &arg_values,
+                )?;
+                let value = result.ok_or_else(|| {
+                    format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )
+                })?;
+                return Ok(ValueBinding {
+                    value,
+                    type_id: signature.return_type,
+                });
+            }
+            if let InternalCallMode::AotDirect(mode) = internal_calls {
+                let result = emit_aot_direct_call_for_signature(
+                    builder,
+                    mode,
+                    signature,
+                    &arg_values,
+                    type_table,
                 )?;
                 let value = result.ok_or_else(|| {
                     format!(
@@ -5874,6 +6018,7 @@ pub(crate) fn emit_simple_expression(
                 lhs,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -5887,6 +6032,7 @@ pub(crate) fn emit_simple_expression(
                 rhs,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -7043,6 +7189,7 @@ pub(crate) fn emit_simple_condition(
     condition: &SimpleCondition,
     values_by_name: &BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
     global_path_types: &GlobalPathTypeMap,
@@ -7058,6 +7205,7 @@ pub(crate) fn emit_simple_condition(
                 lhs,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -7071,6 +7219,7 @@ pub(crate) fn emit_simple_condition(
                 rhs,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -7111,6 +7260,7 @@ pub(crate) fn emit_simple_condition(
                 expression,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -7133,6 +7283,7 @@ pub(crate) fn emit_simple_condition(
                 lhs,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -7157,6 +7308,7 @@ pub(crate) fn emit_simple_condition(
                 rhs,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -7181,6 +7333,7 @@ pub(crate) fn emit_simple_condition(
                 lhs,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -7209,6 +7362,7 @@ pub(crate) fn emit_simple_condition(
                 rhs,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -7229,6 +7383,7 @@ pub(crate) fn emit_simple_condition(
                 inner,
                 values_by_name,
                 runtime_call_refs,
+                internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,

@@ -27,7 +27,6 @@ pub struct AotProcess {
     compiler: Compiler,
     optimization_profile: AotOptimizationProfile,
     next_object_index: u32,
-    next_symbol_seq: u64,
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
     required_emit_roots: Vec<String>,
@@ -51,7 +50,6 @@ impl AotProcess {
             compiler: Compiler::new(),
             optimization_profile,
             next_object_index: 0,
-            next_symbol_seq: 0,
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
             required_emit_roots: Vec::new(),
@@ -139,21 +137,20 @@ impl AotProcess {
         let (
             compiler,
             next_object_index,
-            next_symbol_seq,
             artifacts,
             object_bytes,
             optimization_profile,
         ) = (
             &mut self.compiler,
             &mut self.next_object_index,
-            &mut self.next_symbol_seq,
             &mut self.artifacts,
             &mut self.object_bytes,
             self.optimization_profile,
         );
         let emit = compiler.emit_pass_for_ids_with(&emit_function_ids, &mut |meta, hir| {
-            let symbol = format!("aot_fn_{}_{}", meta.id, *next_symbol_seq);
-            *next_symbol_seq = next_symbol_seq.saturating_add(1);
+            // Stable per-function symbols are required so AOT objects can reference each other
+            // directly without forcing recompilation of callers on every body change.
+            let symbol = format!("aot_fn_{}", meta.id);
             let bytes = compile_function_to_object_bytes(
                 meta,
                 hir,
@@ -217,42 +214,74 @@ impl AotProcess {
                 function.params.len()
             ));
         }
-        let artifact = self
+        let entry_artifact = self
             .artifacts
             .iter()
             .find(|artifact| artifact.function_id == function.id)
             .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
-        let object_bytes = self
-            .object_bytes
-            .get(artifact.object_index as usize)
-            .ok_or_else(|| {
-                format!(
-                    "object bytes missing for function '{name}' at index {}",
-                    artifact.object_index
-                )
-            })?;
-        let object_path = output_executable.with_extension("obj");
-        if let Some(parent) = object_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!(
-                    "failed to create output object directory {}: {error}",
-                    parent.display()
-                )
-            })?;
-        }
-        fs::write(&object_path, object_bytes).map_err(|error| {
+
+        let stem = output_executable
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("stasis_aot_exe");
+        let object_dir = output_executable
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{stem}_objects"));
+        fs::create_dir_all(&object_dir).map_err(|error| {
             format!(
-                "failed to write object file {}: {error}",
-                object_path.display()
+                "failed to create output object directory {}: {error}",
+                object_dir.display()
             )
         })?;
+
+        let mut object_paths: Vec<PathBuf> = Vec::new();
+        let mut entry_object_path: Option<PathBuf> = None;
+        for artifact in &self.artifacts {
+            let artifact_function = self
+                .compiler
+                .functions()
+                .iter()
+                .find(|function| function.id == artifact.function_id)
+                .ok_or_else(|| {
+                    format!("compiled function metadata missing for id {}", artifact.function_id)
+                })?;
+            let object_bytes = self
+                .object_bytes
+                .get(artifact.object_index as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "object bytes missing for function '{}' at index {}",
+                        artifact_function.name, artifact.object_index
+                    )
+                })?;
+            let object_file_name = format!(
+                "{}_{}.obj",
+                sanitize_file_token(&artifact_function.name),
+                artifact.object_index
+            );
+            let object_path = object_dir.join(object_file_name);
+            fs::write(&object_path, object_bytes).map_err(|error| {
+                format!(
+                    "failed to write object file {}: {error}",
+                    object_path.display()
+                )
+            })?;
+            if artifact.function_id == function.id {
+                entry_object_path = Some(object_path.clone());
+            }
+            object_paths.push(object_path);
+        }
+        let entry_object_path = entry_object_path
+            .ok_or_else(|| format!("entry object path missing for function '{name}'"))?;
+
         stasis_jit::link_objects_to_executable(
-            std::slice::from_ref(&object_path),
+            &object_paths,
             output_executable,
-            &artifact.symbol_name,
+            &entry_artifact.symbol_name,
             link_config,
         )?;
-        Ok(object_path)
+        Ok(entry_object_path)
     }
 
     pub fn write_engine_bundle(
@@ -503,6 +532,12 @@ fn compile_function_to_object_bytes(
         }
 
         let empty_foreach_bindings = ForeachBindingMap::new();
+        let mut internal_calls = InternalCallMode::AotDirect(AotDirectCallMode {
+            module: &mut module,
+            self_function_id: meta.id,
+            self_clif_func_id: function_id,
+            imported_function_ids: std::collections::HashMap::new(),
+        });
         let body = extract_function_body(hir)?;
         let mut terminated = false;
         parse_simple_statements_from_block_with(body, type_table, |type_table, statement| {
@@ -514,6 +549,7 @@ fn compile_function_to_object_bytes(
                 std::slice::from_ref(&statement),
                 &mut values_by_name,
                 &runtime_call_refs,
+                &mut internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
@@ -835,6 +871,98 @@ mod tests {
             status.code(),
             Some(27),
             "expected executable to return exit code 27"
+        );
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_process_links_and_executes_internal_i32_call() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function helper(): i32 { return 9; }\nfunction main(): i32 { return helper() + 1; }\n",
+        );
+        process.compile().expect("compile");
+        assert_eq!(process.artifacts().len(), 2, "expected both functions emitted");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_exe_smoke_call_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let exe_path = temp_root.join("main_smoke_call.exe");
+        let link_result =
+            process.link_executable_for_i32_noarg_function("main", &exe_path, &link_config);
+        if let Err(ref message) = link_result {
+            if message.contains("undefined symbol") {
+                eprintln!(
+                    "skipping AOT internal-call smoke: runtime symbols not available at link time"
+                );
+                let _ = fs::remove_dir_all(&temp_root);
+                return;
+            }
+        }
+        link_result.expect("link executable");
+
+        let status = Command::new(&exe_path)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        assert_eq!(
+            status.code(),
+            Some(10),
+            "expected executable to return exit code 10"
+        );
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_process_links_and_executes_internal_void_call_statement() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function helper(): void { return; }\nfunction main(): i32 { helper(); return 7; }\n",
+        );
+        process.compile().expect("compile");
+        assert_eq!(process.artifacts().len(), 2, "expected both functions emitted");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_exe_smoke_voidcall_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let exe_path = temp_root.join("main_smoke_voidcall.exe");
+        let link_result =
+            process.link_executable_for_i32_noarg_function("main", &exe_path, &link_config);
+        if let Err(ref message) = link_result {
+            if message.contains("undefined symbol") {
+                eprintln!(
+                    "skipping AOT internal-void-call smoke: runtime symbols not available at link time"
+                );
+                let _ = fs::remove_dir_all(&temp_root);
+                return;
+            }
+        }
+        link_result.expect("link executable");
+
+        let status = Command::new(&exe_path)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        assert_eq!(
+            status.code(),
+            Some(7),
+            "expected executable to return exit code 7"
         );
         let _ = fs::remove_dir_all(&temp_root);
     }
