@@ -1,10 +1,10 @@
 // Key input helpers.
 //
 // Notes:
-// - The host provides current key state via HostFrame (see `src/host_frame.stasis`).
+// - The host provides current key state via HostFrame (see `src/runtime/host_frame.stasis`).
 // - These helpers let user code keep an explicit previous snapshot (no hidden globals).
 
-import "../host_frame.stasis";
+import "../runtime/host_frame.stasis";
 import "memory.stasis";
 
 const GAME_INPUT_KEY_COUNT: i32 = 512;
