@@ -5370,6 +5370,7 @@ mod tests {
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -5656,6 +5657,7 @@ mod tests {
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker_path),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -5745,6 +5747,7 @@ mod tests {
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker_path),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -5861,6 +5864,7 @@ mod tests {
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker_path),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -5995,6 +5999,7 @@ mod tests {
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker_path),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -6359,6 +6364,7 @@ echo "signed" > "$1.signed"
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -6429,6 +6435,7 @@ echo "signed" > "$1.signed"
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -6502,6 +6509,7 @@ echo "signed" > "$1.signed"
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -6572,6 +6580,7 @@ echo "signed" > "$1.signed"
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -6643,6 +6652,7 @@ echo "signed" > "$1.signed"
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -6901,6 +6911,7 @@ echo "signed" > "$1.signed"
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -6967,6 +6978,7 @@ echo "signed" > "$1.signed"
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -7038,6 +7050,7 @@ echo "signed" > "$1.signed"
         };
         let link_config = AotLinkConfig {
             linker_path: Some(linker),
+            runtime_lib_paths: vec![],
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend_first = IncrementalCompilerBackend::with_aot_compile_and_link_config(
@@ -7076,6 +7089,7 @@ echo "signed" > "$1.signed"
             },
             AotLinkConfig {
                 linker_path: backend_first.aot_link_config.linker_path.clone(),
+                runtime_lib_paths: vec![],
             },
             artifact_root.clone(),
             false,
@@ -7136,6 +7150,7 @@ echo "signed" > "$1.signed"
             },
             AotLinkConfig {
                 linker_path: Some(linker.clone()),
+                runtime_lib_paths: vec![],
             },
             artifact_root_stage1.clone(),
             false,
@@ -7179,6 +7194,7 @@ echo "signed" > "$1.signed"
             },
             AotLinkConfig {
                 linker_path: Some(linker),
+                runtime_lib_paths: vec![],
             },
             artifact_root_stage2.clone(),
             false,
@@ -8547,6 +8563,7 @@ return\n\
         let driver_exe = temp_root.join("bridge_stage_driver.exe");
         let link_config = AotLinkConfig {
             linker_path: Some(linker_path),
+            runtime_lib_paths: vec![],
         };
         link_objects_to_executable(
             &[driver_object, bridge_object, shim_object],
@@ -8666,6 +8683,7 @@ return\n\
             compile_config.clone(),
             AotLinkConfig {
                 linker_path: Some(linker_path.clone()),
+                runtime_lib_paths: vec![],
             },
             temp_root.join("artifacts"),
             false,
@@ -8754,6 +8772,7 @@ return\n\
         let driver_exe = temp_root.join("bridge_stage_driver_clif.exe");
         let link_config = AotLinkConfig {
             linker_path: Some(linker_path),
+            runtime_lib_paths: vec![],
         };
         link_objects_to_executable(
             &[driver_object, bridge_object, shim_object],
@@ -8863,6 +8882,7 @@ return\n\
             compile_config.clone(),
             AotLinkConfig {
                 linker_path: Some(linker_path.clone()),
+                runtime_lib_paths: vec![],
             },
             temp_root.join("artifacts"),
             false,
@@ -8965,6 +8985,7 @@ return\n\
         let driver_exe = temp_root.join("bridge_arg_source_driver_clif.exe");
         let link_config = AotLinkConfig {
             linker_path: Some(linker_path),
+            runtime_lib_paths: vec![],
         };
         link_objects_to_executable(
             &[driver_object, bridge_object, shim_object],
