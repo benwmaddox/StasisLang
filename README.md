@@ -182,7 +182,10 @@ cargo test
 - `crates/stasis_runner`: swap pipeline contracts + sequencing.
 - `runtime/`: graphics/audio host runtime (used by `play`).
 - `src/stdlib/`: standard library.
+- `src/runtime/`: host/runtime bridge modules (ABI layouts for hot reload and host snapshots).
 - `samples/brickout_revenge/`: end-to-end game sample.
+
+Source layout policy: see `docs/src_layout.md`.
 
 ## Specs / PRD
 
