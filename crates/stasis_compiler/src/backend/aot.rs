@@ -1,7 +1,7 @@
 use crate::backend::emit::*;
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
-use crate::frontend::types::{TypeTable, TYPE_ID_I32, TYPE_ID_VOID};
+use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32, TYPE_ID_VOID};
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, Value};
 use cranelift_codegen::settings;
@@ -30,6 +30,7 @@ pub struct AotProcess {
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
     string_literals: BTreeMap<i32, String>,
+    collection_max_lengths: BTreeMap<String, i32>,
     required_emit_roots: Vec<String>,
 }
 
@@ -54,6 +55,7 @@ impl AotProcess {
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
             string_literals: BTreeMap::new(),
+            collection_max_lengths: BTreeMap::new(),
             required_emit_roots: Vec::new(),
         }
     }
@@ -109,6 +111,9 @@ impl AotProcess {
         }
         let global_path_types =
             collect_global_path_types(self.compiler.files(), &mut type_table, &constant_values)
+                .map_err(crate::compiler::CompileError::Backend)?;
+        self.collection_max_lengths =
+            collect_fixed_collection_max_lengths(&global_path_types, &type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
         let collection_infos = collect_foreach_collection_infos(
             self.compiler.files(),
@@ -199,6 +204,10 @@ impl AotProcess {
 
     pub fn string_literals(&self) -> &BTreeMap<i32, String> {
         &self.string_literals
+    }
+
+    pub fn collection_max_lengths(&self) -> &BTreeMap<String, i32> {
+        &self.collection_max_lengths
     }
 
     pub fn optimization_profile(&self) -> AotOptimizationProfile {
@@ -368,6 +377,7 @@ impl AotProcess {
                 entrypoints,
                 &manifest_rows,
                 &self.string_literals,
+                &self.collection_max_lengths,
             );
         fs::write(&manifest_path, manifest).map_err(|error| {
             format!(
@@ -622,6 +632,40 @@ fn record_string_literal(out: &mut BTreeMap<i32, String>, value: &str) -> Result
     Ok(())
 }
 
+fn collect_fixed_collection_max_lengths(
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Result<BTreeMap<String, i32>, String> {
+    let mut out: BTreeMap<String, i32> = BTreeMap::new();
+    for (path, type_id) in global_path_types {
+        let Some(type_info) = type_table.type_info(*type_id) else {
+            continue;
+        };
+        match type_info.category {
+            TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed => {
+                let Some(payload_bytes) = type_info.layout.payload_size_bytes else {
+                    continue;
+                };
+                let max_length = i32::try_from(payload_bytes).map_err(|_| {
+                    format!(
+                        "collection max_length overflow for '{}' (payload bytes {})",
+                        path, payload_bytes
+                    )
+                })?;
+                out.insert(path.clone(), max_length);
+            }
+            TypeCategory::ArrayFixed => {
+                let Some(max_length) = type_table.fixed_collection_len(*type_id) else {
+                    continue;
+                };
+                out.insert(path.clone(), max_length);
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 fn record_string_literals_in_assign_target(
     target: &AssignTarget,
     out: &mut BTreeMap<i32, String>,
@@ -781,6 +825,7 @@ fn build_engine_bundle_manifest(
     entrypoints: &EngineEntrypoints,
     rows: &[(String, String, String)],
     string_literals: &BTreeMap<i32, String>,
+    collection_max_lengths: &BTreeMap<String, i32>,
 ) -> String {
     let mut out = String::new();
     out.push_str("{\n");
@@ -826,6 +871,18 @@ fn build_engine_bundle_manifest(
             "    {{\"id\":{},\"value\":\"{}\"}}{}\n",
             id,
             json_escape(value),
+            comma
+        ));
+    }
+    out.push_str("  ],\n");
+    out.push_str("  \"collection_max_lengths\": [\n");
+    let collections_len = collection_max_lengths.len();
+    for (index, (path, max_length)) in collection_max_lengths.iter().enumerate() {
+        let comma = if index + 1 < collections_len { "," } else { "" };
+        out.push_str(&format!(
+            "    {{\"path\":\"{}\",\"max_length\":{}}}{}\n",
+            json_escape(path),
+            max_length,
             comma
         ));
     }
@@ -1009,6 +1066,37 @@ mod tests {
         assert!(
             manifest.contains("\"value\":\"hello\\n\""),
             "manifest should include escaped literal value"
+        );
+
+        let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[test]
+    fn aot_engine_bundle_manifest_includes_collection_max_lengths() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global values: i32[12];\nfunction tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+        );
+        process.compile().expect("compile");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_collections_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+            .expect("write bundle");
+
+        let manifest = fs::read_to_string(&bundle.manifest_path).expect("read manifest");
+        assert!(
+            manifest.contains("\"collection_max_lengths\""),
+            "manifest should include collection_max_lengths field"
+        );
+        assert!(
+            manifest.contains("\"path\":\"values\"") && manifest.contains("\"max_length\":12"),
+            "manifest should include seeded max_length row"
         );
 
         let _ = fs::remove_dir_all(&bundle_dir);
