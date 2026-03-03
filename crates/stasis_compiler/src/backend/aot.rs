@@ -81,14 +81,14 @@ impl AotProcess {
         let resolved_extern_signatures: Vec<ResolvedExternCallSignature> = extern_signatures
             .iter()
             .filter_map(|sig| {
-                sig.symbol_candidates.first().map(|symbol| {
-                    ResolvedExternCallSignature {
+                sig.symbol_candidates
+                    .first()
+                    .map(|symbol| ResolvedExternCallSignature {
                         name: sig.name.clone(),
                         symbol: symbol.clone(),
                         params: sig.params.clone(),
                         return_type: sig.return_type,
-                    }
-                })
+                    })
             })
             .collect();
         let call_signatures = collect_supported_call_signatures(
@@ -134,13 +134,7 @@ impl AotProcess {
             .map(|function| function.id)
             .collect();
 
-        let (
-            compiler,
-            next_object_index,
-            artifacts,
-            object_bytes,
-            optimization_profile,
-        ) = (
+        let (compiler, next_object_index, artifacts, object_bytes, optimization_profile) = (
             &mut self.compiler,
             &mut self.next_object_index,
             &mut self.artifacts,
@@ -244,7 +238,10 @@ impl AotProcess {
                 .iter()
                 .find(|function| function.id == artifact.function_id)
                 .ok_or_else(|| {
-                    format!("compiled function metadata missing for id {}", artifact.function_id)
+                    format!(
+                        "compiled function metadata missing for id {}",
+                        artifact.function_id
+                    )
                 })?;
             let object_bytes = self
                 .object_bytes
@@ -749,6 +746,19 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_supports_f64_global_field_set_and_read() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Layout { width: f64; }\nglobal state: Layout;\nfunction main(): i32 { state.width = 3.5; let w: f64 = state.width; if (w > 3.0) { return 1; } return 0; }\n",
+        );
+        let report = process.compile().expect("aot compile");
+        assert_eq!(report.index.parsed_functions, 1);
+        assert_eq!(report.emit.emitted_functions, 1);
+        assert!(process.artifacts()[0].object_bytes_len > 0);
+    }
+
+    #[test]
     fn aot_process_supports_void_return_functions() {
         let mut process = AotProcess::new();
         process.upsert_file(
@@ -885,7 +895,11 @@ mod tests {
             "function helper(): i32 { return 9; }\nfunction main(): i32 { return helper() + 1; }\n",
         );
         process.compile().expect("compile");
-        assert_eq!(process.artifacts().len(), 2, "expected both functions emitted");
+        assert_eq!(
+            process.artifacts().len(),
+            2,
+            "expected both functions emitted"
+        );
 
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -931,7 +945,11 @@ mod tests {
             "function helper(): void { return; }\nfunction main(): i32 { helper(); return 7; }\n",
         );
         process.compile().expect("compile");
-        assert_eq!(process.artifacts().len(), 2, "expected both functions emitted");
+        assert_eq!(
+            process.artifacts().len(),
+            2,
+            "expected both functions emitted"
+        );
 
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
