@@ -634,10 +634,10 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height);
  * so both production runners (stasis_runner) and dev runners (JIT) use the same code paths.
  *
  * Notes:
- * - The guest owns the host_window_request globals (src/host_window_request.stasis). We track the last applied
+ * - The guest owns the host_window_request globals (src/runtime/host_window_request.stasis). We track the last applied
  *   request seq in this library, initialized by stasis_host_bulk_init().
- * - HostFrame layout is defined in src/host_frame.stasis and is written by stasis_host_get_frame().
- * - Rendering is driven by gfx_cmd buffers (src/gfx_cmd.stasis) and submitted by stasis_gfx_submit_u8().
+ * - HostFrame layout is defined in src/runtime/host_frame.stasis and is written by stasis_host_get_frame().
+ * - Rendering is driven by gfx_cmd buffers (src/runtime/gfx_cmd.stasis) and submitted by stasis_gfx_submit_u8().
  */
 static int g_host_req_inited = 0;
 static int32_t g_host_last_req_seq = 0;
@@ -654,7 +654,7 @@ STASIS_EXPORT void stasis_host_bulk_apply_requests(
     const int32_t* host_req_window_w_px,
     const int32_t* host_req_window_h_px)
 {
-    /* Matches src/host_window_request.stasis */
+    /* Matches src/runtime/host_window_request.stasis */
     const int32_t HOST_REQ_FLAG_WINDOWED = 1;
     const int32_t HOST_REQ_FLAG_FULLSCREEN = 2;
 
@@ -732,7 +732,7 @@ STASIS_EXPORT int stasis_host_bulk_step(
 /*
  * Host snapshot: fill caller-provided buffers with a deterministic view of host state.
  *
- * Layout is defined in src/host_frame.stasis. This is intentionally a simple
+ * Layout is defined in src/runtime/host_frame.stasis. This is intentionally a simple
  * "copy out" ABI for native now, and a good fit for WASM later (one import to get a snapshot).
  */
 STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {

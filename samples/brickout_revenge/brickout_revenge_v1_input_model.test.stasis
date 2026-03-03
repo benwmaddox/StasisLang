@@ -1,4 +1,4 @@
-import "../../src/input_testkit.stasis";
+import "../../src/runtime/input_testkit.stasis";
 import "brickout_revenge_v1.stasis";
 
 test `brickout refresh input model maps testkit snapshot`(): bool {
