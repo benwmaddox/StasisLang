@@ -46,6 +46,10 @@ Current canonical workspace commands:
 - `cargo build`
 - `cargo test`
 
+Release AOT optimization:
+- Default AOT opt level is `speed_and_size` (release-friendly).
+- Override with `STASIS_AOT_OPT_LEVEL`: `none` | `speed` | `speed_and_size`.
+
 Bootstrap compiler tooling is seed-only for initial bring-up.
 It is not part of the steady-state incremental JIT update loop.
 
