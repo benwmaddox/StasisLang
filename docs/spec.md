@@ -424,6 +424,31 @@ Reference/view bindings for struct/element parameters are not rebindable inside 
 - assigning to fields/elements through the parameter is allowed
 - assigning a new reference target to the parameter binding is a compile-time error
 
+#### 7.1.1 Struct View ABI (Lowering Model)
+
+Struct and struct-element parameters lower to an explicit "struct view" ABI:
+- `base: i32`
+- `index: i32`
+- `len: i32`
+
+Interpretation:
+- AoS-backed single struct view (for example a global `pipe: Pipe` passed as `read_active(pipe)`):
+- `base = hash_global_path("pipe")`
+- `index = -1`
+- `len = 0`
+- SoA-backed array element view (for example `enemies[i]` passed as `damage(enemies[i], 5)`):
+- `base = hash_global_path("enemies")` (the collection hash)
+- `index = i`
+- `len = enemies.length` (the array extent)
+
+Field access on a struct view:
+- If `index < 0` (AoS): compute `field_path_hash = hash_combine(base, "." + field_suffix)` and load/store the scalar field at that global path.
+- Otherwise (SoA): compute `field_hash = hash(field_suffix)` and load/store at `(base, field_hash, index)` in the SoA field arrays.
+
+Rationale:
+- This allows the same function signature to accept either a single global struct or an element view from a struct array.
+- The `len` field supports bounds checks and enables caching/pointer-fast-path optimizations in hot loops.
+
 ### 7.2 Receiver-Scoped Resolution
 
 Function identity for receiver-scoped names is:
