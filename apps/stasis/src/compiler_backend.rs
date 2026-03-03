@@ -89,8 +89,16 @@ struct EngineBundleManifestFunctionRow {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct EngineBundleManifestStringLiteralRow {
+    id: i32,
+    value: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifest {
     functions: Vec<EngineBundleManifestFunctionRow>,
+    #[serde(default)]
+    string_literals: Option<Vec<EngineBundleManifestStringLiteralRow>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -412,6 +420,15 @@ impl IncrementalCompilerBackend {
                         );
                     }
                 };
+                if let Some(literals) = manifest.string_literals.as_ref() {
+                    // AOT code references string literals by hashed ID at runtime. Unlike the JIT path,
+                    // AOT compilation happens out of band from execution, so the runtime table must be
+                    // populated from the bundle manifest before tick/render are called.
+                    stasis_dynload::clear_jit_string_literal_table();
+                    for literal in literals {
+                        stasis_dynload::upsert_jit_string_literal(literal.id, &literal.value);
+                    }
+                }
                 manifest_rows = manifest.functions;
             }
         }
@@ -4954,6 +4971,59 @@ mod tests {
         assert!(
             manifest_path.exists(),
             "expected AOT manifest to be written for successful compile"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_compile_registers_string_literals_from_bundle_manifest() {
+        stasis_dynload::clear_jit_string_literal_table();
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_string_init_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("engine.stasis");
+        let literal_value = "alpha; beta {x}";
+        fs::write(
+            &source,
+            format!(
+                "function tick(): void {{ print_string(\"{}\"); return; }}\nfunction render(): void {{ return; }}\nfunction on_code_swap(): void {{ return; }}\n",
+                literal_value
+            ),
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+
+        let result = backend.compile(CompileRequest::new(
+            RequestId(157),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+
+        let bundle = backend
+            .last_aot_engine_bundle()
+            .expect("expected last AOT engine bundle");
+        let manifest = backend
+            .read_engine_bundle_manifest(&bundle.manifest_path)
+            .expect("read engine bundle manifest");
+        let literals = manifest
+            .string_literals
+            .as_ref()
+            .expect("manifest should include string_literals");
+        let row = literals
+            .iter()
+            .find(|row| row.value == literal_value)
+            .expect("expected literal row in manifest");
+        assert_eq!(
+            stasis_dynload::jit_string_literal_value(row.id),
+            Some(literal_value.to_string()),
+            "expected dynload string literal table to contain registered literal"
         );
 
         fs::remove_dir_all(&temp_root).ok();
