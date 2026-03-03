@@ -1,7 +1,7 @@
 use crate::backend::emit::*;
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
-use crate::frontend::types::{TypeTable, TYPE_ID_I32, TYPE_ID_VOID};
+use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32, TYPE_ID_VOID};
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, Value};
 use cranelift_codegen::settings;
@@ -9,7 +9,7 @@ use cranelift_codegen::settings::Configurable;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{default_libcall_names, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -29,6 +29,8 @@ pub struct AotProcess {
     next_object_index: u32,
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
+    string_literals: BTreeMap<i32, String>,
+    collection_max_lengths: BTreeMap<String, i32>,
     required_emit_roots: Vec<String>,
 }
 
@@ -52,6 +54,8 @@ impl AotProcess {
             next_object_index: 0,
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
+            string_literals: BTreeMap::new(),
+            collection_max_lengths: BTreeMap::new(),
             required_emit_roots: Vec::new(),
         }
     }
@@ -66,6 +70,8 @@ impl AotProcess {
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
+        self.load_import_graph_sources()
+            .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
         let mut type_table = self.compiler.types().clone();
         type_table
@@ -78,12 +84,13 @@ impl AotProcess {
         let extern_signatures =
             collect_supported_extern_call_signatures(self.compiler.files(), &mut type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
+        // AOT objects must be linked against a concrete runtime. For externs we prefer the most
+        // "runtime-friendly" symbol candidate (typically `stasis_jit_*` shims) instead of the
+        // raw source-level name.
         let resolved_extern_signatures: Vec<ResolvedExternCallSignature> = extern_signatures
             .iter()
             .filter_map(|sig| {
-                sig.symbol_candidates
-                    .first()
-                    .map(|symbol| ResolvedExternCallSignature {
+                sig.symbol_candidates.last().map(|symbol| ResolvedExternCallSignature {
                         name: sig.name.clone(),
                         symbol: symbol.clone(),
                         params: sig.params.clone(),
@@ -99,8 +106,17 @@ impl AotProcess {
         let constant_values =
             collect_top_level_constant_values(self.compiler.files(), &mut type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
+        for constant in constant_values.values() {
+            if let ConstantValue::String { value, .. } = constant {
+                record_string_literal(&mut self.string_literals, value)
+                    .map_err(crate::compiler::CompileError::Backend)?;
+            }
+        }
         let global_path_types =
             collect_global_path_types(self.compiler.files(), &mut type_table, &constant_values)
+                .map_err(crate::compiler::CompileError::Backend)?;
+        self.collection_max_lengths =
+            collect_fixed_collection_max_lengths(&global_path_types, &type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
         let collection_infos = collect_foreach_collection_infos(
             self.compiler.files(),
@@ -134,12 +150,20 @@ impl AotProcess {
             .map(|function| function.id)
             .collect();
 
-        let (compiler, next_object_index, artifacts, object_bytes, optimization_profile) = (
+        let (
+            compiler,
+            next_object_index,
+            artifacts,
+            object_bytes,
+            optimization_profile,
+            string_literals,
+        ) = (
             &mut self.compiler,
             &mut self.next_object_index,
             &mut self.artifacts,
             &mut self.object_bytes,
             self.optimization_profile,
+            &mut self.string_literals,
         );
         let emit = compiler.emit_pass_for_ids_with(&emit_function_ids, &mut |meta, hir| {
             // Stable per-function symbols are required so AOT objects can reference each other
@@ -154,6 +178,7 @@ impl AotProcess {
                 &mut type_table,
                 &global_path_types,
                 &constant_values,
+                string_literals,
                 &collection_infos,
                 &named_struct_field_types,
             )?;
@@ -176,8 +201,62 @@ impl AotProcess {
         Ok(CompileReport { index, emit })
     }
 
+    fn load_import_graph_sources(&mut self) -> Result<(), String> {
+        let mut known_paths: BTreeSet<String> = self
+            .compiler
+            .files()
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        let mut queue: Vec<String> = self
+            .compiler
+            .files()
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+
+        while let Some(path) = queue.pop() {
+            let Some(source) = self
+                .compiler
+                .files()
+                .iter()
+                .find(|file| file.path == path)
+                .map(|file| file.content.clone())
+            else {
+                continue;
+            };
+            let imports = parse_import_paths(&source);
+            for import_path in imports {
+                let resolved = resolve_import_path(&path, &import_path);
+                let normalized = normalize_path_for_compiler_key(&resolved);
+                if known_paths.contains(&normalized) {
+                    continue;
+                }
+                let content = std::fs::read_to_string(&resolved).map_err(|error| {
+                    format!(
+                        "failed to load import '{}' referenced by '{}': {}",
+                        import_path, path, error
+                    )
+                })?;
+                self.compiler.upsert_file(normalized.clone(), content);
+                known_paths.insert(normalized.clone());
+                queue.push(normalized);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn artifacts(&self) -> &[AotArtifact] {
         &self.artifacts
+    }
+
+    pub fn string_literals(&self) -> &BTreeMap<i32, String> {
+        &self.string_literals
+    }
+
+    pub fn collection_max_lengths(&self) -> &BTreeMap<String, i32> {
+        &self.collection_max_lengths
     }
 
     pub fn optimization_profile(&self) -> AotOptimizationProfile {
@@ -345,7 +424,13 @@ impl AotProcess {
 
         let manifest_path = output_dir.join("engine_bundle_manifest.json");
         let manifest =
-            build_engine_bundle_manifest(self.optimization_profile, entrypoints, &manifest_rows);
+            build_engine_bundle_manifest(
+                self.optimization_profile,
+                entrypoints,
+                &manifest_rows,
+                &self.string_literals,
+                &self.collection_max_lengths,
+            );
         fs::write(&manifest_path, manifest).map_err(|error| {
             format!(
                 "failed to write engine bundle manifest {}: {error}",
@@ -427,6 +512,7 @@ fn compile_function_to_object_bytes(
     type_table: &mut TypeTable,
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
+    string_literals: &mut BTreeMap<i32, String>,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<Vec<u8>, String> {
@@ -541,6 +627,7 @@ fn compile_function_to_object_bytes(
             if terminated {
                 return Ok(());
             }
+            record_string_literals_in_stmt(&statement, string_literals)?;
             terminated = emit_simple_statements(
                 &mut builder,
                 std::slice::from_ref(&statement),
@@ -581,6 +668,171 @@ fn compile_function_to_object_bytes(
     product
         .emit()
         .map_err(|error| format!("failed to emit AOT object bytes: {error}"))
+}
+
+fn record_string_literal(out: &mut BTreeMap<i32, String>, value: &str) -> Result<(), String> {
+    let id = hash_string_literal(value);
+    if let Some(existing) = out.get(&id) {
+        if existing != value {
+            return Err(format!(
+                "string literal hash collision for id={id}: existing={existing:?} new={value:?}"
+            ));
+        }
+        return Ok(());
+    }
+    out.insert(id, value.to_string());
+    Ok(())
+}
+
+fn collect_fixed_collection_max_lengths(
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Result<BTreeMap<String, i32>, String> {
+    let mut out: BTreeMap<String, i32> = BTreeMap::new();
+    for (path, type_id) in global_path_types {
+        let Some(type_info) = type_table.type_info(*type_id) else {
+            continue;
+        };
+        match type_info.category {
+            TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed => {
+                let Some(payload_bytes) = type_info.layout.payload_size_bytes else {
+                    continue;
+                };
+                let max_length = i32::try_from(payload_bytes).map_err(|_| {
+                    format!(
+                        "collection max_length overflow for '{}' (payload bytes {})",
+                        path, payload_bytes
+                    )
+                })?;
+                out.insert(path.clone(), max_length);
+            }
+            TypeCategory::ArrayFixed => {
+                let Some(max_length) = type_table.fixed_collection_len(*type_id) else {
+                    continue;
+                };
+                out.insert(path.clone(), max_length);
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+fn record_string_literals_in_assign_target(
+    target: &AssignTarget,
+    out: &mut BTreeMap<i32, String>,
+) -> Result<(), String> {
+    match target {
+        AssignTarget::Local(_) | AssignTarget::GlobalPath(_) => Ok(()),
+        AssignTarget::IndexedPath { index, .. } => record_string_literals_in_expr(index, out),
+    }
+}
+
+fn record_string_literals_in_condition(
+    condition: &SimpleCondition,
+    out: &mut BTreeMap<i32, String>,
+) -> Result<(), String> {
+    match condition {
+        SimpleCondition::Comparison { lhs, rhs, .. } => {
+            record_string_literals_in_expr(lhs, out)?;
+            record_string_literals_in_expr(rhs, out)?;
+            Ok(())
+        }
+        SimpleCondition::Expr(expr) => record_string_literals_in_expr(expr, out),
+        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+            record_string_literals_in_condition(lhs, out)?;
+            record_string_literals_in_condition(rhs, out)?;
+            Ok(())
+        }
+        SimpleCondition::Not(inner) => record_string_literals_in_condition(inner, out),
+    }
+}
+
+fn record_string_literals_in_expr(
+    expression: &SimpleExpr,
+    out: &mut BTreeMap<i32, String>,
+) -> Result<(), String> {
+    match expression {
+        SimpleExpr::Int(_)
+        | SimpleExpr::Float(_)
+        | SimpleExpr::Bool(_)
+        | SimpleExpr::Identifier(_) => Ok(()),
+        SimpleExpr::StringLiteral(value) => record_string_literal(out, value),
+        SimpleExpr::Condition(condition) => record_string_literals_in_condition(condition, out),
+        SimpleExpr::IndexedPath { index, .. } => record_string_literals_in_expr(index, out),
+        SimpleExpr::Call { args, .. } => {
+            for arg in args {
+                record_string_literals_in_expr(arg, out)?;
+            }
+            Ok(())
+        }
+        SimpleExpr::Binary { lhs, rhs, .. } => {
+            record_string_literals_in_expr(lhs, out)?;
+            record_string_literals_in_expr(rhs, out)?;
+            Ok(())
+        }
+    }
+}
+
+fn record_string_literals_in_stmt(
+    statement: &SimpleStmt,
+    out: &mut BTreeMap<i32, String>,
+) -> Result<(), String> {
+    match statement {
+        SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => Ok(()),
+        SimpleStmt::Let { expression, .. } => record_string_literals_in_expr(expression, out),
+        SimpleStmt::Assign {
+            target, expression, ..
+        } => {
+            record_string_literals_in_assign_target(target, out)?;
+            record_string_literals_in_expr(expression, out)?;
+            Ok(())
+        }
+        SimpleStmt::Convert { target, source, .. } => {
+            record_string_literals_in_assign_target(target, out)?;
+            record_string_literals_in_expr(source, out)?;
+            Ok(())
+        }
+        SimpleStmt::If {
+            condition,
+            then_statements,
+            else_statements,
+        } => {
+            record_string_literals_in_condition(condition, out)?;
+            for stmt in then_statements {
+                record_string_literals_in_stmt(stmt, out)?;
+            }
+            if let Some(else_statements) = else_statements {
+                for stmt in else_statements {
+                    record_string_literals_in_stmt(stmt, out)?;
+                }
+            }
+            Ok(())
+        }
+        SimpleStmt::For {
+            init,
+            condition,
+            step,
+            body_statements,
+        } => {
+            record_string_literals_in_stmt(init, out)?;
+            record_string_literals_in_condition(condition, out)?;
+            record_string_literals_in_stmt(step, out)?;
+            for stmt in body_statements {
+                record_string_literals_in_stmt(stmt, out)?;
+            }
+            Ok(())
+        }
+        SimpleStmt::Foreach { body_statements, .. } => {
+            for stmt in body_statements {
+                record_string_literals_in_stmt(stmt, out)?;
+            }
+            Ok(())
+        }
+        SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
+            record_string_literals_in_expr(expression, out)
+        }
+    }
 }
 
 fn ensure_function_in_bundle(
@@ -624,6 +876,8 @@ fn build_engine_bundle_manifest(
     optimization_profile: AotOptimizationProfile,
     entrypoints: &EngineEntrypoints,
     rows: &[(String, String, String)],
+    string_literals: &BTreeMap<i32, String>,
+    collection_max_lengths: &BTreeMap<String, i32>,
 ) -> String {
     let mut out = String::new();
     out.push_str("{\n");
@@ -657,6 +911,30 @@ fn build_engine_bundle_manifest(
             json_escape(name),
             json_escape(symbol),
             json_escape(object_file),
+            comma
+        ));
+    }
+    out.push_str("  ],\n");
+    out.push_str("  \"string_literals\": [\n");
+    let literals_len = string_literals.len();
+    for (index, (id, value)) in string_literals.iter().enumerate() {
+        let comma = if index + 1 < literals_len { "," } else { "" };
+        out.push_str(&format!(
+            "    {{\"id\":{},\"value\":\"{}\"}}{}\n",
+            id,
+            json_escape(value),
+            comma
+        ));
+    }
+    out.push_str("  ],\n");
+    out.push_str("  \"collection_max_lengths\": [\n");
+    let collections_len = collection_max_lengths.len();
+    for (index, (path, max_length)) in collection_max_lengths.iter().enumerate() {
+        let comma = if index + 1 < collections_len { "," } else { "" };
+        out.push_str(&format!(
+            "    {{\"path\":\"{}\",\"max_length\":{}}}{}\n",
+            json_escape(path),
+            max_length,
             comma
         ));
     }
@@ -817,6 +1095,73 @@ mod tests {
         assert!(
             manifest.contains("\"tick\": \"tick\"") && manifest.contains("\"render\": \"render\""),
             "manifest should include required entrypoints"
+        );
+
+        let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[test]
+    fn aot_engine_bundle_manifest_includes_string_literals() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function tick(): void { print_string(\"hello\\n\"); return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+        );
+        process.compile().expect("compile");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_literals_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+            .expect("write bundle");
+
+        let manifest = fs::read_to_string(&bundle.manifest_path).expect("read manifest");
+        let literal_id = crate::backend::emit::hash_string_literal("hello\n");
+        assert!(
+            manifest.contains("\"string_literals\""),
+            "manifest should include string_literals field"
+        );
+        assert!(
+            manifest.contains(&format!("\"id\":{literal_id}")),
+            "manifest should include expected literal id"
+        );
+        assert!(
+            manifest.contains("\"value\":\"hello\\n\""),
+            "manifest should include escaped literal value"
+        );
+
+        let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[test]
+    fn aot_engine_bundle_manifest_includes_collection_max_lengths() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global values: i32[12];\nfunction tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+        );
+        process.compile().expect("compile");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_collections_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+            .expect("write bundle");
+
+        let manifest = fs::read_to_string(&bundle.manifest_path).expect("read manifest");
+        assert!(
+            manifest.contains("\"collection_max_lengths\""),
+            "manifest should include collection_max_lengths field"
+        );
+        assert!(
+            manifest.contains("\"path\":\"values\"") && manifest.contains("\"max_length\":12"),
+            "manifest should include seeded max_length row"
         );
 
         let _ = fs::remove_dir_all(&bundle_dir);

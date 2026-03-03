@@ -151,6 +151,35 @@ pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i3
     }
 }
 
+pub fn invoke_i32_i32_i32_i32_to_void(
+    address: usize,
+    arg0: i32,
+    arg1: i32,
+    arg2: i32,
+    arg3: i32,
+) -> Result<(), String> {
+    if address == 0 {
+        return Err("cannot invoke null function pointer".to_string());
+    }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
+    #[cfg(windows)]
+    {
+        let callback: extern "system" fn(i32, i32, i32, i32) =
+            unsafe { std::mem::transmute(address) };
+        callback(arg0, arg1, arg2, arg3);
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let callback: extern "C" fn(i32, i32, i32, i32) =
+            unsafe { std::mem::transmute(address) };
+        callback(arg0, arg1, arg2, arg3);
+        Ok(())
+    }
+}
+
 // ============================================================
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
@@ -317,9 +346,11 @@ struct StasisGraphicsAssetsApi {
     _lib: Library,
     stasis_gfx_load_sprite: usize,
     stasis_gfx_dump_bmp: usize,
+    stasis_gfx_poll_reload: usize,
     stasis_load_font: usize,
     stasis_measure_text: usize,
     stasis_gfx_cache_text: usize,
+    stasis_gfx_measure_text_cached: usize,
 }
 
 impl StasisGraphicsAssetsApi {
@@ -340,9 +371,11 @@ impl StasisGraphicsAssetsApi {
         Ok(Self {
             stasis_gfx_load_sprite: lib.symbol_address("stasis_gfx_load_sprite")?,
             stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
+            stasis_gfx_poll_reload: lib.symbol_address("stasis_gfx_poll_reload")?,
             stasis_load_font: lib.symbol_address("stasis_load_font")?,
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
             stasis_gfx_cache_text: lib.symbol_address("stasis_gfx_cache_text")?,
+            stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
             _lib: lib,
         })
     }
@@ -467,6 +500,14 @@ pub fn upsert_jit_string_literal(id: i32, value: &str) {
         .lock()
         .expect("jit string literal table mutex poisoned");
     guard.insert(id, value.to_string());
+}
+
+pub fn jit_string_literal_value(id: i32) -> Option<String> {
+    let table = jit_string_literal_table();
+    let guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    guard.get(&id).cloned()
 }
 
 // ============================================================
@@ -710,6 +751,83 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
         let _ = text_id;
         0
     }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let callback: extern "system" fn(i32) -> i32 =
+            unsafe { std::mem::transmute(api.stasis_gfx_poll_reload) };
+        return callback(handle);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = handle;
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
+    #[cfg(windows)]
+    {
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0.0;
+        };
+        let callback: extern "system" fn(i32) -> f32 =
+            unsafe { std::mem::transmute(api.stasis_gfx_measure_text_cached) };
+        return callback(run_handle);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = run_handle;
+        0.0
+    }
+}
+
+// AOT engine bundles may be linked and executed headlessly; keep this as a no-op so tests don't
+// block on sleeps during deterministic quality-gate runs.
+#[no_mangle]
+pub extern "C" fn stasis_jit_sleep_ms(ms: i32) {
+    let _ = ms;
+}
+
+// Runtime-compatible time APIs used by `extern function time()`/`time_us()` expansion.
+#[no_mangle]
+pub extern "C" fn stasis_get_time_ms() -> i32 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as i32,
+        Err(_) => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_get_time_us() -> i32 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_micros() as i32,
+        Err(_) => 0,
+    }
+}
+
+// Some stdlib externs use explicit `stasis_gfx_*` symbol names. Provide aliases so AOT bundles can
+// link against the same shim layer used by the JIT runner.
+#[no_mangle]
+pub extern "C" fn stasis_gfx_cache_text(font: i32, text_id: i32) -> i32 {
+    stasis_jit_gfx_cache_text(font, text_id)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_gfx_measure_text_cached(run_handle: i32) -> f32 {
+    stasis_jit_gfx_measure_text_cached(run_handle)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_gfx_poll_reload(handle: i32) -> i32 {
+    stasis_jit_gfx_poll_reload(handle)
 }
 
 #[no_mangle]
@@ -1504,7 +1622,36 @@ pub extern "C" fn stasis_jit_sys_memmove_f32(
 // Brickout uses `audio_is_available()` as a gate; return false so the game runs without calling
 // pointer-typed audio externs (e.g. `audio_push_f32_interleaved`).
 #[no_mangle]
+pub extern "C" fn stasis_jit_audio_init(_sample_rate: i32, _channels: i32, _target_latency_frames: i32) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_shutdown() {}
+
+#[no_mangle]
 pub extern "C" fn stasis_jit_audio_is_available() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_get_sample_rate() -> i32 {
+    // Sensible default for callers that don't guard on `audio_is_available`.
+    48_000
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_get_channels() -> i32 {
+    2
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_get_queued_frames() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_get_underruns() -> i32 {
     0
 }
 
