@@ -5,6 +5,7 @@ pub const TYPE_ID_VOID: TypeId = 0;
 pub const TYPE_ID_I32: TypeId = 1;
 pub const TYPE_ID_F32: TypeId = 2;
 pub const TYPE_ID_BOOL: TypeId = 3;
+pub const TYPE_ID_F64: TypeId = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BuiltinType {
@@ -12,6 +13,7 @@ enum BuiltinType {
     I32,
     F32,
     Bool,
+    F64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -70,6 +72,8 @@ impl TypeTable {
         table.intern_builtin("i32", BuiltinType::I32, 4);
         table.intern_builtin("f32", BuiltinType::F32, 4);
         table.intern_builtin("bool", BuiltinType::Bool, 1);
+        // Keep existing builtin ids stable; append new builtins at the end.
+        table.intern_builtin("f64", BuiltinType::F64, 8);
         table
     }
 
@@ -314,6 +318,9 @@ impl TypeTable {
         }
         if type_name == "bool" {
             return Some(TYPE_ID_BOOL);
+        }
+        if type_name == "f64" {
+            return Some(TYPE_ID_F64);
         }
         if type_name == "string" {
             return self.by_key.get(&TypeKey::Utf8View).copied();

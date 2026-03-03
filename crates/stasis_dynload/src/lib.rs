@@ -485,12 +485,22 @@ fn registered_f32_ptrs() -> &'static Mutex<HashMap<i32, usize>> {
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn registered_f64_ptrs() -> &'static Mutex<HashMap<i32, usize>> {
+    static TABLE: OnceLock<Mutex<HashMap<i32, usize>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn registered_i32_arrays() -> &'static Mutex<HashMap<ArrayKey, (usize, usize)>> {
     static TABLE: OnceLock<Mutex<HashMap<ArrayKey, (usize, usize)>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn registered_f32_arrays() -> &'static Mutex<HashMap<ArrayKey, (usize, usize)>> {
+    static TABLE: OnceLock<Mutex<HashMap<ArrayKey, (usize, usize)>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn registered_f64_arrays() -> &'static Mutex<HashMap<ArrayKey, (usize, usize)>> {
     static TABLE: OnceLock<Mutex<HashMap<ArrayKey, (usize, usize)>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -516,6 +526,14 @@ pub fn register_global_f32_ptr(path_hash: i32, ptr: *mut f32) {
     guard.insert(path_hash, ptr as usize);
 }
 
+pub fn register_global_f64_ptr(path_hash: i32, ptr: *mut f64) {
+    let table = registered_f64_ptrs();
+    let mut guard = table
+        .lock()
+        .expect("registered f64 ptr table mutex poisoned");
+    guard.insert(path_hash, ptr as usize);
+}
+
 pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mut i32, len: usize) {
     let table = registered_i32_arrays();
     let mut guard = table
@@ -529,6 +547,14 @@ pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mu
     let mut guard = table
         .lock()
         .expect("registered f32 array table mutex poisoned");
+    guard.insert((collection_hash, field_hash), (ptr as usize, len));
+}
+
+pub fn register_global_f64_array(collection_hash: i32, field_hash: i32, ptr: *mut f64, len: usize) {
+    let table = registered_f64_arrays();
+    let mut guard = table
+        .lock()
+        .expect("registered f64 array table mutex poisoned");
     guard.insert((collection_hash, field_hash), (ptr as usize, len));
 }
 
@@ -1089,6 +1115,41 @@ pub extern "C" fn stasis_jit_global_f32_store(path_hash: i32, value: f32) {
 }
 
 #[no_mangle]
+pub extern "C" fn stasis_jit_global_f64_load(path_hash: i32) -> f64 {
+    {
+        let table = registered_f64_ptrs();
+        let guard = table
+            .lock()
+            .expect("registered f64 ptr table mutex poisoned");
+        if let Some(ptr) = guard.get(&path_hash).copied() {
+            // Safety: caller owns lifetime; this is a process-global registration.
+            return unsafe { *(ptr as *mut f64) };
+        }
+    }
+    let table = jit_f64_global_table();
+    let guard = table.lock().expect("jit global table mutex poisoned");
+    guard.get(&path_hash).copied().unwrap_or_default()
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_global_f64_store(path_hash: i32, value: f64) {
+    {
+        let table = registered_f64_ptrs();
+        let guard = table
+            .lock()
+            .expect("registered f64 ptr table mutex poisoned");
+        if let Some(ptr) = guard.get(&path_hash).copied() {
+            // Safety: caller owns lifetime; this is a process-global registration.
+            unsafe { *(ptr as *mut f64) = value };
+            return;
+        }
+    }
+    let table = jit_f64_global_table();
+    let mut guard = table.lock().expect("jit global table mutex poisoned");
+    guard.insert(path_hash, value);
+}
+
+#[no_mangle]
 pub extern "C" fn stasis_jit_global_i32_array_load(
     collection_hash: i32,
     field_hash: i32,
@@ -1238,6 +1299,68 @@ pub extern "C" fn stasis_jit_global_f32_array_store(
     guard.insert((collection_hash, field_hash, index), value);
 }
 
+#[no_mangle]
+pub extern "C" fn stasis_jit_global_f64_array_load(
+    collection_hash: i32,
+    field_hash: i32,
+    index: i32,
+) -> f64 {
+    if index < 0 {
+        return 0.0;
+    }
+
+    let idx = index as usize;
+    {
+        let table = registered_f64_arrays();
+        let guard = table
+            .lock()
+            .expect("registered f64 array table mutex poisoned");
+        if let Some((ptr, len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if idx < len {
+                // Safety: caller owns lifetime; this is a process-global registration.
+                return unsafe { *((ptr as *mut f64).add(idx)) };
+            }
+            return 0.0;
+        }
+    }
+    let table = jit_f64_array_global_table();
+    let guard = table.lock().expect("jit global table mutex poisoned");
+    guard
+        .get(&(collection_hash, field_hash, index))
+        .copied()
+        .unwrap_or_default()
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_global_f64_array_store(
+    collection_hash: i32,
+    field_hash: i32,
+    index: i32,
+    value: f64,
+) {
+    if index < 0 {
+        return;
+    }
+
+    let idx = index as usize;
+    {
+        let table = registered_f64_arrays();
+        let guard = table
+            .lock()
+            .expect("registered f64 array table mutex poisoned");
+        if let Some((ptr, len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if idx < len {
+                // Safety: caller owns lifetime; this is a process-global registration.
+                unsafe { *((ptr as *mut f64).add(idx)) = value };
+            }
+            return;
+        }
+    }
+    let table = jit_f64_array_global_table();
+    let mut guard = table.lock().expect("jit global table mutex poisoned");
+    guard.insert((collection_hash, field_hash, index), value);
+}
+
 pub fn clear_jit_i32_global_table() {
     let table = jit_i32_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
@@ -1250,6 +1373,12 @@ pub fn clear_jit_f32_global_table() {
     guard.clear();
 }
 
+pub fn clear_jit_f64_global_table() {
+    let table = jit_f64_global_table();
+    let mut guard = table.lock().expect("jit global table mutex poisoned");
+    guard.clear();
+}
+
 pub fn clear_jit_i32_array_global_table() {
     let table = jit_i32_array_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
@@ -1258,6 +1387,12 @@ pub fn clear_jit_i32_array_global_table() {
 
 pub fn clear_jit_f32_array_global_table() {
     let table = jit_f32_array_global_table();
+    let mut guard = table.lock().expect("jit global table mutex poisoned");
+    guard.clear();
+}
+
+pub fn clear_jit_f64_array_global_table() {
+    let table = jit_f64_array_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.clear();
 }
@@ -1808,8 +1943,10 @@ type JitDispatchMap = std::collections::HashMap<(u32, u8), usize>;
 type JitCodePtrMap = std::collections::HashMap<u32, usize>;
 type JitI32GlobalMap = std::collections::HashMap<i32, i32>;
 type JitF32GlobalMap = std::collections::HashMap<i32, f32>;
+type JitF64GlobalMap = std::collections::HashMap<i32, f64>;
 type JitI32ArrayGlobalMap = std::collections::HashMap<(i32, i32, i32), i32>;
 type JitF32ArrayGlobalMap = std::collections::HashMap<(i32, i32, i32), f32>;
+type JitF64ArrayGlobalMap = std::collections::HashMap<(i32, i32, i32), f64>;
 type JitStringLiteralMap = std::collections::HashMap<i32, String>;
 
 fn jit_i32_dispatch_table() -> &'static Mutex<JitDispatchMap> {
@@ -1837,6 +1974,11 @@ fn jit_f32_global_table() -> &'static Mutex<JitF32GlobalMap> {
     TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+fn jit_f64_global_table() -> &'static Mutex<JitF64GlobalMap> {
+    static TABLE: OnceLock<Mutex<JitF64GlobalMap>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 fn jit_i32_array_global_table() -> &'static Mutex<JitI32ArrayGlobalMap> {
     static TABLE: OnceLock<Mutex<JitI32ArrayGlobalMap>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
@@ -1844,6 +1986,11 @@ fn jit_i32_array_global_table() -> &'static Mutex<JitI32ArrayGlobalMap> {
 
 fn jit_f32_array_global_table() -> &'static Mutex<JitF32ArrayGlobalMap> {
     static TABLE: OnceLock<Mutex<JitF32ArrayGlobalMap>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn jit_f64_array_global_table() -> &'static Mutex<JitF64ArrayGlobalMap> {
+    static TABLE: OnceLock<Mutex<JitF64ArrayGlobalMap>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
