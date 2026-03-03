@@ -1,5 +1,5 @@
-import "stdlib/graphics.stasis";
-import "stdlib/stdlib.stasis";
+import "../stdlib/graphics.stasis";
+import "../stdlib/stdlib.stasis";
 
 // Graphics command buffer (v1 prototype)
 //

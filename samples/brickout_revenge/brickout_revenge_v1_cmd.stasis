@@ -2,8 +2,8 @@ import "../../src/stdlib/stdlib.stasis";
 import "../../src/stdlib/frame_timer.stasis";
 import "../../src/stdlib/sdl_scancodes.stasis";
 import "../../src/stdlib/graphics.stasis";
-import "../../src/host_frame.stasis";
-import "../../src/gfx_cmd.stasis";
+import "../../src/runtime/host_frame.stasis";
+import "../../src/runtime/gfx_cmd.stasis";
 import "../../src/stdlib/audio.stasis";
 
 // Brickout Revenge - Tower Defense meets Breakout
