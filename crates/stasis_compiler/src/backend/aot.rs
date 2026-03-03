@@ -12,6 +12,8 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AotArtifact {
@@ -660,6 +662,9 @@ fn compile_function_to_object_bytes(
         builder.finalize();
     }
 
+    #[cfg(test)]
+    maybe_invoke_clif_dump_hook(meta, &context.func);
+
     module
         .define_function(function_id, &mut context)
         .map_err(|error| format!("failed to define AOT function {symbol}: {error}"))?;
@@ -668,6 +673,32 @@ fn compile_function_to_object_bytes(
     product
         .emit()
         .map_err(|error| format!("failed to emit AOT object bytes: {error}"))
+}
+
+#[cfg(test)]
+type ClifDumpHook =
+    Box<dyn Fn(&FunctionMeta, &cranelift_codegen::ir::Function) + Send + Sync + 'static>;
+
+#[cfg(test)]
+static CLIF_DUMP_HOOK: OnceLock<Mutex<Option<ClifDumpHook>>> = OnceLock::new();
+
+#[cfg(test)]
+fn clif_dump_hook() -> &'static Mutex<Option<ClifDumpHook>> {
+    CLIF_DUMP_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn set_clif_dump_hook(hook: Option<ClifDumpHook>) {
+    *clif_dump_hook().lock().expect("lock clif dump hook") = hook;
+}
+
+#[cfg(test)]
+fn maybe_invoke_clif_dump_hook(meta: &FunctionMeta, func: &cranelift_codegen::ir::Function) {
+    let guard = clif_dump_hook().lock().expect("lock clif dump hook");
+    let Some(hook) = guard.as_ref() else {
+        return;
+    };
+    hook(meta, func);
 }
 
 fn record_string_literal(out: &mut BTreeMap<i32, String>, value: &str) -> Result<(), String> {
@@ -948,6 +979,7 @@ mod tests {
     use super::*;
     use crate::backend::EngineEntrypoints;
     use std::process::Command;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1375,6 +1407,70 @@ mod tests {
         assert_eq!(second_status.code(), Some(9));
 
         let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_perf_balls_bricks_tick_clif_summary() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let source_path = repo_root.join("samples").join("perf_balls_bricks.stasis");
+        assert!(
+            source_path.exists(),
+            "expected perf sample at {}",
+            source_path.display()
+        );
+
+        let source_text = fs::read_to_string(&source_path).expect("read perf sample");
+        let mut process = AotProcess::new();
+        process.upsert_file(source_path.display().to_string(), source_text);
+
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_hook = Arc::clone(&captured);
+        set_clif_dump_hook(Some(Box::new(move |meta, func| {
+            if meta.name == "tick" {
+                *captured_hook.lock().expect("lock clif capture") =
+                    Some(format!("{}", func.display()));
+            }
+        })));
+
+        let report = process.compile().expect("compile perf sample");
+        assert!(report.emit.emitted_functions > 0, "expected functions emitted");
+
+        set_clif_dump_hook(None);
+        let clif = captured
+            .lock()
+            .expect("lock clif capture")
+            .take()
+            .expect("expected tick clif capture");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        let out_path = std::env::temp_dir()
+            .join(format!("stasis_perf_balls_bricks_tick_{stamp}.clif"));
+        fs::write(&out_path, &clif).expect("write clif dump");
+
+        let call_lines = clif.lines().filter(|line| line.contains("call ")).count();
+        let call_value_lines = clif.lines().filter(|line| line.contains("= call ")).count();
+        let call_void_lines = clif
+            .lines()
+            .filter(|line| line.trim_start().starts_with("call "))
+            .count();
+        let load_lines = clif.lines().filter(|line| line.contains("load")).count();
+        let store_lines = clif.lines().filter(|line| line.contains("store")).count();
+
+        println!(
+            "clif_dump=perf_balls_bricks tick_clif_path={} bytes={} lines={} call_lines={} call_value_lines={} call_void_lines={} load_lines={} store_lines={}",
+            out_path.display(),
+            clif.len(),
+            clif.lines().count(),
+            call_lines,
+            call_value_lines,
+            call_void_lines,
+            load_lines,
+            store_lines
+        );
     }
 
     #[cfg(windows)]
