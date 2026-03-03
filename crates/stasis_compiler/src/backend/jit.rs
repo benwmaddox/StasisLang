@@ -1185,6 +1185,7 @@ fn compile_function_to_jit_module(
         }
 
         let empty_foreach_bindings = ForeachBindingMap::new();
+        let mut internal_calls = InternalCallMode::Jit;
         let body = extract_function_body(hir)?;
         let mut terminated = false;
         parse_simple_statements_from_block_with(body, type_table, |type_table, statement| {
@@ -1196,6 +1197,7 @@ fn compile_function_to_jit_module(
                 std::slice::from_ref(&statement),
                 &mut values_by_name,
                 &runtime_call_refs,
+                &mut internal_calls,
                 call_signatures,
                 type_table,
                 global_path_types,
