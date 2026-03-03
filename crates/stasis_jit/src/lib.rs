@@ -39,6 +39,7 @@ impl Default for AotCompileConfig {
 #[derive(Debug, Clone)]
 pub struct AotLinkConfig {
     pub linker_path: Option<PathBuf>,
+    pub runtime_lib_paths: Vec<PathBuf>,
 }
 
 impl Default for AotLinkConfig {
@@ -47,7 +48,10 @@ impl Default for AotLinkConfig {
             .ok()
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
-        Self { linker_path }
+        Self {
+            linker_path,
+            runtime_lib_paths: Vec::new(),
+        }
     }
 }
 
@@ -279,6 +283,9 @@ pub fn link_objects_to_executable(
     }
     for object_path in object_paths {
         command.arg(object_path);
+    }
+    for runtime_lib in &config.runtime_lib_paths {
+        command.arg(runtime_lib);
     }
 
     run_link_command(&mut command, "executable link", &linker)?;
@@ -779,6 +786,7 @@ echo "fake-shared" > "$OUT"
 
         let config = AotLinkConfig {
             linker_path: Some(fake_linker),
+            runtime_lib_paths: vec![],
         };
         link_objects_to_dynamic_library(
             &[dummy_object],
