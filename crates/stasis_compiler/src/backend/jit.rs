@@ -63,6 +63,7 @@ impl JitProcess {
             stasis_dynload::clear_jit_f32_array_global_table();
             stasis_dynload::clear_jit_f64_array_global_table();
             stasis_dynload::clear_jit_string_literal_table();
+            stasis_dynload::clear_registered_global_memory();
         }
 
         Self {
@@ -976,12 +977,20 @@ fn compile_function_to_jit_module(
         stasis_dynload::stasis_jit_global_f32_array_store as *const u8,
     );
     jit_builder.symbol(
+        "stasis_jit_global_f32_array_ptr",
+        stasis_dynload::stasis_jit_global_f32_array_ptr as *const u8,
+    );
+    jit_builder.symbol(
         "stasis_jit_global_f64_array_load",
         stasis_dynload::stasis_jit_global_f64_array_load as *const u8,
     );
     jit_builder.symbol(
         "stasis_jit_global_f64_array_store",
         stasis_dynload::stasis_jit_global_f64_array_store as *const u8,
+    );
+    jit_builder.symbol(
+        "stasis_jit_global_f64_array_ptr",
+        stasis_dynload::stasis_jit_global_f64_array_ptr as *const u8,
     );
     for (extern_symbol, address) in extern_symbol_addresses {
         if *address == 0 {

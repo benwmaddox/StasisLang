@@ -11,7 +11,7 @@ use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
     immediates::{Ieee32, Ieee64},
-    types, AbiParam, Block, FuncRef, InstBuilder, Value,
+    types, AbiParam, Block, FuncRef, InstBuilder, MemFlags, Value,
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
@@ -92,6 +92,8 @@ pub(crate) struct ForeachBinding {
     pub(crate) index_var: Variable,
     pub(crate) element_type: Option<TypeId>,
     pub(crate) field_types: BTreeMap<String, TypeId>,
+    pub(crate) f32_array_base_ptrs: BTreeMap<String, Value>,
+    pub(crate) f64_array_base_ptrs: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1120,8 +1122,10 @@ pub(crate) struct RuntimeCallImportIds {
     pub(crate) global_i32_array_store: FuncId,
     pub(crate) global_f32_array_load: FuncId,
     pub(crate) global_f32_array_store: FuncId,
+    pub(crate) global_f32_array_ptr: FuncId,
     pub(crate) global_f64_array_load: FuncId,
     pub(crate) global_f64_array_store: FuncId,
+    pub(crate) global_f64_array_ptr: FuncId,
     pub(crate) collection_i32_load: FuncId,
     pub(crate) collection_i32_store: FuncId,
     pub(crate) extern_calls: BTreeMap<ExternImportKey, FuncId>,
@@ -1170,8 +1174,10 @@ pub(crate) struct RuntimeCallRefs {
     pub(crate) global_i32_array_store: FuncRef,
     pub(crate) global_f32_array_load: FuncRef,
     pub(crate) global_f32_array_store: FuncRef,
+    pub(crate) global_f32_array_ptr: FuncRef,
     pub(crate) global_f64_array_load: FuncRef,
     pub(crate) global_f64_array_store: FuncRef,
+    pub(crate) global_f64_array_ptr: FuncRef,
     pub(crate) collection_i32_load: FuncRef,
     pub(crate) collection_i32_store: FuncRef,
     pub(crate) extern_calls: BTreeMap<ExternImportKey, FuncRef>,
@@ -1492,6 +1498,20 @@ pub(crate) fn declare_f32_array_store_import(
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
+pub(crate) fn declare_f32_array_ptr_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::I64));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
 pub(crate) fn declare_f64_array_load_import(
     module: &mut impl Module,
     symbol: &str,
@@ -1515,6 +1535,20 @@ pub(crate) fn declare_f64_array_store_import(
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::F64));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_f64_array_ptr_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::I64));
     module
         .declare_function(symbol, Linkage::Import, &signature)
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
@@ -4887,6 +4921,52 @@ pub(crate) fn emit_simple_statements(
                     TYPE_ID_I32,
                     type_table,
                 )?;
+
+                // Cache collection field pointers once per foreach loop, so hot inner loops can
+                // use direct loads/stores instead of calling runtime helpers on every iteration.
+                let collection_hash_value =
+                    emit_foreach_collection_handle_value(builder, collection_handle);
+                let len_value = builder
+                    .ins()
+                    .iconst(types::I32, i64::from(collection_info.len));
+                let mut f32_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
+                let mut f64_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
+                if collection_info.element_type == Some(TYPE_ID_F32) {
+                    let field_hash_value = builder.ins().iconst(types::I32, 0);
+                    let call = builder.ins().call(
+                        runtime_call_refs.global_f32_array_ptr,
+                        &[collection_hash_value, field_hash_value, len_value],
+                    );
+                    f32_array_base_ptrs.insert(String::new(), builder.inst_results(call)[0]);
+                }
+                if collection_info.element_type == Some(TYPE_ID_F64) {
+                    let field_hash_value = builder.ins().iconst(types::I32, 0);
+                    let call = builder.ins().call(
+                        runtime_call_refs.global_f64_array_ptr,
+                        &[collection_hash_value, field_hash_value, len_value],
+                    );
+                    f64_array_base_ptrs.insert(String::new(), builder.inst_results(call)[0]);
+                }
+                for (suffix, type_id) in &collection_info.field_types {
+                    let field_hash = hash_foreach_field_suffix(suffix);
+                    let field_hash_value =
+                        builder.ins().iconst(types::I32, i64::from(field_hash));
+                    if *type_id == TYPE_ID_F32 {
+                        let call = builder.ins().call(
+                            runtime_call_refs.global_f32_array_ptr,
+                            &[collection_hash_value, field_hash_value, len_value],
+                        );
+                        f32_array_base_ptrs.insert(suffix.clone(), builder.inst_results(call)[0]);
+                    }
+                    if *type_id == TYPE_ID_F64 {
+                        let call = builder.ins().call(
+                            runtime_call_refs.global_f64_array_ptr,
+                            &[collection_hash_value, field_hash_value, len_value],
+                        );
+                        f64_array_base_ptrs.insert(suffix.clone(), builder.inst_results(call)[0]);
+                    }
+                }
+
                 let mut loop_values = values_by_name.clone();
                 if let Some(index_name) = index_name {
                     loop_values.insert(
@@ -4905,6 +4985,8 @@ pub(crate) fn emit_simple_statements(
                         index_var,
                         element_type: collection_info.element_type,
                         field_types: collection_info.field_types.clone(),
+                        f32_array_base_ptrs,
+                        f64_array_base_ptrs,
                     },
                 );
 
@@ -6619,11 +6701,11 @@ pub(crate) fn emit_foreach_binding_load(
     suffix: &str,
 ) -> Result<ValueBinding, String> {
     let resolved = resolve_foreach_binding_value_type(binding, suffix)?;
-    let field_hash = hash_foreach_field_suffix(suffix);
-    let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
-    let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
     let index_value = builder.use_var(binding.index_var);
     if is_i32_abi_compatible_type(resolved, type_table) {
+        let field_hash = hash_foreach_field_suffix(suffix);
+        let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
+        let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
         let call = builder.ins().call(
             runtime_call_refs.global_i32_array_load,
             &[collection_hash, field_hash_value, index_value],
@@ -6634,6 +6716,20 @@ pub(crate) fn emit_foreach_binding_load(
         });
     }
     if resolved == TYPE_ID_F32 {
+        if let Some(base_ptr) = binding.f32_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            let value = builder.ins().load(types::F32, MemFlags::new(), addr, 0);
+            return Ok(ValueBinding {
+                value,
+                type_id: TYPE_ID_F32,
+            });
+        }
+
+        let field_hash = hash_foreach_field_suffix(suffix);
+        let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
+        let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
         let call = builder.ins().call(
             runtime_call_refs.global_f32_array_load,
             &[collection_hash, field_hash_value, index_value],
@@ -6644,6 +6740,20 @@ pub(crate) fn emit_foreach_binding_load(
         });
     }
     if resolved == TYPE_ID_F64 {
+        if let Some(base_ptr) = binding.f64_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            let value = builder.ins().load(types::F64, MemFlags::new(), addr, 0);
+            return Ok(ValueBinding {
+                value,
+                type_id: TYPE_ID_F64,
+            });
+        }
+
+        let field_hash = hash_foreach_field_suffix(suffix);
+        let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
+        let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
         let call = builder.ins().call(
             runtime_call_refs.global_f64_array_load,
             &[collection_hash, field_hash_value, index_value],
@@ -6812,10 +6922,17 @@ pub(crate) fn emit_foreach_binding_assignment(
                 ))
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f32_array_store,
-            &[collection_hash, field_hash_value, index_value, value],
-        );
+        if let Some(base_ptr) = binding.f32_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().store(MemFlags::new(), value, addr, 0);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_f32_array_store,
+                &[collection_hash, field_hash_value, index_value, value],
+            );
+        }
         return Ok(());
     }
     if path_type == TYPE_ID_F64 {
@@ -6872,10 +6989,17 @@ pub(crate) fn emit_foreach_binding_assignment(
                 ))
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f64_array_store,
-            &[collection_hash, field_hash_value, index_value, value],
-        );
+        if let Some(base_ptr) = binding.f64_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().store(MemFlags::new(), value, addr, 0);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_f64_array_store,
+                &[collection_hash, field_hash_value, index_value, value],
+            );
+        }
         return Ok(());
     }
     Err(format!(
@@ -8190,6 +8314,7 @@ pub(crate) fn build_runtime_call_import_ids(
             module,
             "stasis_jit_global_f32_array_store",
         )?,
+        global_f32_array_ptr: declare_f32_array_ptr_import(module, "stasis_jit_global_f32_array_ptr")?,
         global_f64_array_load: declare_f64_array_load_import(
             module,
             "stasis_jit_global_f64_array_load",
@@ -8198,6 +8323,7 @@ pub(crate) fn build_runtime_call_import_ids(
             module,
             "stasis_jit_global_f64_array_store",
         )?,
+        global_f64_array_ptr: declare_f64_array_ptr_import(module, "stasis_jit_global_f64_array_ptr")?,
         collection_i32_load: declare_i32_call_import(module, "stasis_jit_collection_i32_load", 2)?,
         collection_i32_store: declare_void_call_import(
             module,
@@ -8256,8 +8382,10 @@ pub(crate) fn build_runtime_call_refs(
         global_i32_array_store: module.declare_func_in_func(imports.global_i32_array_store, func),
         global_f32_array_load: module.declare_func_in_func(imports.global_f32_array_load, func),
         global_f32_array_store: module.declare_func_in_func(imports.global_f32_array_store, func),
+        global_f32_array_ptr: module.declare_func_in_func(imports.global_f32_array_ptr, func),
         global_f64_array_load: module.declare_func_in_func(imports.global_f64_array_load, func),
         global_f64_array_store: module.declare_func_in_func(imports.global_f64_array_store, func),
+        global_f64_array_ptr: module.declare_func_in_func(imports.global_f64_array_ptr, func),
         collection_i32_load: module.declare_func_in_func(imports.collection_i32_load, func),
         collection_i32_store: module.declare_func_in_func(imports.collection_i32_store, func),
         extern_calls: imports
