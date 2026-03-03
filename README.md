@@ -120,7 +120,7 @@ Development runs in one process:
 Run Brickout Revenge v1 (Windows in-process dev runner):
 
 ```powershell
-.\target\debug\stasis.exe play samples\brickout_revenge\brickout_revenge_v1.stasis --watch-dir samples\brickout_revenge
+cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis --watch-dir samples\brickout_revenge
 ```
 
 Edit and save any `.stasis` file in the current import/dependency graph. You should see output like:
@@ -150,13 +150,13 @@ test `adds`(): bool {
 Run tests in a directory:
 
 ```powershell
-.\target\debug\stasis.exe test --dir tests/stasis
+cargo run -p stasis --release -- test --dir tests/stasis
 ```
 
 Watch mode:
 
 ```powershell
-.\target\debug\stasis.exe test --dir tests/stasis --watch --watch-settle-ms 50
+cargo run -p stasis --release -- test --dir tests/stasis --watch --watch-settle-ms 50
 ```
 
 ## Current Constraints

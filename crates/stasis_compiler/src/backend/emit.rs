@@ -4,13 +4,14 @@ use crate::frontend::parser::{
     ParsedField,
 };
 use crate::frontend::types::{
-    TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_I32, TYPE_ID_VOID,
+    TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+    TYPE_ID_VOID,
 };
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
-    immediates::Ieee32,
-    types, AbiParam, Block, FuncRef, InstBuilder, Value,
+    immediates::{Ieee32, Ieee64},
+    types, AbiParam, Block, FuncRef, InstBuilder, MemFlags, Value,
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
@@ -73,6 +74,7 @@ pub(crate) struct CompileAnalysisCache {
 pub(crate) enum ConstantValue {
     I32 { value: i32, type_id: TypeId },
     F32(f32),
+    F64(f64),
     Bool(bool),
     String { value: String, type_id: TypeId },
 }
@@ -90,6 +92,8 @@ pub(crate) struct ForeachBinding {
     pub(crate) index_var: Variable,
     pub(crate) element_type: Option<TypeId>,
     pub(crate) field_types: BTreeMap<String, TypeId>,
+    pub(crate) f32_array_base_ptrs: BTreeMap<String, Value>,
+    pub(crate) f64_array_base_ptrs: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,11 +156,17 @@ pub(crate) fn collect_supported_call_signatures(
     map
 }
 
-pub(crate) fn is_supported_call_lane_type(type_id: TypeId, type_table: &TypeTable, allow_void: bool) -> bool {
+pub(crate) fn is_supported_call_lane_type(
+    type_id: TypeId,
+    type_table: &TypeTable,
+    allow_void: bool,
+) -> bool {
     if allow_void && type_id == TYPE_ID_VOID {
         return true;
     }
-    type_id == TYPE_ID_F32 || is_i32_abi_compatible_type(type_id, type_table)
+    type_id == TYPE_ID_F32
+        || type_id == TYPE_ID_F64
+        || is_i32_abi_compatible_type(type_id, type_table)
 }
 
 pub(crate) fn collect_supported_extern_call_signatures(
@@ -200,7 +210,10 @@ pub(crate) fn build_extern_call_signature(
     })
 }
 
-pub(crate) fn build_extern_symbol_candidates(symbol_name: &str, explicit_symbol: bool) -> Vec<String> {
+pub(crate) fn build_extern_symbol_candidates(
+    symbol_name: &str,
+    explicit_symbol: bool,
+) -> Vec<String> {
     let mut out = Vec::new();
     if symbol_name.is_empty() {
         return out;
@@ -552,10 +565,16 @@ pub(crate) fn resolve_global_path_type_id(
 }
 
 pub(crate) fn is_primitive_scalar_type_id(type_id: TypeId) -> bool {
-    matches!(type_id, TYPE_ID_I32 | TYPE_ID_F32 | TYPE_ID_BOOL)
+    matches!(
+        type_id,
+        TYPE_ID_I32 | TYPE_ID_F32 | TYPE_ID_F64 | TYPE_ID_BOOL
+    )
 }
 
-pub(crate) fn resolve_primitive_scalar_type_id(type_name: &str, type_table: &TypeTable) -> Option<TypeId> {
+pub(crate) fn resolve_primitive_scalar_type_id(
+    type_name: &str,
+    type_table: &TypeTable,
+) -> Option<TypeId> {
     let type_id = type_table.resolve(type_name.trim())?;
     if is_primitive_scalar_type_id(type_id) {
         Some(type_id)
@@ -659,6 +678,12 @@ pub(crate) fn parse_top_level_constant_literal(
             .map_err(|error| format!("invalid f32 initializer for constant '{}': {error}", name))?;
         return Ok(Some(ConstantValue::F32(value)));
     }
+    if type_id == TYPE_ID_F64 {
+        let value = initializer
+            .parse::<f64>()
+            .map_err(|error| format!("invalid f64 initializer for constant '{}': {error}", name))?;
+        return Ok(Some(ConstantValue::F64(value)));
+    }
     if type_id == TYPE_ID_BOOL {
         return match initializer {
             "true" => Ok(Some(ConstantValue::Bool(true))),
@@ -684,7 +709,10 @@ pub(crate) fn parse_top_level_constant_literal(
     Ok(None)
 }
 
-pub(crate) fn parse_constant_string_initializer(name: &str, initializer: &str) -> Result<String, String> {
+pub(crate) fn parse_constant_string_initializer(
+    name: &str,
+    initializer: &str,
+) -> Result<String, String> {
     let tokens = tokenize_simple_expression(initializer).map_err(|error| {
         format!(
             "invalid string initializer for constant '{}': {error}",
@@ -1088,10 +1116,16 @@ pub(crate) struct RuntimeCallImportIds {
     pub(crate) global_i32_store: FuncId,
     pub(crate) global_f32_load: FuncId,
     pub(crate) global_f32_store: FuncId,
+    pub(crate) global_f64_load: FuncId,
+    pub(crate) global_f64_store: FuncId,
     pub(crate) global_i32_array_load: FuncId,
     pub(crate) global_i32_array_store: FuncId,
     pub(crate) global_f32_array_load: FuncId,
     pub(crate) global_f32_array_store: FuncId,
+    pub(crate) global_f32_array_ptr: FuncId,
+    pub(crate) global_f64_array_load: FuncId,
+    pub(crate) global_f64_array_store: FuncId,
+    pub(crate) global_f64_array_ptr: FuncId,
     pub(crate) collection_i32_load: FuncId,
     pub(crate) collection_i32_store: FuncId,
     pub(crate) extern_calls: BTreeMap<ExternImportKey, FuncId>,
@@ -1134,10 +1168,16 @@ pub(crate) struct RuntimeCallRefs {
     pub(crate) global_i32_store: FuncRef,
     pub(crate) global_f32_load: FuncRef,
     pub(crate) global_f32_store: FuncRef,
+    pub(crate) global_f64_load: FuncRef,
+    pub(crate) global_f64_store: FuncRef,
     pub(crate) global_i32_array_load: FuncRef,
     pub(crate) global_i32_array_store: FuncRef,
     pub(crate) global_f32_array_load: FuncRef,
     pub(crate) global_f32_array_store: FuncRef,
+    pub(crate) global_f32_array_ptr: FuncRef,
+    pub(crate) global_f64_array_load: FuncRef,
+    pub(crate) global_f64_array_store: FuncRef,
+    pub(crate) global_f64_array_ptr: FuncRef,
     pub(crate) collection_i32_load: FuncRef,
     pub(crate) collection_i32_store: FuncRef,
     pub(crate) extern_calls: BTreeMap<ExternImportKey, FuncRef>,
@@ -1181,10 +1221,12 @@ fn emit_aot_direct_call_for_signature(
         let symbol = aot_symbol_name(function_id);
         let mut import_signature = mode.module.make_signature();
         for param_type in &signature.params {
-            import_signature.params.push(AbiParam::new(clif_type_for_type_id(
-                *param_type,
-                type_table,
-            )?));
+            import_signature
+                .params
+                .push(AbiParam::new(clif_type_for_type_id(
+                    *param_type,
+                    type_table,
+                )?));
         }
         if signature.return_type != TYPE_ID_VOID {
             import_signature
@@ -1209,9 +1251,11 @@ fn emit_aot_direct_call_for_signature(
     if signature.return_type == TYPE_ID_VOID {
         Ok(None)
     } else {
-        let value = builder.inst_results(call).first().copied().ok_or_else(|| {
-            "direct call expected value result but produced none".to_string()
-        })?;
+        let value = builder
+            .inst_results(call)
+            .first()
+            .copied()
+            .ok_or_else(|| "direct call expected value result but produced none".to_string())?;
         Ok(Some(value))
     }
 }
@@ -1277,7 +1321,10 @@ pub(crate) fn declare_i32_f32_call_import(
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
-pub(crate) fn declare_lookup_code_ptr_import(module: &mut impl Module, symbol: &str) -> Result<FuncId, String> {
+pub(crate) fn declare_lookup_code_ptr_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::I64));
@@ -1286,7 +1333,10 @@ pub(crate) fn declare_lookup_code_ptr_import(module: &mut impl Module, symbol: &
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
-pub(crate) fn declare_direct_f32_unary_import(module: &mut impl Module, symbol: &str) -> Result<FuncId, String> {
+pub(crate) fn declare_direct_f32_unary_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::F32));
     signature.returns.push(AbiParam::new(types::F32));
@@ -1344,7 +1394,10 @@ pub(crate) fn declare_void_call_import(
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
-pub(crate) fn declare_f32_global_load_import(module: &mut impl Module, symbol: &str) -> Result<FuncId, String> {
+pub(crate) fn declare_f32_global_load_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::F32));
@@ -1353,7 +1406,10 @@ pub(crate) fn declare_f32_global_load_import(module: &mut impl Module, symbol: &
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
-pub(crate) fn declare_f32_global_store_import(module: &mut impl Module, symbol: &str) -> Result<FuncId, String> {
+pub(crate) fn declare_f32_global_store_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::F32));
@@ -1362,7 +1418,34 @@ pub(crate) fn declare_f32_global_store_import(module: &mut impl Module, symbol: 
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
-pub(crate) fn declare_i32_array_load_import(module: &mut impl Module, symbol: &str) -> Result<FuncId, String> {
+pub(crate) fn declare_f64_global_load_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::F64));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_f64_global_store_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::F64));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_i32_array_load_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
@@ -1373,7 +1456,10 @@ pub(crate) fn declare_i32_array_load_import(module: &mut impl Module, symbol: &s
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
-pub(crate) fn declare_i32_array_store_import(module: &mut impl Module, symbol: &str) -> Result<FuncId, String> {
+pub(crate) fn declare_i32_array_store_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
@@ -1384,7 +1470,10 @@ pub(crate) fn declare_i32_array_store_import(module: &mut impl Module, symbol: &
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
-pub(crate) fn declare_f32_array_load_import(module: &mut impl Module, symbol: &str) -> Result<FuncId, String> {
+pub(crate) fn declare_f32_array_load_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
@@ -1395,12 +1484,71 @@ pub(crate) fn declare_f32_array_load_import(module: &mut impl Module, symbol: &s
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
 }
 
-pub(crate) fn declare_f32_array_store_import(module: &mut impl Module, symbol: &str) -> Result<FuncId, String> {
+pub(crate) fn declare_f32_array_store_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::F32));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_f32_array_ptr_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::I64));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_f64_array_load_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::F64));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_f64_array_store_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::F64));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_f64_array_ptr_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::I64));
     module
         .declare_function(symbol, Linkage::Import, &signature)
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
@@ -1477,6 +1625,7 @@ pub(crate) fn clif_type_for_type_id(
     match type_id {
         TYPE_ID_I32 => Ok(types::I32),
         TYPE_ID_F32 => Ok(types::F32),
+        TYPE_ID_F64 => Ok(types::F64),
         TYPE_ID_BOOL => Ok(types::I32),
         TYPE_ID_VOID => Err("void is not a value type".to_string()),
         other => {
@@ -1570,6 +1719,7 @@ pub(crate) enum AssignTarget {
 pub(crate) enum ConversionKind {
     FromI32,
     FromF32,
+    FromF64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1866,7 +2016,10 @@ pub(crate) fn parse_assignment_statement(statement_text: &str) -> Result<SimpleS
     })
 }
 
-pub(crate) fn parse_assignment_target(source: &str, cursor: usize) -> Result<(AssignTarget, usize), String> {
+pub(crate) fn parse_assignment_target(
+    source: &str,
+    cursor: usize,
+) -> Result<(AssignTarget, usize), String> {
     let (first, mut next) = parse_identifier(source, cursor)?;
     let mut collection_path = first.to_string();
     let mut index_expr: Option<SimpleExpr> = None;
@@ -1946,13 +2099,16 @@ pub(crate) fn parse_from_conversion_statement(statement_text: &str) -> Result<Si
     let trimmed = statement_text.trim();
     let marker_i32 = ".from_i32(";
     let marker_f32 = ".from_f32(";
+    let marker_f64 = ".from_f64(";
     let (marker_pos, marker, kind) = if let Some(pos) = trimmed.find(marker_i32) {
         (pos, marker_i32, ConversionKind::FromI32)
     } else if let Some(pos) = trimmed.find(marker_f32) {
         (pos, marker_f32, ConversionKind::FromF32)
+    } else if let Some(pos) = trimmed.find(marker_f64) {
+        (pos, marker_f64, ConversionKind::FromF64)
     } else {
         return Err(format!(
-            "unsupported conversion statement '{}': expected from_i32 or from_f32",
+            "unsupported conversion statement '{}': expected from_i32, from_f32, or from_f64",
             statement_text
         ));
     };
@@ -2088,7 +2244,10 @@ pub(crate) fn parse_for_control_segment(
     if starts_with_keyword(trimmed, 0, "let") {
         return parse_let_statement(trimmed, type_table);
     }
-    if trimmed.contains(".from_i32(") || trimmed.contains(".from_f32(") {
+    if trimmed.contains(".from_i32(")
+        || trimmed.contains(".from_f32(")
+        || trimmed.contains(".from_f64(")
+    {
         return parse_from_conversion_statement(trimmed);
     }
     if looks_like_assignment(trimmed, 0) {
@@ -2391,7 +2550,9 @@ pub(crate) fn split_top_level_condition<'a>(condition_text: &'a str, op: &[u8; 2
     parts
 }
 
-pub(crate) fn find_condition_operator(condition_text: &str) -> Option<(ComparisonOp, usize, usize)> {
+pub(crate) fn find_condition_operator(
+    condition_text: &str,
+) -> Option<(ComparisonOp, usize, usize)> {
     let bytes = condition_text.as_bytes();
     let mut depth = 0i32;
     let mut index = 0usize;
@@ -2573,7 +2734,9 @@ pub(crate) fn looks_like_from_conversion_statement(source: &str, cursor: usize) 
         return false;
     }
     let method_tail = &tail[dot_pos..];
-    method_tail.starts_with(".from_i32(") || method_tail.starts_with(".from_f32(")
+    method_tail.starts_with(".from_i32(")
+        || method_tail.starts_with(".from_f32(")
+        || method_tail.starts_with(".from_f64(")
 }
 
 pub(crate) fn looks_like_call_statement(source: &str, cursor: usize) -> bool {
@@ -2728,7 +2891,12 @@ pub(crate) fn find_statement_terminator(source: &str, start: usize) -> Result<us
     ))
 }
 
-pub(crate) fn find_matching_delimiter(source: &str, open_index: usize, open: u8, close: u8) -> Option<usize> {
+pub(crate) fn find_matching_delimiter(
+    source: &str,
+    open_index: usize,
+    open: u8,
+    close: u8,
+) -> Option<usize> {
     let bytes = source.as_bytes();
     if bytes.get(open_index).copied() != Some(open) {
         return None;
@@ -2795,7 +2963,12 @@ pub(crate) fn find_matching_delimiter(source: &str, open_index: usize, open: u8,
     None
 }
 
-pub(crate) fn expect_byte(source: &str, cursor: usize, expected: u8, context: &str) -> Result<usize, String> {
+pub(crate) fn expect_byte(
+    source: &str,
+    cursor: usize,
+    expected: u8,
+    context: &str,
+) -> Result<usize, String> {
     if cursor >= source.len() || source.as_bytes()[cursor] != expected {
         return Err(format!(
             "expected {} near '{}'",
@@ -2825,7 +2998,10 @@ pub(crate) fn parse_identifier(source: &str, cursor: usize) -> Result<(&str, usi
     Ok((&source[cursor..end], end))
 }
 
-pub(crate) fn parse_identifier_path(source: &str, cursor: usize) -> Result<(String, usize), String> {
+pub(crate) fn parse_identifier_path(
+    source: &str,
+    cursor: usize,
+) -> Result<(String, usize), String> {
     let (first, mut next) = parse_identifier(source, cursor)?;
     let mut path = first.to_string();
     loop {
@@ -2892,6 +3068,7 @@ pub(crate) fn emit_host_print_call_statement(
     let argument = emit_simple_expression(
         builder,
         &args[0],
+        None,
         values_by_name,
         runtime_call_refs,
         internal_calls,
@@ -3074,6 +3251,7 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
     let target_index_binding = emit_simple_expression(
         builder,
         target_index,
+        None,
         values_by_name,
         runtime_call_refs,
         internal_calls,
@@ -3088,6 +3266,7 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
     let source_index_binding = emit_simple_expression(
         builder,
         source_index,
+        None,
         values_by_name,
         runtime_call_refs,
         internal_calls,
@@ -3387,6 +3566,7 @@ pub(crate) fn try_emit_struct_copy_from_indexed_to_global(
     let source_index_binding = emit_simple_expression(
         builder,
         source_index,
+        None,
         values_by_name,
         runtime_call_refs,
         internal_calls,
@@ -3501,6 +3681,7 @@ pub(crate) fn try_emit_struct_copy_from_global_to_indexed(
     let target_index_binding = emit_simple_expression(
         builder,
         target_index,
+        None,
         values_by_name,
         runtime_call_refs,
         internal_calls,
@@ -3570,6 +3751,7 @@ pub(crate) fn emit_simple_statements(
                 let binding = emit_simple_expression(
                     builder,
                     expression,
+                    *type_id,
                     values_by_name,
                     runtime_call_refs,
                     internal_calls,
@@ -3683,9 +3865,44 @@ pub(crate) fn emit_simple_statements(
                 )? {
                     continue;
                 }
+                let expected_rhs_type = match target {
+                    AssignTarget::Local(name) => values_by_name
+                        .get(name)
+                        .map(|binding| binding.type_id)
+                        .or_else(|| global_path_types.get(name).copied()),
+                    AssignTarget::GlobalPath(path) => {
+                        global_path_types.get(path).copied().or_else(|| {
+                            let (base, suffix) = path.rsplit_once('.')?;
+                            let local = values_by_name.get(base)?;
+                            let field_types = named_struct_field_types.get(&local.type_id)?;
+                            field_types.get(suffix).copied()
+                        })
+                    }
+                    AssignTarget::IndexedPath {
+                        collection_path,
+                        suffix,
+                        ..
+                    } => {
+                        if let Some(local_collection) = values_by_name.get(collection_path).copied()
+                        {
+                            Some(resolve_local_collection_value_type(
+                                local_collection.type_id,
+                                suffix,
+                                type_table,
+                                named_struct_field_types,
+                            )?)
+                        } else if let Some(collection_info) = collection_infos.get(collection_path)
+                        {
+                            Some(resolve_collection_value_type(collection_info, suffix)?)
+                        } else {
+                            None
+                        }
+                    }
+                };
                 let rhs = emit_simple_expression(
                     builder,
                     expression,
+                    expected_rhs_type,
                     values_by_name,
                     runtime_call_refs,
                     internal_calls,
@@ -3743,6 +3960,32 @@ pub(crate) fn emit_simple_statements(
                                     }
                                 }
                             } else if local.type_id == TYPE_ID_F32 {
+                                match op {
+                                    AssignOp::Set => rhs.value,
+                                    AssignOp::Add => {
+                                        let lhs = builder.use_var(local.var);
+                                        builder.ins().fadd(lhs, rhs.value)
+                                    }
+                                    AssignOp::Sub => {
+                                        let lhs = builder.use_var(local.var);
+                                        builder.ins().fsub(lhs, rhs.value)
+                                    }
+                                    AssignOp::Mul => {
+                                        let lhs = builder.use_var(local.var);
+                                        builder.ins().fmul(lhs, rhs.value)
+                                    }
+                                    AssignOp::Div => {
+                                        let lhs = builder.use_var(local.var);
+                                        builder.ins().fdiv(lhs, rhs.value)
+                                    }
+                                    AssignOp::Mod => {
+                                        return Err(format!(
+                                            "'%=' requires i32 target in current jit path for '{}'",
+                                            name
+                                        ));
+                                    }
+                                }
+                            } else if local.type_id == TYPE_ID_F64 {
                                 match op {
                                     AssignOp::Set => rhs.value,
                                     AssignOp::Add => {
@@ -4043,6 +4286,55 @@ pub(crate) fn emit_simple_statements(
                                         );
                                         continue;
                                     }
+                                    if field_type == TYPE_ID_F64 {
+                                        let value = match op {
+                                            AssignOp::Set => rhs.value,
+                                            AssignOp::Add => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_f64_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().fadd(lhs, rhs.value)
+                                            }
+                                            AssignOp::Sub => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_f64_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().fsub(lhs, rhs.value)
+                                            }
+                                            AssignOp::Mul => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_f64_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().fmul(lhs, rhs.value)
+                                            }
+                                            AssignOp::Div => {
+                                                let call = builder.ins().call(
+                                                    runtime_call_refs.global_f64_load,
+                                                    &[path_hash],
+                                                );
+                                                let lhs = builder.inst_results(call)[0];
+                                                builder.ins().fdiv(lhs, rhs.value)
+                                            }
+                                            AssignOp::Mod => {
+                                                return Err(format!(
+                                                    "'%=' is unsupported for f64 local struct field '{}.{}'",
+                                                    base,
+                                                    suffix
+                                                ));
+                                            }
+                                        };
+                                        builder.ins().call(
+                                            runtime_call_refs.global_f64_store,
+                                            &[path_hash, value],
+                                        );
+                                        continue;
+                                    }
                                     return Err(format!(
                                         "unsupported local struct field type {} for '{}.{}'",
                                         field_type, base, suffix
@@ -4076,6 +4368,7 @@ pub(crate) fn emit_simple_statements(
                             let index_binding = emit_simple_expression(
                                 builder,
                                 index,
+                                Some(TYPE_ID_I32),
                                 values_by_name,
                                 runtime_call_refs,
                                 internal_calls,
@@ -4110,6 +4403,7 @@ pub(crate) fn emit_simple_statements(
                         let index_binding = emit_simple_expression(
                             builder,
                             index,
+                            Some(TYPE_ID_I32),
                             values_by_name,
                             runtime_call_refs,
                             internal_calls,
@@ -4140,9 +4434,15 @@ pub(crate) fn emit_simple_statements(
                 kind,
                 source,
             } => {
+                let expected_source_type = match kind {
+                    ConversionKind::FromI32 => Some(TYPE_ID_I32),
+                    ConversionKind::FromF32 => Some(TYPE_ID_F32),
+                    ConversionKind::FromF64 => Some(TYPE_ID_F64),
+                };
                 let source_binding = emit_simple_expression(
                     builder,
                     source,
+                    expected_source_type,
                     values_by_name,
                     runtime_call_refs,
                     internal_calls,
@@ -4218,6 +4518,7 @@ pub(crate) fn emit_simple_statements(
                         let index_binding = emit_simple_expression(
                             builder,
                             index,
+                            Some(TYPE_ID_I32),
                             values_by_name,
                             runtime_call_refs,
                             internal_calls,
@@ -4269,6 +4570,7 @@ pub(crate) fn emit_simple_statements(
                         let binding = emit_simple_expression(
                             builder,
                             arg,
+                            None,
                             values_by_name,
                             runtime_call_refs,
                             internal_calls,
@@ -4321,6 +4623,7 @@ pub(crate) fn emit_simple_statements(
                 let _ = emit_simple_expression(
                     builder,
                     expression,
+                    None,
                     values_by_name,
                     runtime_call_refs,
                     internal_calls,
@@ -4344,6 +4647,7 @@ pub(crate) fn emit_simple_statements(
                 let binding = emit_simple_expression(
                     builder,
                     expression,
+                    Some(expected_return_type),
                     values_by_name,
                     runtime_call_refs,
                     internal_calls,
@@ -4617,6 +4921,52 @@ pub(crate) fn emit_simple_statements(
                     TYPE_ID_I32,
                     type_table,
                 )?;
+
+                // Cache collection field pointers once per foreach loop, so hot inner loops can
+                // use direct loads/stores instead of calling runtime helpers on every iteration.
+                let collection_hash_value =
+                    emit_foreach_collection_handle_value(builder, collection_handle);
+                let len_value = builder
+                    .ins()
+                    .iconst(types::I32, i64::from(collection_info.len));
+                let mut f32_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
+                let mut f64_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
+                if collection_info.element_type == Some(TYPE_ID_F32) {
+                    let field_hash_value = builder.ins().iconst(types::I32, 0);
+                    let call = builder.ins().call(
+                        runtime_call_refs.global_f32_array_ptr,
+                        &[collection_hash_value, field_hash_value, len_value],
+                    );
+                    f32_array_base_ptrs.insert(String::new(), builder.inst_results(call)[0]);
+                }
+                if collection_info.element_type == Some(TYPE_ID_F64) {
+                    let field_hash_value = builder.ins().iconst(types::I32, 0);
+                    let call = builder.ins().call(
+                        runtime_call_refs.global_f64_array_ptr,
+                        &[collection_hash_value, field_hash_value, len_value],
+                    );
+                    f64_array_base_ptrs.insert(String::new(), builder.inst_results(call)[0]);
+                }
+                for (suffix, type_id) in &collection_info.field_types {
+                    let field_hash = hash_foreach_field_suffix(suffix);
+                    let field_hash_value =
+                        builder.ins().iconst(types::I32, i64::from(field_hash));
+                    if *type_id == TYPE_ID_F32 {
+                        let call = builder.ins().call(
+                            runtime_call_refs.global_f32_array_ptr,
+                            &[collection_hash_value, field_hash_value, len_value],
+                        );
+                        f32_array_base_ptrs.insert(suffix.clone(), builder.inst_results(call)[0]);
+                    }
+                    if *type_id == TYPE_ID_F64 {
+                        let call = builder.ins().call(
+                            runtime_call_refs.global_f64_array_ptr,
+                            &[collection_hash_value, field_hash_value, len_value],
+                        );
+                        f64_array_base_ptrs.insert(suffix.clone(), builder.inst_results(call)[0]);
+                    }
+                }
+
                 let mut loop_values = values_by_name.clone();
                 if let Some(index_name) = index_name {
                     loop_values.insert(
@@ -4635,6 +4985,8 @@ pub(crate) fn emit_simple_statements(
                         index_var,
                         element_type: collection_info.element_type,
                         field_types: collection_info.field_types.clone(),
+                        f32_array_base_ptrs,
+                        f64_array_base_ptrs,
                     },
                 );
 
@@ -4712,25 +5064,64 @@ pub(crate) fn emit_conversion_assignment_value(
             if source.type_id != TYPE_ID_I32 {
                 return Err("from_i32 source expression must be i32".to_string());
             }
-            if target_type != TYPE_ID_F32 {
-                return Err(format!("from_i32 target '{}' must be f32", target_name));
+            if target_type == TYPE_ID_F32 {
+                return Ok(ValueBinding {
+                    value: builder.ins().fcvt_from_sint(types::F32, source.value),
+                    type_id: TYPE_ID_F32,
+                });
             }
-            Ok(ValueBinding {
-                value: builder.ins().fcvt_from_sint(types::F32, source.value),
-                type_id: TYPE_ID_F32,
-            })
+            if target_type == TYPE_ID_F64 {
+                return Ok(ValueBinding {
+                    value: builder.ins().fcvt_from_sint(types::F64, source.value),
+                    type_id: TYPE_ID_F64,
+                });
+            }
+            Err(format!(
+                "from_i32 target '{}' must be f32 or f64",
+                target_name
+            ))
         }
         ConversionKind::FromF32 => {
             if source.type_id != TYPE_ID_F32 {
                 return Err("from_f32 source expression must be f32".to_string());
             }
-            if target_type != TYPE_ID_I32 {
-                return Err(format!("from_f32 target '{}' must be i32", target_name));
+            if target_type == TYPE_ID_I32 {
+                return Ok(ValueBinding {
+                    value: builder.ins().fcvt_to_sint(types::I32, source.value),
+                    type_id: TYPE_ID_I32,
+                });
             }
-            Ok(ValueBinding {
-                value: builder.ins().fcvt_to_sint(types::I32, source.value),
-                type_id: TYPE_ID_I32,
-            })
+            if target_type == TYPE_ID_F64 {
+                return Ok(ValueBinding {
+                    value: builder.ins().fpromote(types::F64, source.value),
+                    type_id: TYPE_ID_F64,
+                });
+            }
+            Err(format!(
+                "from_f32 target '{}' must be i32 or f64",
+                target_name
+            ))
+        }
+        ConversionKind::FromF64 => {
+            if source.type_id != TYPE_ID_F64 {
+                return Err("from_f64 source expression must be f64".to_string());
+            }
+            if target_type == TYPE_ID_I32 {
+                return Ok(ValueBinding {
+                    value: builder.ins().fcvt_to_sint(types::I32, source.value),
+                    type_id: TYPE_ID_I32,
+                });
+            }
+            if target_type == TYPE_ID_F32 {
+                return Ok(ValueBinding {
+                    value: builder.ins().fdemote(types::F32, source.value),
+                    type_id: TYPE_ID_F32,
+                });
+            }
+            Err(format!(
+                "from_f64 target '{}' must be i32 or f32",
+                target_name
+            ))
         }
     }
 }
@@ -4789,7 +5180,7 @@ pub(crate) fn emit_for_control_statement(
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SimpleExpr {
     Int(i64),
-    Float(f32),
+    Float(f64),
     Bool(bool),
     StringLiteral(String),
     Condition(Box<SimpleCondition>),
@@ -4903,7 +5294,7 @@ pub(crate) fn looks_like_condition_expression(expression: &str) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ExprToken {
     Int(i64),
-    Float(f32),
+    Float(f64),
     StringLiteral(String),
     Identifier(String),
     Op(char),
@@ -5027,7 +5418,7 @@ pub(crate) fn tokenize_simple_expression(expression: &str) -> Result<Vec<ExprTok
                 }
                 let text = &expression[start..index];
                 let value = text
-                    .parse::<f32>()
+                    .parse::<f64>()
                     .map_err(|error| format!("invalid float literal '{text}': {error}"))?;
                 tokens.push(ExprToken::Float(value));
             } else {
@@ -5327,6 +5718,7 @@ pub(crate) fn resolve_call_signature<'a>(
 pub(crate) fn emit_simple_expression(
     builder: &mut FunctionBuilder<'_>,
     expression: &SimpleExpr,
+    expected_type: Option<TypeId>,
     values_by_name: &BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
     internal_calls: &mut InternalCallMode<'_>,
@@ -5348,10 +5740,19 @@ pub(crate) fn emit_simple_expression(
                 type_id: TYPE_ID_I32,
             })
         }
-        SimpleExpr::Float(value) => Ok(ValueBinding {
-            value: builder.ins().f32const(Ieee32::with_float(*value)),
-            type_id: TYPE_ID_F32,
-        }),
+        SimpleExpr::Float(value) => {
+            if expected_type == Some(TYPE_ID_F64) {
+                Ok(ValueBinding {
+                    value: builder.ins().f64const(Ieee64::with_float(*value)),
+                    type_id: TYPE_ID_F64,
+                })
+            } else {
+                Ok(ValueBinding {
+                    value: builder.ins().f32const(Ieee32::with_float(*value as f32)),
+                    type_id: TYPE_ID_F32,
+                })
+            }
+        }
         SimpleExpr::Bool(value) => Ok(ValueBinding {
             value: builder
                 .ins()
@@ -5442,6 +5843,15 @@ pub(crate) fn emit_simple_expression(
                                 type_id: TYPE_ID_F32,
                             });
                         }
+                        if field_type == TYPE_ID_F64 {
+                            let call = builder
+                                .ins()
+                                .call(runtime_call_refs.global_f64_load, &[path_hash]);
+                            return Ok(ValueBinding {
+                                value: builder.inst_results(call)[0],
+                                type_id: TYPE_ID_F64,
+                            });
+                        }
                         return Err(format!(
                             "unsupported local struct field type {} for '{}.{}'",
                             field_type, base, suffix
@@ -5484,6 +5894,7 @@ pub(crate) fn emit_simple_expression(
                 let index_binding = emit_simple_expression(
                     builder,
                     index,
+                    Some(TYPE_ID_I32),
                     values_by_name,
                     runtime_call_refs,
                     internal_calls,
@@ -5515,6 +5926,7 @@ pub(crate) fn emit_simple_expression(
             let index_binding = emit_simple_expression(
                 builder,
                 index,
+                Some(TYPE_ID_I32),
                 values_by_name,
                 runtime_call_refs,
                 internal_calls,
@@ -5543,6 +5955,7 @@ pub(crate) fn emit_simple_expression(
                 let binding = emit_simple_expression(
                     builder,
                     arg,
+                    None,
                     values_by_name,
                     runtime_call_refs,
                     internal_calls,
@@ -5996,6 +6409,19 @@ pub(crate) fn emit_simple_expression(
                         }
                     }
                 }
+            } else if signature.return_type == TYPE_ID_F64 {
+                let value = emit_indirect_call_for_signature(
+                    builder,
+                    runtime_call_refs,
+                    signature,
+                    &arg_values,
+                    type_table,
+                )?
+                .ok_or_else(|| format!("call target '{}' did not produce value", target))?;
+                return Ok(ValueBinding {
+                    value,
+                    type_id: TYPE_ID_F64,
+                });
             } else {
                 return Err(format!(
                     "unsupported return type {} for call target '{}'",
@@ -6013,9 +6439,15 @@ pub(crate) fn emit_simple_expression(
             })
         }
         SimpleExpr::Binary { lhs, op, rhs } => {
+            let child_expected = match expected_type {
+                Some(TYPE_ID_F32) => Some(TYPE_ID_F32),
+                Some(TYPE_ID_F64) => Some(TYPE_ID_F64),
+                _ => None,
+            };
             let lhs_value = emit_simple_expression(
                 builder,
                 lhs,
+                child_expected,
                 values_by_name,
                 runtime_call_refs,
                 internal_calls,
@@ -6030,6 +6462,7 @@ pub(crate) fn emit_simple_expression(
             let rhs_value = emit_simple_expression(
                 builder,
                 rhs,
+                child_expected,
                 values_by_name,
                 runtime_call_refs,
                 internal_calls,
@@ -6059,6 +6492,32 @@ pub(crate) fn emit_simple_expression(
                 return Ok(ValueBinding {
                     value,
                     type_id: TYPE_ID_I32,
+                });
+            }
+
+            if lhs_value.type_id == TYPE_ID_F64 || rhs_value.type_id == TYPE_ID_F64 {
+                let (lhs_f64, rhs_f64) =
+                    coerce_numeric_operands_to_f64(builder, lhs_value, rhs_value, *op, type_table)?;
+                let value = match op {
+                    '+' => builder.ins().fadd(lhs_f64, rhs_f64),
+                    '-' => builder.ins().fsub(lhs_f64, rhs_f64),
+                    '*' => builder.ins().fmul(lhs_f64, rhs_f64),
+                    '/' => builder.ins().fdiv(lhs_f64, rhs_f64),
+                    '%' => {
+                        return Err(
+                            "unsupported '%' operator for f64 expression in current jit path"
+                                .to_string(),
+                        )
+                    }
+                    other => {
+                        return Err(format!(
+                            "unsupported binary operator '{other}' in expression"
+                        ))
+                    }
+                };
+                return Ok(ValueBinding {
+                    value,
+                    type_id: TYPE_ID_F64,
                 });
             }
 
@@ -6119,6 +6578,40 @@ pub(crate) fn coerce_numeric_operands_to_f32(
     Ok((lhs_value, rhs_value))
 }
 
+pub(crate) fn coerce_numeric_operands_to_f64(
+    builder: &mut FunctionBuilder<'_>,
+    lhs: ValueBinding,
+    rhs: ValueBinding,
+    op: char,
+    type_table: &TypeTable,
+) -> Result<(Value, Value), String> {
+    let lhs_value = if lhs.type_id == TYPE_ID_F64 {
+        lhs.value
+    } else if lhs.type_id == TYPE_ID_F32 {
+        builder.ins().fpromote(types::F64, lhs.value)
+    } else if is_i32_numeric_type(lhs.type_id, type_table) {
+        builder.ins().fcvt_from_sint(types::F64, lhs.value)
+    } else {
+        return Err(format!(
+            "unsupported lhs type {} for '{}' expression",
+            lhs.type_id, op
+        ));
+    };
+    let rhs_value = if rhs.type_id == TYPE_ID_F64 {
+        rhs.value
+    } else if rhs.type_id == TYPE_ID_F32 {
+        builder.ins().fpromote(types::F64, rhs.value)
+    } else if is_i32_numeric_type(rhs.type_id, type_table) {
+        builder.ins().fcvt_from_sint(types::F64, rhs.value)
+    } else {
+        return Err(format!(
+            "unsupported rhs type {} for '{}' expression",
+            rhs.type_id, op
+        ));
+    };
+    Ok((lhs_value, rhs_value))
+}
+
 pub(crate) fn emit_constant_value(
     builder: &mut FunctionBuilder<'_>,
     constant: &ConstantValue,
@@ -6131,6 +6624,10 @@ pub(crate) fn emit_constant_value(
         ConstantValue::F32(value) => Ok(ValueBinding {
             value: builder.ins().f32const(Ieee32::with_float(*value)),
             type_id: TYPE_ID_F32,
+        }),
+        ConstantValue::F64(value) => Ok(ValueBinding {
+            value: builder.ins().f64const(Ieee64::with_float(*value)),
+            type_id: TYPE_ID_F64,
         }),
         ConstantValue::Bool(value) => Ok(ValueBinding {
             value: builder
@@ -6204,11 +6701,11 @@ pub(crate) fn emit_foreach_binding_load(
     suffix: &str,
 ) -> Result<ValueBinding, String> {
     let resolved = resolve_foreach_binding_value_type(binding, suffix)?;
-    let field_hash = hash_foreach_field_suffix(suffix);
-    let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
-    let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
     let index_value = builder.use_var(binding.index_var);
     if is_i32_abi_compatible_type(resolved, type_table) {
+        let field_hash = hash_foreach_field_suffix(suffix);
+        let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
+        let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
         let call = builder.ins().call(
             runtime_call_refs.global_i32_array_load,
             &[collection_hash, field_hash_value, index_value],
@@ -6219,6 +6716,20 @@ pub(crate) fn emit_foreach_binding_load(
         });
     }
     if resolved == TYPE_ID_F32 {
+        if let Some(base_ptr) = binding.f32_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            let value = builder.ins().load(types::F32, MemFlags::new(), addr, 0);
+            return Ok(ValueBinding {
+                value,
+                type_id: TYPE_ID_F32,
+            });
+        }
+
+        let field_hash = hash_foreach_field_suffix(suffix);
+        let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
+        let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
         let call = builder.ins().call(
             runtime_call_refs.global_f32_array_load,
             &[collection_hash, field_hash_value, index_value],
@@ -6226,6 +6737,30 @@ pub(crate) fn emit_foreach_binding_load(
         return Ok(ValueBinding {
             value: builder.inst_results(call)[0],
             type_id: TYPE_ID_F32,
+        });
+    }
+    if resolved == TYPE_ID_F64 {
+        if let Some(base_ptr) = binding.f64_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            let value = builder.ins().load(types::F64, MemFlags::new(), addr, 0);
+            return Ok(ValueBinding {
+                value,
+                type_id: TYPE_ID_F64,
+            });
+        }
+
+        let field_hash = hash_foreach_field_suffix(suffix);
+        let collection_hash = emit_foreach_collection_handle_value(builder, binding.collection_handle);
+        let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
+        let call = builder.ins().call(
+            runtime_call_refs.global_f64_array_load,
+            &[collection_hash, field_hash_value, index_value],
+        );
+        return Ok(ValueBinding {
+            value: builder.inst_results(call)[0],
+            type_id: TYPE_ID_F64,
         });
     }
     Err(format!(
@@ -6387,10 +6922,84 @@ pub(crate) fn emit_foreach_binding_assignment(
                 ))
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f32_array_store,
-            &[collection_hash, field_hash_value, index_value, value],
-        );
+        if let Some(base_ptr) = binding.f32_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().store(MemFlags::new(), value, addr, 0);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_f32_array_store,
+                &[collection_hash, field_hash_value, index_value, value],
+            );
+        }
+        return Ok(());
+    }
+    if path_type == TYPE_ID_F64 {
+        let value = match op {
+            AssignOp::Set => rhs.value,
+            AssignOp::Add => {
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
+                builder.ins().fadd(lhs, rhs.value)
+            }
+            AssignOp::Sub => {
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
+                builder.ins().fsub(lhs, rhs.value)
+            }
+            AssignOp::Mul => {
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
+                builder.ins().fmul(lhs, rhs.value)
+            }
+            AssignOp::Div => {
+                let lhs = emit_foreach_binding_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    binding,
+                    suffix,
+                )?
+                .value;
+                builder.ins().fdiv(lhs, rhs.value)
+            }
+            AssignOp::Mod => {
+                return Err(format!(
+                    "'%=' is unsupported for f64 foreach binding '{}'",
+                    suffix
+                ))
+            }
+        };
+        if let Some(base_ptr) = binding.f64_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 3);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().store(MemFlags::new(), value, addr, 0);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_f64_array_store,
+                &[collection_hash, field_hash_value, index_value, value],
+            );
+        }
         return Ok(());
     }
     Err(format!(
@@ -6560,6 +7169,16 @@ pub(crate) fn emit_local_indexed_collection_load(
         return Ok(ValueBinding {
             value: builder.inst_results(call)[0],
             type_id: TYPE_ID_F32,
+        });
+    }
+    if resolved == TYPE_ID_F64 {
+        let call = builder.ins().call(
+            runtime_call_refs.global_f64_array_load,
+            &[collection_handle, field_hash, index_binding.value],
+        );
+        return Ok(ValueBinding {
+            value: builder.inst_results(call)[0],
+            type_id: TYPE_ID_F64,
         });
     }
     Err(format!(
@@ -6768,6 +7387,78 @@ pub(crate) fn emit_local_indexed_collection_assignment(
         );
         return Ok(());
     }
+    if path_type == TYPE_ID_F64 {
+        let value = match op {
+            AssignOp::Set => rhs.value,
+            AssignOp::Add => {
+                let lhs = emit_local_indexed_collection_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    named_struct_field_types,
+                    collection_name,
+                    collection_binding,
+                    suffix,
+                    index_binding,
+                )?
+                .value;
+                builder.ins().fadd(lhs, rhs.value)
+            }
+            AssignOp::Sub => {
+                let lhs = emit_local_indexed_collection_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    named_struct_field_types,
+                    collection_name,
+                    collection_binding,
+                    suffix,
+                    index_binding,
+                )?
+                .value;
+                builder.ins().fsub(lhs, rhs.value)
+            }
+            AssignOp::Mul => {
+                let lhs = emit_local_indexed_collection_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    named_struct_field_types,
+                    collection_name,
+                    collection_binding,
+                    suffix,
+                    index_binding,
+                )?
+                .value;
+                builder.ins().fmul(lhs, rhs.value)
+            }
+            AssignOp::Div => {
+                let lhs = emit_local_indexed_collection_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    named_struct_field_types,
+                    collection_name,
+                    collection_binding,
+                    suffix,
+                    index_binding,
+                )?
+                .value;
+                builder.ins().fdiv(lhs, rhs.value)
+            }
+            AssignOp::Mod => {
+                return Err(format!(
+                    "'%=' is unsupported for f64 local indexed assignment '{}[...].{}'",
+                    collection_name, suffix
+                ));
+            }
+        };
+        builder.ins().call(
+            runtime_call_refs.global_f64_array_store,
+            &[collection_handle, field_hash, index_binding.value, value],
+        );
+        return Ok(());
+    }
     Err(format!(
         "unsupported local indexed collection assignment type {} for '{}[...].{}'",
         path_type, collection_name, suffix
@@ -6809,6 +7500,16 @@ pub(crate) fn emit_indexed_collection_load(
         return Ok(ValueBinding {
             value: builder.inst_results(call)[0],
             type_id: TYPE_ID_F32,
+        });
+    }
+    if resolved == TYPE_ID_F64 {
+        let call = builder.ins().call(
+            runtime_call_refs.global_f64_array_load,
+            &[collection_hash, field_hash, index_binding.value],
+        );
+        return Ok(ValueBinding {
+            value: builder.inst_results(call)[0],
+            type_id: TYPE_ID_F64,
         });
     }
     Err(format!(
@@ -6999,6 +7700,74 @@ pub(crate) fn emit_indexed_collection_assignment(
         );
         return Ok(());
     }
+    if path_type == TYPE_ID_F64 {
+        let value = match op {
+            AssignOp::Set => rhs.value,
+            AssignOp::Add => {
+                let lhs = emit_indexed_collection_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    collection_path,
+                    collection_info,
+                    suffix,
+                    index_binding,
+                )?
+                .value;
+                builder.ins().fadd(lhs, rhs.value)
+            }
+            AssignOp::Sub => {
+                let lhs = emit_indexed_collection_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    collection_path,
+                    collection_info,
+                    suffix,
+                    index_binding,
+                )?
+                .value;
+                builder.ins().fsub(lhs, rhs.value)
+            }
+            AssignOp::Mul => {
+                let lhs = emit_indexed_collection_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    collection_path,
+                    collection_info,
+                    suffix,
+                    index_binding,
+                )?
+                .value;
+                builder.ins().fmul(lhs, rhs.value)
+            }
+            AssignOp::Div => {
+                let lhs = emit_indexed_collection_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    collection_path,
+                    collection_info,
+                    suffix,
+                    index_binding,
+                )?
+                .value;
+                builder.ins().fdiv(lhs, rhs.value)
+            }
+            AssignOp::Mod => {
+                return Err(format!(
+                    "'%=' is unsupported for f64 indexed assignment '{}[...].{}'",
+                    collection_path, suffix
+                ))
+            }
+        };
+        builder.ins().call(
+            runtime_call_refs.global_f64_array_store,
+            &[collection_hash, field_hash, index_binding.value, value],
+        );
+        return Ok(());
+    }
     Err(format!(
         "unsupported indexed collection assignment type {} for '{}[...].{}'",
         path_type, collection_path, suffix
@@ -7037,6 +7806,15 @@ pub(crate) fn emit_global_load(
         return Ok(ValueBinding {
             value: builder.inst_results(call)[0],
             type_id: TYPE_ID_F32,
+        });
+    }
+    if path_type == TYPE_ID_F64 {
+        let call = builder
+            .ins()
+            .call(runtime_call_refs.global_f64_load, &[path_hash]);
+        return Ok(ValueBinding {
+            value: builder.inst_results(call)[0],
+            type_id: TYPE_ID_F64,
         });
     }
     Err(format!(
@@ -7165,6 +7943,48 @@ pub(crate) fn emit_global_assignment(
             .call(runtime_call_refs.global_f32_store, &[path_hash, value]);
         return Ok(());
     }
+    if path_type == TYPE_ID_F64 {
+        let value = match op {
+            AssignOp::Set => rhs.value,
+            AssignOp::Add => {
+                let lhs =
+                    emit_global_load(builder, runtime_call_refs, type_table, path, path_type)?
+                        .value;
+                builder.ins().fadd(lhs, rhs.value)
+            }
+            AssignOp::Sub => {
+                let lhs =
+                    emit_global_load(builder, runtime_call_refs, type_table, path, path_type)?
+                        .value;
+                builder.ins().fsub(lhs, rhs.value)
+            }
+            AssignOp::Mul => {
+                let lhs =
+                    emit_global_load(builder, runtime_call_refs, type_table, path, path_type)?
+                        .value;
+                builder.ins().fmul(lhs, rhs.value)
+            }
+            AssignOp::Div => {
+                let lhs =
+                    emit_global_load(builder, runtime_call_refs, type_table, path, path_type)?
+                        .value;
+                builder.ins().fdiv(lhs, rhs.value)
+            }
+            AssignOp::Mod => {
+                return Err(format!(
+                    "'%=' is unsupported for f64 global path '{}'",
+                    path
+                ))
+            }
+        };
+        let path_hash = builder
+            .ins()
+            .iconst(types::I32, i64::from(hash_global_path(path)));
+        builder
+            .ins()
+            .call(runtime_call_refs.global_f64_store, &[path_hash, value]);
+        return Ok(());
+    }
     Err(format!(
         "unsupported global path type {} for '{}'",
         path_type, path
@@ -7203,6 +8023,7 @@ pub(crate) fn emit_simple_condition(
             let lhs = emit_simple_expression(
                 builder,
                 lhs,
+                None,
                 values_by_name,
                 runtime_call_refs,
                 internal_calls,
@@ -7217,6 +8038,7 @@ pub(crate) fn emit_simple_condition(
             let rhs = emit_simple_expression(
                 builder,
                 rhs,
+                None,
                 values_by_name,
                 runtime_call_refs,
                 internal_calls,
@@ -7242,8 +8064,6 @@ pub(crate) fn emit_simple_condition(
                 return Ok(builder.ins().icmp(intcc, lhs.value, rhs.value));
             }
 
-            let (lhs_f32, rhs_f32) =
-                coerce_numeric_operands_to_f32(builder, lhs, rhs, '?', type_table)?;
             let floatcc = match op {
                 ComparisonOp::Eq => FloatCC::Equal,
                 ComparisonOp::Ne => FloatCC::NotEqual,
@@ -7252,12 +8072,22 @@ pub(crate) fn emit_simple_condition(
                 ComparisonOp::Gt => FloatCC::GreaterThan,
                 ComparisonOp::Ge => FloatCC::GreaterThanOrEqual,
             };
+
+            if lhs.type_id == TYPE_ID_F64 || rhs.type_id == TYPE_ID_F64 {
+                let (lhs_f64, rhs_f64) =
+                    coerce_numeric_operands_to_f64(builder, lhs, rhs, '?', type_table)?;
+                return Ok(builder.ins().fcmp(floatcc, lhs_f64, rhs_f64));
+            }
+
+            let (lhs_f32, rhs_f32) =
+                coerce_numeric_operands_to_f32(builder, lhs, rhs, '?', type_table)?;
             Ok(builder.ins().fcmp(floatcc, lhs_f32, rhs_f32))
         }
         SimpleCondition::Expr(expression) => {
             let binding = emit_simple_expression(
                 builder,
                 expression,
+                Some(TYPE_ID_BOOL),
                 values_by_name,
                 runtime_call_refs,
                 internal_calls,
@@ -7466,12 +8296,40 @@ pub(crate) fn build_runtime_call_import_ids(
         global_i32_store: declare_void_call_import(module, "stasis_jit_global_i32_store", 2)?,
         global_f32_load: declare_f32_global_load_import(module, "stasis_jit_global_f32_load")?,
         global_f32_store: declare_f32_global_store_import(module, "stasis_jit_global_f32_store")?,
-        global_i32_array_load: declare_i32_array_load_import(module, "stasis_jit_global_i32_array_load")?,
-        global_i32_array_store: declare_i32_array_store_import(module, "stasis_jit_global_i32_array_store")?,
-        global_f32_array_load: declare_f32_array_load_import(module, "stasis_jit_global_f32_array_load")?,
-        global_f32_array_store: declare_f32_array_store_import(module, "stasis_jit_global_f32_array_store")?,
+        global_f64_load: declare_f64_global_load_import(module, "stasis_jit_global_f64_load")?,
+        global_f64_store: declare_f64_global_store_import(module, "stasis_jit_global_f64_store")?,
+        global_i32_array_load: declare_i32_array_load_import(
+            module,
+            "stasis_jit_global_i32_array_load",
+        )?,
+        global_i32_array_store: declare_i32_array_store_import(
+            module,
+            "stasis_jit_global_i32_array_store",
+        )?,
+        global_f32_array_load: declare_f32_array_load_import(
+            module,
+            "stasis_jit_global_f32_array_load",
+        )?,
+        global_f32_array_store: declare_f32_array_store_import(
+            module,
+            "stasis_jit_global_f32_array_store",
+        )?,
+        global_f32_array_ptr: declare_f32_array_ptr_import(module, "stasis_jit_global_f32_array_ptr")?,
+        global_f64_array_load: declare_f64_array_load_import(
+            module,
+            "stasis_jit_global_f64_array_load",
+        )?,
+        global_f64_array_store: declare_f64_array_store_import(
+            module,
+            "stasis_jit_global_f64_array_store",
+        )?,
+        global_f64_array_ptr: declare_f64_array_ptr_import(module, "stasis_jit_global_f64_array_ptr")?,
         collection_i32_load: declare_i32_call_import(module, "stasis_jit_collection_i32_load", 2)?,
-        collection_i32_store: declare_void_call_import(module, "stasis_jit_collection_i32_store", 3)?,
+        collection_i32_store: declare_void_call_import(
+            module,
+            "stasis_jit_collection_i32_store",
+            3,
+        )?,
         extern_calls: declare_extern_call_imports(module, call_signatures, type_table)?,
     })
 }
@@ -7518,10 +8376,16 @@ pub(crate) fn build_runtime_call_refs(
         global_i32_store: module.declare_func_in_func(imports.global_i32_store, func),
         global_f32_load: module.declare_func_in_func(imports.global_f32_load, func),
         global_f32_store: module.declare_func_in_func(imports.global_f32_store, func),
+        global_f64_load: module.declare_func_in_func(imports.global_f64_load, func),
+        global_f64_store: module.declare_func_in_func(imports.global_f64_store, func),
         global_i32_array_load: module.declare_func_in_func(imports.global_i32_array_load, func),
         global_i32_array_store: module.declare_func_in_func(imports.global_i32_array_store, func),
         global_f32_array_load: module.declare_func_in_func(imports.global_f32_array_load, func),
         global_f32_array_store: module.declare_func_in_func(imports.global_f32_array_store, func),
+        global_f32_array_ptr: module.declare_func_in_func(imports.global_f32_array_ptr, func),
+        global_f64_array_load: module.declare_func_in_func(imports.global_f64_array_load, func),
+        global_f64_array_store: module.declare_func_in_func(imports.global_f64_array_store, func),
+        global_f64_array_ptr: module.declare_func_in_func(imports.global_f64_array_ptr, func),
         collection_i32_load: module.declare_func_in_func(imports.collection_i32_load, func),
         collection_i32_store: module.declare_func_in_func(imports.collection_i32_store, func),
         extern_calls: imports
