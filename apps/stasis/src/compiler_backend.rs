@@ -102,6 +102,8 @@ struct EngineBundleManifestCollectionMaxLengthRow {
 
 #[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifest {
+    #[serde(default)]
+    optimization_profile: Option<String>,
     functions: Vec<EngineBundleManifestFunctionRow>,
     #[serde(default)]
     string_literals: Option<Vec<EngineBundleManifestStringLiteralRow>>,
@@ -3555,6 +3557,281 @@ mod tests {
             "expected Brickout engine bundle manifest to include collection_max_lengths"
         );
 
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_brickout_revenge_v1_engine_bundle_executes_two_ticks() {
+        fn find_lld_link() -> Option<PathBuf> {
+            let candidates = [
+                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\lld-link.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\lld-link.exe",
+            ];
+            for candidate in candidates {
+                let path = PathBuf::from(candidate);
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+            if std::process::Command::new("lld-link.exe")
+                .arg("/NOLOGO")
+                .output()
+                .is_ok()
+            {
+                return Some(PathBuf::from("lld-link.exe"));
+            }
+            None
+        }
+
+        fn hash_global_path(path: &str) -> i32 {
+            // Must match `crates/stasis_compiler/src/backend/jit.rs::hash_global_path`.
+            let mut hash: u32 = 2166136261;
+            for byte in path.bytes() {
+                hash ^= u32::from(byte);
+                hash = hash.wrapping_mul(16777619);
+            }
+            hash as i32
+        }
+
+        fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
+            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("..")
+                        .join("..")
+                        .join("target")
+                });
+            let mut candidates: Vec<PathBuf> = Vec::new();
+
+            for profile in ["debug", "release"] {
+                let base = target_dir.join(profile);
+                let direct = base.join("stasis_dynload.lib");
+                if direct.exists() {
+                    candidates.push(direct);
+                }
+
+                let deps = base.join("deps");
+                let Ok(entries) = fs::read_dir(&deps) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                        continue;
+                    };
+                    if !name.starts_with("stasis_dynload-") || !name.ends_with(".lib") {
+                        continue;
+                    }
+                    candidates.push(path);
+                }
+            }
+
+            candidates.into_iter().max_by_key(|path| {
+                fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                    .unwrap_or_default()
+            })
+        }
+
+        if !std::env::var("STASIS_AOT_QUALITY_GATE")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        {
+            return;
+        }
+
+        // Compile/link steps can consult/modify process-wide env; serialize with other tests.
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+
+        // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
+        let mut dynload_build_command = Command::new("cargo");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload")
+            .arg("--")
+            .arg("--crate-type")
+            .arg("staticlib")
+            .current_dir(&repo_root);
+        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+            dynload_build_command.env("CARGO_TARGET_DIR", target_dir);
+        }
+        let dynload_build = dynload_build_command
+            .output()
+            .expect("spawn cargo rustc -p stasis_dynload --crate-type staticlib");
+        assert!(
+            dynload_build.status.success(),
+            "failed to build stasis_dynload staticlib\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&dynload_build.stdout),
+            String::from_utf8_lossy(&dynload_build.stderr)
+        );
+
+        let linker_path = find_lld_link().expect("lld-link.exe required for AOT quality gate");
+        let stasis_dynload_lib =
+            resolve_stasis_dynload_lib().expect("stasis_dynload staticlib required for AOT quality gate");
+
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("samples")
+            .join("brickout_revenge")
+            .join("brickout_revenge_v1.stasis");
+        assert!(
+            source.exists(),
+            "expected Brickout sample at {}",
+            source.display()
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_brickout_exec_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let artifact_root = temp_root.join("aot_artifacts");
+
+        let compile_config = AotCompileConfig::default();
+        assert_eq!(
+            compile_config.opt_level.as_str(),
+            "speed",
+            "AOT compile config default opt_level should be speed for release-like engine bundles"
+        );
+        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_202),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(
+            result.status,
+            CompileStatus::Success,
+            "expected Brickout AOT compile success, got diagnostics: {:?}",
+            result.diagnostics
+        );
+        let bundle = backend
+            .last_aot_engine_bundle()
+            .expect("AOT engine bundle should be present after successful compile");
+        let manifest = backend
+            .read_engine_bundle_manifest(&bundle.manifest_path)
+            .expect("read engine bundle manifest");
+        assert_eq!(
+            manifest.optimization_profile.as_deref(),
+            Some("speed"),
+            "engine bundle manifest should report speed optimization by default"
+        );
+
+        let main_symbol = manifest
+            .functions
+            .iter()
+            .find(|row| row.name == "main")
+            .map(|row| row.symbol.clone())
+            .expect("manifest should include main");
+        let tick_symbol = manifest
+            .functions
+            .iter()
+            .find(|row| row.name == "tick")
+            .map(|row| row.symbol.clone())
+            .expect("manifest should include tick");
+
+        let object_paths: Vec<PathBuf> = bundle
+            .object_paths_by_function
+            .values()
+            .cloned()
+            .collect();
+        assert!(
+            !object_paths.is_empty(),
+            "expected engine bundle to include object files"
+        );
+
+        let linked_output = temp_root.join("brickout_aot_bundle.dll");
+        let export_symbols = vec![
+            main_symbol.clone(),
+            tick_symbol.clone(),
+            // Seed host frame values in the same runtime instance as the linked AOT code.
+            "stasis_jit_global_i32_array_store".to_string(),
+        ];
+        let link_config = stasis_jit::AotLinkConfig {
+            linker_path: Some(linker_path),
+            runtime_lib_paths: vec![stasis_dynload_lib],
+        };
+
+        stasis_jit::link_objects_to_dynamic_library(
+            &object_paths,
+            &linked_output,
+            &export_symbols,
+            &link_config,
+        )
+        .expect("link engine bundle into dll");
+
+        let library = stasis_dynload::Library::load(&linked_output).expect("load linked image");
+        let main_ptr = library
+            .symbol_address(&main_symbol)
+            .expect("resolve main export");
+        let tick_ptr = library
+            .symbol_address(&tick_symbol)
+            .expect("resolve tick export");
+
+        let store_ptr = library
+            .symbol_address("stasis_jit_global_i32_array_store")
+            .expect("resolve host_i32 store");
+
+        let host_i32 = hash_global_path("host_i32");
+        let field = 0;
+        let store = |index: i32, value: i32| {
+            stasis_dynload::invoke_i32_i32_i32_i32_to_void(
+                store_ptr,
+                host_i32,
+                field,
+                index,
+                value,
+            )
+            .expect("invoke host_i32 store");
+        };
+
+        // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
+        // Indices from src/host_frame.stasis.
+        let t0_ms: i32 = 12345;
+        store(0, t0_ms); // HOST_I_TIME_MS
+        store(1, 360); // HOST_I_WINDOW_W_PX
+        store(2, 720); // HOST_I_WINDOW_H_PX
+        store(3, 0); // HOST_I_VIEWPORT_X_PX
+        store(4, 0); // HOST_I_VIEWPORT_Y_PX
+        store(5, 360); // HOST_I_VIEWPORT_W_PX
+        store(6, 720); // HOST_I_VIEWPORT_H_PX
+        store(7, 0); // HOST_I_POINTER_COUNT
+        store(8, 0); // HOST_I_DROPPED_POINTERS
+        store(9, 0); // HOST_I_QUIT_REQUESTED
+        store(10, 0); // HOST_I_TICK_INDEX
+        store(11, 1); // HOST_I_RESIZED
+        store(12, 360); // HOST_I_SCREEN_W_PX
+        store(13, 720); // HOST_I_SCREEN_H_PX
+        store(19, t0_ms * 1000); // HOST_I_TIME_US (coarse is fine)
+
+        let main_rc = stasis_dynload::invoke_noarg_i32(main_ptr).expect("invoke main");
+        assert_eq!(main_rc, 0, "expected Brickout main() to succeed");
+
+        // Clear resize flag for subsequent ticks.
+        store(11, 0);
+
+        for tick_index in 0..2 {
+            let time_ms = t0_ms + (tick_index + 1) * 16;
+            store(0, time_ms);
+            store(10, tick_index);
+            store(19, time_ms * 1000);
+
+            let rc = stasis_dynload::invoke_noarg_i32(tick_ptr).expect("invoke tick");
+            assert_eq!(rc, 0, "expected tick() to return 0 (keep running)");
+        }
+
+        drop(library);
         fs::remove_dir_all(&temp_root).ok();
     }
 
