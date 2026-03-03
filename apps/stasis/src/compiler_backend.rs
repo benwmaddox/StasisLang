@@ -3651,6 +3651,35 @@ mod tests {
 
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
 
+        // Ensure the Cranelift AOT helper exists so the quality gate can be driven with a single
+        // command on a fresh checkout.
+        let helper_path = repo_root
+            .join("tools")
+            .join("cranelift-aot")
+            .join("target")
+            .join("debug")
+            .join("stasis-cranelift-aot.exe");
+        if !helper_path.exists() {
+            let build_output = Command::new("cargo")
+                .arg("build")
+                .arg("--manifest-path")
+                .arg(repo_root.join("tools").join("cranelift-aot").join("Cargo.toml"))
+                .current_dir(&repo_root)
+                .output()
+                .expect("spawn cargo build for cranelift-aot helper");
+            assert!(
+                build_output.status.success(),
+                "failed to build cranelift-aot helper\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&build_output.stdout),
+                String::from_utf8_lossy(&build_output.stderr)
+            );
+        }
+        assert!(
+            helper_path.exists(),
+            "expected cranelift-aot helper at {}",
+            helper_path.display()
+        );
+
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
         dynload_build_command
@@ -3698,7 +3727,10 @@ mod tests {
         fs::create_dir_all(&temp_root).expect("create temp root");
         let artifact_root = temp_root.join("aot_artifacts");
 
-        let compile_config = AotCompileConfig::default();
+        let compile_config = AotCompileConfig {
+            helper_path: Some(helper_path),
+            ..AotCompileConfig::default()
+        };
         assert_eq!(
             compile_config.opt_level.as_str(),
             "speed",
