@@ -21,7 +21,7 @@
 - Use:
 - `cargo build`
 - `cargo test`
-- `cargo run -p stasis -- --ticks 300 --watch-dir samples/brickout_revenge`
+- `cargo run -p stasis --release -- --ticks 300 --watch-dir samples/brickout_revenge`
 - Use `rg` for search (`rg pattern path`, `rg --files`).
 - Keep commands deterministic and scriptable.
 - Legacy bootstrap tooling remains available for compiler smoke/reference:
