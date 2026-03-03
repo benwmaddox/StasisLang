@@ -977,6 +977,10 @@ fn compile_function_to_jit_module(
         stasis_dynload::stasis_jit_global_i32_array_store as *const u8,
     );
     jit_builder.symbol(
+        "stasis_jit_global_i32_array_ptr",
+        stasis_dynload::stasis_jit_global_i32_array_ptr as *const u8,
+    );
+    jit_builder.symbol(
         "stasis_jit_global_f32_array_load",
         stasis_dynload::stasis_jit_global_f32_array_load as *const u8,
     );
