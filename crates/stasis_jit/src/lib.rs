@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(not(debug_assertions), deny(warnings))]
 
 use stasis_runner::swap::contracts::{CodeGeneration, FnId, FunctionPatchSet, JitCodePtrOverride};
 use std::collections::{BTreeMap, VecDeque};

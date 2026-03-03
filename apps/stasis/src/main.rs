@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), deny(warnings))]
+
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
