@@ -25,13 +25,28 @@ pub struct AotCompileConfig {
     pub opt_level: String,
 }
 
+fn default_aot_opt_level() -> String {
+    if let Ok(value) = std::env::var("STASIS_AOT_OPT_LEVEL") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            let normalized = trimmed.to_ascii_lowercase();
+            match normalized.as_str() {
+                "none" | "speed" | "speed_and_size" => return normalized,
+                "speed-and-size" => return "speed_and_size".to_string(),
+                _ => {}
+            }
+        }
+    }
+    "speed_and_size".to_string()
+}
+
 impl Default for AotCompileConfig {
     fn default() -> Self {
         Self {
             helper_path: None,
             target: default_target_triple(),
             module_name: "stasis_module".to_string(),
-            opt_level: "speed".to_string(),
+            opt_level: default_aot_opt_level(),
         }
     }
 }
@@ -442,6 +457,24 @@ fn resolve_aot_helper_path(config: &AotCompileConfig) -> Result<PathBuf, String>
             .join(default_aot_exe_name()),
     );
 
+    // Alternate dev-friendly default: allow building the helper into the workspace target dir.
+    // This avoids relying on `tools/cranelift-aot/target`, which can be blocked by path-based
+    // execution policies in some Windows environments.
+    candidates.push(
+        repo_root
+            .join("target")
+            .join("cranelift-aot")
+            .join("release")
+            .join(default_aot_exe_name()),
+    );
+    candidates.push(
+        repo_root
+            .join("target")
+            .join("cranelift-aot")
+            .join("debug")
+            .join(default_aot_exe_name()),
+    );
+
     // Allow running with the helper on PATH / in the current directory.
     candidates.push(PathBuf::from(default_aot_exe_name()));
 
@@ -835,12 +868,8 @@ echo "fake-shared" > "$OUT"
     #[test]
     fn aot_helper_compiles_minimal_clif_to_object() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let helper = repo_root
-            .join("tools")
-            .join("cranelift-aot")
-            .join("target")
-            .join("debug")
-            .join("stasis-cranelift-aot.exe");
+        let helper_target_dir = repo_root.join("target").join("cranelift-aot");
+        let helper = helper_target_dir.join("debug").join(default_aot_exe_name());
 
         if !helper.exists() {
             let build_output = Command::new("cargo")
@@ -852,6 +881,8 @@ echo "fake-shared" > "$OUT"
                         .join("cranelift-aot")
                         .join("Cargo.toml"),
                 )
+                .arg("--target-dir")
+                .arg(&helper_target_dir)
                 .current_dir(&repo_root)
                 .output()
                 .expect("failed to build AOT helper");

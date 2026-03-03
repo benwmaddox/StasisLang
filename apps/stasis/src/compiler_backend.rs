@@ -949,7 +949,7 @@ impl IncrementalCompilerBackend {
             "none" => AotOptimizationProfile::None,
             "speed_and_size" => AotOptimizationProfile::SpeedAndSize,
             "speed" => AotOptimizationProfile::Speed,
-            _ => AotOptimizationProfile::Speed,
+            _ => AotOptimizationProfile::SpeedAndSize,
         }
     }
 
@@ -3733,8 +3733,8 @@ mod tests {
         };
         assert_eq!(
             compile_config.opt_level.as_str(),
-            "speed",
-            "AOT compile config default opt_level should be speed for release-like engine bundles"
+            "speed_and_size",
+            "AOT compile config default opt_level should be speed_and_size for release-like engine bundles"
         );
         let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
@@ -3756,8 +3756,8 @@ mod tests {
             .expect("read engine bundle manifest");
         assert_eq!(
             manifest.optimization_profile.as_deref(),
-            Some("speed"),
-            "engine bundle manifest should report speed optimization by default"
+            Some("speed_and_size"),
+            "engine bundle manifest should report speed_and_size optimization by default"
         );
 
         let main_symbol = manifest
