@@ -1716,7 +1716,7 @@ int main(int argc, char **argv)
         tick_sym = GetProcAddress(lib, tick_name);
     }
 
-    /* Host window request globals are used by bulk mode (defined in src/host_window_request.stasis). */
+    /* Host window request globals are used by bulk mode (defined in src/runtime/host_window_request.stasis). */
     int32_t *host_req_seq = (int32_t *)GetProcAddress(lib, "host_req_seq");
     int32_t *host_req_flags = (int32_t *)GetProcAddress(lib, "host_req_flags");
     int32_t *host_req_window_w_px = (int32_t *)GetProcAddress(lib, "host_req_window_w_px");
