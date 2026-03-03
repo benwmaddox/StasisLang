@@ -548,11 +548,13 @@ pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut
     guard.insert((collection_hash, field_hash), (ptr as usize, len));
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_print_i32(value: i32) {
     print!("{value}");
     let _ = std::io::stdout().flush();
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     let table = jit_string_literal_table();
     let guard = table
@@ -582,6 +584,7 @@ fn jit_string_literal_to_cstring(value_id: i32) -> Result<CString, String> {
 // JIT string->C bridge for startup/asset extern calls.
 // The language-level `string` currently lowers to an i32 handle in the JIT path, so we must
 // translate that into a stable `const char*` when calling the C runtime.
+#[no_mangle]
 pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
     #[cfg(windows)]
     {
@@ -604,6 +607,7 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
     }
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
     #[cfg(windows)]
     {
@@ -624,6 +628,7 @@ pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
     }
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
     #[cfg(windows)]
     {
@@ -645,6 +650,7 @@ pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
     }
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
     #[cfg(windows)]
     {
@@ -666,6 +672,7 @@ pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
     }
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
     #[cfg(windows)]
     {
@@ -687,6 +694,7 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
     }
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_lookup_code_ptr(fn_id_raw: i32) -> i64 {
     let fn_id = fn_id_raw as u32;
     let table = jit_code_ptr_table();
@@ -698,10 +706,12 @@ pub extern "C" fn stasis_jit_lookup_code_ptr(fn_id_raw: i32) -> i64 {
         .unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_sin_fast(value: f32) -> f32 {
     value.sin()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_cos_fast(value: f32) -> f32 {
     value.cos()
 }
@@ -711,22 +721,27 @@ fn jit_dispatch_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_0(fn_id_raw: i32) -> i32 {
     dispatch_i32_call0(fn_id_raw).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_1(fn_id_raw: i32, arg0: i32) -> i32 {
     dispatch_i32_call1(fn_id_raw, arg0).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_2(fn_id_raw: i32, arg0: i32, arg1: i32) -> i32 {
     dispatch_i32_call2(fn_id_raw, arg0, arg1).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_3(fn_id_raw: i32, arg0: i32, arg1: i32, arg2: i32) -> i32 {
     dispatch_i32_call3(fn_id_raw, arg0, arg1, arg2).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_4(
     fn_id_raw: i32,
     arg0: i32,
@@ -737,6 +752,7 @@ pub extern "C" fn stasis_jit_call_i32_4(
     dispatch_i32_call4(fn_id_raw, arg0, arg1, arg2, arg3).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_5(
     fn_id_raw: i32,
     arg0: i32,
@@ -748,6 +764,7 @@ pub extern "C" fn stasis_jit_call_i32_5(
     dispatch_i32_call5(fn_id_raw, arg0, arg1, arg2, arg3, arg4).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_6(
     fn_id_raw: i32,
     arg0: i32,
@@ -760,6 +777,7 @@ pub extern "C" fn stasis_jit_call_i32_6(
     dispatch_i32_call6(fn_id_raw, arg0, arg1, arg2, arg3, arg4, arg5).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_7(
     fn_id_raw: i32,
     arg0: i32,
@@ -773,6 +791,7 @@ pub extern "C" fn stasis_jit_call_i32_7(
     dispatch_i32_call7(fn_id_raw, arg0, arg1, arg2, arg3, arg4, arg5, arg6).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_8(
     fn_id_raw: i32,
     arg0: i32,
@@ -788,14 +807,17 @@ pub extern "C" fn stasis_jit_call_i32_8(
         .unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_f32_1(fn_id_raw: i32, arg0: f32) -> i32 {
     dispatch_i32_f32_call1(fn_id_raw, arg0).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_f32_2(fn_id_raw: i32, arg0: f32, arg1: f32) -> i32 {
     dispatch_i32_f32_call2(fn_id_raw, arg0, arg1).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_f32_3(
     fn_id_raw: i32,
     arg0: f32,
@@ -805,6 +827,7 @@ pub extern "C" fn stasis_jit_call_i32_f32_3(
     dispatch_i32_f32_call3(fn_id_raw, arg0, arg1, arg2).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_f32_4(
     fn_id_raw: i32,
     arg0: f32,
@@ -815,6 +838,7 @@ pub extern "C" fn stasis_jit_call_i32_f32_4(
     dispatch_i32_f32_call4(fn_id_raw, arg0, arg1, arg2, arg3).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_f32_5(
     fn_id_raw: i32,
     arg0: f32,
@@ -826,6 +850,7 @@ pub extern "C" fn stasis_jit_call_i32_f32_5(
     dispatch_i32_f32_call5(fn_id_raw, arg0, arg1, arg2, arg3, arg4).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_f32_6(
     fn_id_raw: i32,
     arg0: f32,
@@ -838,6 +863,7 @@ pub extern "C" fn stasis_jit_call_i32_f32_6(
     dispatch_i32_f32_call6(fn_id_raw, arg0, arg1, arg2, arg3, arg4, arg5).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_f32_7(
     fn_id_raw: i32,
     arg0: f32,
@@ -851,6 +877,7 @@ pub extern "C" fn stasis_jit_call_i32_f32_7(
     dispatch_i32_f32_call7(fn_id_raw, arg0, arg1, arg2, arg3, arg4, arg5, arg6).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_i32_f32_8(
     fn_id_raw: i32,
     arg0: f32,
@@ -866,22 +893,27 @@ pub extern "C" fn stasis_jit_call_i32_f32_8(
         .unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_f32_0(fn_id_raw: i32) -> f32 {
     dispatch_f32_call0(fn_id_raw).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_f32_1(fn_id_raw: i32, arg0: f32) -> f32 {
     dispatch_f32_call1(fn_id_raw, arg0).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_f32_2(fn_id_raw: i32, arg0: f32, arg1: f32) -> f32 {
     dispatch_f32_call2(fn_id_raw, arg0, arg1).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_f32_3(fn_id_raw: i32, arg0: f32, arg1: f32, arg2: f32) -> f32 {
     dispatch_f32_call3(fn_id_raw, arg0, arg1, arg2).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_f32_4(
     fn_id_raw: i32,
     arg0: f32,
@@ -892,6 +924,7 @@ pub extern "C" fn stasis_jit_call_f32_4(
     dispatch_f32_call4(fn_id_raw, arg0, arg1, arg2, arg3).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_f32_5(
     fn_id_raw: i32,
     arg0: f32,
@@ -903,6 +936,7 @@ pub extern "C" fn stasis_jit_call_f32_5(
     dispatch_f32_call5(fn_id_raw, arg0, arg1, arg2, arg3, arg4).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_f32_6(
     fn_id_raw: i32,
     arg0: f32,
@@ -915,6 +949,7 @@ pub extern "C" fn stasis_jit_call_f32_6(
     dispatch_f32_call6(fn_id_raw, arg0, arg1, arg2, arg3, arg4, arg5).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_f32_7(
     fn_id_raw: i32,
     arg0: f32,
@@ -928,6 +963,7 @@ pub extern "C" fn stasis_jit_call_f32_7(
     dispatch_f32_call7(fn_id_raw, arg0, arg1, arg2, arg3, arg4, arg5, arg6).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_f32_8(
     fn_id_raw: i32,
     arg0: f32,
@@ -943,10 +979,12 @@ pub extern "C" fn stasis_jit_call_f32_8(
         .unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_call_f32_i32_1(fn_id_raw: i32, arg0: i32) -> f32 {
     dispatch_f32_call_i32_1(fn_id_raw, arg0).unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_global_i32_load(path_hash: i32) -> i32 {
     {
         let table = registered_i32_ptrs();
@@ -963,6 +1001,7 @@ pub extern "C" fn stasis_jit_global_i32_load(path_hash: i32) -> i32 {
     guard.get(&path_hash).copied().unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_global_i32_store(path_hash: i32, value: i32) {
     {
         let table = registered_i32_ptrs();
@@ -1022,6 +1061,7 @@ pub extern "C" fn stasis_jit_collection_i32_store(
     stasis_jit_global_i32_store(derived, value);
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_global_f32_load(path_hash: i32) -> f32 {
     {
         let table = registered_f32_ptrs();
@@ -1038,6 +1078,7 @@ pub extern "C" fn stasis_jit_global_f32_load(path_hash: i32) -> f32 {
     guard.get(&path_hash).copied().unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_global_f32_store(path_hash: i32, value: f32) {
     {
         let table = registered_f32_ptrs();
@@ -1055,6 +1096,7 @@ pub extern "C" fn stasis_jit_global_f32_store(path_hash: i32, value: f32) {
     guard.insert(path_hash, value);
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_global_i32_array_load(
     collection_hash: i32,
     field_hash: i32,
@@ -1099,6 +1141,7 @@ pub extern "C" fn stasis_jit_global_i32_array_load(
         .unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_global_i32_array_store(
     collection_hash: i32,
     field_hash: i32,
@@ -1141,6 +1184,7 @@ pub extern "C" fn stasis_jit_global_i32_array_store(
     guard.insert((collection_hash, field_hash, index), value);
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_global_f32_array_load(
     collection_hash: i32,
     field_hash: i32,
@@ -1172,6 +1216,7 @@ pub extern "C" fn stasis_jit_global_f32_array_load(
         .unwrap_or_default()
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_global_f32_array_store(
     collection_hash: i32,
     field_hash: i32,
@@ -1225,6 +1270,7 @@ pub fn clear_jit_f32_array_global_table() {
     guard.clear();
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_sys_memcpy_u8(
     dst: i32,
     dst_index: i32,
@@ -1246,6 +1292,7 @@ pub extern "C" fn stasis_jit_sys_memcpy_u8(
     }
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_sys_memcpy_i32(
     dst: i32,
     dst_index: i32,
@@ -1267,6 +1314,7 @@ pub extern "C" fn stasis_jit_sys_memcpy_i32(
     }
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_sys_memcpy_f32(
     dst: i32,
     dst_index: i32,
@@ -1288,6 +1336,7 @@ pub extern "C" fn stasis_jit_sys_memcpy_f32(
     }
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_sys_memmove_u8(
     dst: i32,
     dst_index: i32,
@@ -1298,6 +1347,7 @@ pub extern "C" fn stasis_jit_sys_memmove_u8(
     stasis_jit_sys_memcpy_u8(dst, dst_index, src, src_index, count);
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_sys_memmove_i32(
     dst: i32,
     dst_index: i32,
@@ -1308,6 +1358,7 @@ pub extern "C" fn stasis_jit_sys_memmove_i32(
     stasis_jit_sys_memcpy_i32(dst, dst_index, src, src_index, count);
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_sys_memmove_f32(
     dst: i32,
     dst_index: i32,
@@ -1325,10 +1376,12 @@ pub extern "C" fn stasis_jit_sys_memmove_f32(
 // Current dev runner doesn't model audio as a command buffer yet.
 // Brickout uses `audio_is_available()` as a gate; return false so the game runs without calling
 // pointer-typed audio externs (e.g. `audio_push_f32_interleaved`).
+#[no_mangle]
 pub extern "C" fn stasis_jit_audio_is_available() -> i32 {
     0
 }
 
+#[no_mangle]
 pub extern "C" fn stasis_jit_audio_push_f32_interleaved(_samples: i32, _frame_count: i32) -> i32 {
     0
 }

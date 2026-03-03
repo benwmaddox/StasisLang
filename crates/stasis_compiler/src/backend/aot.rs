@@ -1145,9 +1145,6 @@ mod tests {
             process.link_executable_for_i32_noarg_function("main", &exe_path, &link_config);
         if let Err(ref message) = link_result {
             if message.contains("undefined symbol") {
-                eprintln!(
-                    "skipping AOT executable smoke: runtime symbols not available at link time"
-                );
                 let _ = fs::remove_dir_all(&temp_root);
                 return;
             }
@@ -1313,6 +1310,7 @@ mod tests {
             let explicit = PathBuf::from(explicit);
             return Some(stasis_jit::AotLinkConfig {
                 linker_path: Some(explicit),
+                runtime_lib_paths: vec![],
             });
         }
         for candidate in ["lld-link.exe", "link.exe"] {
@@ -1320,6 +1318,7 @@ mod tests {
             if output.status.success() {
                 return Some(stasis_jit::AotLinkConfig {
                     linker_path: Some(PathBuf::from(candidate)),
+                    runtime_lib_paths: vec![],
                 });
             }
         }
