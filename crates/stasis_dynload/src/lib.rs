@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), deny(warnings))]
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
@@ -186,42 +188,70 @@ pub fn invoke_i32_i32_i32_i32_to_void(
 
 pub struct StasisGraphicsApi {
     _lib: Library,
+    #[cfg(windows)]
     stasis_init_window: usize,
+    #[cfg(windows)]
     stasis_host_get_frame: usize,
+    #[cfg(windows)]
     stasis_host_bulk_apply_requests: usize,
+    #[cfg(windows)]
     stasis_gfx_submit_u8: usize,
+    #[cfg(windows)]
     stasis_sleep_ms: usize,
 }
 
 impl StasisGraphicsApi {
     pub fn load_default() -> Result<Self, String> {
-        for candidate in runtime_library_candidate_paths() {
-            if !candidate.exists() {
-                continue;
+        #[cfg(windows)]
+        {
+            for candidate in runtime_library_candidate_paths() {
+                if !candidate.exists() {
+                    continue;
+                }
+                if let Ok(api) = Self::load(&candidate) {
+                    return Ok(api);
+                }
             }
-            if let Ok(api) = Self::load(&candidate) {
-                return Ok(api);
-            }
+            Err("failed to load stasis_graphics runtime library (set STASIS_RUNTIME_DLL_PATH or build runtime)".to_string())
         }
-        Err("failed to load stasis_graphics runtime library (set STASIS_RUNTIME_DLL_PATH or build runtime)".to_string())
+
+        #[cfg(not(windows))]
+        {
+            Err(
+                "stasis_graphics runtime loading is only supported on windows in stasis_dynload"
+                    .to_string(),
+            )
+        }
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
-        let lib = Library::load(path)?;
-        let stasis_init_window = lib.symbol_address("stasis_init_window")?;
-        let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
-        let stasis_host_bulk_apply_requests =
-            lib.symbol_address("stasis_host_bulk_apply_requests")?;
-        let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
-        let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
-        Ok(Self {
-            _lib: lib,
-            stasis_init_window,
-            stasis_host_get_frame,
-            stasis_host_bulk_apply_requests,
-            stasis_gfx_submit_u8,
-            stasis_sleep_ms,
-        })
+        #[cfg(windows)]
+        {
+            let lib = Library::load(path)?;
+            let stasis_init_window = lib.symbol_address("stasis_init_window")?;
+            let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
+            let stasis_host_bulk_apply_requests =
+                lib.symbol_address("stasis_host_bulk_apply_requests")?;
+            let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
+            let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
+            Ok(Self {
+                _lib: lib,
+                stasis_init_window,
+                stasis_host_get_frame,
+                stasis_host_bulk_apply_requests,
+                stasis_gfx_submit_u8,
+                stasis_sleep_ms,
+            })
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+            Err(
+                "stasis_graphics runtime loading is only supported on windows in stasis_dynload"
+                    .to_string(),
+            )
+        }
     }
 
     pub fn init_window(&self, width: i32, height: i32, title: &str) -> Result<bool, String> {
@@ -342,6 +372,7 @@ impl StasisGraphicsApi {
 // stasis_graphics asset API (JIT extern call bridge)
 // ============================================================
 
+#[cfg(windows)]
 struct StasisGraphicsAssetsApi {
     _lib: Library,
     stasis_gfx_load_sprite: usize,
@@ -353,6 +384,7 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_measure_text_cached: usize,
 }
 
+#[cfg(windows)]
 impl StasisGraphicsAssetsApi {
     fn load_default() -> Result<Self, String> {
         for candidate in runtime_library_candidate_paths() {
@@ -381,6 +413,7 @@ impl StasisGraphicsAssetsApi {
     }
 }
 
+#[cfg(windows)]
 fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, String> {
     static API: OnceLock<Result<StasisGraphicsAssetsApi, String>> = OnceLock::new();
     match API.get_or_init(StasisGraphicsAssetsApi::load_default) {
