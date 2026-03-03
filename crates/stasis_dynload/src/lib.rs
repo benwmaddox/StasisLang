@@ -469,6 +469,14 @@ pub fn upsert_jit_string_literal(id: i32, value: &str) {
     guard.insert(id, value.to_string());
 }
 
+pub fn jit_string_literal_value(id: i32) -> Option<String> {
+    let table = jit_string_literal_table();
+    let guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    guard.get(&id).cloned()
+}
+
 // ============================================================
 // Registered global memory (in-process engine)
 // ============================================================
