@@ -361,6 +361,21 @@ Archived priority override (2026-02-13, historical):
 - Priority update (2026-02-13):
 - `S8b` hardening/parity work is explicitly lower priority than `S10b` self-host AOT CLI core.
 - Do not schedule additional `R*` slices unless required to unblock `SH1`, `SH2`, or `SH3`.
+- Deferred hardening triage record (2026-03-04):
+- Ship-gating rule for deferred `R*` slices:
+- keep deferred by default; re-activate only if a deferred shape blocks either (a) Brickout AOT quality gates, (b) self-host stage parity/quality harnesses, or (c) strict no-stub-fallback gates on reachable non-test symbols.
+- `R3b2c2b` decision: `defer`.
+- Rationale: call-heavy return-shape support already covers currently exercised release/sample lanes; broadening nested/mixed forms is not on the critical path unless a real entrypoint/harness fails.
+- Re-activation trigger: deterministic compile failure (or strict fallback rejection) on a reachable, non-test symbol in Brickout or staged self-host flows attributable to nested/mixed call-return shape limits.
+- Re-activation test gate: add one minimal failing fixture for the triggering shape, then require compile/JIT/AOT parity coverage for that exact shape before expanding scope.
+- `R4b2b2b2b` decision: `split` then `defer`.
+- Rationale: the current description is too open-ended; broad "more print shapes" work should be constrained to concrete failing shapes as they appear.
+- Split policy: open shape-scoped follow-up slices (`R4-ext-shape-*`) only when a concrete unsupported print body appears in a reachable lane.
+- Re-activation test gate (per split slice): shape-specific compiler diagnostic/acceptance test + AOT emission assertion + rollback/no-partial-commit failure-path coverage.
+- `R5` decision: `defer`.
+- Rationale: runtime-dependent local mutation/update broadening is valuable but not presently a known blocker for active SH lanes or release quality gates.
+- Re-activation trigger: any active lane requires local-mutation-heavy emitted bodies that currently hard-fail or require fallback in reachable non-test code.
+- Re-activation test gate: representative local assignment-chain fixture with compile/JIT/AOT parity assertions and rollback-preservation coverage for failing variants.
 - Slice R1: Add real branch/join block emission for runtime-dependent `if/else` in `AotProd` (no select-only fallback for supported bodies). (completed 2026-02-13)
 - Slice R2: Add short-circuit boolean control-flow lowering (`&&`, `||`, `!`) in real emitted branch blocks. (completed 2026-02-13)
 - Slice R3a: Lower direct no-arg `i32` return-call bodies (`return callee();`) in emitted AOT bodies when callee dispatch resolves uniquely from compiler metadata in the patch set. (completed 2026-02-13)
