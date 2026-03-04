@@ -128,6 +128,13 @@ pub struct JitCodePtrOverride {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateMapEntry {
+    pub path: String,
+    pub path_hash: i32,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompileStatus {
     Success,
     Failed,
@@ -158,6 +165,8 @@ pub struct CompileResult {
     pub aot_function_symbols: Option<Vec<AotFunctionSymbol>>,
     #[serde(default)]
     pub jit_code_ptr_overrides: Option<Vec<JitCodePtrOverride>>,
+    #[serde(default)]
+    pub state_map: Option<Vec<StateMapEntry>>,
 }
 
 impl CompileResult {
@@ -220,6 +229,7 @@ impl CompileResult {
             aot_linked_image_sha256,
             aot_function_symbols,
             jit_code_ptr_overrides: None,
+            state_map: None,
         }
     }
 
@@ -240,6 +250,7 @@ impl CompileResult {
             aot_linked_image_sha256: None,
             aot_function_symbols: None,
             jit_code_ptr_overrides: None,
+            state_map: None,
         }
     }
 }
@@ -257,6 +268,8 @@ pub struct SwapCommitRequest {
     pub host_set_hash: Option<[u8; 32]>,
     #[serde(default)]
     pub hook_fn_id: Option<FnId>,
+    #[serde(default)]
+    pub state_map: Option<Vec<StateMapEntry>>,
 }
 
 impl SwapCommitRequest {
@@ -275,6 +288,7 @@ impl SwapCommitRequest {
             host_set_id: None,
             host_set_hash: None,
             hook_fn_id: None,
+            state_map: None,
         }
     }
 }
