@@ -94,6 +94,7 @@ pub(crate) struct ForeachBinding {
     pub(crate) element_type: Option<TypeId>,
     pub(crate) struct_type_id: Option<TypeId>,
     pub(crate) field_types: BTreeMap<String, TypeId>,
+    pub(crate) i32_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) f32_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) f64_array_base_ptrs: BTreeMap<String, Value>,
 }
@@ -1122,6 +1123,7 @@ pub(crate) struct RuntimeCallImportIds {
     pub(crate) global_f64_store: FuncId,
     pub(crate) global_i32_array_load: FuncId,
     pub(crate) global_i32_array_store: FuncId,
+    pub(crate) global_i32_array_ptr: FuncId,
     pub(crate) global_f32_array_load: FuncId,
     pub(crate) global_f32_array_store: FuncId,
     pub(crate) global_f32_array_ptr: FuncId,
@@ -1174,6 +1176,7 @@ pub(crate) struct RuntimeCallRefs {
     pub(crate) global_f64_store: FuncRef,
     pub(crate) global_i32_array_load: FuncRef,
     pub(crate) global_i32_array_store: FuncRef,
+    pub(crate) global_i32_array_ptr: FuncRef,
     pub(crate) global_f32_array_load: FuncRef,
     pub(crate) global_f32_array_store: FuncRef,
     pub(crate) global_f32_array_ptr: FuncRef,
@@ -1483,6 +1486,20 @@ pub(crate) fn declare_i32_array_store_import(
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
+    module
+        .declare_function(symbol, Linkage::Import, &signature)
+        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+}
+
+pub(crate) fn declare_i32_array_ptr_import(
+    module: &mut impl Module,
+    symbol: &str,
+) -> Result<FuncId, String> {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.returns.push(AbiParam::new(types::I64));
     module
         .declare_function(symbol, Linkage::Import, &signature)
         .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
@@ -5130,8 +5147,20 @@ pub(crate) fn emit_simple_statements(
                 let len_value = builder
                     .ins()
                     .iconst(types::I32, i64::from(collection_info.len));
+                let mut i32_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
                 let mut f32_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
                 let mut f64_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
+                if collection_info
+                    .element_type
+                    .is_some_and(|type_id| is_i32_abi_compatible_type(type_id, type_table))
+                {
+                    let field_hash_value = builder.ins().iconst(types::I32, 0);
+                    let call = builder.ins().call(
+                        runtime_call_refs.global_i32_array_ptr,
+                        &[collection_hash_value, field_hash_value, len_value],
+                    );
+                    i32_array_base_ptrs.insert(String::new(), builder.inst_results(call)[0]);
+                }
                 if collection_info.element_type == Some(TYPE_ID_F32) {
                     let field_hash_value = builder.ins().iconst(types::I32, 0);
                     let call = builder.ins().call(
@@ -5151,6 +5180,13 @@ pub(crate) fn emit_simple_statements(
                 for (suffix, type_id) in &collection_info.field_types {
                     let field_hash = hash_foreach_field_suffix(suffix);
                     let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
+                    if is_i32_abi_compatible_type(*type_id, type_table) {
+                        let call = builder.ins().call(
+                            runtime_call_refs.global_i32_array_ptr,
+                            &[collection_hash_value, field_hash_value, len_value],
+                        );
+                        i32_array_base_ptrs.insert(suffix.clone(), builder.inst_results(call)[0]);
+                    }
                     if *type_id == TYPE_ID_F32 {
                         let call = builder.ins().call(
                             runtime_call_refs.global_f32_array_ptr,
@@ -5188,6 +5224,7 @@ pub(crate) fn emit_simple_statements(
                         element_type: collection_info.element_type,
                         struct_type_id: collection_struct_type_id,
                         field_types: collection_info.field_types.clone(),
+                        i32_array_base_ptrs,
                         f32_array_base_ptrs,
                         f64_array_base_ptrs,
                     },
@@ -7154,6 +7191,17 @@ pub(crate) fn emit_foreach_binding_load(
     let resolved = resolve_foreach_binding_value_type(binding, suffix)?;
     let index_value = builder.use_var(binding.index_var);
     if is_i32_abi_compatible_type(resolved, type_table) {
+        if let Some(base_ptr) = binding.i32_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            let value = builder.ins().load(types::I32, MemFlags::new(), addr, 0);
+            return Ok(ValueBinding {
+                value,
+                type_id: resolved,
+            });
+        }
+
         let field_hash = hash_foreach_field_suffix(suffix);
         let collection_hash =
             emit_foreach_collection_handle_value(builder, binding.collection_handle);
@@ -7303,10 +7351,17 @@ pub(crate) fn emit_foreach_binding_assignment(
                 builder.ins().srem(lhs, rhs.value)
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[collection_hash, field_hash_value, index_value, value],
-        );
+        if let Some(base_ptr) = binding.i32_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().store(MemFlags::new(), value, addr, 0);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_i32_array_store,
+                &[collection_hash, field_hash_value, index_value, value],
+            );
+        }
         return Ok(());
     }
     if path_type == TYPE_ID_BOOL {
@@ -7316,10 +7371,17 @@ pub(crate) fn emit_foreach_binding_assignment(
                 suffix
             ));
         }
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[collection_hash, field_hash_value, index_value, rhs.value],
-        );
+        if let Some(base_ptr) = binding.i32_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 2);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            builder.ins().store(MemFlags::new(), rhs.value, addr, 0);
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_i32_array_store,
+                &[collection_hash, field_hash_value, index_value, rhs.value],
+            );
+        }
         return Ok(());
     }
     if path_type == TYPE_ID_F32 {
@@ -9099,6 +9161,10 @@ pub(crate) fn build_runtime_call_import_ids(
             module,
             "stasis_jit_global_i32_array_store",
         )?,
+        global_i32_array_ptr: declare_i32_array_ptr_import(
+            module,
+            "stasis_jit_global_i32_array_ptr",
+        )?,
         global_f32_array_load: declare_f32_array_load_import(
             module,
             "stasis_jit_global_f32_array_load",
@@ -9184,6 +9250,7 @@ pub(crate) fn build_runtime_call_refs(
         global_f64_store: module.declare_func_in_func(imports.global_f64_store, func),
         global_i32_array_load: module.declare_func_in_func(imports.global_i32_array_load, func),
         global_i32_array_store: module.declare_func_in_func(imports.global_i32_array_store, func),
+        global_i32_array_ptr: module.declare_func_in_func(imports.global_i32_array_ptr, func),
         global_f32_array_load: module.declare_func_in_func(imports.global_f32_array_load, func),
         global_f32_array_store: module.declare_func_in_func(imports.global_f32_array_store, func),
         global_f32_array_ptr: module.declare_func_in_func(imports.global_f32_array_ptr, func),
