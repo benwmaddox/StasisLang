@@ -430,6 +430,8 @@ impl IncrementalCompilerBackend {
                         );
                     }
                 };
+                // Parsed for manifest forward-compatibility, but not used for behavior today.
+                let _ = manifest.optimization_profile.as_deref();
                 if let Some(literals) = manifest.string_literals.as_ref() {
                     // AOT code references string literals by hashed ID at runtime. Unlike the JIT path,
                     // AOT compilation happens out of band from execution, so the runtime table must be
@@ -3918,6 +3920,21 @@ mod tests {
             .copied()
             .expect("expected main pointer in JIT engine package");
         let tick_ptr = package.tick_code_ptr;
+        let start_level_ptr = package
+            .symbol_code_ptrs
+            .get("start_level")
+            .copied()
+            .expect("expected start_level pointer in JIT engine package");
+        let place_brick_at_grid_ptr = package
+            .symbol_code_ptrs
+            .get("place_brick_at_grid")
+            .copied()
+            .expect("expected place_brick_at_grid pointer in JIT engine package");
+        let try_start_battle_ptr = package
+            .symbol_code_ptrs
+            .get("brickout_try_start_battle")
+            .copied()
+            .expect("expected brickout_try_start_battle pointer in JIT engine package");
         assert_ne!(main_ptr, 0);
         assert_ne!(tick_ptr, 0);
 
@@ -3952,6 +3969,19 @@ mod tests {
         // Clear resize flag for subsequent ticks.
         store(11, 0);
 
+        // Force in-level gameplay (not title screen): enter level 1, place a brick, then start battle.
+        stasis_dynload::invoke_i32_to_void(start_level_ptr as usize, 0).expect("invoke start_level");
+        let place_rc = stasis_dynload::invoke_i32_i32_i32_to_i32(
+            place_brick_at_grid_ptr as usize,
+            0,
+            0,
+            0,
+        )
+        .expect("invoke place_brick_at_grid");
+        assert_ne!(place_rc, 0, "expected place_brick_at_grid to succeed");
+        stasis_dynload::invoke_noarg_void(try_start_battle_ptr as usize)
+            .expect("invoke brickout_try_start_battle");
+
         let ticks: i32 = 1000;
         let start = std::time::Instant::now();
         for tick_index in 0..ticks {
@@ -3967,7 +3997,7 @@ mod tests {
         let ms_per_tick = elapsed.as_secs_f64() * 1_000.0 / f64::from(ticks);
         let us_per_tick = elapsed.as_secs_f64() * 1_000_000.0 / f64::from(ticks);
         println!(
-            "bench=jit brickout_v1 ticks={} elapsed_ms={} ms_per_tick={:.6} us_per_tick={:.3}",
+            "bench=jit brickout_v1_in_level ticks={} elapsed_ms={} ms_per_tick={:.6} us_per_tick={:.3}",
             ticks,
             elapsed.as_millis(),
             ms_per_tick,
@@ -4165,6 +4195,24 @@ mod tests {
             .find(|row| row.name == "tick")
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
+        let start_level_symbol = manifest
+            .functions
+            .iter()
+            .find(|row| row.name == "start_level")
+            .map(|row| row.symbol.clone())
+            .expect("manifest should include start_level");
+        let place_brick_at_grid_symbol = manifest
+            .functions
+            .iter()
+            .find(|row| row.name == "place_brick_at_grid")
+            .map(|row| row.symbol.clone())
+            .expect("manifest should include place_brick_at_grid");
+        let try_start_battle_symbol = manifest
+            .functions
+            .iter()
+            .find(|row| row.name == "brickout_try_start_battle")
+            .map(|row| row.symbol.clone())
+            .expect("manifest should include brickout_try_start_battle");
 
         let object_paths: Vec<PathBuf> = bundle
             .object_paths_by_function
@@ -4180,6 +4228,9 @@ mod tests {
         let export_symbols = vec![
             main_symbol.clone(),
             tick_symbol.clone(),
+            start_level_symbol.clone(),
+            place_brick_at_grid_symbol.clone(),
+            try_start_battle_symbol.clone(),
             // Seed host frame values in the same runtime instance as the linked AOT code.
             "stasis_jit_global_i32_array_store".to_string(),
         ];
@@ -4219,6 +4270,15 @@ mod tests {
         let tick_ptr = library
             .symbol_address(&tick_symbol)
             .expect("resolve tick export");
+        let start_level_ptr = library
+            .symbol_address(&start_level_symbol)
+            .expect("resolve start_level export");
+        let place_brick_at_grid_ptr = library
+            .symbol_address(&place_brick_at_grid_symbol)
+            .expect("resolve place_brick_at_grid export");
+        let try_start_battle_ptr = library
+            .symbol_address(&try_start_battle_symbol)
+            .expect("resolve brickout_try_start_battle export");
         let store_ptr = library
             .symbol_address("stasis_jit_global_i32_array_store")
             .expect("resolve host_i32 store");
@@ -4255,6 +4315,14 @@ mod tests {
         // Clear resize flag for subsequent ticks.
         store(11, 0);
 
+        // Force in-level gameplay (not title screen): enter level 1, place a brick, then start battle.
+        stasis_dynload::invoke_i32_to_void(start_level_ptr, 0).expect("invoke start_level");
+        let place_rc = stasis_dynload::invoke_i32_i32_i32_to_i32(place_brick_at_grid_ptr, 0, 0, 0)
+            .expect("invoke place_brick_at_grid");
+        assert_ne!(place_rc, 0, "expected place_brick_at_grid to succeed");
+        stasis_dynload::invoke_noarg_void(try_start_battle_ptr)
+            .expect("invoke brickout_try_start_battle");
+
         let ticks: i32 = 1000;
         let start = std::time::Instant::now();
         for tick_index in 0..ticks {
@@ -4270,7 +4338,7 @@ mod tests {
         let ms_per_tick = elapsed.as_secs_f64() * 1_000.0 / f64::from(ticks);
         let us_per_tick = elapsed.as_secs_f64() * 1_000_000.0 / f64::from(ticks);
         println!(
-            "bench=aot brickout_v1 ticks={} elapsed_ms={} ms_per_tick={:.6} us_per_tick={:.3}",
+            "bench=aot brickout_v1_in_level ticks={} elapsed_ms={} ms_per_tick={:.6} us_per_tick={:.3}",
             ticks,
             elapsed.as_millis(),
             ms_per_tick,
@@ -4471,6 +4539,24 @@ mod tests {
             .find(|row| row.name == "tick")
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
+        let start_level_symbol = manifest
+            .functions
+            .iter()
+            .find(|row| row.name == "start_level")
+            .map(|row| row.symbol.clone())
+            .expect("manifest should include start_level");
+        let place_brick_at_grid_symbol = manifest
+            .functions
+            .iter()
+            .find(|row| row.name == "place_brick_at_grid")
+            .map(|row| row.symbol.clone())
+            .expect("manifest should include place_brick_at_grid");
+        let try_start_battle_symbol = manifest
+            .functions
+            .iter()
+            .find(|row| row.name == "brickout_try_start_battle")
+            .map(|row| row.symbol.clone())
+            .expect("manifest should include brickout_try_start_battle");
 
         let object_paths: Vec<PathBuf> = bundle
             .object_paths_by_function
@@ -4486,6 +4572,9 @@ mod tests {
         let export_symbols = vec![
             main_symbol.clone(),
             tick_symbol.clone(),
+            start_level_symbol.clone(),
+            place_brick_at_grid_symbol.clone(),
+            try_start_battle_symbol.clone(),
             // Seed host frame values in the same runtime instance as the linked AOT code.
             "stasis_jit_global_i32_array_store".to_string(),
         ];
@@ -4525,6 +4614,15 @@ mod tests {
         let tick_ptr = library
             .symbol_address(&tick_symbol)
             .expect("resolve tick export");
+        let start_level_ptr = library
+            .symbol_address(&start_level_symbol)
+            .expect("resolve start_level export");
+        let place_brick_at_grid_ptr = library
+            .symbol_address(&place_brick_at_grid_symbol)
+            .expect("resolve place_brick_at_grid export");
+        let try_start_battle_ptr = library
+            .symbol_address(&try_start_battle_symbol)
+            .expect("resolve brickout_try_start_battle export");
         let store_ptr = library
             .symbol_address("stasis_jit_global_i32_array_store")
             .expect("resolve host_i32 store");
@@ -4561,6 +4659,14 @@ mod tests {
         // Clear resize flag for subsequent ticks.
         store(11, 0);
 
+        // Force in-level gameplay (not title screen): enter level 1, place a brick, then start battle.
+        stasis_dynload::invoke_i32_to_void(start_level_ptr, 0).expect("invoke start_level");
+        let place_rc = stasis_dynload::invoke_i32_i32_i32_to_i32(place_brick_at_grid_ptr, 0, 0, 0)
+            .expect("invoke place_brick_at_grid");
+        assert_ne!(place_rc, 0, "expected place_brick_at_grid to succeed");
+        stasis_dynload::invoke_noarg_void(try_start_battle_ptr)
+            .expect("invoke brickout_try_start_battle");
+
         let ticks: i32 = 1000;
         let start = std::time::Instant::now();
         for tick_index in 0..ticks {
@@ -4576,7 +4682,7 @@ mod tests {
         let ms_per_tick = elapsed.as_secs_f64() * 1_000.0 / f64::from(ticks);
         let us_per_tick = elapsed.as_secs_f64() * 1_000_000.0 / f64::from(ticks);
         println!(
-            "bench=aot brickout_v1 ticks={} elapsed_ms={} ms_per_tick={:.6} us_per_tick={:.3}",
+            "bench=aot brickout_v1_in_level ticks={} elapsed_ms={} ms_per_tick={:.6} us_per_tick={:.3}",
             ticks,
             elapsed.as_millis(),
             ms_per_tick,
