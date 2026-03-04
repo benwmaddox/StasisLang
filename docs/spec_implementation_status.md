@@ -33,7 +33,7 @@ Status legend:
 | 9. Modules and Imports | Implemented | `import` and project-local module resolution are implemented. |
 | 10. Testing Construct | Partial | `.test.stasis` discovery/execution exists in JIT dev/test workflows. AOT test execution parity is not a current priority. |
 | 11. Memory Model | Partial | Static globals and deterministic layout are central. Remaining gaps are mostly around richer compile-time enforcement and diagnostics, not basic execution. |
-| 12. Runtime Boundary and Extern | Partial | Host-set profile/registry plumbing exists. Required-host extraction/diagnostics are tracked separately (not complete). |
+| 12. Runtime Boundary and Extern | Partial | Host-set profile/registry plumbing exists. Runtime phase-policy and per-tick effect-budget enforcement are in progress (tick queue + commit-hook rejection path implemented for mapped externs). Required-host extraction/diagnostics are tracked separately (not complete). |
 | 12.2 Optional Plugin Libraries | Deferred (Out of Scope) | Plugin libraries are explicitly out of scope for the current release approach; do not plan features around them right now. |
 | 13. Tick Policy | Implemented | Tick-based semantics are supported and used by the runtime loop. |
 | 14. Incremental Compilation and Hot Swap | Partial | Development hot-swap is implemented (JIT). Production AOT is the release approach; it should run the same games as JIT, but "AOT parity" is still being hardened and is explicitly tracked as a release goal. |

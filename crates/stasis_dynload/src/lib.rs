@@ -151,6 +151,267 @@ pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i3
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostExternPhaseClass {
+    TickSafe,
+    CommitOnly,
+    EffectQueued,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostSetRuntimeBudget {
+    pub max_effect_calls_per_tick: u32,
+    pub max_effect_bytes_per_tick: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSetRuntimeConfig {
+    pub enabled: bool,
+    pub extern_phase_classes: HashMap<String, HostExternPhaseClass>,
+    pub budget: HostSetRuntimeBudget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSetRuntimeReport {
+    pub phase: &'static str,
+    pub effect_calls: u32,
+    pub effect_bytes: u32,
+    pub dropped_effects: u32,
+    pub violations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostRuntimePhase {
+    None,
+    Tick,
+    Commit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueuedHostEffect {
+    PrintI32(i32),
+    PrintString(String),
+}
+
+#[derive(Debug)]
+struct HostRuntimeState {
+    enabled: bool,
+    phase: HostRuntimePhase,
+    extern_phase_classes: HashMap<String, HostExternPhaseClass>,
+    max_effect_calls_per_tick: u32,
+    max_effect_bytes_per_tick: u32,
+    tick_effect_calls: u32,
+    tick_effect_bytes: u32,
+    dropped_effects: u32,
+    queued_effects: Vec<QueuedHostEffect>,
+    violations: Vec<String>,
+}
+
+impl Default for HostRuntimeState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            phase: HostRuntimePhase::None,
+            extern_phase_classes: HashMap::new(),
+            max_effect_calls_per_tick: 0,
+            max_effect_bytes_per_tick: 0,
+            tick_effect_calls: 0,
+            tick_effect_bytes: 0,
+            dropped_effects: 0,
+            queued_effects: Vec::new(),
+            violations: Vec::new(),
+        }
+    }
+}
+
+fn host_runtime_state() -> &'static Mutex<HostRuntimeState> {
+    static STATE: OnceLock<Mutex<HostRuntimeState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(HostRuntimeState::default()))
+}
+
+pub fn configure_host_runtime(config: HostSetRuntimeConfig) {
+    let state = host_runtime_state();
+    let mut guard = state.lock().expect("host runtime state mutex poisoned");
+    guard.enabled = config.enabled;
+    guard.phase = HostRuntimePhase::None;
+    guard.extern_phase_classes = config.extern_phase_classes;
+    guard.max_effect_calls_per_tick = config.budget.max_effect_calls_per_tick;
+    guard.max_effect_bytes_per_tick = config.budget.max_effect_bytes_per_tick;
+    guard.tick_effect_calls = 0;
+    guard.tick_effect_bytes = 0;
+    guard.dropped_effects = 0;
+    guard.queued_effects.clear();
+    guard.violations.clear();
+}
+
+pub fn disable_host_runtime() {
+    configure_host_runtime(HostSetRuntimeConfig {
+        enabled: false,
+        extern_phase_classes: HashMap::new(),
+        budget: HostSetRuntimeBudget {
+            max_effect_calls_per_tick: 0,
+            max_effect_bytes_per_tick: 0,
+        },
+    });
+}
+
+pub fn begin_host_tick_phase() {
+    let state = host_runtime_state();
+    let mut guard = state.lock().expect("host runtime state mutex poisoned");
+    guard.phase = HostRuntimePhase::Tick;
+    guard.tick_effect_calls = 0;
+    guard.tick_effect_bytes = 0;
+    guard.dropped_effects = 0;
+    guard.queued_effects.clear();
+    guard.violations.clear();
+}
+
+pub fn begin_host_commit_phase() {
+    let state = host_runtime_state();
+    let mut guard = state.lock().expect("host runtime state mutex poisoned");
+    guard.phase = HostRuntimePhase::Commit;
+    guard.violations.clear();
+}
+
+pub fn end_host_phase() -> HostSetRuntimeReport {
+    let state = host_runtime_state();
+    let (phase, effect_calls, effect_bytes, dropped_effects, queued, violations) = {
+        let mut guard = state.lock().expect("host runtime state mutex poisoned");
+        let phase = match guard.phase {
+            HostRuntimePhase::None => "none",
+            HostRuntimePhase::Tick => "tick",
+            HostRuntimePhase::Commit => "commit",
+        };
+        let effect_calls = guard.tick_effect_calls;
+        let effect_bytes = guard.tick_effect_bytes;
+        let dropped_effects = guard.dropped_effects;
+        let queued = std::mem::take(&mut guard.queued_effects);
+        let violations = std::mem::take(&mut guard.violations);
+        guard.phase = HostRuntimePhase::None;
+        (
+            phase,
+            effect_calls,
+            effect_bytes,
+            dropped_effects,
+            queued,
+            violations,
+        )
+    };
+
+    if phase == "tick" && violations.is_empty() {
+        for effect in queued {
+            match effect {
+                QueuedHostEffect::PrintI32(value) => {
+                    do_print_i32(value);
+                }
+                QueuedHostEffect::PrintString(text) => {
+                    do_print_string(&text);
+                }
+            }
+        }
+    }
+
+    HostSetRuntimeReport {
+        phase,
+        effect_calls,
+        effect_bytes,
+        dropped_effects,
+        violations,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostCallDecision {
+    ExecuteNow,
+    Queue,
+    Reject,
+}
+
+fn resolve_host_phase_class(
+    guard: &HostRuntimeState,
+    symbol: &str,
+) -> Result<HostExternPhaseClass, String> {
+    guard
+        .extern_phase_classes
+        .get(symbol)
+        .copied()
+        .ok_or_else(|| format!("host-set policy violation: extern '{symbol}' is not exported"))
+}
+
+fn evaluate_host_call(
+    symbol: &str,
+    estimated_effect_bytes: u32,
+    queue_supported: bool,
+) -> HostCallDecision {
+    let state = host_runtime_state();
+    let mut guard = state.lock().expect("host runtime state mutex poisoned");
+    if !guard.enabled || guard.phase == HostRuntimePhase::None {
+        return HostCallDecision::ExecuteNow;
+    }
+
+    let phase_class = match resolve_host_phase_class(&guard, symbol) {
+        Ok(phase_class) => phase_class,
+        Err(message) => {
+            guard.violations.push(message);
+            return HostCallDecision::Reject;
+        }
+    };
+
+    match guard.phase {
+        HostRuntimePhase::Tick => match phase_class {
+            HostExternPhaseClass::TickSafe => HostCallDecision::ExecuteNow,
+            HostExternPhaseClass::CommitOnly => {
+                guard.violations.push(format!(
+                    "host-set phase violation: extern '{symbol}' is commit_only and cannot run on tick path"
+                ));
+                HostCallDecision::Reject
+            }
+            HostExternPhaseClass::EffectQueued => {
+                if !queue_supported {
+                    guard.violations.push(format!(
+                        "host-set phase violation: extern '{symbol}' is effect_queued but queue support is unavailable"
+                    ));
+                    return HostCallDecision::Reject;
+                }
+                let next_calls = guard.tick_effect_calls.saturating_add(1);
+                let next_bytes = guard
+                    .tick_effect_bytes
+                    .saturating_add(estimated_effect_bytes);
+                if next_calls > guard.max_effect_calls_per_tick
+                    || next_bytes > guard.max_effect_bytes_per_tick
+                {
+                    let limit_calls = guard.max_effect_calls_per_tick;
+                    let limit_bytes = guard.max_effect_bytes_per_tick;
+                    guard.dropped_effects = guard.dropped_effects.saturating_add(1);
+                    guard.violations.push(format!(
+                        "host-set budget violation: extern '{symbol}' exceeded per-tick budget (calls={}, bytes={}, limit_calls={}, limit_bytes={})",
+                        next_calls,
+                        next_bytes,
+                        limit_calls,
+                        limit_bytes
+                    ));
+                    return HostCallDecision::Reject;
+                }
+                guard.tick_effect_calls = next_calls;
+                guard.tick_effect_bytes = next_bytes;
+                HostCallDecision::Queue
+            }
+        },
+        HostRuntimePhase::Commit => match phase_class {
+            HostExternPhaseClass::EffectQueued => {
+                guard.violations.push(format!(
+                    "host-set phase violation: extern '{symbol}' is effect_queued and cannot run on commit path"
+                ));
+                HostCallDecision::Reject
+            }
+            HostExternPhaseClass::TickSafe | HostExternPhaseClass::CommitOnly => {
+                HostCallDecision::ExecuteNow
+            }
+        },
+        HostRuntimePhase::None => HostCallDecision::ExecuteNow,
+    }
+}
+
 pub fn invoke_i32_i32_i32_i32_to_void(
     address: usize,
     arg0: i32,
@@ -173,8 +434,7 @@ pub fn invoke_i32_i32_i32_i32_to_void(
     }
     #[cfg(not(windows))]
     {
-        let callback: extern "C" fn(i32, i32, i32, i32) =
-            unsafe { std::mem::transmute(address) };
+        let callback: extern "C" fn(i32, i32, i32, i32) = unsafe { std::mem::transmute(address) };
         callback(arg0, arg1, arg2, arg3);
         Ok(())
     }
@@ -687,7 +947,9 @@ pub extern "C" fn stasis_jit_global_f32_array_ptr(
         let mut owned_guard = owned_f32_arrays()
             .lock()
             .expect("owned f32 array table mutex poisoned");
-        let array = owned_guard.entry(key).or_insert_with(|| vec![0.0; requested_len]);
+        let array = owned_guard
+            .entry(key)
+            .or_insert_with(|| vec![0.0; requested_len]);
         if array.len() < requested_len {
             array.resize(requested_len, 0.0);
         }
@@ -747,7 +1009,9 @@ pub extern "C" fn stasis_jit_global_f64_array_ptr(
         let mut owned_guard = owned_f64_arrays()
             .lock()
             .expect("owned f64 array table mutex poisoned");
-        let array = owned_guard.entry(key).or_insert_with(|| vec![0.0; requested_len]);
+        let array = owned_guard
+            .entry(key)
+            .or_insert_with(|| vec![0.0; requested_len]);
         if array.len() < requested_len {
             array.resize(requested_len, 0.0);
         }
@@ -780,20 +1044,59 @@ pub extern "C" fn stasis_jit_global_f64_array_ptr(
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_print_i32(value: i32) {
-    print!("{value}");
-    let _ = std::io::stdout().flush();
+    match evaluate_host_call("print_i32", 12, true) {
+        HostCallDecision::ExecuteNow => do_print_i32(value),
+        HostCallDecision::Queue => {
+            let state = host_runtime_state();
+            let mut guard = state.lock().expect("host runtime state mutex poisoned");
+            guard.queued_effects.push(QueuedHostEffect::PrintI32(value));
+        }
+        HostCallDecision::Reject => {}
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_print_string(value_id: i32) {
+    let maybe_text = lookup_string_literal(value_id);
+    let estimated_bytes = maybe_text
+        .as_ref()
+        .map(|text| u32::try_from(text.len()).unwrap_or(u32::MAX))
+        .unwrap_or(0);
+    match evaluate_host_call("print_string", estimated_bytes, true) {
+        HostCallDecision::ExecuteNow => {
+            if let Some(text) = maybe_text.as_ref() {
+                do_print_string(text);
+            }
+        }
+        HostCallDecision::Queue => {
+            if let Some(text) = maybe_text {
+                let state = host_runtime_state();
+                let mut guard = state.lock().expect("host runtime state mutex poisoned");
+                guard
+                    .queued_effects
+                    .push(QueuedHostEffect::PrintString(text));
+            }
+        }
+        HostCallDecision::Reject => {}
+    }
+}
+
+fn do_print_i32(value: i32) {
+    print!("{value}");
+    let _ = std::io::stdout().flush();
+}
+
+fn do_print_string(text: &str) {
+    print!("{text}");
+    let _ = std::io::stdout().flush();
+}
+
+fn lookup_string_literal(value_id: i32) -> Option<String> {
     let table = jit_string_literal_table();
     let guard = table
         .lock()
         .expect("jit string literal table mutex poisoned");
-    if let Some(text) = guard.get(&value_id) {
-        print!("{text}");
-        let _ = std::io::stdout().flush();
-    }
+    guard.get(&value_id).cloned()
 }
 
 #[cfg(windows)]
@@ -816,6 +1119,9 @@ fn jit_string_literal_to_cstring(value_id: i32) -> Result<CString, String> {
 // translate that into a stable `const char*` when calling the C runtime.
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
+    if evaluate_host_call("gfx_load_sprite", 0, false) != HostCallDecision::ExecuteNow {
+        return 0;
+    }
     #[cfg(windows)]
     {
         let Ok(path) = jit_string_literal_to_cstring(path_id) else {
@@ -839,6 +1145,9 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
+    if evaluate_host_call("gfx_dump_bmp", 0, false) != HostCallDecision::ExecuteNow {
+        return 0;
+    }
     #[cfg(windows)]
     {
         let Ok(path) = jit_string_literal_to_cstring(path_id) else {
@@ -860,6 +1169,9 @@ pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
+    if evaluate_host_call("load_font", 0, false) != HostCallDecision::ExecuteNow {
+        return 0;
+    }
     #[cfg(windows)]
     {
         let Ok(path) = jit_string_literal_to_cstring(path_id) else {
@@ -882,6 +1194,9 @@ pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
+    if evaluate_host_call("measure_text", 0, false) != HostCallDecision::ExecuteNow {
+        return 0.0;
+    }
     #[cfg(windows)]
     {
         let Ok(text) = jit_string_literal_to_cstring(text_id) else {
@@ -904,6 +1219,9 @@ pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
+    if evaluate_host_call("gfx_cache_text", 0, false) != HostCallDecision::ExecuteNow {
+        return 0;
+    }
     #[cfg(windows)]
     {
         let Ok(text) = jit_string_literal_to_cstring(text_id) else {
@@ -926,6 +1244,9 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
+    if evaluate_host_call("stasis_jit_gfx_poll_reload", 0, false) != HostCallDecision::ExecuteNow {
+        return 0;
+    }
     #[cfg(windows)]
     {
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -944,6 +1265,11 @@ pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
+    if evaluate_host_call("stasis_jit_gfx_measure_text_cached", 0, false)
+        != HostCallDecision::ExecuteNow
+    {
+        return 0.0;
+    }
     #[cfg(windows)]
     {
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -964,6 +1290,9 @@ pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
 // block on sleeps during deterministic quality-gate runs.
 #[no_mangle]
 pub extern "C" fn stasis_jit_sleep_ms(ms: i32) {
+    if evaluate_host_call("stasis_jit_sleep_ms", 0, false) != HostCallDecision::ExecuteNow {
+        return;
+    }
     let _ = ms;
 }
 
@@ -1793,7 +2122,11 @@ pub extern "C" fn stasis_jit_sys_memmove_f32(
 // Brickout uses `audio_is_available()` as a gate; return false so the game runs without calling
 // pointer-typed audio externs (e.g. `audio_push_f32_interleaved`).
 #[no_mangle]
-pub extern "C" fn stasis_jit_audio_init(_sample_rate: i32, _channels: i32, _target_latency_frames: i32) -> i32 {
+pub extern "C" fn stasis_jit_audio_init(
+    _sample_rate: i32,
+    _channels: i32,
+    _target_latency_frames: i32,
+) -> i32 {
     0
 }
 
@@ -1802,6 +2135,9 @@ pub extern "C" fn stasis_jit_audio_shutdown() {}
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_is_available() -> i32 {
+    if evaluate_host_call("audio_is_available", 0, false) != HostCallDecision::ExecuteNow {
+        return 0;
+    }
     0
 }
 
@@ -1828,6 +2164,9 @@ pub extern "C" fn stasis_jit_audio_get_underruns() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_push_f32_interleaved(_samples: i32, _frame_count: i32) -> i32 {
+    if evaluate_host_call("audio_push_f32_interleaved", 0, false) != HostCallDecision::ExecuteNow {
+        return 0;
+    }
     0
 }
 
@@ -2353,5 +2692,100 @@ mod tests {
             .expect("resolve GetTickCount");
         let value = invoke_noarg_u64(address).expect("invoke GetTickCount");
         assert!(value <= u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn host_runtime_rejects_effect_queued_calls_during_commit_phase() {
+        let mut extern_phase_classes = HashMap::new();
+        extern_phase_classes.insert("print_i32".to_string(), HostExternPhaseClass::EffectQueued);
+        configure_host_runtime(HostSetRuntimeConfig {
+            enabled: true,
+            extern_phase_classes,
+            budget: HostSetRuntimeBudget {
+                max_effect_calls_per_tick: 10,
+                max_effect_bytes_per_tick: 256,
+            },
+        });
+
+        begin_host_commit_phase();
+        stasis_jit_print_i32(7);
+        let report = end_host_phase();
+
+        assert_eq!(report.phase, "commit");
+        assert_eq!(report.effect_calls, 0);
+        assert_eq!(report.effect_bytes, 0);
+        assert_eq!(report.dropped_effects, 0);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|message| message.contains("effect_queued")),
+            "expected effect_queued commit-phase violation, got {:?}",
+            report.violations
+        );
+
+        disable_host_runtime();
+    }
+
+    #[test]
+    fn host_runtime_enforces_effect_budget_during_tick_phase() {
+        let mut extern_phase_classes = HashMap::new();
+        extern_phase_classes.insert("print_i32".to_string(), HostExternPhaseClass::EffectQueued);
+        configure_host_runtime(HostSetRuntimeConfig {
+            enabled: true,
+            extern_phase_classes,
+            budget: HostSetRuntimeBudget {
+                max_effect_calls_per_tick: 1,
+                max_effect_bytes_per_tick: 16,
+            },
+        });
+
+        begin_host_tick_phase();
+        stasis_jit_print_i32(1);
+        stasis_jit_print_i32(2);
+        let report = end_host_phase();
+
+        assert_eq!(report.phase, "tick");
+        assert_eq!(report.effect_calls, 1);
+        assert_eq!(report.dropped_effects, 1);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|message| message.contains("budget violation")),
+            "expected budget violation, got {:?}",
+            report.violations
+        );
+
+        disable_host_runtime();
+    }
+
+    #[test]
+    fn host_runtime_rejects_unmapped_extern_calls_when_enabled() {
+        configure_host_runtime(HostSetRuntimeConfig {
+            enabled: true,
+            extern_phase_classes: HashMap::new(),
+            budget: HostSetRuntimeBudget {
+                max_effect_calls_per_tick: 1,
+                max_effect_bytes_per_tick: 1,
+            },
+        });
+
+        begin_host_tick_phase();
+        let _ = stasis_jit_audio_is_available();
+        let report = end_host_phase();
+
+        assert_eq!(report.phase, "tick");
+        assert_eq!(report.effect_calls, 0);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|message| message.contains("not exported")),
+            "expected missing-export violation, got {:?}",
+            report.violations
+        );
+
+        disable_host_runtime();
     }
 }

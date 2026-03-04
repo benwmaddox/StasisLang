@@ -970,7 +970,13 @@ Archived priority override (2026-02-13, historical):
 - `on_code_swap` phase-policy rejection + rollback tests.
 - Done gate:
 - Nondeterministic host effects cannot bypass queued/snapshotted paths.
-- Status: `planned (post-S10b)`
+- Current progress:
+- `apps/stasis/src/host_set_registry.rs` now materializes host-set phase-class metadata (`tick_safe`, `commit_only`, `effect_queued`) and per-profile default budgets; registry JSON can override phase classes and budgets per profile.
+- `crates/stasis_dynload/src/lib.rs` now enforces active phase at runtime:
+- tick phase supports deterministic queueing for `effect_queued` print externs (`print_i32`, `print_string`)
+- commit phase rejects `effect_queued` extern calls with deterministic violation diagnostics
+- `apps/stasis/src/lib.rs` now brackets tick and hook execution with runtime phase boundaries (`begin_host_tick_phase`/`begin_host_commit_phase`) and treats phase violations as hard failures.
+- Status: `in_progress`
 
 ### S16 - Host-Set Budgets and Failure Containment
 - Language:
@@ -986,7 +992,13 @@ Archived priority override (2026-02-13, historical):
 - Budget-overrun rollback/preservation tests.
 - Done gate:
 - Host-set misuse cannot produce partial state mutation or silent nondeterminism.
-- Status: `planned (post-S10b)`
+- Current progress:
+- Runtime per-tick effect budgets (`max_effect_calls_per_tick`, `max_effect_bytes_per_tick`) are enforced in `stasis_dynload` for queued tick effects; overrun produces deterministic budget violations and dropped-effect accounting.
+- Commit-hook path now emits host-set budget/violation telemetry through runner events (`RunnerEvent::HostSetBudgetReport`) and fails swap before patch commit when policy is violated.
+- Added regression coverage:
+- `stasis_dynload` unit tests for commit-phase rejection, per-tick budget enforcement, and deny-by-default missing export behavior.
+- `apps/stasis` unit test for rejecting effect-queued extern usage from `on_code_swap` with rollback-preserving failure semantics.
+- Status: `in_progress`
 
 ## PR Sequence
 

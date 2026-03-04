@@ -29,6 +29,14 @@ pub enum RunnerEvent {
         error: Option<String>,
         commit_duration_ms: Option<u64>,
     },
+    HostSetBudgetReport {
+        request_id: u64,
+        phase: String,
+        effect_calls: u32,
+        effect_bytes: u32,
+        dropped_effects: u32,
+        violations: Vec<String>,
+    },
     Summary {
         ticks_executed: u32,
         compile_successes: u32,

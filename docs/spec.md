@@ -609,6 +609,26 @@ Console output contract:
 Bootstrap compatibility note:
 - Current bootstrap runtime symbol is `print_int`; stdlib provides `print_i32` wrapper to preserve Stasis naming.
 
+### 12.1.1 Host-Set Phase Policy and Budgets
+
+Host-set contracts carry runtime policy metadata for extern symbols:
+- phase class per extern symbol:
+- `tick_safe`: callable during tick and commit phases
+- `commit_only`: callable during commit/swap-hook phase only
+- `effect_queued`: callable on tick path only via deterministic queueing; not callable on commit path
+- per-tick effect budgets:
+- `max_effect_calls_per_tick`
+- `max_effect_bytes_per_tick`
+
+Runtime enforcement rules:
+- Tick phase:
+- `effect_queued` calls are queued in deterministic call order and flushed only after tick completes without policy violations.
+- Budget overrun rejects the call, records deterministic diagnostics, and drops queued effects for that phase.
+- Commit (`on_code_swap`) phase:
+- `effect_queued` calls are rejected as phase violations.
+- Hook phase violations fail the swap before pointer-table commit (all-or-nothing preserved).
+- If host runtime policy is disabled, extern behavior falls back to legacy direct execution.
+
 ### 12.2 Future Direction: Optional Plugin Libraries
 
 This section is intentionally **out of scope** for the current release approach.

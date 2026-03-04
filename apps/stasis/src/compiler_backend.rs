@@ -102,6 +102,7 @@ struct EngineBundleManifestCollectionMaxLengthRow {
 
 #[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifest {
+    #[allow(dead_code)]
     #[serde(default)]
     optimization_profile: Option<String>,
     functions: Vec<EngineBundleManifestFunctionRow>,

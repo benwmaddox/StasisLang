@@ -34,7 +34,7 @@ use stasis_runner::swap::contracts::{
     TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -124,6 +124,14 @@ pub struct RunnerSummary {
 const STASIS_HOST_SET_PROFILE_ENV: &str = "STASIS_HOST_SET_PROFILE";
 const STASIS_HOST_SET_REGISTRY_FILE_ENV: &str = "STASIS_HOST_SET_REGISTRY_FILE";
 
+struct HostRuntimeGuard;
+
+impl Drop for HostRuntimeGuard {
+    fn drop(&mut self) {
+        stasis_dynload::disable_host_runtime();
+    }
+}
+
 fn infer_host_set_profile_from_target_mode(
     target_mode: TargetMode,
 ) -> host_set_registry::HostSetProfile {
@@ -159,6 +167,38 @@ fn resolve_host_set_contract(
         });
 
     host_set_registry::resolve_profile_contract(profile, registry_file.as_deref())
+}
+
+fn to_dynload_phase_class(
+    phase_class: host_set_registry::HostExternPhaseClass,
+) -> stasis_dynload::HostExternPhaseClass {
+    match phase_class {
+        host_set_registry::HostExternPhaseClass::TickSafe => {
+            stasis_dynload::HostExternPhaseClass::TickSafe
+        }
+        host_set_registry::HostExternPhaseClass::CommitOnly => {
+            stasis_dynload::HostExternPhaseClass::CommitOnly
+        }
+        host_set_registry::HostExternPhaseClass::EffectQueued => {
+            stasis_dynload::HostExternPhaseClass::EffectQueued
+        }
+    }
+}
+
+fn configure_dynload_host_runtime(contract: &host_set_registry::HostSetContract) {
+    let mut extern_phase_classes: HashMap<String, stasis_dynload::HostExternPhaseClass> =
+        HashMap::new();
+    for (symbol, phase_class) in &contract.extern_phase_classes {
+        extern_phase_classes.insert(symbol.clone(), to_dynload_phase_class(*phase_class));
+    }
+    stasis_dynload::configure_host_runtime(stasis_dynload::HostSetRuntimeConfig {
+        enabled: true,
+        extern_phase_classes,
+        budget: stasis_dynload::HostSetRuntimeBudget {
+            max_effect_calls_per_tick: contract.budget_policy.max_effect_calls_per_tick,
+            max_effect_bytes_per_tick: contract.budget_policy.max_effect_bytes_per_tick,
+        },
+    });
 }
 
 pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
@@ -241,6 +281,12 @@ pub fn run_play_in_process(
     }
 
     let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
+
+    let host_set_contract =
+        host_set_registry::resolve_profile_contract(host_set_registry::HostSetProfile::Dev, None)
+            .map_err(|error| format!("failed to resolve default dev host-set contract: {error}"))?;
+    configure_dynload_host_runtime(&host_set_contract);
+    let _host_runtime_guard = HostRuntimeGuard;
 
     // Make relative asset paths (e.g. "assets/ball.svg") resolve against the game directory.
     // Use the watch dir so dev workflows stay consistent across `stasis.exe` launch locations.
@@ -427,8 +473,16 @@ pub fn run_play_in_process(
                                 let t_hook = Instant::now();
                                 // Run the hook against the newly compiled code. If it fails, abort the swap attempt
                                 // and keep running last-known-good code/data.
-                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize)
-                                {
+                                stasis_dynload::begin_host_commit_phase();
+                                let hook_result = stasis_dynload::invoke_noarg_void(hook as usize);
+                                let hook_report = stasis_dynload::end_host_phase();
+                                if !hook_report.violations.is_empty() {
+                                    hook_ms = t_hook.elapsed().as_millis();
+                                    hook_failed = Some(format!(
+                                        "host-set policy violation(s): {}",
+                                        hook_report.violations.join(" | ")
+                                    ));
+                                } else if let Err(error) = hook_result {
                                     hook_ms = t_hook.elapsed().as_millis();
                                     hook_failed = Some(error);
                                 } else {
@@ -487,7 +541,16 @@ pub fn run_play_in_process(
             &host_req_window_h_px,
         )?;
 
-        let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
+        stasis_dynload::begin_host_tick_phase();
+        let tick_result = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize);
+        let tick_report = stasis_dynload::end_host_phase();
+        if !tick_report.violations.is_empty() {
+            return Err(format!(
+                "tick host-set policy violation(s): {}",
+                tick_report.violations.join(" | ")
+            ));
+        }
+        let tick_rc = tick_result?;
         if tick_rc != 0 {
             break;
         }
@@ -752,6 +815,8 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             };
         }
     };
+    configure_dynload_host_runtime(&host_set_contract);
+    let _host_runtime_guard = HostRuntimeGuard;
 
     let mut pipeline = DevHotSwapPipeline::with_target_mode(backend, config.target_mode);
     pipeline.set_host_set_contract(
@@ -1190,7 +1255,28 @@ fn apply_commit_request(
                     swap_failure_reasons.push(hook_error.clone());
                     return SwapCommitResult::failed(request.request_id, hook_error);
                 }
-                if let Err(error) = stasis_dynload::invoke_noarg_void(code_ptr as usize) {
+                stasis_dynload::begin_host_commit_phase();
+                let hook_result = stasis_dynload::invoke_noarg_void(code_ptr as usize);
+                let hook_report = stasis_dynload::end_host_phase();
+                push_host_set_budget_event(events, request.request_id, &hook_report);
+                if !hook_report.violations.is_empty() {
+                    *hook_failures += 1;
+                    let hook_error = format!(
+                        "{hook_symbol} failed: host-set policy violation(s): {}",
+                        hook_report.violations.join(" | ")
+                    );
+                    hook_failure_reasons.push(hook_error.clone());
+                    events.push(RunnerEvent::HookResult {
+                        request_id: request.request_id.0,
+                        symbol: hook_symbol.to_string(),
+                        status: "failed".to_string(),
+                        error: Some(hook_error.clone()),
+                    });
+                    *swap_commit_failures += 1;
+                    swap_failure_reasons.push(hook_error.clone());
+                    return SwapCommitResult::failed(request.request_id, hook_error);
+                }
+                if let Err(error) = hook_result {
                     *hook_failures += 1;
                     let hook_error = format!("{hook_symbol} failed: {error}");
                     hook_failure_reasons.push(hook_error.clone());
@@ -1358,7 +1444,28 @@ fn apply_commit_request(
                 }
             };
 
-            if let Err(error) = stasis_dynload::invoke_noarg_void(address) {
+            stasis_dynload::begin_host_commit_phase();
+            let hook_result = stasis_dynload::invoke_noarg_void(address);
+            let hook_report = stasis_dynload::end_host_phase();
+            push_host_set_budget_event(events, request.request_id, &hook_report);
+            if !hook_report.violations.is_empty() {
+                *hook_failures += 1;
+                let hook_error = format!(
+                    "{hook_symbol} failed: host-set policy violation(s): {}",
+                    hook_report.violations.join(" | ")
+                );
+                hook_failure_reasons.push(hook_error.clone());
+                events.push(RunnerEvent::HookResult {
+                    request_id: request.request_id.0,
+                    symbol: hook_symbol.to_string(),
+                    status: "failed".to_string(),
+                    error: Some(hook_error.clone()),
+                });
+                *swap_commit_failures += 1;
+                swap_failure_reasons.push(hook_error.clone());
+                return SwapCommitResult::failed(request.request_id, hook_error);
+            }
+            if let Err(error) = hook_result {
                 *hook_failures += 1;
                 let hook_error = format!("{hook_symbol} failed: {error}");
                 hook_failure_reasons.push(hook_error.clone());
@@ -1429,6 +1536,29 @@ fn apply_commit_request(
         outcome.swapped_fn_ids,
         outcome.new_generation,
     )
+}
+
+fn push_host_set_budget_event(
+    events: &mut Vec<RunnerEvent>,
+    request_id: RequestId,
+    report: &stasis_dynload::HostSetRuntimeReport,
+) {
+    if report.effect_calls == 0
+        && report.effect_bytes == 0
+        && report.dropped_effects == 0
+        && report.violations.is_empty()
+    {
+        return;
+    }
+
+    events.push(RunnerEvent::HostSetBudgetReport {
+        request_id: request_id.0,
+        phase: report.phase.to_string(),
+        effect_calls: report.effect_calls,
+        effect_bytes: report.effect_bytes,
+        dropped_effects: report.dropped_effects,
+        violations: report.violations.clone(),
+    });
 }
 
 fn observe_pipeline_results(
@@ -1605,6 +1735,10 @@ mod tests {
     ) {
         request.host_set_id = Some(contract.host_set_id.clone());
         request.host_set_hash = Some(contract.host_set_hash);
+    }
+
+    extern "system" fn test_effectful_hook_print_i32() {
+        stasis_dynload::stasis_jit_print_i32(7);
     }
 
     #[test]
@@ -1967,6 +2101,86 @@ mod tests {
         );
         assert_eq!(pointer_table.generation().0, 0);
         assert!(pointer_table.code_ptr(FnId(9)).is_none());
+    }
+
+    #[test]
+    fn apply_commit_request_rejects_effect_queued_host_call_from_hook_phase() {
+        let request_id = RequestId(77);
+        let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            LayoutHash([7; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(9) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        request.hook_fn_id = Some(FnId(7));
+
+        let mut pointer_table = FunctionPointerTable::new();
+        let config = RunnerConfig {
+            target_mode: TargetMode::JitDev,
+            runtime_launch: false,
+            ..RunnerConfig::default()
+        };
+        let host_set_contract = expected_host_set(&config);
+        attach_host_set(&mut request, &host_set_contract);
+        configure_dynload_host_runtime(&host_set_contract);
+        let _host_runtime_guard = HostRuntimeGuard;
+
+        let mut hook_runs = 0u32;
+        let mut hook_failures = 0u32;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0u32;
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
+        let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
+            BTreeMap::new();
+        pending_jit_code_ptr_overrides.insert(
+            request_id,
+            vec![JitCodePtrOverride {
+                fn_id: FnId(7),
+                code_ptr: test_effectful_hook_print_i32 as usize as u64,
+            }],
+        );
+
+        let result = apply_commit_request(
+            request,
+            &mut pointer_table,
+            &config,
+            &host_set_contract,
+            &mut hook_runs,
+            &mut hook_failures,
+            &mut hook_failure_reasons,
+            &mut swap_commit_successes,
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+            &mut events,
+            None,
+            None,
+            &pending_aot_metadata,
+            &pending_jit_code_ptr_overrides,
+        );
+
+        assert_eq!(result.status, SwapCommitStatus::Failed);
+        assert_eq!(hook_runs, 1);
+        assert_eq!(hook_failures, 1);
+        assert_eq!(swap_commit_successes, 0);
+        assert_eq!(swap_commit_failures, 1);
+        assert!(
+            result.error.as_ref().is_some_and(|error| {
+                error.contains("host-set policy violation") && error.contains("effect_queued")
+            }),
+            "expected host-set phase violation, got {:?}",
+            result.error
+        );
+        assert_eq!(pointer_table.generation().0, 0);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RunnerEvent::HostSetBudgetReport { phase, violations, .. }
+                if phase == "commit" && !violations.is_empty()
+        )));
     }
 
     #[test]
