@@ -685,7 +685,7 @@ Rules:
 - Retire previous code generation.
 
 Swap is rejected if:
-- Global layout changes.
+- Global layout changes and state-map migration is missing or incompatible.
 - Signature compatibility changes.
 - `on_code_swap()` fails.
 
@@ -694,6 +694,11 @@ Current policy (pre-1.0):
 - Automatic blob state migration (`state-map` old->new layout copy) is planned but not yet implemented.
 
 On rejection, old code and old data remain active.
+
+Current migration policy (pre-1.0):
+- Layout hash changes can commit only when both active and incoming builds provide deterministic state-map metadata.
+- Migration compatibility is path-based: overlapping paths must keep compatible type shape; added/removed paths are allowed.
+- Incompatible or missing state-map metadata fails commit deterministically with actionable `restart required` diagnostics.
 
 ### 14.4 Development File-Change Boundary Contracts
 
@@ -708,8 +713,8 @@ Role ownership:
 Required high-level message contracts:
 - `FileChangeEvent(path, revision, text_source, change_kind)`
 - `CompileRequest(request_id, changed_files[], target_mode)`
-- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set, hook_symbol?)`
-- `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol)`
+- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set, hook_symbol?, state_map?)`
+- `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol, state_map?)`
 - `SwapCommitResult(request_id, status, swapped_fn_ids[], new_generation, error)`
 
 Rules:
