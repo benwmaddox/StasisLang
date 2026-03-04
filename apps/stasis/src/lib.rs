@@ -31,8 +31,8 @@ use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
     AotFunctionSymbol, CompileRequest, CompileResult, CompileStatus, Diagnostic,
     DiagnosticSeverity, FileChangeEvent, FileChangeKind, FnId, FunctionPatch, FunctionPatchSet,
-    JitCodePtrOverride, LayoutHash, RequestId, SwapCommitResult, SwapCommitStatus, TargetMode,
-    TextSource,
+    JitCodePtrOverride, LayoutHash, RequestId, StateMapEntry, SwapCommitResult, SwapCommitStatus,
+    TargetMode, TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::{BTreeMap, BTreeSet};
@@ -785,6 +785,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
         BTreeMap::new();
     let mut active_layout_hash: Option<LayoutHash> = None;
+    let mut active_state_map: Option<Vec<StateMapEntry>> = None;
     let mut aot_linked_image_activations: u32 = 0;
     let mut active_aot_linked_image_path: Option<PathBuf> = None;
     let mut active_aot_linked_image_size_bytes: Option<u64> = None;
@@ -843,16 +844,36 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
         pipeline.process_commits_at_safe_point(|request| {
-            if let Some(result) = enforce_layout_change_policy(
-                request.request_id,
-                active_layout_hash,
-                request.layout_hash,
-                &mut swap_commit_failures,
-                &mut swap_failure_reasons,
-            ) {
-                return result;
-            }
             let request_layout_hash = request.layout_hash;
+            let request_state_map = request.state_map.clone();
+            if let Err(message) = validate_layout_transition(
+                active_layout_hash,
+                request_layout_hash,
+                active_state_map.as_deref(),
+                request_state_map.as_deref(),
+            ) {
+                record_swap_failure(
+                    &message,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                );
+                return SwapCommitResult::failed(request.request_id, message);
+            }
+            let layout_changed = active_layout_hash.is_some_and(|hash| hash != request_layout_hash);
+            if layout_changed {
+                if let (Some(from), Some(to)) =
+                    (active_state_map.as_deref(), request_state_map.as_deref())
+                {
+                    if let Err(message) = migrate_state_map_fields(from, to) {
+                        record_swap_failure(
+                            &message,
+                            &mut swap_commit_failures,
+                            &mut swap_failure_reasons,
+                        );
+                        return SwapCommitResult::failed(request.request_id, message);
+                    }
+                }
+            }
             let result = apply_commit_request(
                 request,
                 &mut pointer_table,
@@ -872,6 +893,9 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             );
             if result.status == SwapCommitStatus::Success {
                 active_layout_hash = Some(request_layout_hash);
+                if let Some(state_map) = request_state_map {
+                    active_state_map = Some(state_map);
+                }
             }
             result
         });
@@ -947,16 +971,36 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
         pipeline.process_commits_at_safe_point(|request| {
-            if let Some(result) = enforce_layout_change_policy(
-                request.request_id,
-                active_layout_hash,
-                request.layout_hash,
-                &mut swap_commit_failures,
-                &mut swap_failure_reasons,
-            ) {
-                return result;
-            }
             let request_layout_hash = request.layout_hash;
+            let request_state_map = request.state_map.clone();
+            if let Err(message) = validate_layout_transition(
+                active_layout_hash,
+                request_layout_hash,
+                active_state_map.as_deref(),
+                request_state_map.as_deref(),
+            ) {
+                record_swap_failure(
+                    &message,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                );
+                return SwapCommitResult::failed(request.request_id, message);
+            }
+            let layout_changed = active_layout_hash.is_some_and(|hash| hash != request_layout_hash);
+            if layout_changed {
+                if let (Some(from), Some(to)) =
+                    (active_state_map.as_deref(), request_state_map.as_deref())
+                {
+                    if let Err(message) = migrate_state_map_fields(from, to) {
+                        record_swap_failure(
+                            &message,
+                            &mut swap_commit_failures,
+                            &mut swap_failure_reasons,
+                        );
+                        return SwapCommitResult::failed(request.request_id, message);
+                    }
+                }
+            }
             let result = apply_commit_request(
                 request,
                 &mut pointer_table,
@@ -976,6 +1020,9 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             );
             if result.status == SwapCommitStatus::Success {
                 active_layout_hash = Some(request_layout_hash);
+                if let Some(state_map) = request_state_map {
+                    active_state_map = Some(state_map);
+                }
             }
             result
         });
@@ -1141,28 +1188,129 @@ fn format_layout_hash_hex(layout_hash: LayoutHash) -> String {
     out
 }
 
-fn enforce_layout_change_policy(
-    request_id: RequestId,
-    active_layout_hash: Option<LayoutHash>,
-    request_layout_hash: LayoutHash,
+fn record_swap_failure(
+    message: &str,
     swap_commit_failures: &mut u32,
     swap_failure_reasons: &mut Vec<String>,
-) -> Option<SwapCommitResult> {
+) {
+    *swap_commit_failures += 1;
+    swap_failure_reasons.push(message.to_string());
+}
+
+fn normalize_state_map(
+    entries: &[StateMapEntry],
+    label: &str,
+) -> Result<BTreeMap<String, StateMapEntry>, String> {
+    let mut by_path: BTreeMap<String, StateMapEntry> = BTreeMap::new();
+    for entry in entries {
+        if entry.path.trim().is_empty() {
+            return Err(format!(
+                "{label} state-map contains empty path entry (restart required)"
+            ));
+        }
+        if let Some(previous) = by_path.insert(entry.path.clone(), entry.clone()) {
+            if previous.type_name != entry.type_name || previous.path_hash != entry.path_hash {
+                return Err(format!(
+                    "{label} state-map contains conflicting duplicate path '{}' (restart required)",
+                    entry.path
+                ));
+            }
+        }
+    }
+    Ok(by_path)
+}
+
+fn validate_layout_transition(
+    active_layout_hash: Option<LayoutHash>,
+    request_layout_hash: LayoutHash,
+    active_state_map: Option<&[StateMapEntry]>,
+    request_state_map: Option<&[StateMapEntry]>,
+) -> Result<(), String> {
     let Some(active_layout_hash) = active_layout_hash else {
-        return None;
+        return Ok(());
     };
     if active_layout_hash == request_layout_hash {
-        return None;
+        return Ok(());
+    }
+    let Some(active_state_map) = active_state_map else {
+        return Err(format!(
+            "layout hash changed from {} to {}, but active state-map metadata is missing (restart required)",
+            format_layout_hash_hex(active_layout_hash),
+            format_layout_hash_hex(request_layout_hash)
+        ));
+    };
+    let Some(request_state_map) = request_state_map else {
+        return Err(format!(
+            "layout hash changed from {} to {}, but incoming state-map metadata is missing (restart required)",
+            format_layout_hash_hex(active_layout_hash),
+            format_layout_hash_hex(request_layout_hash)
+        ));
+    };
+
+    let active_by_path = normalize_state_map(active_state_map, "active")?;
+    let request_by_path = normalize_state_map(request_state_map, "incoming")?;
+    for (path, request_entry) in &request_by_path {
+        if let Some(active_entry) = active_by_path.get(path) {
+            if active_entry.type_name != request_entry.type_name {
+                return Err(format!(
+                    "layout hash changed from {} to {} and state-map path '{}' changed type '{}' -> '{}' (restart required)",
+                    format_layout_hash_hex(active_layout_hash),
+                    format_layout_hash_hex(request_layout_hash),
+                    path,
+                    active_entry.type_name,
+                    request_entry.type_name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn type_name_is_f32(type_name: &str) -> bool {
+    type_name.trim() == "f32"
+}
+
+fn type_name_is_f64(type_name: &str) -> bool {
+    type_name.trim() == "f64"
+}
+
+fn type_name_is_collection_like(type_name: &str) -> bool {
+    let normalized = type_name.trim();
+    normalized.contains('[') || normalized == "ascii" || normalized == "utf8"
+}
+
+fn migrate_state_map_fields(
+    active_state_map: &[StateMapEntry],
+    request_state_map: &[StateMapEntry],
+) -> Result<(), String> {
+    let active_by_path = normalize_state_map(active_state_map, "active")?;
+    let request_by_path = normalize_state_map(request_state_map, "incoming")?;
+
+    for (path, request_entry) in &request_by_path {
+        let Some(active_entry) = active_by_path.get(path) else {
+            continue;
+        };
+        if active_entry.type_name != request_entry.type_name {
+            continue;
+        }
+        if type_name_is_collection_like(&request_entry.type_name) {
+            continue;
+        }
+        if type_name_is_f32(&request_entry.type_name) {
+            let value = stasis_dynload::stasis_jit_global_f32_load(active_entry.path_hash);
+            stasis_dynload::stasis_jit_global_f32_store(request_entry.path_hash, value);
+            continue;
+        }
+        if type_name_is_f64(&request_entry.type_name) {
+            let value = stasis_dynload::stasis_jit_global_f64_load(active_entry.path_hash);
+            stasis_dynload::stasis_jit_global_f64_store(request_entry.path_hash, value);
+            continue;
+        }
+        let value = stasis_dynload::stasis_jit_global_i32_load(active_entry.path_hash);
+        stasis_dynload::stasis_jit_global_i32_store(request_entry.path_hash, value);
     }
 
-    let message = format!(
-        "layout hash changed from {} to {}; hot reload state migration is not implemented yet, restart required",
-        format_layout_hash_hex(active_layout_hash),
-        format_layout_hash_hex(request_layout_hash)
-    );
-    *swap_commit_failures += 1;
-    swap_failure_reasons.push(message.clone());
-    Some(SwapCommitResult::failed(request_id, message))
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1672,49 +1820,87 @@ mod tests {
     }
 
     #[test]
-    fn layout_change_policy_accepts_initial_and_matching_layout_hashes() {
-        let mut swap_commit_failures = 0u32;
-        let mut swap_failure_reasons = Vec::new();
-        assert!(enforce_layout_change_policy(
-            RequestId(1),
-            None,
-            LayoutHash([1; 32]),
-            &mut swap_commit_failures,
-            &mut swap_failure_reasons,
-        )
-        .is_none());
-        assert!(enforce_layout_change_policy(
-            RequestId(2),
+    fn validate_layout_transition_rejects_type_change_for_existing_path() {
+        let active_map = vec![StateMapEntry {
+            path: "State.score".to_string(),
+            path_hash: 11,
+            type_name: "i32".to_string(),
+        }];
+        let incoming_map = vec![StateMapEntry {
+            path: "State.score".to_string(),
+            path_hash: 11,
+            type_name: "f32".to_string(),
+        }];
+        let result = validate_layout_transition(
             Some(LayoutHash([1; 32])),
-            LayoutHash([1; 32]),
-            &mut swap_commit_failures,
-            &mut swap_failure_reasons,
-        )
-        .is_none());
-        assert_eq!(swap_commit_failures, 0);
-        assert!(swap_failure_reasons.is_empty());
+            LayoutHash([2; 32]),
+            Some(active_map.as_slice()),
+            Some(incoming_map.as_slice()),
+        );
+        assert!(result.is_err());
+        let message = result.expect_err("transition should fail");
+        assert!(message.contains("changed type"));
+        assert!(message.contains("restart required"));
     }
 
     #[test]
-    fn layout_change_policy_rejects_layout_hash_change_with_restart_required() {
-        let mut swap_commit_failures = 0u32;
-        let mut swap_failure_reasons = Vec::new();
-        let result = enforce_layout_change_policy(
-            RequestId(3),
-            Some(LayoutHash([1; 32])),
-            LayoutHash([2; 32]),
-            &mut swap_commit_failures,
-            &mut swap_failure_reasons,
-        )
-        .expect("layout change should be rejected");
+    fn validate_layout_transition_allows_added_and_removed_paths_when_types_match() {
+        let active_map = vec![
+            StateMapEntry {
+                path: "State.score".to_string(),
+                path_hash: 11,
+                type_name: "i32".to_string(),
+            },
+            StateMapEntry {
+                path: "State.removed".to_string(),
+                path_hash: 12,
+                type_name: "i32".to_string(),
+            },
+        ];
+        let incoming_map = vec![
+            StateMapEntry {
+                path: "State.score".to_string(),
+                path_hash: 21,
+                type_name: "i32".to_string(),
+            },
+            StateMapEntry {
+                path: "State.added".to_string(),
+                path_hash: 22,
+                type_name: "i32".to_string(),
+            },
+        ];
+        let result = validate_layout_transition(
+            Some(LayoutHash([3; 32])),
+            LayoutHash([4; 32]),
+            Some(active_map.as_slice()),
+            Some(incoming_map.as_slice()),
+        );
+        assert!(result.is_ok(), "expected migration-compatible transition");
+    }
 
-        assert_eq!(result.status, SwapCommitStatus::Failed);
-        assert_eq!(swap_commit_failures, 1);
-        assert_eq!(swap_failure_reasons.len(), 1);
-        let error = result.error.expect("error should be present");
-        assert!(error.contains("layout hash changed from"));
-        assert!(error.contains("hot reload state migration is not implemented yet"));
-        assert!(error.contains("restart required"));
+    #[test]
+    fn migrate_state_map_fields_copies_i32_for_matching_paths() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::stasis_jit_global_i32_store(11, 777);
+        stasis_dynload::stasis_jit_global_i32_store(22, 0);
+
+        let active_map = vec![StateMapEntry {
+            path: "State.score".to_string(),
+            path_hash: 11,
+            type_name: "i32".to_string(),
+        }];
+        let incoming_map = vec![StateMapEntry {
+            path: "State.score".to_string(),
+            path_hash: 22,
+            type_name: "i32".to_string(),
+        }];
+
+        migrate_state_map_fields(&active_map, &incoming_map).expect("migration should succeed");
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(22), 777);
+        stasis_dynload::clear_jit_i32_global_table();
     }
 
     #[test]
