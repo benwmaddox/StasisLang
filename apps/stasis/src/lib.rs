@@ -784,6 +784,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let mut pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
     let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
         BTreeMap::new();
+    let mut active_layout_hash: Option<LayoutHash> = None;
     let mut aot_linked_image_activations: u32 = 0;
     let mut active_aot_linked_image_path: Option<PathBuf> = None;
     let mut active_aot_linked_image_size_bytes: Option<u64> = None;
@@ -842,7 +843,17 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
         pipeline.process_commits_at_safe_point(|request| {
-            apply_commit_request(
+            if let Some(result) = enforce_layout_change_policy(
+                request.request_id,
+                active_layout_hash,
+                request.layout_hash,
+                &mut swap_commit_failures,
+                &mut swap_failure_reasons,
+            ) {
+                return result;
+            }
+            let request_layout_hash = request.layout_hash;
+            let result = apply_commit_request(
                 request,
                 &mut pointer_table,
                 &config,
@@ -858,7 +869,11 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                 swap_failure_reason.as_ref(),
                 &pending_aot_metadata,
                 &pending_jit_code_ptr_overrides,
-            )
+            );
+            if result.status == SwapCommitStatus::Success {
+                active_layout_hash = Some(request_layout_hash);
+            }
+            result
         });
 
         pipeline.pump_coordinator();
@@ -932,7 +947,17 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
         pipeline.process_commits_at_safe_point(|request| {
-            apply_commit_request(
+            if let Some(result) = enforce_layout_change_policy(
+                request.request_id,
+                active_layout_hash,
+                request.layout_hash,
+                &mut swap_commit_failures,
+                &mut swap_failure_reasons,
+            ) {
+                return result;
+            }
+            let request_layout_hash = request.layout_hash;
+            let result = apply_commit_request(
                 request,
                 &mut pointer_table,
                 &config,
@@ -948,7 +973,11 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                 swap_failure_reason.as_ref(),
                 &pending_aot_metadata,
                 &pending_jit_code_ptr_overrides,
-            )
+            );
+            if result.status == SwapCommitStatus::Success {
+                active_layout_hash = Some(request_layout_hash);
+            }
+            result
         });
         pipeline.pump_coordinator();
         let new_commit = observe_pipeline_results(
@@ -1100,6 +1129,40 @@ fn capture_pending_jit_compile_metadata(
     pending_jit_code_ptr_overrides
         .entry(result.request_id)
         .or_insert(overrides);
+}
+
+fn format_layout_hash_hex(layout_hash: LayoutHash) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in layout_hash.0 {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn enforce_layout_change_policy(
+    request_id: RequestId,
+    active_layout_hash: Option<LayoutHash>,
+    request_layout_hash: LayoutHash,
+    swap_commit_failures: &mut u32,
+    swap_failure_reasons: &mut Vec<String>,
+) -> Option<SwapCommitResult> {
+    let Some(active_layout_hash) = active_layout_hash else {
+        return None;
+    };
+    if active_layout_hash == request_layout_hash {
+        return None;
+    }
+
+    let message = format!(
+        "layout hash changed from {} to {}; hot reload state migration is not implemented yet, restart required",
+        format_layout_hash_hex(active_layout_hash),
+        format_layout_hash_hex(request_layout_hash)
+    );
+    *swap_commit_failures += 1;
+    swap_failure_reasons.push(message.clone());
+    Some(SwapCommitResult::failed(request_id, message))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1606,6 +1669,52 @@ mod tests {
     ) {
         request.host_set_id = Some(contract.host_set_id.clone());
         request.host_set_hash = Some(contract.host_set_hash);
+    }
+
+    #[test]
+    fn layout_change_policy_accepts_initial_and_matching_layout_hashes() {
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        assert!(enforce_layout_change_policy(
+            RequestId(1),
+            None,
+            LayoutHash([1; 32]),
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+        )
+        .is_none());
+        assert!(enforce_layout_change_policy(
+            RequestId(2),
+            Some(LayoutHash([1; 32])),
+            LayoutHash([1; 32]),
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+        )
+        .is_none());
+        assert_eq!(swap_commit_failures, 0);
+        assert!(swap_failure_reasons.is_empty());
+    }
+
+    #[test]
+    fn layout_change_policy_rejects_layout_hash_change_with_restart_required() {
+        let mut swap_commit_failures = 0u32;
+        let mut swap_failure_reasons = Vec::new();
+        let result = enforce_layout_change_policy(
+            RequestId(3),
+            Some(LayoutHash([1; 32])),
+            LayoutHash([2; 32]),
+            &mut swap_commit_failures,
+            &mut swap_failure_reasons,
+        )
+        .expect("layout change should be rejected");
+
+        assert_eq!(result.status, SwapCommitStatus::Failed);
+        assert_eq!(swap_commit_failures, 1);
+        assert_eq!(swap_failure_reasons.len(), 1);
+        let error = result.error.expect("error should be present");
+        assert!(error.contains("layout hash changed from"));
+        assert!(error.contains("hot reload state migration is not implemented yet"));
+        assert!(error.contains("restart required"));
     }
 
     #[test]
