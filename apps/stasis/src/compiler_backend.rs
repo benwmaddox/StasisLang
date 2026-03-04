@@ -82,6 +82,21 @@ struct EngineFunctionEntry {
     name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequiredHostSetDeclaration {
+    host_set_id: String,
+    host_set_hash: Option<[u8; 32]>,
+    source_path: PathBuf,
+    line: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequiredHostSetDiagnostic {
+    message: String,
+    path: Option<PathBuf>,
+    line: Option<u32>,
+    column: Option<u32>,
+}
 #[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifestFunctionRow {
     name: String,
@@ -257,6 +272,18 @@ impl CompilerBackend for IncrementalCompilerBackend {
                 );
             }
         };
+        if let Err(error) = self.validate_required_host_set_contract(&request) {
+            return CompileResult::failed(
+                request.request_id,
+                vec![Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: error.message,
+                    path: error.path,
+                    line: error.line,
+                    column: error.column,
+                }],
+            );
+        }
 
         let has_tick_entrypoint = self.source_cache_has_function("tick");
         let has_render_entrypoint = self.source_cache_has_function("render");
@@ -301,6 +328,109 @@ impl CompilerBackend for IncrementalCompilerBackend {
 }
 
 impl IncrementalCompilerBackend {
+    fn validate_required_host_set_contract(
+        &self,
+        request: &CompileRequest,
+    ) -> Result<(), RequiredHostSetDiagnostic> {
+        let declarations =
+            collect_required_host_set_declarations(&request.changed_files).map_err(|message| {
+                RequiredHostSetDiagnostic {
+                    message,
+                    path: request.changed_files.first().cloned(),
+                    line: None,
+                    column: None,
+                }
+            })?;
+        if declarations.is_empty() {
+            return Ok(());
+        }
+
+        let first = declarations
+            .first()
+            .expect("declarations should not be empty after guard");
+        for declaration in declarations.iter().skip(1) {
+            if declaration.host_set_id != first.host_set_id {
+                return Err(RequiredHostSetDiagnostic {
+                    message: format!(
+                        "conflicting @required-host-set declarations: '{}' ({}) vs '{}' ({})",
+                        first.host_set_id,
+                        first.source_path.display(),
+                        declaration.host_set_id,
+                        declaration.source_path.display()
+                    ),
+                    path: Some(declaration.source_path.clone()),
+                    line: Some(declaration.line),
+                    column: Some(1),
+                });
+            }
+            if declaration.host_set_hash != first.host_set_hash {
+                return Err(RequiredHostSetDiagnostic {
+                    message: format!(
+                        "conflicting @required-host-set hash declarations for id '{}': {} ({}) vs {} ({})",
+                        first.host_set_id,
+                        format_optional_sha256(first.host_set_hash),
+                        first.source_path.display(),
+                        format_optional_sha256(declaration.host_set_hash),
+                        declaration.source_path.display()
+                    ),
+                    path: Some(declaration.source_path.clone()),
+                    line: Some(declaration.line),
+                    column: Some(1),
+                });
+            }
+        }
+
+        let Some(request_host_set_id) = request.host_set_id.as_deref() else {
+            return Err(RequiredHostSetDiagnostic {
+                message: format!(
+                    "required host-set declaration '{}' found, but compile request host_set_id is missing",
+                    first.host_set_id
+                ),
+                path: Some(first.source_path.clone()),
+                line: Some(first.line),
+                column: Some(1),
+            });
+        };
+        if request_host_set_id != first.host_set_id {
+            return Err(RequiredHostSetDiagnostic {
+                message: format!(
+                    "required host-set id mismatch: source requires '{}', compile request uses '{}'",
+                    first.host_set_id, request_host_set_id
+                ),
+                path: Some(first.source_path.clone()),
+                line: Some(first.line),
+                column: Some(1),
+            });
+        }
+        if let Some(required_hash) = first.host_set_hash {
+            let Some(request_hash) = request.host_set_hash else {
+                return Err(RequiredHostSetDiagnostic {
+                    message: format!(
+                        "required host-set hash is declared for '{}', but compile request host_set_hash is missing",
+                        first.host_set_id
+                    ),
+                    path: Some(first.source_path.clone()),
+                    line: Some(first.line),
+                    column: Some(1),
+                });
+            };
+            if request_hash != required_hash {
+                return Err(RequiredHostSetDiagnostic {
+                    message: format!(
+                        "required host-set hash mismatch for '{}': source requires {}, compile request uses {}",
+                        first.host_set_id,
+                        format_sha256(required_hash),
+                        format_sha256(request_hash)
+                    ),
+                    path: Some(first.source_path.clone()),
+                    line: Some(first.line),
+                    column: Some(1),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn existing_fn_id_for_identifier_hash(&self, id_hash: i32) -> Option<FnId> {
         let token = format!("::{id_hash}::");
         self.fn_id_by_signature
@@ -1285,6 +1415,169 @@ impl IncrementalCompilerBackend {
         })?;
         Ok(())
     }
+}
+
+fn format_optional_sha256(value: Option<[u8; 32]>) -> String {
+    value
+        .map(format_sha256)
+        .unwrap_or_else(|| "<none>".to_string())
+}
+
+fn format_sha256(value: [u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in value {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn parse_sha256_hex(value: &str) -> Result<[u8; 32], String> {
+    let trimmed = value.trim().trim_start_matches("0x");
+    if trimmed.len() != 64 {
+        return Err(format!("expected 64 hex chars, got {}", trimmed.len()));
+    }
+    let mut out = [0u8; 32];
+    for (index, chunk) in trimmed.as_bytes().chunks(2).enumerate() {
+        let pair = std::str::from_utf8(chunk).map_err(|_| "hash is not valid utf-8".to_string())?;
+        out[index] =
+            u8::from_str_radix(pair, 16).map_err(|_| format!("invalid hex byte '{pair}'"))?;
+    }
+    Ok(out)
+}
+
+fn parse_required_host_set_directive(
+    line: &str,
+    source_path: &Path,
+    line_number: u32,
+) -> Result<Option<RequiredHostSetDeclaration>, String> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("//") {
+        return Ok(None);
+    }
+    let payload = trimmed.trim_start_matches("//").trim_start();
+    let marker = if payload.starts_with("@required-host-set") {
+        "@required-host-set"
+    } else if payload.starts_with("@required_host_set") {
+        "@required_host_set"
+    } else {
+        return Ok(None);
+    };
+    let mut rest = payload[marker.len()..].trim_start();
+    if let Some(stripped) = rest.strip_prefix(':') {
+        rest = stripped.trim_start();
+    }
+    if rest.is_empty() {
+        return Err(format!(
+            "{}:{}: @required-host-set directive must include at least id=<host-set-id>",
+            source_path.display(),
+            line_number
+        ));
+    }
+
+    let mut host_set_id: Option<String> = None;
+    let mut host_set_hash: Option<[u8; 32]> = None;
+    for token in rest.split_whitespace() {
+        if let Some(value) = token.strip_prefix("id=") {
+            let normalized = value.trim();
+            if normalized.is_empty() {
+                return Err(format!(
+                    "{}:{}: @required-host-set id= must not be empty",
+                    source_path.display(),
+                    line_number
+                ));
+            }
+            host_set_id = Some(normalized.to_string());
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("hash=") {
+            host_set_hash = Some(parse_sha256_hex(value).map_err(|message| {
+                format!(
+                    "{}:{}: invalid @required-host-set hash: {}",
+                    source_path.display(),
+                    line_number,
+                    message
+                )
+            })?);
+            continue;
+        }
+        if !token.contains('=') && host_set_id.is_none() {
+            host_set_id = Some(token.to_string());
+            continue;
+        }
+        return Err(format!(
+            "{}:{}: unsupported @required-host-set token '{}' (expected id=<...> and optional hash=<64hex>)",
+            source_path.display(),
+            line_number,
+            token
+        ));
+    }
+
+    let Some(host_set_id) = host_set_id else {
+        return Err(format!(
+            "{}:{}: @required-host-set directive must include id=<host-set-id>",
+            source_path.display(),
+            line_number
+        ));
+    };
+    Ok(Some(RequiredHostSetDeclaration {
+        host_set_id,
+        host_set_hash,
+        source_path: source_path.to_path_buf(),
+        line: line_number,
+    }))
+}
+
+fn collect_required_host_set_declarations(
+    changed_files: &[PathBuf],
+) -> Result<Vec<RequiredHostSetDeclaration>, String> {
+    let mut roots: Vec<PathBuf> = changed_files.to_vec();
+    roots.sort();
+    roots.dedup();
+    let mut queue = roots;
+    let mut cursor = 0usize;
+    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut declarations: Vec<RequiredHostSetDeclaration> = Vec::new();
+    while cursor < queue.len() {
+        let current = queue[cursor].clone();
+        cursor += 1;
+        if !current.exists() {
+            continue;
+        }
+        let canonical = current
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize {}: {error}", current.display()))?;
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+        let source = std::fs::read_to_string(&canonical)
+            .map_err(|error| format!("failed to read {}: {error}", canonical.display()))?;
+        for (line_index, line_text) in source.lines().enumerate() {
+            if let Some(declaration) =
+                parse_required_host_set_directive(line_text, &canonical, (line_index + 1) as u32)?
+            {
+                declarations.push(declaration);
+            }
+        }
+
+        let parent = canonical.parent().unwrap_or(Path::new("."));
+        let mut imports = parse_project_import_paths(&source);
+        imports.sort();
+        for import_path in imports {
+            let candidate = parent.join(import_path);
+            if candidate.exists() {
+                queue.push(candidate);
+            }
+        }
+    }
+    declarations.sort_by(|left, right| {
+        left.source_path
+            .cmp(&right.source_path)
+            .then(left.line.cmp(&right.line))
+            .then(left.host_set_id.cmp(&right.host_set_id))
+    });
+    Ok(declarations)
 }
 
 fn format_error_message(code: i32, detail_a: i32, detail_b: i32) -> String {
@@ -3663,7 +3956,12 @@ mod tests {
             let build_output = Command::new("cargo")
                 .arg("build")
                 .arg("--manifest-path")
-                .arg(repo_root.join("tools").join("cranelift-aot").join("Cargo.toml"))
+                .arg(
+                    repo_root
+                        .join("tools")
+                        .join("cranelift-aot")
+                        .join("Cargo.toml"),
+                )
                 .current_dir(&repo_root)
                 .output()
                 .expect("spawn cargo build for cranelift-aot helper");
@@ -3682,7 +3980,10 @@ mod tests {
 
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command.arg("rustc").arg("-p").arg("stasis_dynload");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload");
         if !cfg!(debug_assertions) {
             dynload_build_command.arg("--release");
         }
@@ -3705,8 +4006,8 @@ mod tests {
         );
 
         let linker_path = find_lld_link().expect("lld-link.exe required for AOT quality gate");
-        let stasis_dynload_lib =
-            resolve_stasis_dynload_lib().expect("stasis_dynload staticlib required for AOT quality gate");
+        let stasis_dynload_lib = resolve_stasis_dynload_lib()
+            .expect("stasis_dynload staticlib required for AOT quality gate");
 
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -3737,7 +4038,8 @@ mod tests {
             "speed_and_size",
             "AOT compile config default opt_level should be speed_and_size for release-like engine bundles"
         );
-        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_202),
             vec![source],
@@ -3774,11 +4076,8 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
 
-        let object_paths: Vec<PathBuf> = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect();
+        let object_paths: Vec<PathBuf> =
+            bundle.object_paths_by_function.values().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -3820,11 +4119,7 @@ mod tests {
         let field = 0;
         let store = |index: i32, value: i32| {
             stasis_dynload::invoke_i32_i32_i32_i32_to_void(
-                store_ptr,
-                host_i32,
-                field,
-                index,
-                value,
+                store_ptr, host_i32, field, index, value,
             )
             .expect("invoke host_i32 store");
         };
@@ -4080,7 +4375,10 @@ mod tests {
 
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command.arg("rustc").arg("-p").arg("stasis_dynload");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload");
         if !cfg!(debug_assertions) {
             dynload_build_command.arg("--release");
         }
@@ -4128,7 +4426,8 @@ mod tests {
             opt_level: "speed_and_size".to_string(),
             ..AotCompileConfig::default()
         };
-        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_302),
             vec![source],
@@ -4166,11 +4465,8 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
 
-        let object_paths: Vec<PathBuf> = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect();
+        let object_paths: Vec<PathBuf> =
+            bundle.object_paths_by_function.values().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -4201,7 +4497,11 @@ mod tests {
             .unwrap_or_default();
         let objects_bytes = object_paths
             .iter()
-            .map(|path| fs::metadata(path).map(|meta| meta.len()).unwrap_or_default())
+            .map(|path| {
+                fs::metadata(path)
+                    .map(|meta| meta.len())
+                    .unwrap_or_default()
+            })
             .sum::<u64>();
         let manifest_bytes = fs::metadata(&bundle.manifest_path)
             .map(|meta| meta.len())
@@ -4226,8 +4526,10 @@ mod tests {
         let host_i32 = hash_global_path("host_i32");
         let field = 0;
         let store = |index: i32, value: i32| {
-            stasis_dynload::invoke_i32_i32_i32_i32_to_void(store_ptr, host_i32, field, index, value)
-                .expect("invoke host_i32 store");
+            stasis_dynload::invoke_i32_i32_i32_i32_to_void(
+                store_ptr, host_i32, field, index, value,
+            )
+            .expect("invoke host_i32 store");
         };
 
         // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
@@ -4386,7 +4688,10 @@ mod tests {
 
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command.arg("rustc").arg("-p").arg("stasis_dynload");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload");
         if !cfg!(debug_assertions) {
             dynload_build_command.arg("--release");
         }
@@ -4434,7 +4739,8 @@ mod tests {
             opt_level: "speed".to_string(),
             ..AotCompileConfig::default()
         };
-        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_303),
             vec![source],
@@ -4472,11 +4778,8 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
 
-        let object_paths: Vec<PathBuf> = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect();
+        let object_paths: Vec<PathBuf> =
+            bundle.object_paths_by_function.values().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -4507,7 +4810,11 @@ mod tests {
             .unwrap_or_default();
         let objects_bytes = object_paths
             .iter()
-            .map(|path| fs::metadata(path).map(|meta| meta.len()).unwrap_or_default())
+            .map(|path| {
+                fs::metadata(path)
+                    .map(|meta| meta.len())
+                    .unwrap_or_default()
+            })
             .sum::<u64>();
         let manifest_bytes = fs::metadata(&bundle.manifest_path)
             .map(|meta| meta.len())
@@ -4532,8 +4839,10 @@ mod tests {
         let host_i32 = hash_global_path("host_i32");
         let field = 0;
         let store = |index: i32, value: i32| {
-            stasis_dynload::invoke_i32_i32_i32_i32_to_void(store_ptr, host_i32, field, index, value)
-                .expect("invoke host_i32 store");
+            stasis_dynload::invoke_i32_i32_i32_i32_to_void(
+                store_ptr, host_i32, field, index, value,
+            )
+            .expect("invoke host_i32 store");
         };
 
         // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
@@ -4751,7 +5060,10 @@ mod tests {
 
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command.arg("rustc").arg("-p").arg("stasis_dynload");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload");
         if !cfg!(debug_assertions) {
             dynload_build_command.arg("--release");
         }
@@ -4796,7 +5108,8 @@ mod tests {
             opt_level: "speed".to_string(),
             ..AotCompileConfig::default()
         };
-        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_402),
             vec![source],
@@ -4834,11 +5147,8 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
 
-        let object_paths: Vec<PathBuf> = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect();
+        let object_paths: Vec<PathBuf> =
+            bundle.object_paths_by_function.values().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -4863,7 +5173,11 @@ mod tests {
             .unwrap_or_default();
         let objects_bytes = object_paths
             .iter()
-            .map(|path| fs::metadata(path).map(|meta| meta.len()).unwrap_or_default())
+            .map(|path| {
+                fs::metadata(path)
+                    .map(|meta| meta.len())
+                    .unwrap_or_default()
+            })
             .sum::<u64>();
         let manifest_bytes = fs::metadata(&bundle.manifest_path)
             .map(|meta| meta.len())
@@ -5001,7 +5315,10 @@ mod tests {
 
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command.arg("rustc").arg("-p").arg("stasis_dynload");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload");
         if !cfg!(debug_assertions) {
             dynload_build_command.arg("--release");
         }
@@ -5046,7 +5363,8 @@ mod tests {
             opt_level: "speed_and_size".to_string(),
             ..AotCompileConfig::default()
         };
-        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_403),
             vec![source],
@@ -5084,11 +5402,8 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
 
-        let object_paths: Vec<PathBuf> = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect();
+        let object_paths: Vec<PathBuf> =
+            bundle.object_paths_by_function.values().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -5113,7 +5428,11 @@ mod tests {
             .unwrap_or_default();
         let objects_bytes = object_paths
             .iter()
-            .map(|path| fs::metadata(path).map(|meta| meta.len()).unwrap_or_default())
+            .map(|path| {
+                fs::metadata(path)
+                    .map(|meta| meta.len())
+                    .unwrap_or_default()
+            })
             .sum::<u64>();
         let manifest_bytes = fs::metadata(&bundle.manifest_path)
             .map(|meta| meta.len())
@@ -5266,6 +5585,92 @@ mod tests {
         );
         assert!(backend.last_jit_engine_package().is_none());
         assert!(backend.last_aot_engine_bundle().is_none());
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn collect_required_host_set_declarations_reads_import_closure() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_required_host_import_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let root = temp_root.join("root.stasis");
+        let dep = temp_root.join("dep.stasis");
+        fs::write(
+            &root,
+            "import \"./dep.stasis\";\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write root");
+        fs::write(
+            &dep,
+            "// @required-host-set id=stasis-dev\nfunction helper(): i32 { return 1; }\n",
+        )
+        .expect("write dep");
+
+        let declarations =
+            collect_required_host_set_declarations(std::slice::from_ref(&root)).expect("collect");
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].host_set_id, "stasis-dev");
+        assert_eq!(declarations[0].line, 1);
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_rejects_required_host_set_mismatch() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_required_host_mismatch_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("game.stasis");
+        fs::write(
+            &source,
+            "// @required-host-set id=stasis-prod\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let mut request = CompileRequest::new(RequestId(9_106), vec![source], TargetMode::JitDev);
+        request.host_set_id = Some("stasis-dev".to_string());
+        let result = backend.compile(request);
+        assert_eq!(result.status, CompileStatus::Failed);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("required host-set id mismatch")),
+            "expected host-set mismatch diagnostic"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn compile_accepts_required_host_set_when_request_matches() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_required_host_match_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("game.stasis");
+        fs::write(
+            &source,
+            "// @required-host-set id=stasis-dev\nfunction main(): i32 { return 1; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let mut request = CompileRequest::new(RequestId(9_107), vec![source], TargetMode::JitDev);
+        request.host_set_id = Some("stasis-dev".to_string());
+        let result = backend.compile(request);
+        assert_eq!(result.status, CompileStatus::Success);
+        assert!(result.diagnostics.is_empty());
+
         fs::remove_dir_all(&temp_root).ok();
     }
 

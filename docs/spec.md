@@ -691,6 +691,12 @@ Swap is rejected if:
 
 On rejection, old code and old data remain active.
 
+Required host-set declaration (S13):
+- `.stasis` sources may declare required host-set contract in comments using:
+  - `// @required-host-set id=<host-set-id>`
+  - Optional hash pin: `// @required-host-set id=<host-set-id> hash=<64hex>`
+- Extraction scope is deterministic over the watched root import closure.
+- If present, declarations must agree and must match compile-request host-set metadata; mismatch/malformed declarations fail compile deterministically.
 ### 14.4 Development File-Change Boundary Contracts
 
 During development, file-change handling uses explicit role ownership and message boundaries.
