@@ -689,6 +689,10 @@ Swap is rejected if:
 - Signature compatibility changes.
 - `on_code_swap()` fails.
 
+Current policy (pre-1.0):
+- Layout-hash changes are rejected deterministically with a `restart required` error.
+- Automatic blob state migration (`state-map` old->new layout copy) is planned but not yet implemented.
+
 On rejection, old code and old data remain active.
 
 ### 14.4 Development File-Change Boundary Contracts
