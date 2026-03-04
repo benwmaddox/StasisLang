@@ -174,7 +174,12 @@ pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i3
     }
 }
 
-pub fn invoke_i32_i32_i32_to_i32(address: usize, arg0: i32, arg1: i32, arg2: i32) -> Result<i32, String> {
+pub fn invoke_i32_i32_i32_to_i32(
+    address: usize,
+    arg0: i32,
+    arg1: i32,
+    arg2: i32,
+) -> Result<i32, String> {
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
     }
@@ -216,8 +221,7 @@ pub fn invoke_i32_i32_i32_i32_to_void(
     }
     #[cfg(not(windows))]
     {
-        let callback: extern "C" fn(i32, i32, i32, i32) =
-            unsafe { std::mem::transmute(address) };
+        let callback: extern "C" fn(i32, i32, i32, i32) = unsafe { std::mem::transmute(address) };
         callback(arg0, arg1, arg2, arg3);
         Ok(())
     }
@@ -635,6 +639,21 @@ fn owned_i32_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<i32>>> {
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn owned_i32_globals() -> &'static Mutex<HashMap<i32, Box<i32>>> {
+    static TABLE: OnceLock<Mutex<HashMap<i32, Box<i32>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn owned_f32_globals() -> &'static Mutex<HashMap<i32, Box<f32>>> {
+    static TABLE: OnceLock<Mutex<HashMap<i32, Box<f32>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn owned_f64_globals() -> &'static Mutex<HashMap<i32, Box<f64>>> {
+    static TABLE: OnceLock<Mutex<HashMap<i32, Box<f64>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn owned_f64_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<f64>>> {
     static TABLE: OnceLock<Mutex<HashMap<ArrayKey, Vec<f64>>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -681,6 +700,18 @@ pub fn clear_registered_global_memory() {
     owned_f64_arrays()
         .lock()
         .expect("owned f64 array table mutex poisoned")
+        .clear();
+    owned_i32_globals()
+        .lock()
+        .expect("owned i32 global table mutex poisoned")
+        .clear();
+    owned_f32_globals()
+        .lock()
+        .expect("owned f32 global table mutex poisoned")
+        .clear();
+    owned_f64_globals()
+        .lock()
+        .expect("owned f64 global table mutex poisoned")
         .clear();
 }
 
@@ -768,7 +799,9 @@ pub extern "C" fn stasis_jit_global_i32_array_ptr(
         let mut owned_guard = owned_i32_arrays()
             .lock()
             .expect("owned i32 array table mutex poisoned");
-        let array = owned_guard.entry(key).or_insert_with(|| vec![0; requested_len]);
+        let array = owned_guard
+            .entry(key)
+            .or_insert_with(|| vec![0; requested_len]);
         if array.len() < requested_len {
             array.resize(requested_len, 0);
         }
@@ -829,7 +862,9 @@ pub extern "C" fn stasis_jit_global_f32_array_ptr(
         let mut owned_guard = owned_f32_arrays()
             .lock()
             .expect("owned f32 array table mutex poisoned");
-        let array = owned_guard.entry(key).or_insert_with(|| vec![0.0; requested_len]);
+        let array = owned_guard
+            .entry(key)
+            .or_insert_with(|| vec![0.0; requested_len]);
         if array.len() < requested_len {
             array.resize(requested_len, 0.0);
         }
@@ -889,7 +924,9 @@ pub extern "C" fn stasis_jit_global_f64_array_ptr(
         let mut owned_guard = owned_f64_arrays()
             .lock()
             .expect("owned f64 array table mutex poisoned");
-        let array = owned_guard.entry(key).or_insert_with(|| vec![0.0; requested_len]);
+        let array = owned_guard
+            .entry(key)
+            .or_insert_with(|| vec![0.0; requested_len]);
         if array.len() < requested_len {
             array.resize(requested_len, 0.0);
         }
@@ -1434,38 +1471,104 @@ pub extern "C" fn stasis_jit_call_f32_i32_1(fn_id_raw: i32, arg0: i32) -> f32 {
 }
 
 #[no_mangle]
-pub extern "C" fn stasis_jit_global_i32_load(path_hash: i32) -> i32 {
+pub extern "C" fn stasis_jit_global_i32_ptr(path_hash: i32) -> *mut i32 {
     {
         let table = registered_i32_ptrs();
         let guard = table
             .lock()
             .expect("registered i32 ptr table mutex poisoned");
         if let Some(ptr) = guard.get(&path_hash).copied() {
-            // Safety: caller owns lifetime; this is a process-global registration.
-            return unsafe { *(ptr as *mut i32) };
+            return ptr as *mut i32;
         }
     }
-    let table = jit_i32_global_table();
-    let guard = table.lock().expect("jit global table mutex poisoned");
-    guard.get(&path_hash).copied().unwrap_or_default()
+
+    let value = {
+        let table = jit_i32_global_table();
+        let mut guard = table.lock().expect("jit global table mutex poisoned");
+        guard.remove(&path_hash).unwrap_or_default()
+    };
+
+    let mut owned_guard = owned_i32_globals()
+        .lock()
+        .expect("owned i32 global table mutex poisoned");
+    let slot = owned_guard
+        .entry(path_hash)
+        .or_insert_with(|| Box::new(value));
+    (&mut **slot) as *mut i32
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_global_f32_ptr(path_hash: i32) -> *mut f32 {
+    {
+        let table = registered_f32_ptrs();
+        let guard = table
+            .lock()
+            .expect("registered f32 ptr table mutex poisoned");
+        if let Some(ptr) = guard.get(&path_hash).copied() {
+            return ptr as *mut f32;
+        }
+    }
+
+    let value = {
+        let table = jit_f32_global_table();
+        let mut guard = table.lock().expect("jit global table mutex poisoned");
+        guard.remove(&path_hash).unwrap_or_default()
+    };
+
+    let mut owned_guard = owned_f32_globals()
+        .lock()
+        .expect("owned f32 global table mutex poisoned");
+    let slot = owned_guard
+        .entry(path_hash)
+        .or_insert_with(|| Box::new(value));
+    (&mut **slot) as *mut f32
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_global_f64_ptr(path_hash: i32) -> *mut f64 {
+    {
+        let table = registered_f64_ptrs();
+        let guard = table
+            .lock()
+            .expect("registered f64 ptr table mutex poisoned");
+        if let Some(ptr) = guard.get(&path_hash).copied() {
+            return ptr as *mut f64;
+        }
+    }
+
+    let value = {
+        let table = jit_f64_global_table();
+        let mut guard = table.lock().expect("jit global table mutex poisoned");
+        guard.remove(&path_hash).unwrap_or_default()
+    };
+
+    let mut owned_guard = owned_f64_globals()
+        .lock()
+        .expect("owned f64 global table mutex poisoned");
+    let slot = owned_guard
+        .entry(path_hash)
+        .or_insert_with(|| Box::new(value));
+    (&mut **slot) as *mut f64
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_global_i32_load(path_hash: i32) -> i32 {
+    let ptr = stasis_jit_global_i32_ptr(path_hash);
+    if ptr.is_null() {
+        return 0;
+    }
+    // Safety: pointer comes from registered/owned global table.
+    unsafe { *ptr }
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_global_i32_store(path_hash: i32, value: i32) {
-    {
-        let table = registered_i32_ptrs();
-        let guard = table
-            .lock()
-            .expect("registered i32 ptr table mutex poisoned");
-        if let Some(ptr) = guard.get(&path_hash).copied() {
-            // Safety: caller owns lifetime; this is a process-global registration.
-            unsafe { *(ptr as *mut i32) = value };
-            return;
-        }
+    let ptr = stasis_jit_global_i32_ptr(path_hash);
+    if ptr.is_null() {
+        return;
     }
-    let table = jit_i32_global_table();
-    let mut guard = table.lock().expect("jit global table mutex poisoned");
-    guard.insert(path_hash, value);
+    // Safety: pointer comes from registered/owned global table.
+    unsafe { *ptr = value };
 }
 
 fn fnv1a_extend_u32(mut hash: u32, suffix: &[u8]) -> u32 {
@@ -1512,72 +1615,42 @@ pub extern "C" fn stasis_jit_collection_i32_store(
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_global_f32_load(path_hash: i32) -> f32 {
-    {
-        let table = registered_f32_ptrs();
-        let guard = table
-            .lock()
-            .expect("registered f32 ptr table mutex poisoned");
-        if let Some(ptr) = guard.get(&path_hash).copied() {
-            // Safety: caller owns lifetime; this is a process-global registration.
-            return unsafe { *(ptr as *mut f32) };
-        }
+    let ptr = stasis_jit_global_f32_ptr(path_hash);
+    if ptr.is_null() {
+        return 0.0;
     }
-    let table = jit_f32_global_table();
-    let guard = table.lock().expect("jit global table mutex poisoned");
-    guard.get(&path_hash).copied().unwrap_or_default()
+    // Safety: pointer comes from registered/owned global table.
+    unsafe { *ptr }
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_global_f32_store(path_hash: i32, value: f32) {
-    {
-        let table = registered_f32_ptrs();
-        let guard = table
-            .lock()
-            .expect("registered f32 ptr table mutex poisoned");
-        if let Some(ptr) = guard.get(&path_hash).copied() {
-            // Safety: caller owns lifetime; this is a process-global registration.
-            unsafe { *(ptr as *mut f32) = value };
-            return;
-        }
+    let ptr = stasis_jit_global_f32_ptr(path_hash);
+    if ptr.is_null() {
+        return;
     }
-    let table = jit_f32_global_table();
-    let mut guard = table.lock().expect("jit global table mutex poisoned");
-    guard.insert(path_hash, value);
+    // Safety: pointer comes from registered/owned global table.
+    unsafe { *ptr = value };
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_global_f64_load(path_hash: i32) -> f64 {
-    {
-        let table = registered_f64_ptrs();
-        let guard = table
-            .lock()
-            .expect("registered f64 ptr table mutex poisoned");
-        if let Some(ptr) = guard.get(&path_hash).copied() {
-            // Safety: caller owns lifetime; this is a process-global registration.
-            return unsafe { *(ptr as *mut f64) };
-        }
+    let ptr = stasis_jit_global_f64_ptr(path_hash);
+    if ptr.is_null() {
+        return 0.0;
     }
-    let table = jit_f64_global_table();
-    let guard = table.lock().expect("jit global table mutex poisoned");
-    guard.get(&path_hash).copied().unwrap_or_default()
+    // Safety: pointer comes from registered/owned global table.
+    unsafe { *ptr }
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_global_f64_store(path_hash: i32, value: f64) {
-    {
-        let table = registered_f64_ptrs();
-        let guard = table
-            .lock()
-            .expect("registered f64 ptr table mutex poisoned");
-        if let Some(ptr) = guard.get(&path_hash).copied() {
-            // Safety: caller owns lifetime; this is a process-global registration.
-            unsafe { *(ptr as *mut f64) = value };
-            return;
-        }
+    let ptr = stasis_jit_global_f64_ptr(path_hash);
+    if ptr.is_null() {
+        return;
     }
-    let table = jit_f64_global_table();
-    let mut guard = table.lock().expect("jit global table mutex poisoned");
-    guard.insert(path_hash, value);
+    // Safety: pointer comes from registered/owned global table.
+    unsafe { *ptr = value };
 }
 
 #[no_mangle]
@@ -1935,7 +2008,11 @@ pub extern "C" fn stasis_jit_sys_memmove_f32(
 // Brickout uses `audio_is_available()` as a gate; return false so the game runs without calling
 // pointer-typed audio externs (e.g. `audio_push_f32_interleaved`).
 #[no_mangle]
-pub extern "C" fn stasis_jit_audio_init(_sample_rate: i32, _channels: i32, _target_latency_frames: i32) -> i32 {
+pub extern "C" fn stasis_jit_audio_init(
+    _sample_rate: i32,
+    _channels: i32,
+    _target_latency_frames: i32,
+) -> i32 {
     0
 }
 
@@ -2534,6 +2611,27 @@ mod tests {
         );
 
         let ptr2 = stasis_jit_global_i32_array_ptr(collection_hash, field_hash, 4);
+        assert_eq!(ptr, ptr2);
+    }
+
+    #[test]
+    fn i32_global_ptr_migrates_fallback_value_and_supports_direct_access() {
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+
+        let path_hash = 0x1020_3040i32;
+        stasis_jit_global_i32_store(path_hash, 77);
+        let ptr = stasis_jit_global_i32_ptr(path_hash);
+        assert!(!ptr.is_null());
+        assert_eq!(stasis_jit_global_i32_load(path_hash), 77);
+
+        // Safety: pointer comes from dynload-owned registration table for this test process.
+        unsafe {
+            *ptr = 123;
+        }
+        assert_eq!(stasis_jit_global_i32_load(path_hash), 123);
+
+        let ptr2 = stasis_jit_global_i32_ptr(path_hash);
         assert_eq!(ptr, ptr2);
     }
 }
