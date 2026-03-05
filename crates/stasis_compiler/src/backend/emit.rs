@@ -192,6 +192,75 @@ pub(crate) fn collect_supported_extern_call_signatures(
     Ok(out)
 }
 
+pub(crate) fn resolve_preferred_extern_call_signatures(
+    extern_signatures: &[ExternCallSignature],
+) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), String> {
+    let mut resolved = Vec::with_capacity(extern_signatures.len());
+    for signature in extern_signatures {
+        let Some(symbol) = signature.symbol_candidates.last() else {
+            return Err(format!(
+                "unresolved extern call target '{}' with candidates {:?}",
+                signature.name, signature.symbol_candidates
+            ));
+        };
+        resolved.push(ResolvedExternCallSignature {
+            name: signature.name.clone(),
+            symbol: symbol.clone(),
+            params: signature.params.clone(),
+            return_type: signature.return_type,
+        });
+    }
+    Ok((resolved, BTreeMap::new()))
+}
+
+pub(crate) fn build_compile_analysis_cache(
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    type_table: &mut TypeTable,
+    files_fingerprint: u64,
+    extern_resolver: impl FnOnce(
+        &[ExternCallSignature],
+    ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), String>,
+) -> Result<CompileAnalysisCache, String> {
+    let extern_signatures = collect_supported_extern_call_signatures(files, type_table)?;
+    let (resolved_extern_signatures, extern_symbol_addresses) =
+        extern_resolver(&extern_signatures)?;
+    build_compile_analysis_cache_from_resolved_externs(
+        files,
+        functions,
+        type_table,
+        files_fingerprint,
+        resolved_extern_signatures,
+        extern_symbol_addresses,
+    )
+}
+
+pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    type_table: &mut TypeTable,
+    files_fingerprint: u64,
+    resolved_extern_signatures: Vec<ResolvedExternCallSignature>,
+    extern_symbol_addresses: ExternSymbolAddressMap,
+) -> Result<CompileAnalysisCache, String> {
+    let call_signatures =
+        collect_supported_call_signatures(functions, &resolved_extern_signatures, type_table);
+    let constant_values = collect_top_level_constant_values(files, type_table)?;
+    let global_path_types = collect_global_path_types(files, type_table, &constant_values)?;
+    let collection_infos = collect_foreach_collection_infos(files, type_table, &constant_values)?;
+    let named_struct_field_types = collect_named_struct_field_types(files, type_table)?;
+    Ok(CompileAnalysisCache {
+        files_fingerprint,
+        call_signatures,
+        resolved_extern_signatures,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        extern_symbol_addresses,
+    })
+}
+
 pub(crate) fn build_extern_call_signature(
     type_table: &mut TypeTable,
     declaration: ParsedExternFunctionDeclaration,
@@ -360,6 +429,31 @@ pub(crate) fn compile_analysis_requires_reemit(
         || previous.global_path_types != next.global_path_types
         || previous.collection_infos != next.collection_infos
         || previous.named_struct_field_types != next.named_struct_field_types
+}
+
+pub(crate) fn select_emit_function_ids(
+    functions: &[FunctionMeta],
+    required_emit_roots: &[String],
+    compiled_body_hashes: &HashMap<FunctionId, u64>,
+    force_reemit_reachable: bool,
+) -> Vec<FunctionId> {
+    let reachable = crate::backend::reachability::compute_reachable_function_ids(
+        functions,
+        required_emit_roots,
+    );
+    functions
+        .iter()
+        .filter(|function| reachable.contains(&function.id))
+        .filter(|function| {
+            if force_reemit_reachable {
+                return true;
+            }
+            let compiled_body_hash = compiled_body_hashes.get(&function.id).copied();
+            let artifact_matches_body_hash = compiled_body_hash == Some(function.body_hash);
+            function.dirty || !artifact_matches_body_hash
+        })
+        .map(|function| function.id)
+        .collect()
 }
 
 pub(crate) fn compute_files_fingerprint(files: &[SourceFile]) -> u64 {
