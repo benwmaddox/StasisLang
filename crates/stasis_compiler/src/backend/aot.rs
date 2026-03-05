@@ -9,7 +9,7 @@ use cranelift_codegen::settings::Configurable;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{default_libcall_names, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -33,6 +33,7 @@ pub struct AotProcess {
     object_bytes: Vec<Vec<u8>>,
     string_literals: BTreeMap<i32, String>,
     collection_max_lengths: BTreeMap<String, i32>,
+    compile_analysis_cache: Option<CompileAnalysisCache>,
     required_emit_roots: Vec<String>,
 }
 
@@ -58,6 +59,7 @@ impl AotProcess {
             object_bytes: Vec::new(),
             string_literals: BTreeMap::new(),
             collection_max_lengths: BTreeMap::new(),
+            compile_analysis_cache: None,
             required_emit_roots: Vec::new(),
         }
     }
@@ -82,77 +84,52 @@ impl AotProcess {
         type_table
             .ensure_ascii_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
-
-        let extern_signatures =
-            collect_supported_extern_call_signatures(self.compiler.files(), &mut type_table)
-                .map_err(crate::compiler::CompileError::Backend)?;
-        // AOT objects must be linked against a concrete runtime. For externs we prefer the most
-        // "runtime-friendly" symbol candidate (typically `stasis_jit_*` shims) instead of the
-        // raw source-level name.
-        let resolved_extern_signatures: Vec<ResolvedExternCallSignature> = extern_signatures
-            .iter()
-            .filter_map(|sig| {
-                sig.symbol_candidates
-                    .last()
-                    .map(|symbol| ResolvedExternCallSignature {
-                        name: sig.name.clone(),
-                        symbol: symbol.clone(),
-                        params: sig.params.clone(),
-                        return_type: sig.return_type,
-                    })
-            })
-            .collect();
-        let call_signatures = collect_supported_call_signatures(
-            self.compiler.functions(),
-            &resolved_extern_signatures,
-            &type_table,
-        );
-        let constant_values =
-            collect_top_level_constant_values(self.compiler.files(), &mut type_table)
-                .map_err(crate::compiler::CompileError::Backend)?;
-        for constant in constant_values.values() {
+        let files_fingerprint = compute_files_fingerprint(self.compiler.files());
+        let cache_miss = self
+            .compile_analysis_cache
+            .as_ref()
+            .is_none_or(|cache| cache.files_fingerprint != files_fingerprint);
+        let mut force_reemit_reachable = false;
+        if cache_miss {
+            let next_cache = build_compile_analysis_cache(
+                self.compiler.files(),
+                self.compiler.functions(),
+                &mut type_table,
+                files_fingerprint,
+                resolve_preferred_extern_call_signatures,
+            )
+            .map_err(crate::compiler::CompileError::Backend)?;
+            if let Some(previous_cache) = self.compile_analysis_cache.as_ref() {
+                force_reemit_reachable =
+                    compile_analysis_requires_reemit(previous_cache, &next_cache);
+            }
+            self.compile_analysis_cache = Some(next_cache);
+        }
+        let analysis = self.compile_analysis_cache.as_ref().ok_or_else(|| {
+            crate::compiler::CompileError::Invariant(
+                "aot compile analysis cache missing after refresh".to_string(),
+            )
+        })?;
+        for constant in analysis.constant_values.values() {
             if let ConstantValue::String { value, .. } = constant {
                 record_string_literal(&mut self.string_literals, value)
                     .map_err(crate::compiler::CompileError::Backend)?;
             }
         }
-        let global_path_types =
-            collect_global_path_types(self.compiler.files(), &mut type_table, &constant_values)
-                .map_err(crate::compiler::CompileError::Backend)?;
         self.collection_max_lengths =
-            collect_fixed_collection_max_lengths(&global_path_types, &type_table)
+            collect_fixed_collection_max_lengths(&analysis.global_path_types, &type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
-        let collection_infos = collect_foreach_collection_infos(
-            self.compiler.files(),
-            &mut type_table,
-            &constant_values,
-        )
-        .map_err(crate::compiler::CompileError::Backend)?;
-        let named_struct_field_types =
-            collect_named_struct_field_types(self.compiler.files(), &mut type_table)
-                .map_err(crate::compiler::CompileError::Backend)?;
-
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
-            self.compiler.functions(),
-            &self.required_emit_roots,
-        );
-        let compiled_body_hashes: BTreeMap<FunctionId, u64> = self
+        let compiled_body_hashes: HashMap<FunctionId, u64> = self
             .artifacts
             .iter()
             .map(|artifact| (artifact.function_id, artifact.body_hash))
             .collect();
-        let emit_function_ids: Vec<FunctionId> = self
-            .compiler
-            .functions()
-            .iter()
-            .filter(|function| reachable.contains(&function.id))
-            .filter(|function| {
-                let compiled_body_hash = compiled_body_hashes.get(&function.id).copied();
-                let artifact_matches_body_hash = compiled_body_hash == Some(function.body_hash);
-                function.dirty || !artifact_matches_body_hash
-            })
-            .map(|function| function.id)
-            .collect();
+        let emit_function_ids = select_emit_function_ids(
+            self.compiler.functions(),
+            &self.required_emit_roots,
+            &compiled_body_hashes,
+            force_reemit_reachable,
+        );
 
         let (
             compiler,
@@ -178,13 +155,13 @@ impl AotProcess {
                 hir,
                 &symbol,
                 optimization_profile,
-                &call_signatures,
+                &analysis.call_signatures,
                 &mut type_table,
-                &global_path_types,
-                &constant_values,
+                &analysis.global_path_types,
+                &analysis.constant_values,
                 string_literals,
-                &collection_infos,
-                &named_struct_field_types,
+                &analysis.collection_infos,
+                &analysis.named_struct_field_types,
             )?;
             let object_index = *next_object_index;
             *next_object_index = next_object_index.saturating_add(1);
@@ -201,6 +178,10 @@ impl AotProcess {
             Ok(())
         })?;
 
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+            self.compiler.functions(),
+            &self.required_emit_roots,
+        );
         artifacts.retain(|artifact| reachable.contains(&artifact.function_id));
         Ok(CompileReport { index, emit })
     }
@@ -1118,6 +1099,28 @@ mod tests {
         );
         let second = process.compile().expect("second compile");
         assert_eq!(second.emit.emitted_functions, 0);
+        assert_eq!(process.artifacts().len(), 1);
+    }
+
+    #[test]
+    fn aot_process_reemits_reachable_functions_when_imported_constant_changes() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "import \"constants.stasis\";\nfunction main(): i32 { return VALUE; }\n",
+        );
+        process.upsert_file("constants.stasis", "const VALUE: i32 = 11;\n");
+
+        let first = process.compile().expect("first compile");
+        assert_eq!(first.emit.emitted_functions, 1);
+        assert_eq!(process.artifacts().len(), 1);
+
+        process.upsert_file("constants.stasis", "const VALUE: i32 = 27;\n");
+        let second = process.compile().expect("second compile");
+        assert_eq!(
+            second.emit.emitted_functions, 1,
+            "main should be re-emitted when imported constants change"
+        );
         assert_eq!(process.artifacts().len(), 1);
     }
 
