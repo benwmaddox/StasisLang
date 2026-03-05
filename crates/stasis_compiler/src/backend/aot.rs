@@ -945,6 +945,30 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_accepts_known_runtime_shim_families() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "extern function sleep_ms(ms: i32): void;\nextern function audio_init(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;\nfunction main(): i32 { sleep_ms(1); if (audio_init(48000, 2, 512)) { return 1; } return 0; }\n",
+        );
+
+        process.compile().expect("compile");
+        let analysis = process
+            .compile_analysis_cache
+            .as_ref()
+            .expect("compile analysis cache");
+        assert_eq!(analysis.resolved_extern_signatures.len(), 2);
+        assert_eq!(
+            analysis.resolved_extern_signatures[0].symbol,
+            "stasis_jit_sleep_ms"
+        );
+        assert_eq!(
+            analysis.resolved_extern_signatures[1].symbol,
+            "stasis_jit_audio_init"
+        );
+    }
+
+    #[test]
     fn aot_process_rejects_nonexplicit_unknown_extern_without_known_runtime_symbol() {
         let mut process = AotProcess::new();
         process.upsert_file(

@@ -223,36 +223,34 @@ pub(crate) fn resolve_extern_call_signatures_with(
 }
 
 pub(crate) fn is_known_aot_runtime_extern_symbol(symbol: &str) -> bool {
-    matches!(
-        symbol,
-        "stasis_jit_print_i32"
-            | "stasis_jit_print_string"
-            | "stasis_jit_gfx_load_sprite"
-            | "stasis_jit_gfx_dump_bmp"
-            | "stasis_jit_load_font"
-            | "stasis_jit_measure_text"
-            | "stasis_jit_gfx_cache_text"
-            | "stasis_jit_audio_is_available"
-            | "stasis_jit_audio_push_f32_interleaved"
-            | "stasis_jit_sin_fast"
-            | "stasis_jit_cos_fast"
-            | "stasis_jit_global_i32_load"
-            | "stasis_jit_global_i32_store"
-            | "stasis_jit_global_f32_load"
-            | "stasis_jit_global_f32_store"
-            | "stasis_jit_global_f64_load"
-            | "stasis_jit_global_f64_store"
-            | "stasis_jit_collection_i32_load"
-            | "stasis_jit_collection_i32_store"
-            | "stasis_jit_sys_memcpy_u8"
-            | "stasis_jit_sys_memcpy_i32"
-            | "stasis_jit_sys_memcpy_f32"
-            | "stasis_jit_sys_memmove_u8"
-            | "stasis_jit_sys_memmove_i32"
-            | "stasis_jit_sys_memmove_f32"
-            | "stasis_get_time_ms"
-            | "stasis_get_time_us"
-    )
+    symbol == "stasis_get_time_ms"
+        || symbol == "stasis_get_time_us"
+        || matches!(
+            symbol,
+            "stasis_jit_print_i32"
+                | "stasis_jit_print_string"
+                | "stasis_jit_load_font"
+                | "stasis_jit_measure_text"
+                | "stasis_jit_sleep_ms"
+                | "stasis_jit_sin_fast"
+                | "stasis_jit_cos_fast"
+                | "stasis_jit_global_i32_load"
+                | "stasis_jit_global_i32_store"
+                | "stasis_jit_global_f32_load"
+                | "stasis_jit_global_f32_store"
+                | "stasis_jit_global_f64_load"
+                | "stasis_jit_global_f64_store"
+                | "stasis_jit_collection_i32_load"
+                | "stasis_jit_collection_i32_store"
+                | "stasis_jit_sys_memcpy_u8"
+                | "stasis_jit_sys_memcpy_i32"
+                | "stasis_jit_sys_memcpy_f32"
+                | "stasis_jit_sys_memmove_u8"
+                | "stasis_jit_sys_memmove_i32"
+                | "stasis_jit_sys_memmove_f32"
+        )
+        || symbol.starts_with("stasis_jit_gfx_")
+        || symbol.starts_with("stasis_jit_audio_")
 }
 
 pub(crate) fn resolve_preferred_extern_call_signatures(
