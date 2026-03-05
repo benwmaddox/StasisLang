@@ -192,25 +192,81 @@ pub(crate) fn collect_supported_extern_call_signatures(
     Ok(out)
 }
 
-pub(crate) fn resolve_preferred_extern_call_signatures(
+pub(crate) fn resolve_extern_call_signatures_with(
     extern_signatures: &[ExternCallSignature],
+    mut resolve_candidate: impl FnMut(&ExternCallSignature, &str) -> Option<usize>,
 ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), String> {
     let mut resolved = Vec::with_capacity(extern_signatures.len());
+    let mut symbol_addresses: ExternSymbolAddressMap = BTreeMap::new();
     for signature in extern_signatures {
-        let Some(symbol) = signature.symbol_candidates.last() else {
+        let mut selected: Option<(String, usize)> = None;
+        for candidate in &signature.symbol_candidates {
+            if let Some(address) = resolve_candidate(signature, candidate) {
+                selected = Some((candidate.clone(), address));
+                break;
+            }
+        }
+        let Some((symbol, address)) = selected else {
             return Err(format!(
                 "unresolved extern call target '{}' with candidates {:?}",
                 signature.name, signature.symbol_candidates
             ));
         };
+        symbol_addresses.insert(symbol.clone(), address);
         resolved.push(ResolvedExternCallSignature {
             name: signature.name.clone(),
-            symbol: symbol.clone(),
+            symbol,
             params: signature.params.clone(),
             return_type: signature.return_type,
         });
     }
-    Ok((resolved, BTreeMap::new()))
+    Ok((resolved, symbol_addresses))
+}
+
+pub(crate) fn is_known_aot_runtime_extern_symbol(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        "stasis_jit_print_i32"
+            | "stasis_jit_print_string"
+            | "stasis_jit_gfx_load_sprite"
+            | "stasis_jit_gfx_dump_bmp"
+            | "stasis_jit_load_font"
+            | "stasis_jit_measure_text"
+            | "stasis_jit_gfx_cache_text"
+            | "stasis_jit_audio_is_available"
+            | "stasis_jit_audio_push_f32_interleaved"
+            | "stasis_jit_sin_fast"
+            | "stasis_jit_cos_fast"
+            | "stasis_jit_global_i32_load"
+            | "stasis_jit_global_i32_store"
+            | "stasis_jit_global_f32_load"
+            | "stasis_jit_global_f32_store"
+            | "stasis_jit_global_f64_load"
+            | "stasis_jit_global_f64_store"
+            | "stasis_jit_collection_i32_load"
+            | "stasis_jit_collection_i32_store"
+            | "stasis_jit_sys_memcpy_u8"
+            | "stasis_jit_sys_memcpy_i32"
+            | "stasis_jit_sys_memcpy_f32"
+            | "stasis_jit_sys_memmove_u8"
+            | "stasis_jit_sys_memmove_i32"
+            | "stasis_jit_sys_memmove_f32"
+            | "stasis_get_time_ms"
+            | "stasis_get_time_us"
+    )
+}
+
+pub(crate) fn resolve_preferred_extern_call_signatures(
+    extern_signatures: &[ExternCallSignature],
+) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), String> {
+    resolve_extern_call_signatures_with(extern_signatures, |signature, candidate| {
+        if is_known_aot_runtime_extern_symbol(candidate) || signature.symbol_candidates.len() == 1
+        {
+            Some(0)
+        } else {
+            None
+        }
+    })
 }
 
 pub(crate) fn build_compile_analysis_cache(

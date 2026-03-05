@@ -1103,6 +1103,63 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_prefers_known_runtime_extern_symbol_over_source_alias() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "extern function print_i32(value: i32): void;\nfunction main(): i32 { print_i32(7); return 0; }\n",
+        );
+
+        process.compile().expect("compile");
+        let analysis = process
+            .compile_analysis_cache
+            .as_ref()
+            .expect("compile analysis cache");
+        assert_eq!(analysis.resolved_extern_signatures.len(), 1);
+        assert_eq!(
+            analysis.resolved_extern_signatures[0].symbol,
+            "stasis_jit_print_i32"
+        );
+    }
+
+    #[test]
+    fn aot_process_accepts_explicit_single_symbol_extern() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function @extern(\"custom_symbol\") custom(value: i32): i32;\nfunction main(): i32 { return custom(7); }\n",
+        );
+
+        process.compile().expect("compile");
+        let analysis = process
+            .compile_analysis_cache
+            .as_ref()
+            .expect("compile analysis cache");
+        assert_eq!(analysis.resolved_extern_signatures.len(), 1);
+        assert_eq!(analysis.resolved_extern_signatures[0].symbol, "custom_symbol");
+    }
+
+    #[test]
+    fn aot_process_rejects_nonexplicit_unknown_extern_without_known_runtime_symbol() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "extern function totally_unknown(value: i32): i32;\nfunction main(): i32 { return totally_unknown(7); }\n",
+        );
+
+        let error = process.compile().expect_err("compile should fail");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("unresolved extern call target 'totally_unknown'"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn aot_process_reemits_reachable_functions_when_imported_constant_changes() {
         let mut process = AotProcess::new();
         process.upsert_file(
