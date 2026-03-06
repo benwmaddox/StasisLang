@@ -954,18 +954,37 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     }
 }
 
-fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
-    let table = jit_string_literal_table();
-    let guard = table
-        .lock()
-        .expect("jit string literal table mutex poisoned");
-    if let Some(text) = guard.get(&value_id) {
-        return Some(text.as_bytes().to_vec());
+fn jit_text_buffer_is_registered(value_id: i32) -> bool {
+    if stasis_jit_collection_i32_load(value_id, 2) > 0 {
+        return true;
     }
-    drop(guard);
+    if registered_u8_arrays()
+        .lock()
+        .expect("registered u8 array table mutex poisoned")
+        .contains_key(&(value_id, 0))
+    {
+        return true;
+    }
+    if registered_i32_arrays()
+        .lock()
+        .expect("registered i32 array table mutex poisoned")
+        .contains_key(&(value_id, 0))
+    {
+        return true;
+    }
+    jit_i32_array_global_table()
+        .lock()
+        .expect("jit i32 array global table mutex poisoned")
+        .keys()
+        .any(|(collection_hash, field_hash, _)| *collection_hash == value_id && *field_hash == 0)
+}
 
+fn jit_global_text_bytes(value_id: i32) -> Option<Vec<u8>> {
+    if !jit_text_buffer_is_registered(value_id) {
+        return None;
+    }
     let byte_len = stasis_jit_collection_i32_load(value_id, 1);
-    if byte_len <= 0 {
+    if byte_len < 0 {
         return None;
     }
 
@@ -978,6 +997,18 @@ fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
         bytes.push(byte);
     }
     Some(bytes)
+}
+
+fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
+    if let Some(bytes) = jit_global_text_bytes(value_id) {
+        return Some(bytes);
+    }
+
+    let table = jit_string_literal_table();
+    let guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    guard.get(&value_id).map(|text| text.as_bytes().to_vec())
 }
 
 #[cfg(windows)]
@@ -2515,6 +2546,13 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
+
+    fn test_lock() -> MutexGuard<'static, ()> {
+        jit_dispatch_lock()
+            .lock()
+            .expect("jit dispatch lock mutex poisoned")
+    }
 
     #[cfg(windows)]
     #[test]
@@ -2539,6 +2577,7 @@ mod tests {
 
     #[test]
     fn i32_array_ptr_migrates_fallback_values_and_supports_direct_access() {
+        let _lock = test_lock();
         clear_registered_global_memory();
         clear_jit_i32_array_global_table();
 
@@ -2579,6 +2618,10 @@ mod tests {
 
     #[test]
     fn jit_text_arg_bytes_reads_string_literals() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
         clear_jit_string_literal_table();
 
         upsert_jit_string_literal(1234, "hello");
@@ -2588,6 +2631,7 @@ mod tests {
 
     #[test]
     fn jit_text_arg_bytes_reads_utf8_global_buffers() {
+        let _lock = test_lock();
         clear_registered_global_memory();
         clear_jit_i32_global_table();
         clear_jit_i32_array_global_table();
@@ -2602,5 +2646,28 @@ mod tests {
         stasis_jit_global_i32_array_store(collection_hash, 0, 3, i32::from(b'h'));
 
         assert_eq!(jit_text_arg_bytes(collection_hash), Some(b"path".to_vec()));
+    }
+
+    #[test]
+    fn jit_text_arg_bytes_prefers_runtime_buffer_over_literal_hash_collision() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+
+        let shared_id = 0x2244_6688i32;
+        upsert_jit_string_literal(shared_id, "literal");
+        stasis_jit_collection_i32_store(shared_id, 1, 6);
+        stasis_jit_collection_i32_store(shared_id, 2, 8);
+        stasis_jit_collection_i32_store(shared_id, 3, 6);
+        stasis_jit_global_i32_array_store(shared_id, 0, 0, i32::from(b'b'));
+        stasis_jit_global_i32_array_store(shared_id, 0, 1, i32::from(b'u'));
+        stasis_jit_global_i32_array_store(shared_id, 0, 2, i32::from(b'f'));
+        stasis_jit_global_i32_array_store(shared_id, 0, 3, i32::from(b'f'));
+        stasis_jit_global_i32_array_store(shared_id, 0, 4, i32::from(b'e'));
+        stasis_jit_global_i32_array_store(shared_id, 0, 5, i32::from(b'r'));
+
+        assert_eq!(jit_text_arg_bytes(shared_id), Some(b"buffer".to_vec()));
     }
 }
