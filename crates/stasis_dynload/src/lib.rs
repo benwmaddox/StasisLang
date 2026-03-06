@@ -174,7 +174,12 @@ pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i3
     }
 }
 
-pub fn invoke_i32_i32_i32_to_i32(address: usize, arg0: i32, arg1: i32, arg2: i32) -> Result<i32, String> {
+pub fn invoke_i32_i32_i32_to_i32(
+    address: usize,
+    arg0: i32,
+    arg1: i32,
+    arg2: i32,
+) -> Result<i32, String> {
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
     }
@@ -216,8 +221,7 @@ pub fn invoke_i32_i32_i32_i32_to_void(
     }
     #[cfg(not(windows))]
     {
-        let callback: extern "C" fn(i32, i32, i32, i32) =
-            unsafe { std::mem::transmute(address) };
+        let callback: extern "C" fn(i32, i32, i32, i32) = unsafe { std::mem::transmute(address) };
         callback(arg0, arg1, arg2, arg3);
         Ok(())
     }
@@ -768,7 +772,9 @@ pub extern "C" fn stasis_jit_global_i32_array_ptr(
         let mut owned_guard = owned_i32_arrays()
             .lock()
             .expect("owned i32 array table mutex poisoned");
-        let array = owned_guard.entry(key).or_insert_with(|| vec![0; requested_len]);
+        let array = owned_guard
+            .entry(key)
+            .or_insert_with(|| vec![0; requested_len]);
         if array.len() < requested_len {
             array.resize(requested_len, 0);
         }
@@ -829,7 +835,9 @@ pub extern "C" fn stasis_jit_global_f32_array_ptr(
         let mut owned_guard = owned_f32_arrays()
             .lock()
             .expect("owned f32 array table mutex poisoned");
-        let array = owned_guard.entry(key).or_insert_with(|| vec![0.0; requested_len]);
+        let array = owned_guard
+            .entry(key)
+            .or_insert_with(|| vec![0.0; requested_len]);
         if array.len() < requested_len {
             array.resize(requested_len, 0.0);
         }
@@ -889,7 +897,9 @@ pub extern "C" fn stasis_jit_global_f64_array_ptr(
         let mut owned_guard = owned_f64_arrays()
             .lock()
             .expect("owned f64 array table mutex poisoned");
-        let array = owned_guard.entry(key).or_insert_with(|| vec![0.0; requested_len]);
+        let array = owned_guard
+            .entry(key)
+            .or_insert_with(|| vec![0.0; requested_len]);
         if array.len() < requested_len {
             array.resize(requested_len, 0.0);
         }
@@ -928,6 +938,12 @@ pub extern "C" fn stasis_jit_print_i32(value: i32) {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_print_string(value_id: i32) {
+    if let Some(bytes) = jit_text_arg_bytes(value_id) {
+        print!("{}", String::from_utf8_lossy(&bytes));
+        let _ = std::io::stdout().flush();
+        return;
+    }
+
     let table = jit_string_literal_table();
     let guard = table
         .lock()
@@ -938,18 +954,69 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     }
 }
 
-#[cfg(windows)]
-fn jit_string_literal_to_cstring(value_id: i32) -> Result<CString, String> {
+fn jit_text_buffer_is_registered(value_id: i32) -> bool {
+    if stasis_jit_collection_i32_load(value_id, 2) > 0 {
+        return true;
+    }
+    if registered_u8_arrays()
+        .lock()
+        .expect("registered u8 array table mutex poisoned")
+        .contains_key(&(value_id, 0))
+    {
+        return true;
+    }
+    if registered_i32_arrays()
+        .lock()
+        .expect("registered i32 array table mutex poisoned")
+        .contains_key(&(value_id, 0))
+    {
+        return true;
+    }
+    jit_i32_array_global_table()
+        .lock()
+        .expect("jit i32 array global table mutex poisoned")
+        .keys()
+        .any(|(collection_hash, field_hash, _)| *collection_hash == value_id && *field_hash == 0)
+}
+
+fn jit_global_text_bytes(value_id: i32) -> Option<Vec<u8>> {
+    if !jit_text_buffer_is_registered(value_id) {
+        return None;
+    }
+    let byte_len = stasis_jit_collection_i32_load(value_id, 1);
+    if byte_len < 0 {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(byte_len as usize);
+    for index in 0..byte_len {
+        let byte = stasis_jit_global_i32_array_load(value_id, 0, index);
+        let Ok(byte) = u8::try_from(byte) else {
+            return None;
+        };
+        bytes.push(byte);
+    }
+    Some(bytes)
+}
+
+fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
+    if let Some(bytes) = jit_global_text_bytes(value_id) {
+        return Some(bytes);
+    }
+
     let table = jit_string_literal_table();
     let guard = table
         .lock()
         .expect("jit string literal table mutex poisoned");
-    let Some(text) = guard.get(&value_id) else {
-        return Err(format!(
-            "missing jit string literal for id={value_id} (string extern bridge only supports literals today)"
-        ));
-    };
-    CString::new(text.as_bytes())
+    guard.get(&value_id).map(|text| text.as_bytes().to_vec())
+}
+
+#[cfg(windows)]
+fn jit_text_arg_to_cstring(value_id: i32) -> Result<CString, String> {
+    let bytes = jit_text_arg_bytes(value_id).ok_or_else(|| {
+        format!("missing jit text handle for id={value_id} (neither literal nor utf8 buffer)")
+    })?;
+    CString::new(bytes)
         .map_err(|_| "string contains interior NUL byte; cannot pass to C runtime".to_string())
 }
 
@@ -960,7 +1027,7 @@ fn jit_string_literal_to_cstring(value_id: i32) -> Result<CString, String> {
 pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
     #[cfg(windows)]
     {
-        let Ok(path) = jit_string_literal_to_cstring(path_id) else {
+        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
             return 0;
         };
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -983,7 +1050,7 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
 pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
     #[cfg(windows)]
     {
-        let Ok(path) = jit_string_literal_to_cstring(path_id) else {
+        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
             return 0;
         };
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -1004,7 +1071,7 @@ pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
 pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
     #[cfg(windows)]
     {
-        let Ok(path) = jit_string_literal_to_cstring(path_id) else {
+        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
             return 0;
         };
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -1026,7 +1093,7 @@ pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
 pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
     #[cfg(windows)]
     {
-        let Ok(text) = jit_string_literal_to_cstring(text_id) else {
+        let Ok(text) = jit_text_arg_to_cstring(text_id) else {
             return 0.0;
         };
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -1048,7 +1115,7 @@ pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
 pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
     #[cfg(windows)]
     {
-        let Ok(text) = jit_string_literal_to_cstring(text_id) else {
+        let Ok(text) = jit_text_arg_to_cstring(text_id) else {
             return 0;
         };
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -1935,7 +2002,11 @@ pub extern "C" fn stasis_jit_sys_memmove_f32(
 // Brickout uses `audio_is_available()` as a gate; return false so the game runs without calling
 // pointer-typed audio externs (e.g. `audio_push_f32_interleaved`).
 #[no_mangle]
-pub extern "C" fn stasis_jit_audio_init(_sample_rate: i32, _channels: i32, _target_latency_frames: i32) -> i32 {
+pub extern "C" fn stasis_jit_audio_init(
+    _sample_rate: i32,
+    _channels: i32,
+    _target_latency_frames: i32,
+) -> i32 {
     0
 }
 
@@ -2475,6 +2546,13 @@ extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
+
+    fn test_lock() -> MutexGuard<'static, ()> {
+        jit_dispatch_lock()
+            .lock()
+            .expect("jit dispatch lock mutex poisoned")
+    }
 
     #[cfg(windows)]
     #[test]
@@ -2499,6 +2577,7 @@ mod tests {
 
     #[test]
     fn i32_array_ptr_migrates_fallback_values_and_supports_direct_access() {
+        let _lock = test_lock();
         clear_registered_global_memory();
         clear_jit_i32_array_global_table();
 
@@ -2535,5 +2614,60 @@ mod tests {
 
         let ptr2 = stasis_jit_global_i32_array_ptr(collection_hash, field_hash, 4);
         assert_eq!(ptr, ptr2);
+    }
+
+    #[test]
+    fn jit_text_arg_bytes_reads_string_literals() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+
+        upsert_jit_string_literal(1234, "hello");
+
+        assert_eq!(jit_text_arg_bytes(1234), Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn jit_text_arg_bytes_reads_utf8_global_buffers() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+
+        let collection_hash = 0x4455_6677i32;
+        stasis_jit_collection_i32_store(collection_hash, 1, 4);
+        stasis_jit_collection_i32_store(collection_hash, 2, 8);
+        stasis_jit_collection_i32_store(collection_hash, 3, 4);
+        stasis_jit_global_i32_array_store(collection_hash, 0, 0, i32::from(b'p'));
+        stasis_jit_global_i32_array_store(collection_hash, 0, 1, i32::from(b'a'));
+        stasis_jit_global_i32_array_store(collection_hash, 0, 2, i32::from(b't'));
+        stasis_jit_global_i32_array_store(collection_hash, 0, 3, i32::from(b'h'));
+
+        assert_eq!(jit_text_arg_bytes(collection_hash), Some(b"path".to_vec()));
+    }
+
+    #[test]
+    fn jit_text_arg_bytes_prefers_runtime_buffer_over_literal_hash_collision() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+
+        let shared_id = 0x2244_6688i32;
+        upsert_jit_string_literal(shared_id, "literal");
+        stasis_jit_collection_i32_store(shared_id, 1, 6);
+        stasis_jit_collection_i32_store(shared_id, 2, 8);
+        stasis_jit_collection_i32_store(shared_id, 3, 6);
+        stasis_jit_global_i32_array_store(shared_id, 0, 0, i32::from(b'b'));
+        stasis_jit_global_i32_array_store(shared_id, 0, 1, i32::from(b'u'));
+        stasis_jit_global_i32_array_store(shared_id, 0, 2, i32::from(b'f'));
+        stasis_jit_global_i32_array_store(shared_id, 0, 3, i32::from(b'f'));
+        stasis_jit_global_i32_array_store(shared_id, 0, 4, i32::from(b'e'));
+        stasis_jit_global_i32_array_store(shared_id, 0, 5, i32::from(b'r'));
+
+        assert_eq!(jit_text_arg_bytes(shared_id), Some(b"buffer".to_vec()));
     }
 }
