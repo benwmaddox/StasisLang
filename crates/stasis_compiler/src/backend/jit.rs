@@ -154,36 +154,15 @@ impl JitProcess {
             let (resolved_extern_signatures, extern_symbol_addresses) = self
                 .resolve_extern_call_signatures(&extern_signatures)
                 .map_err(crate::compiler::CompileError::Backend)?;
-            let call_signatures = collect_supported_call_signatures(
-                self.compiler.functions(),
-                &resolved_extern_signatures,
-                &type_table,
-            );
-            let constant_values =
-                collect_top_level_constant_values(self.compiler.files(), &mut type_table)
-                    .map_err(crate::compiler::CompileError::Backend)?;
-            let global_path_types =
-                collect_global_path_types(self.compiler.files(), &mut type_table, &constant_values)
-                    .map_err(crate::compiler::CompileError::Backend)?;
-            let collection_infos = collect_foreach_collection_infos(
+            let next_cache = build_compile_analysis_cache_from_resolved_externs(
                 self.compiler.files(),
+                self.compiler.functions(),
                 &mut type_table,
-                &constant_values,
+                files_fingerprint,
+                resolved_extern_signatures,
+                extern_symbol_addresses,
             )
             .map_err(crate::compiler::CompileError::Backend)?;
-            let named_struct_field_types =
-                collect_named_struct_field_types(self.compiler.files(), &mut type_table)
-                    .map_err(crate::compiler::CompileError::Backend)?;
-            let next_cache = CompileAnalysisCache {
-                files_fingerprint,
-                call_signatures,
-                resolved_extern_signatures,
-                global_path_types,
-                constant_values,
-                collection_infos,
-                named_struct_field_types,
-                extern_symbol_addresses,
-            };
             if let Some(previous_cache) = self.compile_analysis_cache.as_ref() {
                 force_reemit_reachable =
                     compile_analysis_requires_reemit(previous_cache, &next_cache);
@@ -665,27 +644,16 @@ fn select_emit_function_ids(
     required_emit_roots: &[String],
     force_reemit_reachable: bool,
 ) -> Vec<FunctionId> {
-    let reachable = crate::backend::reachability::compute_reachable_function_ids(
-        functions,
-        required_emit_roots,
-    );
     let compiled_body_hashes: HashMap<FunctionId, u64> = artifacts
         .iter()
         .map(|artifact| (artifact.function_id, artifact.body_hash))
         .collect();
-    functions
-        .iter()
-        .filter(|function| reachable.contains(&function.id))
-        .filter(|function| {
-            if force_reemit_reachable {
-                return true;
-            }
-            let compiled_body_hash = compiled_body_hashes.get(&function.id).copied();
-            let artifact_matches_body_hash = compiled_body_hash == Some(function.body_hash);
-            function.dirty || !artifact_matches_body_hash
-        })
-        .map(|function| function.id)
-        .collect()
+    crate::backend::emit::select_emit_function_ids(
+        functions,
+        required_emit_roots,
+        &compiled_body_hashes,
+        force_reemit_reachable,
+    )
 }
 
 fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
