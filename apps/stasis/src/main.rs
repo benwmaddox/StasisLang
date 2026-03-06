@@ -43,6 +43,8 @@ struct AotCliContractArgs {
 struct PlayCliArgs {
     watch_file: PathBuf,
     watch_dir: Option<PathBuf>,
+    data_bind_json: Option<PathBuf>,
+    data_bind_struct_meta: Option<PathBuf>,
     tick_sleep_micros: u64,
     ticks: Option<u64>,
 }
@@ -56,6 +58,8 @@ struct CacheCleanupSummary {
 fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     let mut watch_file: Option<PathBuf> = None;
     let mut watch_dir: Option<PathBuf> = None;
+    let mut data_bind_json: Option<PathBuf> = None;
+    let mut data_bind_struct_meta: Option<PathBuf> = None;
     let mut tick_sleep_micros: u64 = 16000;
     let mut ticks: Option<u64> = None;
     let mut i: usize = 0;
@@ -81,6 +85,17 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
             }
             watch_dir = Some(PathBuf::from(args[i + 1].clone()));
             i += 2;
+            continue;
+        }
+        if arg == "--data-bind" {
+            if i + 2 >= args.len() {
+                return Err(
+                    "missing values for --data-bind <json_path> <struct_meta_path>".to_string(),
+                );
+            }
+            data_bind_json = Some(PathBuf::from(args[i + 1].clone()));
+            data_bind_struct_meta = Some(PathBuf::from(args[i + 2].clone()));
+            i += 3;
             continue;
         }
         if arg == "--ticks" {
@@ -116,6 +131,8 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     Ok(PlayCliArgs {
         watch_file,
         watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
         tick_sleep_micros,
         ticks,
     })
@@ -139,6 +156,8 @@ fn try_run_play_subcommand() -> Option<i32> {
     match run_play_in_process(
         &parsed.watch_file,
         parsed.watch_dir.as_deref(),
+        parsed.data_bind_json.as_deref(),
+        parsed.data_bind_struct_meta.as_deref(),
         parsed.tick_sleep_micros,
         parsed.ticks,
     ) {
@@ -810,6 +829,45 @@ mod tests {
         assert_eq!(parsed.directory, PathBuf::from("tests/stasis"));
         assert!(!parsed.watch);
         assert_eq!(parsed.watch_settle_ms, 0);
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_data_bind_paths() {
+        let args = vec![
+            "samples/bucket_catcher.stasis".to_string(),
+            "--watch-dir".to_string(),
+            "samples".to_string(),
+            "--data-bind".to_string(),
+            "samples/bucket_catcher/data/config.json".to_string(),
+            "samples/bucket_catcher/data/config.struct-meta.json".to_string(),
+        ];
+        let parsed = parse_play_cli_args(&args).expect("parse should succeed");
+        assert_eq!(
+            parsed.watch_file,
+            PathBuf::from("samples/bucket_catcher.stasis")
+        );
+        assert_eq!(parsed.watch_dir, Some(PathBuf::from("samples")));
+        assert_eq!(
+            parsed.data_bind_json,
+            Some(PathBuf::from("samples/bucket_catcher/data/config.json"))
+        );
+        assert_eq!(
+            parsed.data_bind_struct_meta,
+            Some(PathBuf::from(
+                "samples/bucket_catcher/data/config.struct-meta.json"
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_play_cli_args_rejects_incomplete_data_bind_flag() {
+        let args = vec![
+            "samples/bucket_catcher.stasis".to_string(),
+            "--data-bind".to_string(),
+            "samples/bucket_catcher/data/config.json".to_string(),
+        ];
+        let error = parse_play_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("missing values for --data-bind"));
     }
 
     #[test]
