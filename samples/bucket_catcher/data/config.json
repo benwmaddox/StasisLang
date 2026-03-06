@@ -1,0 +1,25 @@
+{
+  "config": {
+    "json_loaded": true,
+    "screen_width": 800,
+    "screen_height": 600,
+    "font_path": "C:/Windows/Fonts/consola.ttf",
+    "font_size_pixels": 24,
+    "bucket_sprite_path": "bucket_catcher/assets/bucket.svg",
+    "ball_sprite_path": "bucket_catcher/assets/ball.svg",
+    "bucket_width": 150,
+    "bucket_height": 42,
+    "bucket_bottom_padding": 28,
+    "bucket_speed": 22,
+    "bucket_turn_rate": 18,
+    "ball_radius": 18,
+    "ball_fall_speed": 7,
+    "ball_spawn_ticks": 36,
+    "background_red": 0.08,
+    "background_green": 0.11,
+    "background_blue": 0.17,
+    "ui_red": 0.95,
+    "ui_green": 0.97,
+    "ui_blue": 0.90
+  }
+}
