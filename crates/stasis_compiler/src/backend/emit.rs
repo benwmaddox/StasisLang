@@ -3673,6 +3673,369 @@ pub(crate) fn emit_extern_call_for_signature(
     }
 }
 
+pub(crate) fn emit_internal_call_for_signature(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    signature: &CallSignature,
+    arg_values: &[Value],
+    arg_types: &[TypeId],
+    type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    target: &str,
+) -> Result<Option<Value>, String> {
+    if signature.extern_symbol.is_some() {
+        return Err("internal call dispatch requested for extern signature".to_string());
+    }
+
+    if let InternalCallMode::AotDirect(mode) = internal_calls {
+        return emit_aot_direct_call_for_signature(
+            builder,
+            mode,
+            signature,
+            arg_values,
+            type_table,
+            named_struct_field_types,
+        );
+    }
+
+    let function_id = signature.function_id.ok_or_else(|| {
+        format!(
+            "internal call target '{}' is missing function id metadata",
+            target
+        )
+    })?;
+    let function_id_i32 = i32::try_from(function_id).map_err(|_| {
+        format!(
+            "function id {} out of i32 range for call target '{}'",
+            function_id, target
+        )
+    })?;
+    let fn_id_value = builder.ins().iconst(types::I32, i64::from(function_id_i32));
+
+    if signature.return_type == TYPE_ID_VOID {
+        return emit_indirect_call_for_signature(
+            builder,
+            runtime_call_refs,
+            signature,
+            arg_values,
+            type_table,
+            named_struct_field_types,
+        );
+    }
+
+    if is_i32_abi_compatible_type(signature.return_type, type_table) {
+        let all_i32_abi_args = arg_types
+            .iter()
+            .all(|type_id| is_i32_abi_compatible_type(*type_id, type_table))
+            && signature
+                .params
+                .iter()
+                .all(|type_id| is_i32_abi_compatible_type(*type_id, type_table));
+        let all_f32_args = arg_types.iter().all(|type_id| *type_id == TYPE_ID_F32)
+            && signature
+                .params
+                .iter()
+                .all(|type_id| *type_id == TYPE_ID_F32);
+        let call = if all_i32_abi_args {
+            match arg_values.len() {
+                0 => Some(
+                    builder
+                        .ins()
+                        .call(runtime_call_refs.call_i32_0, &[fn_id_value]),
+                ),
+                1 => Some(
+                    builder
+                        .ins()
+                        .call(runtime_call_refs.call_i32_1, &[fn_id_value, arg_values[0]]),
+                ),
+                2 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_2,
+                    &[fn_id_value, arg_values[0], arg_values[1]],
+                )),
+                3 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_3,
+                    &[fn_id_value, arg_values[0], arg_values[1], arg_values[2]],
+                )),
+                4 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_4,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                    ],
+                )),
+                5 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_5,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                    ],
+                )),
+                6 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_6,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                        arg_values[5],
+                    ],
+                )),
+                7 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_7,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                        arg_values[5],
+                        arg_values[6],
+                    ],
+                )),
+                8 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_8,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                        arg_values[5],
+                        arg_values[6],
+                        arg_values[7],
+                    ],
+                )),
+                _ => None,
+            }
+        } else if all_f32_args {
+            match arg_values.len() {
+                0 => Some(
+                    builder
+                        .ins()
+                        .call(runtime_call_refs.call_i32_0, &[fn_id_value]),
+                ),
+                1 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_f32_1,
+                    &[fn_id_value, arg_values[0]],
+                )),
+                2 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_f32_2,
+                    &[fn_id_value, arg_values[0], arg_values[1]],
+                )),
+                3 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_f32_3,
+                    &[fn_id_value, arg_values[0], arg_values[1], arg_values[2]],
+                )),
+                4 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_f32_4,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                    ],
+                )),
+                5 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_f32_5,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                    ],
+                )),
+                6 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_f32_6,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                        arg_values[5],
+                    ],
+                )),
+                7 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_f32_7,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                        arg_values[5],
+                        arg_values[6],
+                    ],
+                )),
+                8 => Some(builder.ins().call(
+                    runtime_call_refs.call_i32_f32_8,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                        arg_values[5],
+                        arg_values[6],
+                        arg_values[7],
+                    ],
+                )),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(call) = call {
+            if signature.return_type == TYPE_ID_VOID {
+                return Ok(None);
+            }
+            let value = builder
+                .inst_results(call)
+                .first()
+                .copied()
+                .ok_or_else(|| format!("call target '{}' did not produce value", target))?;
+            return Ok(Some(value));
+        }
+    } else if signature.return_type == TYPE_ID_F32 {
+        let call = if arg_values.is_empty() {
+            Some(
+                builder
+                    .ins()
+                    .call(runtime_call_refs.call_f32_0, &[fn_id_value]),
+            )
+        } else if arg_values.len() == 1
+            && is_i32_abi_compatible_type(signature.params[0], type_table)
+            && is_i32_abi_compatible_type(arg_types[0], type_table)
+        {
+            Some(builder.ins().call(
+                runtime_call_refs.call_f32_i32_1,
+                &[fn_id_value, arg_values[0]],
+            ))
+        } else if arg_types.iter().all(|type_id| *type_id == TYPE_ID_F32) {
+            match arg_values.len() {
+                1 => Some(
+                    builder
+                        .ins()
+                        .call(runtime_call_refs.call_f32_1, &[fn_id_value, arg_values[0]]),
+                ),
+                2 => Some(builder.ins().call(
+                    runtime_call_refs.call_f32_2,
+                    &[fn_id_value, arg_values[0], arg_values[1]],
+                )),
+                3 => Some(builder.ins().call(
+                    runtime_call_refs.call_f32_3,
+                    &[fn_id_value, arg_values[0], arg_values[1], arg_values[2]],
+                )),
+                4 => Some(builder.ins().call(
+                    runtime_call_refs.call_f32_4,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                    ],
+                )),
+                5 => Some(builder.ins().call(
+                    runtime_call_refs.call_f32_5,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                    ],
+                )),
+                6 => Some(builder.ins().call(
+                    runtime_call_refs.call_f32_6,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                        arg_values[5],
+                    ],
+                )),
+                7 => Some(builder.ins().call(
+                    runtime_call_refs.call_f32_7,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                        arg_values[5],
+                        arg_values[6],
+                    ],
+                )),
+                8 => Some(builder.ins().call(
+                    runtime_call_refs.call_f32_8,
+                    &[
+                        fn_id_value,
+                        arg_values[0],
+                        arg_values[1],
+                        arg_values[2],
+                        arg_values[3],
+                        arg_values[4],
+                        arg_values[5],
+                        arg_values[6],
+                        arg_values[7],
+                    ],
+                )),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(call) = call {
+            let value = builder
+                .inst_results(call)
+                .first()
+                .copied()
+                .ok_or_else(|| format!("call target '{}' did not produce value", target))?;
+            return Ok(Some(value));
+        }
+    } else if signature.return_type != TYPE_ID_F64 {
+        return Err(format!(
+            "unsupported return type {} for call target '{}'",
+            signature.return_type, target
+        ));
+    }
+
+    emit_indirect_call_for_signature(
+        builder,
+        runtime_call_refs,
+        signature,
+        arg_values,
+        type_table,
+        named_struct_field_types,
+    )
+}
+
 pub(crate) fn ensure_no_variable_shadowing(
     name: &str,
     values_by_name: &BTreeMap<String, LocalBinding>,
@@ -5190,28 +5553,17 @@ pub(crate) fn emit_simple_statements(
                                 &arg_values,
                             )?;
                         } else {
-                            match internal_calls {
-                                InternalCallMode::Jit => {
-                                    let _ = emit_indirect_call_for_signature(
-                                        builder,
-                                        runtime_call_refs,
-                                        signature,
-                                        &arg_values,
-                                        type_table,
-                                        named_struct_field_types,
-                                    )?;
-                                }
-                                InternalCallMode::AotDirect(mode) => {
-                                    let _ = emit_aot_direct_call_for_signature(
-                                        builder,
-                                        mode,
-                                        signature,
-                                        &arg_values,
-                                        type_table,
-                                        named_struct_field_types,
-                                    )?;
-                                }
-                            }
+                            let _ = emit_internal_call_for_signature(
+                                builder,
+                                runtime_call_refs,
+                                internal_calls,
+                                signature,
+                                &arg_values,
+                                &arg_types,
+                                type_table,
+                                named_struct_field_types,
+                                target,
+                            )?;
                         }
                         continue;
                     }
@@ -6901,422 +7253,23 @@ pub(crate) fn emit_simple_expression(
                     type_id: signature.return_type,
                 });
             }
-            if let InternalCallMode::AotDirect(mode) = internal_calls {
-                let result = emit_aot_direct_call_for_signature(
-                    builder,
-                    mode,
-                    signature,
-                    &arg_values,
-                    type_table,
-                    named_struct_field_types,
-                )?;
-                let value = result.ok_or_else(|| {
-                    format!(
-                        "void call target '{}' cannot be used in value expression",
-                        target
-                    )
-                })?;
-                return Ok(ValueBinding {
-                    value,
-                    type_id: signature.return_type,
-                });
-            }
-            let function_id = signature.function_id.ok_or_else(|| {
+            let value = emit_internal_call_for_signature(
+                builder,
+                runtime_call_refs,
+                internal_calls,
+                signature,
+                &arg_values,
+                &arg_types,
+                type_table,
+                named_struct_field_types,
+                target,
+            )?
+            .ok_or_else(|| {
                 format!(
-                    "internal call target '{}' is missing function id metadata",
+                    "void call target '{}' cannot be used in value expression",
                     target
                 )
             })?;
-            let function_id_i32 = i32::try_from(function_id).map_err(|_| {
-                format!(
-                    "function id {} out of i32 range for call target '{}'",
-                    function_id, target
-                )
-            })?;
-            let fn_id_value = builder.ins().iconst(types::I32, i64::from(function_id_i32));
-            let call = if is_i32_abi_compatible_type(signature.return_type, type_table) {
-                let all_i32_abi_args = arg_types
-                    .iter()
-                    .all(|type_id| is_i32_abi_compatible_type(*type_id, type_table))
-                    && signature
-                        .params
-                        .iter()
-                        .all(|type_id| is_i32_abi_compatible_type(*type_id, type_table));
-                let all_f32_args = arg_types.iter().all(|type_id| *type_id == TYPE_ID_F32)
-                    && signature
-                        .params
-                        .iter()
-                        .all(|type_id| *type_id == TYPE_ID_F32);
-                if all_i32_abi_args {
-                    match arg_values.len() {
-                        0 => builder
-                            .ins()
-                            .call(runtime_call_refs.call_i32_0, &[fn_id_value]),
-                        1 => builder
-                            .ins()
-                            .call(runtime_call_refs.call_i32_1, &[fn_id_value, arg_values[0]]),
-                        2 => builder.ins().call(
-                            runtime_call_refs.call_i32_2,
-                            &[fn_id_value, arg_values[0], arg_values[1]],
-                        ),
-                        3 => builder.ins().call(
-                            runtime_call_refs.call_i32_3,
-                            &[fn_id_value, arg_values[0], arg_values[1], arg_values[2]],
-                        ),
-                        4 => builder.ins().call(
-                            runtime_call_refs.call_i32_4,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                            ],
-                        ),
-                        5 => builder.ins().call(
-                            runtime_call_refs.call_i32_5,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                            ],
-                        ),
-                        6 => builder.ins().call(
-                            runtime_call_refs.call_i32_6,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                                arg_values[5],
-                            ],
-                        ),
-                        7 => builder.ins().call(
-                            runtime_call_refs.call_i32_7,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                                arg_values[5],
-                                arg_values[6],
-                            ],
-                        ),
-                        8 => builder.ins().call(
-                            runtime_call_refs.call_i32_8,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                                arg_values[5],
-                                arg_values[6],
-                                arg_values[7],
-                            ],
-                        ),
-                        _ => {
-                            let value = emit_indirect_call_for_signature(
-                                builder,
-                                runtime_call_refs,
-                                signature,
-                                &arg_values,
-                                type_table,
-                                named_struct_field_types,
-                            )?
-                            .ok_or_else(|| {
-                                format!("call target '{}' did not produce value", target)
-                            })?;
-                            return Ok(ValueBinding {
-                                value,
-                                type_id: signature.return_type,
-                            });
-                        }
-                    }
-                } else if all_f32_args {
-                    match arg_values.len() {
-                        0 => builder
-                            .ins()
-                            .call(runtime_call_refs.call_i32_0, &[fn_id_value]),
-                        1 => builder.ins().call(
-                            runtime_call_refs.call_i32_f32_1,
-                            &[fn_id_value, arg_values[0]],
-                        ),
-                        2 => builder.ins().call(
-                            runtime_call_refs.call_i32_f32_2,
-                            &[fn_id_value, arg_values[0], arg_values[1]],
-                        ),
-                        3 => builder.ins().call(
-                            runtime_call_refs.call_i32_f32_3,
-                            &[fn_id_value, arg_values[0], arg_values[1], arg_values[2]],
-                        ),
-                        4 => builder.ins().call(
-                            runtime_call_refs.call_i32_f32_4,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                            ],
-                        ),
-                        5 => builder.ins().call(
-                            runtime_call_refs.call_i32_f32_5,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                            ],
-                        ),
-                        6 => builder.ins().call(
-                            runtime_call_refs.call_i32_f32_6,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                                arg_values[5],
-                            ],
-                        ),
-                        7 => builder.ins().call(
-                            runtime_call_refs.call_i32_f32_7,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                                arg_values[5],
-                                arg_values[6],
-                            ],
-                        ),
-                        8 => builder.ins().call(
-                            runtime_call_refs.call_i32_f32_8,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                                arg_values[5],
-                                arg_values[6],
-                                arg_values[7],
-                            ],
-                        ),
-                        _ => {
-                            let value = emit_indirect_call_for_signature(
-                                builder,
-                                runtime_call_refs,
-                                signature,
-                                &arg_values,
-                                type_table,
-                                named_struct_field_types,
-                            )?
-                            .ok_or_else(|| {
-                                format!("call target '{}' did not produce value", target)
-                            })?;
-                            return Ok(ValueBinding {
-                                value,
-                                type_id: signature.return_type,
-                            });
-                        }
-                    }
-                } else {
-                    let result = if signature.extern_symbol.is_some() {
-                        emit_extern_call_for_signature(
-                            builder,
-                            runtime_call_refs,
-                            signature,
-                            &arg_values,
-                        )?
-                    } else {
-                        emit_indirect_call_for_signature(
-                            builder,
-                            runtime_call_refs,
-                            signature,
-                            &arg_values,
-                            type_table,
-                            named_struct_field_types,
-                        )?
-                    };
-                    let value = result
-                        .ok_or_else(|| format!("call target '{}' did not produce value", target))?;
-                    return Ok(ValueBinding {
-                        value,
-                        type_id: signature.return_type,
-                    });
-                }
-            } else if signature.return_type == TYPE_ID_F32 {
-                if arg_values.is_empty() {
-                    builder
-                        .ins()
-                        .call(runtime_call_refs.call_f32_0, &[fn_id_value])
-                } else if arg_values.len() == 1
-                    && is_i32_abi_compatible_type(signature.params[0], type_table)
-                    && is_i32_abi_compatible_type(arg_types[0], type_table)
-                {
-                    builder.ins().call(
-                        runtime_call_refs.call_f32_i32_1,
-                        &[fn_id_value, arg_values[0]],
-                    )
-                } else {
-                    if !arg_types.iter().all(|type_id| *type_id == TYPE_ID_F32) {
-                        let result = if signature.extern_symbol.is_some() {
-                            emit_extern_call_for_signature(
-                                builder,
-                                runtime_call_refs,
-                                signature,
-                                &arg_values,
-                            )?
-                        } else {
-                            emit_indirect_call_for_signature(
-                                builder,
-                                runtime_call_refs,
-                                signature,
-                                &arg_values,
-                                type_table,
-                                named_struct_field_types,
-                            )?
-                        };
-                        let value = result.ok_or_else(|| {
-                            format!("call target '{}' did not produce value", target)
-                        })?;
-                        return Ok(ValueBinding {
-                            value,
-                            type_id: signature.return_type,
-                        });
-                    }
-                    match arg_values.len() {
-                        1 => builder
-                            .ins()
-                            .call(runtime_call_refs.call_f32_1, &[fn_id_value, arg_values[0]]),
-                        2 => builder.ins().call(
-                            runtime_call_refs.call_f32_2,
-                            &[fn_id_value, arg_values[0], arg_values[1]],
-                        ),
-                        3 => builder.ins().call(
-                            runtime_call_refs.call_f32_3,
-                            &[fn_id_value, arg_values[0], arg_values[1], arg_values[2]],
-                        ),
-                        4 => builder.ins().call(
-                            runtime_call_refs.call_f32_4,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                            ],
-                        ),
-                        5 => builder.ins().call(
-                            runtime_call_refs.call_f32_5,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                            ],
-                        ),
-                        6 => builder.ins().call(
-                            runtime_call_refs.call_f32_6,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                                arg_values[5],
-                            ],
-                        ),
-                        7 => builder.ins().call(
-                            runtime_call_refs.call_f32_7,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                                arg_values[5],
-                                arg_values[6],
-                            ],
-                        ),
-                        8 => builder.ins().call(
-                            runtime_call_refs.call_f32_8,
-                            &[
-                                fn_id_value,
-                                arg_values[0],
-                                arg_values[1],
-                                arg_values[2],
-                                arg_values[3],
-                                arg_values[4],
-                                arg_values[5],
-                                arg_values[6],
-                                arg_values[7],
-                            ],
-                        ),
-                        _ => {
-                            let value = emit_indirect_call_for_signature(
-                                builder,
-                                runtime_call_refs,
-                                signature,
-                                &arg_values,
-                                type_table,
-                                named_struct_field_types,
-                            )?
-                            .ok_or_else(|| {
-                                format!("call target '{}' did not produce value", target)
-                            })?;
-                            return Ok(ValueBinding {
-                                value,
-                                type_id: signature.return_type,
-                            });
-                        }
-                    }
-                }
-            } else if signature.return_type == TYPE_ID_F64 {
-                let value = emit_indirect_call_for_signature(
-                    builder,
-                    runtime_call_refs,
-                    signature,
-                    &arg_values,
-                    type_table,
-                    named_struct_field_types,
-                )?
-                .ok_or_else(|| format!("call target '{}' did not produce value", target))?;
-                return Ok(ValueBinding {
-                    value,
-                    type_id: TYPE_ID_F64,
-                });
-            } else {
-                return Err(format!(
-                    "unsupported return type {} for call target '{}'",
-                    signature.return_type, target
-                ));
-            };
-            let results = builder.inst_results(call);
-            let value = results
-                .first()
-                .copied()
-                .ok_or_else(|| format!("call to '{}' produced no value", target))?;
             Ok(ValueBinding {
                 value,
                 type_id: signature.return_type,
