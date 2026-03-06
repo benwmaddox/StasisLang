@@ -1,0 +1,175 @@
+{
+  "version": 1,
+  "globalName": "state",
+  "totalSize": 0,
+  "fields": [
+    {
+      "name": "state__config__json_loaded",
+      "jsonPath": "config.json_loaded",
+      "offset": 0,
+      "size": 1,
+      "type": "bool",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__screen_width",
+      "jsonPath": "config.screen_width",
+      "offset": 4,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__screen_height",
+      "jsonPath": "config.screen_height",
+      "offset": 8,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__font_path",
+      "jsonPath": "config.font_path",
+      "offset": 12,
+      "size": 268,
+      "type": "string",
+      "arrayCount": 256
+    },
+    {
+      "name": "state__config__font_size_pixels",
+      "jsonPath": "config.font_size_pixels",
+      "offset": 280,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__bucket_sprite_path",
+      "jsonPath": "config.bucket_sprite_path",
+      "offset": 284,
+      "size": 268,
+      "type": "string",
+      "arrayCount": 256
+    },
+    {
+      "name": "state__config__ball_sprite_path",
+      "jsonPath": "config.ball_sprite_path",
+      "offset": 552,
+      "size": 268,
+      "type": "string",
+      "arrayCount": 256
+    },
+    {
+      "name": "state__config__bucket_width",
+      "jsonPath": "config.bucket_width",
+      "offset": 820,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__bucket_height",
+      "jsonPath": "config.bucket_height",
+      "offset": 824,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__bucket_bottom_padding",
+      "jsonPath": "config.bucket_bottom_padding",
+      "offset": 828,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__bucket_speed",
+      "jsonPath": "config.bucket_speed",
+      "offset": 832,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__bucket_turn_rate",
+      "jsonPath": "config.bucket_turn_rate",
+      "offset": 836,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__ball_radius",
+      "jsonPath": "config.ball_radius",
+      "offset": 840,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__ball_fall_speed",
+      "jsonPath": "config.ball_fall_speed",
+      "offset": 844,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__ball_spawn_ticks",
+      "jsonPath": "config.ball_spawn_ticks",
+      "offset": 848,
+      "size": 4,
+      "type": "i32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__background_red",
+      "jsonPath": "config.background_red",
+      "offset": 852,
+      "size": 4,
+      "type": "f32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__background_green",
+      "jsonPath": "config.background_green",
+      "offset": 856,
+      "size": 4,
+      "type": "f32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__background_blue",
+      "jsonPath": "config.background_blue",
+      "offset": 860,
+      "size": 4,
+      "type": "f32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__ui_red",
+      "jsonPath": "config.ui_red",
+      "offset": 864,
+      "size": 4,
+      "type": "f32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__ui_green",
+      "jsonPath": "config.ui_green",
+      "offset": 868,
+      "size": 4,
+      "type": "f32",
+      "arrayCount": 1
+    },
+    {
+      "name": "state__config__ui_blue",
+      "jsonPath": "config.ui_blue",
+      "offset": 872,
+      "size": 4,
+      "type": "f32",
+      "arrayCount": 1
+    }
+  ]
+}

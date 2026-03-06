@@ -18,6 +18,8 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // - The runtime runner binds matching keys into the global state (see --data-bind).
 // - We require JSON binding; json_loaded must be true.
 // - json_loaded stays false unless the JSON file explicitly sets it to true.
+// - Example:
+//   stasis.exe play samples/bucket_catcher.stasis --watch-dir samples --data-bind samples/bucket_catcher/data/config.json samples/bucket_catcher/data/config.struct-meta.json
 
 const MAX_BALLS: i32 = 24;
 
