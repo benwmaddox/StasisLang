@@ -240,6 +240,45 @@ fn resolve_play_sidecar_path(path: &Path, launch_dir: &Path) -> PathBuf {
     launch_dir.join(path)
 }
 
+fn resolve_play_data_binding_paths(
+    watch_file: &Path,
+    launch_dir: &Path,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    match (data_bind_json, data_bind_struct_meta) {
+        (Some(json_path), Some(struct_meta_path)) => {
+            return Ok(Some((
+                resolve_play_sidecar_path(json_path, launch_dir),
+                resolve_play_sidecar_path(struct_meta_path, launch_dir),
+            )));
+        }
+        (None, None) => {}
+        _ => return Err("play data binding requires both json and struct-meta paths".to_string()),
+    }
+
+    let watch_file_path = resolve_play_sidecar_path(watch_file, launch_dir);
+    let Some(file_stem) = watch_file_path.file_stem() else {
+        return Ok(None);
+    };
+    let base_dir = watch_file_path.parent().unwrap_or(launch_dir);
+    let auto_root = base_dir.join(file_stem);
+    let json_path = auto_root.join("data").join("config.json");
+    let struct_meta_path = auto_root.join("data").join("config.struct-meta.json");
+
+    if json_path.exists() && struct_meta_path.exists() {
+        return Ok(Some((json_path, struct_meta_path)));
+    }
+    if !json_path.exists() && !struct_meta_path.exists() {
+        return Ok(None);
+    }
+    Err(format!(
+        "play auto data binding requires both sidecars; looked for {} and {}",
+        json_path.display(),
+        struct_meta_path.display()
+    ))
+}
+
 fn json_value_by_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
     if path.is_empty() {
         return Some(root);
@@ -497,14 +536,12 @@ pub fn run_play_in_process(
     let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
     let launch_dir = std::env::current_dir()
         .map_err(|error| format!("failed to read current directory before play launch: {error}"))?;
-    let data_binding_paths = match (data_bind_json, data_bind_struct_meta) {
-        (Some(json_path), Some(struct_meta_path)) => Some((
-            resolve_play_sidecar_path(json_path, &launch_dir),
-            resolve_play_sidecar_path(struct_meta_path, &launch_dir),
-        )),
-        (None, None) => None,
-        _ => return Err("play data binding requires both json and struct-meta paths".to_string()),
-    };
+    let data_binding_paths = resolve_play_data_binding_paths(
+        watch_file,
+        &launch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+    )?;
 
     // Make relative asset paths (e.g. "assets/ball.svg") resolve against the game directory.
     // Use the watch dir so dev workflows stay consistent across `stasis.exe` launch locations.
@@ -2218,6 +2255,52 @@ mod tests {
         let error =
             apply_play_data_binding_value(&root, &metadata).expect_err("binding should fail");
         assert!(error.contains("unsupported struct-meta version"));
+    }
+
+    #[test]
+    fn resolve_play_data_binding_paths_auto_discovers_bucket_layout() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_auto_{stamp}"));
+        let sample_dir = temp_root.join("samples");
+        let watch_file = sample_dir.join("bucket_catcher.stasis");
+        let data_dir = sample_dir.join("bucket_catcher").join("data");
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        fs::write(&watch_file, "function main(): i32 { return 0; }\n").expect("write watch file");
+        fs::write(data_dir.join("config.json"), "{}\n").expect("write json");
+        fs::write(data_dir.join("config.struct-meta.json"), "{}\n").expect("write struct meta");
+
+        let resolved = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
+            .expect("auto discovery should succeed")
+            .expect("expected auto binding paths");
+
+        assert_eq!(resolved.0, data_dir.join("config.json"));
+        assert_eq!(resolved.1, data_dir.join("config.struct-meta.json"));
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn resolve_play_data_binding_paths_errors_on_partial_auto_sidecars() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_partial_{stamp}"));
+        let sample_dir = temp_root.join("samples");
+        let watch_file = sample_dir.join("bucket_catcher.stasis");
+        let data_dir = sample_dir.join("bucket_catcher").join("data");
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        fs::write(&watch_file, "function main(): i32 { return 0; }\n").expect("write watch file");
+        fs::write(data_dir.join("config.json"), "{}\n").expect("write json");
+
+        let error = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
+            .expect_err("partial sidecars should fail");
+        assert!(error.contains("play auto data binding requires both sidecars"));
+
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]
