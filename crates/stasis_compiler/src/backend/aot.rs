@@ -849,10 +849,46 @@ fn build_engine_bundle_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::jit::JitProcess;
     use crate::backend::EngineEntrypoints;
     use std::process::Command;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(windows)]
+    fn run_linked_i32_noarg_fixture(
+        process: &AotProcess,
+        function_name: &str,
+        label: &str,
+        link_config: &stasis_jit::AotLinkConfig,
+    ) -> Option<i32> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_fixture_{label}_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let exe_path = temp_root.join(format!("{function_name}_{label}.exe"));
+        let link_result =
+            process.link_executable_for_i32_noarg_function(function_name, &exe_path, link_config);
+        if let Err(ref message) = link_result {
+            if message.contains("undefined symbol") {
+                eprintln!(
+                    "skipping AOT parity fixture '{label}': runtime symbols not available at link time"
+                );
+                let _ = fs::remove_dir_all(&temp_root);
+                return None;
+            }
+        }
+        link_result.expect("link executable");
+
+        let status = Command::new(&exe_path)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let code = status.code().expect("expected process exit code");
+        let _ = fs::remove_dir_all(&temp_root);
+        Some(code)
+    }
 
     #[test]
     fn aot_process_runs_full_compile_and_records_objects() {
@@ -1323,6 +1359,47 @@ mod tests {
             "expected executable to return exit code 10"
         );
         let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_and_jit_match_internal_call_fixture_results() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+
+        let cases = [
+            (
+                "value_call",
+                "function helper(): i32 { return 9; }\nfunction main(): i32 { return helper() + 1; }\n",
+            ),
+            (
+                "void_call_statement",
+                "function helper(): void { return; }\nfunction main(): i32 { helper(); return 7; }\n",
+            ),
+        ];
+
+        for (label, source) in cases {
+            let mut jit = JitProcess::new();
+            jit.upsert_file("sample.stasis", source);
+            jit.compile().expect("jit compile");
+            let jit_result = jit
+                .execute_i32_noarg_by_name("main")
+                .unwrap_or_else(|error| panic!("jit execute {label}: {error}"));
+
+            let mut aot = AotProcess::new();
+            aot.upsert_file("sample.stasis", source);
+            aot.compile().expect("aot compile");
+            let Some(aot_result) = run_linked_i32_noarg_fixture(&aot, "main", label, &link_config)
+            else {
+                return;
+            };
+
+            assert_eq!(
+                aot_result, jit_result,
+                "AOT/JIT mismatch for internal call fixture '{label}'"
+            );
+        }
     }
 
     #[cfg(windows)]
