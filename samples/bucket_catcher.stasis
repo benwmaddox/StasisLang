@@ -15,11 +15,12 @@ import "../src/stdlib/sdl_scancodes.stasis";
 //
 // Config binding:
 // - A JSON file at samples/bucket_catcher/data/config.json can populate state.config.
-// - The runtime runner binds matching keys into the global state (see --data-bind).
+// - The runtime runner auto-binds matching sidecars from bucket_catcher/data/.
+// - Use --data-bind only to override the default sidecar paths.
 // - We require JSON binding; json_loaded must be true.
 // - json_loaded stays false unless the JSON file explicitly sets it to true.
 // - Example:
-//   stasis.exe play samples/bucket_catcher.stasis --watch-dir samples --data-bind samples/bucket_catcher/data/config.json samples/bucket_catcher/data/config.struct-meta.json
+//   stasis.exe play samples/bucket_catcher.stasis --watch-dir samples
 
 const MAX_BALLS: i32 = 24;
 
