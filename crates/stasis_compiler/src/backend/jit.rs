@@ -469,31 +469,9 @@ impl JitProcess {
         &mut self,
         extern_signatures: &[ExternCallSignature],
     ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), String> {
-        let mut resolved = Vec::with_capacity(extern_signatures.len());
-        let mut symbol_addresses: ExternSymbolAddressMap = BTreeMap::new();
-        for signature in extern_signatures {
-            let mut selected: Option<(String, usize)> = None;
-            for candidate in &signature.symbol_candidates {
-                if let Some(address) = self.resolve_host_symbol_address(candidate) {
-                    selected = Some((candidate.clone(), address));
-                    break;
-                }
-            }
-            let Some((symbol, address)) = selected else {
-                return Err(format!(
-                    "unresolved extern call target '{}' with candidates {:?}",
-                    signature.name, signature.symbol_candidates
-                ));
-            };
-            symbol_addresses.insert(symbol.clone(), address);
-            resolved.push(ResolvedExternCallSignature {
-                name: signature.name.clone(),
-                params: signature.params.clone(),
-                return_type: signature.return_type,
-                symbol,
-            });
-        }
-        Ok((resolved, symbol_addresses))
+        resolve_extern_call_signatures_with(extern_signatures, |_signature, candidate| {
+            self.resolve_host_symbol_address(candidate)
+        })
     }
 
     fn resolve_host_symbol_address(&mut self, symbol: &str) -> Option<usize> {
