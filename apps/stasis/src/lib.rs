@@ -278,7 +278,6 @@ fn resolve_play_data_binding_paths(
         struct_meta_path.display()
     ))
 }
-
 fn json_value_by_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
     if path.is_empty() {
         return Some(root);

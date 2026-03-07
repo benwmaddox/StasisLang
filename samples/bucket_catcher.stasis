@@ -19,8 +19,10 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // - Use --data-bind only to override the default sidecar paths.
 // - We require JSON binding; json_loaded must be true.
 // - json_loaded stays false unless the JSON file explicitly sets it to true.
-// - Example:
+// - Example (auto-discovery):
 //   stasis.exe play samples/bucket_catcher.stasis --watch-dir samples
+// - Example (explicit override):
+//   stasis.exe play samples/bucket_catcher.stasis --watch-dir samples --data-bind samples/bucket_catcher/data/config.json samples/bucket_catcher/data/config.struct-meta.json
 
 const MAX_BALLS: i32 = 24;
 
