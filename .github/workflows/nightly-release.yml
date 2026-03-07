@@ -152,10 +152,10 @@ jobs:
         run: |
           $out = "dist/${{ matrix.archive }}"
           New-Item -ItemType Directory -Force -Path "$out/bin" | Out-Null
-          Copy-Item "target/${{ matrix.rust_target }}/release/stasis.exe" "$out/bin/" -Force
+          Copy-Item "target/${{ matrix.rust_target }}/release/stasis.exe" "$out/" -Force
           Copy-Item "tools/cranelift-aot/target/${{ matrix.rust_target }}/release/stasis-cranelift-aot.exe" "$out/bin/" -Force
-          # Include the graphics runtime DLL so `stasis play` works out of the box on Windows.
-          Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/bin/" -Force
+          # Keep the runtime DLL beside stasis.exe so `stasis.exe play ...` works from the archive root.
+          Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/" -Force
           Copy-Item README.md "$out/" -Force
           Copy-Item LICENSE "$out/" -Force
           # Ship the stdlib + samples so relative imports keep working in the bundle.
@@ -169,9 +169,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
-          Push-Location "dist/${{ matrix.archive }}/bin"
+          Push-Location "dist/${{ matrix.archive }}"
           .\stasis.exe probe-graphics-runtime
-          .\stasis-cranelift-aot.exe --help | Out-Null
+          .\bin\stasis-cranelift-aot.exe --help | Out-Null
           Pop-Location
 
       - name: Upload packaged artifact
