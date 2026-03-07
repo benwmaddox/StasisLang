@@ -41,6 +41,19 @@ Nightly releases are published from `main`:
 - Releases: https://github.com/benwmaddox/StasisLang/releases
 - Workflow: `.github/workflows/nightly-release.yml`
 
+Windows release zip layout:
+
+- `stasis.exe` at the archive root
+- `stasis_graphics.dll` at the archive root
+- `bin/stasis-cranelift-aot.exe`
+- `src/` and `samples/` at the archive root
+
+That keeps the common Windows command simple:
+
+```powershell
+.\stasis.exe play samples\bucket_catcher.stasis
+```
+
 On Windows, SmartScreen may warn on unsigned binaries.
 
 ## Hello, World
@@ -120,7 +133,7 @@ Development runs in one process:
 Run Brickout Revenge v1 (Windows in-process dev runner):
 
 ```powershell
-cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis --watch-dir samples\brickout_revenge
+cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis
 ```
 
 Edit and save any `.stasis` file in the current import/dependency graph. You should see output like:
@@ -133,6 +146,7 @@ Edit and save any `.stasis` file in the current import/dependency graph. You sho
 Notes:
 
 - `play` is currently Windows-focused (graphics runtime integration).
+- If `--watch-dir` is omitted, `play` watches the entry file's parent directory by default.
 - You can cap runtime for smoke testing with `--ticks N`.
 
 ## Tests (In Stasis, Run via JIT)
@@ -173,6 +187,17 @@ Current intentional language/runtime constraints:
 cargo build
 cargo test
 ```
+
+On Windows, `play` also needs the native graphics runtime DLL:
+
+```powershell
+runtime\build.bat
+cargo build -p stasis --release
+```
+
+After the runtime exists under the repo (`runtime/build/...` or `runtime/build_ci/...`), the
+`stasis` build automatically stages `stasis_graphics.dll` next to `stasis.exe` so you can run
+`play` from the built output without manually copying the DLL.
 
 ## Where Things Live
 

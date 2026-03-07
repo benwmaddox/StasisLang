@@ -105,19 +105,15 @@ New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
 Invoke-WebRequest -Headers $headers -Uri $assetUrl -OutFile $zipPath
 Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
 
-$cliExePath = Join-Path $extractDir "Stasis.Cli.exe"
-if (-not (Test-Path $cliExePath)) {
-    throw "Extracted bundle does not contain Stasis.Cli.exe at $cliExePath"
+$stasisExePath = Join-Path $extractDir "stasis.exe"
+if (-not (Test-Path $stasisExePath)) {
+    throw "Extracted bundle does not contain stasis.exe at $stasisExePath"
 }
 
-$stasisBatPath = Join-Path $extractDir "stasis.bat"
-$stasisBatContent = @"
-@echo off
-setlocal
-"%~dp0Stasis.Cli.exe" %*
-exit /b %ERRORLEVEL%
-"@
-Set-Content -Path $stasisBatPath -Value $stasisBatContent -Encoding ASCII
+$graphicsDllPath = Join-Path $extractDir "stasis_graphics.dll"
+if (-not (Test-Path $graphicsDllPath)) {
+    throw "Extracted bundle does not contain stasis_graphics.dll at $graphicsDllPath"
+}
 
 $runFile = Join-Path $extractDir "smoke_run.stasis"
 $testFile = Join-Path $extractDir "smoke_test.stasis"
@@ -147,16 +143,20 @@ $env:STASIS_CRANELIFT_AOT = $craneliftAotExe
 Push-Location $extractDir
 try {
     Invoke-CheckedCommand -Description "Running stasis run smoke_run.stasis" -ExpectedExitCode 7 -Action {
-        & $stasisBatPath run $runFile --backend cranelift --no-cranelift-runner
+        & $stasisExePath run $runFile --backend cranelift --no-cranelift-runner
     }
     Invoke-CheckedCommand -Description "Running stasis build smoke_run.stasis" -Action {
-        & $stasisBatPath build $runFile --backend cranelift --out $buildOut
+        & $stasisExePath build $runFile --backend cranelift --out $buildOut
     }
     if (-not (Test-Path $buildOut)) {
         throw "stasis build did not produce expected output: $buildOut"
     }
+    Invoke-CheckedCommand -Description "Running stasis.exe probe-graphics-runtime" -Action {
+        Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
+        & $stasisExePath probe-graphics-runtime
+    }
     Invoke-CheckedCommand -Description "Running stasis test smoke_test.stasis" -Action {
-        & $stasisBatPath test $testFile --backend cranelift --no-cranelift-runner
+        & $stasisExePath test $testFile --backend cranelift --no-cranelift-runner
     }
 }
 finally {
@@ -165,4 +165,4 @@ finally {
 
 Write-Host "Release CLI bundle validation succeeded for tag $tag."
 Write-Host "Bundle location: $extractDir"
-Write-Host "Launcher path: $stasisBatPath"
+Write-Host "Launcher path: $stasisExePath"

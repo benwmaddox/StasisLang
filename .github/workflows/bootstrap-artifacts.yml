@@ -88,10 +88,10 @@ jobs:
         run: |
           $out = "dist/stasis-release-${{ runner.os }}"
           New-Item -ItemType Directory -Force -Path "$out/bin" | Out-Null
-          Copy-Item "target/release/stasis.exe" "$out/bin/" -Force
+          Copy-Item "target/release/stasis.exe" "$out/" -Force
           Copy-Item "tools/cranelift-aot/target/release/stasis-cranelift-aot.exe" "$out/bin/" -Force
-          # Include the graphics runtime DLL so `stasis play` works out of the box on Windows.
-          Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/bin/" -Force
+          # Keep the runtime DLL beside stasis.exe so `stasis.exe play ...` works from the archive root.
+          Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/" -Force
           Copy-Item README.md "$out/" -Force
           Copy-Item LICENSE "$out/" -Force
           Copy-Item src "$out/" -Recurse -Force
@@ -104,9 +104,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
-          Push-Location "dist/stasis-release-${{ runner.os }}/bin"
+          Push-Location "dist/stasis-release-${{ runner.os }}"
           .\stasis.exe probe-graphics-runtime
-          .\stasis-cranelift-aot.exe --help | Out-Null
+          .\bin\stasis-cranelift-aot.exe --help | Out-Null
           Pop-Location
 
       - name: Upload artifact (unix)
