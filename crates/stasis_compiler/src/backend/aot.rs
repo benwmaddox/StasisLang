@@ -1,13 +1,11 @@
 use crate::backend::emit::*;
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
-use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32, TYPE_ID_VOID};
+use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32};
 use crate::ir::hir::FunctionHIR;
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Value};
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_module::{default_libcall_names, Linkage, Module};
+use cranelift_module::{default_libcall_names, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -517,230 +515,34 @@ fn compile_function_to_object_bytes(
         default_libcall_names(),
     )
     .map_err(|error| format!("failed to construct object builder: {error}"))?;
-    let mut module = ObjectModule::new(builder);
-    let mut context = module.make_context();
-    context.func.signature = module.make_signature();
-    for param_type in &meta.params {
-        append_abi_params_for_type_id(
-            &mut context.func.signature.params,
-            *param_type,
-            type_table,
-            named_struct_field_types,
-        )?;
-    }
-    if meta.return_type != TYPE_ID_VOID {
-        let clif_return_type =
-            clif_type_for_type_id(meta.return_type, type_table).map_err(|_| {
-                format!(
-                    "unsupported AOT return type id {} for function {}",
-                    meta.return_type, meta.name
-                )
-            })?;
-        context
-            .func
-            .signature
-            .returns
-            .push(AbiParam::new(clif_return_type));
-    }
-
-    let function_id = module
-        .declare_function(symbol, Linkage::Export, &context.func.signature)
-        .map_err(|error| format!("failed to declare AOT function {symbol}: {error}"))?;
-    let runtime_call_imports = build_runtime_call_import_ids(
-        &mut module,
+    compile_function_with_module(
+        ObjectModule::new(builder),
+        meta,
+        hir,
+        symbol,
+        SharedCompileBackendMode::AotDirect,
         call_signatures,
         type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
         named_struct_field_types,
-    )?;
-
-    let mut function_builder_context = FunctionBuilderContext::new();
-    {
-        let mut builder = FunctionBuilder::new(&mut context.func, &mut function_builder_context);
-        let runtime_call_refs =
-            build_runtime_call_refs(&mut module, &runtime_call_imports, builder.func);
-        let entry = builder.create_block();
-        for param_type in &meta.params {
-            if is_struct_view_type(*param_type, named_struct_field_types) {
-                for _ in 0..STRUCT_VIEW_ABI_WORDS {
-                    builder.append_block_param(entry, types::I32);
-                }
-            } else {
-                builder.append_block_param(entry, clif_type_for_type_id(*param_type, type_table)?);
-            }
-        }
-        builder.switch_to_block(entry);
-        builder.seal_block(entry);
-
-        if meta.param_names.len() != meta.params.len() {
-            return Err(format!(
-                "parameter metadata mismatch for function '{}' ({} names, {} types)",
-                meta.name,
-                meta.param_names.len(),
-                meta.params.len()
-            ));
-        }
-        let mut values_by_name: BTreeMap<String, LocalBinding> = BTreeMap::new();
-        let mut next_variable = 0u32;
-        let block_params: Vec<Value> = builder.block_params(entry).to_vec();
-        let mut block_param_cursor = 0usize;
-        for (index, name) in meta.param_names.iter().enumerate() {
-            let param_type = meta.params[index];
-            let (variable, struct_view) =
-                if is_struct_view_type(param_type, named_struct_field_types) {
-                    let base_value =
-                        block_params
-                            .get(block_param_cursor)
-                            .copied()
-                            .ok_or_else(|| {
-                                format!(
-                                    "missing struct view base parameter {} for function '{}'",
-                                    block_param_cursor, meta.name
-                                )
-                            })?;
-                    let index_value = block_params
-                        .get(block_param_cursor + 1)
-                        .copied()
-                        .ok_or_else(|| {
-                            format!(
-                                "missing struct view index parameter {} for function '{}'",
-                                block_param_cursor + 1,
-                                meta.name
-                            )
-                        })?;
-                    let len_value = block_params
-                        .get(block_param_cursor + 2)
-                        .copied()
-                        .ok_or_else(|| {
-                            format!(
-                                "missing struct view len parameter {} for function '{}'",
-                                block_param_cursor + 2,
-                                meta.name
-                            )
-                        })?;
-                    block_param_cursor += STRUCT_VIEW_ABI_WORDS;
-
-                    let base_var = declare_new_variable(
-                        &mut builder,
-                        &mut next_variable,
-                        base_value,
-                        param_type,
-                        type_table,
-                    )?;
-                    let index_var = declare_new_variable(
-                        &mut builder,
-                        &mut next_variable,
-                        index_value,
-                        TYPE_ID_I32,
-                        type_table,
-                    )?;
-                    let len_var = declare_new_variable(
-                        &mut builder,
-                        &mut next_variable,
-                        len_value,
-                        TYPE_ID_I32,
-                        type_table,
-                    )?;
-                    (base_var, Some(StructViewBinding { index_var, len_var }))
-                } else {
-                    let value = block_params
-                        .get(block_param_cursor)
-                        .copied()
-                        .ok_or_else(|| {
-                            format!(
-                                "missing block parameter {} for function '{}'",
-                                block_param_cursor, meta.name
-                            )
-                        })?;
-                    block_param_cursor = block_param_cursor.saturating_add(1);
-                    (
-                        declare_new_variable(
-                            &mut builder,
-                            &mut next_variable,
-                            value,
-                            param_type,
-                            type_table,
-                        )?,
-                        None,
-                    )
-                };
-            if values_by_name.contains_key(name) {
-                return Err(format!("parameter '{}' shadows existing variable", name));
-            }
-            values_by_name.insert(
-                name.clone(),
-                LocalBinding {
-                    var: variable,
-                    type_id: param_type,
-                    struct_view,
-                },
-            );
-        }
-        if block_param_cursor != block_params.len() {
-            return Err(format!(
-                "block parameter count mismatch for function '{}' (consumed {}, found {})",
-                meta.name,
-                block_param_cursor,
-                block_params.len()
-            ));
-        }
-
-        let empty_foreach_bindings = ForeachBindingMap::new();
-        let mut internal_calls = InternalCallMode::AotDirect(AotDirectCallMode {
-            module: &mut module,
-            self_function_id: meta.id,
-            self_clif_func_id: function_id,
-            imported_function_ids: std::collections::HashMap::new(),
-        });
-        let body = extract_function_body(hir)?;
-        let mut terminated = false;
-        parse_simple_statements_from_block_with(body, type_table, |type_table, statement| {
-            if terminated {
-                return Ok(());
-            }
-            record_string_literals_in_stmt(&statement, string_literals)?;
-            terminated = emit_simple_statements(
-                &mut builder,
-                std::slice::from_ref(&statement),
-                &mut values_by_name,
-                &runtime_call_refs,
-                &mut internal_calls,
-                call_signatures,
-                type_table,
-                global_path_types,
-                constant_values,
-                collection_infos,
-                named_struct_field_types,
-                &empty_foreach_bindings,
-                None,
-                meta.return_type,
-                &mut next_variable,
-            )?;
-            Ok(())
-        })?;
-        if !terminated {
-            if meta.return_type == TYPE_ID_VOID {
-                builder.ins().return_(&[]);
-            } else {
-                return Err(format!(
-                    "non-void function '{}' must end with a return statement",
-                    meta.name
-                ));
-            }
-        }
-        builder.finalize();
-    }
-
-    #[cfg(test)]
-    maybe_invoke_clif_dump_hook(meta, &context.func);
-
-    module
-        .define_function(function_id, &mut context)
-        .map_err(|error| format!("failed to define AOT function {symbol}: {error}"))?;
-    module.clear_context(&mut context);
-    let product = module.finish();
-    product
-        .emit()
-        .map_err(|error| format!("failed to emit AOT object bytes: {error}"))
+        |statement| record_string_literals_in_stmt(statement, string_literals),
+        |_meta, _func| {
+            #[cfg(test)]
+            maybe_invoke_clif_dump_hook(_meta, _func);
+        },
+        |mut module, function_id, mut context| {
+            module
+                .define_function(function_id, &mut context)
+                .map_err(|error| format!("failed to define AOT function {symbol}: {error}"))?;
+            module.clear_context(&mut context);
+            module
+                .finish()
+                .emit()
+                .map_err(|error| format!("failed to emit AOT object bytes: {error}"))
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1047,10 +849,46 @@ fn build_engine_bundle_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::jit::JitProcess;
     use crate::backend::EngineEntrypoints;
     use std::process::Command;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(windows)]
+    fn run_linked_i32_noarg_fixture(
+        process: &AotProcess,
+        function_name: &str,
+        label: &str,
+        link_config: &stasis_jit::AotLinkConfig,
+    ) -> Option<i32> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_fixture_{label}_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let exe_path = temp_root.join(format!("{function_name}_{label}.exe"));
+        let link_result =
+            process.link_executable_for_i32_noarg_function(function_name, &exe_path, link_config);
+        if let Err(ref message) = link_result {
+            if message.contains("undefined symbol") {
+                eprintln!(
+                    "skipping AOT parity fixture '{label}': runtime symbols not available at link time"
+                );
+                let _ = fs::remove_dir_all(&temp_root);
+                return None;
+            }
+        }
+        link_result.expect("link executable");
+
+        let status = Command::new(&exe_path)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
+        let code = status.code().expect("expected process exit code");
+        let _ = fs::remove_dir_all(&temp_root);
+        Some(code)
+    }
 
     #[test]
     fn aot_process_runs_full_compile_and_records_objects() {
@@ -1136,7 +974,10 @@ mod tests {
             .as_ref()
             .expect("compile analysis cache");
         assert_eq!(analysis.resolved_extern_signatures.len(), 1);
-        assert_eq!(analysis.resolved_extern_signatures[0].symbol, "custom_symbol");
+        assert_eq!(
+            analysis.resolved_extern_signatures[0].symbol,
+            "custom_symbol"
+        );
     }
 
     #[test]
@@ -1518,6 +1359,47 @@ mod tests {
             "expected executable to return exit code 10"
         );
         let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_and_jit_match_internal_call_fixture_results() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+
+        let cases = [
+            (
+                "value_call",
+                "function helper(): i32 { return 9; }\nfunction main(): i32 { return helper() + 1; }\n",
+            ),
+            (
+                "void_call_statement",
+                "function helper(): void { return; }\nfunction main(): i32 { helper(); return 7; }\n",
+            ),
+        ];
+
+        for (label, source) in cases {
+            let mut jit = JitProcess::new();
+            jit.upsert_file("sample.stasis", source);
+            jit.compile().expect("jit compile");
+            let jit_result = jit
+                .execute_i32_noarg_by_name("main")
+                .unwrap_or_else(|error| panic!("jit execute {label}: {error}"));
+
+            let mut aot = AotProcess::new();
+            aot.upsert_file("sample.stasis", source);
+            aot.compile().expect("aot compile");
+            let Some(aot_result) = run_linked_i32_noarg_fixture(&aot, "main", label, &link_config)
+            else {
+                return;
+            };
+
+            assert_eq!(
+                aot_result, jit_result,
+                "AOT/JIT mismatch for internal call fixture '{label}'"
+            );
+        }
     }
 
     #[cfg(windows)]
