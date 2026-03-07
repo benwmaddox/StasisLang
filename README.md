@@ -51,7 +51,7 @@ Windows release zip layout:
 That keeps the common Windows command simple:
 
 ```powershell
-.\stasis.exe play samples\bucket_catcher.stasis --watch-dir samples
+.\stasis.exe play samples\bucket_catcher.stasis
 ```
 
 On Windows, SmartScreen may warn on unsigned binaries.
@@ -133,7 +133,7 @@ Development runs in one process:
 Run Brickout Revenge v1 (Windows in-process dev runner):
 
 ```powershell
-cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis --watch-dir samples\brickout_revenge
+cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis
 ```
 
 Edit and save any `.stasis` file in the current import/dependency graph. You should see output like:
@@ -146,6 +146,7 @@ Edit and save any `.stasis` file in the current import/dependency graph. You sho
 Notes:
 
 - `play` is currently Windows-focused (graphics runtime integration).
+- If `--watch-dir` is omitted, `play` watches the entry file's parent directory by default.
 - You can cap runtime for smoke testing with `--ticks N`.
 
 ## Tests (In Stasis, Run via JIT)
