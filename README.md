@@ -174,6 +174,17 @@ cargo build
 cargo test
 ```
 
+On Windows, `play` also needs the native graphics runtime DLL:
+
+```powershell
+runtime\build.bat
+cargo build -p stasis --release
+```
+
+After the runtime exists under the repo (`runtime/build/...` or `runtime/build_ci/...`), the
+`stasis` build automatically stages `stasis_graphics.dll` next to `stasis.exe` so you can run
+`play` from the built output without manually copying the DLL.
+
 ## Where Things Live
 
 - `apps/stasis`: main app/CLI (includes `play`, `test`, `aot-cli`).

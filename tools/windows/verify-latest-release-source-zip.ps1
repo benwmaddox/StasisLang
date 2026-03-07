@@ -112,6 +112,18 @@ try {
         Invoke-CheckedCommand -Description "Running cargo build --workspace --all-targets" -Action {
             cargo build --workspace --all-targets
         }
+        if ($IsWindows) {
+            Invoke-CheckedCommand -Description "Running runtime\\build.bat" -Action {
+                cmd /c runtime\build.bat
+            }
+            Invoke-CheckedCommand -Description "Running cargo build -p stasis --release" -Action {
+                cargo build -p stasis --release
+            }
+            Invoke-CheckedCommand -Description "Running target\\release\\stasis.exe probe-graphics-runtime" -Action {
+                Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
+                .\target\release\stasis.exe probe-graphics-runtime
+            }
+        }
     }
     elseif ((Test-Path $legacyBuildBat) -and (Test-Path $legacyTestBat)) {
         $validationMode = "legacy-source"
