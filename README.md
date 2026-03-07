@@ -41,6 +41,19 @@ Nightly releases are published from `main`:
 - Releases: https://github.com/benwmaddox/StasisLang/releases
 - Workflow: `.github/workflows/nightly-release.yml`
 
+Windows release zip layout:
+
+- `stasis.exe` at the archive root
+- `stasis_graphics.dll` at the archive root
+- `bin/stasis-cranelift-aot.exe`
+- `src/` and `samples/` at the archive root
+
+That keeps the common Windows command simple:
+
+```powershell
+.\stasis.exe play samples\bucket_catcher.stasis --watch-dir samples
+```
+
 On Windows, SmartScreen may warn on unsigned binaries.
 
 ## Hello, World
