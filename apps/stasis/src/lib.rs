@@ -25,14 +25,16 @@ pub use window_config::WindowConfig;
 
 use compiler_backend::IncrementalCompilerBackend;
 use runtime_exec::RuntimeLauncher;
+use serde::Deserialize;
+use serde_json::Value;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
     AotFunctionSymbol, CompileRequest, CompileResult, CompileStatus, Diagnostic,
     DiagnosticSeverity, FileChangeEvent, FileChangeKind, FnId, FunctionPatch, FunctionPatchSet,
-    JitCodePtrOverride, LayoutHash, RequestId, SwapCommitResult, SwapCommitStatus, TargetMode,
-    TextSource,
+    JitCodePtrOverride, LayoutHash, RequestId, StateMapEntry, SwapCommitResult, SwapCommitStatus,
+    TargetMode, TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::{BTreeMap, BTreeSet};
@@ -213,6 +215,255 @@ fn hash_global_path(path: &str) -> i32 {
     hash as i32
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct PlayStructMetadata {
+    version: i32,
+    #[serde(rename = "globalName")]
+    global_name: String,
+    fields: Vec<PlayStructFieldMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct PlayStructFieldMetadata {
+    #[serde(rename = "jsonPath")]
+    json_path: String,
+    #[serde(rename = "type")]
+    type_name: String,
+    #[serde(rename = "arrayCount")]
+    array_count: i32,
+}
+
+fn resolve_play_sidecar_path(path: &Path, launch_dir: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    launch_dir.join(path)
+}
+
+fn json_value_by_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
+    if path.is_empty() {
+        return Some(root);
+    }
+
+    let mut current = root;
+    for segment in path.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+fn truncate_utf8_to_capacity(value: &str, max_bytes: usize) -> (Vec<u8>, i32) {
+    let mut out = Vec::new();
+    let mut chars = 0i32;
+    for ch in value.chars() {
+        let mut encoded = [0u8; 4];
+        let bytes = ch.encode_utf8(&mut encoded).as_bytes();
+        if out.len() + bytes.len() > max_bytes {
+            break;
+        }
+        out.extend_from_slice(bytes);
+        chars += 1;
+    }
+    (out, chars)
+}
+
+fn apply_play_bound_string(path: &str, fallback_capacity: i32, value: &str) {
+    let collection_hash = hash_global_path(path);
+    let seeded_capacity = stasis_dynload::stasis_jit_collection_i32_load(collection_hash, 2);
+    let capacity = if seeded_capacity > 0 {
+        seeded_capacity as usize
+    } else if fallback_capacity > 0 {
+        fallback_capacity as usize
+    } else {
+        0
+    };
+    if capacity == 0 {
+        return;
+    }
+
+    let max_copy = capacity.saturating_sub(1);
+    let (bytes, char_count) = truncate_utf8_to_capacity(value, max_copy);
+    for index in 0..capacity {
+        stasis_dynload::stasis_jit_global_i32_array_store(collection_hash, 0, index as i32, 0);
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        stasis_dynload::stasis_jit_global_i32_array_store(
+            collection_hash,
+            0,
+            index as i32,
+            i32::from(*byte),
+        );
+    }
+    stasis_dynload::stasis_jit_collection_i32_store(collection_hash, 1, bytes.len() as i32);
+    if seeded_capacity <= 0 {
+        stasis_dynload::stasis_jit_collection_i32_store(collection_hash, 2, capacity as i32);
+    }
+    stasis_dynload::stasis_jit_collection_i32_store(collection_hash, 3, char_count);
+}
+
+fn apply_play_bound_array(field: &PlayStructFieldMetadata, path: &str, value: &Value) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    let collection_hash = hash_global_path(path);
+    let capacity = usize::try_from(field.array_count.max(0)).unwrap_or(0);
+    let count = capacity.min(items.len());
+    if capacity == 0 {
+        return;
+    }
+
+    match field.type_name.as_str() {
+        "bool" | "u8" | "u16" | "u32" | "i32" => {
+            for (index, item) in items.iter().take(count).enumerate() {
+                let value = match field.type_name.as_str() {
+                    "bool" => item.as_bool().map(|flag| if flag { 1 } else { 0 }),
+                    _ => item.as_i64().and_then(|number| i32::try_from(number).ok()),
+                };
+                let Some(value) = value else {
+                    continue;
+                };
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    0,
+                    index as i32,
+                    value,
+                );
+            }
+        }
+        "f32" => {
+            for (index, item) in items.iter().take(count).enumerate() {
+                let Some(value) = item.as_f64() else {
+                    continue;
+                };
+                stasis_dynload::stasis_jit_global_f32_array_store(
+                    collection_hash,
+                    0,
+                    index as i32,
+                    value as f32,
+                );
+            }
+        }
+        "f64" => {
+            for (index, item) in items.iter().take(count).enumerate() {
+                let Some(value) = item.as_f64() else {
+                    continue;
+                };
+                stasis_dynload::stasis_jit_global_f64_array_store(
+                    collection_hash,
+                    0,
+                    index as i32,
+                    value,
+                );
+            }
+        }
+        _ => {}
+    }
+
+    stasis_dynload::stasis_jit_collection_i32_store(collection_hash, 1, count as i32);
+    stasis_dynload::stasis_jit_collection_i32_store(collection_hash, 2, capacity as i32);
+}
+
+fn apply_play_bound_value(field: &PlayStructFieldMetadata, value: &Value, full_path: &str) {
+    if field.type_name == "string" {
+        if let Some(text) = value.as_str() {
+            apply_play_bound_string(full_path, field.array_count, text);
+        }
+        return;
+    }
+    if field.array_count > 1 {
+        apply_play_bound_array(field, full_path, value);
+        return;
+    }
+
+    let path_hash = hash_global_path(full_path);
+    match field.type_name.as_str() {
+        "bool" => {
+            let Some(flag) = value.as_bool() else {
+                return;
+            };
+            stasis_dynload::stasis_jit_global_i32_store(path_hash, if flag { 1 } else { 0 });
+        }
+        "u8" | "u16" | "u32" | "i32" => {
+            let Some(number) = value.as_i64().and_then(|number| i32::try_from(number).ok()) else {
+                return;
+            };
+            stasis_dynload::stasis_jit_global_i32_store(path_hash, number);
+        }
+        "f32" => {
+            let Some(number) = value.as_f64() else {
+                return;
+            };
+            stasis_dynload::stasis_jit_global_f32_store(path_hash, number as f32);
+        }
+        "f64" => {
+            let Some(number) = value.as_f64() else {
+                return;
+            };
+            stasis_dynload::stasis_jit_global_f64_store(path_hash, number);
+        }
+        _ => {}
+    }
+}
+
+fn apply_play_data_binding_value(
+    root: &Value,
+    metadata: &PlayStructMetadata,
+) -> Result<(), String> {
+    if metadata.version != 1 {
+        return Err(format!(
+            "unsupported struct-meta version {} (expected 1)",
+            metadata.version
+        ));
+    }
+
+    for field in &metadata.fields {
+        let Some(value) = json_value_by_path(root, &field.json_path) else {
+            continue;
+        };
+        let full_path = if field.json_path.is_empty() {
+            metadata.global_name.clone()
+        } else {
+            format!("{}.{}", metadata.global_name, field.json_path)
+        };
+        apply_play_bound_value(field, value, &full_path);
+    }
+
+    Ok(())
+}
+
+fn load_and_apply_play_data_binding(
+    json_path: &Path,
+    struct_meta_path: &Path,
+) -> Result<(), String> {
+    let json_source = fs::read_to_string(json_path).map_err(|error| {
+        format!(
+            "failed to read data-bind json {}: {error}",
+            json_path.display()
+        )
+    })?;
+    let json_root: Value = serde_json::from_str(&json_source).map_err(|error| {
+        format!(
+            "failed to parse data-bind json {}: {error}",
+            json_path.display()
+        )
+    })?;
+
+    let meta_source = fs::read_to_string(struct_meta_path).map_err(|error| {
+        format!(
+            "failed to read data-bind struct-meta {}: {error}",
+            struct_meta_path.display()
+        )
+    })?;
+    let metadata: PlayStructMetadata = serde_json::from_str(&meta_source).map_err(|error| {
+        format!(
+            "failed to parse data-bind struct-meta {}: {error}",
+            struct_meta_path.display()
+        )
+    })?;
+
+    apply_play_data_binding_value(&json_root, &metadata)
+}
+
 fn resolve_play_watch_dir(watch_file: &Path, watch_dir: Option<&Path>) -> PathBuf {
     if let Some(dir) = watch_dir {
         if !dir.as_os_str().is_empty() {
@@ -234,6 +485,8 @@ fn resolve_play_watch_dir(watch_file: &Path, watch_dir: Option<&Path>) -> PathBu
 pub fn run_play_in_process(
     watch_file: &Path,
     watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
     tick_sleep_micros: u64,
     max_ticks: Option<u64>,
 ) -> Result<(), String> {
@@ -242,6 +495,16 @@ pub fn run_play_in_process(
     }
 
     let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
+    let launch_dir = std::env::current_dir()
+        .map_err(|error| format!("failed to read current directory before play launch: {error}"))?;
+    let data_binding_paths = match (data_bind_json, data_bind_struct_meta) {
+        (Some(json_path), Some(struct_meta_path)) => Some((
+            resolve_play_sidecar_path(json_path, &launch_dir),
+            resolve_play_sidecar_path(struct_meta_path, &launch_dir),
+        )),
+        (None, None) => None,
+        _ => return Err("play data binding requires both json and struct-meta paths".to_string()),
+    };
 
     // Make relative asset paths (e.g. "assets/ball.svg") resolve against the game directory.
     // Use the watch dir so dev workflows stay consistent across `stasis.exe` launch locations.
@@ -343,6 +606,9 @@ pub fn run_play_in_process(
     let _ = jit
         .compile()
         .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
+    if let Some((json_path, struct_meta_path)) = data_binding_paths.as_ref() {
+        load_and_apply_play_data_binding(json_path, struct_meta_path)?;
+    }
     let package = jit
         .build_engine_package(&EngineEntrypoints::runtime_default())
         .map_err(|error| format!("failed to build engine package: {error}"))?;
@@ -785,6 +1051,7 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
         BTreeMap::new();
     let mut active_layout_hash: Option<LayoutHash> = None;
+    let mut active_state_map: Option<Vec<StateMapEntry>> = None;
     let mut aot_linked_image_activations: u32 = 0;
     let mut active_aot_linked_image_path: Option<PathBuf> = None;
     let mut active_aot_linked_image_size_bytes: Option<u64> = None;
@@ -843,16 +1110,36 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
         pipeline.process_commits_at_safe_point(|request| {
-            if let Some(result) = enforce_layout_change_policy(
-                request.request_id,
-                active_layout_hash,
-                request.layout_hash,
-                &mut swap_commit_failures,
-                &mut swap_failure_reasons,
-            ) {
-                return result;
-            }
             let request_layout_hash = request.layout_hash;
+            let request_state_map = request.state_map.clone();
+            if let Err(message) = validate_layout_transition(
+                active_layout_hash,
+                request_layout_hash,
+                active_state_map.as_deref(),
+                request_state_map.as_deref(),
+            ) {
+                record_swap_failure(
+                    &message,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                );
+                return SwapCommitResult::failed(request.request_id, message);
+            }
+            let layout_changed = active_layout_hash.is_some_and(|hash| hash != request_layout_hash);
+            if layout_changed {
+                if let (Some(from), Some(to)) =
+                    (active_state_map.as_deref(), request_state_map.as_deref())
+                {
+                    if let Err(message) = migrate_state_map_fields(from, to) {
+                        record_swap_failure(
+                            &message,
+                            &mut swap_commit_failures,
+                            &mut swap_failure_reasons,
+                        );
+                        return SwapCommitResult::failed(request.request_id, message);
+                    }
+                }
+            }
             let result = apply_commit_request(
                 request,
                 &mut pointer_table,
@@ -872,6 +1159,9 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             );
             if result.status == SwapCommitStatus::Success {
                 active_layout_hash = Some(request_layout_hash);
+                if let Some(state_map) = request_state_map {
+                    active_state_map = Some(state_map);
+                }
             }
             result
         });
@@ -947,16 +1237,36 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
         pipeline.process_commits_at_safe_point(|request| {
-            if let Some(result) = enforce_layout_change_policy(
-                request.request_id,
-                active_layout_hash,
-                request.layout_hash,
-                &mut swap_commit_failures,
-                &mut swap_failure_reasons,
-            ) {
-                return result;
-            }
             let request_layout_hash = request.layout_hash;
+            let request_state_map = request.state_map.clone();
+            if let Err(message) = validate_layout_transition(
+                active_layout_hash,
+                request_layout_hash,
+                active_state_map.as_deref(),
+                request_state_map.as_deref(),
+            ) {
+                record_swap_failure(
+                    &message,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                );
+                return SwapCommitResult::failed(request.request_id, message);
+            }
+            let layout_changed = active_layout_hash.is_some_and(|hash| hash != request_layout_hash);
+            if layout_changed {
+                if let (Some(from), Some(to)) =
+                    (active_state_map.as_deref(), request_state_map.as_deref())
+                {
+                    if let Err(message) = migrate_state_map_fields(from, to) {
+                        record_swap_failure(
+                            &message,
+                            &mut swap_commit_failures,
+                            &mut swap_failure_reasons,
+                        );
+                        return SwapCommitResult::failed(request.request_id, message);
+                    }
+                }
+            }
             let result = apply_commit_request(
                 request,
                 &mut pointer_table,
@@ -976,6 +1286,9 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             );
             if result.status == SwapCommitStatus::Success {
                 active_layout_hash = Some(request_layout_hash);
+                if let Some(state_map) = request_state_map {
+                    active_state_map = Some(state_map);
+                }
             }
             result
         });
@@ -1141,28 +1454,129 @@ fn format_layout_hash_hex(layout_hash: LayoutHash) -> String {
     out
 }
 
-fn enforce_layout_change_policy(
-    request_id: RequestId,
-    active_layout_hash: Option<LayoutHash>,
-    request_layout_hash: LayoutHash,
+fn record_swap_failure(
+    message: &str,
     swap_commit_failures: &mut u32,
     swap_failure_reasons: &mut Vec<String>,
-) -> Option<SwapCommitResult> {
+) {
+    *swap_commit_failures += 1;
+    swap_failure_reasons.push(message.to_string());
+}
+
+fn normalize_state_map(
+    entries: &[StateMapEntry],
+    label: &str,
+) -> Result<BTreeMap<String, StateMapEntry>, String> {
+    let mut by_path: BTreeMap<String, StateMapEntry> = BTreeMap::new();
+    for entry in entries {
+        if entry.path.trim().is_empty() {
+            return Err(format!(
+                "{label} state-map contains empty path entry (restart required)"
+            ));
+        }
+        if let Some(previous) = by_path.insert(entry.path.clone(), entry.clone()) {
+            if previous.type_name != entry.type_name || previous.path_hash != entry.path_hash {
+                return Err(format!(
+                    "{label} state-map contains conflicting duplicate path '{}' (restart required)",
+                    entry.path
+                ));
+            }
+        }
+    }
+    Ok(by_path)
+}
+
+fn validate_layout_transition(
+    active_layout_hash: Option<LayoutHash>,
+    request_layout_hash: LayoutHash,
+    active_state_map: Option<&[StateMapEntry]>,
+    request_state_map: Option<&[StateMapEntry]>,
+) -> Result<(), String> {
     let Some(active_layout_hash) = active_layout_hash else {
-        return None;
+        return Ok(());
     };
     if active_layout_hash == request_layout_hash {
-        return None;
+        return Ok(());
+    }
+    let Some(active_state_map) = active_state_map else {
+        return Err(format!(
+            "layout hash changed from {} to {}, but active state-map metadata is missing (restart required)",
+            format_layout_hash_hex(active_layout_hash),
+            format_layout_hash_hex(request_layout_hash)
+        ));
+    };
+    let Some(request_state_map) = request_state_map else {
+        return Err(format!(
+            "layout hash changed from {} to {}, but incoming state-map metadata is missing (restart required)",
+            format_layout_hash_hex(active_layout_hash),
+            format_layout_hash_hex(request_layout_hash)
+        ));
+    };
+
+    let active_by_path = normalize_state_map(active_state_map, "active")?;
+    let request_by_path = normalize_state_map(request_state_map, "incoming")?;
+    for (path, request_entry) in &request_by_path {
+        if let Some(active_entry) = active_by_path.get(path) {
+            if active_entry.type_name != request_entry.type_name {
+                return Err(format!(
+                    "layout hash changed from {} to {} and state-map path '{}' changed type '{}' -> '{}' (restart required)",
+                    format_layout_hash_hex(active_layout_hash),
+                    format_layout_hash_hex(request_layout_hash),
+                    path,
+                    active_entry.type_name,
+                    request_entry.type_name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn type_name_is_f32(type_name: &str) -> bool {
+    type_name.trim() == "f32"
+}
+
+fn type_name_is_f64(type_name: &str) -> bool {
+    type_name.trim() == "f64"
+}
+
+fn type_name_is_collection_like(type_name: &str) -> bool {
+    let normalized = type_name.trim();
+    normalized.contains('[') || normalized == "ascii" || normalized == "utf8"
+}
+
+fn migrate_state_map_fields(
+    active_state_map: &[StateMapEntry],
+    request_state_map: &[StateMapEntry],
+) -> Result<(), String> {
+    let active_by_path = normalize_state_map(active_state_map, "active")?;
+    let request_by_path = normalize_state_map(request_state_map, "incoming")?;
+
+    for (path, request_entry) in &request_by_path {
+        let Some(active_entry) = active_by_path.get(path) else {
+            continue;
+        };
+        if active_entry.type_name != request_entry.type_name {
+            continue;
+        }
+        if type_name_is_collection_like(&request_entry.type_name) {
+            continue;
+        }
+        if type_name_is_f32(&request_entry.type_name) {
+            let value = stasis_dynload::stasis_jit_global_f32_load(active_entry.path_hash);
+            stasis_dynload::stasis_jit_global_f32_store(request_entry.path_hash, value);
+            continue;
+        }
+        if type_name_is_f64(&request_entry.type_name) {
+            let value = stasis_dynload::stasis_jit_global_f64_load(active_entry.path_hash);
+            stasis_dynload::stasis_jit_global_f64_store(request_entry.path_hash, value);
+            continue;
+        }
+        let value = stasis_dynload::stasis_jit_global_i32_load(active_entry.path_hash);
+        stasis_dynload::stasis_jit_global_i32_store(request_entry.path_hash, value);
     }
 
-    let message = format!(
-        "layout hash changed from {} to {}; hot reload state migration is not implemented yet, restart required",
-        format_layout_hash_hex(active_layout_hash),
-        format_layout_hash_hex(request_layout_hash)
-    );
-    *swap_commit_failures += 1;
-    swap_failure_reasons.push(message.clone());
-    Some(SwapCommitResult::failed(request_id, message))
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1659,6 +2073,14 @@ mod tests {
         }
     }
 
+    fn decode_zero_terminated_utf8(bytes: &[u8]) -> String {
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        String::from_utf8(bytes[..end].to_vec()).expect("utf8 should decode")
+    }
+
     fn expected_host_set(config: &RunnerConfig) -> host_set_registry::HostSetContract {
         resolve_host_set_contract(config).expect("host-set contract should resolve in tests")
     }
@@ -1672,49 +2094,190 @@ mod tests {
     }
 
     #[test]
-    fn layout_change_policy_accepts_initial_and_matching_layout_hashes() {
-        let mut swap_commit_failures = 0u32;
-        let mut swap_failure_reasons = Vec::new();
-        assert!(enforce_layout_change_policy(
-            RequestId(1),
-            None,
-            LayoutHash([1; 32]),
-            &mut swap_commit_failures,
-            &mut swap_failure_reasons,
-        )
-        .is_none());
-        assert!(enforce_layout_change_policy(
-            RequestId(2),
+    fn validate_layout_transition_rejects_type_change_for_existing_path() {
+        let active_map = vec![StateMapEntry {
+            path: "State.score".to_string(),
+            path_hash: 11,
+            type_name: "i32".to_string(),
+        }];
+        let incoming_map = vec![StateMapEntry {
+            path: "State.score".to_string(),
+            path_hash: 11,
+            type_name: "f32".to_string(),
+        }];
+        let result = validate_layout_transition(
             Some(LayoutHash([1; 32])),
-            LayoutHash([1; 32]),
-            &mut swap_commit_failures,
-            &mut swap_failure_reasons,
-        )
-        .is_none());
-        assert_eq!(swap_commit_failures, 0);
-        assert!(swap_failure_reasons.is_empty());
+            LayoutHash([2; 32]),
+            Some(active_map.as_slice()),
+            Some(incoming_map.as_slice()),
+        );
+        assert!(result.is_err());
+        let message = result.expect_err("transition should fail");
+        assert!(message.contains("changed type"));
+        assert!(message.contains("restart required"));
     }
 
     #[test]
-    fn layout_change_policy_rejects_layout_hash_change_with_restart_required() {
-        let mut swap_commit_failures = 0u32;
-        let mut swap_failure_reasons = Vec::new();
-        let result = enforce_layout_change_policy(
-            RequestId(3),
-            Some(LayoutHash([1; 32])),
-            LayoutHash([2; 32]),
-            &mut swap_commit_failures,
-            &mut swap_failure_reasons,
-        )
-        .expect("layout change should be rejected");
+    fn apply_play_data_binding_value_populates_registered_scalars_and_strings() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_f64_global_table();
 
-        assert_eq!(result.status, SwapCommitStatus::Failed);
-        assert_eq!(swap_commit_failures, 1);
-        assert_eq!(swap_failure_reasons.len(), 1);
-        let error = result.error.expect("error should be present");
-        assert!(error.contains("layout hash changed from"));
-        assert!(error.contains("hot reload state migration is not implemented yet"));
-        assert!(error.contains("restart required"));
+        let mut json_loaded = 0i32;
+        let mut screen_width = 0i32;
+        let mut background_red = 0.0f32;
+        let mut font_bytes = vec![0u8; 64];
+
+        let json_loaded_hash = hash_global_path("state.config.json_loaded");
+        let screen_width_hash = hash_global_path("state.config.screen_width");
+        let background_red_hash = hash_global_path("state.config.background_red");
+        let font_path_hash = hash_global_path("state.config.font_path");
+
+        stasis_dynload::register_global_i32_ptr(json_loaded_hash, &mut json_loaded);
+        stasis_dynload::register_global_i32_ptr(screen_width_hash, &mut screen_width);
+        stasis_dynload::register_global_f32_ptr(background_red_hash, &mut background_red);
+        stasis_dynload::register_global_u8_array(
+            font_path_hash,
+            0,
+            font_bytes.as_mut_ptr(),
+            font_bytes.len(),
+        );
+
+        let metadata = PlayStructMetadata {
+            version: 1,
+            global_name: "state".to_string(),
+            fields: vec![
+                PlayStructFieldMetadata {
+                    json_path: "config.json_loaded".to_string(),
+                    type_name: "bool".to_string(),
+                    array_count: 1,
+                },
+                PlayStructFieldMetadata {
+                    json_path: "config.screen_width".to_string(),
+                    type_name: "i32".to_string(),
+                    array_count: 1,
+                },
+                PlayStructFieldMetadata {
+                    json_path: "config.background_red".to_string(),
+                    type_name: "f32".to_string(),
+                    array_count: 1,
+                },
+                PlayStructFieldMetadata {
+                    json_path: "config.font_path".to_string(),
+                    type_name: "string".to_string(),
+                    array_count: 64,
+                },
+            ],
+        };
+        let root = serde_json::json!({
+            "config": {
+                "json_loaded": true,
+                "screen_width": 800,
+                "background_red": 0.25,
+                "font_path": "C:/Windows/Fonts/consola.ttf"
+            }
+        });
+
+        apply_play_data_binding_value(&root, &metadata).expect("binding should succeed");
+
+        assert_eq!(json_loaded, 1);
+        assert_eq!(screen_width, 800);
+        assert!((background_red - 0.25).abs() < f32::EPSILON);
+        assert_eq!(
+            decode_zero_terminated_utf8(&font_bytes),
+            "C:/Windows/Fonts/consola.ttf"
+        );
+        assert_eq!(
+            stasis_dynload::stasis_jit_collection_i32_load(font_path_hash, 1),
+            "C:/Windows/Fonts/consola.ttf".len() as i32
+        );
+        assert_eq!(
+            stasis_dynload::stasis_jit_collection_i32_load(font_path_hash, 3),
+            "C:/Windows/Fonts/consola.ttf".chars().count() as i32
+        );
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_f32_global_table();
+        stasis_dynload::clear_jit_f64_global_table();
+    }
+
+    #[test]
+    fn apply_play_data_binding_value_rejects_unknown_metadata_version() {
+        let metadata = PlayStructMetadata {
+            version: 2,
+            global_name: "state".to_string(),
+            fields: Vec::new(),
+        };
+        let root = serde_json::json!({});
+
+        let error =
+            apply_play_data_binding_value(&root, &metadata).expect_err("binding should fail");
+        assert!(error.contains("unsupported struct-meta version"));
+    }
+
+    #[test]
+    fn validate_layout_transition_allows_added_and_removed_paths_when_types_match() {
+        let active_map = vec![
+            StateMapEntry {
+                path: "State.score".to_string(),
+                path_hash: 11,
+                type_name: "i32".to_string(),
+            },
+            StateMapEntry {
+                path: "State.removed".to_string(),
+                path_hash: 12,
+                type_name: "i32".to_string(),
+            },
+        ];
+        let incoming_map = vec![
+            StateMapEntry {
+                path: "State.score".to_string(),
+                path_hash: 21,
+                type_name: "i32".to_string(),
+            },
+            StateMapEntry {
+                path: "State.added".to_string(),
+                path_hash: 22,
+                type_name: "i32".to_string(),
+            },
+        ];
+        let result = validate_layout_transition(
+            Some(LayoutHash([3; 32])),
+            LayoutHash([4; 32]),
+            Some(active_map.as_slice()),
+            Some(incoming_map.as_slice()),
+        );
+        assert!(result.is_ok(), "expected migration-compatible transition");
+    }
+
+    #[test]
+    fn migrate_state_map_fields_copies_i32_for_matching_paths() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::stasis_jit_global_i32_store(11, 777);
+        stasis_dynload::stasis_jit_global_i32_store(22, 0);
+
+        let active_map = vec![StateMapEntry {
+            path: "State.score".to_string(),
+            path_hash: 11,
+            type_name: "i32".to_string(),
+        }];
+        let incoming_map = vec![StateMapEntry {
+            path: "State.score".to_string(),
+            path_hash: 22,
+            type_name: "i32".to_string(),
+        }];
+
+        migrate_state_map_fields(&active_map, &incoming_map).expect("migration should succeed");
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(22), 777);
+        stasis_dynload::clear_jit_i32_global_table();
     }
 
     #[test]

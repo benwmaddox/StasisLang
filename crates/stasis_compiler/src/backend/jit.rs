@@ -632,56 +632,86 @@ fn select_emit_function_ids(
     )
 }
 
+fn function_address(function: *const ()) -> usize {
+    function as usize
+}
+
 fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
     let address = match symbol {
-        "print_i32" | "stasis_jit_print_i32" => stasis_dynload::stasis_jit_print_i32 as usize,
+        "print_i32" | "stasis_jit_print_i32" => {
+            function_address(stasis_dynload::stasis_jit_print_i32 as *const ())
+        }
         "print_string" | "stasis_jit_print_string" => {
-            stasis_dynload::stasis_jit_print_string as usize
+            function_address(stasis_dynload::stasis_jit_print_string as *const ())
         }
         "gfx_load_sprite" | "stasis_gfx_load_sprite" => {
-            stasis_dynload::stasis_jit_gfx_load_sprite as usize
+            function_address(stasis_dynload::stasis_jit_gfx_load_sprite as *const ())
         }
-        "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => stasis_dynload::stasis_jit_gfx_dump_bmp as usize,
-        "load_font" | "stasis_load_font" => stasis_dynload::stasis_jit_load_font as usize,
-        "measure_text" | "stasis_measure_text" => stasis_dynload::stasis_jit_measure_text as usize,
+        "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => {
+            function_address(stasis_dynload::stasis_jit_gfx_dump_bmp as *const ())
+        }
+        "load_font" | "stasis_load_font" => {
+            function_address(stasis_dynload::stasis_jit_load_font as *const ())
+        }
+        "measure_text" | "stasis_measure_text" => {
+            function_address(stasis_dynload::stasis_jit_measure_text as *const ())
+        }
         "gfx_cache_text" | "stasis_gfx_cache_text" => {
-            stasis_dynload::stasis_jit_gfx_cache_text as usize
+            function_address(stasis_dynload::stasis_jit_gfx_cache_text as *const ())
         }
         "audio_is_available" | "stasis_audio_is_available" => {
-            stasis_dynload::stasis_jit_audio_is_available as usize
+            function_address(stasis_dynload::stasis_jit_audio_is_available as *const ())
         }
         "audio_push_f32_interleaved" | "stasis_audio_push_f32_interleaved" => {
-            stasis_dynload::stasis_jit_audio_push_f32_interleaved as usize
+            function_address(stasis_dynload::stasis_jit_audio_push_f32_interleaved as *const ())
         }
-        "sin_fast" | "stasis_jit_sin_fast" => stasis_dynload::stasis_jit_sin_fast as usize,
-        "cos_fast" | "stasis_jit_cos_fast" => stasis_dynload::stasis_jit_cos_fast as usize,
-        "stasis_jit_global_i32_load" => stasis_dynload::stasis_jit_global_i32_load as usize,
-        "stasis_jit_global_i32_store" => stasis_dynload::stasis_jit_global_i32_store as usize,
-        "stasis_jit_global_f32_load" => stasis_dynload::stasis_jit_global_f32_load as usize,
-        "stasis_jit_global_f32_store" => stasis_dynload::stasis_jit_global_f32_store as usize,
-        "stasis_jit_global_f64_load" => stasis_dynload::stasis_jit_global_f64_load as usize,
-        "stasis_jit_global_f64_store" => stasis_dynload::stasis_jit_global_f64_store as usize,
-        "stasis_jit_collection_i32_load" => stasis_dynload::stasis_jit_collection_i32_load as usize,
+        "sin_fast" | "stasis_jit_sin_fast" => {
+            function_address(stasis_dynload::stasis_jit_sin_fast as *const ())
+        }
+        "cos_fast" | "stasis_jit_cos_fast" => {
+            function_address(stasis_dynload::stasis_jit_cos_fast as *const ())
+        }
+        "stasis_jit_global_i32_load" => {
+            function_address(stasis_dynload::stasis_jit_global_i32_load as *const ())
+        }
+        "stasis_jit_global_i32_store" => {
+            function_address(stasis_dynload::stasis_jit_global_i32_store as *const ())
+        }
+        "stasis_jit_global_f32_load" => {
+            function_address(stasis_dynload::stasis_jit_global_f32_load as *const ())
+        }
+        "stasis_jit_global_f32_store" => {
+            function_address(stasis_dynload::stasis_jit_global_f32_store as *const ())
+        }
+        "stasis_jit_global_f64_load" => {
+            function_address(stasis_dynload::stasis_jit_global_f64_load as *const ())
+        }
+        "stasis_jit_global_f64_store" => {
+            function_address(stasis_dynload::stasis_jit_global_f64_store as *const ())
+        }
+        "stasis_jit_collection_i32_load" => {
+            function_address(stasis_dynload::stasis_jit_collection_i32_load as *const ())
+        }
         "stasis_jit_collection_i32_store" => {
-            stasis_dynload::stasis_jit_collection_i32_store as usize
+            function_address(stasis_dynload::stasis_jit_collection_i32_store as *const ())
         }
         "sys_memcpy_u8" | "stasis_jit_sys_memcpy_u8" => {
-            stasis_dynload::stasis_jit_sys_memcpy_u8 as usize
+            function_address(stasis_dynload::stasis_jit_sys_memcpy_u8 as *const ())
         }
         "sys_memcpy_i32" | "stasis_jit_sys_memcpy_i32" => {
-            stasis_dynload::stasis_jit_sys_memcpy_i32 as usize
+            function_address(stasis_dynload::stasis_jit_sys_memcpy_i32 as *const ())
         }
         "sys_memcpy_f32" | "stasis_jit_sys_memcpy_f32" => {
-            stasis_dynload::stasis_jit_sys_memcpy_f32 as usize
+            function_address(stasis_dynload::stasis_jit_sys_memcpy_f32 as *const ())
         }
         "sys_memmove_u8" | "stasis_jit_sys_memmove_u8" => {
-            stasis_dynload::stasis_jit_sys_memmove_u8 as usize
+            function_address(stasis_dynload::stasis_jit_sys_memmove_u8 as *const ())
         }
         "sys_memmove_i32" | "stasis_jit_sys_memmove_i32" => {
-            stasis_dynload::stasis_jit_sys_memmove_i32 as usize
+            function_address(stasis_dynload::stasis_jit_sys_memmove_i32 as *const ())
         }
         "sys_memmove_f32" | "stasis_jit_sys_memmove_f32" => {
-            stasis_dynload::stasis_jit_sys_memmove_f32 as usize
+            function_address(stasis_dynload::stasis_jit_sys_memmove_f32 as *const ())
         }
         _ => return None,
     };

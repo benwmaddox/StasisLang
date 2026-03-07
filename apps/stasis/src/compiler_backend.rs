@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
-use stasis_compiler::frontend::parser::parse_top_level_functions;
+use stasis_compiler::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
 #[cfg(test)]
 use stasis_compiler::{SimpleI32Condition, SimpleI32ReturnExpr};
 use stasis_jit::{
@@ -12,7 +12,8 @@ use stasis_jit::{
 };
 use stasis_runner::swap::contracts::{
     AotFunctionSymbol, CompileRequest, CompileResult, Diagnostic, DiagnosticSeverity, FnId,
-    FunctionPatch, FunctionPatchSet, JitCodePtrOverride, LayoutHash, RequestId, TargetMode,
+    FunctionPatch, FunctionPatchSet, JitCodePtrOverride, LayoutHash, RequestId, StateMapEntry,
+    TargetMode,
 };
 use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,6 +81,12 @@ struct SelfHostObjectBundle {
 struct EngineFunctionEntry {
     path: String,
     name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructFieldType {
+    field_name: String,
+    type_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -608,6 +615,22 @@ impl IncrementalCompilerBackend {
             aot_function_symbols,
         );
         result.jit_code_ptr_overrides = jit_code_ptr_overrides;
+        let state_map = match self.state_map_from_source_cache() {
+            Ok(map) => map,
+            Err(message) => {
+                return CompileResult::failed(
+                    request.request_id,
+                    vec![Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message,
+                        path: request.changed_files.first().cloned(),
+                        line: None,
+                        column: None,
+                    }],
+                );
+            }
+        };
+        result.state_map = Some(state_map);
         result
     }
 
@@ -679,6 +702,7 @@ impl IncrementalCompilerBackend {
             None,
         );
         result.jit_code_ptr_overrides = Some(jit_code_ptr_overrides);
+        result.state_map = Some(self.state_map_from_source_cache()?);
         Ok(result)
     }
 
@@ -763,6 +787,8 @@ impl IncrementalCompilerBackend {
             aot_linked_image_sha256,
             Some(aot_function_symbols),
         );
+        let mut result = result;
+        result.state_map = Some(self.state_map_from_source_cache()?);
         Ok(result)
     }
 
@@ -868,6 +894,101 @@ impl IncrementalCompilerBackend {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&digest);
         LayoutHash(bytes)
+    }
+
+    fn state_map_from_source_cache(&self) -> Result<Vec<StateMapEntry>, String> {
+        let mut struct_fields_by_name: BTreeMap<String, Vec<StructFieldType>> = BTreeMap::new();
+        for (path, source) in &self.source_by_path {
+            let parsed = parse_top_level_type_layout(source).map_err(|error| {
+                format!(
+                    "failed parsing top-level type layout in {} for state map extraction: {error}",
+                    path
+                )
+            })?;
+            for struct_def in parsed.structs {
+                let mut fields = Vec::new();
+                for field in struct_def.fields {
+                    fields.push(StructFieldType {
+                        field_name: field.name,
+                        type_name: field.type_name,
+                    });
+                }
+                struct_fields_by_name.insert(struct_def.name, fields);
+            }
+        }
+
+        let mut leaf_by_path: BTreeMap<String, StateMapEntry> = BTreeMap::new();
+        for (path, source) in &self.source_by_path {
+            let parsed = parse_top_level_type_layout(source).map_err(|error| {
+                format!(
+                    "failed parsing top-level type layout in {} for state map extraction: {error}",
+                    path
+                )
+            })?;
+            for global in parsed.globals {
+                Self::collect_state_map_leaf_entries(
+                    &global.name,
+                    &global.type_name,
+                    &struct_fields_by_name,
+                    &mut Vec::new(),
+                    &mut leaf_by_path,
+                )?;
+            }
+            for block in parsed.global_blocks {
+                for field in block.fields {
+                    let field_path = format!("{}.{}", block.name, field.name);
+                    Self::collect_state_map_leaf_entries(
+                        &field_path,
+                        &field.type_name,
+                        &struct_fields_by_name,
+                        &mut Vec::new(),
+                        &mut leaf_by_path,
+                    )?;
+                }
+            }
+        }
+
+        Ok(leaf_by_path.into_values().collect())
+    }
+
+    fn collect_state_map_leaf_entries(
+        path: &str,
+        type_name: &str,
+        struct_fields_by_name: &BTreeMap<String, Vec<StructFieldType>>,
+        struct_stack: &mut Vec<String>,
+        leaf_by_path: &mut BTreeMap<String, StateMapEntry>,
+    ) -> Result<(), String> {
+        if let Some(fields) = struct_fields_by_name.get(type_name) {
+            if struct_stack.iter().any(|name| name == type_name) {
+                return Err(format!(
+                    "state-map extraction rejected recursive struct '{}' in path '{}'",
+                    type_name, path
+                ));
+            }
+            struct_stack.push(type_name.to_string());
+            for field in fields {
+                let child_path = format!("{}.{}", path, field.field_name);
+                Self::collect_state_map_leaf_entries(
+                    &child_path,
+                    &field.type_name,
+                    struct_fields_by_name,
+                    struct_stack,
+                    leaf_by_path,
+                )?;
+            }
+            struct_stack.pop();
+            return Ok(());
+        }
+
+        leaf_by_path.insert(
+            path.to_string(),
+            StateMapEntry {
+                path: path.to_string(),
+                path_hash: crate::hash_global_path(path),
+                type_name: type_name.to_string(),
+            },
+        );
+        Ok(())
     }
 
     fn compile_jit_engine_package_from_cache(
@@ -3665,7 +3786,12 @@ mod tests {
             let build_output = Command::new("cargo")
                 .arg("build")
                 .arg("--manifest-path")
-                .arg(repo_root.join("tools").join("cranelift-aot").join("Cargo.toml"))
+                .arg(
+                    repo_root
+                        .join("tools")
+                        .join("cranelift-aot")
+                        .join("Cargo.toml"),
+                )
                 .current_dir(&repo_root)
                 .output()
                 .expect("spawn cargo build for cranelift-aot helper");
@@ -3684,7 +3810,10 @@ mod tests {
 
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command.arg("rustc").arg("-p").arg("stasis_dynload");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload");
         if !cfg!(debug_assertions) {
             dynload_build_command.arg("--release");
         }
@@ -3707,8 +3836,8 @@ mod tests {
         );
 
         let linker_path = find_lld_link().expect("lld-link.exe required for AOT quality gate");
-        let stasis_dynload_lib =
-            resolve_stasis_dynload_lib().expect("stasis_dynload staticlib required for AOT quality gate");
+        let stasis_dynload_lib = resolve_stasis_dynload_lib()
+            .expect("stasis_dynload staticlib required for AOT quality gate");
 
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -3739,7 +3868,8 @@ mod tests {
             "speed_and_size",
             "AOT compile config default opt_level should be speed_and_size for release-like engine bundles"
         );
-        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_202),
             vec![source],
@@ -3776,11 +3906,8 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
 
-        let object_paths: Vec<PathBuf> = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect();
+        let object_paths: Vec<PathBuf> =
+            bundle.object_paths_by_function.values().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -3822,11 +3949,7 @@ mod tests {
         let field = 0;
         let store = |index: i32, value: i32| {
             stasis_dynload::invoke_i32_i32_i32_i32_to_void(
-                store_ptr,
-                host_i32,
-                field,
-                index,
-                value,
+                store_ptr, host_i32, field, index, value,
             )
             .expect("invoke host_i32 store");
         };
@@ -4110,7 +4233,10 @@ mod tests {
 
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command.arg("rustc").arg("-p").arg("stasis_dynload");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload");
         if !cfg!(debug_assertions) {
             dynload_build_command.arg("--release");
         }
@@ -4158,7 +4284,8 @@ mod tests {
             opt_level: "speed_and_size".to_string(),
             ..AotCompileConfig::default()
         };
-        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_302),
             vec![source],
@@ -4214,11 +4341,8 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include brickout_try_start_battle");
 
-        let object_paths: Vec<PathBuf> = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect();
+        let object_paths: Vec<PathBuf> =
+            bundle.object_paths_by_function.values().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -4252,7 +4376,11 @@ mod tests {
             .unwrap_or_default();
         let objects_bytes = object_paths
             .iter()
-            .map(|path| fs::metadata(path).map(|meta| meta.len()).unwrap_or_default())
+            .map(|path| {
+                fs::metadata(path)
+                    .map(|meta| meta.len())
+                    .unwrap_or_default()
+            })
             .sum::<u64>();
         let manifest_bytes = fs::metadata(&bundle.manifest_path)
             .map(|meta| meta.len())
@@ -4286,8 +4414,10 @@ mod tests {
         let host_i32 = hash_global_path("host_i32");
         let field = 0;
         let store = |index: i32, value: i32| {
-            stasis_dynload::invoke_i32_i32_i32_i32_to_void(store_ptr, host_i32, field, index, value)
-                .expect("invoke host_i32 store");
+            stasis_dynload::invoke_i32_i32_i32_i32_to_void(
+                store_ptr, host_i32, field, index, value,
+            )
+            .expect("invoke host_i32 store");
         };
 
         // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
@@ -4454,7 +4584,10 @@ mod tests {
 
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command.arg("rustc").arg("-p").arg("stasis_dynload");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload");
         if !cfg!(debug_assertions) {
             dynload_build_command.arg("--release");
         }
@@ -4502,7 +4635,8 @@ mod tests {
             opt_level: "speed".to_string(),
             ..AotCompileConfig::default()
         };
-        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_303),
             vec![source],
@@ -4558,11 +4692,8 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include brickout_try_start_battle");
 
-        let object_paths: Vec<PathBuf> = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect();
+        let object_paths: Vec<PathBuf> =
+            bundle.object_paths_by_function.values().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -4596,7 +4727,11 @@ mod tests {
             .unwrap_or_default();
         let objects_bytes = object_paths
             .iter()
-            .map(|path| fs::metadata(path).map(|meta| meta.len()).unwrap_or_default())
+            .map(|path| {
+                fs::metadata(path)
+                    .map(|meta| meta.len())
+                    .unwrap_or_default()
+            })
             .sum::<u64>();
         let manifest_bytes = fs::metadata(&bundle.manifest_path)
             .map(|meta| meta.len())
@@ -4630,8 +4765,10 @@ mod tests {
         let host_i32 = hash_global_path("host_i32");
         let field = 0;
         let store = |index: i32, value: i32| {
-            stasis_dynload::invoke_i32_i32_i32_i32_to_void(store_ptr, host_i32, field, index, value)
-                .expect("invoke host_i32 store");
+            stasis_dynload::invoke_i32_i32_i32_i32_to_void(
+                store_ptr, host_i32, field, index, value,
+            )
+            .expect("invoke host_i32 store");
         };
 
         // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
@@ -4857,7 +4994,10 @@ mod tests {
 
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command.arg("rustc").arg("-p").arg("stasis_dynload");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload");
         if !cfg!(debug_assertions) {
             dynload_build_command.arg("--release");
         }
@@ -4902,7 +5042,8 @@ mod tests {
             opt_level: "speed".to_string(),
             ..AotCompileConfig::default()
         };
-        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_402),
             vec![source],
@@ -4940,11 +5081,8 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
 
-        let object_paths: Vec<PathBuf> = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect();
+        let object_paths: Vec<PathBuf> =
+            bundle.object_paths_by_function.values().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -4969,7 +5107,11 @@ mod tests {
             .unwrap_or_default();
         let objects_bytes = object_paths
             .iter()
-            .map(|path| fs::metadata(path).map(|meta| meta.len()).unwrap_or_default())
+            .map(|path| {
+                fs::metadata(path)
+                    .map(|meta| meta.len())
+                    .unwrap_or_default()
+            })
             .sum::<u64>();
         let manifest_bytes = fs::metadata(&bundle.manifest_path)
             .map(|meta| meta.len())
@@ -5107,7 +5249,10 @@ mod tests {
 
         // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
         let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command.arg("rustc").arg("-p").arg("stasis_dynload");
+        dynload_build_command
+            .arg("rustc")
+            .arg("-p")
+            .arg("stasis_dynload");
         if !cfg!(debug_assertions) {
             dynload_build_command.arg("--release");
         }
@@ -5152,7 +5297,8 @@ mod tests {
             opt_level: "speed_and_size".to_string(),
             ..AotCompileConfig::default()
         };
-        let mut backend = IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_403),
             vec![source],
@@ -5190,11 +5336,8 @@ mod tests {
             .map(|row| row.symbol.clone())
             .expect("manifest should include tick");
 
-        let object_paths: Vec<PathBuf> = bundle
-            .object_paths_by_function
-            .values()
-            .cloned()
-            .collect();
+        let object_paths: Vec<PathBuf> =
+            bundle.object_paths_by_function.values().cloned().collect();
         assert!(
             !object_paths.is_empty(),
             "expected engine bundle to include object files"
@@ -5219,7 +5362,11 @@ mod tests {
             .unwrap_or_default();
         let objects_bytes = object_paths
             .iter()
-            .map(|path| fs::metadata(path).map(|meta| meta.len()).unwrap_or_default())
+            .map(|path| {
+                fs::metadata(path)
+                    .map(|meta| meta.len())
+                    .unwrap_or_default()
+            })
             .sum::<u64>();
         let manifest_bytes = fs::metadata(&bundle.manifest_path)
             .map(|meta| meta.len())
@@ -5373,6 +5520,70 @@ mod tests {
         assert!(backend.last_jit_engine_package().is_none());
         assert!(backend.last_aot_engine_bundle().is_none());
         fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn jit_dev_non_engine_result_includes_flattened_state_map_entries() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_jit_state_map_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("game_logic.stasis");
+        fs::write(
+            &source,
+            "struct Enemy { hp: i32; speed: f32; }\nglobal Game { score: i32; first_enemy: Enemy; }\nfunction main(): i32 { return Game.score; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_103),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Success);
+        let state_map = result
+            .state_map
+            .as_ref()
+            .expect("state map should be populated on successful compile");
+        assert!(
+            state_map
+                .iter()
+                .any(|entry| entry.path == "Game.score" && entry.type_name == "i32"),
+            "expected scalar global block entry in state map"
+        );
+        assert!(
+            state_map
+                .iter()
+                .any(|entry| entry.path == "Game.first_enemy.hp" && entry.type_name == "i32"),
+            "expected flattened struct field entry in state map"
+        );
+        assert!(
+            state_map
+                .iter()
+                .any(|entry| entry.path == "Game.first_enemy.speed" && entry.type_name == "f32"),
+            "expected flattened struct field entry in state map"
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn state_map_extraction_rejects_recursive_structs() {
+        let mut backend = IncrementalCompilerBackend::new();
+        backend.source_by_path.insert(
+            "recursive.stasis".to_string(),
+            "struct Node { next: Node; }\nglobal root: Node;\nfunction main(): i32 { return 0; }\n"
+                .to_string(),
+        );
+        let result = backend.state_map_from_source_cache();
+        assert!(
+            result.is_err(),
+            "recursive struct layout should be rejected"
+        );
+        let message = result.expect_err("state map extraction should fail");
+        assert!(message.contains("recursive struct"));
     }
 
     #[test]
