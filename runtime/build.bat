@@ -2,7 +2,6 @@
 setlocal EnableDelayedExpansion
 
 pushd "%~dp0"
-call "%~dp0..\env.bat"
 
 echo Building Stasis Graphics Runtime Library (static+shared)...
 
