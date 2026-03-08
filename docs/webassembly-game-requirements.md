@@ -27,7 +27,7 @@ The main blockers are below:
 The shortest credible path is not "port the Windows runner to the browser." The right path is:
 
 - keep the host-frame + command-buffer game ABI
-- add a real `wasm-web` target
+- add a real `wasm-web` target as a compiled/exported target, like AOT or mobile
 - add a browser host/runtime that drives the same ABI from JavaScript
 - add web packaging for assets, HTML, JS bootstrap, and a `.wasm` payload
 
@@ -93,6 +93,7 @@ Recommended v1 definition:
 
 - target: modern desktop/mobile browsers
 - execution: browser-hosted WebAssembly
+- build class: compiled/export target, not `play`/watch-mode iteration
 - render host: browser runtime, not native SDL DLL
 - packaging: static web bundle
 - supported game model: `main()`, `tick()`, `render()`
@@ -100,13 +101,13 @@ Recommended v1 definition:
 - JIT in browser: not required for v1
 - shipping output: one `.wasm` plus JS/HTML/assets
 
-Without this scope lock, the project will mix three different problems:
+Without this scope lock, the project will mix too many different problems:
 
 - browser runtime
 - wasm code generation
-- in-browser hot-reload development
+- browser development tooling
 
-Those should not all be phase 1.
+The first version should be treated like a mobile/export target, not like a browser-native replacement for `play`.
 
 ## 2. Add a real WebAssembly code generation target
 
@@ -126,6 +127,8 @@ Add a new target mode, for example:
 
 - `TargetMode::WasmWeb`
 - CLI surface such as `stasis build --target wasm-web`
+
+This target should be modeled as an export/build artifact path alongside AOT/mobile-style targets, not as a live dev runner.
 
 ### What that target must produce
 
@@ -460,15 +463,16 @@ That flow needs to:
 - generate or copy the browser host shell
 - emit a runnable output directory
 
-### Optional but useful
+### Optional but secondary
 
-- `stasis serve --target wasm-web`
-- local static file server for browser testing
+- a lightweight static file server for browser testing
 - optional source map / debug metadata output
 
-## 10. Decide what dev workflow is in scope for the web
+The important point is that serving/testing is not the core target definition. The core requirement is a build/export pipeline that emits a runnable web bundle.
 
-This should be explicit, because the native dev loop is one of Stasis's core selling points.
+## 10. Treat web as an export target, not a dev runner
+
+This should be explicit, because the native dev loop is one of Stasis's core selling points and the browser target should not try to inherit it by default.
 
 ### Native dev loop today
 
@@ -479,24 +483,20 @@ Native `play` currently provides:
 - hot swap between ticks
 - `on_code_swap()`
 
-### Recommended web phases
+### Required web assumption
 
-Phase 1:
+- `wasm-web` is a compiled output like AOT/mobile packaging
+- it is not a browser equivalent of `play`
+- it does not need watch mode, JIT, or in-browser hot swap for v1
+- full rebuild + refresh is acceptable for initial browser validation
 
-- build and refresh the page manually or with full page reload
-- no in-browser JIT
-- no live code patching
+### Practical v1 developer flow
 
-Phase 2:
+1. Run `stasis build --target wasm-web ...`
+2. Host the emitted directory with any static web server
+3. Refresh the page to test the new build
 
-- fast rebuild + browser reload
-- maybe preserve save data or selected host state
-
-Phase 3:
-
-- evaluate true web hot swap only if the wasm runtime design supports it cleanly
-
-Trying to preserve native dev hot swap in phase 1 will likely delay the entire effort.
+Anything more advanced than that should be treated as follow-on tooling, not as part of the core web target definition.
 
 ## 11. Add web-focused tests and acceptance criteria
 
@@ -570,7 +570,7 @@ Bucket Catcher is a good early web milestone because it exercises:
 
 - `stasis build --target wasm-web`
 - output layout
-- local serve/dev guidance
+- basic static hosting guidance
 - release documentation
 
 ## 13. Recommended non-goals for v1
@@ -579,6 +579,7 @@ These should not block first browser support:
 
 - in-browser JIT
 - native-equivalent hot swap
+- `play` parity in the browser
 - asset file watching in browser
 - exact SDL/OpenGL implementation parity
 - browser-side AOT relinking of native artifacts
@@ -610,6 +611,7 @@ Must be built:
 Must be redesigned or explicitly scoped out:
 
 - JIT dev loop in browser
+- browser `play`-style iteration loop
 - DLL-based runtime loading
 - filesystem watch/reload model
 - native linker/exe packaging assumptions
