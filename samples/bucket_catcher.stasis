@@ -1,7 +1,7 @@
 import "../src/stdlib/stdlib.stasis";
 import "../src/stdlib/graphics.stasis";
-import "../src/stdlib/game_input.stasis";
 import "../src/stdlib/game_draw.stasis";
+import "../src/runtime/host_input_snapshot.stasis";
 import "../src/stdlib/sdl_scancodes.stasis";
 
 // Bucket Catcher - minimal instructional sample.
@@ -214,15 +214,15 @@ function spawn_ball(): void {
 
 function update_input(): void {
     // Pointer input: follow the first active pointer when it is down.
-    let count: i32 = input_pointer_count();
-    if (count > 0 && input_pointer_is_down(0)) {
-        state.bucket_target_x = f32_to_i32(input_pointer_x_px(0));
+    let count: i32 = input.pointer_count;
+    if (count > 0 && input.pointer_is_down[0]) {
+        state.bucket_target_x = input.pointer_x_px[0];
     }
 
     // Keyboard input: steer left/right with arrow keys.
     let move: i32 = 0;
-    if (input_key_down(Scancode.Left)) { move = move - 1; }
-    if (input_key_down(Scancode.Right)) { move = move + 1; }
+    if (input.key_down[Scancode.Left]) { move = move - 1; }
+    if (input.key_down[Scancode.Right]) { move = move + 1; }
     if (move != 0) {
         state.bucket_target_x = state.bucket_target_x + move * state.config.bucket_speed;
     }
@@ -318,8 +318,12 @@ function draw_ui(): void {
     draw_text(state.ui_font, state.ui_text, 12.0, 10.0, state.config.ui_red, state.config.ui_green, state.config.ui_blue, 1.0);
 }
 
+function is_ready_to_run(): bool {
+    return state.config.json_loaded && state.ui_font != 0 && state.bucket_sprite != 0 && state.ball_sprite != 0;
+}
+
 function tick(): i32 {
-    if (!state.config.json_loaded || state.ui_font == 0 || state.bucket_sprite == 0 || state.ball_sprite == 0) {
+    if (!is_ready_to_run()) {
         return 1;
     }
 
@@ -331,13 +335,6 @@ function tick(): i32 {
     update_bucket();
     update_spawns();
     update_balls();
-
-    begin_frame();
-    clear(state.config.background_red, state.config.background_green, state.config.background_blue, 1.0);
-    draw_balls();
-    draw_bucket();
-    draw_ui();
-    end_frame();
 
     return 0;
 }
@@ -353,8 +350,18 @@ function main(): i32 {
     return 0;
 }
 
-// The play runner expects a render() hook even if a sample renders inside tick().
 function render(): i32 {
+    if (!is_ready_to_run()) {
+        return 1;
+    }
+
+    begin_frame();
+    clear(state.config.background_red, state.config.background_green, state.config.background_blue, 1.0);
+    draw_balls();
+    draw_bucket();
+    draw_ui();
+    end_frame();
+
     return 0;
 }
 
