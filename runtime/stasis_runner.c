@@ -168,9 +168,12 @@ static int stasis_rebind_bulk_pointers_linux(
         *last_req_seq = *host_req_seq ? **host_req_seq : 0;
     }
 
-    if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
+    const int have_host_frame = host_i32 && host_f32 &&
+        *host_i32 && *host_f32 && host_get_frame;
+    const int have_bulk_step = host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
         *host_i32 && *host_f32 && *gfx_cmd_i32 && *gfx_cmd_f32 && *gfx_cmd_u8 &&
-        (host_bulk_step || (host_get_frame && gfx_submit_u8)))
+        host_bulk_step;
+    if (have_host_frame || have_bulk_step)
     {
         return 1;
     }
@@ -1012,9 +1015,16 @@ static void stasis_rebind_bulk_pointers(
         }
     }
 
-    if (bulk_active && host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && (host_bulk_step || (host_get_frame && gfx_submit_u8)))
+    if (bulk_active)
     {
-        if (*host_i32 && *host_f32 && *gfx_cmd_i32 && *gfx_cmd_f32 && *gfx_cmd_u8 && (*host_bulk_step || (*host_get_frame && *gfx_submit_u8)))
+        const int have_host_frame = host_i32 && host_f32 &&
+            *host_i32 && *host_f32 &&
+            host_get_frame && *host_get_frame;
+        const int have_bulk_step = host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
+            *host_i32 && *host_f32 &&
+            *gfx_cmd_i32 && *gfx_cmd_f32 && *gfx_cmd_u8 &&
+            host_bulk_step && *host_bulk_step;
+        if (have_host_frame || have_bulk_step)
         {
             *bulk_active = 1;
         }
@@ -1659,7 +1669,7 @@ int main(int argc, char **argv)
         QueryPerformanceFrequency(&freq);
         long long target_us = 1000000LL / (long long)fps;
 
-        /* Tick execution requires HostFrame/gfx bulk globals. */
+        /* Tick execution requires HostFrame bulk globals; gfx command buffers are optional. */
         int bulk_active = 0;
         int32_t *host_i32 = NULL;
         float *host_f32 = NULL;
@@ -1684,14 +1694,14 @@ int main(int argc, char **argv)
             gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
         }
 
-        if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
-            (host_bulk_step || (host_get_frame && gfx_submit_u8)))
+        if ((host_i32 && host_f32 && host_get_frame) ||
+            (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && host_bulk_step))
         {
             bulk_active = 1;
         }
         if (!bulk_active)
         {
-            fprintf(stderr, "error: stasis_runner requires HostFrame/gfx bulk globals for tick execution\n");
+            fprintf(stderr, "error: stasis_runner requires HostFrame bulk globals for tick execution\n");
             result = 1;
         }
 
@@ -1972,7 +1982,7 @@ int main(int argc, char **argv)
             /* Poll data bindings for changes (fast path: just checks mtimes) */
             stasis_data_poll_all();
 
-            if (bulk_active && host_bulk_step)
+            if (bulk_active && host_bulk_step && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
             {
                 int step_result = host_bulk_step(
                     host_i32,
@@ -2035,11 +2045,14 @@ int main(int argc, char **argv)
                     log_cmd_remaining--;
                 }
 
-                gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
+                if (gfx_submit_u8 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
+                {
+                    gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
+                }
             }
             else
             {
-                fprintf(stderr, "error: bulk HostFrame/gfx globals became unavailable during tick loop\n");
+                fprintf(stderr, "error: HostFrame bulk globals became unavailable during tick loop\n");
                 result = 1;
                 break;
             }
@@ -2302,7 +2315,7 @@ int main(int argc, char **argv)
             &last_req_seq);
         if (!bulk_active)
         {
-            fprintf(stderr, "error: stasis_runner requires HostFrame/gfx bulk globals for tick execution\n");
+            fprintf(stderr, "error: stasis_runner requires HostFrame bulk globals for tick execution\n");
             result = 1;
         }
 
@@ -2560,7 +2573,7 @@ int main(int argc, char **argv)
 
             stasis_data_poll_all();
 
-            if (bulk_active && host_bulk_step)
+            if (bulk_active && host_bulk_step && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
             {
                 int step_result = host_bulk_step(
                     host_i32,
@@ -2617,14 +2630,14 @@ int main(int argc, char **argv)
                     result = tick_result == 1 ? 0 : tick_result;
                     break;
                 }
-                if (gfx_submit_u8)
+                if (gfx_submit_u8 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
                 {
                     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
                 }
             }
             else
             {
-                fprintf(stderr, "error: bulk HostFrame/gfx globals became unavailable during tick loop\n");
+                fprintf(stderr, "error: HostFrame bulk globals became unavailable during tick loop\n");
                 result = 1;
                 break;
             }
