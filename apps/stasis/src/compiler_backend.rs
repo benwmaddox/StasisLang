@@ -118,6 +118,37 @@ struct EngineBundleManifest {
     collection_max_lengths: Option<Vec<EngineBundleManifestCollectionMaxLengthRow>>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct StructMetaFieldExportRow {
+    name: String,
+    size: usize,
+    #[serde(rename = "type")]
+    field_type: String,
+    #[serde(rename = "arrayCount")]
+    array_count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StructMetaExportFile {
+    fields: Vec<StructMetaFieldExportRow>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PackagedAotSupportFiles {
+    data_bind_json_rel: Option<String>,
+    data_bind_meta_rel: Option<String>,
+    export_symbols: Vec<String>,
+    runtime_fields: Vec<PackagedRuntimeField>,
+}
+
+#[derive(Debug, Clone)]
+struct PackagedRuntimeField {
+    name: String,
+    size: usize,
+    field_type: String,
+    array_count: usize,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SourceCacheDelta {
     touched_paths: Vec<String>,
@@ -2238,6 +2269,64 @@ fn aot_symbol_name(metric: &stasis_compiler::FunctionMetric) -> String {
     )
 }
 
+fn parse_aot_symbol_unsigned_id_hash(symbol: &str) -> Option<u32> {
+    let mut parts = symbol.split('_');
+    let tag = parts.next()?;
+    if tag != "fn" {
+        return None;
+    }
+    let id_hash = parts.next()?.parse::<u32>().ok()?;
+    let _sig_hash = parts.next()?;
+    let _ordinal = parts.next()?;
+    Some(id_hash)
+}
+
+fn parse_aot_fn_symbol_id(symbol: &str) -> Option<i32> {
+    symbol.strip_prefix("aot_fn_")?.parse::<i32>().ok()
+}
+
+fn resolve_self_host_aot_entry_symbol(
+    backend: &IncrementalCompilerBackend,
+    result: &CompileResult,
+    entry_name: &str,
+) -> Result<String, String> {
+    let symbols = result.aot_function_symbols.as_ref();
+    let entry_id_hash = hash_identifier(entry_name);
+    if let Some(symbols) = symbols {
+        if let Some(fn_id) = backend.existing_fn_id_for_identifier_hash(entry_id_hash) {
+            if let Some(symbol) = symbols
+                .iter()
+                .find(|entry| entry.fn_id == fn_id)
+                .map(|entry| entry.symbol.clone())
+            {
+                return Ok(symbol);
+            }
+        }
+    }
+
+    if let Some(bundle) = backend.last_aot_engine_bundle.as_ref() {
+        let manifest = backend.read_engine_bundle_manifest(&bundle.manifest_path)?;
+        if let Some(row) = manifest.functions.iter().find(|row| row.name == entry_name) {
+            return Ok(row.symbol.clone());
+        }
+    }
+
+    let target_unsigned_id_hash = entry_id_hash.unsigned_abs();
+    let mut matches = symbols.into_iter().flatten().filter(|entry| {
+        parse_aot_symbol_unsigned_id_hash(&entry.symbol) == Some(target_unsigned_id_hash)
+    });
+    let Some(first) = matches.next() else {
+        return Err(format!("missing AOT symbol mapping for {entry_name}"));
+    };
+    if let Some(second) = matches.next() {
+        return Err(format!(
+            "multiple AOT symbol mappings matched {entry_name} by id hash: {} and {}",
+            first.symbol, second.symbol
+        ));
+    }
+    Ok(first.symbol.clone())
+}
+
 fn compute_file_sha256_hex(path: &Path) -> Result<String, String> {
     let file = std::fs::File::open(path)
         .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
@@ -2254,6 +2343,1004 @@ fn compute_file_sha256_hex(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn self_host_repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+}
+
+fn resolve_self_host_aot_entry_file(project_dir: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(entry_file) = std::env::var_os("STASIS_AOT_ENTRY_FILE") else {
+        return Ok(None);
+    };
+    if entry_file.is_empty() {
+        return Ok(None);
+    }
+    let entry_path = PathBuf::from(entry_file);
+    let full_path = if entry_path.is_absolute() {
+        entry_path
+    } else {
+        project_dir.join(entry_path)
+    };
+    let canonical = full_path.canonicalize().map_err(|error| {
+        format!(
+            "failed to canonicalize AOT entry file {}: {error}",
+            full_path.display()
+        )
+    })?;
+    Ok(Some(canonical))
+}
+
+fn resolve_latest_existing_path(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .filter(|path| path.exists())
+        .max_by_key(|path| {
+            std::fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        })
+}
+
+fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| self_host_repo_root().join("target"));
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    for profile in ["debug", "release"] {
+        let base = target_dir.join(profile);
+        let direct = base.join("stasis_dynload.lib");
+        if direct.exists() {
+            candidates.push(direct);
+        }
+
+        let deps = base.join("deps");
+        let Ok(entries) = std::fs::read_dir(&deps) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if name.starts_with("stasis_dynload-") && name.ends_with(".lib") {
+                candidates.push(path);
+            }
+        }
+    }
+
+    resolve_latest_existing_path(candidates)
+}
+
+fn ensure_stasis_dynload_staticlib() -> Result<PathBuf, String> {
+    let repo_root = self_host_repo_root();
+    let mut command = std::process::Command::new("cargo");
+    command.arg("rustc").arg("-p").arg("stasis_dynload");
+    if !cfg!(debug_assertions) {
+        command.arg("--release");
+    }
+    command
+        .arg("--")
+        .arg("--crate-type")
+        .arg("staticlib")
+        .current_dir(&repo_root);
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        command.env("CARGO_TARGET_DIR", target_dir);
+    }
+
+    let output = command.output().map_err(|error| {
+        format!("failed to spawn cargo rustc -p stasis_dynload --crate-type staticlib: {error}")
+    })?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to build stasis_dynload staticlib\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    resolve_stasis_dynload_lib()
+        .ok_or_else(|| "stasis_dynload staticlib build reported success but no .lib was found".to_string())
+}
+
+fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
+    resolve_latest_existing_path(vec![
+        repo_root.join("stasis_runner.exe"),
+        repo_root.join("build").join("stasis_runner.exe"),
+        repo_root
+            .join("runtime")
+            .join("build")
+            .join("bin")
+            .join("Release")
+            .join("stasis_runner.exe"),
+    ])
+}
+
+fn resolve_runtime_graphics_path(repo_root: &Path) -> Option<PathBuf> {
+    resolve_latest_existing_path(vec![
+        repo_root.join("stasis_graphics.dll"),
+        repo_root.join("build").join("stasis_graphics.dll"),
+        repo_root
+            .join("runtime")
+            .join("build")
+            .join("bin")
+            .join("Release")
+            .join("stasis_graphics.dll"),
+    ])
+}
+
+fn resolve_msvc_link_exe() -> Option<PathBuf> {
+    let roots = [
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"),
+    ];
+    let mut candidates = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path().join("bin").join("HostX64").join("x64").join("link.exe");
+            if path.exists() {
+                candidates.push(path);
+            }
+        }
+    }
+    resolve_latest_existing_path(candidates)
+}
+
+fn resolve_rust_lld_exe() -> Option<PathBuf> {
+    let toolchain = std::env::var_os("RUSTUP_TOOLCHAIN")
+        .unwrap_or_else(|| "stable-x86_64-pc-windows-msvc".into());
+    let candidate = PathBuf::from(std::env::var_os("USERPROFILE")?)
+        .join(".rustup")
+        .join("toolchains")
+        .join(toolchain)
+        .join("lib")
+        .join("rustlib")
+        .join("x86_64-pc-windows-msvc")
+        .join("bin")
+        .join("rust-lld.exe");
+    candidate.exists().then_some(candidate)
+}
+
+fn ensure_rust_lld_link_wrapper(artifact_root: &Path) -> Option<PathBuf> {
+    let rust_lld = resolve_rust_lld_exe()?;
+    let wrapper_path = artifact_root.join("rust-lld-link.cmd");
+    let script = format!("@echo off\r\n\"{}\" -flavor link %*\r\n", rust_lld.display());
+    std::fs::write(&wrapper_path, script).ok()?;
+    Some(wrapper_path)
+}
+
+fn ensure_runtime_release_artifacts() -> Result<(PathBuf, PathBuf), String> {
+    let repo_root = self_host_repo_root();
+    let runner = resolve_runtime_runner_path(&repo_root);
+    let graphics = resolve_runtime_graphics_path(&repo_root);
+    if let (Some(runner), Some(graphics)) = (runner, graphics) {
+        return Ok((runner, graphics));
+    }
+
+    let output = std::process::Command::new("cmd")
+        .arg("/c")
+        .arg("runtime\\build.bat")
+        .current_dir(&repo_root)
+        .output()
+        .map_err(|error| format!("failed to spawn runtime\\build.bat: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "runtime\\build.bat failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let runner = resolve_runtime_runner_path(&repo_root)
+        .ok_or_else(|| "runtime build succeeded but stasis_runner.exe was not found".to_string())?;
+    let graphics = resolve_runtime_graphics_path(&repo_root)
+        .ok_or_else(|| "runtime build succeeded but stasis_graphics.dll was not found".to_string())?;
+    Ok((runner, graphics))
+}
+
+fn copy_file_creating_parent(src: &Path, dst: &Path) -> Result<(), String> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create parent directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    std::fs::copy(src, dst).map_err(|error| {
+        format!(
+            "failed to copy {} to {}: {error}",
+            src.display(),
+            dst.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|error| {
+        format!(
+            "failed to create directory {}: {error}",
+            dst.display()
+        )
+    })?;
+    let entries = std::fs::read_dir(src)
+        .map_err(|error| format!("failed to read directory {}: {error}", src.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "failed to read directory entry in {}: {error}",
+                src.display()
+            )
+        })?;
+        let path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| {
+            format!("failed to read file type for {}: {error}", path.display())
+        })?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&path, &dst_path)?;
+        } else if file_type.is_file() {
+            copy_file_creating_parent(&path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, String> {
+    fn walk(dir: &Path, out: &mut BTreeMap<String, PackagedRuntimeField>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|error| format!("failed to read directory {}: {error}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "failed to read directory entry in {}: {error}",
+                    dir.display()
+                )
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| {
+                format!("failed to read file type for {}: {error}", path.display())
+            })?;
+            if file_type.is_dir() {
+                walk(&path, out)?;
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !name.ends_with(".struct-meta.json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+            let meta: StructMetaExportFile = serde_json::from_str(&text).map_err(|error| {
+                format!("failed to parse {}: {error}", path.display())
+            })?;
+            for field in meta.fields {
+                out.entry(field.name.clone()).or_insert(PackagedRuntimeField {
+                    name: field.name,
+                    size: field.size,
+                    field_type: field.field_type,
+                    array_count: field.array_count,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    let mut fields = BTreeMap::new();
+    if root.exists() {
+        walk(root, &mut fields)?;
+    }
+    Ok(fields.into_values().collect())
+}
+
+fn is_bundleable_asset_extension(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "json" | "svg" | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+    )
+}
+
+fn copy_json_referenced_absolute_assets(
+    value: &mut serde_json::Value,
+    staged_entry_dir: &Path,
+    package_rel_root: &str,
+    copied_assets: &mut BTreeMap<PathBuf, String>,
+) -> Result<bool, String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut changed = false;
+            for child in map.values_mut() {
+                changed |= copy_json_referenced_absolute_assets(
+                    child,
+                    staged_entry_dir,
+                    package_rel_root,
+                    copied_assets,
+                )?;
+            }
+            Ok(changed)
+        }
+        serde_json::Value::Array(items) => {
+            let mut changed = false;
+            for child in items {
+                changed |= copy_json_referenced_absolute_assets(
+                    child,
+                    staged_entry_dir,
+                    package_rel_root,
+                    copied_assets,
+                )?;
+            }
+            Ok(changed)
+        }
+        serde_json::Value::String(text) => {
+            let source = PathBuf::from(text.as_str());
+            if !source.is_absolute() || !source.exists() || !is_bundleable_asset_extension(&source) {
+                return Ok(false);
+            }
+
+            if let Some(existing) = copied_assets.get(&source) {
+                *text = existing.clone();
+                return Ok(true);
+            }
+
+            let asset_dir = staged_entry_dir.join("assets");
+            std::fs::create_dir_all(&asset_dir).map_err(|error| {
+                format!(
+                    "failed to create asset directory {}: {error}",
+                    asset_dir.display()
+                )
+            })?;
+
+            let file_name = source
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| format!("invalid asset file name {}", source.display()))?;
+            let mut destination = asset_dir.join(file_name);
+            if destination.exists() {
+                let stem = source
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("asset");
+                let ext = source.extension().and_then(|value| value.to_str()).unwrap_or("");
+                let mut counter: usize = 1;
+                while destination.exists() {
+                    let candidate = if ext.is_empty() {
+                        format!("{stem}_{counter}")
+                    } else {
+                        format!("{stem}_{counter}.{ext}")
+                    };
+                    destination = asset_dir.join(candidate);
+                    counter += 1;
+                }
+            }
+
+            copy_file_creating_parent(&source, &destination)?;
+            let rel_name = destination
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| format!("invalid packaged asset path {}", destination.display()))?;
+            let rel_path = format!("{package_rel_root}/assets/{rel_name}");
+            copied_assets.insert(source, rel_path.clone());
+            *text = rel_path;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn rewrite_packaged_json_asset_paths(
+    staged_entry_dir: &Path,
+    package_rel_root: &str,
+) -> Result<(), String> {
+    fn walk(
+        dir: &Path,
+        staged_entry_dir: &Path,
+        package_rel_root: &str,
+        copied_assets: &mut BTreeMap<PathBuf, String>,
+    ) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|error| format!("failed to read directory {}: {error}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "failed to read directory entry in {}: {error}",
+                    dir.display()
+                )
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| {
+                format!("failed to read file type for {}: {error}", path.display())
+            })?;
+            if file_type.is_dir() {
+                walk(&path, staged_entry_dir, package_rel_root, copied_assets)?;
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !name.ends_with(".json") || name.ends_with(".struct-meta.json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+            let mut value: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if copy_json_referenced_absolute_assets(
+                &mut value,
+                staged_entry_dir,
+                package_rel_root,
+                copied_assets,
+            )? {
+                let next = serde_json::to_string_pretty(&value)
+                    .map_err(|error| format!("failed to serialize {}: {error}", path.display()))?;
+                std::fs::write(&path, next)
+                    .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut copied_assets = BTreeMap::new();
+    if staged_entry_dir.exists() {
+        walk(
+            staged_entry_dir,
+            staged_entry_dir,
+            package_rel_root,
+            &mut copied_assets,
+        )?;
+    }
+    Ok(())
+}
+
+fn stage_entry_support_files(
+    project_dir: &Path,
+    entry_file: Option<&Path>,
+    output_root: &Path,
+) -> Result<PackagedAotSupportFiles, String> {
+    let Some(entry_file) = entry_file else {
+        return Ok(PackagedAotSupportFiles::default());
+    };
+    let entry_root = entry_file.parent().unwrap_or(project_dir);
+    let package_dir_name = entry_file
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("invalid entry file name {}", entry_file.display()))?
+        .to_string();
+    let source_bundle_dir = entry_root.join(&package_dir_name);
+    if !source_bundle_dir.exists() {
+        return Ok(PackagedAotSupportFiles::default());
+    }
+
+    let staged_bundle_dir = output_root.join(&package_dir_name);
+    if staged_bundle_dir.exists() {
+        std::fs::remove_dir_all(&staged_bundle_dir).map_err(|error| {
+            format!(
+                "failed to clear existing staged asset directory {}: {error}",
+                staged_bundle_dir.display()
+            )
+        })?;
+    }
+    copy_dir_recursive(&source_bundle_dir, &staged_bundle_dir)?;
+    rewrite_packaged_json_asset_paths(&staged_bundle_dir, &package_dir_name)?;
+
+    let runtime_fields = collect_struct_meta_fields(&staged_bundle_dir)?;
+    let mut support = PackagedAotSupportFiles {
+        export_symbols: runtime_fields.iter().map(|field| field.name.clone()).collect(),
+        runtime_fields,
+        ..PackagedAotSupportFiles::default()
+    };
+
+    let data_json = staged_bundle_dir.join("data").join("config.json");
+    let data_meta = staged_bundle_dir.join("data").join("config.struct-meta.json");
+    if data_json.exists() && data_meta.exists() {
+        support.data_bind_json_rel = Some(format!("{package_dir_name}/data/config.json"));
+        support.data_bind_meta_rel = Some(format!("{package_dir_name}/data/config.struct-meta.json"));
+    }
+
+    Ok(support)
+}
+
+fn append_runtime_bridge_field_source(
+    source: &mut String,
+    register_lines: &mut Vec<String>,
+    field: &PackagedRuntimeField,
+) -> Result<(), String> {
+    let runtime_path = field.name.replace("__", ".");
+    let field_hash = crate::hash_global_path(&runtime_path);
+    match field.field_type.as_str() {
+        "bool" | "u8" | "u16" | "u32" | "i32" => {
+            if field.array_count > 1 {
+                source.push_str(&format!(
+                    "__declspec(dllexport) int32_t {}[{}] = {{0}};\n",
+                    field.name, field.array_count
+                ));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_i32_array({field_hash}, 0, {name}, {len});",
+                    name = field.name,
+                    len = field.array_count
+                ));
+            } else {
+                source.push_str(&format!(
+                    "__declspec(dllexport) int32_t {} = 0;\n",
+                    field.name
+                ));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_i32_ptr({field_hash}, &{name});",
+                    name = field.name
+                ));
+            }
+        }
+        "f32" => {
+            if field.array_count > 1 {
+                source.push_str(&format!(
+                    "__declspec(dllexport) float {}[{}] = {{0}};\n",
+                    field.name, field.array_count
+                ));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_f32_array({field_hash}, 0, {name}, {len});",
+                    name = field.name,
+                    len = field.array_count
+                ));
+            } else {
+                source.push_str(&format!(
+                    "__declspec(dllexport) float {} = 0.0f;\n",
+                    field.name
+                ));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_f32_ptr({field_hash}, &{name});",
+                    name = field.name
+                ));
+            }
+        }
+        "f64" => {
+            if field.array_count > 1 {
+                source.push_str(&format!(
+                    "__declspec(dllexport) double {}[{}] = {{0}};\n",
+                    field.name, field.array_count
+                ));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_f64_array({field_hash}, 0, {name}, {len});",
+                    name = field.name,
+                    len = field.array_count
+                ));
+            } else {
+                source.push_str(&format!(
+                    "__declspec(dllexport) double {} = 0.0;\n",
+                    field.name
+                ));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_f64_ptr({field_hash}, &{name});",
+                    name = field.name
+                ));
+            }
+        }
+        "string" => {
+            let len = field.size.max(1);
+            let header_bytes = field.size.saturating_sub(field.array_count);
+            let payload_len = field.array_count.max(1);
+            source.push_str(&format!(
+                "__declspec(dllexport) uint8_t {}[{}] = {{0}};\n",
+                field.name, len
+            ));
+            if header_bytes >= 8 {
+                let max_length_hash =
+                    crate::hash_global_path(&format!("{}.max_length", runtime_path));
+                register_lines.push(format!(
+                    "*((int32_t*)({name} + 4)) = {payload_len};",
+                    name = field.name
+                ));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_i32_ptr({max_length_hash}, (int32_t*)({name} + 4));",
+                    name = field.name
+                ));
+            }
+            if header_bytes >= 8 {
+                let length_hash = crate::hash_global_path(&format!("{}.length", runtime_path));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_i32_ptr({length_hash}, (int32_t*){name});",
+                    name = field.name
+                ));
+            }
+            if header_bytes >= 12 {
+                let char_length_hash =
+                    crate::hash_global_path(&format!("{}.char_length", runtime_path));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_i32_ptr({char_length_hash}, (int32_t*)({name} + 8));",
+                    name = field.name
+                ));
+            }
+            register_lines.push(format!(
+                "stasis_jit_register_global_u8_array({field_hash}, 0, {name} + {header_bytes}, {payload_len});",
+                name = field.name,
+                header_bytes = header_bytes,
+                payload_len = payload_len
+            ));
+        }
+        other => {
+            return Err(format!(
+                "unsupported packaged runtime field type {other} for {}",
+                field.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn escape_c_string_literal(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_ascii_graphic() || c == ' ' => out.push(c),
+            c => out.push_str(&format!("\\x{:02X}", c as u32)),
+        }
+    }
+    out
+}
+
+fn build_engine_bundle_runtime_bridge_source(
+    runtime_fields: &[PackagedRuntimeField],
+    function_symbols: &[String],
+    string_literals: &[EngineBundleManifestStringLiteralRow],
+) -> Result<String, String> {
+    let host_i32_hash = crate::hash_global_path("host_i32");
+    let host_f32_hash = crate::hash_global_path("host_f32");
+    let gfx_cmd_i32_hash = crate::hash_global_path("gfx_cmd_i32");
+    let gfx_cmd_f32_hash = crate::hash_global_path("gfx_cmd_f32");
+    let gfx_cmd_u8_hash = crate::hash_global_path("gfx_cmd_u8");
+    let host_req_seq_hash = crate::hash_global_path("host_req_seq");
+    let host_req_flags_hash = crate::hash_global_path("host_req_flags");
+    let host_req_window_w_px_hash = crate::hash_global_path("host_req_window_w_px");
+    let host_req_window_h_px_hash = crate::hash_global_path("host_req_window_h_px");
+
+    let mut source = String::new();
+    source.push_str("#include <stdint.h>\n");
+    source.push_str(
+        "void stasis_jit_register_global_i32_ptr(int32_t path_hash, int32_t* ptr);\n\
+void stasis_jit_register_global_f32_ptr(int32_t path_hash, float* ptr);\n\
+void stasis_jit_register_global_f64_ptr(int32_t path_hash, double* ptr);\n\
+void stasis_jit_register_global_i32_array(int32_t collection_hash, int32_t field_hash, int32_t* ptr, int32_t len);\n\
+void stasis_jit_register_global_f32_array(int32_t collection_hash, int32_t field_hash, float* ptr, int32_t len);\n\
+void stasis_jit_register_global_f64_array(int32_t collection_hash, int32_t field_hash, double* ptr, int32_t len);\n\
+void stasis_jit_register_global_u8_array(int32_t collection_hash, int32_t field_hash, uint8_t* ptr, int32_t len);\n\
+void stasis_jit_register_code_ptr(int32_t fn_id_raw, int64_t code_ptr);\n\
+void stasis_jit_clear_string_literal_table(void);\n\
+void stasis_jit_upsert_string_literal(int32_t id, const char* value);\n",
+    );
+
+    for symbol in function_symbols {
+        source.push_str(&format!("void {}(void);\n", symbol));
+    }
+    for literal in string_literals {
+        source.push_str(&format!(
+            "static const char stasis_literal_{}[] = \"{}\";\n",
+            literal.id.unsigned_abs(),
+            escape_c_string_literal(&literal.value)
+        ));
+    }
+
+    source.push_str(
+        "__declspec(dllexport) int32_t host_i32[768] = {0};\n\
+__declspec(dllexport) float host_f32[64] = {0};\n\
+__declspec(dllexport) int32_t gfx_cmd_i32[34848] = {0};\n\
+__declspec(dllexport) float gfx_cmd_f32[92292] = {0};\n\
+__declspec(dllexport) uint8_t gfx_cmd_u8[65536] = {0};\n\
+__declspec(dllexport) int32_t host_req_seq = 0;\n\
+__declspec(dllexport) int32_t host_req_flags = 0;\n\
+__declspec(dllexport) int32_t host_req_window_w_px = 0;\n\
+__declspec(dllexport) int32_t host_req_window_h_px = 0;\n",
+    );
+
+    let mut register_lines = vec![
+        format!(
+            "stasis_jit_register_global_i32_array({host_i32_hash}, 0, host_i32, 768);"
+        ),
+        format!(
+            "stasis_jit_register_global_f32_array({host_f32_hash}, 0, host_f32, 64);"
+        ),
+        format!(
+            "stasis_jit_register_global_i32_array({gfx_cmd_i32_hash}, 0, gfx_cmd_i32, 34848);"
+        ),
+        format!(
+            "stasis_jit_register_global_f32_array({gfx_cmd_f32_hash}, 0, gfx_cmd_f32, 92292);"
+        ),
+        format!(
+            "stasis_jit_register_global_u8_array({gfx_cmd_u8_hash}, 0, gfx_cmd_u8, 65536);"
+        ),
+        format!(
+            "stasis_jit_register_global_i32_ptr({host_req_seq_hash}, &host_req_seq);"
+        ),
+        format!(
+            "stasis_jit_register_global_i32_ptr({host_req_flags_hash}, &host_req_flags);"
+        ),
+        format!(
+            "stasis_jit_register_global_i32_ptr({host_req_window_w_px_hash}, &host_req_window_w_px);"
+        ),
+        format!(
+            "stasis_jit_register_global_i32_ptr({host_req_window_h_px_hash}, &host_req_window_h_px);"
+        ),
+    ];
+
+    for field in runtime_fields {
+        append_runtime_bridge_field_source(&mut source, &mut register_lines, field)?;
+    }
+    for symbol in function_symbols {
+        let Some(fn_id) = parse_aot_fn_symbol_id(symbol) else {
+            continue;
+        };
+        register_lines.push(format!(
+            "stasis_jit_register_code_ptr({fn_id}, (int64_t)(uintptr_t)&{symbol});"
+        ));
+    }
+    register_lines.push("stasis_jit_clear_string_literal_table();".to_string());
+    for literal in string_literals {
+        register_lines.push(format!(
+            "stasis_jit_upsert_string_literal({id}, stasis_literal_{name});",
+            id = literal.id,
+            name = literal.id.unsigned_abs()
+        ));
+    }
+
+    source.push_str("__declspec(dllexport) void stasis_aot_bind_runtime_globals(void) {\n");
+    for line in register_lines {
+        source.push_str("    ");
+        source.push_str(&line);
+        source.push('\n');
+    }
+    source.push_str("}\n");
+    Ok(source)
+}
+
+fn emit_engine_bundle_runtime_bridge_object(
+    backend: &IncrementalCompilerBackend,
+    runtime_fields: &[PackagedRuntimeField],
+    function_symbols: &[String],
+    string_literals: &[EngineBundleManifestStringLiteralRow],
+) -> Result<PathBuf, String> {
+    let source_path = backend
+        .aot_artifact_root
+        .join("engine_bundle_runtime_bridge.c");
+    let object_path = backend
+        .aot_artifact_root
+        .join("engine_bundle_runtime_bridge.obj");
+    let source = build_engine_bundle_runtime_bridge_source(
+        runtime_fields,
+        function_symbols,
+        string_literals,
+    )?;
+    std::fs::write(&source_path, source).map_err(|error| {
+        format!(
+            "failed to write engine bundle runtime bridge source {}: {error}",
+            source_path.display()
+        )
+    })?;
+
+    let output = std::process::Command::new("clang-cl.exe")
+        .arg("/nologo")
+        .arg("/c")
+        .arg("/O2")
+        .arg("/TC")
+        .arg(format!("/Fo{}", object_path.display()))
+        .arg(&source_path)
+        .output()
+        .map_err(|error| format!("failed to spawn clang-cl.exe for runtime bridge object: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to build engine bundle runtime bridge object\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(object_path)
+}
+
+fn resolve_engine_bundle_symbol(
+    manifest: &EngineBundleManifest,
+    name: &str,
+) -> Result<String, String> {
+    manifest
+        .functions
+        .iter()
+        .find(|row| row.name == name)
+        .map(|row| row.symbol.clone())
+        .ok_or_else(|| format!("engine bundle manifest is missing required symbol {name}"))
+}
+
+fn package_engine_bundle_release(
+    backend: &mut IncrementalCompilerBackend,
+    bundle: &AotEngineBundle,
+    output_exe: &Path,
+    project_dir: &Path,
+) -> Result<SelfHostedAotCliSummary, String> {
+    let manifest = backend.read_engine_bundle_manifest(&bundle.manifest_path)?;
+    let entry_symbol = resolve_engine_bundle_symbol(&manifest, "main")?;
+    let tick_symbol = manifest
+        .functions
+        .iter()
+        .find(|row| row.name == "tick")
+        .map(|row| row.symbol.clone());
+    let render_symbol = manifest
+        .functions
+        .iter()
+        .find(|row| row.name == "render")
+        .map(|row| row.symbol.clone());
+
+    let output_root = output_exe.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(output_root).map_err(|error| {
+        format!(
+            "failed to create AOT output directory {}: {error}",
+            output_root.display()
+        )
+    })?;
+
+    let entry_file = resolve_self_host_aot_entry_file(project_dir)?;
+    let support = stage_entry_support_files(project_dir, entry_file.as_deref(), output_root)?;
+
+    let mut export_symbols: BTreeSet<String> = BTreeSet::new();
+    export_symbols.insert(entry_symbol.clone());
+    export_symbols.insert("stasis_aot_bind_runtime_globals".to_string());
+    if let Some(symbol) = tick_symbol.as_ref() {
+        export_symbols.insert(symbol.clone());
+    }
+    if let Some(symbol) = render_symbol.as_ref() {
+        export_symbols.insert(symbol.clone());
+    }
+    if let Some(on_code_swap) = manifest
+        .functions
+        .iter()
+        .find(|row| row.name == "on_code_swap")
+        .map(|row| row.symbol.clone())
+    {
+        export_symbols.insert(on_code_swap);
+    }
+    for symbol in [
+        "host_i32",
+        "host_f32",
+        "gfx_cmd_i32",
+        "gfx_cmd_f32",
+        "gfx_cmd_u8",
+        "host_req_seq",
+        "host_req_flags",
+        "host_req_window_w_px",
+        "host_req_window_h_px",
+    ] {
+        export_symbols.insert(format!("{symbol},DATA"));
+    }
+    for symbol in &support.export_symbols {
+        export_symbols.insert(format!("{symbol},DATA"));
+    }
+
+    let mut link_config = backend.aot_link_config.clone();
+    let dynload_lib = ensure_stasis_dynload_staticlib()?;
+    if !link_config.runtime_lib_paths.iter().any(|path| path == &dynload_lib) {
+        link_config.runtime_lib_paths.push(dynload_lib);
+    }
+    if cfg!(windows) {
+        if let Some(wrapper) = ensure_rust_lld_link_wrapper(&backend.aot_artifact_root) {
+            link_config.linker_path = Some(wrapper);
+        }
+    }
+
+    let linked_library_path = output_exe.with_extension("dll");
+    let function_symbols: Vec<String> = manifest
+        .functions
+        .iter()
+        .map(|row| row.symbol.clone())
+        .collect();
+    let string_literals = manifest.string_literals.clone().unwrap_or_default();
+    let bridge_object = emit_engine_bundle_runtime_bridge_object(
+        backend,
+        &support.runtime_fields,
+        &function_symbols,
+        &string_literals,
+    )?;
+    let mut object_paths: Vec<PathBuf> = bundle.object_paths_by_function.values().cloned().collect();
+    object_paths.push(bridge_object);
+    let export_symbols: Vec<String> = export_symbols.into_iter().collect();
+    let initial_link = link_objects_to_dynamic_library(
+        &object_paths,
+        &linked_library_path,
+        &export_symbols,
+        &link_config,
+    );
+    if let Err(initial_error) = initial_link {
+        if cfg!(windows) {
+            if let Some(link_exe) = resolve_msvc_link_exe() {
+                let mut fallback_config = link_config.clone();
+                fallback_config.linker_path = Some(link_exe);
+                link_objects_to_dynamic_library(
+                    &object_paths,
+                    &linked_library_path,
+                    &export_symbols,
+                    &fallback_config,
+                )
+                .map_err(|fallback_error| {
+                    format!(
+                        "dynamic library link failed with configured linker and MSVC fallback\nconfigured_link_error:\n{initial_error}\nmsvc_link_error:\n{fallback_error}"
+                    )
+                })?;
+            } else {
+                return Err(initial_error);
+            }
+        } else {
+            return Err(initial_error);
+        }
+    }
+
+    let (runner_src, graphics_src) = ensure_runtime_release_artifacts()?;
+    copy_file_creating_parent(&runner_src, output_exe)?;
+    copy_file_creating_parent(&graphics_src, &output_root.join("stasis_graphics.dll"))?;
+
+    let launch_file_name = format!(
+        "{}.launch",
+        output_exe
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| format!("invalid output file name {}", output_exe.display()))?
+    );
+    let launch_path = output_root.join(launch_file_name);
+    let linked_library_name = linked_library_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("invalid linked library path {}", linked_library_path.display()))?;
+    let mut launch_lines = vec![
+        format!("dll={linked_library_name}"),
+        format!("entry={entry_symbol}"),
+        "fps=60".to_string(),
+    ];
+    if let Some(symbol) = tick_symbol.as_ref() {
+        launch_lines.push(format!("tick={symbol}"));
+    }
+    if let Some(symbol) = render_symbol.as_ref() {
+        launch_lines.push(format!("render={symbol}"));
+    }
+    if let (Some(data_json), Some(data_meta)) = (
+        support.data_bind_json_rel.as_ref(),
+        support.data_bind_meta_rel.as_ref(),
+    ) {
+        launch_lines.push(format!("data_bind_json={data_json}"));
+        launch_lines.push(format!("data_bind_meta={data_meta}"));
+    }
+    std::fs::write(&launch_path, launch_lines.join("\n")).map_err(|error| {
+        format!(
+            "failed to write launch manifest {}: {error}",
+            launch_path.display()
+        )
+    })?;
+
+    maybe_sign_output_executable(output_exe)?;
+
+    let object_file_names = object_paths
+        .iter()
+        .map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+    Ok(SelfHostedAotCliSummary {
+        source_file_count: object_paths.len(),
+        linked_image_path: output_exe.to_path_buf(),
+        entry_symbol,
+        ir_bundle_path: PathBuf::new(),
+        object_bundle_path: bundle.manifest_path.clone(),
+        object_file_names,
+    })
 }
 
 fn aot_call_conv() -> &'static str {
@@ -8479,20 +9566,8 @@ echo "signed" > "$1.signed"
         by_hash
     }
 
-    fn parse_aot_symbol_unsigned_id_hash(symbol: &str) -> Option<u32> {
-        let mut parts = symbol.split('_');
-        let tag = parts.next()?;
-        if tag != "fn" {
-            return None;
-        }
-        let id_hash = parts.next()?.parse::<u32>().ok()?;
-        let _sig_hash = parts.next()?;
-        let _ordinal = parts.next()?;
-        Some(id_hash)
-    }
-
-    #[test]
-    fn self_host_aot_cli_links_runnable_executable_with_main_entry_symbol() {
+#[test]
+fn self_host_aot_cli_links_runnable_executable_with_main_entry_symbol() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -11362,62 +12437,76 @@ fn host_emit_ir_from_compiler_state_with_backend(
         }
         return Err(format_compile_diagnostics(&result.diagnostics));
     }
-    let main_fn_id = backend
-        .existing_fn_id_for_identifier_hash(hash_identifier("main"))
-        .ok_or_else(|| "missing resolved fn_id for main".to_string())?;
-    let entry_symbol = result
-        .aot_function_symbols
-        .as_ref()
-        .and_then(|symbols| {
-            symbols
-                .iter()
-                .find(|entry| entry.fn_id == main_fn_id)
-                .map(|entry| entry.symbol.clone())
-        })
-        .ok_or_else(|| "missing AOT symbol mapping for main".to_string())?;
+    let entry_symbol = resolve_self_host_aot_entry_symbol(backend, &result, "main")?;
 
     let manifest_path = backend.aot_artifact_root.join("last_patch_manifest.json");
-    let manifest_text = std::fs::read_to_string(&manifest_path).map_err(|error| {
-        format!(
-            "failed to read AOT patch manifest {}: {error}",
-            manifest_path.display()
-        )
-    })?;
-    let manifest: AotPatchManifest = serde_json::from_str(&manifest_text).map_err(|error| {
-        format!(
-            "failed to parse AOT patch manifest {}: {error}",
-            manifest_path.display()
-        )
-    })?;
-    if env_snapshot.strict_self_host
-        && !env_snapshot.allow_stub_fallback
-        && !manifest.fallback_stub_symbols.is_empty()
-    {
-        let preview = manifest
-            .fallback_stub_symbols
-            .iter()
-            .take(6)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
+    let object_paths: Vec<String> = if manifest_path.exists() {
+        let manifest_text = std::fs::read_to_string(&manifest_path).map_err(|error| {
+            format!(
+                "failed to read AOT patch manifest {}: {error}",
+                manifest_path.display()
+            )
+        })?;
+        let manifest: AotPatchManifest = serde_json::from_str(&manifest_text).map_err(|error| {
+            format!(
+                "failed to parse AOT patch manifest {}: {error}",
+                manifest_path.display()
+            )
+        })?;
+        if env_snapshot.strict_self_host
+            && !env_snapshot.allow_stub_fallback
+            && !manifest.fallback_stub_symbols.is_empty()
+        {
+            let preview = manifest
+                .fallback_stub_symbols
+                .iter()
+                .take(6)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "self-host aot-cli strict mode rejected stub fallback lowering for i32 functions: {preview}; set STASIS_AOT_ALLOW_STUB_FALLBACK=1 to bypass temporarily"
+            ));
+        }
+        if env_snapshot.quality_gate
+            && manifest
+                .fallback_stub_symbols
+                .iter()
+                .any(|symbol| symbol == &entry_symbol)
+        {
+            return Err(format!(
+                "quality gate rejected output: entry symbol {entry_symbol} still uses fallback stub lowering; add lowering coverage for selected entry path before producing game executable"
+            ));
+        }
+        manifest.artifact_paths
+    } else if let Some(bundle) = backend.last_aot_engine_bundle.as_ref() {
+        if env_snapshot.strict_self_host && !env_snapshot.allow_stub_fallback {
+            return Err(
+                "self-host aot-cli strict mode is not yet supported for engine-bundle AOT outputs"
+                    .to_string(),
+            );
+        }
+        if env_snapshot.quality_gate {
+            return Err(
+                "self-host aot-cli quality gate is not yet supported for engine-bundle AOT outputs"
+                    .to_string(),
+            );
+        }
+        bundle
+            .object_paths_by_function
+            .values()
+            .map(|path| path.display().to_string())
+            .collect()
+    } else {
         return Err(format!(
-            "self-host aot-cli strict mode rejected stub fallback lowering for i32 functions: {preview}; set STASIS_AOT_ALLOW_STUB_FALLBACK=1 to bypass temporarily"
+            "failed to find AOT artifact manifest at {} and no engine bundle was available",
+            manifest_path.display()
         ));
-    }
-    if env_snapshot.quality_gate
-        && manifest
-            .fallback_stub_symbols
-            .iter()
-            .any(|symbol| symbol == &entry_symbol)
-    {
-        return Err(format!(
-            "quality gate rejected output: entry symbol {entry_symbol} still uses fallback stub lowering; add lowering coverage for selected entry path before producing game executable"
-        ));
-    }
+    };
     let ir_bundle = SelfHostIrBundle {
         source_file_count: changed_files.len(),
         entry_symbol,
-        object_paths: manifest.artifact_paths,
+        object_paths,
     };
     let ir_bundle_path = backend.aot_artifact_root.join("self_host_ir_bundle.json");
     let ir_json = serde_json::to_string_pretty(&ir_bundle)
@@ -11476,7 +12565,12 @@ fn host_link_executable_from_object_bundle_with_backend(
     backend: &mut IncrementalCompilerBackend,
     object_bundle_path: &Path,
     output_exe: &Path,
+    project_dir: &Path,
 ) -> Result<SelfHostedAotCliSummary, String> {
+    if let Some(bundle) = backend.last_aot_engine_bundle.as_ref().cloned() {
+        return package_engine_bundle_release(backend, &bundle, output_exe, project_dir);
+    }
+
     let object_text = std::fs::read_to_string(object_bundle_path).map_err(|error| {
         format!(
             "failed to read object bundle {}: {error}",
@@ -12384,6 +13478,7 @@ fn run_self_host_aot_cli_with_backend(
         backend,
         &object_bundle_path,
         output_exe,
+        project_dir,
     )?;
     summary.source_file_count = changed_files.len();
     summary.ir_bundle_path = ir_bundle_path;
