@@ -42,7 +42,6 @@ def main() -> int:
     runtime_modules = {
         "gfx_cmd.stasis": "src/runtime/gfx_cmd.stasis",
         "host_frame.stasis": "src/runtime/host_frame.stasis",
-        "host_input_snapshot.stasis": "src/runtime/host_input_snapshot.stasis",
         "host_window_request.stasis": "src/runtime/host_window_request.stasis",
         "input_testkit.stasis": "src/runtime/input_testkit.stasis",
     }

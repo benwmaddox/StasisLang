@@ -92,6 +92,11 @@ The library exports these functions for Stasis programs:
 | `stasis_audio_get_underruns()` | Underrun counter (device starved -> outputs silence) |
 | `stasis_audio_push_f32_interleaved(ptr, frames)` | Push `f32` interleaved frames (LRLR...); returns frames accepted |
 
+`play` and the native runner use HostFrame bulk snapshots for per-tick input/state now.
+Guest code should read keyboard/pointer/quit state through `src/runtime/host_frame.stasis`
+directly or via the HostFrame-backed stdlib wrappers in `src/stdlib/graphics.stasis` and
+`src/stdlib/game_input.stasis`.
+
 ## SDL Scancodes
 
 Common key scancodes for input:

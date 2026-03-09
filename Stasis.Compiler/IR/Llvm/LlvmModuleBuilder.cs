@@ -71,7 +71,6 @@ public sealed class LlvmModuleBuilder : IDisposable
         return name is
             "host_i32" or
             "host_f32" or
-            "host_keys" or
             "gfx_cmd_i32" or
             "gfx_cmd_f32" or
             "gfx_cmd_u8" or
