@@ -1957,6 +1957,8 @@ int main(int argc, char **argv)
     /* Optional tick loop: if `<module>__tick` is exported, call init once then tick at target FPS. */
     char tick_name[512];
     char render_name[512];
+    tick_name[0] = '\0';
+    render_name[0] = '\0';
     if (tick_name_override && tick_name_override[0])
     {
         strncpy(tick_name, tick_name_override, sizeof(tick_name) - 1);
@@ -2594,6 +2596,8 @@ int main(int argc, char **argv)
 
     char tick_name[512];
     char render_name[512];
+    tick_name[0] = '\0';
+    render_name[0] = '\0';
     if (tick_name_override && tick_name_override[0])
     {
         strncpy(tick_name, tick_name_override, sizeof(tick_name) - 1);
