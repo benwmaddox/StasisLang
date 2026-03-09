@@ -1,0 +1,120 @@
+FONTLOG for Cascadia Code
+===================================
+
+This file provides detailed information on the Cascadia Code font. This information should be distributed along with the Cascadia Code font and any derivative works.
+
+Basic Font Information
+-----------------------------------
+
+Cascadia Code is a monospaced font shipped by Microsoft. It includes programming ligatures and is intended for use in terminal applications as well as text editors.
+
+Contribution Information
+-----------------------------------
+
+Documentation and contribution guidelines can be found at: https://github.com/microsoft/cascadia-code
+
+ChangeLog
+-----------------------------------
+
+09-25-2019 (Aaron Bell) Bug Fixes and Improvements
+
+09-18-2019 (Aaron Bell) Cascadia Code Version 1909.16
+- Initial release
+
+10-04-2019 (Aaron Bell) Cascadia Code Version 1910.04
+- Addition of Latin-1 characters
+- Addition of box drawing glyphs
+11-20-2019 (Aaron Bell) Cascadia Code Version 1911.20
+- Cyrillic, Greek, Vietnamese, and many other symbols added
+- Font converted to UFO with a build workflow
+- font rehinted
+- many other fixes!
+
+04-29-2020 (Aaron Bell) April bug fixes
+- Many small bug fixes from the last few months
+
+05-05-2020 Font vertical metrics locked
+
+05-15-2020 (Aaron Bell, Dustin Howett) [Version 2005.15]
+Fixed WinDescent value to improve line spacing
+
+06-29-2020 (Aaron Bell) Variable font conversion
+Converted Cascadia Code to a Variable font with a weight axis
+
+
+06-29-2020 (Aaron Bell) [Version 2007.01]
+Reworked Cascadia Code to be a variable font with 6 named variations ranging
+from ExtraLight to Bold.
+Split the long equals ligature (==) for earier reading
+Removed the hexadeciaml 'x' alternate
+Corrected malformed IJacute dioacritics
+Introduced a compatibility layout for PowerLine glyphs that will
+be used in GDI
+
+08-25-2020 (Aaron Bell) [Version 2008.25]
+Started generating static TTFs and hinting them with ttfautohint
+Aligned the powerline glyphs to the font metrics exactly
+Realigned the box drawing glyphs to match the letters
+Added anchors to all alphabetic characters (and brevecomb-cy)
+added fi/fl ligatures (decomposed!)
+Fixed the weight of horncomb in bold
+
+9-14-2020
+1) Added support for Salishan language groups
+2) Remastered mark positioning for glyphs with 2 diacritics (needed for Salishan)
+3) Rebuild Build Script to simplify code
+4) Fixed minor other hinting issues
+5) Fixed RVRN substitutions for heavy weight
+
+9-21-2020
+1) Correcting mark positioning for salishan
+
+5-25-2021
+CASCADIA CODE ITALIC
+
+6-17-2021
+CASCADIA CODE ARABIC & HEBREW
+ITALIC V2
+
+01-19-2024 (Philippe Majerus) Checkerboard, more quadrants, and sextants.
+- Added some new checkerboard characters U+2427 - U+2429, U+1FB95, U+1FB96 (Symbols for Legacy Computing).
+- Added new centered Quadrants U+1FBE4 - U+1FBE7 (Symbols for Legacy Computing).
+- Added Triangular Quadrant characters U+1FB68 - U+1FB6F, U+1FB9A, U+1FB9B (Symbols for Legacy Computing).
+- Added Circular Quadrant characters U+1FBE8 - U+1FBEF (Symbols for Legacy Computing).
+- Added Sextant characters U+1FB00 - U+1FB3B (Symbols for Legacy Computing).
+
+04-08-2024 (Aaron Bell) Nerd Fonts
+- Implemented Nerd Fonts, current as of 2024-04-08, as an optional build feature for the entire Cascadia
+  family.
+
+04-10-2024 (Philippe Majerus) Diagonals, octants, sedecimants & eights, separated quadrants & sextants, segmented digits, and large type pieces.
+- Added diagonals U+1FB3C - U+1FB67 (Symbols for Legacy Computing).
+- Added octants U+1CD00 - U+1CDE5 (Symbols for Legacy Computing).
+- Added sedecimants U+1CE90 - U+1CEAF (Symbols for Legacy Computing).
+- Added eights U+1FB70 - U+1FB80, U+1FB82 - U+1FB8B (Symbols for Legacy Computing).
+- Added misc. blocks U+1FB97, U+1FBCE, U+1FBCF (Symbols for Legacy Computing).
+- Added separated quadrants U+1CC21 - U+1CC2F (Symbols for Legacy Computing).
+- Added separated sextants U+1CE51 - U+1CE8F (Symbols for Legacy Computing).
+- Added segmented digits U+1CCF0 - U+1CCF9 (Symbols for Legacy Computing).
+- Added large type pieces U+1CE1A - U+1CE50 (Symbols for Legacy Computing).
+
+04-23-2024 (Dustin L. Howett)
+- Minted version 2404.23
+
+07-24-2024 (Aaron Bell, Dustin L. Howett)
+- Fixed hinting issue for Arabic glyphs
+- Minted version 2407.24
+
+Acknowledgements
+-----------------------------------
+
+If you make modifications, be sure to add your name (N), email (E), web-address (if you have one) (W), and description (D). This list is in alphabetical order.
+
+N: Aaron Bell
+E: aaron@sajatypeworks.com
+W: http://sajatypeworks.com
+D: Original font designer
+
+N: Philippe Majerus
+W: http://www.phm.lu
+D: Legacy computing, mosaic blocks, large type pieces

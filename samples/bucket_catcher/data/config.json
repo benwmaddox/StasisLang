@@ -3,7 +3,7 @@
     "json_loaded": true,
     "screen_width": 800,
     "screen_height": 600,
-    "font_path": "C:/Windows/Fonts/consola.ttf",
+    "font_path": "bucket_catcher/assets/CascadiaCode.ttf",
     "font_size_pixels": 24,
     "bucket_sprite_path": "bucket_catcher/assets/bucket.svg",
     "ball_sprite_path": "bucket_catcher/assets/ball.svg",
