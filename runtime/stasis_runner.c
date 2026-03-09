@@ -40,6 +40,7 @@
 
 typedef int (*stasis_entry_fn)(void);
 typedef int (*stasis_tick_fn)(void);
+typedef void (*stasis_aot_bind_runtime_globals_fn)(void);
 typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
 typedef void (*stasis_host_get_frame_fn)(int32_t *out_i32, float *out_f32);
 typedef void (*stasis_gfx_submit_u8_fn)(const int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
@@ -292,17 +293,7 @@ static int stasis_try_get_self_path(const char *argv0, char *out, size_t out_cap
     DWORD written = GetModuleFileNameA(NULL, out, (DWORD)out_cap);
     if (written == 0 || written >= out_cap)
     {
-        if (!argv0 || !argv0[0])
-        {
-            return 0;
-        }
-        strncpy(out, argv0, out_cap - 1);
-        out[out_cap - 1] = '\0';
-        return 1;
-    }
-    if (strncmp(out, "\\\\?\\", 4) == 0)
-    {
-        memmove(out, out + 4, strlen(out + 4) + 1);
+        return 0;
     }
     return 1;
 #else
@@ -354,113 +345,6 @@ static int stasis_set_current_dir(const char *path)
 #endif
 }
 
-static void stasis_set_asset_root_env(const char *path)
-{
-    if (!path || !path[0])
-    {
-        return;
-    }
-#ifdef _WIN32
-    SetEnvironmentVariableA("STASIS_ASSET_ROOT", path);
-#else
-    setenv("STASIS_ASSET_ROOT", path, 1);
-#endif
-}
-
-static int stasis_path_is_absolute(const char *path)
-{
-    if (!path || !path[0])
-    {
-        return 0;
-    }
-#ifdef _WIN32
-    if ((path[0] && path[1] == ':') ||
-        (path[0] == '\\' && path[1] == '\\') ||
-        (path[0] == '/' && path[1] == '/'))
-    {
-        return 1;
-    }
-    return 0;
-#else
-    return path[0] == '/';
-#endif
-}
-
-static int stasis_join_path(
-    const char *dir,
-    const char *path,
-    char *out,
-    size_t out_cap)
-{
-    if (!dir || !dir[0] || !path || !path[0] || !out || out_cap == 0)
-    {
-        return 0;
-    }
-    if (stasis_path_is_absolute(path))
-    {
-        strncpy(out, path, out_cap - 1);
-        out[out_cap - 1] = '\0';
-        return 1;
-    }
-    if (snprintf(out, out_cap, "%s/%s", dir, path) >= (int)out_cap)
-    {
-        return 0;
-    }
-    return 1;
-}
-
-static FILE *stasis_try_open_launch_file(
-    const char *argv0,
-    const char *self_path,
-    const char *exe_dir,
-    char *launch_path,
-    size_t launch_path_cap)
-{
-    FILE *file = NULL;
-
-    if (self_path && self_path[0])
-    {
-        if (snprintf(launch_path, launch_path_cap, "%s.launch", self_path) < (int)launch_path_cap)
-        {
-            file = fopen(launch_path, "rb");
-            if (file)
-            {
-                return file;
-            }
-        }
-    }
-
-    if (argv0 && argv0[0])
-    {
-        if (snprintf(launch_path, launch_path_cap, "%s.launch", argv0) < (int)launch_path_cap)
-        {
-            file = fopen(launch_path, "rb");
-            if (file)
-            {
-                return file;
-            }
-        }
-    }
-
-    if (exe_dir && exe_dir[0] && self_path && self_path[0])
-    {
-        const char *slash = strrchr(self_path, '\\');
-        const char *fslash = strrchr(self_path, '/');
-        const char *sep = slash > fslash ? slash : fslash;
-        const char *base = sep ? sep + 1 : self_path;
-        if (snprintf(launch_path, launch_path_cap, "%s/%s.launch", exe_dir, base) < (int)launch_path_cap)
-        {
-            file = fopen(launch_path, "rb");
-            if (file)
-            {
-                return file;
-            }
-        }
-    }
-
-    return NULL;
-}
-
 static int stasis_try_load_launch_config(
     const char *argv0,
     char *dll_out,
@@ -480,46 +364,25 @@ static int stasis_try_load_launch_config(
     char self_path[2048];
     char launch_path[2080];
     char exe_dir[2048];
-    char resolved_path[2048];
     char line[2048];
-    int runner_diag = stasis_env_flag("STASIS_RUNNER_DIAG", 0);
 
     if (!stasis_try_get_self_path(argv0, self_path, sizeof(self_path)))
     {
-        if (runner_diag)
-        {
-            fprintf(stderr, "RUNNER_DIAG: failed to resolve self path for launch config\n");
-            fflush(stderr);
-        }
         return 0;
     }
     if (!stasis_extract_dir(self_path, exe_dir, sizeof(exe_dir)))
     {
-        if (runner_diag)
-        {
-            fprintf(stderr, "RUNNER_DIAG: failed to extract exe dir from %s\n", self_path);
-            fflush(stderr);
-        }
         return 0;
     }
-    FILE *file = stasis_try_open_launch_file(argv0, self_path, exe_dir, launch_path, sizeof(launch_path));
+    if (snprintf(launch_path, sizeof(launch_path), "%s.launch", self_path) >= (int)sizeof(launch_path))
+    {
+        return 0;
+    }
+
+    FILE *file = fopen(launch_path, "rb");
     if (!file)
     {
-        if (runner_diag)
-        {
-            fprintf(stderr,
-                    "RUNNER_DIAG: launch config not found self=%s argv0=%s attempted=%s\n",
-                    self_path,
-                    argv0 ? argv0 : "(null)",
-                    launch_path[0] ? launch_path : "(none)");
-            fflush(stderr);
-        }
         return 0;
-    }
-    if (runner_diag)
-    {
-        fprintf(stderr, "RUNNER_DIAG: launch config=%s\n", launch_path);
-        fflush(stderr);
     }
 
     if (dll_out && dll_out_cap > 0)
@@ -625,26 +488,7 @@ static int stasis_try_load_launch_config(
         entry_out[entry_out_cap - 1] = '\0';
     }
 
-    if (dll_out && dll_out[0] && stasis_join_path(exe_dir, dll_out, resolved_path, sizeof(resolved_path)))
-    {
-        strncpy(dll_out, resolved_path, dll_out_cap - 1);
-        dll_out[dll_out_cap - 1] = '\0';
-    }
-    if (data_json_out && data_json_out[0] &&
-        stasis_join_path(exe_dir, data_json_out, resolved_path, sizeof(resolved_path)))
-    {
-        strncpy(data_json_out, resolved_path, data_json_out_cap - 1);
-        data_json_out[data_json_out_cap - 1] = '\0';
-    }
-    if (data_meta_out && data_meta_out[0] &&
-        stasis_join_path(exe_dir, data_meta_out, resolved_path, sizeof(resolved_path)))
-    {
-        strncpy(data_meta_out, resolved_path, data_meta_out_cap - 1);
-        data_meta_out[data_meta_out_cap - 1] = '\0';
-    }
-
     /* Make relative asset/data paths stable for packaged game builds. */
-    stasis_set_asset_root_env(exe_dir);
     stasis_set_current_dir(exe_dir);
     return 1;
 }
@@ -695,6 +539,7 @@ static void stasis_build_related_symbol_names(
         memcpy(render_name, "render", 7);
     }
 }
+
 #ifdef _WIN32
 static int file_exists(const char *path);
 
@@ -1701,7 +1546,21 @@ int main(int argc, char **argv)
     const char *swap_file_path = NULL;
     const char *data_bind_json = NULL;
     const char *data_bind_meta = NULL;
+    const char *tick_name_override = NULL;
+    const char *render_name_override = NULL;
+    char launch_dll_buf[2048];
+    char launch_entry_buf[512];
+    char launch_tick_buf[512];
+    char launch_render_buf[512];
+    char launch_data_json_buf[2048];
+    char launch_data_meta_buf[2048];
     int fps = 60;
+    launch_dll_buf[0] = '\0';
+    launch_entry_buf[0] = '\0';
+    launch_tick_buf[0] = '\0';
+    launch_render_buf[0] = '\0';
+    launch_data_json_buf[0] = '\0';
+    launch_data_meta_buf[0] = '\0';
 
     if (argc >= 2 && strcmp(argv[1], "--server") == 0)
     {
@@ -1838,12 +1697,46 @@ int main(int argc, char **argv)
 
     if (argc < 2)
     {
-        print_usage();
-        return 1;
+        if (!stasis_try_load_launch_config(
+                argv[0],
+                launch_dll_buf,
+                sizeof(launch_dll_buf),
+                launch_entry_buf,
+                sizeof(launch_entry_buf),
+                launch_tick_buf,
+                sizeof(launch_tick_buf),
+                launch_render_buf,
+                sizeof(launch_render_buf),
+                launch_data_json_buf,
+                sizeof(launch_data_json_buf),
+                launch_data_meta_buf,
+                sizeof(launch_data_meta_buf),
+                &fps))
+        {
+            print_usage();
+            return 1;
+        }
+        dll_path = launch_dll_buf;
+        entry_name = launch_entry_buf[0] ? launch_entry_buf : "main";
+        if (launch_data_json_buf[0] && launch_data_meta_buf[0])
+        {
+            data_bind_json = launch_data_json_buf;
+            data_bind_meta = launch_data_meta_buf;
+        }
+        if (launch_tick_buf[0])
+        {
+            tick_name_override = launch_tick_buf;
+        }
+        if (launch_render_buf[0])
+        {
+            render_name_override = launch_render_buf;
+        }
     }
-
-    dll_path = argv[1];
-    entry_name = argc >= 3 ? argv[2] : "run_tests";
+    else
+    {
+        dll_path = argv[1];
+        entry_name = argc >= 3 ? argv[2] : "run_tests";
+    }
 
     for (int i = 2; i < argc; i++)
     {
@@ -1903,6 +1796,7 @@ int main(int argc, char **argv)
 
 #ifdef _WIN32
     stasis_enable_dll_search(argv[0], dll_path);
+    int runner_diag = stasis_env_flag("STASIS_RUNNER_DIAG", 0);
     HMODULE lib = stasis_load_program_library(dll_path);
     if (!lib)
     {
@@ -1918,6 +1812,14 @@ int main(int argc, char **argv)
                        NULL);
         fprintf(stderr, "error: failed to load %s (err=%lu %s)\n", dll_path, err, msg);
         return 1;
+    }
+
+    {
+        FARPROC bind_globals_sym = GetProcAddress(lib, "stasis_aot_bind_runtime_globals");
+        if (bind_globals_sym)
+        {
+            ((stasis_aot_bind_runtime_globals_fn)bind_globals_sym)();
+        }
     }
 
     /* Set DLL handle for data binding system */
@@ -1939,6 +1841,15 @@ int main(int argc, char **argv)
         fprintf(stderr, "error: entrypoint %s not found in %s\n", entry_name, dll_path);
         FreeLibrary(lib);
         return 1;
+    }
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: dll=%s entry=%s tick=%s render=%s\n",
+                dll_path ? dll_path : "(null)",
+                entry_name ? entry_name : "(null)",
+                tick_name_override ? tick_name_override : "(auto)",
+                render_name_override ? render_name_override : "(auto)");
+        fflush(stderr);
     }
 
     /* Default window policy: create a small window if graphics runtime is present.
@@ -2044,8 +1955,8 @@ int main(int argc, char **argv)
     }
 
     /* Optional tick loop: if `<module>__tick` is exported, call init once then tick at target FPS. */
-    char tick_name[512] = {0};
-    char render_name[512] = {0};
+    char tick_name[512];
+    char render_name[512];
     if (tick_name_override && tick_name_override[0])
     {
         strncpy(tick_name, tick_name_override, sizeof(tick_name) - 1);
@@ -2102,7 +2013,17 @@ int main(int argc, char **argv)
 
     stasis_try_set_sys_args(lib, argc, argv);
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: calling entry\n");
+        fflush(stderr);
+    }
     int result = entry();
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: entry returned=%d\n", result);
+        fflush(stderr);
+    }
 
     if (result == 0 && (tick_sym || render_sym))
     {
@@ -2318,13 +2239,22 @@ int main(int argc, char **argv)
                                 continue;
                             }
 
+                            FARPROC new_tick_sym = NULL;
+                            FARPROC new_render_sym = NULL;
                             QueryPerformanceCounter(&sw_t0);
-                            FARPROC new_tick_sym = GetProcAddress(new_lib, tick_name);
+                            if (tick_name[0] != '\0')
+                            {
+                                new_tick_sym = GetProcAddress(new_lib, tick_name);
+                            }
+                            if (render_name[0] != '\0')
+                            {
+                                new_render_sym = GetProcAddress(new_lib, render_name);
+                            }
                             QueryPerformanceCounter(&sw_t1);
                             tick_us = (sw_t1.QuadPart - sw_t0.QuadPart) * 1000000LL / sw_freq.QuadPart;
-                            if (!new_tick_sym)
+                            if (!new_tick_sym && !new_render_sym)
                             {
-                                fprintf(stderr, "HOTSWAP warning: tick entrypoint %s not found in %s\n", tick_name, new_path);
+                                fprintf(stderr, "HOTSWAP warning: tick/render entrypoints not found in %s\n", new_path);
                                 fflush(stderr);
                                 FreeLibrary(new_lib);
                                 free(buffer);
@@ -2377,7 +2307,15 @@ int main(int argc, char **argv)
 
                             FreeLibrary(lib);
                             lib = new_lib;
+                            {
+                                FARPROC bind_globals_sym = GetProcAddress(lib, "stasis_aot_bind_runtime_globals");
+                                if (bind_globals_sym)
+                                {
+                                    ((stasis_aot_bind_runtime_globals_fn)bind_globals_sym)();
+                                }
+                            }
                             tick = (stasis_tick_fn)new_tick_sym;
+                            render = (stasis_tick_fn)new_render_sym;
                             stasis_try_set_sys_args(lib, argc, argv);
                             stasis_rebind_bulk_pointers(
                                 lib,
@@ -2425,7 +2363,7 @@ int main(int argc, char **argv)
             /* Poll data bindings for changes (fast path: just checks mtimes) */
             stasis_data_poll_all();
 
-            if (bulk_active && host_bulk_step && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
+            if (bulk_active && host_bulk_step && !render && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
             {
                 int step_result = host_bulk_step(
                     host_i32,
@@ -2446,6 +2384,12 @@ int main(int argc, char **argv)
             }
             else if (bulk_active)
             {
+                if (!host_get_frame)
+                {
+                    fprintf(stderr, "error: manual tick/render path requires stasis_host_get_frame\n");
+                    result = 1;
+                    break;
+                }
                 host_get_frame(host_i32, host_f32);
 
                 /* Exit if host requested quit (avoid requiring guest queries). */
@@ -2474,11 +2418,25 @@ int main(int argc, char **argv)
                     }
                 }
 
-                int tick_result = tick();
-                if (tick_result != 0)
+                int step_result = 0;
+                if (tick)
                 {
-                    result = tick_result == 1 ? 0 : tick_result;
-                    break;
+                    step_result = tick();
+                    if (step_result != 0)
+                    {
+                        result = step_result == 1 ? 0 : step_result;
+                        break;
+                    }
+                }
+
+                if (render)
+                {
+                    step_result = render();
+                    if (step_result != 0)
+                    {
+                        result = step_result == 1 ? 0 : step_result;
+                        break;
+                    }
                 }
 
                 if (log_cmd_remaining > 0 && gfx_cmd_i32)
@@ -2608,6 +2566,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "error: failed to load %s: %s\n", dll_path, dlerror());
         return 1;
     }
+    {
+        void *bind_globals_sym = dlsym(lib, "stasis_aot_bind_runtime_globals");
+        if (bind_globals_sym)
+        {
+            ((stasis_aot_bind_runtime_globals_fn)bind_globals_sym)();
+        }
+    }
     if (runner_diag)
     {
         fprintf(stderr, "RUNNER_DIAG: dlopen ok\n");
@@ -2627,8 +2592,8 @@ int main(int argc, char **argv)
         fflush(stderr);
     }
 
-    char tick_name[512] = {0};
-    char render_name[512] = {0};
+    char tick_name[512];
+    char render_name[512];
     if (tick_name_override && tick_name_override[0])
     {
         strncpy(tick_name, tick_name_override, sizeof(tick_name) - 1);
@@ -2660,7 +2625,11 @@ int main(int argc, char **argv)
     }
     if (runner_diag)
     {
-        fprintf(stderr, "RUNNER_DIAG: tick_name=%s tick_sym=%s\n", tick_name[0] ? tick_name : "(none)", tick_sym ? "yes" : "no");
+        fprintf(stderr, "RUNNER_DIAG: tick_name=%s tick_sym=%s render_name=%s render_sym=%s\n",
+                tick_name[0] ? tick_name : "(none)",
+                tick_sym ? "yes" : "no",
+                render_name[0] ? render_name : "(none)",
+                render_sym ? "yes" : "no");
         fflush(stderr);
     }
 
@@ -2913,13 +2882,22 @@ int main(int argc, char **argv)
                         continue;
                     }
 
+                    void *new_tick_sym = NULL;
+                    void *new_render_sym = NULL;
                     clock_gettime(CLOCK_MONOTONIC, &t0);
-                    void *new_tick_sym = dlsym(new_lib, tick_name);
+                    if (tick_name[0] != '\0')
+                    {
+                        new_tick_sym = dlsym(new_lib, tick_name);
+                    }
+                    if (render_name[0] != '\0')
+                    {
+                        new_render_sym = dlsym(new_lib, render_name);
+                    }
                     clock_gettime(CLOCK_MONOTONIC, &t1);
                     tick_us = (t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000LL;
-                    if (!new_tick_sym)
+                    if (!new_tick_sym && !new_render_sym)
                     {
-                        fprintf(stderr, "HOTSWAP warning: tick entrypoint %s not found in %s\n", tick_name, new_path);
+                        fprintf(stderr, "HOTSWAP warning: tick/render entrypoints not found in %s\n", new_path);
                         fflush(stderr);
                         dlclose(new_lib);
                         free(buffer);
@@ -2972,7 +2950,15 @@ int main(int argc, char **argv)
 
                     dlclose(lib);
                     lib = new_lib;
+                    {
+                        void *bind_globals_sym = dlsym(lib, "stasis_aot_bind_runtime_globals");
+                        if (bind_globals_sym)
+                        {
+                            ((stasis_aot_bind_runtime_globals_fn)bind_globals_sym)();
+                        }
+                    }
                     tick = (stasis_tick_fn)new_tick_sym;
+                    render = (stasis_tick_fn)new_render_sym;
                     stasis_try_set_sys_args(lib, argc, argv);
                     stasis_data_set_dll(new_lib);
                     bulk_active = stasis_rebind_bulk_pointers_linux(
@@ -3031,7 +3017,7 @@ int main(int argc, char **argv)
 
             stasis_data_poll_all();
 
-            if (bulk_active && host_bulk_step && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
+            if (bulk_active && host_bulk_step && !render && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
             {
                 int step_result = host_bulk_step(
                     host_i32,
@@ -3056,6 +3042,12 @@ int main(int argc, char **argv)
                 {
                     host_get_frame(host_i32, host_f32);
                 }
+                else
+                {
+                    fprintf(stderr, "error: manual tick/render path requires stasis_host_get_frame\n");
+                    result = 1;
+                    break;
+                }
                 if (host_i32 && host_i32[9] != 0)
                 {
                     result = 0;
@@ -3076,7 +3068,11 @@ int main(int argc, char **argv)
                     fflush(stderr);
                 }
 
-                int tick_result = tick();
+                int tick_result = 0;
+                if (tick)
+                {
+                    tick_result = tick();
+                }
                 if (runner_diag && tick_diag_count < 10)
                 {
                     fprintf(stderr, "RUNNER_DIAG: tick end %d result=%d\n", tick_diag_count, tick_result);
@@ -3087,6 +3083,15 @@ int main(int argc, char **argv)
                 {
                     result = tick_result == 1 ? 0 : tick_result;
                     break;
+                }
+                if (render)
+                {
+                    int render_result = render();
+                    if (render_result != 0)
+                    {
+                        result = render_result == 1 ? 0 : render_result;
+                        break;
+                    }
                 }
                 if (gfx_submit_u8 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
                 {

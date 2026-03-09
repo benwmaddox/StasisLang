@@ -385,7 +385,7 @@ static void apply_string_value_to_dest(const FieldMeta* field, void* dest, cJSON
     if (field->array_count > field->size) return;
 
     int header_bytes = field->size - field->array_count;
-    if (header_bytes != 4 && header_bytes != 8) {
+    if (header_bytes != 8 && header_bytes != 12) {
         return;
     }
 
@@ -397,7 +397,7 @@ static void apply_string_value_to_dest(const FieldMeta* field, void* dest, cJSON
     int max_copy = payload_cap - 1;
     if (max_copy < 0) max_copy = 0;
 
-    if (header_bytes == 4) {
+    if (header_bytes == 8) {
         int copy_len = 0;
         copy_ascii_bounded(value->valuestring, payload, max_copy, &copy_len);
         if (copy_len >= 0 && copy_len < payload_cap) {
@@ -407,10 +407,11 @@ static void apply_string_value_to_dest(const FieldMeta* field, void* dest, cJSON
             copy_len = payload_cap - 1;
         }
         *((int32_t*)base) = (int32_t)copy_len;
+        *((int32_t*)(base + 4)) = (int32_t)payload_cap;
         return;
     }
 
-    /* UTF-8: [byte_len:i32][char_len:i32][u8[N]] */
+    /* UTF-8: [byte_len:i32][max_length:i32][char_len:i32][u8[N]] */
     int copy_bytes = 0;
     int copy_chars = 0;
     copy_utf8_bounded(value->valuestring, payload, max_copy, &copy_bytes, &copy_chars);
@@ -432,7 +433,8 @@ static void apply_string_value_to_dest(const FieldMeta* field, void* dest, cJSON
     }
 
     *((int32_t*)base) = (int32_t)copy_bytes;
-    *((int32_t*)(base + 4)) = (int32_t)copy_chars;
+    *((int32_t*)(base + 4)) = (int32_t)payload_cap;
+    *((int32_t*)(base + 8)) = (int32_t)copy_chars;
 }
 
 static void apply_scalar_value_to_dest(const FieldMeta* field, void* dest, cJSON* value) {
