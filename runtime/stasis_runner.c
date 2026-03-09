@@ -42,7 +42,6 @@ typedef int (*stasis_entry_fn)(void);
 typedef int (*stasis_tick_fn)(void);
 typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
 typedef void (*stasis_host_get_frame_fn)(int32_t *out_i32, float *out_f32);
-typedef int (*stasis_host_get_keyboard_state_fn)(uint8_t *out_u8, int max_bytes);
 typedef void (*stasis_gfx_submit_u8_fn)(const int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
 typedef void (*stasis_host_bulk_init_fn)(const int32_t *host_req_seq);
 typedef void (*stasis_host_bulk_apply_requests_fn)(
@@ -64,23 +63,6 @@ typedef int (*stasis_host_bulk_step_fn)(
 typedef int (*stasis_init_window_fn)(int width, int height, const char *title);
 typedef int (*stasis_set_fullscreen_fn)(int enabled);
 typedef void (*stasis_set_window_size_fn)(int width, int height);
-typedef struct {
-    uint8_t *key_down;
-    uint8_t *key_went_down;
-    uint8_t *key_went_up;
-    int32_t *pointer_count;
-    int32_t *pointer_id;
-    int32_t *pointer_x_px;
-    int32_t *pointer_y_px;
-    uint8_t *pointer_is_down;
-    uint8_t *pointer_went_down;
-    uint8_t *pointer_went_up;
-    int32_t *mouse_x_px;
-    int32_t *mouse_y_px;
-    uint8_t *mouse_down;
-    uint8_t *mouse_clicked;
-} stasis_input_bindings;
-typedef void (*stasis_input_bind_fn)(const stasis_input_bindings *bindings);
 
 static int stasis_env_flag(const char *name, int default_value)
 {
@@ -128,7 +110,6 @@ static int stasis_rebind_bulk_pointers_linux(
     int32_t **host_req_window_h_px,
     int32_t **host_i32,
     float **host_f32,
-    uint8_t **host_keys,
     int32_t **gfx_cmd_i32,
     float **gfx_cmd_f32,
     uint8_t **gfx_cmd_u8,
@@ -164,10 +145,6 @@ static int stasis_rebind_bulk_pointers_linux(
     {
         *host_f32 = (float *)dlsym(lib, "host_f32");
     }
-    if (host_keys)
-    {
-        *host_keys = (uint8_t *)dlsym(lib, "host_keys");
-    }
     if (gfx_cmd_i32)
     {
         *gfx_cmd_i32 = (int32_t *)dlsym(lib, "gfx_cmd_i32");
@@ -191,9 +168,12 @@ static int stasis_rebind_bulk_pointers_linux(
         *last_req_seq = *host_req_seq ? **host_req_seq : 0;
     }
 
-    if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
+    const int have_host_frame = host_i32 && host_f32 &&
+        *host_i32 && *host_f32 && host_get_frame;
+    const int have_bulk_step = host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
         *host_i32 && *host_f32 && *gfx_cmd_i32 && *gfx_cmd_f32 && *gfx_cmd_u8 &&
-        (host_bulk_step || (host_get_frame && gfx_submit_u8)))
+        host_bulk_step;
+    if (have_host_frame || have_bulk_step)
     {
         return 1;
     }
@@ -926,16 +906,13 @@ static int try_make_fixed_swap_path(const char *input, char *out, size_t out_cap
 
 static void stasis_rebind_bulk_pointers(
     HMODULE dll,
-    int bulk_enabled,
     int *bulk_active,
     int32_t **host_i32,
     float **host_f32,
-    uint8_t **host_keys,
     int32_t **gfx_cmd_i32,
     float **gfx_cmd_f32,
     uint8_t **gfx_cmd_u8,
     stasis_host_get_frame_fn *host_get_frame,
-    stasis_host_get_keyboard_state_fn *host_get_keyboard_state,
     stasis_gfx_submit_u8_fn *gfx_submit_u8,
     stasis_host_bulk_init_fn *host_bulk_init,
     stasis_host_bulk_apply_requests_fn *host_bulk_apply_requests,
@@ -957,10 +934,6 @@ static void stasis_rebind_bulk_pointers(
     if (host_f32)
     {
         *host_f32 = NULL;
-    }
-    if (host_keys)
-    {
-        *host_keys = NULL;
     }
     if (gfx_cmd_i32)
     {
@@ -996,11 +969,6 @@ static void stasis_rebind_bulk_pointers(
         *last_req_seq = host_req_seq && *host_req_seq ? **host_req_seq : 0;
     }
 
-    if (!bulk_enabled)
-    {
-        return;
-    }
-
     if (host_i32)
     {
         *host_i32 = (int32_t *)GetProcAddress(dll, "host_i32");
@@ -1008,10 +976,6 @@ static void stasis_rebind_bulk_pointers(
     if (host_f32)
     {
         *host_f32 = (float *)GetProcAddress(dll, "host_f32");
-    }
-    if (host_keys)
-    {
-        *host_keys = (uint8_t *)GetProcAddress(dll, "host_keys");
     }
     if (gfx_cmd_i32)
     {
@@ -1033,10 +997,6 @@ static void stasis_rebind_bulk_pointers(
         {
             *host_get_frame = (stasis_host_get_frame_fn)GetProcAddress(gfx, "stasis_host_get_frame");
         }
-        if (host_get_keyboard_state)
-        {
-            *host_get_keyboard_state = (stasis_host_get_keyboard_state_fn)GetProcAddress(gfx, "stasis_host_get_keyboard_state");
-        }
         if (gfx_submit_u8)
         {
             *gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
@@ -1055,61 +1015,20 @@ static void stasis_rebind_bulk_pointers(
         }
     }
 
-    if (bulk_active && host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && (host_bulk_step || (host_get_frame && gfx_submit_u8)))
+    if (bulk_active)
     {
-        if (*host_i32 && *host_f32 && *gfx_cmd_i32 && *gfx_cmd_f32 && *gfx_cmd_u8 && (*host_bulk_step || (*host_get_frame && *gfx_submit_u8)))
+        const int have_host_frame = host_i32 && host_f32 &&
+            *host_i32 && *host_f32 &&
+            host_get_frame && *host_get_frame;
+        const int have_bulk_step = host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 &&
+            *host_i32 && *host_f32 &&
+            *gfx_cmd_i32 && *gfx_cmd_f32 && *gfx_cmd_u8 &&
+            host_bulk_step && *host_bulk_step;
+        if (have_host_frame || have_bulk_step)
         {
             *bulk_active = 1;
         }
     }
-}
-
-static void stasis_try_bind_input_snapshot(HMODULE lib)
-{
-    if (!lib)
-    {
-        return;
-    }
-
-    HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
-    if (!gfx)
-    {
-        return;
-    }
-
-    stasis_input_bind_fn input_bind = (stasis_input_bind_fn)GetProcAddress(gfx, "stasis_input_bind");
-    if (!input_bind)
-    {
-        return;
-    }
-
-    stasis_input_bindings bindings;
-    memset(&bindings, 0, sizeof(bindings));
-    bindings.key_down = (uint8_t *)GetProcAddress(lib, "input__key_down");
-    bindings.key_went_down = (uint8_t *)GetProcAddress(lib, "input__key_went_down");
-    bindings.key_went_up = (uint8_t *)GetProcAddress(lib, "input__key_went_up");
-    bindings.pointer_count = (int32_t *)GetProcAddress(lib, "input__pointer_count");
-    bindings.pointer_id = (int32_t *)GetProcAddress(lib, "input__pointer_id");
-    bindings.pointer_x_px = (int32_t *)GetProcAddress(lib, "input__pointer_x_px");
-    bindings.pointer_y_px = (int32_t *)GetProcAddress(lib, "input__pointer_y_px");
-    bindings.pointer_is_down = (uint8_t *)GetProcAddress(lib, "input__pointer_is_down");
-    bindings.pointer_went_down = (uint8_t *)GetProcAddress(lib, "input__pointer_went_down");
-    bindings.pointer_went_up = (uint8_t *)GetProcAddress(lib, "input__pointer_went_up");
-    bindings.mouse_x_px = (int32_t *)GetProcAddress(lib, "input__mouse_x_px");
-    bindings.mouse_y_px = (int32_t *)GetProcAddress(lib, "input__mouse_y_px");
-    bindings.mouse_down = (uint8_t *)GetProcAddress(lib, "input__mouse_down");
-    bindings.mouse_clicked = (uint8_t *)GetProcAddress(lib, "input__mouse_clicked");
-
-    if (!bindings.key_down || !bindings.key_went_down || !bindings.key_went_up ||
-        !bindings.pointer_count || !bindings.pointer_id || !bindings.pointer_x_px || !bindings.pointer_y_px ||
-        !bindings.pointer_is_down || !bindings.pointer_went_down || !bindings.pointer_went_up ||
-        !bindings.mouse_x_px || !bindings.mouse_y_px || !bindings.mouse_down || !bindings.mouse_clicked)
-    {
-        input_bind(NULL);
-        return;
-    }
-
-    input_bind(&bindings);
 }
 
 static DWORD WINAPI hot_exit_thread(LPVOID user_data)
@@ -1743,8 +1662,6 @@ int main(int argc, char **argv)
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
 
-    stasis_try_bind_input_snapshot(lib);
-
     if (result == 0 && tick_sym)
     {
         stasis_tick_fn tick = (stasis_tick_fn)tick_sym;
@@ -1752,42 +1669,40 @@ int main(int argc, char **argv)
         QueryPerformanceFrequency(&freq);
         long long target_us = 1000000LL / (long long)fps;
 
-        /* Bulk host mode: host writes HostFrame globals and submits command buffers. */
-        const int bulk_enabled = stasis_env_flag("STASIS_HOST_BULK", 1);
+        /* Tick execution requires HostFrame bulk globals; gfx command buffers are optional. */
         int bulk_active = 0;
         int32_t *host_i32 = NULL;
         float *host_f32 = NULL;
-        uint8_t *host_keys = NULL;
         int32_t *gfx_cmd_i32 = NULL;
         float *gfx_cmd_f32 = NULL;
         uint8_t *gfx_cmd_u8 = NULL;
 
         stasis_host_get_frame_fn host_get_frame = NULL;
-        stasis_host_get_keyboard_state_fn host_get_keyboard_state = NULL;
         stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
         int32_t last_req_seq = host_req_seq ? *host_req_seq : 0;
 
-        if (bulk_enabled)
+        host_i32 = (int32_t *)GetProcAddress(lib, "host_i32");
+        host_f32 = (float *)GetProcAddress(lib, "host_f32");
+        gfx_cmd_i32 = (int32_t *)GetProcAddress(lib, "gfx_cmd_i32");
+        gfx_cmd_f32 = (float *)GetProcAddress(lib, "gfx_cmd_f32");
+        gfx_cmd_u8 = (uint8_t *)GetProcAddress(lib, "gfx_cmd_u8");
+
+        HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
+        if (gfx)
         {
-            host_i32 = (int32_t *)GetProcAddress(lib, "host_i32");
-            host_f32 = (float *)GetProcAddress(lib, "host_f32");
-            host_keys = (uint8_t *)GetProcAddress(lib, "host_keys");
-            gfx_cmd_i32 = (int32_t *)GetProcAddress(lib, "gfx_cmd_i32");
-            gfx_cmd_f32 = (float *)GetProcAddress(lib, "gfx_cmd_f32");
-            gfx_cmd_u8 = (uint8_t *)GetProcAddress(lib, "gfx_cmd_u8");
+            host_get_frame = (stasis_host_get_frame_fn)GetProcAddress(gfx, "stasis_host_get_frame");
+            gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
+        }
 
-            HMODULE gfx = GetModuleHandleA("stasis_graphics.dll");
-            if (gfx)
-            {
-                host_get_frame = (stasis_host_get_frame_fn)GetProcAddress(gfx, "stasis_host_get_frame");
-                host_get_keyboard_state = (stasis_host_get_keyboard_state_fn)GetProcAddress(gfx, "stasis_host_get_keyboard_state");
-                gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
-            }
-
-            if (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && (host_bulk_step || (host_get_frame && gfx_submit_u8)))
-            {
-                bulk_active = 1;
-            }
+        if ((host_i32 && host_f32 && host_get_frame) ||
+            (host_i32 && host_f32 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8 && host_bulk_step))
+        {
+            bulk_active = 1;
+        }
+        if (!bulk_active)
+        {
+            fprintf(stderr, "error: stasis_runner requires HostFrame bulk globals for tick execution\n");
+            result = 1;
         }
 
         const int log_cmd_hdr = stasis_env_flag("STASIS_GFX_LOG_CMD_HDR", 0);
@@ -2023,16 +1938,13 @@ int main(int argc, char **argv)
                             stasis_try_set_sys_args(lib, argc, argv);
                             stasis_rebind_bulk_pointers(
                                 lib,
-                                bulk_enabled,
                                 &bulk_active,
                                 &host_i32,
                                 &host_f32,
-                                &host_keys,
                                 &gfx_cmd_i32,
                                 &gfx_cmd_f32,
                                 &gfx_cmd_u8,
                                 &host_get_frame,
-                                &host_get_keyboard_state,
                                 &gfx_submit_u8,
                                 &host_bulk_init,
                                 &host_bulk_apply_requests,
@@ -2042,8 +1954,6 @@ int main(int argc, char **argv)
                                 &host_req_window_w_px,
                                 &host_req_window_h_px,
                                 &last_req_seq);
-
-                            stasis_try_bind_input_snapshot(lib);
 
                             if (host_bulk_init)
                             {
@@ -2072,7 +1982,7 @@ int main(int argc, char **argv)
             /* Poll data bindings for changes (fast path: just checks mtimes) */
             stasis_data_poll_all();
 
-            if (bulk_active && host_bulk_step)
+            if (bulk_active && host_bulk_step && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
             {
                 int step_result = host_bulk_step(
                     host_i32,
@@ -2094,10 +2004,6 @@ int main(int argc, char **argv)
             else if (bulk_active)
             {
                 host_get_frame(host_i32, host_f32);
-                if (host_get_keyboard_state && host_keys)
-                {
-                    (void)host_get_keyboard_state(host_keys, 512);
-                }
 
                 /* Exit if host requested quit (avoid requiring guest queries). */
                 if (host_i32[9] != 0)
@@ -2139,16 +2045,16 @@ int main(int argc, char **argv)
                     log_cmd_remaining--;
                 }
 
-                gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
+                if (gfx_submit_u8 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
+                {
+                    gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
+                }
             }
             else
             {
-                int tick_result = tick();
-                if (tick_result != 0)
-                {
-                    result = tick_result == 1 ? 0 : tick_result;
-                    break;
-                }
+                fprintf(stderr, "error: HostFrame bulk globals became unavailable during tick loop\n");
+                result = 1;
+                break;
             }
 
             LARGE_INTEGER now;
@@ -2352,7 +2258,6 @@ int main(int argc, char **argv)
         stasis_host_bulk_apply_requests_fn host_bulk_apply_requests = NULL;
         stasis_host_bulk_step_fn host_bulk_step = NULL;
         stasis_host_get_frame_fn host_get_frame = NULL;
-        stasis_host_get_keyboard_state_fn host_get_keyboard_state = NULL;
         stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
 
         void *gfx_lib = dlopen("libstasis_graphics.so", RTLD_NOW | RTLD_GLOBAL);
@@ -2377,7 +2282,6 @@ int main(int argc, char **argv)
         host_bulk_apply_requests = (stasis_host_bulk_apply_requests_fn)dlsym(gfx_lib, "stasis_host_bulk_apply_requests");
         host_bulk_step = (stasis_host_bulk_step_fn)dlsym(gfx_lib, "stasis_host_bulk_step");
         host_get_frame = (stasis_host_get_frame_fn)dlsym(gfx_lib, "stasis_host_get_frame");
-        host_get_keyboard_state = (stasis_host_get_keyboard_state_fn)dlsym(gfx_lib, "stasis_host_get_keyboard_state");
         gfx_submit_u8 = (stasis_gfx_submit_u8_fn)dlsym(gfx_lib, "stasis_gfx_submit_u8");
 
         int32_t *host_req_seq = NULL;
@@ -2385,35 +2289,34 @@ int main(int argc, char **argv)
         int32_t *host_req_window_w_px = NULL;
         int32_t *host_req_window_h_px = NULL;
 
-        const int bulk_enabled = stasis_env_flag("STASIS_HOST_BULK", 1);
         int bulk_active = 0;
         int32_t *host_i32 = NULL;
         float *host_f32 = NULL;
-        uint8_t *host_keys = NULL;
         int32_t *gfx_cmd_i32 = NULL;
         float *gfx_cmd_f32 = NULL;
         uint8_t *gfx_cmd_u8 = NULL;
         int32_t last_req_seq = host_req_seq ? *host_req_seq : 0;
 
-        if (bulk_enabled)
+        bulk_active = stasis_rebind_bulk_pointers_linux(
+            lib,
+            host_bulk_init,
+            host_bulk_step,
+            host_get_frame,
+            gfx_submit_u8,
+            &host_req_seq,
+            &host_req_flags,
+            &host_req_window_w_px,
+            &host_req_window_h_px,
+            &host_i32,
+            &host_f32,
+            &gfx_cmd_i32,
+            &gfx_cmd_f32,
+            &gfx_cmd_u8,
+            &last_req_seq);
+        if (!bulk_active)
         {
-            bulk_active = stasis_rebind_bulk_pointers_linux(
-                lib,
-                host_bulk_init,
-                host_bulk_step,
-                host_get_frame,
-                gfx_submit_u8,
-                &host_req_seq,
-                &host_req_flags,
-                &host_req_window_w_px,
-                &host_req_window_h_px,
-                &host_i32,
-                &host_f32,
-                &host_keys,
-                &gfx_cmd_i32,
-                &gfx_cmd_f32,
-                &gfx_cmd_u8,
-                &last_req_seq);
+            fprintf(stderr, "error: stasis_runner requires HostFrame bulk globals for tick execution\n");
+            result = 1;
         }
 
         if (bulk_active && host_bulk_apply_requests)
@@ -2614,26 +2517,22 @@ int main(int argc, char **argv)
                     tick = (stasis_tick_fn)new_tick_sym;
                     stasis_try_set_sys_args(lib, argc, argv);
                     stasis_data_set_dll(new_lib);
-                    if (bulk_enabled)
-                    {
-                        bulk_active = stasis_rebind_bulk_pointers_linux(
-                            lib,
-                            host_bulk_init,
-                            host_bulk_step,
-                            host_get_frame,
-                            gfx_submit_u8,
-                            &host_req_seq,
-                            &host_req_flags,
-                            &host_req_window_w_px,
-                            &host_req_window_h_px,
-                            &host_i32,
-                            &host_f32,
-                            &host_keys,
-                            &gfx_cmd_i32,
-                            &gfx_cmd_f32,
-                            &gfx_cmd_u8,
-                            &last_req_seq);
-                    }
+                    bulk_active = stasis_rebind_bulk_pointers_linux(
+                        lib,
+                        host_bulk_init,
+                        host_bulk_step,
+                        host_get_frame,
+                        gfx_submit_u8,
+                        &host_req_seq,
+                        &host_req_flags,
+                        &host_req_window_w_px,
+                        &host_req_window_h_px,
+                        &host_i32,
+                        &host_f32,
+                        &gfx_cmd_i32,
+                        &gfx_cmd_f32,
+                        &gfx_cmd_u8,
+                        &last_req_seq);
 
                     if (next_map_owned)
                     {
@@ -2651,34 +2550,30 @@ int main(int argc, char **argv)
                 }
             }
 
-            if (bulk_enabled)
+            void *current_host_i32 = dlsym(lib, "host_i32");
+            if (current_host_i32 && current_host_i32 != (void *)host_i32)
             {
-                void *current_host_i32 = dlsym(lib, "host_i32");
-                if (current_host_i32 && current_host_i32 != (void *)host_i32)
-                {
-                    bulk_active = stasis_rebind_bulk_pointers_linux(
-                        lib,
-                        host_bulk_init,
-                        host_bulk_step,
-                        host_get_frame,
-                        gfx_submit_u8,
-                        &host_req_seq,
-                        &host_req_flags,
-                        &host_req_window_w_px,
-                        &host_req_window_h_px,
-                        &host_i32,
-                        &host_f32,
-                        &host_keys,
-                        &gfx_cmd_i32,
-                        &gfx_cmd_f32,
-                        &gfx_cmd_u8,
-                        &last_req_seq);
-                }
+                bulk_active = stasis_rebind_bulk_pointers_linux(
+                    lib,
+                    host_bulk_init,
+                    host_bulk_step,
+                    host_get_frame,
+                    gfx_submit_u8,
+                    &host_req_seq,
+                    &host_req_flags,
+                    &host_req_window_w_px,
+                    &host_req_window_h_px,
+                    &host_i32,
+                    &host_f32,
+                    &gfx_cmd_i32,
+                    &gfx_cmd_f32,
+                    &gfx_cmd_u8,
+                    &last_req_seq);
             }
 
             stasis_data_poll_all();
 
-            if (bulk_active && host_bulk_step)
+            if (bulk_active && host_bulk_step && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
             {
                 int step_result = host_bulk_step(
                     host_i32,
@@ -2702,10 +2597,6 @@ int main(int argc, char **argv)
                 if (host_get_frame)
                 {
                     host_get_frame(host_i32, host_f32);
-                }
-                if (host_get_keyboard_state && host_keys)
-                {
-                    (void)host_get_keyboard_state(host_keys, 512);
                 }
                 if (host_i32 && host_i32[9] != 0)
                 {
@@ -2739,31 +2630,16 @@ int main(int argc, char **argv)
                     result = tick_result == 1 ? 0 : tick_result;
                     break;
                 }
-                if (gfx_submit_u8)
+                if (gfx_submit_u8 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
                 {
                     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
                 }
             }
             else
             {
-                if (runner_diag && tick_diag_count < 10)
-                {
-                    fprintf(stderr, "RUNNER_DIAG: tick start %d\n", tick_diag_count);
-                    fflush(stderr);
-                }
-
-                int tick_result = tick();
-                if (runner_diag && tick_diag_count < 10)
-                {
-                    fprintf(stderr, "RUNNER_DIAG: tick end %d result=%d\n", tick_diag_count, tick_result);
-                    fflush(stderr);
-                    tick_diag_count++;
-                }
-                if (tick_result != 0)
-                {
-                    result = tick_result == 1 ? 0 : tick_result;
-                    break;
-                }
+                fprintf(stderr, "error: HostFrame bulk globals became unavailable during tick loop\n");
+                result = 1;
+                break;
             }
 
             struct timespec ts_now;
