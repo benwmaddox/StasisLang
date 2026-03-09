@@ -205,6 +205,17 @@ typedef struct {
 
 static StasisFont g_fonts[MAX_FONTS];
 
+static float stasis_font_top_to_baseline(const StasisFont* font) {
+    if (!font) return 0.0f;
+    return (float)font->ascent * font->scale;
+}
+
+static float stasis_font_line_height(const StasisFont* font) {
+    if (!font) return 0.0f;
+    const float line_height = (float)(font->ascent - font->descent + font->line_gap) * font->scale;
+    return line_height > 0.0f ? line_height : (float)font->font_size;
+}
+
 static int stasis_input_valid_index(int idx) {
     return idx >= 0 && idx < STASIS_MAX_POINTERS;
 }
@@ -4323,17 +4334,18 @@ STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
     int quad_count = 0;
 
     float pos_x = 0.0f;
-    float pos_y = 0.0f;
+    float pos_y = stasis_font_top_to_baseline(font);
     float max_x = 0.0f;
     float max_y = 0.0f;
     const float start_x = 0.0f;
+    const float line_height = stasis_font_line_height(font);
 
     for (int i = 0; i < len; i++) {
         unsigned char ch = (unsigned char)text[i];
         if (ch == '\r') continue;
         if (ch == '\n') {
             pos_x = start_x;
-            pos_y += (float)font->font_size;
+            pos_y += line_height;
             continue;
         }
         if (ch < FONT_FIRST_CHAR || ch >= FONT_FIRST_CHAR + FONT_NUM_CHARS) continue;
@@ -4620,8 +4632,9 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
             (Uint8)(a < 0.0f ? 0 : (a > 1.0f ? 255 : (int)(a * 255.0f))));
 
         float pos_x = x;
-        float pos_y = y;
+        float pos_y = y + stasis_font_top_to_baseline(font);
         const float start_x = x;
+        const float line_height = stasis_font_line_height(font);
 
         while (*text) {
             unsigned char ch = (unsigned char)*text;
@@ -4631,7 +4644,7 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
             }
             if (ch == '\n') {
                 pos_x = start_x;
-                pos_y += (float)font->font_size;
+                pos_y += line_height;
                 text++;
                 continue;
             }
@@ -4679,10 +4692,21 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
     glBegin(GL_QUADS);
 
     float pos_x = x;
-    float pos_y = y;
+    float pos_y = y + stasis_font_top_to_baseline(font);
+    const float line_height = stasis_font_line_height(font);
 
     while (*text) {
         int c = (unsigned char)*text;
+        if (c == '\r') {
+            text++;
+            continue;
+        }
+        if (c == '\n') {
+            pos_x = x;
+            pos_y += line_height;
+            text++;
+            continue;
+        }
         if (c >= FONT_FIRST_CHAR && c < FONT_FIRST_CHAR + FONT_NUM_CHARS) {
             stbtt_aligned_quad quad;
             stbtt_GetBakedQuad(font->char_data, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
