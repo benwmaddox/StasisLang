@@ -267,6 +267,434 @@ static void set_runtime_dir(const char *dll_path)
 #endif
 }
 
+static char *stasis_trim_ascii(char *text)
+{
+    while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n')
+    {
+        text++;
+    }
+    char *end = text + strlen(text);
+    while (end > text && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n'))
+    {
+        end--;
+    }
+    *end = '\0';
+    return text;
+}
+
+static int stasis_try_get_self_path(const char *argv0, char *out, size_t out_cap)
+{
+    if (!out || out_cap == 0)
+    {
+        return 0;
+    }
+#ifdef _WIN32
+    DWORD written = GetModuleFileNameA(NULL, out, (DWORD)out_cap);
+    if (written == 0 || written >= out_cap)
+    {
+        if (!argv0 || !argv0[0])
+        {
+            return 0;
+        }
+        strncpy(out, argv0, out_cap - 1);
+        out[out_cap - 1] = '\0';
+        return 1;
+    }
+    if (strncmp(out, "\\\\?\\", 4) == 0)
+    {
+        memmove(out, out + 4, strlen(out + 4) + 1);
+    }
+    return 1;
+#else
+    if (!argv0 || !argv0[0])
+    {
+        return 0;
+    }
+    strncpy(out, argv0, out_cap - 1);
+    out[out_cap - 1] = '\0';
+    return 1;
+#endif
+}
+
+static int stasis_extract_dir(const char *path, char *out, size_t out_cap)
+{
+    if (!path || !out || out_cap == 0)
+    {
+        return 0;
+    }
+    size_t len = strlen(path);
+    if (len >= out_cap)
+    {
+        return 0;
+    }
+    strncpy(out, path, out_cap - 1);
+    out[out_cap - 1] = '\0';
+
+    char *slash = strrchr(out, '\\');
+    char *fslash = strrchr(out, '/');
+    char *sep = slash > fslash ? slash : fslash;
+    if (!sep)
+    {
+        return 0;
+    }
+    *sep = '\0';
+    return 1;
+}
+
+static int stasis_set_current_dir(const char *path)
+{
+    if (!path || !path[0])
+    {
+        return 0;
+    }
+#ifdef _WIN32
+    return SetCurrentDirectoryA(path) != 0;
+#else
+    return chdir(path) == 0;
+#endif
+}
+
+static void stasis_set_asset_root_env(const char *path)
+{
+    if (!path || !path[0])
+    {
+        return;
+    }
+#ifdef _WIN32
+    SetEnvironmentVariableA("STASIS_ASSET_ROOT", path);
+#else
+    setenv("STASIS_ASSET_ROOT", path, 1);
+#endif
+}
+
+static int stasis_path_is_absolute(const char *path)
+{
+    if (!path || !path[0])
+    {
+        return 0;
+    }
+#ifdef _WIN32
+    if ((path[0] && path[1] == ':') ||
+        (path[0] == '\\' && path[1] == '\\') ||
+        (path[0] == '/' && path[1] == '/'))
+    {
+        return 1;
+    }
+    return 0;
+#else
+    return path[0] == '/';
+#endif
+}
+
+static int stasis_join_path(
+    const char *dir,
+    const char *path,
+    char *out,
+    size_t out_cap)
+{
+    if (!dir || !dir[0] || !path || !path[0] || !out || out_cap == 0)
+    {
+        return 0;
+    }
+    if (stasis_path_is_absolute(path))
+    {
+        strncpy(out, path, out_cap - 1);
+        out[out_cap - 1] = '\0';
+        return 1;
+    }
+    if (snprintf(out, out_cap, "%s/%s", dir, path) >= (int)out_cap)
+    {
+        return 0;
+    }
+    return 1;
+}
+
+static FILE *stasis_try_open_launch_file(
+    const char *argv0,
+    const char *self_path,
+    const char *exe_dir,
+    char *launch_path,
+    size_t launch_path_cap)
+{
+    FILE *file = NULL;
+
+    if (self_path && self_path[0])
+    {
+        if (snprintf(launch_path, launch_path_cap, "%s.launch", self_path) < (int)launch_path_cap)
+        {
+            file = fopen(launch_path, "rb");
+            if (file)
+            {
+                return file;
+            }
+        }
+    }
+
+    if (argv0 && argv0[0])
+    {
+        if (snprintf(launch_path, launch_path_cap, "%s.launch", argv0) < (int)launch_path_cap)
+        {
+            file = fopen(launch_path, "rb");
+            if (file)
+            {
+                return file;
+            }
+        }
+    }
+
+    if (exe_dir && exe_dir[0] && self_path && self_path[0])
+    {
+        const char *slash = strrchr(self_path, '\\');
+        const char *fslash = strrchr(self_path, '/');
+        const char *sep = slash > fslash ? slash : fslash;
+        const char *base = sep ? sep + 1 : self_path;
+        if (snprintf(launch_path, launch_path_cap, "%s/%s.launch", exe_dir, base) < (int)launch_path_cap)
+        {
+            file = fopen(launch_path, "rb");
+            if (file)
+            {
+                return file;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+static int stasis_try_load_launch_config(
+    const char *argv0,
+    char *dll_out,
+    size_t dll_out_cap,
+    char *entry_out,
+    size_t entry_out_cap,
+    char *tick_out,
+    size_t tick_out_cap,
+    char *render_out,
+    size_t render_out_cap,
+    char *data_json_out,
+    size_t data_json_out_cap,
+    char *data_meta_out,
+    size_t data_meta_out_cap,
+    int *fps_out)
+{
+    char self_path[2048];
+    char launch_path[2080];
+    char exe_dir[2048];
+    char resolved_path[2048];
+    char line[2048];
+    int runner_diag = stasis_env_flag("STASIS_RUNNER_DIAG", 0);
+
+    if (!stasis_try_get_self_path(argv0, self_path, sizeof(self_path)))
+    {
+        if (runner_diag)
+        {
+            fprintf(stderr, "RUNNER_DIAG: failed to resolve self path for launch config\n");
+            fflush(stderr);
+        }
+        return 0;
+    }
+    if (!stasis_extract_dir(self_path, exe_dir, sizeof(exe_dir)))
+    {
+        if (runner_diag)
+        {
+            fprintf(stderr, "RUNNER_DIAG: failed to extract exe dir from %s\n", self_path);
+            fflush(stderr);
+        }
+        return 0;
+    }
+    FILE *file = stasis_try_open_launch_file(argv0, self_path, exe_dir, launch_path, sizeof(launch_path));
+    if (!file)
+    {
+        if (runner_diag)
+        {
+            fprintf(stderr,
+                    "RUNNER_DIAG: launch config not found self=%s argv0=%s attempted=%s\n",
+                    self_path,
+                    argv0 ? argv0 : "(null)",
+                    launch_path[0] ? launch_path : "(none)");
+            fflush(stderr);
+        }
+        return 0;
+    }
+    if (runner_diag)
+    {
+        fprintf(stderr, "RUNNER_DIAG: launch config=%s\n", launch_path);
+        fflush(stderr);
+    }
+
+    if (dll_out && dll_out_cap > 0)
+    {
+        dll_out[0] = '\0';
+    }
+    if (entry_out && entry_out_cap > 0)
+    {
+        entry_out[0] = '\0';
+    }
+    if (tick_out && tick_out_cap > 0)
+    {
+        tick_out[0] = '\0';
+    }
+    if (render_out && render_out_cap > 0)
+    {
+        render_out[0] = '\0';
+    }
+    if (data_json_out && data_json_out_cap > 0)
+    {
+        data_json_out[0] = '\0';
+    }
+    if (data_meta_out && data_meta_out_cap > 0)
+    {
+        data_meta_out[0] = '\0';
+    }
+    if (fps_out)
+    {
+        *fps_out = 60;
+    }
+
+    while (fgets(line, sizeof(line), file))
+    {
+        char *trimmed = stasis_trim_ascii(line);
+        if (!trimmed[0] || trimmed[0] == '#')
+        {
+            continue;
+        }
+        char *eq = strchr(trimmed, '=');
+        if (!eq)
+        {
+            continue;
+        }
+        *eq = '\0';
+        char *key = stasis_trim_ascii(trimmed);
+        char *value = stasis_trim_ascii(eq + 1);
+
+        if (strcmp(key, "dll") == 0 && dll_out && dll_out_cap > 0)
+        {
+            strncpy(dll_out, value, dll_out_cap - 1);
+            dll_out[dll_out_cap - 1] = '\0';
+            continue;
+        }
+        if (strcmp(key, "entry") == 0 && entry_out && entry_out_cap > 0)
+        {
+            strncpy(entry_out, value, entry_out_cap - 1);
+            entry_out[entry_out_cap - 1] = '\0';
+            continue;
+        }
+        if (strcmp(key, "tick") == 0 && tick_out && tick_out_cap > 0)
+        {
+            strncpy(tick_out, value, tick_out_cap - 1);
+            tick_out[tick_out_cap - 1] = '\0';
+            continue;
+        }
+        if (strcmp(key, "render") == 0 && render_out && render_out_cap > 0)
+        {
+            strncpy(render_out, value, render_out_cap - 1);
+            render_out[render_out_cap - 1] = '\0';
+            continue;
+        }
+        if (strcmp(key, "data_bind_json") == 0 && data_json_out && data_json_out_cap > 0)
+        {
+            strncpy(data_json_out, value, data_json_out_cap - 1);
+            data_json_out[data_json_out_cap - 1] = '\0';
+            continue;
+        }
+        if (strcmp(key, "data_bind_meta") == 0 && data_meta_out && data_meta_out_cap > 0)
+        {
+            strncpy(data_meta_out, value, data_meta_out_cap - 1);
+            data_meta_out[data_meta_out_cap - 1] = '\0';
+            continue;
+        }
+        if (strcmp(key, "fps") == 0 && fps_out)
+        {
+            int value_i32 = atoi(value);
+            if (value_i32 >= 1 && value_i32 <= 240)
+            {
+                *fps_out = value_i32;
+            }
+            continue;
+        }
+    }
+    fclose(file);
+
+    if (!dll_out || !dll_out[0])
+    {
+        return 0;
+    }
+    if (!entry_out || !entry_out[0])
+    {
+        strncpy(entry_out, "main", entry_out_cap - 1);
+        entry_out[entry_out_cap - 1] = '\0';
+    }
+
+    if (dll_out && dll_out[0] && stasis_join_path(exe_dir, dll_out, resolved_path, sizeof(resolved_path)))
+    {
+        strncpy(dll_out, resolved_path, dll_out_cap - 1);
+        dll_out[dll_out_cap - 1] = '\0';
+    }
+    if (data_json_out && data_json_out[0] &&
+        stasis_join_path(exe_dir, data_json_out, resolved_path, sizeof(resolved_path)))
+    {
+        strncpy(data_json_out, resolved_path, data_json_out_cap - 1);
+        data_json_out[data_json_out_cap - 1] = '\0';
+    }
+    if (data_meta_out && data_meta_out[0] &&
+        stasis_join_path(exe_dir, data_meta_out, resolved_path, sizeof(resolved_path)))
+    {
+        strncpy(data_meta_out, resolved_path, data_meta_out_cap - 1);
+        data_meta_out[data_meta_out_cap - 1] = '\0';
+    }
+
+    /* Make relative asset/data paths stable for packaged game builds. */
+    stasis_set_asset_root_env(exe_dir);
+    stasis_set_current_dir(exe_dir);
+    return 1;
+}
+
+static void stasis_build_related_symbol_names(
+    const char *entry_name,
+    char *tick_name,
+    size_t tick_name_cap,
+    char *render_name,
+    size_t render_name_cap)
+{
+    if (tick_name && tick_name_cap > 0)
+    {
+        tick_name[0] = '\0';
+    }
+    if (render_name && render_name_cap > 0)
+    {
+        render_name[0] = '\0';
+    }
+    if (!entry_name || !entry_name[0])
+    {
+        return;
+    }
+
+    const char *sep = strstr(entry_name, "__");
+    if (sep)
+    {
+        size_t prefix_len = (size_t)(sep - entry_name) + 2;
+        if (tick_name && prefix_len + 4 < tick_name_cap)
+        {
+            memcpy(tick_name, entry_name, prefix_len);
+            memcpy(tick_name + prefix_len, "tick", 5);
+        }
+        if (render_name && prefix_len + 6 < render_name_cap)
+        {
+            memcpy(render_name, entry_name, prefix_len);
+            memcpy(render_name + prefix_len, "render", 7);
+        }
+        return;
+    }
+
+    if (tick_name && tick_name_cap >= 5)
+    {
+        memcpy(tick_name, "tick", 5);
+    }
+    if (render_name && render_name_cap >= 7)
+    {
+        memcpy(render_name, "render", 7);
+    }
+}
 #ifdef _WIN32
 static int file_exists(const char *path);
 
@@ -1616,23 +2044,37 @@ int main(int argc, char **argv)
     }
 
     /* Optional tick loop: if `<module>__tick` is exported, call init once then tick at target FPS. */
-    char tick_name[512];
-    tick_name[0] = '\0';
-    const char *sep = strstr(entry_name, "__");
-    if (sep)
+    char tick_name[512] = {0};
+    char render_name[512] = {0};
+    if (tick_name_override && tick_name_override[0])
     {
-        size_t prefix_len = (size_t)(sep - entry_name) + 2;
-        if (prefix_len + 4 < sizeof(tick_name))
-        {
-            memcpy(tick_name, entry_name, prefix_len);
-            memcpy(tick_name + prefix_len, "tick", 5);
-        }
+        strncpy(tick_name, tick_name_override, sizeof(tick_name) - 1);
+        tick_name[sizeof(tick_name) - 1] = '\0';
+    }
+    if (render_name_override && render_name_override[0])
+    {
+        strncpy(render_name, render_name_override, sizeof(render_name) - 1);
+        render_name[sizeof(render_name) - 1] = '\0';
+    }
+    if (tick_name[0] == '\0' && render_name[0] == '\0')
+    {
+        stasis_build_related_symbol_names(
+            entry_name,
+            tick_name,
+            sizeof(tick_name),
+            render_name,
+            sizeof(render_name));
     }
 
     FARPROC tick_sym = NULL;
     if (tick_name[0] != '\0')
     {
         tick_sym = GetProcAddress(lib, tick_name);
+    }
+    FARPROC render_sym = NULL;
+    if (render_name[0] != '\0')
+    {
+        render_sym = GetProcAddress(lib, render_name);
     }
 
     /* Host window request globals are used by bulk mode (defined in src/runtime/host_window_request.stasis). */
@@ -1662,9 +2104,10 @@ int main(int argc, char **argv)
     stasis_entry_fn entry = (stasis_entry_fn)symbol;
     int result = entry();
 
-    if (result == 0 && tick_sym)
+    if (result == 0 && (tick_sym || render_sym))
     {
         stasis_tick_fn tick = (stasis_tick_fn)tick_sym;
+        stasis_tick_fn render = (stasis_tick_fn)render_sym;
         LARGE_INTEGER freq;
         QueryPerformanceFrequency(&freq);
         long long target_us = 1000000LL / (long long)fps;
@@ -2184,22 +2627,36 @@ int main(int argc, char **argv)
         fflush(stderr);
     }
 
-    char tick_name[512];
-    tick_name[0] = '\0';
-    void *tick_sym = NULL;
-    size_t entry_len = strlen(entry_name);
-    if (entry_len >= 4 && strcmp(entry_name + entry_len - 4, "main") == 0)
+    char tick_name[512] = {0};
+    char render_name[512] = {0};
+    if (tick_name_override && tick_name_override[0])
     {
-        size_t prefix_len = entry_len - 4;
-        if (prefix_len + 4 < sizeof(tick_name))
-        {
-            memcpy(tick_name, entry_name, prefix_len);
-            memcpy(tick_name + prefix_len, "tick", 5);
-        }
+        strncpy(tick_name, tick_name_override, sizeof(tick_name) - 1);
+        tick_name[sizeof(tick_name) - 1] = '\0';
     }
+    if (render_name_override && render_name_override[0])
+    {
+        strncpy(render_name, render_name_override, sizeof(render_name) - 1);
+        render_name[sizeof(render_name) - 1] = '\0';
+    }
+    if (tick_name[0] == '\0' && render_name[0] == '\0')
+    {
+        stasis_build_related_symbol_names(
+            entry_name,
+            tick_name,
+            sizeof(tick_name),
+            render_name,
+            sizeof(render_name));
+    }
+    void *tick_sym = NULL;
     if (tick_name[0] != '\0')
     {
         tick_sym = dlsym(lib, tick_name);
+    }
+    void *render_sym = NULL;
+    if (render_name[0] != '\0')
+    {
+        render_sym = dlsym(lib, render_name);
     }
     if (runner_diag)
     {
@@ -2244,9 +2701,10 @@ int main(int argc, char **argv)
         fflush(stderr);
     }
 
-    if (result == 0 && tick_sym)
+    if (result == 0 && (tick_sym || render_sym))
     {
         stasis_tick_fn tick = (stasis_tick_fn)tick_sym;
+        stasis_tick_fn render = (stasis_tick_fn)render_sym;
         long long target_us = 1000000LL / (long long)fps;
         struct timespec ts_last;
         clock_gettime(CLOCK_MONOTONIC, &ts_last);
