@@ -96,6 +96,7 @@ function gfx_draw_sprites(cmds: i32[], count: i32): void {
     gfx_cmd_sprites_from(cmds, count);
 }
 
+/* Text positioning uses a top-left origin, matching sprite placement. */
 function draw_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
     gfx_cmd_text(font, text, x, y, r, g, b, a);
 }
