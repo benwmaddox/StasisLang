@@ -1,13 +1,14 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
 use std::collections::HashMap;
+use std::ffi::c_char;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(windows)]
-use std::ffi::{c_char, c_void, CString, OsStr};
+use std::ffi::{c_void, CString, OsStr};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
@@ -564,6 +565,19 @@ pub fn replace_jit_code_ptr_table(entries: &[(u32, usize)]) {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn stasis_jit_register_code_ptr(fn_id_raw: i32, code_ptr: i64) {
+    if fn_id_raw < 0 || code_ptr == 0 {
+        return;
+    }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
+    let table = jit_code_ptr_table();
+    let mut guard = table.lock().expect("jit code ptr table mutex poisoned");
+    guard.insert(fn_id_raw as u32, code_ptr as usize);
+}
+
 pub fn clear_jit_string_literal_table() {
     let table = jit_string_literal_table();
     let mut guard = table
@@ -578,6 +592,25 @@ pub fn upsert_jit_string_literal(id: i32, value: &str) {
         .lock()
         .expect("jit string literal table mutex poisoned");
     guard.insert(id, value.to_string());
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_clear_string_literal_table() {
+    clear_jit_string_literal_table();
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_upsert_string_literal(id: i32, value: *const c_char) {
+    if value.is_null() {
+        return;
+    }
+    #[cfg(windows)]
+    let text = unsafe { std::ffi::CStr::from_ptr(value) };
+    #[cfg(not(windows))]
+    let text = unsafe { std::ffi::CStr::from_ptr(value) };
+    if let Ok(text) = text.to_str() {
+        upsert_jit_string_literal(id, text);
+    }
 }
 
 pub fn jit_string_literal_value(id: i32) -> Option<String> {
@@ -742,6 +775,73 @@ pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut
         .lock()
         .expect("registered u8 array table mutex poisoned");
     guard.insert((collection_hash, field_hash), (ptr as usize, len));
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
+    register_global_i32_ptr(path_hash, ptr);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_register_global_f32_ptr(path_hash: i32, ptr: *mut f32) {
+    register_global_f32_ptr(path_hash, ptr);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_register_global_f64_ptr(path_hash: i32, ptr: *mut f64) {
+    register_global_f64_ptr(path_hash, ptr);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_register_global_i32_array(
+    collection_hash: i32,
+    field_hash: i32,
+    ptr: *mut i32,
+    len: i32,
+) {
+    if len <= 0 {
+        return;
+    }
+    register_global_i32_array(collection_hash, field_hash, ptr, len as usize);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_register_global_f32_array(
+    collection_hash: i32,
+    field_hash: i32,
+    ptr: *mut f32,
+    len: i32,
+) {
+    if len <= 0 {
+        return;
+    }
+    register_global_f32_array(collection_hash, field_hash, ptr, len as usize);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_register_global_f64_array(
+    collection_hash: i32,
+    field_hash: i32,
+    ptr: *mut f64,
+    len: i32,
+) {
+    if len <= 0 {
+        return;
+    }
+    register_global_f64_array(collection_hash, field_hash, ptr, len as usize);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_register_global_u8_array(
+    collection_hash: i32,
+    field_hash: i32,
+    ptr: *mut u8,
+    len: i32,
+) {
+    if len <= 0 {
+        return;
+    }
+    register_global_u8_array(collection_hash, field_hash, ptr, len as usize);
 }
 
 #[no_mangle]
