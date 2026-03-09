@@ -2394,12 +2394,19 @@ fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(|| self_host_repo_root().join("target"));
     let mut candidates: Vec<PathBuf> = Vec::new();
+    let static_lib_names: &[&str] = if cfg!(windows) {
+        &["stasis_dynload.lib"]
+    } else {
+        &["libstasis_dynload.a", "stasis_dynload.a"]
+    };
 
     for profile in ["debug", "release"] {
         let base = target_dir.join(profile);
-        let direct = base.join("stasis_dynload.lib");
-        if direct.exists() {
-            candidates.push(direct);
+        for name in static_lib_names {
+            let direct = base.join(name);
+            if direct.exists() {
+                candidates.push(direct);
+            }
         }
 
         let deps = base.join("deps");
@@ -2411,13 +2418,56 @@ fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
             let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            if name.starts_with("stasis_dynload-") && name.ends_with(".lib") {
+            if cfg!(windows) {
+                if name.starts_with("stasis_dynload-") && name.ends_with(".lib") {
+                    candidates.push(path);
+                }
+            } else if (name.starts_with("libstasis_dynload-")
+                || name.starts_with("stasis_dynload-"))
+                && name.ends_with(".a")
+            {
                 candidates.push(path);
             }
         }
     }
 
     resolve_latest_existing_path(candidates)
+}
+
+fn runtime_runner_file_name() -> &'static str {
+    if cfg!(windows) {
+        "stasis_runner.exe"
+    } else {
+        "stasis_runner"
+    }
+}
+
+fn runtime_graphics_file_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["stasis_graphics.dll"]
+    } else if cfg!(target_os = "macos") {
+        &["libstasis_graphics.dylib", "stasis_graphics.dylib"]
+    } else {
+        &["libstasis_graphics.so", "stasis_graphics.so"]
+    }
+}
+
+fn packaged_runtime_library_extension() -> &'static str {
+    if cfg!(windows) {
+        "dll"
+    } else if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    }
+}
+
+fn runtime_bridge_object_extension() -> &'static str {
+    if cfg!(windows) {
+        "obj"
+    } else {
+        "o"
+    }
 }
 
 fn ensure_stasis_dynload_staticlib() -> Result<PathBuf, String> {
@@ -2447,39 +2497,60 @@ fn ensure_stasis_dynload_staticlib() -> Result<PathBuf, String> {
         ));
     }
 
-    resolve_stasis_dynload_lib()
-        .ok_or_else(|| "stasis_dynload staticlib build reported success but no .lib was found".to_string())
+    resolve_stasis_dynload_lib().ok_or_else(|| {
+        "stasis_dynload staticlib build reported success but no static library was found"
+            .to_string()
+    })
 }
 
 fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
+    let runner_name = runtime_runner_file_name();
     resolve_latest_existing_path(vec![
-        repo_root.join("stasis_runner.exe"),
-        repo_root.join("build").join("stasis_runner.exe"),
+        repo_root.join(runner_name),
+        repo_root.join("build").join(runner_name),
         repo_root
             .join("runtime")
             .join("build")
             .join("bin")
             .join("Release")
-            .join("stasis_runner.exe"),
+            .join(runner_name),
+        repo_root
+            .join("runtime")
+            .join("build")
+            .join("bin")
+            .join(runner_name),
     ])
 }
 
 fn resolve_runtime_graphics_path(repo_root: &Path) -> Option<PathBuf> {
-    resolve_latest_existing_path(vec![
-        repo_root.join("stasis_graphics.dll"),
-        repo_root.join("build").join("stasis_graphics.dll"),
-        repo_root
-            .join("runtime")
-            .join("build")
-            .join("bin")
-            .join("Release")
-            .join("stasis_graphics.dll"),
-    ])
+    let mut candidates = Vec::new();
+    for name in runtime_graphics_file_names() {
+        candidates.push(repo_root.join(name));
+        candidates.push(repo_root.join("build").join(name));
+        candidates.push(
+            repo_root
+                .join("runtime")
+                .join("build")
+                .join("bin")
+                .join("Release")
+                .join(name),
+        );
+        candidates.push(
+            repo_root
+                .join("runtime")
+                .join("build")
+                .join("bin")
+                .join(name),
+        );
+    }
+    resolve_latest_existing_path(candidates)
 }
 
 fn resolve_msvc_link_exe() -> Option<PathBuf> {
     let roots = [
-        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"),
+        PathBuf::from(
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
+        ),
         PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"),
     ];
     let mut candidates = Vec::new();
@@ -2488,7 +2559,12 @@ fn resolve_msvc_link_exe() -> Option<PathBuf> {
             continue;
         };
         for entry in entries.flatten() {
-            let path = entry.path().join("bin").join("HostX64").join("x64").join("link.exe");
+            let path = entry
+                .path()
+                .join("bin")
+                .join("HostX64")
+                .join("x64")
+                .join("link.exe");
             if path.exists() {
                 candidates.push(path);
             }
@@ -2515,7 +2591,10 @@ fn resolve_rust_lld_exe() -> Option<PathBuf> {
 fn ensure_rust_lld_link_wrapper(artifact_root: &Path) -> Option<PathBuf> {
     let rust_lld = resolve_rust_lld_exe()?;
     let wrapper_path = artifact_root.join("rust-lld-link.cmd");
-    let script = format!("@echo off\r\n\"{}\" -flavor link %*\r\n", rust_lld.display());
+    let script = format!(
+        "@echo off\r\n\"{}\" -flavor link %*\r\n",
+        rust_lld.display()
+    );
     std::fs::write(&wrapper_path, script).ok()?;
     Some(wrapper_path)
 }
@@ -2528,24 +2607,67 @@ fn ensure_runtime_release_artifacts() -> Result<(PathBuf, PathBuf), String> {
         return Ok((runner, graphics));
     }
 
-    let output = std::process::Command::new("cmd")
-        .arg("/c")
-        .arg("runtime\\build.bat")
-        .current_dir(&repo_root)
-        .output()
-        .map_err(|error| format!("failed to spawn runtime\\build.bat: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "runtime\\build.bat failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    if cfg!(windows) {
+        let output = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("runtime\\build.bat")
+            .current_dir(&repo_root)
+            .output()
+            .map_err(|error| format!("failed to spawn runtime\\build.bat: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "runtime\\build.bat failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    } else {
+        let configure = std::process::Command::new("cmake")
+            .arg("-S")
+            .arg("runtime")
+            .arg("-B")
+            .arg("runtime/build")
+            .arg("-DCMAKE_BUILD_TYPE=Release")
+            .current_dir(&repo_root)
+            .output()
+            .map_err(|error| format!("failed to spawn cmake configure for runtime: {error}"))?;
+        if !configure.status.success() {
+            return Err(format!(
+                "cmake runtime configure failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&configure.stdout),
+                String::from_utf8_lossy(&configure.stderr)
+            ));
+        }
+
+        let build = std::process::Command::new("cmake")
+            .arg("--build")
+            .arg("runtime/build")
+            .arg("--config")
+            .arg("Release")
+            .current_dir(&repo_root)
+            .output()
+            .map_err(|error| format!("failed to spawn cmake build for runtime: {error}"))?;
+        if !build.status.success() {
+            return Err(format!(
+                "cmake runtime build failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&build.stdout),
+                String::from_utf8_lossy(&build.stderr)
+            ));
+        }
     }
 
-    let runner = resolve_runtime_runner_path(&repo_root)
-        .ok_or_else(|| "runtime build succeeded but stasis_runner.exe was not found".to_string())?;
-    let graphics = resolve_runtime_graphics_path(&repo_root)
-        .ok_or_else(|| "runtime build succeeded but stasis_graphics.dll was not found".to_string())?;
+    let runner = resolve_runtime_runner_path(&repo_root).ok_or_else(|| {
+        format!(
+            "runtime build succeeded but {} was not found",
+            runtime_runner_file_name()
+        )
+    })?;
+    let graphics = resolve_runtime_graphics_path(&repo_root).ok_or_else(|| {
+        format!(
+            "runtime build succeeded but none of {:?} were found",
+            runtime_graphics_file_names()
+        )
+    })?;
     Ok((runner, graphics))
 }
 
@@ -2569,12 +2691,8 @@ fn copy_file_creating_parent(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst).map_err(|error| {
-        format!(
-            "failed to create directory {}: {error}",
-            dst.display()
-        )
-    })?;
+    std::fs::create_dir_all(dst)
+        .map_err(|error| format!("failed to create directory {}: {error}", dst.display()))?;
     let entries = std::fs::read_dir(src)
         .map_err(|error| format!("failed to read directory {}: {error}", src.display()))?;
     for entry in entries {
@@ -2586,9 +2704,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         })?;
         let path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        let file_type = entry.file_type().map_err(|error| {
-            format!("failed to read file type for {}: {error}", path.display())
-        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to read file type for {}: {error}", path.display()))?;
         if file_type.is_dir() {
             copy_dir_recursive(&path, &dst_path)?;
         } else if file_type.is_file() {
@@ -2625,16 +2743,16 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
             }
             let text = std::fs::read_to_string(&path)
                 .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-            let meta: StructMetaExportFile = serde_json::from_str(&text).map_err(|error| {
-                format!("failed to parse {}: {error}", path.display())
-            })?;
+            let meta: StructMetaExportFile = serde_json::from_str(&text)
+                .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
             for field in meta.fields {
-                out.entry(field.name.clone()).or_insert(PackagedRuntimeField {
-                    name: field.name,
-                    size: field.size,
-                    field_type: field.field_type,
-                    array_count: field.array_count,
-                });
+                out.entry(field.name.clone())
+                    .or_insert(PackagedRuntimeField {
+                        name: field.name,
+                        size: field.size,
+                        field_type: field.field_type,
+                        array_count: field.array_count,
+                    });
             }
         }
         Ok(())
@@ -2690,7 +2808,8 @@ fn copy_json_referenced_absolute_assets(
         }
         serde_json::Value::String(text) => {
             let source = PathBuf::from(text.as_str());
-            if !source.is_absolute() || !source.exists() || !is_bundleable_asset_extension(&source) {
+            if !source.is_absolute() || !source.exists() || !is_bundleable_asset_extension(&source)
+            {
                 return Ok(false);
             }
 
@@ -2717,7 +2836,10 @@ fn copy_json_referenced_absolute_assets(
                     .file_stem()
                     .and_then(|value| value.to_str())
                     .unwrap_or("asset");
-                let ext = source.extension().and_then(|value| value.to_str()).unwrap_or("");
+                let ext = source
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("");
                 let mut counter: usize = 1;
                 while destination.exists() {
                     let candidate = if ext.is_empty() {
@@ -2843,16 +2965,22 @@ fn stage_entry_support_files(
 
     let runtime_fields = collect_struct_meta_fields(&staged_bundle_dir)?;
     let mut support = PackagedAotSupportFiles {
-        export_symbols: runtime_fields.iter().map(|field| field.name.clone()).collect(),
+        export_symbols: runtime_fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect(),
         runtime_fields,
         ..PackagedAotSupportFiles::default()
     };
 
     let data_json = staged_bundle_dir.join("data").join("config.json");
-    let data_meta = staged_bundle_dir.join("data").join("config.struct-meta.json");
+    let data_meta = staged_bundle_dir
+        .join("data")
+        .join("config.struct-meta.json");
     if data_json.exists() && data_meta.exists() {
         support.data_bind_json_rel = Some(format!("{package_dir_name}/data/config.json"));
-        support.data_bind_meta_rel = Some(format!("{package_dir_name}/data/config.struct-meta.json"));
+        support.data_bind_meta_rel =
+            Some(format!("{package_dir_name}/data/config.struct-meta.json"));
     }
 
     Ok(support)
@@ -2869,7 +2997,7 @@ fn append_runtime_bridge_field_source(
         "bool" | "u8" | "u16" | "u32" | "i32" => {
             if field.array_count > 1 {
                 source.push_str(&format!(
-                    "__declspec(dllexport) int32_t {}[{}] = {{0}};\n",
+                    "STASIS_EXPORT int32_t {}[{}] = {{0}};\n",
                     field.name, field.array_count
                 ));
                 register_lines.push(format!(
@@ -2878,10 +3006,7 @@ fn append_runtime_bridge_field_source(
                     len = field.array_count
                 ));
             } else {
-                source.push_str(&format!(
-                    "__declspec(dllexport) int32_t {} = 0;\n",
-                    field.name
-                ));
+                source.push_str(&format!("STASIS_EXPORT int32_t {} = 0;\n", field.name));
                 register_lines.push(format!(
                     "stasis_jit_register_global_i32_ptr({field_hash}, &{name});",
                     name = field.name
@@ -2891,7 +3016,7 @@ fn append_runtime_bridge_field_source(
         "f32" => {
             if field.array_count > 1 {
                 source.push_str(&format!(
-                    "__declspec(dllexport) float {}[{}] = {{0}};\n",
+                    "STASIS_EXPORT float {}[{}] = {{0}};\n",
                     field.name, field.array_count
                 ));
                 register_lines.push(format!(
@@ -2900,10 +3025,7 @@ fn append_runtime_bridge_field_source(
                     len = field.array_count
                 ));
             } else {
-                source.push_str(&format!(
-                    "__declspec(dllexport) float {} = 0.0f;\n",
-                    field.name
-                ));
+                source.push_str(&format!("STASIS_EXPORT float {} = 0.0f;\n", field.name));
                 register_lines.push(format!(
                     "stasis_jit_register_global_f32_ptr({field_hash}, &{name});",
                     name = field.name
@@ -2913,7 +3035,7 @@ fn append_runtime_bridge_field_source(
         "f64" => {
             if field.array_count > 1 {
                 source.push_str(&format!(
-                    "__declspec(dllexport) double {}[{}] = {{0}};\n",
+                    "STASIS_EXPORT double {}[{}] = {{0}};\n",
                     field.name, field.array_count
                 ));
                 register_lines.push(format!(
@@ -2922,10 +3044,7 @@ fn append_runtime_bridge_field_source(
                     len = field.array_count
                 ));
             } else {
-                source.push_str(&format!(
-                    "__declspec(dllexport) double {} = 0.0;\n",
-                    field.name
-                ));
+                source.push_str(&format!("STASIS_EXPORT double {} = 0.0;\n", field.name));
                 register_lines.push(format!(
                     "stasis_jit_register_global_f64_ptr({field_hash}, &{name});",
                     name = field.name
@@ -2937,7 +3056,7 @@ fn append_runtime_bridge_field_source(
             let header_bytes = field.size.saturating_sub(field.array_count);
             let payload_len = field.array_count.max(1);
             source.push_str(&format!(
-                "__declspec(dllexport) uint8_t {}[{}] = {{0}};\n",
+                "STASIS_EXPORT uint8_t {}[{}] = {{0}};\n",
                 field.name, len
             ));
             if header_bytes >= 8 {
@@ -3019,6 +3138,13 @@ fn build_engine_bundle_runtime_bridge_source(
     let mut source = String::new();
     source.push_str("#include <stdint.h>\n");
     source.push_str(
+        "#if defined(_WIN32)\n\
+#define STASIS_EXPORT __declspec(dllexport)\n\
+#else\n\
+#define STASIS_EXPORT __attribute__((visibility(\"default\")))\n\
+#endif\n",
+    );
+    source.push_str(
         "void stasis_jit_register_global_i32_ptr(int32_t path_hash, int32_t* ptr);\n\
 void stasis_jit_register_global_f32_ptr(int32_t path_hash, float* ptr);\n\
 void stasis_jit_register_global_f64_ptr(int32_t path_hash, double* ptr);\n\
@@ -3043,15 +3169,15 @@ void stasis_jit_upsert_string_literal(int32_t id, const char* value);\n",
     }
 
     source.push_str(
-        "__declspec(dllexport) int32_t host_i32[768] = {0};\n\
-__declspec(dllexport) float host_f32[64] = {0};\n\
-__declspec(dllexport) int32_t gfx_cmd_i32[34848] = {0};\n\
-__declspec(dllexport) float gfx_cmd_f32[92292] = {0};\n\
-__declspec(dllexport) uint8_t gfx_cmd_u8[65536] = {0};\n\
-__declspec(dllexport) int32_t host_req_seq = 0;\n\
-__declspec(dllexport) int32_t host_req_flags = 0;\n\
-__declspec(dllexport) int32_t host_req_window_w_px = 0;\n\
-__declspec(dllexport) int32_t host_req_window_h_px = 0;\n",
+        "STASIS_EXPORT int32_t host_i32[768] = {0};\n\
+STASIS_EXPORT float host_f32[64] = {0};\n\
+STASIS_EXPORT int32_t gfx_cmd_i32[34848] = {0};\n\
+STASIS_EXPORT float gfx_cmd_f32[92292] = {0};\n\
+STASIS_EXPORT uint8_t gfx_cmd_u8[65536] = {0};\n\
+STASIS_EXPORT int32_t host_req_seq = 0;\n\
+STASIS_EXPORT int32_t host_req_flags = 0;\n\
+STASIS_EXPORT int32_t host_req_window_w_px = 0;\n\
+STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
     );
 
     let mut register_lines = vec![
@@ -3107,19 +3233,19 @@ __declspec(dllexport) int32_t host_req_window_h_px = 0;\n",
     for alias in function_aliases {
         if alias.returns_i32 {
             source.push_str(&format!(
-                "__declspec(dllexport) int32_t {alias}(void) {{ return ((int32_t (*)(void)){target})(); }}\n",
+                "STASIS_EXPORT int32_t {alias}(void) {{ return ((int32_t (*)(void)){target})(); }}\n",
                 alias = alias.alias,
                 target = alias.target_symbol
             ));
         } else {
             source.push_str(&format!(
-                "__declspec(dllexport) void {alias}(void) {{ ((void (*)(void)){target})(); }}\n",
+                "STASIS_EXPORT void {alias}(void) {{ ((void (*)(void)){target})(); }}\n",
                 alias = alias.alias,
                 target = alias.target_symbol
             ));
         }
     }
-    source.push_str("__declspec(dllexport) void stasis_aot_bind_runtime_globals(void) {\n");
+    source.push_str("STASIS_EXPORT void stasis_aot_bind_runtime_globals(void) {\n");
     for line in register_lines {
         source.push_str("    ");
         source.push_str(&line);
@@ -3139,9 +3265,10 @@ fn emit_engine_bundle_runtime_bridge_object(
     let source_path = backend
         .aot_artifact_root
         .join("engine_bundle_runtime_bridge.c");
-    let object_path = backend
-        .aot_artifact_root
-        .join("engine_bundle_runtime_bridge.obj");
+    let object_path = backend.aot_artifact_root.join(format!(
+        "engine_bundle_runtime_bridge.{}",
+        runtime_bridge_object_extension()
+    ));
     let source = build_engine_bundle_runtime_bridge_source(
         runtime_fields,
         function_symbols,
@@ -3155,20 +3282,62 @@ fn emit_engine_bundle_runtime_bridge_object(
         )
     })?;
 
-    let output = std::process::Command::new("clang-cl.exe")
-        .arg("/nologo")
-        .arg("/c")
-        .arg("/O2")
-        .arg("/TC")
-        .arg(format!("/Fo{}", object_path.display()))
-        .arg(&source_path)
-        .output()
-        .map_err(|error| format!("failed to spawn clang-cl.exe for runtime bridge object: {error}"))?;
+    let compiler = std::env::var_os("CC").unwrap_or_else(|| {
+        if cfg!(windows) {
+            "clang-cl.exe".into()
+        } else {
+            "cc".into()
+        }
+    });
+    let compiler_name = Path::new(&compiler)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let is_msvc_style = cfg!(windows)
+        && (compiler_name == "clang-cl"
+            || compiler_name == "clang-cl.exe"
+            || compiler_name == "cl"
+            || compiler_name == "cl.exe");
+    let mut command = std::process::Command::new(&compiler);
+    if is_msvc_style {
+        command
+            .arg("/nologo")
+            .arg("/c")
+            .arg("/O2")
+            .arg("/TC")
+            .arg(format!("/Fo{}", object_path.display()))
+            .arg(&source_path);
+    } else {
+        command
+            .arg("-c")
+            .arg("-O2")
+            .arg("-x")
+            .arg("c")
+            .arg("-o")
+            .arg(&object_path);
+        if !cfg!(windows) {
+            command.arg("-fPIC");
+        }
+        command.arg(&source_path);
+    }
+    let output = command.output().map_err(|error| {
+        format!(
+            "failed to spawn C compiler {:?} for runtime bridge object: {error}",
+            compiler
+        )
+    })?;
     if !output.status.success() {
         return Err(format!(
             "failed to build engine bundle runtime bridge object\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    if !object_path.exists() {
+        return Err(format!(
+            "runtime bridge compile succeeded but did not produce {}",
+            object_path.display()
         ));
     }
     Ok(object_path)
@@ -3290,7 +3459,11 @@ fn package_engine_bundle_release(
 
     let mut link_config = backend.aot_link_config.clone();
     let dynload_lib = ensure_stasis_dynload_staticlib()?;
-    if !link_config.runtime_lib_paths.iter().any(|path| path == &dynload_lib) {
+    if !link_config
+        .runtime_lib_paths
+        .iter()
+        .any(|path| path == &dynload_lib)
+    {
         link_config.runtime_lib_paths.push(dynload_lib);
     }
     if cfg!(windows) {
@@ -3299,7 +3472,7 @@ fn package_engine_bundle_release(
         }
     }
 
-    let linked_library_path = output_exe.with_extension("dll");
+    let linked_library_path = output_exe.with_extension(packaged_runtime_library_extension());
     let function_symbols: Vec<String> = manifest
         .functions
         .iter()
@@ -3313,7 +3486,8 @@ fn package_engine_bundle_release(
         &function_aliases,
         &string_literals,
     )?;
-    let mut object_paths: Vec<PathBuf> = bundle.object_paths_by_function.values().cloned().collect();
+    let mut object_paths: Vec<PathBuf> =
+        bundle.object_paths_by_function.values().cloned().collect();
     object_paths.push(bridge_object);
     let export_symbols: Vec<String> = export_symbols.into_iter().collect();
     let initial_link = link_objects_to_dynamic_library(
@@ -3348,13 +3522,23 @@ fn package_engine_bundle_release(
 
     let (runner_src, graphics_src) = ensure_runtime_release_artifacts()?;
     copy_file_creating_parent(&runner_src, output_exe)?;
-    copy_file_creating_parent(&graphics_src, &output_root.join("stasis_graphics.dll"))?;
+    let graphics_dst = output_root.join(
+        graphics_src
+            .file_name()
+            .ok_or_else(|| format!("invalid graphics runtime path {}", graphics_src.display()))?,
+    );
+    copy_file_creating_parent(&graphics_src, &graphics_dst)?;
 
     let launch_path = packaged_launch_sidecar_path(output_exe)?;
     let linked_library_name = linked_library_path
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| format!("invalid linked library path {}", linked_library_path.display()))?;
+        .ok_or_else(|| {
+            format!(
+                "invalid linked library path {}",
+                linked_library_path.display()
+            )
+        })?;
     let mut launch_lines = vec![
         format!("dll={linked_library_name}"),
         "entry=main".to_string(),
@@ -3398,35 +3582,9 @@ fn package_engine_bundle_release(
             )
         })?;
     }
-    let runner_copy_path = output_root.join("stasis_runner.exe");
-    if runner_copy_path.exists() && runner_copy_path != output_exe {
-        std::fs::remove_file(&runner_copy_path).map_err(|error| {
-            format!(
-                "failed to remove stale runner copy {}: {error}",
-                runner_copy_path.display()
-            )
-        })?;
-    }
-    let default_summary_path = resolve_aot_cli_summary_sidecar_path(output_exe, None);
-    if default_summary_path.exists() {
-        std::fs::remove_file(&default_summary_path).map_err(|error| {
-            format!(
-                "failed to remove stale summary sidecar {}: {error}",
-                default_summary_path.display()
-            )
-        })?;
-    }
-    let legacy_cache_root = output_root.join(".stasis_cache");
-    if legacy_cache_root.exists() {
-        std::fs::remove_dir_all(&legacy_cache_root).map_err(|error| {
-            format!(
-                "failed to remove stale release cache {}: {error}",
-                legacy_cache_root.display()
-            )
-        })?;
-    }
-
-    maybe_sign_output_executable(output_exe)?;
+    maybe_sign_output_artifact(output_exe)?;
+    maybe_sign_output_artifact(&linked_library_path)?;
+    maybe_sign_output_artifact(&graphics_dst)?;
 
     let object_file_names = object_paths
         .iter()
@@ -5283,14 +5441,11 @@ mod tests {
         store(11, 0);
 
         // Force in-level gameplay (not title screen): enter level 1, place a brick, then start battle.
-        stasis_dynload::invoke_i32_to_void(start_level_ptr as usize, 0).expect("invoke start_level");
-        let place_rc = stasis_dynload::invoke_i32_i32_i32_to_i32(
-            place_brick_at_grid_ptr as usize,
-            0,
-            0,
-            0,
-        )
-        .expect("invoke place_brick_at_grid");
+        stasis_dynload::invoke_i32_to_void(start_level_ptr as usize, 0)
+            .expect("invoke start_level");
+        let place_rc =
+            stasis_dynload::invoke_i32_i32_i32_to_i32(place_brick_at_grid_ptr as usize, 0, 0, 0)
+                .expect("invoke place_brick_at_grid");
         assert_ne!(place_rc, 0, "expected place_brick_at_grid to succeed");
         stasis_dynload::invoke_noarg_void(try_start_battle_ptr as usize)
             .expect("invoke brickout_try_start_battle");
@@ -9669,8 +9824,8 @@ echo "signed" > "$1.signed"
         by_hash
     }
 
-#[test]
-fn self_host_aot_cli_links_runnable_executable_with_main_entry_symbol() {
+    #[test]
+    fn self_host_aot_cli_links_runnable_executable_with_main_entry_symbol() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -13614,29 +13769,33 @@ pub fn run_self_host_aot_cli(
     run_self_host_aot_cli_with_backend(&mut backend, project_dir, output_exe)
 }
 
-fn maybe_sign_output_executable(output_exe: &Path) -> Result<(), String> {
+fn maybe_sign_output_artifact(artifact_path: &Path) -> Result<(), String> {
     let Some(sign_tool) = std::env::var_os("STASIS_AOT_SIGN_TOOL") else {
         return Ok(());
     };
     let status = std::process::Command::new(&sign_tool)
-        .arg(output_exe)
+        .arg(artifact_path)
         .status()
         .map_err(|error| {
             format!(
                 "failed to launch signer tool {:?} for {}: {error}",
                 sign_tool,
-                output_exe.display()
+                artifact_path.display()
             )
         })?;
     if !status.success() {
         return Err(format!(
             "signer tool {:?} failed for {} with status {:?}",
             sign_tool,
-            output_exe.display(),
+            artifact_path.display(),
             status.code()
         ));
     }
     Ok(())
+}
+
+fn maybe_sign_output_executable(output_exe: &Path) -> Result<(), String> {
+    maybe_sign_output_artifact(output_exe)
 }
 
 fn metric_uses_stub_fallback(metric: &stasis_compiler::FunctionMetric) -> bool {
