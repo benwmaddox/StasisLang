@@ -131,26 +131,6 @@ typedef struct {
 } StasisInputFrame;
 
 static StasisInputFrame g_input_frame;
-typedef struct {
-    uint8_t *key_down;
-    uint8_t *key_went_down;
-    uint8_t *key_went_up;
-    int32_t *pointer_count;
-    int32_t *pointer_id;
-    int32_t *pointer_x_px;
-    int32_t *pointer_y_px;
-    uint8_t *pointer_is_down;
-    uint8_t *pointer_went_down;
-    uint8_t *pointer_went_up;
-    int32_t *mouse_x_px;
-    int32_t *mouse_y_px;
-    uint8_t *mouse_down;
-    uint8_t *mouse_clicked;
-} StasisInputBindings;
-
-static StasisInputBindings g_input_bindings;
-static int g_input_bindings_active = 0;
-static uint8_t g_prev_keys[512];
 static int g_events_pumped_this_frame = 0;
 static float g_prev_x_px[STASIS_MAX_POINTERS];
 static float g_prev_y_px[STASIS_MAX_POINTERS];
@@ -161,7 +141,6 @@ static int g_finger_active[STASIS_MAX_POINTERS - 1];
 STASIS_EXPORT int stasis_get_time_ms(void);
 STASIS_EXPORT int stasis_should_quit(void);
 STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32);
-STASIS_EXPORT void stasis_input_bind(const StasisInputBindings* bindings);
 STASIS_EXPORT int stasis_set_fullscreen(int fullscreen);
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, int x, int y, int w, int h, int rot_degrees, int a);
 STASIS_EXPORT void stasis_gfx_submit_u8(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8);
@@ -550,81 +529,6 @@ STASIS_EXPORT int stasis_input_viewport_h_px(void) {
     return g_window ? g_input_frame.viewport_h_px : 0;
 }
 
-STASIS_EXPORT void stasis_input_bind(const StasisInputBindings* bindings)
-{
-    if (!bindings)
-    {
-        memset(&g_input_bindings, 0, sizeof(g_input_bindings));
-        g_input_bindings_active = 0;
-        return;
-    }
-
-    if (!bindings->key_down || !bindings->key_went_down || !bindings->key_went_up ||
-        !bindings->pointer_count || !bindings->pointer_id || !bindings->pointer_x_px || !bindings->pointer_y_px ||
-        !bindings->pointer_is_down || !bindings->pointer_went_down || !bindings->pointer_went_up ||
-        !bindings->mouse_x_px || !bindings->mouse_y_px || !bindings->mouse_down || !bindings->mouse_clicked)
-    {
-        memset(&g_input_bindings, 0, sizeof(g_input_bindings));
-        g_input_bindings_active = 0;
-        return;
-    }
-
-    g_input_bindings = *bindings;
-    g_input_bindings_active = 1;
-    memset(g_prev_keys, 0, sizeof(g_prev_keys));
-}
-
-static void stasis_write_input_snapshot(const Uint8* keys, int num_keys)
-{
-    if (!g_input_bindings_active)
-    {
-        return;
-    }
-
-    for (int i = 0; i < 512; i++)
-    {
-        uint8_t down = (keys && i < num_keys && keys[i]) ? 1 : 0;
-        g_input_bindings.key_down[i] = down;
-        g_input_bindings.key_went_down[i] = (down && g_prev_keys[i] == 0) ? 1 : 0;
-        g_input_bindings.key_went_up[i] = (!down && g_prev_keys[i] != 0) ? 1 : 0;
-        g_prev_keys[i] = down;
-    }
-
-    int count = g_input_frame.pointer_count;
-    if (count < 0) { count = 0; }
-    if (count > STASIS_MAX_POINTERS) { count = STASIS_MAX_POINTERS; }
-    *g_input_bindings.pointer_count = count;
-
-    for (int i = 0; i < STASIS_MAX_POINTERS; i++)
-    {
-        if (i < count)
-        {
-            const StasisPointer* p = &g_input_frame.pointers[i];
-            g_input_bindings.pointer_id[i] = p->id;
-            g_input_bindings.pointer_x_px[i] = (int32_t)p->x_px;
-            g_input_bindings.pointer_y_px[i] = (int32_t)p->y_px;
-            g_input_bindings.pointer_is_down[i] = p->is_down ? 1 : 0;
-            g_input_bindings.pointer_went_down[i] = p->went_down ? 1 : 0;
-            g_input_bindings.pointer_went_up[i] = p->went_up ? 1 : 0;
-        }
-        else
-        {
-            g_input_bindings.pointer_id[i] = -1;
-            g_input_bindings.pointer_x_px[i] = 0;
-            g_input_bindings.pointer_y_px[i] = 0;
-            g_input_bindings.pointer_is_down[i] = 0;
-            g_input_bindings.pointer_went_down[i] = 0;
-            g_input_bindings.pointer_went_up[i] = 0;
-        }
-    }
-
-    const StasisPointer* mouse = &g_input_frame.pointers[0];
-    *g_input_bindings.mouse_x_px = (int32_t)mouse->x_px;
-    *g_input_bindings.mouse_y_px = (int32_t)mouse->y_px;
-    *g_input_bindings.mouse_down = mouse->is_down ? 1 : 0;
-    *g_input_bindings.mouse_clicked = mouse->went_up ? 1 : 0;
-}
-
 STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height);
 
 /*
@@ -817,8 +721,6 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
         out_f32[f32_base + i * f32_stride + 4] = p->x_n;
         out_f32[f32_base + i * f32_stride + 5] = p->y_n;
     }
-
-    stasis_write_input_snapshot(keys, num_keys);
 
     for (int i = i32_base + STASIS_MAX_POINTERS * i32_stride; i < 768; i++) out_i32[i] = 0;
     for (int i = f32_base + STASIS_MAX_POINTERS * f32_stride; i < 64; i++) out_f32[i] = 0.0f;
@@ -3883,21 +3785,6 @@ STASIS_EXPORT int stasis_is_key_down(int scancode) {
     if (!g_keyboard_state) return 0;
     if (scancode < 0 || scancode >= SDL_NUM_SCANCODES) return 0;
     return g_keyboard_state[scancode] ? 1 : 0;
-}
-
-/*
- * Bulk keyboard snapshot: copy SDL keyboard state into caller-provided buffer.
- * Returns number of bytes written.
- */
-STASIS_EXPORT int stasis_host_get_keyboard_state(uint8_t* out_u8, int max_bytes) {
-    if (!out_u8 || max_bytes <= 0) return 0;
-    SDL_PumpEvents();
-    int len = 0;
-    const uint8_t* state = SDL_GetKeyboardState(&len);
-    if (!state || len <= 0) return 0;
-    int n = len < max_bytes ? len : max_bytes;
-    memcpy(out_u8, state, (size_t)n);
-    return n;
 }
 
 /*

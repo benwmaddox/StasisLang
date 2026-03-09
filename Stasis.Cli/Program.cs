@@ -318,7 +318,6 @@ static void AddHostAbiDataExports(LayoutPlan layout, List<string> exports)
     // Export these globals as DATA so the runner can GetProcAddress them.
     AddIfGlobalExists(layout, exports, "host_i32");
     AddIfGlobalExists(layout, exports, "host_f32");
-    AddIfGlobalExists(layout, exports, "host_keys");
 
     AddIfGlobalExists(layout, exports, "gfx_cmd_i32");
     AddIfGlobalExists(layout, exports, "gfx_cmd_f32");
@@ -8137,4 +8136,3 @@ sealed record TestCacheEntry(
     bool UseCraneliftRunner,
     string? CraneliftTargetTriple,
     string CompilerCacheSalt);
-
