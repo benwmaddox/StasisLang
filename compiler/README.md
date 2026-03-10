@@ -14,7 +14,6 @@ Ownership boundary:
 - `compiler/` is experimental self-hosting work and is not the active compilation pipeline today.
 
 Smoke compile path:
-- Local Windows: `bootstrap\\windows\\stasisc.bat run compiler\\simple_pass_compiler.stasis --emit-ir`
 - Rust smoke test (Windows): `cargo test -p stasis_compiler bootstrap_compiles_incremental_compiler_source -- --nocapture`
 
 Current entrypoint validation API in `compiler/simple_pass_compiler.stasis`:
@@ -44,5 +43,5 @@ Current single-source execution mode:
 
 Console extern naming:
 - Source-level preferred name: `print_i32`.
-- Bootstrap runtime currently exposes `print_int`; stdlib provides `print_i32(value: i32)` wrapper over `print_int(value)`.
-- `print_string` is available directly in bootstrap runtime.
+- Runtime surface exposes `print_i32` directly.
+- `print_string` is available directly in the runtime.

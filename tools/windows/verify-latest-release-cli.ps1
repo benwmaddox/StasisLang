@@ -118,7 +118,6 @@ if (-not (Test-Path $graphicsDllPath)) {
 $runFile = Join-Path $extractDir "smoke_run.stasis"
 $testFile = Join-Path $extractDir "smoke_test.stasis"
 $buildOut = Join-Path $extractDir "smoke_run.exe"
-$craneliftAotExe = Join-Path $extractDir "bin\stasis-cranelift-aot.exe"
 
 $runContent = @'
 function main(): i32 {
@@ -133,12 +132,6 @@ test `one equals one`(): bool {
 }
 '@
 Set-Content -Path $testFile -Value $testContent -Encoding ASCII
-
-if (-not (Test-Path $craneliftAotExe)) {
-    throw "Extracted bundle does not contain Cranelift AOT helper at $craneliftAotExe"
-}
-
-$env:STASIS_CRANELIFT_AOT = $craneliftAotExe
 
 Push-Location $extractDir
 try {

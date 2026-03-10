@@ -5,18 +5,13 @@ mod compiler_backend;
 mod events;
 mod host_set_registry;
 mod runtime_exec;
-mod self_host_runtime_bridge;
 mod stasis_test_runner;
 mod watch;
 mod window_config;
 
 pub use compiler_backend::run_self_host_aot_cli;
+pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use events::RunnerEvent;
-pub use self_host_runtime_bridge::{
-    publish_cli_args_to_env, publish_source_files_to_env, publish_staged_bridge_paths_to_env,
-    restore_cli_args_env, restore_source_files_env, restore_staged_bridge_paths_env,
-    stasis_process_env_lock,
-};
 pub use stasis_test_runner::{
     run_jit_tests_in_directory, run_jit_tests_in_directory_with_session, StasisTestRunSession,
     StasisTestRunSummary,
@@ -2095,8 +2090,13 @@ mod tests {
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
+    fn process_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     fn with_env_var_set(key: &str, value: &str, f: impl FnOnce()) {
-        let _lock = stasis_process_env_lock()
+        let _lock = process_env_lock()
             .lock()
             .expect("process env lock should succeed");
         let old = std::env::var_os(key);
@@ -2960,17 +2960,6 @@ mod tests {
                 .find(|path| path.exists())
         }
 
-        let helper_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("tools")
-            .join("cranelift-aot")
-            .join("target")
-            .join("debug")
-            .join("stasis-cranelift-aot.exe");
-        if !helper_path.exists() {
-            return;
-        }
         let Some(linker_path) = find_lld_link() else {
             return;
         };
@@ -2988,10 +2977,7 @@ mod tests {
         )
         .expect("write source");
 
-        let compile_config = stasis_jit::AotCompileConfig {
-            helper_path: Some(helper_path),
-            ..stasis_jit::AotCompileConfig::default()
-        };
+        let compile_config = stasis_jit::AotCompileConfig::default();
         let link_config = stasis_jit::AotLinkConfig {
             linker_path: Some(linker_path),
             runtime_lib_paths: vec![],

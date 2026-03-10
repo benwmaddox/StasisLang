@@ -30,7 +30,7 @@ Native SDL2+OpenGL graphics library for Stasis programs.
 4. Run an Asteroids demo:
    ```cmd
    cd ..
-   dotnet run --project Stasis.Cli -- run samples/asteroids.stasis --graphics --graphics-lib runtime\build\Release\stasis_graphics.dll
+   cargo run -p stasis --release -- play samples\asteroids.stasis
    ```
 
 ## Android (NDK)
