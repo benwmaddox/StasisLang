@@ -1,6 +1,6 @@
 # Windows App Control (Local Dev)
 
-This guide covers common local blocks when running bootstrap-built Stasis binaries.
+This guide covers common local blocks when running locally built Stasis binaries.
 
 ## Why Blocks Happen
 
@@ -10,29 +10,30 @@ Typical causes:
 - Executables launched from `%TEMP%`.
 - WDAC/AppLocker policy requiring trusted signer/path/hash rules.
 
-Current bootstrap flow uses a stable repo path for transient artifacts:
+Current local execution flow uses stable repo paths for transient artifacts:
 
 - `.stasis_cache/tmp`
 
 ## Recommended Local Setup
 
-1. Build bootstrap binaries.
+1. Build the Rust CLI/runtime outputs.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File bootstrap/windows/build-bootstrap.ps1
+cargo build -p stasis --release
+runtime\build.bat
 ```
 
-2. Sign them locally (self-signed cert for dev).
+2. Sign them locally (self-signed cert for dev) if your environment requires signed execution.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File bootstrap/windows/build-bootstrap.ps1 -Sign -CreateCert -TrustLocalCert
+$env:STASIS_AOT_SIGN_TOOL = "C:\tools\sign-stasis.cmd"
 ```
 
 3. If your environment allows Defender exclusions, add:
 
 ```powershell
 Add-MpPreference -ExclusionPath "F:\StasisLang\.stasis_cache\tmp"
-Add-MpPreference -ExclusionPath "F:\StasisLang\bootstrap\windows\stasis-cli"
+Add-MpPreference -ExclusionPath "F:\StasisLang\target\release"
 ```
 
 Note: this requires elevated/admin PowerShell and does not override WDAC/AppLocker policy.
@@ -62,7 +63,7 @@ If Defender exclusions are insufficient, ask IT/security to allow one of:
 - Hash rule for built binaries.
 - Path rule for:
 - `F:\StasisLang\.stasis_cache\tmp`
-- `F:\StasisLang\bootstrap\windows\stasis-cli`
+- `F:\StasisLang\target\release`
 
 Publisher rules are preferred to reduce churn when binaries change.
 

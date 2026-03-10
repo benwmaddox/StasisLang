@@ -97,9 +97,6 @@ if (-not $sourceRoot) {
 }
 
 $cargoToml = Join-Path $sourceRoot.FullName "Cargo.toml"
-$legacyBuildBat = Join-Path $sourceRoot.FullName "build.bat"
-$legacyTestBat = Join-Path $sourceRoot.FullName "test.bat"
-$legacySolution = Join-Path $sourceRoot.FullName "Stasis.sln"
 $validationMode = ""
 
 Push-Location $sourceRoot.FullName
@@ -123,32 +120,6 @@ try {
                 Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
                 .\target\release\stasis.exe probe-graphics-runtime
             }
-        }
-    }
-    elseif ((Test-Path $legacyBuildBat) -and (Test-Path $legacyTestBat)) {
-        $validationMode = "legacy-source"
-        $env:STASIS_CLEAN_RUNTIME_BUILD = "1"
-
-        Invoke-CheckedCommand -Description "Running runtime\\build.bat" -Action {
-            cmd /c runtime\build.bat
-        }
-        Invoke-CheckedCommand -Description "Running cargo build -p stasis-cranelift-aot --release --manifest-path tools\\cranelift-aot\\Cargo.toml" -Action {
-            cargo build -p stasis-cranelift-aot --release --manifest-path tools\cranelift-aot\Cargo.toml
-        }
-        Invoke-CheckedCommand -Description "Running dotnet build Stasis.sln -c Release -m:1" -Action {
-            dotnet build Stasis.sln -c Release -m:1
-        }
-        Invoke-CheckedCommand -Description "Running dotnet test Stasis.sln -c Release -- RunConfiguration.MaxCpuCount=1" -Action {
-            dotnet test Stasis.sln -c Release -- RunConfiguration.MaxCpuCount=1
-        }
-    }
-    elseif (Test-Path $legacySolution) {
-        $validationMode = "legacy-dotnet-fallback"
-        Invoke-CheckedCommand -Description "Running dotnet build Stasis.sln -c Release" -Action {
-            dotnet build Stasis.sln -c Release
-        }
-        Invoke-CheckedCommand -Description "Running dotnet test Stasis.sln -c Release -- RunConfiguration.MaxCpuCount=1" -Action {
-            dotnet test Stasis.sln -c Release -- RunConfiguration.MaxCpuCount=1
         }
     }
     else {
