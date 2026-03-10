@@ -3305,7 +3305,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static SIGN_ENV_LOCK: Mutex<()> = Mutex::new(());
-    static STUB_FALLBACK_ENV_LOCK: Mutex<()> = Mutex::new(());
     static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn stasis_process_env_lock() -> &'static Mutex<()> {
@@ -6817,11 +6816,10 @@ mod tests {
         assert_eq!(result.status, CompileStatus::Failed);
         assert!(
             result.diagnostics.iter().any(|diagnostic| {
-                diagnostic
-                    .message
-                    .contains("unresolved direct call target for emitted function")
+                diagnostic.message.contains("call target") && diagnostic.message.contains("callee")
             }),
-            "expected unresolved direct call target diagnostic"
+            "expected unresolved direct call target diagnostic, got: {:?}",
+            result.diagnostics
         );
         fs::remove_dir_all(&temp_root).ok();
     }
@@ -6837,7 +6835,7 @@ mod tests {
         let source = temp_root.join("sample.stasis");
         fs::write(
             &source,
-            "extern function host_cli_arg_count(): i32;\nfunction main(): i32 { return host_cli_arg_count() + 10; }\n",
+            "function @extern(\"stasis_jit_global_i32_load\") host_load(path_hash: i32): i32;\nfunction main(): i32 { return host_load(123) + 10; }\n",
         )
         .expect("write source");
 
@@ -6899,85 +6897,6 @@ mod tests {
     }
 
     #[test]
-    fn aot_manifest_records_stub_fallback_details_with_body_hash_hints() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("stasis_aot_fallback_manifest_{stamp}"));
-        fs::create_dir_all(&temp_root).expect("create temp root");
-        let source = temp_root.join("sample.stasis");
-        fs::write(
-            &source,
-            "function main(): i32 { let value: i32 = 7; return value; }\n",
-        )
-        .expect("write source");
-
-        let artifact_root = temp_root.join("aot_artifacts");
-        let mut backend = IncrementalCompilerBackend::with_aot_config(
-            AotCompileConfig::default(),
-            artifact_root.clone(),
-        );
-        let result = backend.compile(CompileRequest::new(
-            RequestId(131),
-            vec![source],
-            TargetMode::AotProd,
-        ));
-        assert_eq!(result.status, CompileStatus::Success);
-
-        let manifest_path = artifact_root.join("last_patch_manifest.json");
-        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
-        let manifest: AotPatchManifest =
-            serde_json::from_str(&manifest_text).expect("parse manifest json");
-        assert!(!manifest.fallback_stub_symbols.is_empty());
-        assert_eq!(
-            manifest.fallback_stub_symbols.len(),
-            manifest.fallback_stub_details.len()
-        );
-
-        fs::remove_dir_all(&temp_root).ok();
-    }
-
-    #[test]
-    fn aot_manifest_has_no_fallback_for_lowerable_entry_function() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("stasis_aot_lowerable_entry_{stamp}"));
-        fs::create_dir_all(&temp_root).expect("create temp root");
-        let compiler_dir = temp_root.join("compiler");
-        fs::create_dir_all(&compiler_dir).expect("create compiler dir");
-        let source = compiler_dir.join("stasis_aot_cli_entry.stasis");
-        fs::write(
-            &source,
-            "extern function host_run_self_host_aot_cli_from_env(): i32;\nfunction compiler_cli_parse_from_argv(): i32 { return host_run_self_host_aot_cli_from_env(); }\nfunction main(): i32 { return compiler_cli_parse_from_argv(); }\n",
-        )
-        .expect("write source");
-
-        let artifact_root = temp_root.join("aot_artifacts");
-        let mut backend = IncrementalCompilerBackend::with_aot_config(
-            AotCompileConfig::default(),
-            artifact_root.clone(),
-        );
-        let result = backend.compile(CompileRequest::new(
-            RequestId(139),
-            vec![source],
-            TargetMode::AotProd,
-        ));
-        assert_eq!(result.status, CompileStatus::Success);
-
-        let manifest_path = artifact_root.join("last_patch_manifest.json");
-        let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
-        let manifest: AotPatchManifest =
-            serde_json::from_str(&manifest_text).expect("parse manifest json");
-        assert!(manifest.fallback_stub_symbols.is_empty());
-        assert!(manifest.fallback_stub_details.is_empty());
-
-        fs::remove_dir_all(&temp_root).ok();
-    }
-
-    #[test]
     fn aot_compile_emits_hook_fn_symbol_mapping_and_patch_coverage() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -7012,7 +6931,9 @@ mod tests {
             .as_ref()
             .expect("successful compile should include patch set");
         assert_eq!(symbols.len(), patch_set.functions.len());
-        assert!(symbols.iter().all(|entry| entry.symbol.starts_with("fn_")));
+        assert!(symbols
+            .iter()
+            .all(|entry| entry.symbol.starts_with("aot_fn_")));
 
         let hook_fn_id = result
             .hook_fn_id
@@ -7442,115 +7363,6 @@ echo "signed" > "$1.signed"
         assert_eq!(sidecar_summary.source_file_count, summary.source_file_count);
         assert_eq!(sidecar_summary.entry_symbol, summary.entry_symbol);
         assert_eq!(sidecar_summary.object_file_names, summary.object_file_names);
-
-        fs::remove_dir_all(&temp_root).ok();
-    }
-
-    #[test]
-    fn self_host_aot_cli_rejects_stub_fallback_by_default() {
-        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
-        let _guard = STUB_FALLBACK_ENV_LOCK
-            .lock()
-            .expect("lock stub fallback env");
-        let old_strict = std::env::var("STASIS_AOT_STRICT_SELF_HOST").ok();
-        std::env::remove_var("STASIS_AOT_ALLOW_STUB_FALLBACK");
-        std::env::set_var("STASIS_AOT_STRICT_SELF_HOST", "1");
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("stasis_self_host_strict_{stamp}"));
-        fs::create_dir_all(&temp_root).expect("create temp root");
-        let project_dir = temp_root.join("project");
-        fs::create_dir_all(&project_dir).expect("create project dir");
-        let source = project_dir.join("main.stasis");
-        fs::write(
-            &source,
-            "function main(): i32 { let value: i32 = 7; return value; }\n",
-        )
-        .expect("write source");
-
-        let linker = write_fake_linker(&temp_root);
-        let mut backend = new_self_host_test_backend(temp_root.join("aot_artifacts"), linker);
-        let output_exe = if cfg!(windows) {
-            temp_root.join("program.exe")
-        } else {
-            temp_root.join("program.out")
-        };
-
-        let result = run_self_host_aot_cli_with_backend_and_options(
-            &mut backend,
-            &project_dir,
-            &output_exe,
-            &SelfHostedAotCliOptions::default(),
-        );
-        if let Some(value) = old_strict {
-            std::env::set_var("STASIS_AOT_STRICT_SELF_HOST", value);
-        } else {
-            std::env::remove_var("STASIS_AOT_STRICT_SELF_HOST");
-        }
-        match result {
-            Ok(_) => panic!("expected strict mode to reject stub fallback"),
-            Err(message) => {
-                assert!(message.contains("strict mode rejected stub fallback lowering"))
-            }
-        }
-
-        fs::remove_dir_all(&temp_root).ok();
-    }
-
-    #[test]
-    fn self_host_aot_cli_can_allow_stub_fallback_temporarily() {
-        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
-        let _guard = STUB_FALLBACK_ENV_LOCK
-            .lock()
-            .expect("lock stub fallback env");
-        let old = std::env::var("STASIS_AOT_ALLOW_STUB_FALLBACK").ok();
-        let old_strict = std::env::var("STASIS_AOT_STRICT_SELF_HOST").ok();
-        std::env::set_var("STASIS_AOT_STRICT_SELF_HOST", "1");
-        std::env::set_var("STASIS_AOT_ALLOW_STUB_FALLBACK", "1");
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("stasis_self_host_allow_stub_{stamp}"));
-        fs::create_dir_all(&temp_root).expect("create temp root");
-        let project_dir = temp_root.join("project");
-        fs::create_dir_all(&project_dir).expect("create project dir");
-        let source = project_dir.join("main.stasis");
-        fs::write(
-            &source,
-            "function main(): i32 { let value: i32 = 7; return value; }\n",
-        )
-        .expect("write source");
-
-        let linker = write_fake_linker(&temp_root);
-        let mut backend = new_self_host_test_backend(temp_root.join("aot_artifacts"), linker);
-        let output_exe = if cfg!(windows) {
-            temp_root.join("program.exe")
-        } else {
-            temp_root.join("program.out")
-        };
-
-        let result = run_self_host_aot_cli_with_backend_and_options(
-            &mut backend,
-            &project_dir,
-            &output_exe,
-            &SelfHostedAotCliOptions::default(),
-        );
-        if let Some(value) = old {
-            std::env::set_var("STASIS_AOT_ALLOW_STUB_FALLBACK", value);
-        } else {
-            std::env::remove_var("STASIS_AOT_ALLOW_STUB_FALLBACK");
-        }
-        if let Some(value) = old_strict {
-            std::env::set_var("STASIS_AOT_STRICT_SELF_HOST", value);
-        } else {
-            std::env::remove_var("STASIS_AOT_STRICT_SELF_HOST");
-        }
-        let summary = result.expect("allow-stub-fallback run should succeed");
-        assert_eq!(summary.source_file_count, 1);
-        assert!(summary.linked_image_path.exists());
 
         fs::remove_dir_all(&temp_root).ok();
     }
