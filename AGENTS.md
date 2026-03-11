@@ -4,8 +4,6 @@
 - `docs/spec.md` is the canonical language spec.
 - `docs/live-compilation-prd.md` is the canonical product/architecture requirements document.
 - `docs/build_checklist.md` is the execution plan; keep slice ordering and temporary migration details there.
-- `compiler/` holds compiler source written in Stasis.
-- Note: `compiler/` is experimental and is not the active compilation pipeline today.
 - `crates/stasis_compiler` hosts Rust compiler substrate/bindings called by Stasis orchestration.
 - `crates/stasis_jit` hosts Cranelift integration for JIT (dev) and AOT (prod), function pointer table integration, and code generation memory management.
 - `crates/stasis_runner` hosts tick loop, swap sequencing, and commit orchestration.
@@ -79,8 +77,8 @@
 - preserve deterministic tick-based semantics; avoid `dt`-driven gameplay progression in Stasis logic.
 
 ## Language Ownership Rules
-- Rust owns host/runtime boundary, platform integration, Cranelift embedding, pointer-table commit mechanics, and process/watch plumbing.
-- `.stasis` owns compiler orchestration policies and language-level compile logic.
+- Rust owns compiler implementation, host/runtime boundary, platform integration, Cranelift embedding, pointer-table commit mechanics, and process/watch plumbing.
+- `.stasis` owns user code, stdlib, and samples.
 - Use C only when unavoidable for platform-level bindings.
 
 ## Compiler Slice Process (Active)

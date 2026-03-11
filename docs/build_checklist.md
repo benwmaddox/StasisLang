@@ -6,7 +6,6 @@ This checklist is the implementation plan and is aligned with:
 
 Status note:
 - This repository's stable compiler is implemented in Rust (`cargo build`, `cargo test`).
-- The `compiler/` directory contains experimental self-hosting work and is not the active compilation pipeline today.
 
 Locked decisions:
 - Entrypoint is `function main(): i32`.
@@ -24,7 +23,7 @@ Locked decisions:
 `Rust` is the compiler and runtime implementation.
 
 - `Rust`: compiler implementation (frontend + lowering + Cranelift), host app/runtime boundary, platform integration, process/watch plumbing, and host-set/phase enforcement.
-- `.stasis`: user code, stdlib, and samples. (`compiler/` is experimental; not the current compiler.)
+- `.stasis`: user code, stdlib, and samples.
 
 Boundary rule:
 - Keep the compiler single-source-of-truth: do not reintroduce parallel compiler implementations that diverge in semantics.
@@ -50,8 +49,7 @@ Release AOT optimization:
 - Default AOT opt level is `speed_and_size` (release-friendly).
 - Override with `STASIS_AOT_OPT_LEVEL`: `none` | `speed` | `speed_and_size`.
 
-Bootstrap compiler tooling is seed-only for initial bring-up.
-It is not part of the steady-state incremental JIT update loop.
+Historical bootstrap/self-host notes below are archival only and do not describe an active compiler track.
 
 ## Slice Plan
 

@@ -1,8 +1,0 @@
-﻿import "../../compiler/simple_pass_compiler.stasis";
-
-function main(): i32 {
-    compiler_reset_state();
-    compiler_set_source("function tick(): i32 { return 0; }");
-    return run_incremental_compiler_with_main_entry();
-}
-
