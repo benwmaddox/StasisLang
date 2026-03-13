@@ -227,55 +227,60 @@ pub fn link_objects_to_dynamic_library(
     }
 
     let linker = resolve_linker_path(config);
-    let mut command = Command::new(&linker);
+    let mut args: Vec<String> = Vec::new();
     if cfg!(windows) {
-        command.arg("/NOLOGO");
-        command.arg("/DLL");
-        command.arg(format!("/OUT:{}", output_library.display()));
+        args.push("/NOLOGO".to_string());
+        args.push("/DLL".to_string());
+        args.push(format!("/OUT:{}", output_library.display()));
         for symbol in export_symbols {
-            command.arg(format!("/EXPORT:{symbol}"));
+            args.push(format!("/EXPORT:{symbol}"));
         }
         let windows_lib_paths = resolve_windows_link_lib_paths();
         for lib_path in &windows_lib_paths {
-            command.arg(format!("/LIBPATH:{}", lib_path.display()));
+            args.push(format!("/LIBPATH:{}", lib_path.display()));
         }
         if let Some(kernel32) = resolve_kernel32_lib_path(&windows_lib_paths) {
-            command.arg(kernel32);
+            args.push(kernel32.display().to_string());
         } else {
-            command.arg("kernel32.lib");
+            args.push("kernel32.lib".to_string());
         }
         // When linking against Rust `staticlib` runtime shims (e.g. `stasis_dynload.lib`),
         // lld-link does not automatically pull in the CRT/system libraries that those objects
         // depend on. Add the common MSVC + Windows SDK libraries so AOT bundles link cleanly.
-        command.arg("ucrt.lib");
-        command.arg("vcruntime.lib");
-        command.arg("msvcrt.lib");
-        command.arg("legacy_stdio_definitions.lib");
-        command.arg("advapi32.lib");
-        command.arg("bcrypt.lib");
-        command.arg("dbghelp.lib");
-        command.arg("ntdll.lib");
-        command.arg("ole32.lib");
-        command.arg("oleaut32.lib");
-        command.arg("psapi.lib");
-        command.arg("secur32.lib");
-        command.arg("shell32.lib");
-        command.arg("user32.lib");
-        command.arg("userenv.lib");
-        command.arg("ws2_32.lib");
+        args.push("ucrt.lib".to_string());
+        args.push("vcruntime.lib".to_string());
+        args.push("msvcrt.lib".to_string());
+        args.push("legacy_stdio_definitions.lib".to_string());
+        args.push("advapi32.lib".to_string());
+        args.push("bcrypt.lib".to_string());
+        args.push("dbghelp.lib".to_string());
+        args.push("ntdll.lib".to_string());
+        args.push("ole32.lib".to_string());
+        args.push("oleaut32.lib".to_string());
+        args.push("psapi.lib".to_string());
+        args.push("secur32.lib".to_string());
+        args.push("shell32.lib".to_string());
+        args.push("user32.lib".to_string());
+        args.push("userenv.lib".to_string());
+        args.push("ws2_32.lib".to_string());
     } else {
-        command.arg("-shared");
-        command.arg("-o");
-        command.arg(output_library);
+        args.push("-shared".to_string());
+        args.push("-o".to_string());
+        args.push(output_library.display().to_string());
     }
     for object_path in object_paths {
-        command.arg(object_path);
+        args.push(object_path.display().to_string());
     }
     for runtime_lib in &config.runtime_lib_paths {
-        command.arg(runtime_lib);
+        args.push(runtime_lib.display().to_string());
     }
 
-    run_link_command(&mut command, "dynamic library link", &linker)?;
+    run_link_command_with_args(
+        &linker,
+        &args,
+        "dynamic library link",
+        &output_library.with_extension("link.rsp"),
+    )?;
     if !output_library.exists() {
         return Err(format!(
             "link step reported success but did not produce {}",
@@ -308,34 +313,39 @@ pub fn link_objects_to_executable(
     }
 
     let linker = resolve_linker_path(config);
-    let mut command = Command::new(&linker);
+    let mut args: Vec<String> = Vec::new();
     if cfg!(windows) {
-        command.arg("/NOLOGO");
-        command.arg(format!("/OUT:{}", output_executable.display()));
-        command.arg(format!("/ENTRY:{entry_symbol}"));
-        command.arg("/SUBSYSTEM:CONSOLE");
+        args.push("/NOLOGO".to_string());
+        args.push(format!("/OUT:{}", output_executable.display()));
+        args.push(format!("/ENTRY:{entry_symbol}"));
+        args.push("/SUBSYSTEM:CONSOLE".to_string());
         let windows_lib_paths = resolve_windows_link_lib_paths();
         for lib_path in &windows_lib_paths {
-            command.arg(format!("/LIBPATH:{}", lib_path.display()));
+            args.push(format!("/LIBPATH:{}", lib_path.display()));
         }
         if let Some(kernel32) = resolve_kernel32_lib_path(&windows_lib_paths) {
-            command.arg(kernel32);
+            args.push(kernel32.display().to_string());
         } else {
-            command.arg("kernel32.lib");
+            args.push("kernel32.lib".to_string());
         }
     } else {
-        command.arg("-o");
-        command.arg(output_executable);
-        command.arg(format!("-Wl,-e,{entry_symbol}"));
+        args.push("-o".to_string());
+        args.push(output_executable.display().to_string());
+        args.push(format!("-Wl,-e,{entry_symbol}"));
     }
     for object_path in object_paths {
-        command.arg(object_path);
+        args.push(object_path.display().to_string());
     }
     for runtime_lib in &config.runtime_lib_paths {
-        command.arg(runtime_lib);
+        args.push(runtime_lib.display().to_string());
     }
 
-    run_link_command(&mut command, "executable link", &linker)?;
+    run_link_command_with_args(
+        &linker,
+        &args,
+        "executable link",
+        &output_executable.with_extension("link.rsp"),
+    )?;
     if !output_executable.exists() {
         return Err(format!(
             "link step reported success but did not produce {}",
@@ -621,6 +631,43 @@ fn run_link_command(command: &mut Command, mode: &str, linker: &Path) -> Result<
         ));
     }
     Ok(())
+}
+
+fn run_link_command_with_args(
+    linker: &Path,
+    args: &[String],
+    mode: &str,
+    response_file_path: &Path,
+) -> Result<(), String> {
+    let mut command = Command::new(linker);
+    if cfg!(windows) {
+        let response_body = args
+            .iter()
+            .map(|arg| escape_linker_response_arg(arg))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(response_file_path, response_body).map_err(|error| {
+            format!(
+                "failed to write linker response file {}: {error}",
+                response_file_path.display()
+            )
+        })?;
+        command.arg(format!("@{}", response_file_path.display()));
+        let result = run_link_command(&mut command, mode, linker);
+        let _ = fs::remove_file(response_file_path);
+        return result;
+    }
+
+    command.args(args);
+    run_link_command(&mut command, mode, linker)
+}
+
+fn escape_linker_response_arg(arg: &str) -> String {
+    if arg.contains([' ', '\t', '"']) {
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    } else {
+        arg.to_string()
+    }
 }
 
 fn default_target_triple() -> String {
