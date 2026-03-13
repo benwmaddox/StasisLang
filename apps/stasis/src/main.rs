@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use stasis::{
-    publish_cli_args_to_env, restore_cli_args_env, run_jit_tests_in_directory_with_session,
-    run_play_in_process, run_self_host_aot_cli, run_with_default_backend, run_with_real_backend,
+    run_jit_tests_in_directory_with_session, run_play_in_process,
+    run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
     RunnerConfig, StasisTestRunSession,
 };
 use stasis_runner::swap::contracts::TargetMode;
@@ -729,9 +729,6 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
     if first != "aot-cli" {
         return None;
     }
-    // Host boundary for self-host AOT CLI:
-    // parse process args, publish bridge env, call self-host compile entry.
-    // Compile orchestration policy belongs in .stasis compiler code.
     let arg_list: Vec<String> = args.collect();
     let parsed = match parse_aot_cli_contract_args(&arg_list) {
         Ok(value) => value,
@@ -740,9 +737,6 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
             return Some(2);
         }
     };
-    let old_summary_override = std::env::var("STASIS_AOT_SUMMARY_FILE").ok();
-    let old_entry_override = std::env::var("STASIS_AOT_ENTRY_FILE").ok();
-    let old_quality_gate = std::env::var("STASIS_AOT_QUALITY_GATE").ok();
     if let Some(path) = parsed.summary_file.as_ref() {
         if let Some(parent) = path.parent() {
             if let Err(error) = std::fs::create_dir_all(parent) {
@@ -753,56 +747,14 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
                 return Some(2);
             }
         }
-        std::env::set_var("STASIS_AOT_SUMMARY_FILE", path);
-    } else {
-        std::env::remove_var("STASIS_AOT_SUMMARY_FILE");
     }
-    if let Some(path) = parsed.entry_file.as_ref() {
-        std::env::set_var("STASIS_AOT_ENTRY_FILE", path);
-    } else {
-        std::env::remove_var("STASIS_AOT_ENTRY_FILE");
-    }
-    if parsed.quality_gate {
-        std::env::set_var("STASIS_AOT_QUALITY_GATE", "1");
-    } else {
-        std::env::remove_var("STASIS_AOT_QUALITY_GATE");
-    }
-    let mut bridge_args = vec![
-        "--project-dir".to_string(),
-        parsed.project_dir.display().to_string(),
-        "--out".to_string(),
-        parsed.output_exe.display().to_string(),
-    ];
-    if let Some(path) = parsed.summary_file.as_ref() {
-        bridge_args.push("--summary-file".to_string());
-        bridge_args.push(path.display().to_string());
-    }
-    if let Some(path) = parsed.entry_file.as_ref() {
-        bridge_args.push("--entry-file".to_string());
-        bridge_args.push(path.display().to_string());
-    }
-    if parsed.quality_gate {
-        bridge_args.push("--quality-gate".to_string());
-    }
-    let bridge_snapshot = publish_cli_args_to_env(&bridge_args, parsed.summary_file.as_deref());
-
-    let result = run_self_host_aot_cli(&parsed.project_dir, &parsed.output_exe);
-    restore_cli_args_env(bridge_snapshot);
-    if let Some(value) = old_summary_override {
-        std::env::set_var("STASIS_AOT_SUMMARY_FILE", value);
-    } else {
-        std::env::remove_var("STASIS_AOT_SUMMARY_FILE");
-    }
-    if let Some(value) = old_entry_override {
-        std::env::set_var("STASIS_AOT_ENTRY_FILE", value);
-    } else {
-        std::env::remove_var("STASIS_AOT_ENTRY_FILE");
-    }
-    if let Some(value) = old_quality_gate {
-        std::env::set_var("STASIS_AOT_QUALITY_GATE", value);
-    } else {
-        std::env::remove_var("STASIS_AOT_QUALITY_GATE");
-    }
+    let _ = parsed.quality_gate;
+    let result = run_self_host_aot_cli_with_options(
+        &parsed.project_dir,
+        &parsed.output_exe,
+        parsed.summary_file.as_deref(),
+        parsed.entry_file.as_deref(),
+    );
 
     match result {
         Ok(summary) => {
@@ -1025,8 +977,8 @@ mod tests {
             "aot-cli host should not run compiler frontend directly"
         );
         assert!(
-            source.contains("run_self_host_aot_cli("),
-            "aot-cli host should delegate through self-host entrypoint"
+            source.contains("run_self_host_aot_cli_with_options("),
+            "aot-cli host should delegate through the library AOT entrypoint"
         );
     }
 }

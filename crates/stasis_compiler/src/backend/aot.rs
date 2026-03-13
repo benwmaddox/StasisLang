@@ -108,6 +108,7 @@ impl AotProcess {
                 "aot compile analysis cache missing after refresh".to_string(),
             )
         })?;
+        self.string_literals.clear();
         for constant in analysis.constant_values.values() {
             if let ConstantValue::String { value, .. } = constant {
                 record_string_literal(&mut self.string_literals, value)
@@ -181,6 +182,8 @@ impl AotProcess {
             &self.required_emit_roots,
         );
         artifacts.retain(|artifact| reachable.contains(&artifact.function_id));
+        compact_active_artifact_storage(artifacts, object_bytes);
+        self.next_object_index = u32::try_from(self.object_bytes.len()).unwrap_or(u32::MAX);
         Ok(CompileReport { index, emit })
     }
 
@@ -483,6 +486,27 @@ impl AotProcess {
         }
         Ok(out)
     }
+}
+
+fn compact_active_artifact_storage(artifacts: &mut [AotArtifact], object_bytes: &mut Vec<Vec<u8>>) {
+    let mut remapped_indices: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut compacted: Vec<Vec<u8>> = Vec::with_capacity(artifacts.len());
+    for artifact in artifacts {
+        let original_index = artifact.object_index;
+        let next_index = if let Some(index) = remapped_indices.get(&original_index).copied() {
+            index
+        } else {
+            let Some(bytes) = object_bytes.get(original_index as usize).cloned() else {
+                continue;
+            };
+            let index = u32::try_from(compacted.len()).unwrap_or(u32::MAX);
+            compacted.push(bytes);
+            remapped_indices.insert(original_index, index);
+            index
+        };
+        artifact.object_index = next_index;
+    }
+    *object_bytes = compacted;
 }
 
 fn compile_function_to_object_bytes(
@@ -938,6 +962,44 @@ mod tests {
         let second = process.compile().expect("second compile");
         assert_eq!(second.emit.emitted_functions, 0);
         assert_eq!(process.artifacts().len(), 1);
+    }
+
+    #[test]
+    fn aot_process_compacts_retained_object_bytes_after_recompile() {
+        let mut process = AotProcess::new();
+        process.upsert_file("sample.stasis", "function main(): i32 { return 1; }\n");
+        process.compile().expect("first compile");
+        assert_eq!(process.object_bytes.len(), 1);
+        assert_eq!(process.artifacts().len(), 1);
+        assert_eq!(process.artifacts()[0].object_index, 0);
+
+        process.upsert_file("sample.stasis", "function main(): i32 { return 9; }\n");
+        process.compile().expect("second compile");
+        assert_eq!(process.object_bytes.len(), 1);
+        assert_eq!(process.artifacts().len(), 1);
+        assert_eq!(process.artifacts()[0].object_index, 0);
+    }
+
+    #[test]
+    fn aot_process_rebuilds_string_literal_table_each_compile() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { print_string(\"first\"); return 0; }\n",
+        );
+        process.compile().expect("first compile");
+        assert_eq!(process.string_literals().len(), 1);
+
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { print_string(\"second\"); return 0; }\n",
+        );
+        process.compile().expect("second compile");
+        assert_eq!(process.string_literals().len(), 1);
+        assert!(process
+            .string_literals()
+            .values()
+            .any(|value| value == "second"));
     }
 
     #[test]

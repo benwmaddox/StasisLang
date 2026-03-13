@@ -606,9 +606,6 @@ Console output contract:
 - `print_string` accepts `string`, `ascii[]`, and `utf8[]` call sites in current runtime conventions.
 - For `ascii[]`/`utf8[]` call sites, argument passing is by string-view/reference semantics (no implicit full-buffer copy).
 
-Bootstrap compatibility note:
-- Current bootstrap runtime symbol is `print_int`; stdlib provides `print_i32` wrapper to preserve Stasis naming.
-
 ### 12.2 Future Direction: Optional Plugin Libraries
 
 This section is intentionally **out of scope** for the current release approach.
