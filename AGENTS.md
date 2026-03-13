@@ -4,11 +4,7 @@
 - `docs/spec.md` is the canonical language spec.
 - `docs/live-compilation-prd.md` is the canonical product/architecture requirements document.
 - `docs/build_checklist.md` is the execution plan; keep slice ordering and temporary migration details there.
-- `compiler/` holds compiler source written in Stasis.
-- Note: `compiler/` is experimental and is not the active compilation pipeline today.
 - `crates/stasis_compiler` hosts Rust compiler substrate/bindings called by Stasis orchestration.
-- `Stasis.Compiler/` and `Stasis.Cli/` are bootstrap compiler sources imported from `main` for branch compatibility.
-- Treat `Stasis.Compiler/` + `Stasis.Cli/` as bootstrap-only (not the long-term self-hosted compiler target).
 - `crates/stasis_jit` hosts Cranelift integration for JIT (dev) and AOT (prod), function pointer table integration, and code generation memory management.
 - `crates/stasis_runner` hosts tick loop, swap sequencing, and commit orchestration.
 - `apps/stasis` is the single in-process graphical runner app.
@@ -24,9 +20,6 @@
 - `cargo run -p stasis --release -- --ticks 300 --watch-dir samples/brickout_revenge`
 - Use `rg` for search (`rg pattern path`, `rg --files`).
 - Keep commands deterministic and scriptable.
-- Legacy bootstrap tooling remains available for compiler smoke/reference:
-- `bootstrap\windows\stasisc.bat run path\to\file.stasis --emit-ir`
-- `bootstrap\windows\stasisc.bat test --all`
 
 ## Coding Style & Naming Conventions
 - Keep files ASCII unless a file already uses non-ASCII and there is a clear reason.
@@ -84,8 +77,8 @@
 - preserve deterministic tick-based semantics; avoid `dt`-driven gameplay progression in Stasis logic.
 
 ## Language Ownership Rules
-- Rust owns host/runtime boundary, platform integration, Cranelift embedding, pointer-table commit mechanics, and process/watch plumbing.
-- `.stasis` owns compiler orchestration policies and language-level compile logic.
+- Rust owns compiler implementation, host/runtime boundary, platform integration, Cranelift embedding, pointer-table commit mechanics, and process/watch plumbing.
+- `.stasis` owns user code, stdlib, and samples.
 - Use C only when unavoidable for platform-level bindings.
 
 ## Compiler Slice Process (Active)
@@ -122,12 +115,12 @@
 - Adjustment: remove compatibility metric channels quickly after reachability contracts are wired to avoid long-lived dead interfaces.
 - Current reflection (2026-02-23, simple-pass restart slice):
 - Good: replacing the copied orchestration file with a fresh single-pass parser immediately clarified scope and ownership.
-- Bad: initial rewrite used unsupported control-flow keywords (`break`/`continue`), causing avoidable bootstrap failures.
-- Adjustment: after the first parser chunk, run one bootstrap fixture immediately to validate language-surface assumptions before adding more code.
+- Bad: initial rewrite used unsupported control-flow keywords (`break`/`continue`), causing avoidable early fixture failures.
+- Adjustment: after the first parser chunk, run one small representative fixture immediately to validate language-surface assumptions before adding more code.
 - Current reflection (2026-02-23, struct-layout reachability slice):
 - Good: wiring struct/global pruning directly in `.stasis` kept the change small and testable while preserving host-glue boundaries.
-- Bad: direct bootstrap fixture execution exceeded the 5-minute command budget and is too slow for routine slice verification.
-- Adjustment: default slice verification to bounded Rust-side harness tests for fast feedback, and run bootstrap fixture commands only as explicitly budgeted checks.
+- Bad: large end-to-end fixture execution exceeded the 5-minute command budget and is too slow for routine slice verification.
+- Adjustment: default slice verification to bounded Rust-side harness tests for fast feedback, and run larger end-to-end fixture commands only as explicitly budgeted checks.
 - Current reflection (2026-02-24, host-required root wiring slice):
 - Good: adding host-required roots as explicit hashes injected into `.stasis` kept ownership clear and avoided parser/keyword surface expansion.
 - Bad: host compiler API had no compile-options channel, so root wiring currently rides through harness generation rather than a structured config object.

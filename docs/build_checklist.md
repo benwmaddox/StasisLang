@@ -6,7 +6,6 @@ This checklist is the implementation plan and is aligned with:
 
 Status note:
 - This repository's stable compiler is implemented in Rust (`cargo build`, `cargo test`).
-- The `compiler/` directory contains experimental self-hosting work and is not the active compilation pipeline today.
 
 Locked decisions:
 - Entrypoint is `function main(): i32`.
@@ -24,7 +23,7 @@ Locked decisions:
 `Rust` is the compiler and runtime implementation.
 
 - `Rust`: compiler implementation (frontend + lowering + Cranelift), host app/runtime boundary, platform integration, process/watch plumbing, and host-set/phase enforcement.
-- `.stasis`: user code, stdlib, and samples. (`compiler/` is experimental; not the current compiler.)
+- `.stasis`: user code, stdlib, and samples.
 
 Boundary rule:
 - Keep the compiler single-source-of-truth: do not reintroduce parallel compiler implementations that diverge in semantics.
@@ -50,8 +49,7 @@ Release AOT optimization:
 - Default AOT opt level is `speed_and_size` (release-friendly).
 - Override with `STASIS_AOT_OPT_LEVEL`: `none` | `speed` | `speed_and_size`.
 
-Bootstrap compiler tooling is seed-only for initial bring-up.
-It is not part of the steady-state incremental JIT update loop.
+Historical bootstrap/self-host notes below are archival only and do not describe an active compiler track.
 
 ## Slice Plan
 
@@ -296,7 +294,7 @@ Archived priority override (2026-02-13, historical):
 - Current implementation:
 - `DevHotSwapPipeline` now supports explicit `TargetMode` (`JitDev` or `AotProd`) dispatch.
 - `apps/stasis` runner config/CLI can request `AotProd` compile requests (`--target-mode aot` / `--aot-prod`).
-- `crates/stasis_jit::compile_clif_to_object` invokes `tools/cranelift-aot` to produce native object artifacts.
+- `crates/stasis_compiler::backend::aot::AotProcess` produces native object artifacts in-process through the shared Cranelift lowering path.
 - `apps/stasis::IncrementalCompilerBackend` now emits per-function AOT object artifacts for changed functions when `TargetMode::AotProd` compile requests are processed in the real backend path.
 - Real backend now writes `last_patch_manifest.json` alongside emitted AOT object artifacts to persist request/artifact mapping for runtime handoff.
 - `crates/stasis_jit` now provides optional object-bundle link support (`link_objects_to_dynamic_library`) and the real backend can emit linked bundle artifacts when `STASIS_AOT_LINK_ARTIFACTS=1` and linker tooling is available.
@@ -573,7 +571,6 @@ Archived priority override (2026-02-13, historical):
 - With `STASIS_AOT_LINKER` set to `lld-link.exe`, Brickout `_v1` self-host compile advances past linker discovery and currently fails on runtime-bridge object unresolved runtime symbols (`core::panicking::*`, `memset`) during final executable link, making runtime-bridge/object-link contract the active blocker.
 - Runtime bridge executable-link fallback now retries with CLIF bridge object when rustc-emitted bridge object fails to link on Windows toolchains (e.g., `lld-link` unresolved runtime symbols), unblocking self-host AOT executable emission for Brickout `_v1`.
 - Linker spawn failures now emit deterministic self-host guidance with `STASIS_AOT_LINKER` override instructions (including missing default `link.exe`/`cc` toolchain hints) and regression coverage in `crates/stasis_jit`.
-- Compiler host bootstrap harness invocation now forces single-shot mode (`stasisc run --no-watch`) so self-host compile analysis does not trip watch-mode `dotnet` guards in bootstrap CLI.
 - Self-host compiler source staging buffer contract was raised to `262144` bytes (`compiler_state`, `.stasis` AOT CLI core temp source buffer, host analysis harness buffer, runtime bridge source-load buffer) so current `compiler/simple_pass_compiler.stasis` size no longer hard-fails lexing during stage analysis.
 - Added opt-in real-toolchain compiler-subset build smoke (`STASIS_RUN_REAL_SELF_HOST_COMPILER_SUBSET_BUILD_SMOKE=1`) that compiles the self-host compiler entry import-closure subset (entry/core/incremental/state/stdlib) via `--entry-file`, asserting 5-file staged contract build viability.
 - Added opt-in real-toolchain stage1 executable parity probe (`STASIS_RUN_REAL_SELF_HOST_STAGE1_EXEC_PARITY_SMOKE=1`) that publishes argv/source/staged-bridge env contracts and executes compiled stage1 compiler subset binary for stage2 summary generation; probe now completes with exit `0` and stage2 summary parity via runtime-bridge CLI-entry host extern routing.
@@ -586,8 +583,7 @@ Archived priority override (2026-02-13, historical):
 - Simple-pass parser now builds deterministic flattened global field layout metadata (nested struct fields included) and lowers direct nested global set/read shape (`State.first_enemy.hp = 7; return State.first_enemy.hp;`) to CLIF direct address + `store`/`load` operations (no runtime hash lookup) against a deterministic shared arena symbol (`sp_global_mem_layout_<layout_hash>`) in the current entry-main lowering path.
 - Added real-backend JIT smoke for `for` accumulation fixture (`apps/stasis::tests::real_backend_smoke_compiles_and_commits_for_accumulation_main`) using `tests/stasis/run_main_for_accumulation_returns_6.stasis`.
 - Added real-toolchain self-host AOT executable smoke for `for` accumulation main (`apps/stasis::compiler_backend::tests::self_host_aot_cli_runs_for_accumulation_main_if_real_toolchain_available`), verifying exit code `6` end-to-end.
-- Incremental compiler host harness now uses a fast bootstrap invocation path (`STASIS_BOOTSTRAP_NO_PREPROCESS=1`) with automatic fallback to the legacy preprocess/copy wrapper path on malformed or failed harness output, reducing self-host analysis latency while preserving compatibility.
-- Windows rustc runtime bridge now uses env-backed staged AOT extern bindings for `host_emit_ir_from_compiler_state`, `host_run_cranelift_aot`, `host_link_executable_from_objects`, and `host_write_aot_cli_summary` (`STASIS_SELF_HOST_IR_BUNDLE_PATH`, `STASIS_SELF_HOST_OBJECT_BUNDLE_PATH`, `STASIS_SELF_HOST_LINK_TEMPLATE_EXE`, `STASIS_SELF_HOST_SUMMARY_TEMPLATE_FILE`) instead of hardcoded return-1 stubs; host-side env publish/restore helpers live in `apps/stasis/src/self_host_runtime_bridge.rs`.
+- Self-host AOT CLI now links directly from in-process AOT object files and no longer depends on the staged runtime-bridge helper module.
 - Added opt-in real-toolchain staged extern smoke (`STASIS_RUN_REAL_RUNTIME_BRIDGE_STAGED_EXTERN_SMOKE=1`) that links and executes a runtime-bridge driver executable, asserting live `host_emit_ir_from_compiler_state`/`host_run_cranelift_aot`/`host_link_executable_from_objects`/`host_write_aot_cli_summary` behavior via env-backed contracts.
 - CLIF fallback runtime bridge now mirrors env-backed staged AOT extern behavior for `host_emit_ir_from_compiler_state`, `host_run_cranelift_aot`, `host_link_executable_from_objects`, and `host_write_aot_cli_summary` (using Win32 `GetEnvironmentVariableA`/`SetEnvironmentVariableA`/`CopyFileA`), with opt-in real-toolchain fallback coverage (`STASIS_RUN_REAL_RUNTIME_BRIDGE_CLIF_STAGED_EXTERN_SMOKE=1`).
 - CLIF fallback runtime bridge now also uses env-backed CLI/source extern behavior for `host_cli_arg_count`, `host_cli_arg_value`, `host_source_file_count`, and `host_load_source_file` (indexed env-key selection with deterministic key tables), with opt-in real-toolchain fallback coverage (`STASIS_RUN_REAL_RUNTIME_BRIDGE_CLIF_ARG_SOURCE_SMOKE=1`).
@@ -861,7 +857,7 @@ Archived priority override (2026-02-13, historical):
 - Slice SH3b2b: Add stage parity harness using `aot-cli --summary-file` outputs so stage1/stage2 compiler executions can be compared via stable machine-readable contract outputs once stage1 executable invocation is wired.
 - Slice SH3b2b1: Add CLI summary-parity integration test for repeated `aot-cli --summary-file` runs on identical source, asserting stable `source_file_count`, `entry_symbol`, and `object_file_names` contract fields. (completed 2026-02-13)
 - Slice SH3b2b2: Execute the same summary-parity harness through stage1 compiled self-host executable invocation once true stage1->stage2 execution is wired. (in progress: executable-path parity harness now runs stage1 subset binary with published argv/source/bridge env contracts and validates summary parity via runtime-entry host extern routing; remaining work is removing residual fallback-only behavior via reachability-first deletion of non-conforming lowering branches)
-- Slice SH3b2d: Add strict self-host lowering gate option (`STASIS_AOT_STRICT_SELF_HOST=1`) that rejects `aot-cli` outputs when emitted `i32` functions rely on stub fallback codegen (temporary bypass via `STASIS_AOT_ALLOW_STUB_FALLBACK=1`). (completed 2026-02-13)
+- Slice SH3b2d: Historical strict self-host stub-fallback gate. This was removed when the repo collapsed onto the direct Rust AOT path and deleted the helper-era fallback scaffolding. (retired 2026-03-10)
 - Slice SH3b2c: Add signed self-host AOT artifact flow (post-link signing hook + signer/policy validation checklist) so Windows security policy allows stage1/stage2 executable invocation in default dev environments.
 - Slice SH3b2c1: Add optional post-link signing hook (`STASIS_AOT_SIGN_TOOL`) in self-host AOT CLI bridge and deterministic fake-signer test coverage for signer invocation contract. (completed 2026-02-13)
 - Slice SH3b2c2: Add signed-artifact policy validation smoke for stage1 executable invocation path on Windows dev environments with Application Control enabled.
@@ -899,8 +895,7 @@ Archived priority override (2026-02-13, historical):
 - End-to-end scenario test with window config assertion.
 - Current runtime coverage:
 - `apps/stasis` scenario run path uses the real incremental backend and drives runtime launch in graphics mode for Brickout.
-- Transitional note: `crates/stasis_compiler` still invokes `Stasis.Cli.exe` for per-file analysis harness execution in compile requests; work is ongoing to remove this external process path.
-- Next step remains replacing harness shell-out analysis with true in-process `.stasis` compiler execution inside the same process.
+- Transitional note removed: the legacy external analysis harness path is no longer part of the active repo.
 - Done gate:
 - Brickout runs with correct proportion and swap loop remains stable.
 - Real compile -> function patch -> commit path updates patch identity on source edit.

@@ -45,7 +45,6 @@ Windows release zip layout:
 
 - `stasis.exe` at the archive root
 - `stasis_graphics.dll` at the archive root
-- `bin/stasis-cranelift-aot.exe`
 - `src/` and `samples/` at the archive root
 
 That keeps the common Windows command simple:

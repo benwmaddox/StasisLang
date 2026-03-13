@@ -19,7 +19,6 @@ cargo test -p stasis aot_brickout_revenge_v1_engine_bundle_executes_two_ticks --
 
 ## What It Does
 
-- Builds `tools/cranelift-aot` helper if missing
 - Builds `stasis_dynload` as a Rust `staticlib` for AOT runtime shims
 - Compiles `samples/brickout_revenge/brickout_revenge_v1.stasis` in `TargetMode::AotProd`
 - Links emitted AOT objects into a temporary `brickout_aot_bundle.dll` via `lld-link`

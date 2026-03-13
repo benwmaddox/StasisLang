@@ -74,7 +74,6 @@ The current compiler backends target native execution:
 
 - JIT uses `cranelift_jit`
 - AOT uses `cranelift_object::ObjectModule`
-- `tools/cranelift-aot/src/main.rs` defaults to `x86_64-pc-windows-msvc`
 - `crates/stasis_jit/src/lib.rs` links native DLLs and native executables with `lld-link.exe` or `cc`
 
 This is a critical point:

@@ -3,7 +3,7 @@
 Last updated: 2026-03-03
 
 This document tracks how much of `docs/spec.md` is implemented in the Rust compiler/runtime pipeline.
-It is intended to be concrete and release-oriented (JIT + AOT), and it explicitly excludes the experimental self-host `.stasis` compiler track under `compiler/`.
+It is intended to be concrete and release-oriented (JIT + AOT).
 
 Status legend:
 - **Implemented**: supported end-to-end in the Rust compiler/runtime.
@@ -47,4 +47,4 @@ Status legend:
 - **Release approach**: Cranelift AOT is the production/release backend; JIT is for development/watch/hot-swap.
 - **AOT parity requirement**: AOT must run the same sample games as JIT (notably `samples/brickout_revenge/brickout_revenge_v1.stasis`).
 - **Quality gate**: AOT should reject shipping builds that still rely on "stub fallback" lowering in emitted artifacts.
-- **Not in scope**: optional plugin libraries and anything that requires a self-host `.stasis` compiler in the release pipeline.
+- **Not in scope**: optional plugin libraries and alternate compiler tracks outside the Rust pipeline.
