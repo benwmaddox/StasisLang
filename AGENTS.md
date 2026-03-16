@@ -20,6 +20,8 @@
 - `cargo run -p stasis --release -- --ticks 300 --watch-dir samples/brickout_revenge`
 - Use `rg` for search (`rg pattern path`, `rg --files`).
 - Keep commands deterministic and scriptable.
+- Night Shift validation entrypoint:
+- `tools/validate_repo.sh`
 
 ## Coding Style & Naming Conventions
 - Keep files ASCII unless a file already uses non-ASCII and there is a clear reason.
@@ -36,7 +38,7 @@
 
 ## Testing Guidelines
 - Ship work in feature slices from `docs/build_checklist.md` and include tests in the same PR.
-- Only implement changes that map to active items in `docs/build_checklist.md`; if a proposed change is outside the checklist, pause and ask before changing requirements or code.
+- Only implement changes that map to active items in `docs/build_checklist.md`, or to inbox-synced PR review feedback in `docs/bugs.md`; if a proposed change is outside those sources, pause and ask before changing requirements or code.
 - Prefer deterministic, isolated tests with explicit expected output/state.
 - If test can reasonably be written in stasis for stasis code, do so. It can be in a .test.stasis file next to the .stasis file.
 - Cover parser/semantics/lowering/JIT boundaries and hot-swap safety behavior.
@@ -102,6 +104,15 @@
 - Compiler feature-slice completion gate: each slice must include at least one representative sample program that goes end-to-end through the compiler pipeline to Cranelift IR, is built into an executable, is run, and has its behavior verified by test assertions.
 - If a slice cannot yet pass that end-to-end executable verification path, the slice is not complete.
 - After each code change, run a quick simplicity review on the touched code and simplify again if a more direct version is possible.
+
+## Night Shift Workflow
+- Loop contract: `docs/night_shift_loop.md`
+- Reviewer personas: `docs/review_personas.md`
+- Bug queue: `docs/bugs.md`
+- Validation entrypoint: `tools/validate_repo.sh`
+- If an inbox process syncs PR review feedback into `docs/bugs.md`, treat that as the highest-priority bug work.
+- If the inbox sync changes tracked docs, commit that sync before launching the Night Shift runner so the run starts from a clean tree.
+- If the task came from PR review feedback, reply on GitHub when appropriate after fixing or clarifying the issue.
 
 ## Self-Reflection Loop (Required)
 - At the end of each compiler slice, record one `Good`, one `Bad`, and one `Adjustment` entry in the work summary, then update this file if a process rule should change.

@@ -25,6 +25,7 @@ _ReSharper.Caches/
 # Local-only artifacts (screenshots, recordings, etc.)
 artifacts/
 scratch/
+logs/nightshift/
 
 # Build artifacts
 *.dll
