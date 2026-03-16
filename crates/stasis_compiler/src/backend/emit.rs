@@ -1,3 +1,4 @@
+use crate::backend::runtime_exports::is_aot_runtime_export_symbol;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::frontend::parser::{
     parse_top_level_extern_functions, parse_top_level_type_layout, ParsedExternFunctionDeclaration,
@@ -222,42 +223,11 @@ pub(crate) fn resolve_extern_call_signatures_with(
     Ok((resolved, symbol_addresses))
 }
 
-pub(crate) fn is_known_aot_runtime_extern_symbol(symbol: &str) -> bool {
-    symbol == "stasis_get_time_ms"
-        || symbol == "stasis_get_time_us"
-        || matches!(
-            symbol,
-            "stasis_jit_print_i32"
-                | "stasis_jit_print_string"
-                | "stasis_jit_load_font"
-                | "stasis_jit_measure_text"
-                | "stasis_jit_sleep_ms"
-                | "stasis_jit_sin_fast"
-                | "stasis_jit_cos_fast"
-                | "stasis_jit_global_i32_load"
-                | "stasis_jit_global_i32_store"
-                | "stasis_jit_global_f32_load"
-                | "stasis_jit_global_f32_store"
-                | "stasis_jit_global_f64_load"
-                | "stasis_jit_global_f64_store"
-                | "stasis_jit_collection_i32_load"
-                | "stasis_jit_collection_i32_store"
-                | "stasis_jit_sys_memcpy_u8"
-                | "stasis_jit_sys_memcpy_i32"
-                | "stasis_jit_sys_memcpy_f32"
-                | "stasis_jit_sys_memmove_u8"
-                | "stasis_jit_sys_memmove_i32"
-                | "stasis_jit_sys_memmove_f32"
-        )
-        || symbol.starts_with("stasis_jit_gfx_")
-        || symbol.starts_with("stasis_jit_audio_")
-}
-
 pub(crate) fn resolve_preferred_extern_call_signatures(
     extern_signatures: &[ExternCallSignature],
 ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), String> {
     resolve_extern_call_signatures_with(extern_signatures, |signature, candidate| {
-        if is_known_aot_runtime_extern_symbol(candidate) || signature.symbol_candidates.len() == 1 {
+        if is_aot_runtime_export_symbol(candidate) || signature.symbol_candidates.len() == 1 {
             Some(0)
         } else {
             None
