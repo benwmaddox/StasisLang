@@ -2,6 +2,7 @@ pub mod aot;
 pub(crate) mod emit;
 pub mod jit;
 mod reachability;
+mod runtime_exports;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineEntrypoints {

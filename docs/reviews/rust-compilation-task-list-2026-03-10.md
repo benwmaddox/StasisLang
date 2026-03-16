@@ -104,6 +104,12 @@ Benefit:
 
 Priority: Medium
 
+Status:
+- Completed
+- replaced the AOT extern prefix heuristic with an explicit runtime export contract in `crates/stasis_compiler`
+- added regression coverage that fake `gfx_*` externs now fail unless the symbol exists in the contract
+- kept explicit single-symbol extern annotations working for non-runtime link targets
+
 Task:
 - define the runtime symbols AOT is allowed to bind against in one explicit manifest or generated export list
 - resolve AOT externs against that contract instead of a hardcoded allowlist heuristic
@@ -176,9 +182,15 @@ The structured-HIR task is the largest internal compiler change. It is worth doi
 - Live AOT execution has been rebased onto the in-process backend first, which removes the main runtime drift point between JIT and AOT.
 - Retention cleanup in `AotProcess` is done and covered by focused regression tests.
 - Task 1 cleanup is complete: the old helper/test bridge surface and the older C# compiler path have been removed instead of retained as historical scaffolding.
+- Task 4 is complete: AOT extern candidate resolution now checks an explicit runtime export list instead of accepting whole `stasis_jit_gfx_*` / `stasis_jit_audio_*` families by prefix.
 - Focused validation passed after the cleanup:
 - `cargo test -p stasis_jit`
 - `cargo test -p stasis_compiler backend:: -- --nocapture`
 - `cargo test -p stasis --lib compiler_backend::tests::aot_compile_writes_manifest_with_artifacts_on_success -- --nocapture --test-threads=1`
 - `cargo test -p stasis --lib compiler_backend::tests::self_host_aot_cli_writes_default_summary_sidecar -- --nocapture --test-threads=1`
 - `cargo test -p stasis --lib compiler_backend::tests::self_host_aot_cli_is_deterministic_across_repeated_runs_with_same_source -- --nocapture --test-threads=1`
+- Additional focused validation for Task 4:
+- `cargo test -p stasis_compiler aot_process_rejects_fake_runtime_prefix_extern_without_export_contract_entry -- --nocapture`
+- `cargo test -p stasis_compiler aot_process_accepts_known_runtime_shim_families -- --nocapture`
+- `cargo test -p stasis_compiler aot_process_prefers_known_runtime_extern_symbol_over_source_alias -- --nocapture`
+- `cargo test -p stasis_compiler aot_runtime_export_contract_requires_exact_symbol_matches -- --nocapture`
