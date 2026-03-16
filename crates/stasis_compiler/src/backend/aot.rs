@@ -1087,6 +1087,26 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_rejects_fake_runtime_prefix_extern_without_export_contract_entry() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "extern function gfx_totally_missing(path: string, max_w: i32, max_h: i32): i32;\nfunction main(): i32 { return gfx_totally_missing(\"sprite.bmp\", 8, 8); }\n",
+        );
+
+        let error = process.compile().expect_err("compile should fail");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("unresolved extern call target 'gfx_totally_missing'"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn aot_process_reemits_reachable_functions_when_imported_constant_changes() {
         let mut process = AotProcess::new();
         process.upsert_file(
