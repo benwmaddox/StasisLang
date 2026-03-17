@@ -20,7 +20,7 @@
 - `cargo run -p stasis --release -- --ticks 300 --watch-dir samples/brickout_revenge`
 - Use `rg` for search (`rg pattern path`, `rg --files`).
 - Keep commands deterministic and scriptable.
-- Night Shift validation entrypoint:
+- Validation entrypoint:
 - `tools/validate_repo.sh`
 
 ## Coding Style & Naming Conventions
@@ -105,13 +105,13 @@
 - If a slice cannot yet pass that end-to-end executable verification path, the slice is not complete.
 - After each code change, run a quick simplicity review on the touched code and simplify again if a more direct version is possible.
 
-## Night Shift Workflow
-- Loop contract: `docs/night_shift_loop.md`
+## Contributor Workflow
+- Workflow contract: `docs/contributor_workflow.md`
 - Reviewer personas: `docs/review_personas.md`
 - Bug queue: `docs/bugs.md`
 - Validation entrypoint: `tools/validate_repo.sh`
 - If an inbox process syncs PR review feedback into `docs/bugs.md`, treat that as the highest-priority bug work.
-- If the inbox sync changes tracked docs, commit that sync before launching the Night Shift runner so the run starts from a clean tree.
+- If the inbox sync changes tracked docs, commit that sync before continuing so the run starts from a clean tree.
 - If the task came from PR review feedback, reply on GitHub when appropriate after fixing or clarifying the issue.
 
 ## Self-Reflection Loop (Required)
