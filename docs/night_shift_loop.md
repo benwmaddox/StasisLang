@@ -51,8 +51,9 @@ Run autonomously without requiring plan review. Own validation and leave the rep
 
 1. Update any docs that would prevent repeating the same mistake.
 2. If the task came from PR review feedback, reply on GitHub when appropriate with the fix, clarification, or follow-up question.
-3. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
-4. Append a concise entry to `docs/night_shift_report.md`.
+3. Ensure the PR has a human reviewer requested before you finish. Prefer `benwmaddox` unless the repo says otherwise.
+4. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
+5. Append a concise entry to `docs/night_shift_report.md`.
 
 ## Stop conditions
 
