@@ -4,6 +4,8 @@
 
 Run autonomously without requiring plan review. Own validation and leave the repository in a reviewable state.
 
+Before you start, define finishing criteria for the chosen task: what must be true for the work to count as done, what checks must pass, and what user-visible behavior must be confirmed. Use that checklist before you report back.
+
 ## Preparation
 
 1. Inspect `git status --short`.
@@ -41,6 +43,7 @@ Run autonomously without requiring plan review. Own validation and leave the rep
 
 - Make the smallest change that satisfies the failing checks.
 - Run the full quality gates after each meaningful change.
+- If something fails or still looks wrong, keep iterating and retesting instead of handing back a first draft.
 
 ## Reviewer gate after implementation
 
@@ -52,8 +55,12 @@ Run autonomously without requiring plan review. Own validation and leave the rep
 1. Update any docs that would prevent repeating the same mistake.
 2. If the task came from PR review feedback, reply on GitHub when appropriate with the fix, clarification, or follow-up question.
 3. Ensure the PR has a human reviewer requested before you finish. Prefer `benwmaddox` unless the repo says otherwise.
-4. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
-5. Append a concise entry to `docs/night_shift_report.md`.
+4. Before reporting back, verify the work directly when possible. Run the relevant checks, inspect the output, and exercise the changed flow instead of assuming the change worked.
+5. If the work is visual or interactive, look at the changed screens or flows and confirm they render and behave correctly.
+6. Only report back when the finishing criteria are met or when you are genuinely blocked on outside input.
+7. When reporting results to the user, explain what changed and what happened in plain, clear English. Avoid jargon, technical implementation detail, and code-speak in the final write-up.
+8. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
+9. Append a concise entry to `docs/night_shift_report.md`.
 
 ## Stop conditions
 
