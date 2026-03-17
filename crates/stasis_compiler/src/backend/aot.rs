@@ -875,9 +875,20 @@ mod tests {
     use super::*;
     use crate::backend::jit::JitProcess;
     use crate::backend::EngineEntrypoints;
+    #[cfg(windows)]
     use std::process::Command;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct ParityCorpusCase {
+        label: &'static str,
+        source: &'static str,
+        expected_exit: i32,
+        expected_extern_symbols: &'static [(&'static str, &'static str)],
+        expected_string_literals: &'static [&'static str],
+        expected_collection_max_lengths: &'static [(&'static str, i32)],
+        expected_clif_markers: &'static [(&'static str, &'static [&'static str])],
+    }
 
     #[cfg(windows)]
     fn run_linked_i32_noarg_fixture(
@@ -912,6 +923,154 @@ mod tests {
         let code = status.code().expect("expected process exit code");
         let _ = fs::remove_dir_all(&temp_root);
         Some(code)
+    }
+
+    fn capture_aot_clif_by_function(process: &mut AotProcess) -> BTreeMap<String, String> {
+        let captured: Arc<Mutex<BTreeMap<String, String>>> = Arc::new(Mutex::new(BTreeMap::new()));
+        let captured_hook = Arc::clone(&captured);
+        set_clif_dump_hook(Some(Box::new(move |meta, func| {
+            captured_hook
+                .lock()
+                .expect("lock clif capture")
+                .insert(meta.name.clone(), format!("{}", func.display()));
+        })));
+        let compile_result = process.compile();
+        set_clif_dump_hook(None);
+        compile_result.expect("aot compile");
+        let captured = captured.lock().expect("lock clif capture").clone();
+        captured
+    }
+
+    fn parity_corpus_cases() -> &'static [ParityCorpusCase] {
+        &[
+            ParityCorpusCase {
+                label: "extern_and_string_literal",
+                source: "extern function print_string(value: string): void;\nfunction main(): i32 { print_string(\"alpha; beta {x}\"); return 1; }\n",
+                expected_exit: 1,
+                expected_extern_symbols: &[("print_string", "stasis_jit_print_string")],
+                expected_string_literals: &["alpha; beta {x}"],
+                expected_collection_max_lengths: &[],
+                expected_clif_markers: &[("main", &["call"])],
+            },
+            ParityCorpusCase {
+                label: "globals_and_collection_view",
+                source: "const COUNT: i32 = 3;\nglobal nums: i32[COUNT];\nfunction main(): i32 {\n    nums[1] = 9;\n    nums[2] = 11;\n    return nums[1] + nums[2];\n}\n",
+                expected_exit: 20,
+                expected_extern_symbols: &[],
+                expected_string_literals: &[],
+                expected_collection_max_lengths: &[("nums", 3)],
+                expected_clif_markers: &[("main", &["call", "iadd"])],
+            },
+            ParityCorpusCase {
+                label: "control_flow_branching",
+                source: "function main(): i32 {\n    let sum: i32 = 0;\n    for (let i: i32 = 0; i < 3; i += 1) {\n        sum += i;\n    }\n    if (sum == 3) {\n        return 1;\n    }\n    return 0;\n}\n",
+                expected_exit: 1,
+                expected_extern_symbols: &[],
+                expected_string_literals: &[],
+                expected_collection_max_lengths: &[],
+                expected_clif_markers: &[("main", &["brif", "jump"])],
+            },
+            ParityCorpusCase {
+                label: "struct_view_abi",
+                source: "const COUNT: i32 = 3;\nstruct Enemy { hp: i32; }\nglobal enemies: Enemy[COUNT];\nfunction mutate(arr: Enemy[], idx: i32): i32 {\n    arr[idx].hp = 10;\n    arr[idx + 1].hp = arr[idx].hp + 4;\n    return arr[idx + 1].hp;\n}\nfunction main(): i32 { return mutate(enemies, 0); }\n",
+                expected_exit: 14,
+                expected_extern_symbols: &[],
+                expected_string_literals: &[],
+                expected_collection_max_lengths: &[("enemies", 3)],
+                expected_clif_markers: &[
+                    ("main", &["call"]),
+                    ("mutate", &["call fn39", "call fn38", "iadd"]),
+                ],
+            },
+        ]
+    }
+
+    fn run_parity_corpus_case(case: &ParityCorpusCase) {
+        let mut jit = JitProcess::new();
+        jit.upsert_file("sample.stasis", case.source);
+        jit.compile()
+            .unwrap_or_else(|error| panic!("jit compile {}: {:?}", case.label, error));
+        let jit_result = jit
+            .execute_i32_noarg_by_name("main")
+            .unwrap_or_else(|error| panic!("jit execute {}: {error}", case.label));
+        assert_eq!(
+            jit_result, case.expected_exit,
+            "unexpected JIT result for parity fixture '{}'",
+            case.label
+        );
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("sample.stasis", case.source);
+        let captured_clif = capture_aot_clif_by_function(&mut aot);
+
+        let analysis = aot
+            .compile_analysis_cache
+            .as_ref()
+            .expect("compile analysis cache");
+        let resolved_externs: BTreeMap<_, _> = analysis
+            .resolved_extern_signatures
+            .iter()
+            .map(|signature| (signature.name.as_str(), signature.symbol.as_str()))
+            .collect();
+        for (name, expected_symbol) in case.expected_extern_symbols {
+            assert_eq!(
+                resolved_externs.get(name).copied(),
+                Some(*expected_symbol),
+                "unexpected extern symbol mapping for fixture '{}'",
+                case.label
+            );
+        }
+
+        for expected_literal in case.expected_string_literals {
+            assert!(
+                aot.string_literals().values().any(|value| value == expected_literal),
+                "missing string literal {:?} in fixture '{}'",
+                expected_literal,
+                case.label
+            );
+        }
+
+        for (path, expected_max_length) in case.expected_collection_max_lengths {
+            assert_eq!(
+                aot.collection_max_lengths().get(*path).copied(),
+                Some(*expected_max_length),
+                "unexpected collection max_length for fixture '{}'",
+                case.label
+            );
+        }
+
+        for (function_name, markers) in case.expected_clif_markers {
+            let clif = captured_clif
+                .get(*function_name)
+                .unwrap_or_else(|| panic!("missing captured CLIF for function '{}'", function_name));
+            for marker in *markers {
+                assert!(
+                    clif.contains(marker),
+                    "missing CLIF marker '{}' in fixture '{}' function '{}':\n{}",
+                    marker,
+                    case.label,
+                    function_name,
+                    clif
+                );
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let Some(aot_result) =
+                run_linked_i32_noarg_fixture(&aot, "main", case.label, &link_config)
+            else {
+                return;
+            };
+            assert_eq!(
+                aot_result, jit_result,
+                "AOT/JIT mismatch for parity fixture '{}'",
+                case.label
+            );
+        }
     }
 
     #[test]
@@ -1079,6 +1238,26 @@ mod tests {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
                     message.contains("unresolved extern call target 'totally_unknown'"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aot_process_rejects_fake_runtime_prefix_extern_without_export_contract_entry() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "extern function gfx_totally_missing(path: string, max_w: i32, max_h: i32): i32;\nfunction main(): i32 { return gfx_totally_missing(\"sprite.bmp\", 8, 8); }\n",
+        );
+
+        let error = process.compile().expect_err("compile should fail");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("unresolved extern call target 'gfx_totally_missing'"),
                     "unexpected message: {message}"
                 );
             }
@@ -1461,6 +1640,13 @@ mod tests {
                 aot_result, jit_result,
                 "AOT/JIT mismatch for internal call fixture '{label}'"
             );
+        }
+    }
+
+    #[test]
+    fn parity_corpus_covers_shared_lowering_shapes() {
+        for case in parity_corpus_cases() {
+            run_parity_corpus_case(case);
         }
     }
 

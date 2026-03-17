@@ -104,6 +104,12 @@ Benefit:
 
 Priority: Medium
 
+Status:
+- Completed
+- replaced the AOT extern prefix heuristic with an explicit runtime export contract in `crates/stasis_compiler`
+- added regression coverage that fake `gfx_*` externs now fail unless the symbol exists in the contract
+- kept explicit single-symbol extern annotations working for non-runtime link targets
+
 Task:
 - define the runtime symbols AOT is allowed to bind against in one explicit manifest or generated export list
 - resolve AOT externs against that contract instead of a hardcoded allowlist heuristic
@@ -127,6 +133,12 @@ Benefit:
 ## Task 5: Expand JIT/AOT Parity Coverage
 
 Priority: Medium
+
+Status:
+- Completed
+- added a shared parity corpus in `crates/stasis_compiler/src/backend/aot.rs`
+- the corpus now covers extern calls, globals/collection access, control flow, struct-view field access, and string literal handling
+- each fixture always checks JIT behavior plus AOT compile/CLIF markers, and compares linked AOT runtime behavior when executable smoke linkage is available
 
 Task:
 - create a small parity fixture corpus that runs through both JIT and AOT
@@ -176,9 +188,20 @@ The structured-HIR task is the largest internal compiler change. It is worth doi
 - Live AOT execution has been rebased onto the in-process backend first, which removes the main runtime drift point between JIT and AOT.
 - Retention cleanup in `AotProcess` is done and covered by focused regression tests.
 - Task 1 cleanup is complete: the old helper/test bridge surface and the older C# compiler path have been removed instead of retained as historical scaffolding.
+- Task 4 is complete: AOT extern candidate resolution now checks an explicit runtime export list instead of accepting whole `stasis_jit_gfx_*` / `stasis_jit_audio_*` families by prefix.
 - Focused validation passed after the cleanup:
 - `cargo test -p stasis_jit`
 - `cargo test -p stasis_compiler backend:: -- --nocapture`
 - `cargo test -p stasis --lib compiler_backend::tests::aot_compile_writes_manifest_with_artifacts_on_success -- --nocapture --test-threads=1`
 - `cargo test -p stasis --lib compiler_backend::tests::self_host_aot_cli_writes_default_summary_sidecar -- --nocapture --test-threads=1`
 - `cargo test -p stasis --lib compiler_backend::tests::self_host_aot_cli_is_deterministic_across_repeated_runs_with_same_source -- --nocapture --test-threads=1`
+- Additional focused validation for Task 4:
+- `cargo test -p stasis_compiler aot_process_rejects_fake_runtime_prefix_extern_without_export_contract_entry -- --nocapture`
+- `cargo test -p stasis_compiler aot_process_accepts_known_runtime_shim_families -- --nocapture`
+- `cargo test -p stasis_compiler aot_process_prefers_known_runtime_extern_symbol_over_source_alias -- --nocapture`
+- `cargo test -p stasis_compiler aot_runtime_export_contract_requires_exact_symbol_matches -- --nocapture`
+- Task 5 is complete: `parity_corpus_covers_shared_lowering_shapes` adds a compact corpus that exercises the shared backend across extern/string-literal handling, globals and collections, branch-heavy control flow, and struct-view field mutation.
+- Task 5 verification:
+- `cargo test -p stasis_compiler parity_corpus_covers_shared_lowering_shapes -- --nocapture`
+- `cargo test -p stasis_compiler aot_engine_bundle_manifest_includes_string_literals -- --nocapture`
+- `cargo test -p stasis_compiler aot_process_prefers_known_runtime_extern_symbol_over_source_alias -- --nocapture`
