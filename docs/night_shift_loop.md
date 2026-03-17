@@ -7,10 +7,11 @@ Run autonomously without requiring plan review. Own validation and leave the rep
 ## Preparation
 
 1. Inspect `git status --short`.
-2. If the tree is dirty because an inbox process just synced review feedback into tracked docs, commit that sync first.
-3. Otherwise, if the tree is dirty, either create a protective WIP commit or stop and explain why the state is unsafe to modify.
-4. Run the quality gates in `tools/validate_repo.sh`.
-5. If validation fails, fix it first or move the task to `NEEDS INPUT FROM USER` with evidence.
+2. Inspect `git branch --show-current` and preserve the current branch when the run was launched to revise an existing PR. For issue-driven or backlog-driven work, start from the repo default branch after it has been synced with `origin`, then create a fresh `nightshift/...` branch.
+3. If the tree is dirty because an inbox process just synced review feedback into tracked docs, commit that sync first.
+4. Otherwise, if the tree is dirty, either create a protective WIP commit or stop and explain why the state is unsafe to modify.
+5. Run the quality gates in `tools/validate_repo.sh`.
+6. If validation fails, fix it first or move the task to `NEEDS INPUT FROM USER` with evidence.
 
 ## Choose work
 
@@ -50,8 +51,9 @@ Run autonomously without requiring plan review. Own validation and leave the rep
 
 1. Update any docs that would prevent repeating the same mistake.
 2. If the task came from PR review feedback, reply on GitHub when appropriate with the fix, clarification, or follow-up question.
-3. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
-4. Append a concise entry to `docs/night_shift_report.md`.
+3. Ensure the PR has a human reviewer requested before you finish. Prefer `benwmaddox` unless the repo says otherwise.
+4. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
+5. Append a concise entry to `docs/night_shift_report.md`.
 
 ## Stop conditions
 
