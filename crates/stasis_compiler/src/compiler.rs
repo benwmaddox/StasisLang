@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 
+use crate::backend::emit::parse_simple_statements_from_block;
 use crate::frontend::indexer::{hash_text, index_file};
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::ir::hir::{Block, FunctionHIR};
@@ -379,7 +380,7 @@ impl Compiler {
         }
     }
 
-    fn lower_function_to_hir(&self, function: &FunctionMeta) -> CompileResult<FunctionHIR> {
+    fn lower_function_to_hir(&mut self, function: &FunctionMeta) -> CompileResult<FunctionHIR> {
         let file = self.files.get(function.file_id as usize).ok_or_else(|| {
             CompileError::Invariant("function references missing file".to_string())
         })?;
@@ -390,8 +391,11 @@ impl Compiler {
                 CompileError::Invariant("function body range out of bounds".to_string())
             })?
             .to_string();
+        let statements =
+            parse_simple_statements_from_block(&body, &mut self.types).map_err(CompileError::Backend)?;
         Ok(FunctionHIR {
             blocks: vec![Block { source: body }],
+            statements,
         })
     }
 }
@@ -722,5 +726,26 @@ mod tests {
         assert!(function_by_name(&compiler, "leaf").dirty);
         assert!(function_by_name(&compiler, "mid").dirty);
         assert!(function_by_name(&compiler, "top").dirty);
+    }
+
+    #[test]
+    fn emitted_hir_contains_structured_statements() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "function add_one(value: i32): i32 { let next = value + 1; return next; }\n",
+        );
+
+        let mut statement_counts = Vec::new();
+        compiler
+            .compile_with(|meta, hir| {
+                if meta.name == "add_one" {
+                    statement_counts.push(hir.statements.len());
+                }
+                Ok(())
+            })
+            .expect("compile should succeed");
+
+        assert_eq!(statement_counts, vec![2]);
     }
 }

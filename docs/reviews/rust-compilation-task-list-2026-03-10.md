@@ -47,6 +47,12 @@ Benefit:
 
 Priority: High
 
+Status:
+- Completed
+- `Compiler::lower_function_to_hir` now parses function bodies once into structured statements during HIR construction
+- the shared backend consumes `hir.statements` directly instead of reparsing block source during emit
+- focused regression coverage now checks that emitted HIR carries the parsed statement list
+
 Task:
 - replace `FunctionHIR { blocks: Vec<Block { source: String }> }` with a typed statement/expression representation
 - parse once in the frontend, then lower that structured form in both JIT and AOT
@@ -205,3 +211,7 @@ The structured-HIR task is the largest internal compiler change. It is worth doi
 - `cargo test -p stasis_compiler parity_corpus_covers_shared_lowering_shapes -- --nocapture`
 - `cargo test -p stasis_compiler aot_engine_bundle_manifest_includes_string_literals -- --nocapture`
 - `cargo test -p stasis_compiler aot_process_prefers_known_runtime_extern_symbol_over_source_alias -- --nocapture`
+- Task 2 is complete: `FunctionHIR` now carries parsed statements so the backend no longer reparses function-body source slices on each emit pass.
+- Task 2 verification:
+- `cargo test -p stasis_compiler emitted_hir_contains_structured_statements -- --nocapture`
+- `cargo test -p stasis_compiler parity_corpus_covers_shared_lowering_shapes -- --nocapture`

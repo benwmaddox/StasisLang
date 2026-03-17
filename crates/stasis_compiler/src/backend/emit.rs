@@ -1616,16 +1616,15 @@ where
                 imported_function_ids: HashMap::new(),
             }),
         };
-        let body = extract_function_body(hir)?;
         let mut terminated = false;
-        parse_simple_statements_from_block_with(body, type_table, |type_table, statement| {
+        for statement in &hir.statements {
             if terminated {
-                return Ok(());
+                break;
             }
-            before_statement(&statement)?;
+            before_statement(statement)?;
             terminated = emit_simple_statements(
                 &mut builder,
-                std::slice::from_ref(&statement),
+                std::slice::from_ref(statement),
                 &mut values_by_name,
                 &runtime_call_refs,
                 &mut internal_calls,
@@ -1640,8 +1639,7 @@ where
                 meta.return_type,
                 &mut next_variable,
             )?;
-            Ok(())
-        })?;
+        }
         if !terminated {
             if meta.return_type == TYPE_ID_VOID {
                 builder.ins().return_(&[]);
@@ -2198,13 +2196,6 @@ pub(crate) enum ComparisonOp {
     Le,
     Gt,
     Ge,
-}
-
-pub(crate) fn extract_function_body(hir: &FunctionHIR) -> Result<&str, String> {
-    let Some(block) = hir.blocks.first() else {
-        return Err("function body missing block text".to_string());
-    };
-    Ok(block.source.as_str())
 }
 
 pub(crate) fn parse_simple_statements_from_block_with<F>(
