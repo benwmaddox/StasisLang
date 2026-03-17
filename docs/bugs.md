@@ -29,7 +29,7 @@ Codex has been enabled to automatically review pull requests in this repo. Revie
 
 If Codex has suggestions, it will comment; otherwise it will react with 👍.
 
-
+ 
 
 
 When you [sign up for Codex through ChatGPT](https://openai.com/codex), Codex can also answer questions or update the PR, like "@codex address that feedback".
@@ -42,6 +42,11 @@ When `NIGHTSHIFT_BRANCH_MODE=preserve`, the script accepts an empty branch name 
 Useful? React with 👍 / 👎.
     - Reply on GitHub: https://github.com/benwmaddox/StasisLang/pull/247#discussion_r2946496401
 <!-- NED-INBOX:END -->
+
+
+* Work through items in docs/reviews/rust-compilation-task-list-2026-03-10.md. All should be completed.
+
+
 
 ## IN PROGRESS
 
