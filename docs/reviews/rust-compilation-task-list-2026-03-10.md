@@ -134,6 +134,12 @@ Benefit:
 
 Priority: Medium
 
+Status:
+- Completed
+- added a shared parity corpus in `crates/stasis_compiler/src/backend/aot.rs`
+- the corpus now covers extern calls, globals/collection access, control flow, struct-view field access, and string literal handling
+- each fixture always checks JIT behavior plus AOT compile/CLIF markers, and compares linked AOT runtime behavior when executable smoke linkage is available
+
 Task:
 - create a small parity fixture corpus that runs through both JIT and AOT
 - cover:
@@ -194,3 +200,8 @@ The structured-HIR task is the largest internal compiler change. It is worth doi
 - `cargo test -p stasis_compiler aot_process_accepts_known_runtime_shim_families -- --nocapture`
 - `cargo test -p stasis_compiler aot_process_prefers_known_runtime_extern_symbol_over_source_alias -- --nocapture`
 - `cargo test -p stasis_compiler aot_runtime_export_contract_requires_exact_symbol_matches -- --nocapture`
+- Task 5 is complete: `parity_corpus_covers_shared_lowering_shapes` adds a compact corpus that exercises the shared backend across extern/string-literal handling, globals and collections, branch-heavy control flow, and struct-view field mutation.
+- Task 5 verification:
+- `cargo test -p stasis_compiler parity_corpus_covers_shared_lowering_shapes -- --nocapture`
+- `cargo test -p stasis_compiler aot_engine_bundle_manifest_includes_string_literals -- --nocapture`
+- `cargo test -p stasis_compiler aot_process_prefers_known_runtime_extern_symbol_over_source_alias -- --nocapture`
