@@ -38,7 +38,7 @@
 
 ## Testing Guidelines
 - Ship work in feature slices from `docs/build_checklist.md` and include tests in the same PR.
-- Only implement changes that map to active items in `docs/build_checklist.md`, or to inbox-synced PR review feedback in `docs/bugs.md`; if a proposed change is outside those sources, pause and ask before changing requirements or code.
+- For Night Shift or inbox-driven work, only implement changes that map to the selected GitHub issue, PR, review, or review comments. Use repo docs and plans as context, not as a competing source of task selection.
 - Prefer deterministic, isolated tests with explicit expected output/state.
 - If test can reasonably be written in stasis for stasis code, do so. It can be in a .test.stasis file next to the .stasis file.
 - Cover parser/semantics/lowering/JIT boundaries and hot-swap safety behavior.
@@ -108,10 +108,11 @@
 ## Night Shift Workflow
 - Loop contract: `docs/night_shift_loop.md`
 - Reviewer personas: `docs/review_personas.md`
-- Bug queue: `docs/bugs.md`
 - Validation entrypoint: `tools/validate_repo.sh`
-- If an inbox process syncs PR review feedback into `docs/bugs.md`, treat that as the highest-priority bug work.
-- If the inbox sync changes tracked docs, commit that sync before launching the Night Shift runner so the run starts from a clean tree.
+- GitHub issues, PR comments, and PR reviews are the only source of work selection for Night Shift runs.
+- Repo docs such as `docs/build_checklist.md` and `docs/bugs.md` are context only; they explain constraints, history, and validation, but they do not override the selected GitHub item.
+- Branch setup, fetch/fast-forward, and executor launch are owned by the central Ned inbox runner rather than a repo-local wrapper script.
+- If a repo does not yet have a strict validation entrypoint, create or tighten one before relying on automation there. Prefer one deterministic script that runs the strongest real bounded checks already supported by the repo.
 - If the task came from PR review feedback, reply on GitHub when appropriate after fixing or clarifying the issue.
 
 ## Self-Reflection Loop (Required)

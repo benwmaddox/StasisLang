@@ -27,3 +27,13 @@
 - Good: the branch-mode logic sits in one small shell block, so the safety fix stayed narrow and easy to regression-test.
 - Bad: the first implementation pass landed on the wrong local branch because the synced PR bug and the starting checkout did not match.
 - Adjustment: when `docs/bugs.md` points to a specific PR, confirm the local checkout matches that PR head before editing and fast-forward it before the first validation run.
+
+## 2026-03-18
+
+- Updated the Night Shift process to treat GitHub issues, PR comments, and PR reviews as the only source of work selection.
+- Repo-local docs now serve only as context and validation guidance; they no longer act as a competing task queue for Night Shift runs.
+- Added a runner guard that stops when no selected GitHub item was provided, and kept the runner self-snapshot logic so editing `tools/nightshift.sh` during a run does not break the live process.
+- Verification: `tools/test_nightshift.sh`
+- Good: removing the split between GitHub-selected work and repo-local queue files makes the automation easier to reason about.
+- Bad: standalone repo-local Night Shift runs are now intentionally narrower and require the inbox handoff to provide a selected item.
+- Adjustment: keep repo-local docs focused on how to change and validate the repo, and keep work selection in GitHub.
