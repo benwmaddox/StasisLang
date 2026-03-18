@@ -36,11 +36,15 @@ git status --short || true
 
 if [[ "$BRANCH_MODE" == "preserve" ]]; then
   CURRENT_BRANCH="$(git branch --show-current)"
+  if [[ -z "$CURRENT_BRANCH" ]]; then
+    echo "ERROR: preserve branch mode requires a checked out branch; current HEAD is detached."
+    exit 4
+  fi
   if [[ -n "$EXPECTED_BRANCH" && "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]]; then
     echo "ERROR: expected to run on branch '$EXPECTED_BRANCH' but current branch is '$CURRENT_BRANCH'."
     exit 4
   fi
-  echo "== Branch mode: preserve current branch ${CURRENT_BRANCH:-DETACHED} =="
+  echo "== Branch mode: preserve current branch $CURRENT_BRANCH =="
 else
   if git rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
     git switch "$BRANCH"
