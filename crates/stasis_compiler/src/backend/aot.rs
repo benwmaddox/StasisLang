@@ -75,13 +75,15 @@ impl AotProcess {
         self.load_import_graph_sources()
             .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
-        let mut type_table = self.compiler.types().clone();
-        type_table
+        self.compiler
+            .types_mut()
             .ensure_utf8_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
-        type_table
+        self.compiler
+            .types_mut()
             .ensure_ascii_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
+        let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
         let cache_miss = self
             .compile_analysis_cache
@@ -92,7 +94,7 @@ impl AotProcess {
             let next_cache = build_compile_analysis_cache(
                 self.compiler.files(),
                 self.compiler.functions(),
-                &mut type_table,
+                &mut analysis_type_table,
                 files_fingerprint,
                 resolve_preferred_extern_call_signatures,
             )
@@ -103,6 +105,7 @@ impl AotProcess {
             }
             self.compile_analysis_cache = Some(next_cache);
         }
+        *self.compiler.types_mut() = analysis_type_table.clone();
         let analysis = self.compile_analysis_cache.as_ref().ok_or_else(|| {
             crate::compiler::CompileError::Invariant(
                 "aot compile analysis cache missing after refresh".to_string(),
@@ -116,7 +119,7 @@ impl AotProcess {
             }
         }
         self.collection_max_lengths =
-            collect_fixed_collection_max_lengths(&analysis.global_path_types, &type_table)
+            collect_fixed_collection_max_lengths(&analysis.global_path_types, &analysis_type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
         let compiled_body_hashes: HashMap<FunctionId, u64> = self
             .artifacts
@@ -145,37 +148,43 @@ impl AotProcess {
             self.optimization_profile,
             &mut self.string_literals,
         );
-        let emit = compiler.emit_pass_for_ids_with(&emit_function_ids, &mut |meta, hir| {
-            // Stable per-function symbols are required so AOT objects can reference each other
-            // directly without forcing recompilation of callers on every body change.
-            let symbol = format!("aot_fn_{}", meta.id);
-            let bytes = compile_function_to_object_bytes(
-                meta,
-                hir,
-                &symbol,
-                optimization_profile,
-                &analysis.call_signatures,
-                &mut type_table,
-                &analysis.global_path_types,
-                &analysis.constant_values,
-                string_literals,
-                &analysis.collection_infos,
-                &analysis.named_struct_field_types,
-            )?;
-            let object_index = *next_object_index;
-            *next_object_index = next_object_index.saturating_add(1);
-            object_bytes.push(bytes);
-            let object_bytes_len = object_bytes.last().map_or(0usize, std::vec::Vec::len);
-            artifacts.retain(|artifact| artifact.function_id != meta.id);
-            artifacts.push(AotArtifact {
-                function_id: meta.id,
-                object_index,
-                body_hash: meta.body_hash,
-                symbol_name: symbol,
-                object_bytes_len,
-            });
-            Ok(())
-        })?;
+        let emit = compiler.emit_pass_for_ids_with(
+            &emit_function_ids,
+            &mut |meta, hir, lowered_types| {
+                // Stable per-function symbols are required so AOT objects can reference each other
+                // directly without forcing recompilation of callers on every body change.
+                let symbol = format!("aot_fn_{}", meta.id);
+                let mut type_table = lowered_types.clone();
+                type_table.ensure_utf8_view_id()?;
+                type_table.ensure_ascii_view_id()?;
+                let bytes = compile_function_to_object_bytes(
+                    meta,
+                    hir,
+                    &symbol,
+                    optimization_profile,
+                    &analysis.call_signatures,
+                    &mut type_table,
+                    &analysis.global_path_types,
+                    &analysis.constant_values,
+                    string_literals,
+                    &analysis.collection_infos,
+                    &analysis.named_struct_field_types,
+                )?;
+                let object_index = *next_object_index;
+                *next_object_index = next_object_index.saturating_add(1);
+                object_bytes.push(bytes);
+                let object_bytes_len = object_bytes.last().map_or(0usize, std::vec::Vec::len);
+                artifacts.retain(|artifact| artifact.function_id != meta.id);
+                artifacts.push(AotArtifact {
+                    function_id: meta.id,
+                    object_index,
+                    body_hash: meta.body_hash,
+                    symbol_name: symbol,
+                    object_bytes_len,
+                });
+                Ok(())
+            },
+        )?;
 
         let reachable = crate::backend::reachability::compute_reachable_function_ids(
             self.compiler.functions(),
@@ -1023,7 +1032,9 @@ mod tests {
 
         for expected_literal in case.expected_string_literals {
             assert!(
-                aot.string_literals().values().any(|value| value == expected_literal),
+                aot.string_literals()
+                    .values()
+                    .any(|value| value == expected_literal),
                 "missing string literal {:?} in fixture '{}'",
                 expected_literal,
                 case.label
@@ -1040,9 +1051,9 @@ mod tests {
         }
 
         for (function_name, markers) in case.expected_clif_markers {
-            let clif = captured_clif
-                .get(*function_name)
-                .unwrap_or_else(|| panic!("missing captured CLIF for function '{}'", function_name));
+            let clif = captured_clif.get(*function_name).unwrap_or_else(|| {
+                panic!("missing captured CLIF for function '{}'", function_name)
+            });
             for marker in *markers {
                 assert!(
                     clif.contains(marker),
@@ -1082,6 +1093,18 @@ mod tests {
         assert_eq!(report.emit.emitted_functions, 1);
         assert_eq!(process.artifacts().len(), 1);
         assert!(process.artifacts()[0].object_bytes_len > 0);
+    }
+
+    #[test]
+    fn aot_process_supports_local_annotation_only_type_during_emit() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let token: local_only = 7; return token; }\n",
+        );
+        let report = process.compile().expect("aot compile");
+        assert_eq!(report.emit.emitted_functions, 1);
+        assert_eq!(process.artifacts().len(), 1);
     }
 
     #[test]
