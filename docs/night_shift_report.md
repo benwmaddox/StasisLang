@@ -37,3 +37,9 @@
 - Good: removing the split between GitHub-selected work and repo-local queue files makes the automation easier to reason about.
 - Bad: standalone repo-local Night Shift runs are now intentionally narrower and require the inbox handoff to provide a selected item.
 - Adjustment: keep repo-local docs focused on how to change and validate the repo, and keep work selection in GitHub.
+- Removed the stale preparation step in `docs/night_shift_loop.md` that still told the executor to sync the default branch and create a fresh `nightshift/...` branch for issue-driven work.
+- The loop contract now tells the executor to preserve the branch prepared by the central Ned inbox runner and to stop on branch/check-out mismatches instead of mutating local branch state.
+- Verification: `tools/validate_repo.sh`
+- Good: the review comment pointed to one concrete contract mismatch, so the fix stayed narrow and easy to verify.
+- Bad: the loop doc still had one leftover instruction from the older repo-local runner model even after the ownership note moved branch setup to the inbox runner.
+- Adjustment: when workflow ownership moves across systems, re-read the procedural checklist line by line and delete stale executor steps in the same change.
