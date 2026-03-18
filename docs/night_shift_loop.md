@@ -6,26 +6,28 @@ Run autonomously without requiring plan review. Own validation and leave the rep
 
 Before you start, define finishing criteria for the chosen task: what must be true for the work to count as done, what checks must pass, and what user-visible behavior must be confirmed. Use that checklist before you report back.
 
+The central Ned inbox runner owns fetch/fast-forward, branch checkout or branch creation, and launching the executor. This repo only needs to provide strict validation and context docs.
+
+If a repo is missing a strict validation entrypoint, treat that as setup work before relying on automation there. Build one deterministic script from the strongest real bounded checks the repo already supports, then use that script consistently.
+
 ## Preparation
 
 1. Inspect `git status --short`.
-2. Inspect `git branch --show-current` and preserve the current branch when the run was launched to revise an existing PR. For issue-driven or backlog-driven work, start from the repo default branch after it has been synced with `origin`, then create a fresh `nightshift/...` branch.
-3. If the tree is dirty because an inbox process just synced review feedback into tracked docs, commit that sync first.
-4. Otherwise, if the tree is dirty, either create a protective WIP commit or stop and explain why the state is unsafe to modify.
-5. Run the quality gates in `tools/validate_repo.sh`.
-6. If validation fails, fix it first or move the task to `NEEDS INPUT FROM USER` with evidence.
+2. Inspect `git branch --show-current` and preserve the current branch when the run was launched to revise an existing PR. For issue-driven work, start from the repo default branch after it has been synced with `origin`, then create a fresh `nightshift/...` branch.
+3. If the tree is dirty, either create a protective WIP commit or stop and explain why the state is unsafe to modify.
+4. Run the quality gates in `tools/validate_repo.sh`.
+5. If validation fails, fix it first or move the task to `NEEDS INPUT FROM USER` with evidence.
 
 ## Choose work
 
-1. Read `docs/bugs.md`; choose the highest-severity item in `READY`, including any PR review feedback synced there by an inbox process.
-2. If no bug is ready, choose the highest-priority active item from `docs/build_checklist.md`.
-3. If no implementation task is available, improve docs, validation, or task hygiene.
+This workflow only works from a GitHub-selected item. If the run was not launched for a specific GitHub issue or PR, stop and report that no selected item was provided.
+
+Stay on the exact selected issue or PR. Do not switch to a different task because of local notes, queue files, or checklists. If local docs appear to point somewhere else, treat them as context only and report the mismatch instead of changing scope.
 
 ## Understand the task
 
-- Read the chosen checklist or bug entry.
-- If the bug came from synced PR review feedback, use the included GitHub links and thread context to understand exactly what needs a reply.
-- Load only the docs needed for that task.
+- Read the selected GitHub issue, PR, review, and review comments carefully.
+- Load only the docs needed to understand how this repo works and how to validate the change.
 - Read the relevant Rust and `.stasis` code before proposing changes.
 
 ## Tests-first workflow
@@ -64,6 +66,6 @@ Before you start, define finishing criteria for the chosen task: what must be tr
 
 ## Stop conditions
 
-- No `READY` bugs remain and no runnable checklist/spec work remains.
+- No selected GitHub item was provided for the run.
 - The task requires a product, design, or business decision from the user.
 - Validation cannot be restored safely within the current run.
