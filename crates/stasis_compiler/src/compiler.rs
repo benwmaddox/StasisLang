@@ -210,7 +210,7 @@ impl Compiler {
 
     pub fn compile_with<F>(&mut self, mut emit_function: F) -> CompileResult<CompileReport>
     where
-        F: FnMut(&FunctionMeta, &FunctionHIR) -> Result<(), String>,
+        F: FnMut(&FunctionMeta, &FunctionHIR, &TypeTable) -> Result<(), String>,
     {
         let index = self.index_pass()?;
         let emit = self.emit_pass_with(&mut emit_function)?;
@@ -298,7 +298,7 @@ impl Compiler {
 
     pub fn emit_pass_with<F>(&mut self, emit_function: &mut F) -> CompileResult<EmitPassResult>
     where
-        F: FnMut(&FunctionMeta, &FunctionHIR) -> Result<(), String>,
+        F: FnMut(&FunctionMeta, &FunctionHIR, &TypeTable) -> Result<(), String>,
     {
         let dirty_ids: Vec<FunctionId> = self
             .functions
@@ -315,7 +315,7 @@ impl Compiler {
         emit_function: &mut F,
     ) -> CompileResult<EmitPassResult>
     where
-        F: FnMut(&FunctionMeta, &FunctionHIR) -> Result<(), String>,
+        F: FnMut(&FunctionMeta, &FunctionHIR, &TypeTable) -> Result<(), String>,
     {
         let mut emitted_functions = 0usize;
         let mut emitted_ids: Vec<FunctionId> = Vec::with_capacity(function_ids.len());
@@ -328,7 +328,7 @@ impl Compiler {
                 })?
                 .clone();
             let hir = self.lower_function_to_hir(&snapshot)?;
-            emit_function(&snapshot, &hir).map_err(CompileError::Backend)?;
+            emit_function(&snapshot, &hir, &self.types).map_err(CompileError::Backend)?;
             emitted_ids.push(*function_id);
             emitted_functions += 1;
         }
@@ -348,6 +348,10 @@ impl Compiler {
 
     pub fn types(&self) -> &TypeTable {
         &self.types
+    }
+
+    pub fn types_mut(&mut self) -> &mut TypeTable {
+        &mut self.types
     }
 
     fn capture_previous_hashes(&self) -> HashMap<(u32, u64), PreviousFunctionHashes> {
@@ -391,8 +395,8 @@ impl Compiler {
                 CompileError::Invariant("function body range out of bounds".to_string())
             })?
             .to_string();
-        let statements =
-            parse_simple_statements_from_block(&body, &mut self.types).map_err(CompileError::Backend)?;
+        let statements = parse_simple_statements_from_block(&body, &mut self.types)
+            .map_err(CompileError::Backend)?;
         Ok(FunctionHIR {
             blocks: vec![Block { source: body }],
             statements,
@@ -457,11 +461,13 @@ mod tests {
     fn unchanged_source_emits_nothing_after_initial_emit() {
         let mut compiler = Compiler::new();
         compiler.upsert_file("sample.stasis", "function main(): i32 { return 7; }\n");
-        let first = compiler.compile_with(|_, _| Ok(())).expect("first compile");
+        let first = compiler
+            .compile_with(|_, _, _| Ok(()))
+            .expect("first compile");
         assert_eq!(first.emit.emitted_functions, 1);
 
         let second = compiler
-            .compile_with(|_, _| Ok(()))
+            .compile_with(|_, _, _| Ok(()))
             .expect("second compile");
         assert_eq!(second.index.dirty_functions, 0);
         assert_eq!(second.emit.emitted_functions, 0);
@@ -475,7 +481,7 @@ mod tests {
             "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
         );
         compiler
-            .compile_with(|_, _| Ok(()))
+            .compile_with(|_, _, _| Ok(()))
             .expect("initial compile");
 
         compiler.upsert_file(
@@ -488,7 +494,7 @@ mod tests {
         assert!(!function_by_name(&compiler, "main").dirty);
 
         let emit = compiler
-            .emit_pass_with(&mut |_, _| Ok(()))
+            .emit_pass_with(&mut |_, _, _| Ok(()))
             .expect("emit pass");
         assert_eq!(emit.emitted_functions, 1);
     }
@@ -502,7 +508,7 @@ mod tests {
         );
         compiler.upsert_file("extra.stasis", "function utility(): i32 { return 3; }\n");
         compiler
-            .compile_with(|_, _| Ok(()))
+            .compile_with(|_, _, _| Ok(()))
             .expect("initial compile");
 
         compiler.upsert_file("extra.stasis", "function utility(): i32 { return 4; }\n");
@@ -515,7 +521,7 @@ mod tests {
 
         let mut emitted_names = Vec::new();
         let emit = compiler
-            .emit_pass_with(&mut |meta, _| {
+            .emit_pass_with(&mut |meta, _, _| {
                 emitted_names.push(meta.name.clone());
                 Ok(())
             })
@@ -532,7 +538,7 @@ mod tests {
             "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
         );
         compiler
-            .compile_with(|_, _| Ok(()))
+            .compile_with(|_, _, _| Ok(()))
             .expect("initial compile");
 
         compiler.upsert_file(
@@ -554,7 +560,7 @@ mod tests {
             "function helper(value: i32): i32 { return value; }\nfunction main(): i32 { return helper(7); }\n",
         );
         compiler
-            .compile_with(|_, _| Ok(()))
+            .compile_with(|_, _, _| Ok(()))
             .expect("initial compile");
 
         compiler.upsert_file(
@@ -568,7 +574,7 @@ mod tests {
         assert!(!function_by_name(&compiler, "main").dirty);
 
         let emit = compiler
-            .emit_pass_with(&mut |_, _| Ok(()))
+            .emit_pass_with(&mut |_, _, _| Ok(()))
             .expect("emit pass");
         assert_eq!(emit.emitted_functions, 0);
     }
@@ -581,7 +587,7 @@ mod tests {
             "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
         );
         compiler
-            .compile_with(|_, _| Ok(()))
+            .compile_with(|_, _, _| Ok(()))
             .expect("initial compile");
 
         compiler.upsert_file(
@@ -592,7 +598,7 @@ mod tests {
 
         let mut emitted_names = Vec::new();
         let _ = compiler
-            .emit_pass_with(&mut |meta, _| {
+            .emit_pass_with(&mut |meta, _, _| {
                 emitted_names.push(meta.name.clone());
                 Ok(())
             })
@@ -609,7 +615,7 @@ mod tests {
         );
         let _ = compiler.index_pass().expect("index pass");
 
-        let error = compiler.emit_pass_with(&mut |meta, _| {
+        let error = compiler.emit_pass_with(&mut |meta, _, _| {
             if meta.name == "helper" {
                 return Err("forced emit failure".to_string());
             }
@@ -667,7 +673,7 @@ mod tests {
             "function helper(): i32 { return 1; }\nfunction left(): i32 { return helper(); }\nfunction right(): i32 { return helper(); }\n",
         );
         compiler
-            .compile_with(|_, _| Ok(()))
+            .compile_with(|_, _, _| Ok(()))
             .expect("initial compile");
 
         compiler.upsert_file(
@@ -690,7 +696,7 @@ mod tests {
             "function helper(): i32 { return 1; }\nfunction left(): i32 { return helper(); }\nfunction right(): i32 { return helper(); }\n",
         );
         compiler
-            .compile_with(|_, _| Ok(()))
+            .compile_with(|_, _, _| Ok(()))
             .expect("initial compile");
 
         compiler.upsert_file(
@@ -713,7 +719,7 @@ mod tests {
             "function leaf(): i32 { return 1; }\nfunction mid(): i32 { return leaf(); }\nfunction top(): i32 { return mid(); }\n",
         );
         compiler
-            .compile_with(|_, _| Ok(()))
+            .compile_with(|_, _, _| Ok(()))
             .expect("initial compile");
 
         compiler.upsert_file(
@@ -738,7 +744,7 @@ mod tests {
 
         let mut statement_counts = Vec::new();
         compiler
-            .compile_with(|meta, hir| {
+            .compile_with(|meta, hir, _| {
                 if meta.name == "add_one" {
                     statement_counts.push(hir.statements.len());
                 }
