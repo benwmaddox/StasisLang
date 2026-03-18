@@ -1,5 +1,15 @@
 # Night Shift Report
 
+## 2026-03-17
+
+- Addressed PR #247 review feedback on preserve-mode branch safety in `tools/nightshift.sh`.
+- `NIGHTSHIFT_BRANCH_MODE=preserve` now fails fast when `HEAD` is detached instead of continuing with an unattached commit path.
+- Added `tools/ci/test_nightshift_preserve_mode.sh` and promoted it into the standard validation gate via `tools/validate_repo.sh`.
+- Verification: `tools/ci/test_nightshift_preserve_mode.sh`, `tools/validate_repo.sh`
+- Good: the launcher bug was easy to isolate once the shell regression ran inside a temporary git repo instead of the main workspace.
+- Bad: inherited `NIGHTSHIFT_EXPECT_BRANCH` environment in the local shell initially masked the detached-HEAD path and made the first failing test less precise.
+- Adjustment: clear inherited Night Shift environment variables in script-level regressions so each harness asserts one branch-management behavior at a time.
+
 ## 2026-03-16
 
 - Prepared StasisLang for Night Shift style repo-local runs.
