@@ -9,4 +9,5 @@ if [[ -f "$HOME/.cargo/env" ]]; then
 fi
 
 python3 tools/ci/check_stasis_src_layout.py
+tools/ci/test_nightshift_preserve_mode.sh
 cargo test --workspace --all-targets -- --test-threads=1
