@@ -13,7 +13,7 @@ If a repo is missing a strict validation entrypoint, treat that as setup work be
 ## Preparation
 
 1. Inspect `git status --short`.
-2. Inspect `git branch --show-current` and preserve the current branch when the run was launched to revise an existing PR. For issue-driven work, start from the repo default branch after it has been synced with `origin`, then create a fresh `nightshift/...` branch.
+2. Inspect `git branch --show-current` and preserve the current branch the central Ned inbox runner prepared for this run. If the branch or checkout state does not match the selected GitHub item, stop and report the mismatch instead of creating or switching branches locally.
 3. If the tree is dirty, either create a protective WIP commit or stop and explain why the state is unsafe to modify.
 4. Run the quality gates in `tools/validate_repo.sh`.
 5. If validation fails, fix it first or move the task to `NEEDS INPUT FROM USER` with evidence.
