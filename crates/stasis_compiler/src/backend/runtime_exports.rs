@@ -60,6 +60,8 @@ mod tests {
     #[test]
     fn aot_runtime_export_contract_requires_exact_symbol_matches() {
         assert!(is_aot_runtime_export_symbol("stasis_jit_gfx_load_sprite"));
-        assert!(!is_aot_runtime_export_symbol("stasis_jit_gfx_totally_missing"));
+        assert!(!is_aot_runtime_export_symbol(
+            "stasis_jit_gfx_totally_missing"
+        ));
     }
 }
