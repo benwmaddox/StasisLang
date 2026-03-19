@@ -2,12 +2,30 @@
 
 ## 2026-03-19
 
+- Refreshed PR #252 again after `main` advanced, merging the current branch tip into `chore/night-shift-workflow` and resolving the only conflict in `docs/night_shift_report.md`.
+- Kept the reviewed `docs/night_shift_loop.md` branch-ownership wording intact, so the PR still preserves the runner-prepared branch instead of creating or switching branches locally.
+- Verification: `tools/validate_repo.sh`
+- Good: the follow-up refresh stayed isolated to report history, so the reviewed workflow change itself did not need to move again.
+- Bad: GitHub still showed the PR as conflicting after the earlier refresh because `main` advanced again almost immediately.
+- Adjustment: before closing a conflict-resolution pass, compare the live PR base SHA with the current remote `main` SHA so a second refresh is not missed.
+
+## 2026-03-19
+
 - Refreshed PR #252 by resolving the remaining merge conflicts against `main` without restoring the deleted repo-local Night Shift wrapper.
 - Kept the branch-ownership wording in `docs/night_shift_loop.md` and aligned the related process docs so the PR branch now reflects the review fix on top of current `main`.
 - Verification: `tools/validate_repo.sh`
 - Good: the unresolved merge was confined to the same Night Shift process files already under review, so the refresh stayed narrow.
 - Bad: the PR had already fixed the review comment, but the dirty merge state obscured that and kept the branch from moving forward.
 - Adjustment: when a review thread is already resolved but the PR still shows `DIRTY`, check mergeability before assuming more content changes are needed.
+
+## 2026-03-18
+
+- Verified issue #250 against GitHub and the repo task list, and found the remaining work was repo-tracking cleanup rather than compiler code changes.
+- Removed the stale open item from `docs/bugs.md` and recorded issue #250 as done so local workflow docs match the completed Rust compilation review task list.
+- Verification: `tools/validate_repo.sh`
+- Good: the issue scope was easy to resolve once the GitHub issue text and the repo task list were checked side by side.
+- Bad: the repo still had an open tracking line for work that the task list already marked complete, which forced a second pass just to reconcile status.
+- Adjustment: when a review task list item is completed, clear the matching `docs/bugs.md` or inbox-tracking entry in the same change so issue state does not drift from repo state.
 
 ## 2026-03-17
 
