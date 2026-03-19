@@ -1,5 +1,23 @@
 # Night Shift Report
 
+## 2026-03-19
+
+- Refreshed PR #252 again after `main` advanced, merging the current branch tip into `chore/night-shift-workflow` and resolving the only conflict in `docs/night_shift_report.md`.
+- Kept the reviewed `docs/night_shift_loop.md` branch-ownership wording intact, so the PR still preserves the runner-prepared branch instead of creating or switching branches locally.
+- Verification: `tools/validate_repo.sh`
+- Good: the follow-up refresh stayed isolated to report history, so the reviewed workflow change itself did not need to move again.
+- Bad: GitHub still showed the PR as conflicting after the earlier refresh because `main` advanced again almost immediately.
+- Adjustment: before closing a conflict-resolution pass, compare the live PR base SHA with the current remote `main` SHA so a second refresh is not missed.
+
+## 2026-03-19
+
+- Refreshed PR #252 by resolving the remaining merge conflicts against `main` without restoring the deleted repo-local Night Shift wrapper.
+- Kept the branch-ownership wording in `docs/night_shift_loop.md` and aligned the related process docs so the PR branch now reflects the review fix on top of current `main`.
+- Verification: `tools/validate_repo.sh`
+- Good: the unresolved merge was confined to the same Night Shift process files already under review, so the refresh stayed narrow.
+- Bad: the PR had already fixed the review comment, but the dirty merge state obscured that and kept the branch from moving forward.
+- Adjustment: when a review thread is already resolved but the PR still shows `DIRTY`, check mergeability before assuming more content changes are needed.
+
 ## 2026-03-18
 
 - Verified issue #250 against GitHub and the repo task list, and found the remaining work was repo-tracking cleanup rather than compiler code changes.
@@ -37,3 +55,28 @@
 - Good: writing the parity cases as one corpus made it easy to tighten IR-shape assertions after the first run exposed where helper calls actually appear.
 - Bad: some CLIF expectations that looked obvious at first were wrong because collection and struct-view access lower through shared helper calls rather than inline load/store ops.
 - Adjustment: keep future parity CLIF checks at the shared-lowering seam that is actually stable, and use behavior assertions for the rest instead of overfitting to incidental instruction placement.
+
+## 2026-03-17
+
+- Addressed PR #247 review feedback in `tools/nightshift.sh` by rejecting detached-HEAD preserve runs unless `NIGHTSHIFT_EXPECT_BRANCH` names a local branch whose tip matches `HEAD`, in which case the script now reattaches before continuing.
+- Added `tools/test_nightshift.sh` and wired it into `tools/validate_repo.sh` so detached preserve-mode rejection and explicit reattach behavior stay covered.
+- Verification: `tools/test_nightshift.sh`, `tools/validate_repo.sh`
+- Good: the branch-mode logic sits in one small shell block, so the safety fix stayed narrow and easy to regression-test.
+- Bad: the first implementation pass landed on the wrong local branch because the synced PR bug and the starting checkout did not match.
+- Adjustment: when `docs/bugs.md` points to a specific PR, confirm the local checkout matches that PR head before editing and fast-forward it before the first validation run.
+
+## 2026-03-18
+
+- Updated the Night Shift process to treat GitHub issues, PR comments, and PR reviews as the only source of work selection.
+- Repo-local docs now serve only as context and validation guidance; they no longer act as a competing task queue for Night Shift runs.
+- Added a runner guard that stops when no selected GitHub item was provided, and kept the runner self-snapshot logic so editing `tools/nightshift.sh` during a run does not break the live process.
+- Verification: `tools/test_nightshift.sh`
+- Good: removing the split between GitHub-selected work and repo-local queue files makes the automation easier to reason about.
+- Bad: standalone repo-local Night Shift runs are now intentionally narrower and require the inbox handoff to provide a selected item.
+- Adjustment: keep repo-local docs focused on how to change and validate the repo, and keep work selection in GitHub.
+- Removed the stale preparation step in `docs/night_shift_loop.md` that still told the executor to sync the default branch and create a fresh `nightshift/...` branch for issue-driven work.
+- The loop contract now tells the executor to preserve the branch prepared by the central Ned inbox runner and to stop on branch/check-out mismatches instead of mutating local branch state.
+- Verification: `tools/validate_repo.sh`
+- Good: the review comment pointed to one concrete contract mismatch, so the fix stayed narrow and easy to verify.
+- Bad: the loop doc still had one leftover instruction from the older repo-local runner model even after the ownership note moved branch setup to the inbox runner.
+- Adjustment: when workflow ownership moves across systems, re-read the procedural checklist line by line and delete stale executor steps in the same change.
