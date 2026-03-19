@@ -1,5 +1,14 @@
 # Night Shift Report
 
+## 2026-03-18
+
+- Verified issue #250 against GitHub and the repo task list, and found the remaining work was repo-tracking cleanup rather than compiler code changes.
+- Removed the stale open item from `docs/bugs.md` and recorded issue #250 as done so local workflow docs match the completed Rust compilation review task list.
+- Verification: `tools/validate_repo.sh`
+- Good: the issue scope was easy to resolve once the GitHub issue text and the repo task list were checked side by side.
+- Bad: the repo still had an open tracking line for work that the task list already marked complete, which forced a second pass just to reconcile status.
+- Adjustment: when a review task list item is completed, clear the matching `docs/bugs.md` or inbox-tracking entry in the same change so issue state does not drift from repo state.
+
 ## 2026-03-17
 
 - Addressed PR #247 review feedback on preserve-mode branch safety in `tools/nightshift.sh`.
