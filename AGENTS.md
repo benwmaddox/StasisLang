@@ -20,7 +20,7 @@
 - `cargo run -p stasis --release -- --ticks 300 --watch-dir samples/brickout_revenge`
 - Use `rg` for search (`rg pattern path`, `rg --files`).
 - Keep commands deterministic and scriptable.
-- Night Shift validation entrypoint:
+- Validation entrypoint:
 - `tools/validate_repo.sh`
 
 ## Coding Style & Naming Conventions
@@ -105,8 +105,8 @@
 - If a slice cannot yet pass that end-to-end executable verification path, the slice is not complete.
 - After each code change, run a quick simplicity review on the touched code and simplify again if a more direct version is possible.
 
-## Night Shift Workflow
-- Loop contract: `docs/night_shift_loop.md`
+## Contributor Workflow
+- Workflow contract: `docs/contributor_workflow.md`
 - Reviewer personas: `docs/review_personas.md`
 - Validation entrypoint: `tools/validate_repo.sh`
 - GitHub issues, PR comments, and PR reviews are the only source of work selection for Night Shift runs.
