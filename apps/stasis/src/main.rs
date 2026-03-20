@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use stasis::{
-    run_jit_tests_in_directory_with_session, run_play_in_process,
-    run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
-    RunnerConfig, StasisTestRunSession,
+    run_android_game_build_with_options, run_jit_tests_in_directory_with_session,
+    run_play_in_process, run_self_host_aot_cli_with_options, run_with_default_backend,
+    run_with_real_backend, AndroidGameBuildConfig, AndroidGameBuildOptions, RunnerConfig,
+    StasisTestRunSession,
 };
 use stasis_runner::swap::contracts::TargetMode;
 
@@ -47,6 +48,17 @@ struct PlayCliArgs {
     data_bind_struct_meta: Option<PathBuf>,
     tick_sleep_micros: u64,
     ticks: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildCliArgs {
+    target: String,
+    project_dir: PathBuf,
+    output_dir: Option<PathBuf>,
+    entry_file: Option<PathBuf>,
+    package_id: String,
+    app_name: String,
+    min_sdk: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -206,6 +218,152 @@ fn try_run_probe_graphics_runtime_subcommand() -> Option<i32> {
         eprintln!("candidate[{idx}]={}", candidate.display());
     }
     Some(1)
+}
+
+fn parse_build_cli_args(args: &[String]) -> Result<BuildCliArgs, String> {
+    let mut target: Option<String> = None;
+    let mut project_dir = PathBuf::from(".");
+    let mut output_dir: Option<PathBuf> = None;
+    let mut entry_file: Option<PathBuf> = None;
+    let mut package_id: Option<String> = None;
+    let mut app_name: Option<String> = None;
+    let mut min_sdk: u32 = 26;
+    let mut i: usize = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
+            "--target" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --target".to_string());
+                }
+                target = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--project-dir" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --project-dir".to_string());
+                }
+                project_dir = PathBuf::from(args[i + 1].clone());
+                i += 2;
+            }
+            "--output-dir" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --output-dir".to_string());
+                }
+                output_dir = Some(PathBuf::from(args[i + 1].clone()));
+                i += 2;
+            }
+            "--entry-file" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --entry-file".to_string());
+                }
+                entry_file = Some(PathBuf::from(args[i + 1].clone()));
+                i += 2;
+            }
+            "--package-id" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --package-id".to_string());
+                }
+                package_id = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--app-name" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --app-name".to_string());
+                }
+                app_name = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--min-sdk" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --min-sdk".to_string());
+                }
+                min_sdk = args[i + 1]
+                    .parse::<u32>()
+                    .map_err(|error| format!("invalid value for --min-sdk: {error}"))?;
+                i += 2;
+            }
+            _ => {
+                return Err(format!("unknown build arg '{arg}'"));
+            }
+        }
+    }
+
+    let Some(target) = target else {
+        return Err("missing required --target".to_string());
+    };
+    if target != "android-game" {
+        return Err(format!(
+            "unsupported --target '{target}' (expected android-game)"
+        ));
+    }
+    let Some(package_id) = package_id else {
+        return Err("missing required --package-id".to_string());
+    };
+    let Some(app_name) = app_name else {
+        return Err("missing required --app-name".to_string());
+    };
+
+    Ok(BuildCliArgs {
+        target,
+        project_dir,
+        output_dir,
+        entry_file,
+        package_id,
+        app_name,
+        min_sdk,
+    })
+}
+
+fn try_run_build_subcommand() -> Option<i32> {
+    let mut args = env::args().skip(1);
+    let first = args.next()?;
+    if first != "build" {
+        return None;
+    }
+    let arg_list: Vec<String> = args.collect();
+    let parsed = match parse_build_cli_args(&arg_list) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(2);
+        }
+    };
+
+    let mut options = AndroidGameBuildOptions::new(AndroidGameBuildConfig::new(
+        parsed.package_id,
+        parsed.app_name,
+        parsed.min_sdk,
+    ));
+    options.entry_file = parsed.entry_file;
+    options.output_root = parsed.output_dir;
+
+    match run_android_game_build_with_options(&parsed.project_dir, options) {
+        Ok(summary) => {
+            println!(
+                "android_output_dir={}",
+                summary.android_output_dir.display()
+            );
+            println!(
+                "android_project_dir={}",
+                summary.android_project_dir.display()
+            );
+            println!(
+                "android_native_library={}",
+                summary.native_library_path.display()
+            );
+            println!("android_game_pack={}", summary.asset_pack_path.display());
+            println!(
+                "android_config_json={}",
+                summary.android_config_path.display()
+            );
+            Some(0)
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            Some(1)
+        }
+    }
 }
 
 fn parse_args() -> CliOptions {
@@ -823,6 +981,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_build_cli_args_accepts_android_game_target() {
+        let args = vec![
+            "--target".to_string(),
+            "android-game".to_string(),
+            "--project-dir".to_string(),
+            "samples/brickout_revenge".to_string(),
+            "--output-dir".to_string(),
+            "build".to_string(),
+            "--entry-file".to_string(),
+            "main.stasis".to_string(),
+            "--package-id".to_string(),
+            "com.maddoxlabs.game".to_string(),
+            "--app-name".to_string(),
+            "My Game".to_string(),
+            "--min-sdk".to_string(),
+            "26".to_string(),
+        ];
+        let parsed = parse_build_cli_args(&args).expect("parse should succeed");
+        assert_eq!(parsed.target, "android-game");
+        assert_eq!(
+            parsed.project_dir,
+            PathBuf::from("samples/brickout_revenge")
+        );
+        assert_eq!(parsed.output_dir, Some(PathBuf::from("build")));
+        assert_eq!(parsed.entry_file, Some(PathBuf::from("main.stasis")));
+        assert_eq!(parsed.package_id, "com.maddoxlabs.game");
+        assert_eq!(parsed.app_name, "My Game");
+        assert_eq!(parsed.min_sdk, 26);
+    }
+
+    #[test]
+    fn parse_build_cli_args_rejects_missing_required_fields() {
+        let args = vec![
+            "--target".to_string(),
+            "android-game".to_string(),
+            "--package-id".to_string(),
+            "com.maddoxlabs.game".to_string(),
+        ];
+        let error = parse_build_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("missing required --app-name"));
+    }
+
+    #[test]
     fn parse_test_cli_args_rejects_missing_required_dir_flag() {
         let args = vec!["--ticks".to_string(), "10".to_string()];
         let error = parse_test_cli_args(&args).expect_err("parse should fail");
@@ -993,6 +1194,9 @@ fn main() {
         std::process::exit(exit);
     }
     if let Some(exit) = try_run_aot_cli_subcommand() {
+        std::process::exit(exit);
+    }
+    if let Some(exit) = try_run_build_subcommand() {
         std::process::exit(exit);
     }
     if let Some(exit) = try_run_play_subcommand() {

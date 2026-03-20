@@ -43,8 +43,15 @@ Android builds currently use the SDL_Renderer backend only (no OpenGL 2.1/GLEW p
 Build helper:
 - `runtime/build_android.ps1` (requires `ANDROID_NDK_HOME` and vcpkg via `VCPKG_ROOT` or `C:\vcpkg`)
 
-Brickout Revenge debug APK workflow:
-- See `docs/brickout-android-debug-plan.md` and use `android/build_brickout_android_debug.ps1` + `android/install_brickout_android_debug.ps1`.
+Stasis Android export prototype:
+- `cargo run -p stasis -- build --target android-game --project-dir <game_dir> --package-id <package> --app-name <name>`
+- Output contract:
+  - `build/android/libstasis_game.so`
+  - `build/android/game.pack`
+  - `build/android/android-config.json`
+  - `build/android-project/`
+- For cross-target C compilation/linking, set `STASIS_ANDROID_CC` and `STASIS_AOT_LINKER` to Android NDK compiler wrappers as needed.
+- The generated Android project is a thin Gradle/GameActivity shell; final Windows + emulator verification is still required for full device validation.
 
 ## Manual Build (Alternative)
 

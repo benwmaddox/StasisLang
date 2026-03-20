@@ -20,6 +20,7 @@ pub struct CommitOutcome {
 #[derive(Debug, Clone)]
 pub struct AotCompileConfig {
     pub opt_level: String,
+    pub target_triple: Option<String>,
 }
 
 fn default_aot_opt_level() -> String {
@@ -41,6 +42,10 @@ impl Default for AotCompileConfig {
     fn default() -> Self {
         Self {
             opt_level: default_aot_opt_level(),
+            target_triple: std::env::var("STASIS_AOT_TARGET")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
         }
     }
 }

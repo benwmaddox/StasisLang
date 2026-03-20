@@ -3,6 +3,7 @@ use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32};
 use crate::ir::hir::FunctionHIR;
+use cranelift_codegen::isa;
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
 use cranelift_module::{default_libcall_names, Module};
@@ -10,6 +11,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
@@ -26,6 +28,7 @@ pub struct AotArtifact {
 pub struct AotProcess {
     compiler: Compiler,
     optimization_profile: AotOptimizationProfile,
+    target_triple: Option<String>,
     next_object_index: u32,
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
@@ -52,6 +55,7 @@ impl AotProcess {
         Self {
             compiler: Compiler::new(),
             optimization_profile,
+            target_triple: None,
             next_object_index: 0,
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
@@ -64,6 +68,13 @@ impl AotProcess {
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
         self.compiler.upsert_file(path, content);
+    }
+
+    pub fn set_target_triple(&mut self, triple: Option<&str>) {
+        self.target_triple = triple
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
     }
 
     pub fn set_required_emit_roots(&mut self, roots: &[String]) {
@@ -169,6 +180,7 @@ impl AotProcess {
                     string_literals,
                     &analysis.collection_infos,
                     &analysis.named_struct_field_types,
+                    self.target_triple.as_deref(),
                 )?;
                 let object_index = *next_object_index;
                 *next_object_index = next_object_index.saturating_add(1);
@@ -530,17 +542,30 @@ fn compile_function_to_object_bytes(
     string_literals: &mut BTreeMap<i32, String>,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    target_triple: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     let mut flag_builder = settings::builder();
     flag_builder
         .set("opt_level", optimization_profile.as_cranelift_opt_level())
         .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
     let flags = settings::Flags::new(flag_builder);
-    let isa_builder = cranelift_native::builder()
-        .map_err(|error| format!("failed to construct native ISA builder: {error}"))?;
-    let isa = isa_builder
-        .finish(flags)
-        .map_err(|error| format!("failed to finalize native ISA: {error}"))?;
+    let isa_builder = if let Some(target_triple) = target_triple {
+        let triple = target_lexicon::Triple::from_str(target_triple)
+            .map_err(|error| format!("failed to parse target triple '{target_triple}': {error}"))?;
+        isa::lookup(triple).map_err(|error| {
+            format!("failed to construct ISA builder for target '{target_triple}': {error}")
+        })?
+    } else {
+        cranelift_native::builder()
+            .map_err(|error| format!("failed to construct native ISA builder: {error}"))?
+    };
+    let isa = isa_builder.finish(flags).map_err(|error| {
+        if let Some(target_triple) = target_triple {
+            format!("failed to finalize target ISA for '{target_triple}': {error}")
+        } else {
+            format!("failed to finalize native ISA: {error}")
+        }
+    })?;
 
     let builder = ObjectBuilder::new(
         isa,

@@ -11,6 +11,10 @@ mod window_config;
 
 pub use compiler_backend::run_self_host_aot_cli;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
+pub use compiler_backend::{
+    run_android_game_build, run_android_game_build_with_options, AndroidGameBuildConfig,
+    AndroidGameBuildOptions, AndroidGameBuildSummary,
+};
 pub use events::RunnerEvent;
 pub use stasis_test_runner::{
     run_jit_tests_in_directory, run_jit_tests_in_directory_with_session, StasisTestRunSession,

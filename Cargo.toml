@@ -25,12 +25,13 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-cranelift-codegen = "0.117"
+cranelift-codegen = { version = "0.117", features = ["arm64"] }
 cranelift-frontend = "0.117"
 cranelift-jit = "0.117"
 cranelift-module = "0.117"
 cranelift-native = "0.117"
 cranelift-object = "0.117"
+target-lexicon = "0.13"
 
 winit = "0.29"
 glutin = "0.31"

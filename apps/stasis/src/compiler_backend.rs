@@ -42,6 +42,37 @@ pub struct SelfHostedAotCliSummary {
     pub object_file_names: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AndroidGameBuildConfig {
+    #[serde(rename = "packageId")]
+    pub package_id: String,
+    #[serde(rename = "appName")]
+    pub app_name: String,
+    #[serde(rename = "minSdk")]
+    pub min_sdk: u32,
+    pub abi: String,
+}
+
+impl AndroidGameBuildConfig {
+    pub fn new(package_id: impl Into<String>, app_name: impl Into<String>, min_sdk: u32) -> Self {
+        Self {
+            package_id: package_id.into(),
+            app_name: app_name.into(),
+            min_sdk,
+            abi: "arm64-v8a".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AndroidGameBuildSummary {
+    pub android_output_dir: PathBuf,
+    pub android_project_dir: PathBuf,
+    pub native_library_path: PathBuf,
+    pub asset_pack_path: PathBuf,
+    pub android_config_path: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AotFallbackStubDetail {
     symbol: String,
@@ -173,6 +204,23 @@ impl SelfHostedAotCliOptions {
         Self {
             summary_file_path,
             entry_file,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AndroidGameBuildOptions {
+    pub config: AndroidGameBuildConfig,
+    pub entry_file: Option<PathBuf>,
+    pub output_root: Option<PathBuf>,
+}
+
+impl AndroidGameBuildOptions {
+    pub fn new(config: AndroidGameBuildConfig) -> Self {
+        Self {
+            config,
+            entry_file: None,
+            output_root: None,
         }
     }
 }
@@ -1046,6 +1094,7 @@ impl IncrementalCompilerBackend {
         let mut process = AotProcess::with_optimization_profile(
             Self::aot_optimization_profile_from_compile_config(&self.aot_compile_config),
         );
+        process.set_target_triple(self.aot_compile_config.target_triple.as_deref());
         for (path, source) in &self.source_by_path {
             process.upsert_file(path.clone(), source.clone());
         }
@@ -2958,13 +3007,25 @@ fn emit_engine_bundle_runtime_bridge_object(
         )
     })?;
 
-    let compiler = std::env::var_os("CC").unwrap_or_else(|| {
-        if cfg!(windows) {
-            "clang-cl.exe".into()
-        } else {
-            "cc".into()
-        }
-    });
+    compile_c_source_to_object(&source_path, &object_path, None)?;
+    Ok(object_path)
+}
+
+fn compile_c_source_to_object(
+    source_path: &Path,
+    object_path: &Path,
+    compiler_override: Option<&Path>,
+) -> Result<(), String> {
+    let compiler = compiler_override
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("CC").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                PathBuf::from("clang-cl.exe")
+            } else {
+                PathBuf::from("cc")
+            }
+        });
     let compiler_name = Path::new(&compiler)
         .file_name()
         .and_then(|value| value.to_str())
@@ -3016,7 +3077,666 @@ fn emit_engine_bundle_runtime_bridge_object(
             object_path.display()
         ));
     }
+    Ok(())
+}
+
+fn android_target_triple() -> &'static str {
+    "aarch64-linux-android"
+}
+
+fn android_game_library_name() -> &'static str {
+    "libstasis_game.so"
+}
+
+fn validate_android_game_build_config(config: &AndroidGameBuildConfig) -> Result<(), String> {
+    if config.abi != "arm64-v8a" {
+        return Err(format!(
+            "unsupported android abi '{}' (expected arm64-v8a)",
+            config.abi
+        ));
+    }
+    if config.min_sdk == 0 {
+        return Err("android minSdk must be greater than 0".to_string());
+    }
+    if config.package_id.trim().is_empty() {
+        return Err("android packageId must not be empty".to_string());
+    }
+    if config.app_name.trim().is_empty() {
+        return Err("android appName must not be empty".to_string());
+    }
+    let segments: Vec<&str> = config.package_id.split('.').collect();
+    if segments.len() < 2 {
+        return Err(format!(
+            "android packageId '{}' must contain at least two segments",
+            config.package_id
+        ));
+    }
+    for segment in segments {
+        if segment.is_empty()
+            || !segment
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            || segment.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        {
+            return Err(format!(
+                "android packageId '{}' contains invalid segment '{}'",
+                config.package_id, segment
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_relative_files(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|error| format!("failed to read directory {}: {error}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "failed to read directory entry in {}: {error}",
+                    dir.display()
+                )
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| {
+                format!("failed to read file type for {}: {error}", path.display())
+            })?;
+            if file_type.is_dir() {
+                walk(root, &path, out)?;
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|error| {
+                    format!(
+                        "failed to compute relative path for {} under {}: {error}",
+                        path.display(),
+                        root.display()
+                    )
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((relative, path));
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    if root.exists() {
+        walk(root, root, &mut files)?;
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+    }
+    Ok(files)
+}
+
+fn write_android_game_pack(source_dir: &Path, output_path: &Path) -> Result<(), String> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create android asset pack directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let entries = collect_relative_files(source_dir)?;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"STPK1");
+    bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for (relative, path) in entries {
+        let relative_bytes = relative.as_bytes();
+        let file_bytes = std::fs::read(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        bytes.extend_from_slice(&(relative_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(relative_bytes);
+        bytes.extend_from_slice(&(file_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&file_bytes);
+    }
+    std::fs::write(output_path, bytes).map_err(|error| {
+        format!(
+            "failed to write android asset pack {}: {error}",
+            output_path.display()
+        )
+    })
+}
+
+fn resolve_android_c_compiler(link_config: &AotLinkConfig) -> Option<PathBuf> {
+    std::env::var_os("STASIS_ANDROID_CC")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| link_config.linker_path.clone())
+}
+
+fn mangle_jni_ident(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        match ch {
+            '_' => out.push_str("_1"),
+            '$' => out.push_str("_00024"),
+            ';' => out.push_str("_2"),
+            '[' => out.push_str("_3"),
+            '/' | '.' => out.push('_'),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn build_android_game_runtime_bridge_source(
+    runtime_fields: &[PackagedRuntimeField],
+    function_rows: &[EngineBundleManifestFunctionRow],
+    string_literals: &[EngineBundleManifestStringLiteralRow],
+    package_id: &str,
+) -> Result<String, String> {
+    let function_symbols: Vec<String> =
+        function_rows.iter().map(|row| row.symbol.clone()).collect();
+    let function_aliases = vec![
+        PackagedFunctionAlias {
+            alias: "main",
+            target_symbol: function_rows
+                .iter()
+                .find(|row| row.name == "main")
+                .map(|row| row.symbol.clone())
+                .ok_or_else(|| {
+                    "engine bundle manifest is missing required symbol main".to_string()
+                })?,
+            returns_i32: true,
+        },
+        PackagedFunctionAlias {
+            alias: "tick",
+            target_symbol: function_rows
+                .iter()
+                .find(|row| row.name == "tick")
+                .map(|row| row.symbol.clone())
+                .ok_or_else(|| {
+                    "engine bundle manifest is missing required symbol tick".to_string()
+                })?,
+            returns_i32: true,
+        },
+        PackagedFunctionAlias {
+            alias: "render",
+            target_symbol: function_rows
+                .iter()
+                .find(|row| row.name == "render")
+                .map(|row| row.symbol.clone())
+                .ok_or_else(|| {
+                    "engine bundle manifest is missing required symbol render".to_string()
+                })?,
+            returns_i32: true,
+        },
+    ];
+    let mut source = build_engine_bundle_runtime_bridge_source(
+        runtime_fields,
+        &function_symbols,
+        &function_aliases,
+        string_literals,
+    )?;
+    source.push_str("#include <string.h>\n");
+    let jni_prefix = format!("Java_{}_MainActivity_", mangle_jni_ident(package_id));
+    source.push_str(
+        r#"
+static int32_t stasis_android_initialized = 0;
+static float stasis_android_prev_x = 0.0f;
+static float stasis_android_prev_y = 0.0f;
+static int32_t stasis_android_pointer_down = 0;
+
+static void stasis_android_commit_dimensions(int32_t width, int32_t height) {
+    if (width < 0) { width = 0; }
+    if (height < 0) { height = 0; }
+    host_i32[1] = width;
+    host_i32[2] = height;
+    host_i32[3] = 0;
+    host_i32[4] = 0;
+    host_i32[5] = width;
+    host_i32[6] = height;
+    host_i32[11] = 1;
+    host_i32[12] = width;
+    host_i32[13] = height;
+    host_i32[14] = 1;
+    host_i32[16] = 60;
+    host_i32[17] = 1;
+    host_req_window_w_px = width;
+    host_req_window_h_px = height;
+}
+
+static void stasis_android_commit_pointer(float x, float y) {
+    const int base_i = 544;
+    const int base_f = 0;
+    const float width = host_i32[5] > 0 ? (float)host_i32[5] : 1.0f;
+    const float height = host_i32[6] > 0 ? (float)host_i32[6] : 1.0f;
+    host_i32[base_i + 0] = 0;
+    host_f32[base_f + 0] = x;
+    host_f32[base_f + 1] = y;
+    host_f32[base_f + 2] = x - stasis_android_prev_x;
+    host_f32[base_f + 3] = y - stasis_android_prev_y;
+    host_f32[base_f + 4] = x / width;
+    host_f32[base_f + 5] = y / height;
+    stasis_android_prev_x = x;
+    stasis_android_prev_y = y;
+}
+
+STASIS_EXPORT void stasis_init(int32_t width, int32_t height) {
+    memset(host_i32, 0, sizeof(host_i32));
+    memset(host_f32, 0, sizeof(host_f32));
+    memset(gfx_cmd_i32, 0, sizeof(gfx_cmd_i32));
+    memset(gfx_cmd_f32, 0, sizeof(gfx_cmd_f32));
+    memset(gfx_cmd_u8, 0, sizeof(gfx_cmd_u8));
+    host_i32[7] = 0;
+    host_i32[8] = 0;
+    host_i32[9] = 0;
+    host_i32[10] = 0;
+    stasis_aot_bind_runtime_globals();
+    stasis_android_commit_dimensions(width, height);
+    stasis_android_initialized = 1;
+    stasis_android_pointer_down = 0;
+    if (main() != 0) {
+        host_i32[9] = 1;
+    }
+}
+
+STASIS_EXPORT void stasis_tick(float dt) {
+    if (!stasis_android_initialized) {
+        return;
+    }
+    if (dt < 0.0f) {
+        dt = 0.0f;
+    }
+    host_i32[0] += (int32_t)(dt * 1000.0f);
+    host_i32[19] += (int32_t)(dt * 1000000.0f);
+    host_i32[10] += 1;
+    if (tick() != 0) {
+        host_i32[9] = 1;
+    }
+    host_i32[546] = 0;
+    host_i32[547] = 0;
+    host_f32[2] = 0.0f;
+    host_f32[3] = 0.0f;
+}
+
+STASIS_EXPORT void stasis_render(void) {
+    if (!stasis_android_initialized) {
+        return;
+    }
+    if (render() != 0) {
+        host_i32[9] = 1;
+    }
+}
+
+STASIS_EXPORT void stasis_on_input(int32_t type, int32_t a, int32_t b) {
+    if (!stasis_android_initialized) {
+        return;
+    }
+    switch (type) {
+        case 1:
+            stasis_android_pointer_down = 1;
+            host_i32[7] = 1;
+            host_i32[545] = 1;
+            host_i32[546] = 1;
+            host_i32[547] = 0;
+            stasis_android_commit_pointer((float)a, (float)b);
+            break;
+        case 2:
+            stasis_android_pointer_down = 0;
+            host_i32[7] = 1;
+            host_i32[545] = 0;
+            host_i32[546] = 0;
+            host_i32[547] = 1;
+            stasis_android_commit_pointer((float)a, (float)b);
+            break;
+        case 3:
+            host_i32[7] = stasis_android_pointer_down ? 1 : 0;
+            host_i32[545] = stasis_android_pointer_down ? 1 : 0;
+            stasis_android_commit_pointer((float)a, (float)b);
+            break;
+        case 4:
+            host_i32[9] = 1;
+            break;
+        case 5:
+            if (a >= 0 && a < 512) {
+                host_i32[32 + a] = 1;
+            }
+            break;
+        case 6:
+            if (a >= 0 && a < 512) {
+                host_i32[32 + a] = 0;
+            }
+            break;
+        case 7:
+            stasis_android_commit_dimensions(a, b);
+            break;
+        default:
+            break;
+    }
+}
+"#,
+    );
+    source.push_str("\nSTASIS_EXPORT void ");
+    source.push_str(&jni_prefix);
+    source.push_str(
+        "nativeInit(void* env, void* thiz, int32_t width, int32_t height) {\n    (void)env;\n    (void)thiz;\n    stasis_init(width, height);\n}\n",
+    );
+    source.push_str("\nSTASIS_EXPORT void ");
+    source.push_str(&jni_prefix);
+    source.push_str(
+        "nativeTick(void* env, void* thiz, float dt) {\n    (void)env;\n    (void)thiz;\n    stasis_tick(dt);\n}\n",
+    );
+    source.push_str("\nSTASIS_EXPORT void ");
+    source.push_str(&jni_prefix);
+    source.push_str(
+        "nativeRender(void* env, void* thiz) {\n    (void)env;\n    (void)thiz;\n    stasis_render();\n}\n",
+    );
+    source.push_str("\nSTASIS_EXPORT void ");
+    source.push_str(&jni_prefix);
+    source.push_str(
+        "nativeOnInput(void* env, void* thiz, int32_t type, int32_t a, int32_t b) {\n    (void)env;\n    (void)thiz;\n    stasis_on_input(type, a, b);\n}\n",
+    );
+    Ok(source)
+}
+
+fn emit_android_game_runtime_bridge_object(
+    backend: &IncrementalCompilerBackend,
+    runtime_fields: &[PackagedRuntimeField],
+    function_rows: &[EngineBundleManifestFunctionRow],
+    string_literals: &[EngineBundleManifestStringLiteralRow],
+    package_id: &str,
+    compiler_path: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let source_path = backend
+        .aot_artifact_root
+        .join("android_game_runtime_bridge.c");
+    let object_path = backend.aot_artifact_root.join(format!(
+        "android_game_runtime_bridge.{}",
+        runtime_bridge_object_extension()
+    ));
+    let source = build_android_game_runtime_bridge_source(
+        runtime_fields,
+        function_rows,
+        string_literals,
+        package_id,
+    )?;
+    std::fs::write(&source_path, source).map_err(|error| {
+        format!(
+            "failed to write android game runtime bridge source {}: {error}",
+            source_path.display()
+        )
+    })?;
+    compile_c_source_to_object(&source_path, &object_path, compiler_path)?;
     Ok(object_path)
+}
+
+fn java_package_path(package_id: &str) -> PathBuf {
+    let mut path = PathBuf::new();
+    for segment in package_id.split('.') {
+        path.push(segment);
+    }
+    path
+}
+
+fn generate_android_game_project(
+    project_root: &Path,
+    config: &AndroidGameBuildConfig,
+    native_library_path: &Path,
+    asset_pack_path: &Path,
+) -> Result<(), String> {
+    let main_root = project_root.join("app").join("src").join("main");
+    let jni_lib_dir = main_root.join("jniLibs").join(&config.abi);
+    let asset_dir = main_root.join("assets");
+    let java_dir = main_root
+        .join("java")
+        .join(java_package_path(&config.package_id));
+    std::fs::create_dir_all(&jni_lib_dir).map_err(|error| {
+        format!(
+            "failed to create android jniLibs directory {}: {error}",
+            jni_lib_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(&asset_dir).map_err(|error| {
+        format!(
+            "failed to create android assets directory {}: {error}",
+            asset_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(&java_dir).map_err(|error| {
+        format!(
+            "failed to create android java directory {}: {error}",
+            java_dir.display()
+        )
+    })?;
+
+    copy_file_creating_parent(
+        native_library_path,
+        &jni_lib_dir.join(android_game_library_name()),
+    )?;
+    copy_file_creating_parent(asset_pack_path, &asset_dir.join("game.pack"))?;
+
+    let manifest = format!(
+        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" package=\"{package}\">\n    <application android:label=\"{app}\">\n        <activity android:name=\".MainActivity\" android:exported=\"true\">\n            <intent-filter>\n                <action android:name=\"android.intent.action.MAIN\" />\n                <category android:name=\"android.intent.category.LAUNCHER\" />\n            </intent-filter>\n        </activity>\n    </application>\n</manifest>\n",
+        package = config.package_id,
+        app = xml_escape(&config.app_name),
+    );
+    std::fs::write(main_root.join("AndroidManifest.xml"), manifest).map_err(|error| {
+        format!(
+            "failed to write Android manifest in {}: {error}",
+            main_root.display()
+        )
+    })?;
+
+    let kotlin = format!(
+        "package {package}\n\nimport android.os.Bundle\nimport android.view.Choreographer\nimport android.view.KeyEvent\nimport android.view.MotionEvent\nimport androidx.games.activity.GameActivity\n\nclass MainActivity : GameActivity(), Choreographer.FrameCallback {{\n    private var nativeStarted = false\n    private var lastFrameNanos = 0L\n\n    override fun onCreate(savedInstanceState: Bundle?) {{\n        super.onCreate(savedInstanceState)\n        System.loadLibrary(\"stasis_game\")\n    }}\n\n    override fun onWindowFocusChanged(hasFocus: Boolean) {{\n        super.onWindowFocusChanged(hasFocus)\n        if (!hasFocus) {{\n            return\n        }}\n        val decor = window.decorView\n        if (!nativeStarted && decor.width > 0 && decor.height > 0) {{\n            nativeInit(decor.width, decor.height)\n            nativeStarted = true\n        }}\n        if (nativeStarted) {{\n            Choreographer.getInstance().postFrameCallback(this)\n        }}\n    }}\n\n    override fun doFrame(frameTimeNanos: Long) {{\n        if (!nativeStarted) {{\n            return\n        }}\n        val dtSeconds = if (lastFrameNanos == 0L) 1.0f / 60.0f else ((frameTimeNanos - lastFrameNanos).coerceAtLeast(0L).toFloat() / 1_000_000_000.0f)\n        lastFrameNanos = frameTimeNanos\n        nativeTick(dtSeconds)\n        nativeRender()\n        Choreographer.getInstance().postFrameCallback(this)\n    }}\n\n    override fun onTouchEvent(event: MotionEvent): Boolean {{\n        val x = event.x.toInt()\n        val y = event.y.toInt()\n        when (event.actionMasked) {{\n            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> nativeOnInput(1, x, y)\n            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> nativeOnInput(2, x, y)\n            MotionEvent.ACTION_MOVE -> nativeOnInput(3, x, y)\n        }}\n        return true\n    }}\n\n    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {{\n        nativeOnInput(5, keyCode, 0)\n        return super.onKeyDown(keyCode, event)\n    }}\n\n    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {{\n        nativeOnInput(6, keyCode, 0)\n        return super.onKeyUp(keyCode, event)\n    }}\n\n    override fun onBackPressed() {{\n        nativeOnInput(4, 0, 0)\n        super.onBackPressed()\n    }}\n\n    private external fun nativeInit(width: Int, height: Int)\n    private external fun nativeTick(dt: Float)\n    private external fun nativeRender()\n    private external fun nativeOnInput(type: Int, a: Int, b: Int)\n}}\n",
+        package = config.package_id
+    );
+    std::fs::write(java_dir.join("MainActivity.kt"), kotlin).map_err(|error| {
+        format!(
+            "failed to write Android MainActivity in {}: {error}",
+            java_dir.display()
+        )
+    })?;
+
+    let root_build = "plugins {\n    id(\"com.android.application\") version \"8.5.2\" apply false\n    kotlin(\"android\") version \"1.9.24\" apply false\n}\n";
+    std::fs::write(project_root.join("build.gradle.kts"), root_build).map_err(|error| {
+        format!(
+            "failed to write Android root build.gradle.kts {}: {error}",
+            project_root.display()
+        )
+    })?;
+
+    let settings = "pluginManagement {\n    repositories {\n        google()\n        mavenCentral()\n        gradlePluginPortal()\n    }\n}\n\ndependencyResolutionManagement {\n    repositoriesMode.set(org.gradle.api.initialization.resolve.RepositoriesMode.FAIL_ON_PROJECT_REPOS)\n    repositories {\n        google()\n        mavenCentral()\n    }\n}\n\nrootProject.name = \"stasis-android-game\"\ninclude(\":app\")\n";
+    std::fs::write(project_root.join("settings.gradle.kts"), settings).map_err(|error| {
+        format!(
+            "failed to write Android settings.gradle.kts {}: {error}",
+            project_root.display()
+        )
+    })?;
+
+    let app_build = format!(
+        "plugins {{\n    id(\"com.android.application\")\n    kotlin(\"android\")\n}}\n\nandroid {{\n    namespace = \"{package}\"\n    compileSdk = 35\n\n    defaultConfig {{\n        applicationId = \"{package}\"\n        minSdk = {min_sdk}\n        targetSdk = 35\n        versionCode = 1\n        versionName = \"1.0\"\n    }}\n\n    buildTypes {{\n        release {{\n            isMinifyEnabled = false\n        }}\n    }}\n\n    compileOptions {{\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n    }}\n    kotlinOptions {{\n        jvmTarget = \"17\"\n    }}\n\n    sourceSets[\"main\"].jniLibs.srcDirs(\"src/main/jniLibs\")\n    sourceSets[\"main\"].assets.srcDirs(\"src/main/assets\")\n}}\n\ndependencies {{\n    implementation(\"androidx.games:games-activity:4.3.0-alpha01\")\n}}\n",
+        package = config.package_id,
+        min_sdk = config.min_sdk,
+    );
+    let app_dir = project_root.join("app");
+    std::fs::create_dir_all(&app_dir)
+        .map_err(|error| format!("failed to create app module {}: {error}", app_dir.display()))?;
+    std::fs::write(app_dir.join("build.gradle.kts"), app_build).map_err(|error| {
+        format!(
+            "failed to write Android app build.gradle.kts {}: {error}",
+            app_dir.display()
+        )
+    })?;
+
+    let gradlew_bat = "@echo off\r\nsetlocal\r\nwhere gradle >nul 2>nul\r\nif errorlevel 1 (\r\n  echo gradle not found in PATH. Install Gradle or run from an Android Studio terminal.\r\n  exit /b 1\r\n)\r\ngradle %*\r\n";
+    std::fs::write(project_root.join("gradlew.bat"), gradlew_bat).map_err(|error| {
+        format!(
+            "failed to write Android gradlew.bat {}: {error}",
+            project_root.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn run_android_game_build_with_backend(
+    backend: &mut IncrementalCompilerBackend,
+    project_dir: &Path,
+    options: &AndroidGameBuildOptions,
+) -> Result<AndroidGameBuildSummary, String> {
+    validate_android_game_build_config(&options.config)?;
+    if !project_dir.exists() {
+        return Err(format!(
+            "project directory does not exist: {}",
+            project_dir.display()
+        ));
+    }
+    let output_root = options
+        .output_root
+        .clone()
+        .unwrap_or_else(|| project_dir.join("build"));
+    let android_output_dir = output_root.join("android");
+    let android_project_dir = output_root.join("android-project");
+    std::fs::create_dir_all(&android_output_dir).map_err(|error| {
+        format!(
+            "failed to create android output directory {}: {error}",
+            android_output_dir.display()
+        )
+    })?;
+    if android_project_dir.exists() {
+        std::fs::remove_dir_all(&android_project_dir).map_err(|error| {
+            format!(
+                "failed to clear existing android project directory {}: {error}",
+                android_project_dir.display()
+            )
+        })?;
+    }
+
+    let changed_files = collect_stasis_files_for_self_host_project_with_entry(
+        project_dir,
+        options.entry_file.as_deref(),
+    )?;
+    if changed_files.is_empty() {
+        return Err(format!(
+            "no .stasis files found under {}",
+            project_dir.display()
+        ));
+    }
+
+    backend.last_jit_engine_package = None;
+    backend.last_aot_engine_bundle = None;
+    backend.refresh_cached_sources(&changed_files)?;
+    if !backend.source_cache_has_function("main")
+        || !backend.source_cache_has_function("tick")
+        || !backend.source_cache_has_function("render")
+    {
+        return Err(
+            "android-game build requires engine entrypoints main(), tick(), and render()"
+                .to_string(),
+        );
+    }
+
+    let bundle = backend.compile_aot_engine_bundle_from_cache(1, false)?;
+    let manifest = backend.read_engine_bundle_manifest(&bundle.manifest_path)?;
+    let entry_file = resolve_self_host_aot_entry_file(project_dir, options.entry_file.as_deref())?;
+    let staging_root = output_root.join("android-pack-stage");
+    if staging_root.exists() {
+        std::fs::remove_dir_all(&staging_root).map_err(|error| {
+            format!(
+                "failed to clear android pack staging directory {}: {error}",
+                staging_root.display()
+            )
+        })?;
+    }
+    let support = stage_entry_support_files(project_dir, entry_file.as_deref(), &staging_root)?;
+    let staged_bundle_dir = entry_file
+        .as_deref()
+        .and_then(|path| path.file_stem().and_then(|value| value.to_str()))
+        .map(|stem| staging_root.join(stem))
+        .filter(|path| path.exists());
+
+    let pack_path = android_output_dir.join("game.pack");
+    if let Some(staged_bundle_dir) = staged_bundle_dir.as_ref() {
+        write_android_game_pack(staged_bundle_dir, &pack_path)?;
+    } else {
+        write_android_game_pack(
+            &output_root.join("__stasis_empty_android_pack__"),
+            &pack_path,
+        )?;
+    }
+
+    let android_config_path = android_output_dir.join("android-config.json");
+    let android_config_json = serde_json::to_string_pretty(&options.config)
+        .map_err(|error| format!("failed to serialize android-config.json: {error}"))?;
+    std::fs::write(&android_config_path, android_config_json).map_err(|error| {
+        format!(
+            "failed to write android-config.json {}: {error}",
+            android_config_path.display()
+        )
+    })?;
+
+    let function_rows = manifest.functions.clone();
+    let compiler_path = resolve_android_c_compiler(&backend.aot_link_config);
+    let bridge_object = emit_android_game_runtime_bridge_object(
+        backend,
+        &support.runtime_fields,
+        &function_rows,
+        manifest.string_literals.as_deref().unwrap_or(&[]),
+        &options.config.package_id,
+        compiler_path.as_deref(),
+    )?;
+
+    let mut object_paths: Vec<PathBuf> =
+        bundle.object_paths_by_function.values().cloned().collect();
+    object_paths.push(bridge_object);
+    let export_symbols = vec![
+        "stasis_init".to_string(),
+        "stasis_tick".to_string(),
+        "stasis_render".to_string(),
+        "stasis_on_input".to_string(),
+        "stasis_aot_bind_runtime_globals".to_string(),
+    ];
+    let native_library_path = android_output_dir.join(android_game_library_name());
+    let dynload_lib = ensure_stasis_dynload_staticlib()?;
+    let mut link_config = backend.aot_link_config.clone();
+    if !link_config
+        .runtime_lib_paths
+        .iter()
+        .any(|path| path == &dynload_lib)
+    {
+        link_config.runtime_lib_paths.push(dynload_lib);
+    }
+    link_objects_to_dynamic_library(
+        &object_paths,
+        &native_library_path,
+        &export_symbols,
+        &link_config,
+    )?;
+
+    generate_android_game_project(
+        &android_project_dir,
+        &options.config,
+        &native_library_path,
+        &pack_path,
+    )?;
+
+    if staging_root.exists() {
+        std::fs::remove_dir_all(&staging_root).ok();
+    }
+
+    Ok(AndroidGameBuildSummary {
+        android_output_dir,
+        android_project_dir,
+        native_library_path,
+        asset_pack_path: pack_path,
+        android_config_path,
+    })
 }
 
 fn resolve_engine_bundle_symbol(
@@ -3294,6 +4014,7 @@ fn aot_call_conv() -> &'static str {
 mod tests {
     use super::*;
     use object::Object;
+    #[cfg(windows)]
     use stasis_compiler::IncrementalCompilerHost;
     #[cfg(windows)]
     use stasis_dynload::{invoke_noarg_u64, Library as DynamicLibrary};
@@ -7191,6 +7912,159 @@ echo "signed" > "$1.signed"
         )
     }
 
+    fn new_android_test_backend(
+        artifact_root: PathBuf,
+        linker_path: PathBuf,
+    ) -> IncrementalCompilerBackend {
+        IncrementalCompilerBackend::with_aot_compile_and_link_config(
+            AotCompileConfig {
+                target_triple: Some(android_target_triple().to_string()),
+                ..AotCompileConfig::default()
+            },
+            AotLinkConfig {
+                linker_path: Some(linker_path),
+                runtime_lib_paths: vec![],
+            },
+            artifact_root,
+            false,
+        )
+    }
+
+    fn read_android_pack_entries(path: &Path) -> Vec<String> {
+        let bytes = fs::read(path).expect("read game.pack");
+        assert!(bytes.starts_with(b"STPK1"));
+        let mut cursor: usize = 5;
+        let count = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().expect("count"));
+        cursor += 4;
+        let mut entries = Vec::new();
+        for _ in 0..count {
+            let path_len =
+                u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().expect("path len"))
+                    as usize;
+            cursor += 4;
+            let path_text =
+                String::from_utf8(bytes[cursor..cursor + path_len].to_vec()).expect("utf8 path");
+            cursor += path_len;
+            let file_len =
+                u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().expect("file len"))
+                    as usize;
+            cursor += 8 + file_len;
+            entries.push(path_text);
+        }
+        entries
+    }
+
+    #[test]
+    fn android_game_build_generates_android_outputs_and_aarch64_objects() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let old_android_cc = std::env::var("STASIS_ANDROID_CC").ok();
+        if let Some(value) = std::env::var_os("CC").filter(|value| !value.is_empty()) {
+            std::env::set_var("STASIS_ANDROID_CC", value);
+        } else if cfg!(windows) {
+            std::env::set_var("STASIS_ANDROID_CC", "clang-cl.exe");
+        } else {
+            std::env::set_var("STASIS_ANDROID_CC", "cc");
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_android_build_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let project_dir = temp_root.join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        let entry_file = project_dir.join("main.stasis");
+        fs::write(
+            &entry_file,
+            "function main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+
+        let entry_bundle = project_dir.join("main");
+        fs::create_dir_all(entry_bundle.join("data")).expect("create entry bundle");
+        let absolute_asset = temp_root.join("ship.png");
+        fs::write(&absolute_asset, [1u8, 2, 3, 4]).expect("write asset");
+        fs::write(
+            entry_bundle.join("data").join("config.json"),
+            format!(r#"{{"sprite":"{}"}}"#, absolute_asset.display()),
+        )
+        .expect("write config json");
+
+        let linker = write_fake_linker(&temp_root);
+        let mut backend = new_android_test_backend(temp_root.join("aot_artifacts"), linker);
+        let summary = run_android_game_build_with_backend(
+            &mut backend,
+            &project_dir,
+            &AndroidGameBuildOptions {
+                config: AndroidGameBuildConfig::new("com.maddoxlabs.game", "My Game", 26),
+                entry_file: Some(PathBuf::from("main.stasis")),
+                output_root: Some(temp_root.join("build")),
+            },
+        )
+        .expect("android build should succeed");
+
+        assert!(summary.native_library_path.exists());
+        assert!(summary.asset_pack_path.exists());
+        assert!(summary.android_config_path.exists());
+        assert!(summary.android_project_dir.join("gradlew.bat").exists());
+        assert!(summary
+            .android_project_dir
+            .join("app")
+            .join("src")
+            .join("main")
+            .join("AndroidManifest.xml")
+            .exists());
+
+        let config_text =
+            fs::read_to_string(&summary.android_config_path).expect("read android-config");
+        let config: AndroidGameBuildConfig =
+            serde_json::from_str(&config_text).expect("parse android-config");
+        assert_eq!(config.package_id, "com.maddoxlabs.game");
+        assert_eq!(config.app_name, "My Game");
+        assert_eq!(config.min_sdk, 26);
+        assert_eq!(config.abi, "arm64-v8a");
+
+        let project_activity = fs::read_to_string(
+            summary
+                .android_project_dir
+                .join("app")
+                .join("src")
+                .join("main")
+                .join("java")
+                .join("com")
+                .join("maddoxlabs")
+                .join("game")
+                .join("MainActivity.kt"),
+        )
+        .expect("read MainActivity");
+        assert!(project_activity.contains("class MainActivity : GameActivity()"));
+        assert!(project_activity.contains("nativeOnInput(1, x, y)"));
+
+        let pack_entries = read_android_pack_entries(&summary.asset_pack_path);
+        assert!(pack_entries.iter().any(|entry| entry == "data/config.json"));
+        assert!(pack_entries.iter().any(|entry| entry == "assets/ship.png"));
+
+        let bundle = backend
+            .last_aot_engine_bundle()
+            .expect("last android engine bundle");
+        let object_path = bundle
+            .object_paths_by_function
+            .get("main")
+            .expect("main object path");
+        let object_bytes = fs::read(object_path).expect("read main object");
+        let object_file = object::File::parse(&*object_bytes).expect("parse object file");
+        assert_eq!(object_file.format(), object::BinaryFormat::Elf);
+        assert_eq!(object_file.architecture(), object::Architecture::Aarch64);
+
+        fs::remove_dir_all(&temp_root).ok();
+        if let Some(value) = old_android_cc {
+            std::env::set_var("STASIS_ANDROID_CC", value);
+        } else {
+            std::env::remove_var("STASIS_ANDROID_CC");
+        }
+    }
+
     #[test]
     fn self_host_aot_cli_links_runnable_executable_with_main_entry_symbol() {
         let stamp = SystemTime::now()
@@ -7716,6 +8590,52 @@ pub fn run_self_host_aot_cli(
     output_exe: &Path,
 ) -> Result<SelfHostedAotCliSummary, String> {
     run_self_host_aot_cli_with_options(project_dir, output_exe, None, None)
+}
+
+fn sanitize_cache_key(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "android_game".to_string()
+    } else {
+        out
+    }
+}
+
+pub fn run_android_game_build_with_options(
+    project_dir: &Path,
+    options: AndroidGameBuildOptions,
+) -> Result<AndroidGameBuildSummary, String> {
+    let cache_key = sanitize_cache_key(&options.config.package_id);
+    let artifact_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(".stasis_cache")
+        .join("android_game")
+        .join(cache_key);
+    let compile_config = AotCompileConfig {
+        target_triple: Some(android_target_triple().to_string()),
+        ..AotCompileConfig::default()
+    };
+    let mut backend = IncrementalCompilerBackend::new();
+    backend.aot_compile_config = compile_config;
+    backend.aot_link_config = AotLinkConfig::default();
+    backend.aot_artifact_root = artifact_root;
+    backend.enable_aot_link_step = false;
+    run_android_game_build_with_backend(&mut backend, project_dir, &options)
+}
+
+pub fn run_android_game_build(
+    project_dir: &Path,
+    config: AndroidGameBuildConfig,
+) -> Result<AndroidGameBuildSummary, String> {
+    run_android_game_build_with_options(project_dir, AndroidGameBuildOptions::new(config))
 }
 
 fn maybe_sign_output_artifact(artifact_path: &Path) -> Result<(), String> {
