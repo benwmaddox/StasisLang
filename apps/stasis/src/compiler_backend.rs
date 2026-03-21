@@ -2226,7 +2226,11 @@ fn ensure_stasis_dynload_staticlib(target_triple: Option<&str>) -> Result<PathBu
     command
         .arg("--")
         .arg("--crate-type")
-        .arg("staticlib")
+        .arg("staticlib");
+    if target_triple_uses_pic_staticlib(target_triple) {
+        command.arg("-C").arg("relocation-model=pic");
+    }
+    command
         .current_dir(&repo_root);
     if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
         command.env("CARGO_TARGET_DIR", target_dir);
@@ -2267,6 +2271,10 @@ fn ensure_stasis_dynload_staticlib(target_triple: Option<&str>) -> Result<PathBu
                 .to_string()
         }
     })
+}
+
+fn target_triple_uses_pic_staticlib(target_triple: Option<&str>) -> bool {
+    target_triple.is_some_and(|triple| triple.contains("android"))
 }
 
 fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
@@ -3543,6 +3551,7 @@ fn generate_android_game_project(
     let java_dir = main_root
         .join("java")
         .join(java_package_path(&config.package_id));
+    let values_dir = main_root.join("res").join("values");
     std::fs::create_dir_all(&jni_lib_dir).map_err(|error| {
         format!(
             "failed to create android jniLibs directory {}: {error}",
@@ -3561,6 +3570,12 @@ fn generate_android_game_project(
             java_dir.display()
         )
     })?;
+    std::fs::create_dir_all(&values_dir).map_err(|error| {
+        format!(
+            "failed to create android values directory {}: {error}",
+            values_dir.display()
+        )
+    })?;
 
     copy_file_creating_parent(
         native_library_path,
@@ -3569,7 +3584,7 @@ fn generate_android_game_project(
     copy_file_creating_parent(asset_pack_path, &asset_dir.join("game.pack"))?;
 
     let manifest = format!(
-        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" package=\"{package}\">\n    <application android:label=\"{app}\">\n        <activity android:name=\".MainActivity\" android:exported=\"true\">\n            <intent-filter>\n                <action android:name=\"android.intent.action.MAIN\" />\n                <category android:name=\"android.intent.category.LAUNCHER\" />\n            </intent-filter>\n        </activity>\n    </application>\n</manifest>\n",
+        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" package=\"{package}\">\n    <application android:label=\"{app}\" android:theme=\"@style/Application.Fullscreen\">\n        <activity android:name=\".MainActivity\" android:exported=\"true\">\n            <meta-data android:name=\"android.app.lib_name\" android:value=\"stasis_game\" />\n            <intent-filter>\n                <action android:name=\"android.intent.action.MAIN\" />\n                <category android:name=\"android.intent.category.LAUNCHER\" />\n            </intent-filter>\n        </activity>\n    </application>\n</manifest>\n",
         package = config.package_id,
         app = xml_escape(&config.app_name),
     );
@@ -3581,7 +3596,7 @@ fn generate_android_game_project(
     })?;
 
     let kotlin = format!(
-        "package {package}\n\nimport android.os.Bundle\nimport android.view.Choreographer\nimport android.view.KeyEvent\nimport android.view.MotionEvent\nimport androidx.games.activity.GameActivity\n\nclass MainActivity : GameActivity(), Choreographer.FrameCallback {{\n    private var nativeStarted = false\n    private var lastFrameNanos = 0L\n\n    override fun onCreate(savedInstanceState: Bundle?) {{\n        super.onCreate(savedInstanceState)\n        System.loadLibrary(\"stasis_game\")\n    }}\n\n    override fun onWindowFocusChanged(hasFocus: Boolean) {{\n        super.onWindowFocusChanged(hasFocus)\n        if (!hasFocus) {{\n            return\n        }}\n        val decor = window.decorView\n        if (!nativeStarted && decor.width > 0 && decor.height > 0) {{\n            nativeInit(decor.width, decor.height)\n            nativeStarted = true\n        }}\n        if (nativeStarted) {{\n            Choreographer.getInstance().postFrameCallback(this)\n        }}\n    }}\n\n    override fun doFrame(frameTimeNanos: Long) {{\n        if (!nativeStarted) {{\n            return\n        }}\n        val dtSeconds = if (lastFrameNanos == 0L) 1.0f / 60.0f else ((frameTimeNanos - lastFrameNanos).coerceAtLeast(0L).toFloat() / 1_000_000_000.0f)\n        lastFrameNanos = frameTimeNanos\n        nativeTick(dtSeconds)\n        nativeRender()\n        Choreographer.getInstance().postFrameCallback(this)\n    }}\n\n    override fun onTouchEvent(event: MotionEvent): Boolean {{\n        val x = event.x.toInt()\n        val y = event.y.toInt()\n        when (event.actionMasked) {{\n            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> nativeOnInput(1, x, y)\n            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> nativeOnInput(2, x, y)\n            MotionEvent.ACTION_MOVE -> nativeOnInput(3, x, y)\n        }}\n        return true\n    }}\n\n    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {{\n        nativeOnInput(5, keyCode, 0)\n        return super.onKeyDown(keyCode, event)\n    }}\n\n    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {{\n        nativeOnInput(6, keyCode, 0)\n        return super.onKeyUp(keyCode, event)\n    }}\n\n    override fun onBackPressed() {{\n        nativeOnInput(4, 0, 0)\n        super.onBackPressed()\n    }}\n\n    private external fun nativeInit(width: Int, height: Int)\n    private external fun nativeTick(dt: Float)\n    private external fun nativeRender()\n    private external fun nativeOnInput(type: Int, a: Int, b: Int)\n}}\n",
+        "package {package}\n\nimport android.view.Choreographer\nimport android.view.KeyEvent\nimport android.view.MotionEvent\nimport com.google.androidgamesdk.GameActivity\n\nclass MainActivity : GameActivity(), Choreographer.FrameCallback {{\n    private var nativeStarted = false\n    private var lastFrameNanos = 0L\n\n    companion object {{\n        init {{\n            System.loadLibrary(\"stasis_game\")\n        }}\n    }}\n\n    override fun onWindowFocusChanged(hasFocus: Boolean) {{\n        super.onWindowFocusChanged(hasFocus)\n        if (!hasFocus) {{\n            return\n        }}\n        val decor = window.decorView\n        if (!nativeStarted && decor.width > 0 && decor.height > 0) {{\n            nativeInit(decor.width, decor.height)\n            nativeStarted = true\n        }}\n        if (nativeStarted) {{\n            Choreographer.getInstance().postFrameCallback(this)\n        }}\n    }}\n\n    override fun doFrame(frameTimeNanos: Long) {{\n        if (!nativeStarted) {{\n            return\n        }}\n        val dtSeconds = if (lastFrameNanos == 0L) 1.0f / 60.0f else ((frameTimeNanos - lastFrameNanos).coerceAtLeast(0L).toFloat() / 1_000_000_000.0f)\n        lastFrameNanos = frameTimeNanos\n        nativeTick(dtSeconds)\n        nativeRender()\n        Choreographer.getInstance().postFrameCallback(this)\n    }}\n\n    override fun onTouchEvent(event: MotionEvent): Boolean {{\n        val x = event.x.toInt()\n        val y = event.y.toInt()\n        when (event.actionMasked) {{\n            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> nativeOnInput(1, x, y)\n            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> nativeOnInput(2, x, y)\n            MotionEvent.ACTION_MOVE -> nativeOnInput(3, x, y)\n        }}\n        return true\n    }}\n\n    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {{\n        nativeOnInput(5, keyCode, 0)\n        return super.onKeyDown(keyCode, event)\n    }}\n\n    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {{\n        nativeOnInput(6, keyCode, 0)\n        return super.onKeyUp(keyCode, event)\n    }}\n\n    override fun onBackPressed() {{\n        nativeOnInput(4, 0, 0)\n        super.onBackPressed()\n    }}\n\n    private external fun nativeInit(width: Int, height: Int)\n    private external fun nativeTick(dt: Float)\n    private external fun nativeRender()\n    private external fun nativeOnInput(type: Int, a: Int, b: Int)\n}}\n",
         package = config.package_id
     );
     std::fs::write(java_dir.join("MainActivity.kt"), kotlin).map_err(|error| {
@@ -3608,7 +3623,7 @@ fn generate_android_game_project(
     })?;
 
     let app_build = format!(
-        "plugins {{\n    id(\"com.android.application\")\n    kotlin(\"android\")\n}}\n\nandroid {{\n    namespace = \"{package}\"\n    compileSdk = 35\n\n    defaultConfig {{\n        applicationId = \"{package}\"\n        minSdk = {min_sdk}\n        targetSdk = 35\n        versionCode = 1\n        versionName = \"1.0\"\n    }}\n\n    buildTypes {{\n        release {{\n            isMinifyEnabled = false\n        }}\n    }}\n\n    compileOptions {{\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n    }}\n    kotlinOptions {{\n        jvmTarget = \"17\"\n    }}\n\n    sourceSets[\"main\"].jniLibs.srcDirs(\"src/main/jniLibs\")\n    sourceSets[\"main\"].assets.srcDirs(\"src/main/assets\")\n}}\n\ndependencies {{\n    implementation(\"androidx.games:games-activity:4.3.0-alpha01\")\n}}\n",
+        "plugins {{\n    id(\"com.android.application\")\n    kotlin(\"android\")\n}}\n\nandroid {{\n    namespace = \"{package}\"\n    compileSdk = 35\n\n    defaultConfig {{\n        applicationId = \"{package}\"\n        minSdk = {min_sdk}\n        targetSdk = 35\n        versionCode = 1\n        versionName = \"1.0\"\n    }}\n\n    buildTypes {{\n        release {{\n            isMinifyEnabled = false\n        }}\n    }}\n\n    compileOptions {{\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n    }}\n    kotlinOptions {{\n        jvmTarget = \"17\"\n    }}\n\n    sourceSets[\"main\"].jniLibs.srcDirs(\"src/main/jniLibs\")\n    sourceSets[\"main\"].assets.srcDirs(\"src/main/assets\")\n}}\n\ndependencies {{\n    implementation(\"androidx.appcompat:appcompat:1.7.0\")\n    implementation(\"androidx.games:games-activity:4.3.0-alpha01\")\n}}\n",
         package = config.package_id,
         min_sdk = config.min_sdk,
     );
@@ -3621,6 +3636,16 @@ fn generate_android_game_project(
             app_dir.display()
         )
     })?;
+
+    let gradle_properties = "android.useAndroidX=true\n";
+    std::fs::write(project_root.join("gradle.properties"), gradle_properties).map_err(
+        |error| {
+            format!(
+                "failed to write Android gradle.properties {}: {error}",
+                project_root.display()
+            )
+        },
+    )?;
 
     let gradlew = "#!/usr/bin/env sh\nset -eu\nif ! command -v gradle >/dev/null 2>&1; then\n  echo \"gradle not found in PATH. Install Gradle or run from an Android Studio terminal.\" >&2\n  exit 1\nfi\nexec gradle \"$@\"\n";
     let gradlew_path = project_root.join("gradlew");
@@ -3645,6 +3670,14 @@ fn generate_android_game_project(
         format!(
             "failed to write Android gradlew.bat {}: {error}",
             project_root.display()
+        )
+    })?;
+
+    let themes = "<resources>\n    <style name=\"Application.Fullscreen\" parent=\"Theme.AppCompat.Light.NoActionBar\">\n        <item name=\"android:windowFullscreen\">true</item>\n        <item name=\"android:windowContentOverlay\">@null</item>\n    </style>\n</resources>\n";
+    std::fs::write(values_dir.join("themes.xml"), themes).map_err(|error| {
+        format!(
+            "failed to write Android themes.xml in {}: {error}",
+            values_dir.display()
         )
     })?;
 
@@ -8057,6 +8090,15 @@ echo "signed" > "$1.signed"
     }
 
     #[test]
+    fn android_target_triple_requires_pic_staticlib() {
+        assert!(target_triple_uses_pic_staticlib(Some(android_target_triple())));
+        assert!(!target_triple_uses_pic_staticlib(Some(
+            "x86_64-pc-windows-msvc"
+        )));
+        assert!(!target_triple_uses_pic_staticlib(None));
+    }
+
+    #[test]
     fn android_game_build_requires_android_toolchain_wrapper() {
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let old_android_cc = std::env::var("STASIS_ANDROID_CC").ok();
@@ -8206,6 +8248,7 @@ echo "signed" > "$1.signed"
         assert!(summary.native_library_path.exists());
         assert!(summary.asset_pack_path.exists());
         assert!(summary.android_config_path.exists());
+        assert!(summary.android_project_dir.join("gradle.properties").exists());
         assert!(summary.android_project_dir.join("gradlew").exists());
         assert!(summary.android_project_dir.join("gradlew.bat").exists());
         assert!(summary
@@ -8214,6 +8257,15 @@ echo "signed" > "$1.signed"
             .join("src")
             .join("main")
             .join("AndroidManifest.xml")
+            .exists());
+        assert!(summary
+            .android_project_dir
+            .join("app")
+            .join("src")
+            .join("main")
+            .join("res")
+            .join("values")
+            .join("themes.xml")
             .exists());
 
         let config_text =
@@ -8238,13 +8290,44 @@ echo "signed" > "$1.signed"
                 .join("MainActivity.kt"),
         )
         .expect("read MainActivity");
+        assert!(project_activity.contains("import com.google.androidgamesdk.GameActivity"));
         assert!(project_activity.contains("class MainActivity : GameActivity()"));
+        assert!(project_activity.contains("companion object"));
+        assert!(project_activity.contains("System.loadLibrary(\"stasis_game\")"));
         assert!(project_activity.contains("nativeOnInput(1, x, y)"));
+
+        let manifest = fs::read_to_string(
+            summary
+                .android_project_dir
+                .join("app")
+                .join("src")
+                .join("main")
+                .join("AndroidManifest.xml"),
+        )
+        .expect("read AndroidManifest");
+        assert!(manifest.contains("android:theme=\"@style/Application.Fullscreen\""));
+        assert!(manifest.contains("android.app.lib_name"));
+        assert!(manifest.contains("android:value=\"stasis_game\""));
 
         let gradlew_text =
             fs::read_to_string(summary.android_project_dir.join("gradlew")).expect("read gradlew");
         assert!(gradlew_text.contains("command -v gradle"));
         assert!(gradlew_text.contains("exec gradle \"$@\""));
+        let gradle_properties = fs::read_to_string(summary.android_project_dir.join("gradle.properties"))
+            .expect("read gradle.properties");
+        assert!(gradle_properties.contains("android.useAndroidX=true"));
+        let themes = fs::read_to_string(
+            summary
+                .android_project_dir
+                .join("app")
+                .join("src")
+                .join("main")
+                .join("res")
+                .join("values")
+                .join("themes.xml"),
+        )
+        .expect("read themes.xml");
+        assert!(themes.contains("Theme.AppCompat.Light.NoActionBar"));
         #[cfg(unix)]
         {
             let permissions = fs::metadata(summary.android_project_dir.join("gradlew"))

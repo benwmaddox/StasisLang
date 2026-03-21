@@ -548,6 +548,11 @@ fn compile_function_to_object_bytes(
     flag_builder
         .set("opt_level", optimization_profile.as_cranelift_opt_level())
         .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
+    if target_triple_uses_pic(target_triple) {
+        flag_builder
+            .set("is_pic", "true")
+            .map_err(|error| format!("failed to enable Cranelift PIC mode: {error}"))?;
+    }
     let flags = settings::Flags::new(flag_builder);
     let isa_builder = if let Some(target_triple) = target_triple {
         let triple = target_lexicon::Triple::from_str(target_triple)
@@ -601,6 +606,10 @@ fn compile_function_to_object_bytes(
                 .map_err(|error| format!("failed to emit AOT object bytes: {error}"))
         },
     )
+}
+
+fn target_triple_uses_pic(target_triple: Option<&str>) -> bool {
+    target_triple.is_some_and(|triple| triple.contains("android"))
 }
 
 #[cfg(test)]
@@ -1392,6 +1401,13 @@ mod tests {
             process.optimization_profile(),
             AotOptimizationProfile::Speed
         );
+    }
+
+    #[test]
+    fn android_target_triple_enables_pic() {
+        assert!(target_triple_uses_pic(Some("aarch64-linux-android")));
+        assert!(!target_triple_uses_pic(Some("x86_64-pc-windows-msvc")));
+        assert!(!target_triple_uses_pic(None));
     }
 
     #[test]

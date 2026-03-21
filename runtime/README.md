@@ -55,6 +55,8 @@ Stasis Android export prototype:
   - set `STASIS_ANDROID_CC` to an Android NDK `aarch64-linux-android*-clang` wrapper
   - set `STASIS_AOT_LINKER` only if the link step should use a different Android NDK wrapper than `STASIS_ANDROID_CC`
 - The generated Android project includes `gradlew` for macOS/Linux and `gradlew.bat` for Windows so the exported shell can be assembled from either host OS with Gradle on `PATH`.
+- The exported Android shell also writes `gradle.properties` with `android.useAndroidX=true` so the bundled `androidx.games:games-activity` dependency can assemble on Linux/Windows without manual project edits.
+- The generated shell also includes the AppCompat theme and `android.app.lib_name=stasis_game` manifest wiring required by `GameActivity`.
 - Final device-side verification is still required on a host with Android SDK/NDK + emulator before the prototype can be treated as complete.
 
 ## Manual Build (Alternative)
