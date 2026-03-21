@@ -2114,7 +2114,7 @@ fn resolve_latest_existing_path(candidates: Vec<PathBuf>) -> Option<PathBuf> {
         })
 }
 
-fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
+fn resolve_stasis_dynload_lib(target_triple: Option<&str>) -> Option<PathBuf> {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| self_host_repo_root().join("target"));
@@ -2126,7 +2126,9 @@ fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
     };
 
     for profile in ["debug", "release"] {
-        let base = target_dir.join(profile);
+        let base = target_triple
+            .map(|triple| target_dir.join(triple).join(profile))
+            .unwrap_or_else(|| target_dir.join(profile));
         for name in static_lib_names {
             let direct = base.join(name);
             if direct.exists() {
@@ -2157,6 +2159,20 @@ fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
     }
 
     resolve_latest_existing_path(candidates)
+}
+
+fn is_stasis_dynload_staticlib(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if cfg!(windows) {
+        name == "stasis_dynload.lib"
+            || (name.starts_with("stasis_dynload-") && name.ends_with(".lib"))
+    } else {
+        (name == "libstasis_dynload.a" || name == "stasis_dynload.a")
+            || ((name.starts_with("libstasis_dynload-") || name.starts_with("stasis_dynload-"))
+                && name.ends_with(".a"))
+    }
 }
 
 fn runtime_runner_file_name() -> &'static str {
@@ -2195,12 +2211,15 @@ fn runtime_bridge_object_extension() -> &'static str {
     }
 }
 
-fn ensure_stasis_dynload_staticlib() -> Result<PathBuf, String> {
+fn ensure_stasis_dynload_staticlib(target_triple: Option<&str>) -> Result<PathBuf, String> {
     let repo_root = self_host_repo_root();
     let mut command = std::process::Command::new("cargo");
     command.arg("rustc").arg("-p").arg("stasis_dynload");
     if !cfg!(debug_assertions) {
         command.arg("--release");
+    }
+    if let Some(target_triple) = target_triple {
+        command.arg("--target").arg(target_triple);
     }
     command
         .arg("--")
@@ -2212,19 +2231,39 @@ fn ensure_stasis_dynload_staticlib() -> Result<PathBuf, String> {
     }
 
     let output = command.output().map_err(|error| {
-        format!("failed to spawn cargo rustc -p stasis_dynload --crate-type staticlib: {error}")
+        if let Some(target_triple) = target_triple {
+            format!(
+                "failed to spawn cargo rustc -p stasis_dynload --target {target_triple} --crate-type staticlib: {error}"
+            )
+        } else {
+            format!("failed to spawn cargo rustc -p stasis_dynload --crate-type staticlib: {error}")
+        }
     })?;
     if !output.status.success() {
-        return Err(format!(
-            "failed to build stasis_dynload staticlib\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        return if let Some(target_triple) = target_triple {
+            Err(format!(
+                "failed to build stasis_dynload staticlib for target {target_triple}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        } else {
+            Err(format!(
+                "failed to build stasis_dynload staticlib\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        };
     }
 
-    resolve_stasis_dynload_lib().ok_or_else(|| {
-        "stasis_dynload staticlib build reported success but no static library was found"
-            .to_string()
+    resolve_stasis_dynload_lib(target_triple).ok_or_else(|| {
+        if let Some(target_triple) = target_triple {
+            format!(
+                "stasis_dynload staticlib build reported success but no target library was found for {target_triple}"
+            )
+        } else {
+            "stasis_dynload staticlib build reported success but no static library was found"
+                .to_string()
+        }
     })
 }
 
@@ -3211,6 +3250,20 @@ fn resolve_android_c_compiler(link_config: &AotLinkConfig) -> Option<PathBuf> {
         .or_else(|| link_config.linker_path.clone())
 }
 
+fn resolve_android_link_config(link_config: &AotLinkConfig) -> Result<AotLinkConfig, String> {
+    let mut resolved = link_config.clone();
+    if resolved.linker_path.is_none() {
+        resolved.linker_path = resolve_android_c_compiler(link_config);
+    }
+    if resolved.linker_path.is_none() {
+        return Err(format!(
+            "android-game build requires STASIS_ANDROID_CC or STASIS_AOT_LINKER to point to an Android NDK clang wrapper for {}",
+            android_target_triple()
+        ));
+    }
+    Ok(resolved)
+}
+
 fn mangle_jni_ident(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
@@ -3591,6 +3644,7 @@ fn run_android_game_build_with_backend(
     options: &AndroidGameBuildOptions,
 ) -> Result<AndroidGameBuildSummary, String> {
     validate_android_game_build_config(&options.config)?;
+    let link_config = resolve_android_link_config(&backend.aot_link_config)?;
     if !project_dir.exists() {
         return Err(format!(
             "project directory does not exist: {}",
@@ -3682,7 +3736,7 @@ fn run_android_game_build_with_backend(
     })?;
 
     let function_rows = manifest.functions.clone();
-    let compiler_path = resolve_android_c_compiler(&backend.aot_link_config);
+    let compiler_path = resolve_android_c_compiler(&link_config);
     let bridge_object = emit_android_game_runtime_bridge_object(
         backend,
         &support.runtime_fields,
@@ -3702,14 +3756,15 @@ fn run_android_game_build_with_backend(
         "stasis_on_input".to_string(),
         "stasis_aot_bind_runtime_globals".to_string(),
     ];
+    let mut link_config = link_config;
     let native_library_path = android_output_dir.join(android_game_library_name());
-    let dynload_lib = ensure_stasis_dynload_staticlib()?;
-    let mut link_config = backend.aot_link_config.clone();
     if !link_config
         .runtime_lib_paths
         .iter()
-        .any(|path| path == &dynload_lib)
+        .any(|path| is_stasis_dynload_staticlib(path))
     {
+        let dynload_lib =
+            ensure_stasis_dynload_staticlib(backend.aot_compile_config.target_triple.as_deref())?;
         link_config.runtime_lib_paths.push(dynload_lib);
     }
     link_objects_to_dynamic_library(
@@ -3855,12 +3910,13 @@ fn package_engine_bundle_release(
     }
 
     let mut link_config = backend.aot_link_config.clone();
-    let dynload_lib = ensure_stasis_dynload_staticlib()?;
     if !link_config
         .runtime_lib_paths
         .iter()
-        .any(|path| path == &dynload_lib)
+        .any(|path| is_stasis_dynload_staticlib(path))
     {
+        let dynload_lib =
+            ensure_stasis_dynload_staticlib(backend.aot_compile_config.target_triple.as_deref())?;
         link_config.runtime_lib_paths.push(dynload_lib);
     }
     if cfg!(windows) {
@@ -7897,6 +7953,16 @@ echo "signed" > "$1.signed"
         }
     }
 
+    fn write_fake_staticlib(temp_root: &Path) -> PathBuf {
+        let path = if cfg!(windows) {
+            temp_root.join("stasis_dynload.lib")
+        } else {
+            temp_root.join("libstasis_dynload.a")
+        };
+        fs::write(&path, b"fake-staticlib").expect("write fake staticlib");
+        path
+    }
+
     fn new_self_host_test_backend(
         artifact_root: PathBuf,
         linker_path: PathBuf,
@@ -7912,22 +7978,123 @@ echo "signed" > "$1.signed"
         )
     }
 
-    fn new_android_test_backend(
-        artifact_root: PathBuf,
-        linker_path: PathBuf,
-    ) -> IncrementalCompilerBackend {
-        IncrementalCompilerBackend::with_aot_compile_and_link_config(
+    #[test]
+    fn resolve_stasis_dynload_lib_uses_target_triple_directory() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let old_target_dir = std::env::var("CARGO_TARGET_DIR").ok();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_dynload_target_dir_{stamp}"));
+        let target_path = temp_root
+            .join(android_target_triple())
+            .join("debug")
+            .join("libstasis_dynload.a");
+        let host_path = temp_root.join("debug").join("libstasis_dynload.a");
+        fs::create_dir_all(target_path.parent().expect("target parent")).expect("target dir");
+        fs::create_dir_all(host_path.parent().expect("host parent")).expect("host dir");
+        fs::write(&target_path, b"target").expect("write target lib");
+        fs::write(&host_path, b"host").expect("write host lib");
+        std::env::set_var("CARGO_TARGET_DIR", &temp_root);
+
+        let resolved =
+            resolve_stasis_dynload_lib(Some(android_target_triple())).expect("target dynload lib");
+        assert_eq!(resolved, target_path);
+        let host_resolved =
+            resolve_stasis_dynload_lib(None).expect("host dynload lib should resolve");
+        assert_eq!(host_resolved, host_path);
+
+        fs::remove_dir_all(&temp_root).ok();
+        if let Some(value) = old_target_dir {
+            std::env::set_var("CARGO_TARGET_DIR", value);
+        } else {
+            std::env::remove_var("CARGO_TARGET_DIR");
+        }
+    }
+
+    #[test]
+    fn resolve_android_link_config_uses_android_cc_when_linker_is_unset() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let old_android_cc = std::env::var("STASIS_ANDROID_CC").ok();
+        std::env::set_var("STASIS_ANDROID_CC", "/tmp/fake-android-clang");
+
+        let resolved = resolve_android_link_config(&AotLinkConfig {
+            linker_path: None,
+            runtime_lib_paths: vec![],
+        })
+        .expect("android link config should resolve");
+        assert_eq!(
+            resolved.linker_path,
+            Some(PathBuf::from("/tmp/fake-android-clang"))
+        );
+
+        if let Some(value) = old_android_cc {
+            std::env::set_var("STASIS_ANDROID_CC", value);
+        } else {
+            std::env::remove_var("STASIS_ANDROID_CC");
+        }
+    }
+
+    #[test]
+    fn android_game_build_requires_android_toolchain_wrapper() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let old_android_cc = std::env::var("STASIS_ANDROID_CC").ok();
+        let old_aot_linker = std::env::var("STASIS_AOT_LINKER").ok();
+        std::env::remove_var("STASIS_ANDROID_CC");
+        std::env::remove_var("STASIS_AOT_LINKER");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_android_missing_linker_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let project_dir = temp_root.join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(
+            project_dir.join("main.stasis"),
+            "function main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
             AotCompileConfig {
                 target_triple: Some(android_target_triple().to_string()),
                 ..AotCompileConfig::default()
             },
             AotLinkConfig {
-                linker_path: Some(linker_path),
+                linker_path: None,
                 runtime_lib_paths: vec![],
             },
-            artifact_root,
+            temp_root.join("aot_artifacts"),
             false,
+        );
+        let error = run_android_game_build_with_backend(
+            &mut backend,
+            &project_dir,
+            &AndroidGameBuildOptions {
+                config: AndroidGameBuildConfig::new("com.maddoxlabs.game", "My Game", 26),
+                entry_file: Some(PathBuf::from("main.stasis")),
+                output_root: Some(temp_root.join("build")),
+            },
         )
+        .expect_err("android build should fail without configured toolchain wrapper");
+        assert!(
+            error.contains("android-game build requires STASIS_ANDROID_CC or STASIS_AOT_LINKER")
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+        if let Some(value) = old_android_cc {
+            std::env::set_var("STASIS_ANDROID_CC", value);
+        } else {
+            std::env::remove_var("STASIS_ANDROID_CC");
+        }
+        if let Some(value) = old_aot_linker {
+            std::env::set_var("STASIS_AOT_LINKER", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_LINKER");
+        }
     }
 
     fn read_android_pack_entries(path: &Path) -> Vec<String> {
@@ -7992,7 +8159,19 @@ echo "signed" > "$1.signed"
         .expect("write config json");
 
         let linker = write_fake_linker(&temp_root);
-        let mut backend = new_android_test_backend(temp_root.join("aot_artifacts"), linker);
+        let fake_dynload = write_fake_staticlib(&temp_root);
+        let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
+            AotCompileConfig {
+                target_triple: Some(android_target_triple().to_string()),
+                ..AotCompileConfig::default()
+            },
+            AotLinkConfig {
+                linker_path: Some(linker),
+                runtime_lib_paths: vec![fake_dynload],
+            },
+            temp_root.join("aot_artifacts"),
+            false,
+        );
         let summary = run_android_game_build_with_backend(
             &mut backend,
             &project_dir,

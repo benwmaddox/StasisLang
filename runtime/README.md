@@ -50,7 +50,10 @@ Stasis Android export prototype:
   - `build/android/game.pack`
   - `build/android/android-config.json`
   - `build/android-project/`
-- For cross-target C compilation/linking, set `STASIS_ANDROID_CC` and `STASIS_AOT_LINKER` to Android NDK compiler wrappers as needed.
+- Prerequisites:
+  - `rustup target add aarch64-linux-android`
+  - set `STASIS_ANDROID_CC` to an Android NDK `aarch64-linux-android*-clang` wrapper
+  - set `STASIS_AOT_LINKER` only if the link step should use a different Android NDK wrapper than `STASIS_ANDROID_CC`
 - The generated Android project is a thin Gradle/GameActivity shell; final Windows + emulator verification is still required for full device validation.
 
 ## Manual Build (Alternative)
