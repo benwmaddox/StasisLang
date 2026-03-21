@@ -54,7 +54,8 @@ Stasis Android export prototype:
   - `rustup target add aarch64-linux-android`
   - set `STASIS_ANDROID_CC` to an Android NDK `aarch64-linux-android*-clang` wrapper
   - set `STASIS_AOT_LINKER` only if the link step should use a different Android NDK wrapper than `STASIS_ANDROID_CC`
-- The generated Android project is a thin Gradle/GameActivity shell; final Windows + emulator verification is still required for full device validation.
+- The generated Android project includes `gradlew` for macOS/Linux and `gradlew.bat` for Windows so the exported shell can be assembled from either host OS with Gradle on `PATH`.
+- Final device-side verification is still required on a host with Android SDK/NDK + emulator before the prototype can be treated as complete.
 
 ## Manual Build (Alternative)
 

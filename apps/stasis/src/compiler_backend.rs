@@ -16,6 +16,8 @@ use stasis_runner::swap::contracts::{
 use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 pub struct IncrementalCompilerBackend {
@@ -3619,6 +3621,24 @@ fn generate_android_game_project(
             app_dir.display()
         )
     })?;
+
+    let gradlew = "#!/usr/bin/env sh\nset -eu\nif ! command -v gradle >/dev/null 2>&1; then\n  echo \"gradle not found in PATH. Install Gradle or run from an Android Studio terminal.\" >&2\n  exit 1\nfi\nexec gradle \"$@\"\n";
+    let gradlew_path = project_root.join("gradlew");
+    std::fs::write(&gradlew_path, gradlew).map_err(|error| {
+        format!(
+            "failed to write Android gradlew {}: {error}",
+            project_root.display()
+        )
+    })?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&gradlew_path, std::fs::Permissions::from_mode(0o755)).map_err(
+        |error| {
+            format!(
+                "failed to set Android gradlew executable bit {}: {error}",
+                gradlew_path.display()
+            )
+        },
+    )?;
 
     let gradlew_bat = "@echo off\r\nsetlocal\r\nwhere gradle >nul 2>nul\r\nif errorlevel 1 (\r\n  echo gradle not found in PATH. Install Gradle or run from an Android Studio terminal.\r\n  exit /b 1\r\n)\r\ngradle %*\r\n";
     std::fs::write(project_root.join("gradlew.bat"), gradlew_bat).map_err(|error| {
@@ -8186,6 +8206,7 @@ echo "signed" > "$1.signed"
         assert!(summary.native_library_path.exists());
         assert!(summary.asset_pack_path.exists());
         assert!(summary.android_config_path.exists());
+        assert!(summary.android_project_dir.join("gradlew").exists());
         assert!(summary.android_project_dir.join("gradlew.bat").exists());
         assert!(summary
             .android_project_dir
@@ -8219,6 +8240,19 @@ echo "signed" > "$1.signed"
         .expect("read MainActivity");
         assert!(project_activity.contains("class MainActivity : GameActivity()"));
         assert!(project_activity.contains("nativeOnInput(1, x, y)"));
+
+        let gradlew_text =
+            fs::read_to_string(summary.android_project_dir.join("gradlew")).expect("read gradlew");
+        assert!(gradlew_text.contains("command -v gradle"));
+        assert!(gradlew_text.contains("exec gradle \"$@\""));
+        #[cfg(unix)]
+        {
+            let permissions = fs::metadata(summary.android_project_dir.join("gradlew"))
+                .expect("gradlew metadata")
+                .permissions()
+                .mode();
+            assert_ne!(permissions & 0o111, 0, "gradlew should be executable");
+        }
 
         let pack_entries = read_android_pack_entries(&summary.asset_pack_path);
         assert!(pack_entries.iter().any(|entry| entry == "data/config.json"));
