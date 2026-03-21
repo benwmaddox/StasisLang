@@ -59,6 +59,7 @@ struct BuildCliArgs {
     package_id: String,
     app_name: String,
     min_sdk: u32,
+    abi: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -228,6 +229,7 @@ fn parse_build_cli_args(args: &[String]) -> Result<BuildCliArgs, String> {
     let mut package_id: Option<String> = None;
     let mut app_name: Option<String> = None;
     let mut min_sdk: u32 = 26;
+    let mut abi = "arm64-v8a".to_string();
     let mut i: usize = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -283,6 +285,13 @@ fn parse_build_cli_args(args: &[String]) -> Result<BuildCliArgs, String> {
                     .map_err(|error| format!("invalid value for --min-sdk: {error}"))?;
                 i += 2;
             }
+            "--abi" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --abi".to_string());
+                }
+                abi = args[i + 1].clone();
+                i += 2;
+            }
             _ => {
                 return Err(format!("unknown build arg '{arg}'"));
             }
@@ -312,6 +321,7 @@ fn parse_build_cli_args(args: &[String]) -> Result<BuildCliArgs, String> {
         package_id,
         app_name,
         min_sdk,
+        abi,
     })
 }
 
@@ -335,6 +345,7 @@ fn try_run_build_subcommand() -> Option<i32> {
         parsed.app_name,
         parsed.min_sdk,
     ));
+    options.config.abi = parsed.abi;
     options.entry_file = parsed.entry_file;
     options.output_root = parsed.output_dir;
 
@@ -1009,6 +1020,23 @@ mod tests {
         assert_eq!(parsed.package_id, "com.maddoxlabs.game");
         assert_eq!(parsed.app_name, "My Game");
         assert_eq!(parsed.min_sdk, 26);
+        assert_eq!(parsed.abi, "arm64-v8a");
+    }
+
+    #[test]
+    fn parse_build_cli_args_accepts_explicit_android_abi() {
+        let args = vec![
+            "--target".to_string(),
+            "android-game".to_string(),
+            "--package-id".to_string(),
+            "com.maddoxlabs.game".to_string(),
+            "--app-name".to_string(),
+            "My Game".to_string(),
+            "--abi".to_string(),
+            "x86_64".to_string(),
+        ];
+        let parsed = parse_build_cli_args(&args).expect("parse should succeed");
+        assert_eq!(parsed.abi, "x86_64");
     }
 
     #[test]

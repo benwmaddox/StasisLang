@@ -45,6 +45,7 @@ Build helper:
 
 Stasis Android export prototype:
 - `cargo run -p stasis -- build --target android-game --project-dir <game_dir> --package-id <package> --app-name <name>`
+- Optional emulator ABI override: add `--abi x86_64` to package an `x86_64` native library for Linux/macOS Android emulators. The default remains `arm64-v8a` for device builds.
 - Output contract:
   - `build/android/libstasis_game.so`
   - `build/android/game.pack`
@@ -52,7 +53,8 @@ Stasis Android export prototype:
   - `build/android-project/`
 - Prerequisites:
   - `rustup target add aarch64-linux-android`
-  - set `STASIS_ANDROID_CC` to an Android NDK `aarch64-linux-android*-clang` wrapper
+  - add `rustup target add x86_64-linux-android` when building with `--abi x86_64`
+  - set `STASIS_ANDROID_CC` to an Android NDK clang wrapper matching the selected ABI target (`aarch64-linux-android*-clang` by default, `x86_64-linux-android*-clang` for `--abi x86_64`)
   - set `STASIS_AOT_LINKER` only if the link step should use a different Android NDK wrapper than `STASIS_ANDROID_CC`
 - The generated Android project includes `gradlew` for macOS/Linux and `gradlew.bat` for Windows so the exported shell can be assembled from either host OS with Gradle on `PATH`.
 - The exported Android shell also writes `gradle.properties` with `android.useAndroidX=true` so the bundled `androidx.games:games-activity` dependency can assemble on Linux/Windows without manual project edits.

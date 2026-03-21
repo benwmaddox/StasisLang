@@ -61,7 +61,7 @@ impl AndroidGameBuildConfig {
             package_id: package_id.into(),
             app_name: app_name.into(),
             min_sdk,
-            abi: "arm64-v8a".to_string(),
+            abi: default_android_abi().to_string(),
         }
     }
 }
@@ -2223,15 +2223,11 @@ fn ensure_stasis_dynload_staticlib(target_triple: Option<&str>) -> Result<PathBu
     if let Some(target_triple) = target_triple {
         command.arg("--target").arg(target_triple);
     }
-    command
-        .arg("--")
-        .arg("--crate-type")
-        .arg("staticlib");
+    command.arg("--").arg("--crate-type").arg("staticlib");
     if target_triple_uses_pic_staticlib(target_triple) {
         command.arg("-C").arg("relocation-model=pic");
     }
-    command
-        .current_dir(&repo_root);
+    command.current_dir(&repo_root);
     if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
         command.env("CARGO_TARGET_DIR", target_dir);
     }
@@ -3129,8 +3125,20 @@ fn compile_c_source_to_object(
     Ok(())
 }
 
-fn android_target_triple() -> &'static str {
-    "aarch64-linux-android"
+fn default_android_abi() -> &'static str {
+    "arm64-v8a"
+}
+
+fn android_target_triple_for_abi(abi: &str) -> Option<&'static str> {
+    match abi {
+        "arm64-v8a" => Some("aarch64-linux-android"),
+        "x86_64" => Some("x86_64-linux-android"),
+        _ => None,
+    }
+}
+
+fn android_default_target_triple() -> &'static str {
+    android_target_triple_for_abi(default_android_abi()).expect("default Android ABI target")
 }
 
 fn android_game_library_name() -> &'static str {
@@ -3138,9 +3146,9 @@ fn android_game_library_name() -> &'static str {
 }
 
 fn validate_android_game_build_config(config: &AndroidGameBuildConfig) -> Result<(), String> {
-    if config.abi != "arm64-v8a" {
+    if android_target_triple_for_abi(&config.abi).is_none() {
         return Err(format!(
-            "unsupported android abi '{}' (expected arm64-v8a)",
+            "unsupported android abi '{}' (expected arm64-v8a or x86_64)",
             config.abi
         ));
     }
@@ -3260,7 +3268,10 @@ fn resolve_android_c_compiler(link_config: &AotLinkConfig) -> Option<PathBuf> {
         .or_else(|| link_config.linker_path.clone())
 }
 
-fn resolve_android_link_config(link_config: &AotLinkConfig) -> Result<AotLinkConfig, String> {
+fn resolve_android_link_config(
+    link_config: &AotLinkConfig,
+    target_triple: &str,
+) -> Result<AotLinkConfig, String> {
     let mut resolved = link_config.clone();
     if resolved.linker_path.is_none() {
         resolved.linker_path = resolve_android_c_compiler(link_config);
@@ -3268,7 +3279,7 @@ fn resolve_android_link_config(link_config: &AotLinkConfig) -> Result<AotLinkCon
     if resolved.linker_path.is_none() {
         return Err(format!(
             "android-game build requires STASIS_ANDROID_CC or STASIS_AOT_LINKER to point to an Android NDK clang wrapper for {}",
-            android_target_triple()
+            target_triple
         ));
     }
     Ok(resolved)
@@ -3638,14 +3649,12 @@ fn generate_android_game_project(
     })?;
 
     let gradle_properties = "android.useAndroidX=true\n";
-    std::fs::write(project_root.join("gradle.properties"), gradle_properties).map_err(
-        |error| {
-            format!(
-                "failed to write Android gradle.properties {}: {error}",
-                project_root.display()
-            )
-        },
-    )?;
+    std::fs::write(project_root.join("gradle.properties"), gradle_properties).map_err(|error| {
+        format!(
+            "failed to write Android gradle.properties {}: {error}",
+            project_root.display()
+        )
+    })?;
 
     let gradlew = "#!/usr/bin/env sh\nset -eu\nif ! command -v gradle >/dev/null 2>&1; then\n  echo \"gradle not found in PATH. Install Gradle or run from an Android Studio terminal.\" >&2\n  exit 1\nfi\nexec gradle \"$@\"\n";
     let gradlew_path = project_root.join("gradlew");
@@ -3697,7 +3706,11 @@ fn run_android_game_build_with_backend(
     options: &AndroidGameBuildOptions,
 ) -> Result<AndroidGameBuildSummary, String> {
     validate_android_game_build_config(&options.config)?;
-    let link_config = resolve_android_link_config(&backend.aot_link_config)?;
+    let target_triple = android_target_triple_for_abi(&options.config.abi)
+        .ok_or_else(|| format!("unsupported android abi '{}'", options.config.abi))?
+        .to_string();
+    backend.aot_compile_config.target_triple = Some(target_triple.clone());
+    let link_config = resolve_android_link_config(&backend.aot_link_config, &target_triple)?;
     if !project_dir.exists() {
         return Err(format!(
             "project directory does not exist: {}",
@@ -3816,8 +3829,7 @@ fn run_android_game_build_with_backend(
         .iter()
         .any(|path| is_stasis_dynload_staticlib(path))
     {
-        let dynload_lib =
-            ensure_stasis_dynload_staticlib(backend.aot_compile_config.target_triple.as_deref())?;
+        let dynload_lib = ensure_stasis_dynload_staticlib(Some(&target_triple))?;
         link_config.runtime_lib_paths.push(dynload_lib);
     }
     link_objects_to_dynamic_library(
@@ -8041,7 +8053,7 @@ echo "signed" > "$1.signed"
             .as_nanos();
         let temp_root = std::env::temp_dir().join(format!("stasis_dynload_target_dir_{stamp}"));
         let target_path = temp_root
-            .join(android_target_triple())
+            .join(android_default_target_triple())
             .join("debug")
             .join("libstasis_dynload.a");
         let host_path = temp_root.join("debug").join("libstasis_dynload.a");
@@ -8051,8 +8063,8 @@ echo "signed" > "$1.signed"
         fs::write(&host_path, b"host").expect("write host lib");
         std::env::set_var("CARGO_TARGET_DIR", &temp_root);
 
-        let resolved =
-            resolve_stasis_dynload_lib(Some(android_target_triple())).expect("target dynload lib");
+        let resolved = resolve_stasis_dynload_lib(Some(android_default_target_triple()))
+            .expect("target dynload lib");
         assert_eq!(resolved, target_path);
         let host_resolved =
             resolve_stasis_dynload_lib(None).expect("host dynload lib should resolve");
@@ -8072,10 +8084,13 @@ echo "signed" > "$1.signed"
         let old_android_cc = std::env::var("STASIS_ANDROID_CC").ok();
         std::env::set_var("STASIS_ANDROID_CC", "/tmp/fake-android-clang");
 
-        let resolved = resolve_android_link_config(&AotLinkConfig {
-            linker_path: None,
-            runtime_lib_paths: vec![],
-        })
+        let resolved = resolve_android_link_config(
+            &AotLinkConfig {
+                linker_path: None,
+                runtime_lib_paths: vec![],
+            },
+            android_default_target_triple(),
+        )
         .expect("android link config should resolve");
         assert_eq!(
             resolved.linker_path,
@@ -8091,7 +8106,12 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn android_target_triple_requires_pic_staticlib() {
-        assert!(target_triple_uses_pic_staticlib(Some(android_target_triple())));
+        assert!(target_triple_uses_pic_staticlib(Some(
+            android_default_target_triple()
+        )));
+        assert!(target_triple_uses_pic_staticlib(Some(
+            android_target_triple_for_abi("x86_64").expect("x86_64 android target")
+        )));
         assert!(!target_triple_uses_pic_staticlib(Some(
             "x86_64-pc-windows-msvc"
         )));
@@ -8122,7 +8142,7 @@ echo "signed" > "$1.signed"
 
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
             AotCompileConfig {
-                target_triple: Some(android_target_triple().to_string()),
+                target_triple: Some(android_default_target_triple().to_string()),
                 ..AotCompileConfig::default()
             },
             AotLinkConfig {
@@ -8224,7 +8244,7 @@ echo "signed" > "$1.signed"
         let fake_dynload = write_fake_staticlib(&temp_root);
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
             AotCompileConfig {
-                target_triple: Some(android_target_triple().to_string()),
+                target_triple: Some(android_default_target_triple().to_string()),
                 ..AotCompileConfig::default()
             },
             AotLinkConfig {
@@ -8248,7 +8268,10 @@ echo "signed" > "$1.signed"
         assert!(summary.native_library_path.exists());
         assert!(summary.asset_pack_path.exists());
         assert!(summary.android_config_path.exists());
-        assert!(summary.android_project_dir.join("gradle.properties").exists());
+        assert!(summary
+            .android_project_dir
+            .join("gradle.properties")
+            .exists());
         assert!(summary.android_project_dir.join("gradlew").exists());
         assert!(summary.android_project_dir.join("gradlew.bat").exists());
         assert!(summary
@@ -8275,7 +8298,16 @@ echo "signed" > "$1.signed"
         assert_eq!(config.package_id, "com.maddoxlabs.game");
         assert_eq!(config.app_name, "My Game");
         assert_eq!(config.min_sdk, 26);
-        assert_eq!(config.abi, "arm64-v8a");
+        assert_eq!(config.abi, default_android_abi());
+        assert!(summary
+            .android_project_dir
+            .join("app")
+            .join("src")
+            .join("main")
+            .join("jniLibs")
+            .join(default_android_abi())
+            .join(android_game_library_name())
+            .exists());
 
         let project_activity = fs::read_to_string(
             summary
@@ -8313,8 +8345,9 @@ echo "signed" > "$1.signed"
             fs::read_to_string(summary.android_project_dir.join("gradlew")).expect("read gradlew");
         assert!(gradlew_text.contains("command -v gradle"));
         assert!(gradlew_text.contains("exec gradle \"$@\""));
-        let gradle_properties = fs::read_to_string(summary.android_project_dir.join("gradle.properties"))
-            .expect("read gradle.properties");
+        let gradle_properties =
+            fs::read_to_string(summary.android_project_dir.join("gradle.properties"))
+                .expect("read gradle.properties");
         assert!(gradle_properties.contains("android.useAndroidX=true"));
         let themes = fs::read_to_string(
             summary
@@ -8352,6 +8385,96 @@ echo "signed" > "$1.signed"
         let object_file = object::File::parse(&*object_bytes).expect("parse object file");
         assert_eq!(object_file.format(), object::BinaryFormat::Elf);
         assert_eq!(object_file.architecture(), object::Architecture::Aarch64);
+
+        fs::remove_dir_all(&temp_root).ok();
+        if let Some(value) = old_android_cc {
+            std::env::set_var("STASIS_ANDROID_CC", value);
+        } else {
+            std::env::remove_var("STASIS_ANDROID_CC");
+        }
+    }
+
+    #[test]
+    fn android_game_build_accepts_x86_64_abi_for_linux_emulator_packaging() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let old_android_cc = std::env::var("STASIS_ANDROID_CC").ok();
+        if let Some(value) = std::env::var_os("CC").filter(|value| !value.is_empty()) {
+            std::env::set_var("STASIS_ANDROID_CC", value);
+        } else if cfg!(windows) {
+            std::env::set_var("STASIS_ANDROID_CC", "clang-cl.exe");
+        } else {
+            std::env::set_var("STASIS_ANDROID_CC", "cc");
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_android_x86_64_build_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let project_dir = temp_root.join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(
+            project_dir.join("main.stasis"),
+            "function main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+
+        let linker = write_fake_linker(&temp_root);
+        let fake_dynload = write_fake_staticlib(&temp_root);
+        let target_triple =
+            android_target_triple_for_abi("x86_64").expect("x86_64 Android target triple");
+        let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
+            AotCompileConfig {
+                target_triple: Some(target_triple.to_string()),
+                ..AotCompileConfig::default()
+            },
+            AotLinkConfig {
+                linker_path: Some(linker),
+                runtime_lib_paths: vec![fake_dynload],
+            },
+            temp_root.join("aot_artifacts"),
+            false,
+        );
+        let mut config = AndroidGameBuildConfig::new("com.maddoxlabs.game", "My Game", 26);
+        config.abi = "x86_64".to_string();
+        let summary = run_android_game_build_with_backend(
+            &mut backend,
+            &project_dir,
+            &AndroidGameBuildOptions {
+                config,
+                entry_file: Some(PathBuf::from("main.stasis")),
+                output_root: Some(temp_root.join("build")),
+            },
+        )
+        .expect("x86_64 android build should succeed");
+
+        let config_text =
+            fs::read_to_string(&summary.android_config_path).expect("read android-config");
+        let config: AndroidGameBuildConfig =
+            serde_json::from_str(&config_text).expect("parse android-config");
+        assert_eq!(config.abi, "x86_64");
+        assert!(summary
+            .android_project_dir
+            .join("app")
+            .join("src")
+            .join("main")
+            .join("jniLibs")
+            .join("x86_64")
+            .join(android_game_library_name())
+            .exists());
+
+        let bundle = backend
+            .last_aot_engine_bundle()
+            .expect("last android engine bundle");
+        let object_path = bundle
+            .object_paths_by_function
+            .get("main")
+            .expect("main object path");
+        let object_bytes = fs::read(object_path).expect("read main object");
+        let object_file = object::File::parse(&*object_bytes).expect("parse object file");
+        assert_eq!(object_file.format(), object::BinaryFormat::Elf);
+        assert_eq!(object_file.architecture(), object::Architecture::X86_64);
 
         fs::remove_dir_all(&temp_root).ok();
         if let Some(value) = old_android_cc {
@@ -8916,7 +9039,7 @@ pub fn run_android_game_build_with_options(
         .join("android_game")
         .join(cache_key);
     let compile_config = AotCompileConfig {
-        target_triple: Some(android_target_triple().to_string()),
+        target_triple: Some(android_default_target_triple().to_string()),
         ..AotCompileConfig::default()
     };
     let mut backend = IncrementalCompilerBackend::new();
