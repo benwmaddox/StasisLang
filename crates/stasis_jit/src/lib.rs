@@ -272,6 +272,12 @@ pub fn link_objects_to_dynamic_library(
     for runtime_lib in &config.runtime_lib_paths {
         args.push(runtime_lib.display().to_string());
     }
+    if !cfg!(windows) {
+        // Rust staticlibs used in AOT bundles can reference libm symbols such as `cosf`.
+        // Link libm explicitly so Android/shared-library loads do not defer these failures
+        // until app startup.
+        args.push("-lm".to_string());
+    }
 
     run_link_command_with_args(
         &linker,
@@ -336,6 +342,9 @@ pub fn link_objects_to_executable(
     }
     for runtime_lib in &config.runtime_lib_paths {
         args.push(runtime_lib.display().to_string());
+    }
+    if !cfg!(windows) {
+        args.push("-lm".to_string());
     }
 
     run_link_command_with_args(
@@ -739,6 +748,75 @@ echo "fake-shared" > "$OUT"
         )
         .expect("fake linker should succeed");
         assert!(output_library.exists(), "fake linker should create output");
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn aot_unix_dynamic_link_appends_libm() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("stasis_aot_link_unix_args_{stamp}"));
+        fs::create_dir_all(&temp_dir).expect("create unix link temp dir");
+
+        let args_log = temp_dir.join("args.txt");
+        let fake_linker = temp_dir.join("fake-link.sh");
+        let script = format!(
+            r#"#!/usr/bin/env sh
+printf '%s\n' "$@" > "{args_log}"
+OUT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      OUT="$2"
+      shift
+      ;;
+  esac
+  shift
+done
+if [ -z "$OUT" ]; then
+  exit 2
+fi
+echo "fake-shared" > "$OUT"
+"#,
+            args_log = args_log.display()
+        );
+        fs::write(&fake_linker, script).expect("write fake unix linker");
+        let status = Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_linker)
+            .status()
+            .expect("chmod fake linker");
+        assert!(status.success(), "chmod fake linker should succeed");
+
+        let dummy_object = temp_dir.join("dummy.o");
+        fs::write(&dummy_object, "not-an-object").expect("write dummy object");
+        let output_library = if cfg!(target_os = "macos") {
+            temp_dir.join("bundle.dylib")
+        } else {
+            temp_dir.join("bundle.so")
+        };
+
+        let config = AotLinkConfig {
+            linker_path: Some(fake_linker),
+            runtime_lib_paths: vec![],
+        };
+        link_objects_to_dynamic_library(
+            &[dummy_object],
+            &output_library,
+            &["fn_1".to_string()],
+            &config,
+        )
+        .expect("fake linker should succeed");
+
+        let args = fs::read_to_string(&args_log).expect("read fake linker args");
+        assert!(
+            args.lines().any(|line| line == "-lm"),
+            "unix dynamic link args should include -lm: {args}"
+        );
 
         fs::remove_dir_all(&temp_dir).ok();
     }
