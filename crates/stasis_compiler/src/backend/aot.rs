@@ -10,8 +10,10 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
+use target_lexicon::Triple;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AotArtifact {
@@ -26,6 +28,7 @@ pub struct AotArtifact {
 pub struct AotProcess {
     compiler: Compiler,
     optimization_profile: AotOptimizationProfile,
+    target: stasis_jit::AotTarget,
     next_object_index: u32,
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
@@ -52,6 +55,7 @@ impl AotProcess {
         Self {
             compiler: Compiler::new(),
             optimization_profile,
+            target: stasis_jit::AotTarget::default(),
             next_object_index: 0,
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
@@ -64,6 +68,10 @@ impl AotProcess {
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
         self.compiler.upsert_file(path, content);
+    }
+
+    pub fn set_target(&mut self, target: stasis_jit::AotTarget) {
+        self.target = target;
     }
 
     pub fn set_required_emit_roots(&mut self, roots: &[String]) {
@@ -140,6 +148,7 @@ impl AotProcess {
             object_bytes,
             optimization_profile,
             string_literals,
+            target,
         ) = (
             &mut self.compiler,
             &mut self.next_object_index,
@@ -147,6 +156,7 @@ impl AotProcess {
             &mut self.object_bytes,
             self.optimization_profile,
             &mut self.string_literals,
+            self.target.clone(),
         );
         let emit = compiler.emit_pass_for_ids_with(
             &emit_function_ids,
@@ -167,6 +177,7 @@ impl AotProcess {
                     &analysis.global_path_types,
                     &analysis.constant_values,
                     string_literals,
+                    &target,
                     &analysis.collection_infos,
                     &analysis.named_struct_field_types,
                 )?;
@@ -528,6 +539,7 @@ fn compile_function_to_object_bytes(
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     string_literals: &mut BTreeMap<i32, String>,
+    target: &stasis_jit::AotTarget,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<Vec<u8>, String> {
@@ -536,8 +548,19 @@ fn compile_function_to_object_bytes(
         .set("opt_level", optimization_profile.as_cranelift_opt_level())
         .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
     let flags = settings::Flags::new(flag_builder);
-    let isa_builder = cranelift_native::builder()
-        .map_err(|error| format!("failed to construct native ISA builder: {error}"))?;
+    let isa_builder = match target.object_triple() {
+        Some(triple_text) => {
+            let triple = Triple::from_str(triple_text).map_err(|error| {
+                format!("failed to parse AOT target triple {triple_text}: {error}")
+            })?;
+            let triple_display = triple.to_string();
+            cranelift_codegen::isa::lookup(triple).map_err(|error| {
+                format!("failed to construct ISA builder for {triple_display}: {error}")
+            })?
+        }
+        None => cranelift_native::builder()
+            .map_err(|error| format!("failed to construct native ISA builder: {error}"))?,
+    };
     let isa = isa_builder
         .finish(flags)
         .map_err(|error| format!("failed to finalize native ISA: {error}"))?;
@@ -884,6 +907,7 @@ mod tests {
     use super::*;
     use crate::backend::jit::JitProcess;
     use crate::backend::EngineEntrypoints;
+    use object::{Architecture, BinaryFormat, File, Object};
     #[cfg(windows)]
     use std::process::Command;
     use std::sync::Arc;
@@ -1370,6 +1394,22 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_emits_android_arm64_elf_objects_when_target_is_configured() {
+        let mut process = AotProcess::new();
+        process.set_target(stasis_jit::AotTarget::android_arm64_default());
+        process.upsert_file("sample.stasis", "function main(): i32 { return 7; }\n");
+        process.compile().expect("android aot compile");
+
+        let bytes = process
+            .object_bytes
+            .first()
+            .expect("expected first object bytes");
+        let object = File::parse(bytes.as_slice()).expect("parse emitted object");
+        assert_eq!(object.format(), BinaryFormat::Elf);
+        assert_eq!(object.architecture(), Architecture::Aarch64);
+    }
+
+    #[test]
     fn aot_engine_bundle_writes_manifest_and_required_entrypoints() {
         let mut process = AotProcess::new();
         process.upsert_file(
@@ -1847,6 +1887,7 @@ mod tests {
             return Some(stasis_jit::AotLinkConfig {
                 linker_path: Some(explicit),
                 runtime_lib_paths: vec![],
+                target: stasis_jit::AotTarget::default(),
             });
         }
         for candidate in ["lld-link.exe", "link.exe"] {
@@ -1855,6 +1896,7 @@ mod tests {
                 return Some(stasis_jit::AotLinkConfig {
                     linker_path: Some(PathBuf::from(candidate)),
                     runtime_lib_paths: vec![],
+                    target: stasis_jit::AotTarget::default(),
                 });
             }
         }

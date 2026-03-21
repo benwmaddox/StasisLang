@@ -20,6 +20,7 @@ pub struct CommitOutcome {
 #[derive(Debug, Clone)]
 pub struct AotCompileConfig {
     pub opt_level: String,
+    pub target: AotTarget,
 }
 
 fn default_aot_opt_level() -> String {
@@ -41,7 +42,40 @@ impl Default for AotCompileConfig {
     fn default() -> Self {
         Self {
             opt_level: default_aot_opt_level(),
+            target: AotTarget::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AotTarget {
+    Native,
+    AndroidArm64 { min_sdk: u32 },
+}
+
+impl AotTarget {
+    pub fn android_arm64_default() -> Self {
+        Self::AndroidArm64 { min_sdk: 26 }
+    }
+
+    pub fn object_triple(&self) -> Option<&'static str> {
+        match self {
+            Self::Native => None,
+            Self::AndroidArm64 { .. } => Some("aarch64-linux-android"),
+        }
+    }
+
+    pub fn clang_target(&self) -> Option<String> {
+        match self {
+            Self::Native => None,
+            Self::AndroidArm64 { min_sdk } => Some(format!("aarch64-linux-android{min_sdk}")),
+        }
+    }
+}
+
+impl Default for AotTarget {
+    fn default() -> Self {
+        Self::Native
     }
 }
 
@@ -49,6 +83,7 @@ impl Default for AotCompileConfig {
 pub struct AotLinkConfig {
     pub linker_path: Option<PathBuf>,
     pub runtime_lib_paths: Vec<PathBuf>,
+    pub target: AotTarget,
 }
 
 impl Default for AotLinkConfig {
@@ -60,6 +95,7 @@ impl Default for AotLinkConfig {
         Self {
             linker_path,
             runtime_lib_paths: Vec::new(),
+            target: AotTarget::default(),
         }
     }
 }
@@ -221,7 +257,7 @@ pub fn link_objects_to_dynamic_library(
 
     let linker = resolve_linker_path(config);
     let mut args: Vec<String> = Vec::new();
-    if cfg!(windows) {
+    if uses_msvc_linker_syntax(config) {
         args.push("/NOLOGO".to_string());
         args.push("/DLL".to_string());
         args.push(format!("/OUT:{}", output_library.display()));
@@ -260,6 +296,9 @@ pub fn link_objects_to_dynamic_library(
         args.push("-shared".to_string());
         args.push("-o".to_string());
         args.push(output_library.display().to_string());
+        if let Some(target) = config.target.clang_target() {
+            args.push(format!("--target={target}"));
+        }
     }
     for object_path in object_paths {
         args.push(object_path.display().to_string());
@@ -307,7 +346,7 @@ pub fn link_objects_to_executable(
 
     let linker = resolve_linker_path(config);
     let mut args: Vec<String> = Vec::new();
-    if cfg!(windows) {
+    if uses_msvc_linker_syntax(config) {
         args.push("/NOLOGO".to_string());
         args.push(format!("/OUT:{}", output_executable.display()));
         args.push(format!("/ENTRY:{entry_symbol}"));
@@ -325,6 +364,9 @@ pub fn link_objects_to_executable(
         args.push("-o".to_string());
         args.push(output_executable.display().to_string());
         args.push(format!("-Wl,-e,{entry_symbol}"));
+        if let Some(target) = config.target.clang_target() {
+            args.push(format!("--target={target}"));
+        }
     }
     for object_path in object_paths {
         args.push(object_path.display().to_string());
@@ -357,6 +399,10 @@ fn resolve_linker_path(config: &AotLinkConfig) -> PathBuf {
     } else {
         PathBuf::from("cc")
     }
+}
+
+fn uses_msvc_linker_syntax(config: &AotLinkConfig) -> bool {
+    matches!(config.target, AotTarget::Native) && cfg!(windows)
 }
 
 #[cfg(windows)]
@@ -725,6 +771,7 @@ echo "fake-shared" > "$OUT"
         let config = AotLinkConfig {
             linker_path: Some(fake_linker),
             runtime_lib_paths: vec![],
+            target: AotTarget::default(),
         };
         link_objects_to_dynamic_library(
             &[dummy_object],
