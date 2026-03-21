@@ -2981,6 +2981,7 @@ mod tests {
         let link_config = stasis_jit::AotLinkConfig {
             linker_path: Some(linker_path),
             runtime_lib_paths: vec![],
+            target: stasis_jit::AotTarget::default(),
         };
         let artifact_root = temp_root.join("aot_artifacts");
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(

@@ -1,5 +1,15 @@
 # Night Shift Report
 
+## 2026-03-21
+
+- Started the real Android AOT prerequisite slice for issue #254 instead of landing template-only scaffolding.
+- Enabled Cranelift arm64 support in the workspace, added an explicit `AotTarget` config path, and taught the AOT backend to emit `aarch64-linux-android` ELF objects when that target is selected.
+- Added Android bridge export coverage in `apps/stasis` so the runtime bridge now emits the fixed Android entry ABI symbols (`stasis_init`, `stasis_tick`, `stasis_render`, `stasis_on_input`) on the Android target path.
+- Verification: `cargo test -p stasis_compiler aot_process_emits_android_arm64_elf_objects_when_target_is_configured -- --nocapture`, `cargo test -p stasis engine_bundle_runtime_bridge_source_includes_android_entry_exports -- --nocapture`, `tools/validate_repo.sh`
+- Good: this slice stayed narrow but still proved the two core prerequisites in code and tests instead of only adding config plumbing.
+- Bad: the first Android target compile failed because the workspace had only host-arch Cranelift enabled, so the target-selection code alone was not enough.
+- Adjustment: whenever a new backend target is introduced, add one object-format test immediately so missing Cranelift feature flags surface before higher-level packaging work starts.
+
 ## 2026-03-19
 
 - Refreshed PR #252 again after `main` advanced, merging the current branch tip into `chore/night-shift-workflow` and resolving the only conflict in `docs/night_shift_report.md`.

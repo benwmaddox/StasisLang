@@ -686,8 +686,10 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "cranelift-object",
+ "object",
  "stasis_dynload",
  "stasis_jit",
+ "target-lexicon",
 ]
 
 [[package]]
