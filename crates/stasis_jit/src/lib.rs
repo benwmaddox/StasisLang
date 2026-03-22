@@ -394,7 +394,9 @@ fn resolve_linker_path(config: &AotLinkConfig) -> PathBuf {
     if let Some(path) = config.linker_path.as_ref() {
         return path.clone();
     }
-    if cfg!(windows) {
+    if matches!(config.target, AotTarget::AndroidArm64 { .. }) {
+        PathBuf::from("clang")
+    } else if cfg!(windows) {
         PathBuf::from("lld-link.exe")
     } else {
         PathBuf::from("cc")
@@ -783,5 +785,32 @@ echo "fake-shared" > "$OUT"
         assert!(output_library.exists(), "fake linker should create output");
 
         fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn android_aot_linker_defaults_to_clang_when_unset() {
+        let config = AotLinkConfig {
+            linker_path: None,
+            runtime_lib_paths: vec![],
+            target: AotTarget::android_arm64_default(),
+        };
+
+        assert_eq!(resolve_linker_path(&config), PathBuf::from("clang"));
+    }
+
+    #[test]
+    fn native_aot_linker_default_stays_host_appropriate() {
+        let config = AotLinkConfig {
+            linker_path: None,
+            runtime_lib_paths: vec![],
+            target: AotTarget::default(),
+        };
+        let expected = if cfg!(windows) {
+            PathBuf::from("lld-link.exe")
+        } else {
+            PathBuf::from("cc")
+        };
+
+        assert_eq!(resolve_linker_path(&config), expected);
     }
 }
