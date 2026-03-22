@@ -2149,6 +2149,20 @@ fn runtime_bridge_object_extension(target: &stasis_jit::AotTarget) -> &'static s
     }
 }
 
+fn should_link_stasis_dynload_staticlib(target: &stasis_jit::AotTarget) -> bool {
+    matches!(target, stasis_jit::AotTarget::Native)
+}
+
+fn default_runtime_bridge_compiler(target: &stasis_jit::AotTarget) -> PathBuf {
+    if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
+        PathBuf::from("clang")
+    } else if cfg!(windows) {
+        PathBuf::from("clang-cl.exe")
+    } else {
+        PathBuf::from("cc")
+    }
+}
+
 fn ensure_stasis_dynload_staticlib() -> Result<PathBuf, String> {
     let repo_root = self_host_repo_root();
     let mut command = std::process::Command::new("cargo");
@@ -2992,20 +3006,18 @@ fn emit_engine_bundle_runtime_bridge_object(
         )
     })?;
 
-    let compiler = std::env::var_os("CC").unwrap_or_else(|| {
-        if cfg!(windows) {
-            "clang-cl.exe".into()
-        } else {
-            "cc".into()
-        }
-    });
-    let compiler_name = Path::new(&compiler)
+    let compiler = std::env::var_os("CC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_runtime_bridge_compiler(&backend.aot_compile_config.target));
+    let compiler_name = compiler
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let is_msvc_style = matches!(backend.aot_compile_config.target, stasis_jit::AotTarget::Native)
-        && cfg!(windows)
+    let is_msvc_style = matches!(
+        backend.aot_compile_config.target,
+        stasis_jit::AotTarget::Native
+    ) && cfg!(windows)
         && (compiler_name == "clang-cl"
             || compiler_name == "clang-cl.exe"
             || compiler_name == "cl"
@@ -3179,13 +3191,15 @@ fn package_engine_bundle_release(
 
     let mut link_config = backend.aot_link_config.clone();
     link_config.target = backend.aot_compile_config.target.clone();
-    let dynload_lib = ensure_stasis_dynload_staticlib()?;
-    if !link_config
-        .runtime_lib_paths
-        .iter()
-        .any(|path| path == &dynload_lib)
-    {
-        link_config.runtime_lib_paths.push(dynload_lib);
+    if should_link_stasis_dynload_staticlib(&link_config.target) {
+        let dynload_lib = ensure_stasis_dynload_staticlib()?;
+        if !link_config
+            .runtime_lib_paths
+            .iter()
+            .any(|path| path == &dynload_lib)
+        {
+            link_config.runtime_lib_paths.push(dynload_lib);
+        }
     }
     if cfg!(windows) {
         if let Some(wrapper) = ensure_rust_lld_link_wrapper(&backend.aot_artifact_root) {
@@ -3367,7 +3381,11 @@ mod tests {
         let source = build_engine_bundle_runtime_bridge_source(
             &stasis_jit::AotTarget::android_arm64_default(),
             &[],
-            &["aot_fn_1".to_string(), "aot_fn_2".to_string(), "aot_fn_3".to_string()],
+            &[
+                "aot_fn_1".to_string(),
+                "aot_fn_2".to_string(),
+                "aot_fn_3".to_string(),
+            ],
             &[
                 PackagedFunctionAlias {
                     alias: "main",
@@ -3395,6 +3413,21 @@ mod tests {
         assert!(source.contains("host_i32[10] = host_i32[10] + 1;"));
         assert!(source.contains("STASIS_EXPORT void stasis_render(void)"));
         assert!(source.contains("STASIS_EXPORT void stasis_on_input(int type, int a, int b)"));
+    }
+
+    #[test]
+    fn android_engine_bundle_skips_host_dynload_staticlib() {
+        assert!(!should_link_stasis_dynload_staticlib(
+            &stasis_jit::AotTarget::android_arm64_default()
+        ));
+    }
+
+    #[test]
+    fn android_runtime_bridge_compiler_defaults_to_clang() {
+        assert_eq!(
+            default_runtime_bridge_compiler(&stasis_jit::AotTarget::android_arm64_default()),
+            PathBuf::from("clang")
+        );
     }
 
     #[test]
