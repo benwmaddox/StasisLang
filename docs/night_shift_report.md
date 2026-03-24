@@ -90,3 +90,12 @@
 - Good: the review comment pointed to one concrete contract mismatch, so the fix stayed narrow and easy to verify.
 - Bad: the loop doc still had one leftover instruction from the older repo-local runner model even after the ownership note moved branch setup to the inbox runner.
 - Adjustment: when workflow ownership moves across systems, re-read the procedural checklist line by line and delete stale executor steps in the same change.
+
+## 2026-03-24
+
+- Completed issue #258 by adding a lookup CLI to `apps/stasis/src/main.rs` with `s|search`, `sig|signature`, and `def|definition` support plus `--entry` import-closure scope and `--file` single-file scope.
+- Added parser-backed struct definition ranges in `crates/stasis_compiler/src/frontend/parser.rs` so definition lookups can print exact struct bodies without a second ad-hoc parser.
+- Verification: `cargo test -p stasis parse_lookup -- --nocapture`, `cargo test -p stasis run_lookup_command -- --nocapture`, `cargo test -p stasis_compiler parses_top_level_struct_definition_ranges -- --nocapture`, `cargo run -p stasis -- sig tick --file samples/brickout_revenge/brickout_revenge.stasis`, `tools/validate_repo.sh`
+- Good: keeping the lookup output parser-backed made the new command small and let the whole-directory search ignore invalid fixture files cleanly.
+- Bad: the compiler parser exposed function ranges but not struct ranges, so exact struct-definition output needed a small parser extension before the CLI work could stay clean.
+- Adjustment: when a new tooling feature needs source excerpts, expose precise ranges from the shared parser first instead of duplicating extraction logic in the CLI.
