@@ -175,6 +175,7 @@ fn parse_lookup_cli_args(args: &[String]) -> Result<Option<LookupCliArgs>, Strin
 
 fn parse_lookup_import_paths(source: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     for line in source.lines() {
         let trimmed = line.trim_start();
         if !trimmed.starts_with("import ") {
@@ -211,9 +212,13 @@ fn collect_lookup_stasis_files_recursive(root: &Path) -> Result<Vec<PathBuf>, St
             .collect();
         entries.sort();
         for path in entries {
-            let metadata = fs::metadata(&path)
+            let metadata = fs::symlink_metadata(&path)
                 .map_err(|error| format!("failed to stat {}: {error}", path.display()))?;
-            if metadata.is_dir() {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
                     continue;
                 };
@@ -1339,6 +1344,67 @@ mod tests {
         assert_eq!(
             output,
             "entry.stasis\nfunction tick_main(): i32 { return helper_tick(); }\n\nnested/helper.stasis\nfunction helper_tick(): i32 { return 7; }\n\nnested/helper.stasis\nstruct TickState {\n    value: i32;\n}\n\n"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn run_lookup_command_definition_entry_follows_bom_prefixed_imports() {
+        let root = temp_lookup_root("entry_bom_scope");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(
+            root.join("entry.stasis"),
+            "\u{feff}import \"./nested/helper.stasis\";\nfunction tick_main(): i32 { return helper_tick(); }\n",
+        )
+        .expect("write entry");
+        std::fs::write(
+            nested.join("helper.stasis"),
+            "function helper_tick(): i32 { return 7; }\n",
+        )
+        .expect("write helper");
+
+        let parsed = LookupCliArgs {
+            mode: LookupMode::Definition,
+            query: "tick".to_string(),
+            entry_file: Some(PathBuf::from("entry.stasis")),
+            file: None,
+        };
+        let output = run_lookup_command(&parsed, &root).expect("lookup should succeed");
+        assert_eq!(
+            output,
+            "entry.stasis\nfunction tick_main(): i32 { return helper_tick(); }\n\nnested/helper.stasis\nfunction helper_tick(): i32 { return 7; }\n\n"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_lookup_command_signature_skips_symlinked_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_lookup_root("signature_symlink_scope");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(
+            nested.join("helper.stasis"),
+            "function tick_nested(): i32 { return 5; }\n",
+        )
+        .expect("write helper");
+        symlink("./nested", root.join("nested_link")).expect("create dir symlink");
+
+        let parsed = LookupCliArgs {
+            mode: LookupMode::Signature,
+            query: "tick".to_string(),
+            entry_file: None,
+            file: None,
+        };
+        let output = run_lookup_command(&parsed, &root).expect("lookup should succeed");
+        assert_eq!(
+            output,
+            "nested/helper.stasis\nfunction tick_nested(): i32\n\n"
         );
 
         std::fs::remove_dir_all(&root).ok();
