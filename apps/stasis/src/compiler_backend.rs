@@ -7819,9 +7819,7 @@ pub fn run_self_host_aot_cli_with_options(
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("aot_output");
-    let artifact_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+    let artifact_root = project_dir
         .join(".stasis_cache")
         .join("aot_cli")
         .join(output_key);
