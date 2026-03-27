@@ -1458,6 +1458,9 @@ static int sprite_ensure_capacity(int min_capacity) {
     if (min_capacity > g_sprite_limit) return 0;
 
     int new_capacity = g_sprite_capacity > 0 ? g_sprite_capacity : 64;
+    if (new_capacity > g_sprite_limit) {
+        new_capacity = g_sprite_limit;
+    }
     while (new_capacity < min_capacity) {
         if (new_capacity >= g_sprite_limit) {
             new_capacity = g_sprite_limit;
@@ -1833,12 +1836,44 @@ static void sprite_atlas_free_region(int page_index, int x, int y, int w, int h)
     }
 }
 
+static int sprite_atlas_clear_upload_rect(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) return 0;
+
+    const size_t pixel_count = (size_t)w * (size_t)h;
+    if (pixel_count > SIZE_MAX / 4) return 0;
+
+    unsigned char* clear_pixels = (unsigned char*)calloc(pixel_count, 4);
+    if (!clear_pixels) return 0;
+
+    glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, clear_pixels);
+    free(clear_pixels);
+    return 1;
+}
+
 static int sprite_atlas_upload_region(int page_index, int x, int y, int w, int h, const unsigned char* pixels) {
     if (page_index < 0 || page_index >= g_sprite_atlas_page_count || !pixels) return 0;
-    GLuint texture = g_sprite_atlas_pages[page_index].texture;
+    SpriteAtlasPage* page = &g_sprite_atlas_pages[page_index];
+    GLuint texture = page->texture;
     if (texture == 0) return 0;
 
+    const int alloc_x = x - SPRITE_ATLAS_PAD;
+    const int alloc_y = y - SPRITE_ATLAS_PAD;
+    const int alloc_w = w + SPRITE_ATLAS_PAD * 2;
+    const int alloc_h = h + SPRITE_ATLAS_PAD * 2;
+    if (alloc_x < 0 ||
+        alloc_y < 0 ||
+        alloc_w <= 0 ||
+        alloc_h <= 0 ||
+        alloc_x + alloc_w > page->width ||
+        alloc_y + alloc_h > page->height) {
+        return 0;
+    }
+
     glBindTexture(GL_TEXTURE_2D, texture);
+    if (!sprite_atlas_clear_upload_rect(alloc_x, alloc_y, alloc_w, alloc_h)) {
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return 0;
+    }
     glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     glGenerateMipmap(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, 0);
