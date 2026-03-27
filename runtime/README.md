@@ -71,7 +71,7 @@ The library exports these functions for Stasis programs:
 | `stasis_clear(r, g, b, a)` | Clear screen with color |
 | `stasis_draw_line(x1, y1, x2, y2, r, g, b, a)` | Queue a line for rendering |
 | `stasis_draw_lines_f32(lines, count)` | Batch: queue `count` lines from an `f32` array (8 floats per line) |
-| `stasis_gfx_load_sprite(path)` | Load and bake an SVG sprite into an atlas; returns handle |
+| `stasis_gfx_load_sprite(path)` | Load and bake an SVG sprite into the paged sprite atlas; returns handle |
 | `stasis_gfx_draw_sprite(handle, x, y, sx, sy, rot, r, g, b, a)` | Draw baked sprite (centered) with scale/rotation/tint |
 | `stasis_gfx_draw_sprites_i32(cmds, count)` | Batch: draw `count` sprites from an `i32` array (7 ints per sprite) |
 | `stasis_gfx_debug_bake_hash(path)` | Debug: bake SVG on CPU and return a pixel hash |
@@ -93,6 +93,11 @@ The library exports these functions for Stasis programs:
 | `stasis_audio_push_f32_interleaved(ptr, frames)` | Push `f32` interleaved frames (LRLR...); returns frames accepted |
 
 `play` and the native runner use HostFrame bulk snapshots for per-tick input/state now.
+
+Sprite atlas behavior:
+- The OpenGL path now grows across multiple atlas pages instead of one fixed texture.
+- Atlas page size defaults to `2048x2048`, clamps to `GL_MAX_TEXTURE_SIZE`, and can be overridden with `STASIS_GFX_ATLAS_SIZE`.
+- Sprite handle storage now grows dynamically; `STASIS_GFX_MAX_SPRITES` can set an optional runtime cap.
 Guest code should read keyboard/pointer/quit state through `src/runtime/host_frame.stasis`
 directly or via the HostFrame-backed stdlib wrappers in `src/stdlib/graphics.stasis` and
 `src/stdlib/game_input.stasis`.

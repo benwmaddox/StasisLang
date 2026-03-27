@@ -99,3 +99,12 @@
 - Good: keeping the lookup output parser-backed made the new command small and let the whole-directory search ignore invalid fixture files cleanly.
 - Bad: the compiler parser exposed function ranges but not struct ranges, so exact struct-definition output needed a small parser extension before the CLI work could stay clean.
 - Adjustment: when a new tooling feature needs source excerpts, expose precise ranges from the shared parser first instead of duplicating extraction logic in the CLI.
+
+## 2026-03-27
+
+- Completed issue #263 by replacing the fixed GL sprite slot array with a dynamic table, adding paged sprite atlases with free-region reuse, and flushing sprite batches on atlas page changes instead of assuming one bound atlas texture.
+- Added runtime atlas diagnostics and config knobs in `runtime/stasis_graphics.c`, and documented the new `STASIS_GFX_ATLAS_SIZE` and `STASIS_GFX_MAX_SPRITES` behavior in `runtime/README.md`.
+- Verification: `tools/validate_repo.sh`; attempted direct runtime build verification, but this environment does not have `cmake`, `SDL.h`, or `GL/glew.h`, so the graphics runtime could not be compiled locally through its normal toolchain here.
+- Good: the issue comment already narrowed the architecture, so the implementation could stay on one reviewable path instead of mixing multiple atlas experiments.
+- Bad: repo validation still does not exercise `runtime/stasis_graphics.c`, which left the runtime-specific compile check dependent on local system tooling that is missing in this environment.
+- Adjustment: add a bounded CI-friendly graphics runtime compile check that does not depend on ad hoc local desktop SDK setup, so renderer slices get a real compiler pass alongside `tools/validate_repo.sh`.
