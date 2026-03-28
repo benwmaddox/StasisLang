@@ -2085,6 +2085,9 @@ mod tests {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    const STASIS_GRAPHICS_SOURCE: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/stasis_graphics.c"));
+
     fn jit_global_table_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -2107,6 +2110,32 @@ mod tests {
         } else {
             std::env::remove_var(key);
         }
+    }
+
+    #[test]
+    fn sprite_runtime_clamps_initial_sprite_growth_to_configured_limit() {
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains(
+                "if (min_capacity > limit) {\n        return 0;\n    }\n\n    int new_capacity = g_sprite_capacity > 0 ? g_sprite_capacity : clamp_i32(SPRITE_TABLE_INITIAL_CAPACITY, 1, limit);"
+            ),
+            "runtime sprite allocation should clamp the initial growth step to STASIS_GFX_MAX_SPRITES"
+        );
+    }
+
+    #[test]
+    fn sprite_runtime_clears_reused_atlas_padding_before_mipmap_regeneration() {
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains(
+                "unsigned char* clear_pixels = (unsigned char*)calloc(pixel_count, 4);"
+            ),
+            "runtime sprite upload should zero the reused atlas allocation before writing sprite pixels"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains(
+                "atlas_page_clear_region(page, alloc_x, alloc_y, alloc_w, alloc_h);\n    if (!atlas_page_upload_region(page, sprite_x, sprite_y, w, h, pixels)) {"
+            ),
+            "runtime sprite upload should clear padded texels before updating the sprite interior and regenerating mipmaps"
+        );
     }
 
     fn decode_zero_terminated_utf8(bytes: &[u8]) -> String {

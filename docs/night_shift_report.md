@@ -1,5 +1,16 @@
 # Night Shift Report
 
+## 2026-03-27
+
+- Completed issue #263 by replacing the fixed OpenGL sprite atlas model with pageable atlas textures and reusable free-rect allocation in [runtime/stasis_graphics.c](/home/ben/StasisLang/runtime/stasis_graphics.c).
+- Removed the fixed compile-time sprite table ceiling by growing sprite handles at runtime and honoring `STASIS_GFX_MAX_SPRITES`, while atlas page sizing now respects runtime GL limits and the atlas env var overrides.
+- Added source-level regression checks in [apps/stasis/src/lib.rs](/home/ben/StasisLang/apps/stasis/src/lib.rs) for the two issue-critical guardrails: clamped sprite table growth and clearing reused atlas padding before mipmap regeneration.
+- Documented the run outcome here after rebasing onto the existing remote `ned/issue-263` branch instead of overwriting earlier issue work.
+- Verification: `tools/validate_repo.sh`
+- Good: fetching and rebasing onto the already-populated bot branch preserved the earlier issue implementation and avoided another non-fast-forward failure.
+- Bad: the first local pass started from `main` and only later discovered the remote issue branch already contained overlapping atlas work, which forced a rebase and report correction.
+- Adjustment: when rerunning work on a reused Ned branch, fetch the remote issue branch before coding so the starting point matches the real handoff state.
+
 ## 2026-03-21
 
 - Started the real Android AOT prerequisite slice for issue #254 instead of landing template-only scaffolding.
