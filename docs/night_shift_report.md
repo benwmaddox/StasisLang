@@ -2,14 +2,14 @@
 
 ## 2026-03-27
 
-- Completed issue #263 by replacing the fixed OpenGL sprite atlas model with a paged atlas allocator that can grow across multiple textures and reuse freed regions on size-changing sprite reloads.
-- Removed the fixed `MAX_SPRITES` table in `runtime/stasis_graphics.c`; sprite handles now come from a heap-backed table so larger projects are no longer capped by one compile-time sprite slot array.
-- Added a direct allocator regression harness in `apps/stasis/src/lib.rs` that compiles and runs `runtime/stasis_sprite_atlas.c` during `cargo test`, covering both freed-region reuse and page growth once one page fills.
-- Documented the new atlas behavior in `runtime/README.md`, including the `2048x2048` default page size, runtime clamping to `GL_MAX_TEXTURE_SIZE`, and the `STASIS_GFX_ATLAS_PAGE_SIZE` override.
-- Verification: `cargo test -p stasis sprite_atlas_allocator_reuses_regions_and_grows_pages -- --nocapture`, `cargo test -p stasis --lib -- --test-threads=1`, `tools/validate_repo.sh`
-- Good: extracting the allocator into a small C module made the runtime change testable without needing a full renderer harness.
-- Bad: the first guillotine split heuristic fragmented the page badly enough that the new reuse test still forced an unnecessary second page.
-- Adjustment: when adding allocator-style runtime slices, run one direct fragmentation harness immediately so split and merge policy problems surface before the full repo validation pass.
+- Completed issue #263 by replacing the fixed OpenGL sprite atlas model with pageable atlas textures and reusable free-rect allocation in [runtime/stasis_graphics.c](/home/ben/StasisLang/runtime/stasis_graphics.c).
+- Removed the fixed compile-time sprite table ceiling by growing sprite handles at runtime and honoring `STASIS_GFX_MAX_SPRITES`, while atlas page sizing now respects runtime GL limits and the atlas env var overrides.
+- Added source-level regression checks in [apps/stasis/src/lib.rs](/home/ben/StasisLang/apps/stasis/src/lib.rs) for the two issue-critical guardrails: clamped sprite table growth and clearing reused atlas padding before mipmap regeneration.
+- Documented the run outcome here after rebasing onto the existing remote `ned/issue-263` branch instead of overwriting earlier issue work.
+- Verification: `tools/validate_repo.sh`
+- Good: fetching and rebasing onto the already-populated bot branch preserved the earlier issue implementation and avoided another non-fast-forward failure.
+- Bad: the first local pass started from `main` and only later discovered the remote issue branch already contained overlapping atlas work, which forced a rebase and report correction.
+- Adjustment: when rerunning work on a reused Ned branch, fetch the remote issue branch before coding so the starting point matches the real handoff state.
 
 ## 2026-03-21
 
