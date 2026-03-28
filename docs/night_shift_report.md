@@ -1,5 +1,16 @@
 # Night Shift Report
 
+## 2026-03-27
+
+- Completed issue #263 by replacing the fixed OpenGL sprite atlas model with a paged atlas allocator that can grow across multiple textures and reuse freed regions on size-changing sprite reloads.
+- Removed the fixed `MAX_SPRITES` table in `runtime/stasis_graphics.c`; sprite handles now come from a heap-backed table so larger projects are no longer capped by one compile-time sprite slot array.
+- Added a direct allocator regression harness in `apps/stasis/src/lib.rs` that compiles and runs `runtime/stasis_sprite_atlas.c` during `cargo test`, covering both freed-region reuse and page growth once one page fills.
+- Documented the new atlas behavior in `runtime/README.md`, including the `2048x2048` default page size, runtime clamping to `GL_MAX_TEXTURE_SIZE`, and the `STASIS_GFX_ATLAS_PAGE_SIZE` override.
+- Verification: `cargo test -p stasis sprite_atlas_allocator_reuses_regions_and_grows_pages -- --nocapture`, `cargo test -p stasis --lib -- --test-threads=1`, `tools/validate_repo.sh`
+- Good: extracting the allocator into a small C module made the runtime change testable without needing a full renderer harness.
+- Bad: the first guillotine split heuristic fragmented the page badly enough that the new reuse test still forced an unnecessary second page.
+- Adjustment: when adding allocator-style runtime slices, run one direct fragmentation harness immediately so split and merge policy problems surface before the full repo validation pass.
+
 ## 2026-03-21
 
 - Started the real Android AOT prerequisite slice for issue #254 instead of landing template-only scaffolding.
