@@ -1408,15 +1408,22 @@ static char* stasis_strdup(const char* s) {
 #endif
 }
 
+static int clamp_i32(int value, int min_value, int max_value) {
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
 static int parse_env_i32(const char* name, int fallback, int min_value, int max_value) {
+    int clamped_fallback = clamp_i32(fallback, min_value, max_value);
     const char* raw = getenv(name);
-    if (!raw || !raw[0]) return fallback;
+    if (!raw || !raw[0]) return clamped_fallback;
 
     char* end = NULL;
     long parsed = strtol(raw, &end, 10);
     if (end == raw || (end && *end != '\0')) {
-        SDL_Log("%s: invalid integer '%s'; using %d", name, raw, fallback);
-        return fallback;
+        SDL_Log("%s: invalid integer '%s'; using %d", name, raw, clamped_fallback);
+        return clamped_fallback;
     }
     if (parsed < (long)min_value) {
         SDL_Log("%s: clamping %ld to %d", name, parsed, min_value);
@@ -1444,7 +1451,7 @@ static int ensure_sprite_table_capacity(int min_capacity) {
         return 0;
     }
 
-    int new_capacity = g_sprite_capacity > 0 ? g_sprite_capacity : SPRITE_TABLE_INITIAL_CAPACITY;
+    int new_capacity = g_sprite_capacity > 0 ? g_sprite_capacity : clamp_i32(SPRITE_TABLE_INITIAL_CAPACITY, 1, limit);
     while (new_capacity < min_capacity) {
         if (new_capacity >= limit) {
             new_capacity = limit;
