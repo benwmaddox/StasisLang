@@ -59,6 +59,16 @@ If you prefer to build manually or vcpkg is unavailable:
    cmake --build . --config Release
    ```
 
+## Sprite Atlas Runtime Settings
+
+The OpenGL sprite path now uses a multi-page atlas instead of one fixed texture.
+
+- `STASIS_GFX_ATLAS_W` and `STASIS_GFX_ATLAS_H` set the per-page atlas size.
+- The default page size is `2048x2048`, clamped to the runtime `GL_MAX_TEXTURE_SIZE`.
+- `STASIS_GFX_MAX_SPRITES` optionally caps sprite-handle growth; unset or `0` leaves the table heap-backed and effectively unbounded.
+- Size-stable reloads update in place. Size-changing reloads allocate a new region, switch the sprite handle, and free the old region.
+- Atlas allocation failures now log page count, page size, free-region summary, and current sprite-table usage.
+
 ## API
 
 The library exports these functions for Stasis programs:
