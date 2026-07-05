@@ -130,6 +130,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covering manifest, Gradle config, native CMake, JNI entrypoint, and arm64 ABI selection.
 - Done gate: The shell is installable in principle without linking Stasis runtime or game code yet.
 - Status: `completed`
+#### AW9 - Android Bundled Workshop Surface
+- Language: `Android Java + .stasis assets + docs`.
+- Scope: Replace the smoke-only screen with a native Android workshop surface backed by bundled Stasis-style project files.
+- Deliverable: The installed app can show Main, Structs, Systems, and Root symbol groups and display selected symbol source from normal `.stasis` files.
+- Tests: Structural Android shell verifier covers bundled assets, Stasis syntax rules, symbol-browser code path, and smoke JNI retention; debug APK builds and installs on a paired phone.
+- Done gate: A sideloaded app shows a real workshop project surface without hard-coding Rust-style examples.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

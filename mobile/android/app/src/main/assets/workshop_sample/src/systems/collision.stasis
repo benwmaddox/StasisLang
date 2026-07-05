@@ -1,0 +1,22 @@
+import "../game_state.stasis";
+import "../player.stasis";
+import "../enemy.stasis";
+
+function collision_update(): void {
+    foreach (let enemy in GameState.enemies) {
+        if (!enemy.active) {
+            continue;
+        }
+
+        if (player_overlaps_enemy(GameState.player, enemy)) {
+            enemy.damage(1);
+        }
+    }
+}
+
+function player_overlaps_enemy(player: Player, enemy: Enemy): bool {
+    let dx = player.x - enemy.x;
+    let dy = player.y - enemy.y;
+
+    return dx * dx + dy * dy < 64.0;
+}

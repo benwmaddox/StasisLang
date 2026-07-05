@@ -1,0 +1,6 @@
+global GameState {
+    player: Player;
+    enemies: Enemy[32];
+    score: i32;
+    tick_count: i32;
+}

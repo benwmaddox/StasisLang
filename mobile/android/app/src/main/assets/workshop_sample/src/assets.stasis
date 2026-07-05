@@ -1,0 +1,5 @@
+struct SpriteAsset {
+    id: i32;
+    width: i32;
+    height: i32;
+}

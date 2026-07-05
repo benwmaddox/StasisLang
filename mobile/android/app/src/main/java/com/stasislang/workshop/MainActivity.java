@@ -1,11 +1,45 @@
 package com.stasislang.workshop;
 
 import android.app.Activity;
+import android.content.res.AssetManager;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
-import android.view.Gravity;
+import android.view.View;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TreeSet;
+
 public final class MainActivity extends Activity {
+    private static final String ASSET_ROOT = "workshop_sample/";
+    private static final String[] SAMPLE_FILES = new String[] {
+            "src/main.stasis",
+            "src/root.stasis",
+            "src/game_state.stasis",
+            "src/player.stasis",
+            "src/enemy.stasis",
+            "src/input.stasis",
+            "src/assets.stasis",
+            "src/systems/collision.stasis"
+    };
+
+    private TextView sourceTitle;
+    private TextView sourceText;
+
     static {
         System.loadLibrary("stasis_mobile_smoke");
     }
@@ -16,10 +50,496 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        ProjectSnapshot project = loadBundledProject();
+        setContentView(createWorkshopView(project));
+    }
+
+    private View createWorkshopView(ProjectSnapshot project) {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setBackgroundColor(Color.rgb(247, 248, 251));
+        page.setPadding(dp(16), dp(14), dp(16), dp(16));
+
+        TextView title = new TextView(this);
+        title.setText("Stasis Workshop");
+        title.setTextColor(Color.rgb(22, 27, 34));
+        title.setTextSize(24.0f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        page.addView(title, fullWidth());
+
         TextView status = new TextView(this);
-        status.setGravity(Gravity.CENTER);
-        status.setTextSize(20.0f);
-        status.setText(nativeStatus());
-        setContentView(status);
+        status.setText(nativeStatus() + " - " + project.files.size() + " files - " + project.symbolCount + " symbols");
+        status.setTextColor(Color.rgb(73, 84, 100));
+        status.setTextSize(13.0f);
+        status.setPadding(0, dp(4), 0, dp(12));
+        page.addView(status, fullWidth());
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+
+        for (SymbolSection section : project.sections) {
+            addSection(content, section);
+        }
+
+        sourceTitle = new TextView(this);
+        sourceTitle.setTextColor(Color.rgb(22, 27, 34));
+        sourceTitle.setTextSize(16.0f);
+        sourceTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        sourceTitle.setPadding(0, dp(16), 0, dp(6));
+        content.addView(sourceTitle, fullWidth());
+
+        sourceText = new TextView(this);
+        sourceText.setTextColor(Color.rgb(28, 37, 49));
+        sourceText.setTextSize(12.0f);
+        sourceText.setTypeface(Typeface.MONOSPACE);
+        sourceText.setPadding(dp(12), dp(10), dp(12), dp(10));
+        sourceText.setBackground(createPanelBackground(Color.WHITE, Color.rgb(207, 214, 224)));
+        content.addView(sourceText, fullWidth());
+
+        ScrollView scrollView = new ScrollView(this);
+        scrollView.addView(content);
+        page.addView(scrollView, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1.0f));
+
+        if (project.firstSymbol != null) {
+            showSymbol(project.firstSymbol);
+        }
+
+        return page;
+    }
+
+    private void addSection(LinearLayout content, SymbolSection section) {
+        TextView sectionTitle = new TextView(this);
+        sectionTitle.setText(section.title);
+        sectionTitle.setTextColor(Color.rgb(35, 45, 60));
+        sectionTitle.setTextSize(18.0f);
+        sectionTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        sectionTitle.setPadding(0, dp(10), 0, dp(4));
+        content.addView(sectionTitle, fullWidth());
+
+        for (SymbolGroup group : section.groups) {
+            if (!group.title.equals(section.title)) {
+                TextView groupTitle = new TextView(this);
+                groupTitle.setText(group.title);
+                groupTitle.setTextColor(Color.rgb(83, 96, 115));
+                groupTitle.setTextSize(13.0f);
+                groupTitle.setTypeface(Typeface.DEFAULT_BOLD);
+                groupTitle.setPadding(0, dp(6), 0, dp(3));
+                content.addView(groupTitle, fullWidth());
+            }
+
+            for (SymbolEntry symbol : group.symbols) {
+                content.addView(createSymbolRow(symbol), fullWidth());
+            }
+        }
+    }
+
+    private TextView createSymbolRow(final SymbolEntry symbol) {
+        TextView row = new TextView(this);
+        row.setText(symbol.displayName());
+        row.setTextColor(Color.rgb(23, 43, 77));
+        row.setTextSize(14.0f);
+        row.setPadding(dp(12), dp(9), dp(12), dp(9));
+        row.setBackground(createPanelBackground(Color.WHITE, Color.rgb(218, 224, 233)));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                showSymbol(symbol);
+            }
+        });
+
+        LinearLayout.LayoutParams margins = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        margins.setMargins(0, 0, 0, dp(6));
+        row.setLayoutParams(margins);
+        return row;
+    }
+
+    private void showSymbol(SymbolEntry symbol) {
+        sourceTitle.setText(symbol.file + " - " + symbol.displayName());
+        sourceText.setText(symbol.source.trim());
+    }
+
+    private ProjectSnapshot loadBundledProject() {
+        List<SourceFile> files = new ArrayList<>();
+        AssetManager assets = getAssets();
+
+        for (String file : SAMPLE_FILES) {
+            try {
+                files.add(new SourceFile(file, readAsset(assets, ASSET_ROOT + file)));
+            } catch (IOException error) {
+                files.add(new SourceFile(file, "// Unable to load " + file + ": " + error.getMessage()));
+            }
+        }
+
+        return ProjectSnapshot.from(files);
+    }
+
+    private String readAsset(AssetManager assets, String path) throws IOException {
+        InputStream input = assets.open(path);
+        try {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            return new String(output.toByteArray(), StandardCharsets.UTF_8);
+        } finally {
+            input.close();
+        }
+    }
+
+    private LinearLayout.LayoutParams fullWidth() {
+        return new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+    }
+
+    private GradientDrawable createPanelBackground(int fill, int stroke) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(fill);
+        drawable.setStroke(dp(1), stroke);
+        drawable.setCornerRadius(dp(6));
+        return drawable;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private static final class ProjectSnapshot {
+        final List<SourceFile> files;
+        final List<SymbolSection> sections;
+        final SymbolEntry firstSymbol;
+        final int symbolCount;
+
+        private ProjectSnapshot(List<SourceFile> files, List<SymbolSection> sections, SymbolEntry firstSymbol, int symbolCount) {
+            this.files = files;
+            this.sections = sections;
+            this.firstSymbol = firstSymbol;
+            this.symbolCount = symbolCount;
+        }
+
+        static ProjectSnapshot from(List<SourceFile> files) {
+            TreeSet<String> structs = new TreeSet<>();
+            for (SourceFile file : files) {
+                structs.addAll(parseStructNames(file.source));
+            }
+
+            List<SymbolEntry> symbols = new ArrayList<>();
+            for (SourceFile file : files) {
+                symbols.addAll(parseSymbols(file, structs));
+            }
+
+            List<SymbolSection> sections = groupSymbols(symbols);
+            SymbolEntry first = symbols.isEmpty() ? null : symbols.get(0);
+            return new ProjectSnapshot(files, sections, first, symbols.size());
+        }
+    }
+
+    private static List<String> parseStructNames(String source) {
+        List<String> names = new ArrayList<>();
+        int cursor = 0;
+        while (true) {
+            int structIndex = source.indexOf("struct ", cursor);
+            if (structIndex < 0) {
+                return names;
+            }
+
+            int nameStart = structIndex + "struct ".length();
+            int nameEnd = readIdentifierEnd(source, nameStart);
+            if (nameEnd > nameStart) {
+                names.add(source.substring(nameStart, nameEnd));
+            }
+            cursor = nameEnd;
+        }
+    }
+
+    private static List<SymbolEntry> parseSymbols(SourceFile file, TreeSet<String> structs) {
+        List<SymbolEntry> symbols = new ArrayList<>();
+        int cursor = 0;
+        while (cursor < file.source.length()) {
+            int nextStruct = file.source.indexOf("struct ", cursor);
+            int nextFunction = file.source.indexOf("function ", cursor);
+            int next = minPositive(nextStruct, nextFunction);
+            if (next < 0) {
+                break;
+            }
+
+            if (next == nextStruct) {
+                SymbolEntry symbol = parseStruct(file, next);
+                if (symbol != null) {
+                    symbols.add(symbol);
+                    cursor = symbol.end;
+                } else {
+                    cursor = next + "struct ".length();
+                }
+            } else {
+                SymbolEntry symbol = parseFunction(file, next, structs);
+                if (symbol != null) {
+                    symbols.add(symbol);
+                    cursor = symbol.end;
+                } else {
+                    cursor = next + "function ".length();
+                }
+            }
+        }
+        return symbols;
+    }
+
+    private static SymbolEntry parseStruct(SourceFile file, int start) {
+        int nameStart = start + "struct ".length();
+        int nameEnd = readIdentifierEnd(file.source, nameStart);
+        int bodyStart = file.source.indexOf('{', nameEnd);
+        int end = findMatchingBrace(file.source, bodyStart);
+        if (nameEnd <= nameStart || bodyStart < 0 || end < 0) {
+            return null;
+        }
+
+        String name = file.source.substring(nameStart, nameEnd);
+        String source = file.source.substring(start, end);
+        return new SymbolEntry("struct", name, name, "struct " + name, file.path, source, end);
+    }
+
+    private static SymbolEntry parseFunction(SourceFile file, int start, TreeSet<String> structs) {
+        int signatureStart = start + "function ".length();
+        int bodyStart = file.source.indexOf('{', signatureStart);
+        int end = findMatchingBrace(file.source, bodyStart);
+        if (bodyStart < 0 || end < 0) {
+            return null;
+        }
+
+        String signature = file.source.substring(signatureStart, bodyStart).trim();
+        int paren = signature.indexOf('(');
+        String name = paren < 0 ? signature : signature.substring(0, paren).trim();
+        String owner = ownerForFunction(file.path, name, signature, structs);
+        String source = file.source.substring(start, end);
+        return new SymbolEntry("function", name, owner, signature, file.path, source, end);
+    }
+
+    private static String ownerForFunction(String file, String name, String signature, TreeSet<String> structs) {
+        if (isLifecycle(name)) {
+            return "Main";
+        }
+
+        String receiver = receiverType(signature);
+        if (receiver != null && structs.contains(receiver)) {
+            return receiver;
+        }
+
+        String firstParameterType = firstParameterType(signature);
+        if (firstParameterType != null && structs.contains(firstParameterType)) {
+            return firstParameterType;
+        }
+
+        if (file.startsWith("src/systems/")) {
+            return titleCase(file.substring(file.lastIndexOf('/') + 1, file.lastIndexOf('.')));
+        }
+
+        return "Root";
+    }
+
+    private static List<SymbolSection> groupSymbols(List<SymbolEntry> symbols) {
+        Map<String, Map<String, List<SymbolEntry>>> sections = new LinkedHashMap<>();
+        sections.put("Main", new LinkedHashMap<String, List<SymbolEntry>>());
+        sections.put("Structs", new LinkedHashMap<String, List<SymbolEntry>>());
+        sections.put("Systems", new LinkedHashMap<String, List<SymbolEntry>>());
+        sections.put("Root", new LinkedHashMap<String, List<SymbolEntry>>());
+
+        for (SymbolEntry symbol : symbols) {
+            String section = sectionFor(symbol);
+            Map<String, List<SymbolEntry>> groups = sections.get(section);
+            if (!groups.containsKey(symbol.owner)) {
+                groups.put(symbol.owner, new ArrayList<SymbolEntry>());
+            }
+            groups.get(symbol.owner).add(symbol);
+        }
+
+        List<SymbolSection> out = new ArrayList<>();
+        for (Map.Entry<String, Map<String, List<SymbolEntry>>> section : sections.entrySet()) {
+            if (section.getValue().isEmpty()) {
+                continue;
+            }
+
+            List<SymbolGroup> groups = new ArrayList<>();
+            for (Map.Entry<String, List<SymbolEntry>> group : sortedGroups(section.getValue())) {
+                groups.add(new SymbolGroup(group.getKey(), group.getValue()));
+            }
+            out.add(new SymbolSection(section.getKey(), groups));
+        }
+        return out;
+    }
+
+    private static String sectionFor(SymbolEntry symbol) {
+        if ("Main".equals(symbol.owner)) {
+            return "Main";
+        }
+        if ("Root".equals(symbol.owner)) {
+            return "Root";
+        }
+        if (symbol.file.startsWith("src/systems/")) {
+            return "Systems";
+        }
+        return "Structs";
+    }
+
+    private static List<Map.Entry<String, List<SymbolEntry>>> sortedGroups(Map<String, List<SymbolEntry>> groups) {
+        List<Map.Entry<String, List<SymbolEntry>>> entries = new ArrayList<>(groups.entrySet());
+        Collections.sort(entries, new Comparator<Map.Entry<String, List<SymbolEntry>>>() {
+            @Override
+            public int compare(Map.Entry<String, List<SymbolEntry>> left, Map.Entry<String, List<SymbolEntry>> right) {
+                return left.getKey().compareTo(right.getKey());
+            }
+        });
+        return entries;
+    }
+
+    private static boolean isLifecycle(String name) {
+        return "main".equals(name)
+                || "init".equals(name)
+                || "tick".equals(name)
+                || "render".equals(name)
+                || "on_code_swap".equals(name);
+    }
+
+    private static String receiverType(String signature) {
+        String first = firstParameter(signature);
+        if (first == null || !first.startsWith("self:")) {
+            return null;
+        }
+        return first.substring("self:".length()).trim();
+    }
+
+    private static String firstParameterType(String signature) {
+        String first = firstParameter(signature);
+        if (first == null) {
+            return null;
+        }
+        int colon = first.indexOf(':');
+        return colon < 0 ? null : first.substring(colon + 1).trim();
+    }
+
+    private static String firstParameter(String signature) {
+        int open = signature.indexOf('(');
+        int close = signature.indexOf(')', open + 1);
+        if (open < 0 || close < 0 || close <= open + 1) {
+            return null;
+        }
+        String parameters = signature.substring(open + 1, close).trim();
+        if (parameters.isEmpty()) {
+            return null;
+        }
+        int comma = parameters.indexOf(',');
+        return (comma < 0 ? parameters : parameters.substring(0, comma)).trim();
+    }
+
+    private static int readIdentifierEnd(String source, int start) {
+        int index = start;
+        while (index < source.length()) {
+            char c = source.charAt(index);
+            if (!Character.isLetterOrDigit(c) && c != '_') {
+                break;
+            }
+            index += 1;
+        }
+        return index;
+    }
+
+    private static int findMatchingBrace(String source, int bodyStart) {
+        if (bodyStart < 0 || bodyStart >= source.length()) {
+            return -1;
+        }
+
+        int depth = 0;
+        for (int index = bodyStart; index < source.length(); index += 1) {
+            char c = source.charAt(index);
+            if (c == '{') {
+                depth += 1;
+            } else if (c == '}') {
+                depth -= 1;
+                if (depth == 0) {
+                    return index + 1;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static int minPositive(int left, int right) {
+        if (left < 0) {
+            return right;
+        }
+        if (right < 0) {
+            return left;
+        }
+        return Math.min(left, right);
+    }
+
+    private static String titleCase(String value) {
+        if (value.isEmpty()) {
+            return value;
+        }
+        return value.substring(0, 1).toUpperCase(Locale.US) + value.substring(1);
+    }
+
+    private static final class SourceFile {
+        final String path;
+        final String source;
+
+        SourceFile(String path, String source) {
+            this.path = path;
+            this.source = source;
+        }
+    }
+
+    private static final class SymbolSection {
+        final String title;
+        final List<SymbolGroup> groups;
+
+        SymbolSection(String title, List<SymbolGroup> groups) {
+            this.title = title;
+            this.groups = groups;
+        }
+    }
+
+    private static final class SymbolGroup {
+        final String title;
+        final List<SymbolEntry> symbols;
+
+        SymbolGroup(String title, List<SymbolEntry> symbols) {
+            this.title = title;
+            this.symbols = symbols;
+        }
+    }
+
+    private static final class SymbolEntry {
+        final String kind;
+        final String name;
+        final String owner;
+        final String signature;
+        final String file;
+        final String source;
+        final int end;
+
+        SymbolEntry(String kind, String name, String owner, String signature, String file, String source, int end) {
+            this.kind = kind;
+            this.name = name;
+            this.owner = owner;
+            this.signature = signature;
+            this.file = file;
+            this.source = source;
+            this.end = end;
+        }
+
+        String displayName() {
+            if ("struct".equals(kind)) {
+                return signature;
+            }
+            return signature;
+        }
     }
 }
