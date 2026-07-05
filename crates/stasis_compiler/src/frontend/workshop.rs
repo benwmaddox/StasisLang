@@ -5,7 +5,10 @@ use std::path::Path;
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkshopSymbolKind {
     Struct,
     Function,
@@ -547,14 +550,14 @@ pub fn apply_ai_code_response_to_file(
     Ok(updated)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkshopReloadClassification {
     pub expected_reload: ExpectedReload,
     pub reason: String,
     pub changed_symbols: Vec<WorkshopChangedSymbol>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkshopChangedSymbol {
     pub kind: WorkshopSymbolKind,
     pub name: String,
@@ -564,7 +567,8 @@ pub struct WorkshopChangedSymbol {
     pub change: WorkshopSymbolChange,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorkshopSymbolChange {
     Added,
     Modified,
@@ -802,6 +806,92 @@ fn symbol_identity(symbol: &WorkshopSymbol) -> SymbolIdentity {
         owner: symbol.owner.clone(),
         name: symbol.name.clone(),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkshopGitChangeSummary {
+    pub changed_symbols: Vec<WorkshopChangedSymbolGroup>,
+    pub changed_files: Vec<String>,
+    pub raw_file_diffs: Vec<WorkshopRawFileDiff>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkshopChangedSymbolGroup {
+    pub name: String,
+    pub symbols: Vec<WorkshopChangedSymbolSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkshopChangedSymbolSummary {
+    pub change: WorkshopSymbolChange,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub file: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkshopRawFileDiff {
+    pub file: String,
+    pub diff: String,
+}
+
+pub fn summarize_workshop_git_changes(
+    changed_symbols: &[WorkshopChangedSymbol],
+    raw_file_diffs: Vec<WorkshopRawFileDiff>,
+) -> WorkshopGitChangeSummary {
+    let mut grouped: BTreeMap<String, Vec<WorkshopChangedSymbolSummary>> = BTreeMap::new();
+    let mut changed_files = BTreeSet::new();
+
+    for symbol in changed_symbols {
+        changed_files.insert(symbol.file.clone());
+        let group_name = symbol
+            .owner
+            .clone()
+            .unwrap_or_else(|| fallback_change_group(symbol));
+        grouped
+            .entry(group_name)
+            .or_default()
+            .push(WorkshopChangedSymbolSummary {
+                change: symbol.change,
+                name: symbol.name.clone(),
+                owner: symbol.owner.clone(),
+                file: symbol.file.clone(),
+                signature: symbol.signature.clone(),
+            });
+    }
+    for diff in &raw_file_diffs {
+        changed_files.insert(diff.file.clone());
+    }
+
+    let mut changed_symbols = grouped
+        .into_iter()
+        .map(|(name, mut symbols)| {
+            symbols.sort_by_key(|symbol| (symbol.file.clone(), symbol.name.clone()));
+            WorkshopChangedSymbolGroup { name, symbols }
+        })
+        .collect::<Vec<_>>();
+    changed_symbols.sort_by_key(|group| group.name.clone());
+
+    WorkshopGitChangeSummary {
+        changed_symbols,
+        changed_files: changed_files.into_iter().collect(),
+        raw_file_diffs,
+    }
+}
+
+fn fallback_change_group(symbol: &WorkshopChangedSymbol) -> String {
+    if is_main_path(&symbol.file) {
+        return "Main".to_string();
+    }
+    if is_system_path(&symbol.file) {
+        return title_case_stem(&symbol.file).unwrap_or_else(|| "Systems".to_string());
+    }
+    if is_root_path(&symbol.file) {
+        return "Root".to_string();
+    }
+    "Root".to_string()
 }
 
 fn changed_symbol_from(
@@ -1105,5 +1195,65 @@ mod reload_tests {
         let classified = classify_workshop_reload(&before, &after).expect("classify");
         assert_eq!(classified.expected_reload, ExpectedReload::ResetRequired);
         assert!(classified.reason.contains("jump signature changed"));
+    }
+}
+
+#[cfg(test)]
+mod git_summary_tests {
+    use super::*;
+
+    #[test]
+    fn summarizes_changes_by_symbol_group_before_files_and_raw_diff() {
+        let changed = vec![
+            WorkshopChangedSymbol {
+                kind: WorkshopSymbolKind::Function,
+                name: "jump".to_string(),
+                owner: Some("Player".to_string()),
+                file: "src/player.stasis".to_string(),
+                signature: "jump(self: Player): void".to_string(),
+                change: WorkshopSymbolChange::Modified,
+            },
+            WorkshopChangedSymbol {
+                kind: WorkshopSymbolKind::Function,
+                name: "update".to_string(),
+                owner: Some("Player".to_string()),
+                file: "src/player.stasis".to_string(),
+                signature: "update(self: Player, input: InputState): void".to_string(),
+                change: WorkshopSymbolChange::Modified,
+            },
+        ];
+        let summary = summarize_workshop_git_changes(
+            &changed,
+            vec![WorkshopRawFileDiff {
+                file: "src/player.stasis".to_string(),
+                diff: "@@ player diff @@".to_string(),
+            }],
+        );
+
+        assert_eq!(summary.changed_symbols.len(), 1);
+        assert_eq!(summary.changed_symbols[0].name, "Player");
+        assert_eq!(
+            summary.changed_symbols[0]
+                .symbols
+                .iter()
+                .map(|symbol| (symbol.change, symbol.signature.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (WorkshopSymbolChange::Modified, "jump(self: Player): void"),
+                (
+                    WorkshopSymbolChange::Modified,
+                    "update(self: Player, input: InputState): void"
+                ),
+            ]
+        );
+        assert_eq!(summary.changed_files, vec!["src/player.stasis".to_string()]);
+        assert_eq!(summary.raw_file_diffs[0].diff, "@@ player diff @@");
+
+        let json = serde_json::to_string(&summary).expect("serialize summary");
+        let symbol_index = json.find("changed_symbols").expect("changed_symbols key");
+        let files_index = json.find("changed_files").expect("changed_files key");
+        let diffs_index = json.find("raw_file_diffs").expect("raw_file_diffs key");
+        assert!(symbol_index < files_index);
+        assert!(files_index < diffs_index);
     }
 }
