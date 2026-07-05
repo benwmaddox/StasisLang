@@ -96,7 +96,7 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Deliverable: Changed symbols are summarized before changed files, with raw file diffs as advanced review data.
 - Tests: Summary ordering and grouping tests.
 - Done gate: `Player`-owned edits group under `Player`; file list contains affected `.stasis` files.
-- Status: `planned`
+- Status: `completed`
 
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
