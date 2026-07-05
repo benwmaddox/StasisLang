@@ -67,7 +67,11 @@ build/wasm/
 examples/wasm/**/*.wasm
 
 # Android local build outputs
-android/out/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/**/.cxx/
+mobile/android/local.propertiesandroid/out/
 android/build/
 android/**/app/build/
 *.apk
