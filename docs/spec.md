@@ -5,6 +5,7 @@ It is aligned with:
 - `docs/live-compilation-prd.md`
 - `docs/build_checklist.md`
 - `docs/spec_implementation_status.md` (spec section -> Rust implementation status table)
+- `docs/android_workshop_prd.md` for Android workshop product/editor requirements
 
 The focus is deterministic simulation/game logic with static memory, in-process incremental compilation, and safe hot swap.
 
@@ -769,3 +770,4 @@ Rules:
 
 This document defines the current direction.
 Legacy bootstrap/tooling details from prior repository generations are intentionally excluded.
+
