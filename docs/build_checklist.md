@@ -114,6 +114,14 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Multi-file project edit application, struct replacement, function replacement, and wrong-target rejection.
 - Done gate: Struct edits can force `ResetRequired` via the existing reload classifier.
 - Status: `completed`
+
+#### AW7 - Symbol Placement Planner
+- Language: `Rust`.
+- Scope: Apply Android workshop placement rules for new/moved symbols: structs, lifecycle functions, receiver-owned functions, struct constructors, root utilities, and system functions.
+- Deliverable: Android can choose the correct `.stasis` file before creating a symbol or requesting an AI edit.
+- Tests: Lifecycle/root placement, struct-owned receiver placement, struct-return constructor placement, system placement, and struct file placement.
+- Done gate: Placement results match the Android Workshop PRD function placement rules.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

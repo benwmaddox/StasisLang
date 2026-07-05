@@ -200,6 +200,151 @@ fn normalize_workshop_project_path(project_root: &Path, path: &Path) -> String {
         .to_string()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkshopSymbolPlacementRequest {
+    pub kind: WorkshopPlacementSymbolKind,
+    pub name: String,
+    #[serde(default)]
+    pub params: Vec<WorkshopFunctionParam>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkshopPlacementSymbolKind {
+    Struct,
+    Function,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkshopFunctionParam {
+    pub name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkshopSymbolPlacement {
+    pub file: String,
+    pub group: String,
+    pub reason: String,
+}
+
+pub fn plan_workshop_symbol_placement(
+    files: &[WorkshopSourceFile],
+    request: &WorkshopSymbolPlacementRequest,
+) -> Result<WorkshopSymbolPlacement, String> {
+    let known_structs = collect_workshop_struct_names(files)?;
+    match request.kind {
+        WorkshopPlacementSymbolKind::Struct => Ok(WorkshopSymbolPlacement {
+            file: format!("src/{}.stasis", snake_case(&request.name)),
+            group: request.name.clone(),
+            reason: "Struct definitions go in their own file.".to_string(),
+        }),
+        WorkshopPlacementSymbolKind::Function => {
+            plan_workshop_function_placement(request, &known_structs)
+        }
+    }
+}
+
+fn plan_workshop_function_placement(
+    request: &WorkshopSymbolPlacementRequest,
+    known_structs: &BTreeSet<String>,
+) -> Result<WorkshopSymbolPlacement, String> {
+    if is_lifecycle_function(&request.name) {
+        return Ok(WorkshopSymbolPlacement {
+            file: "src/main.stasis".to_string(),
+            group: "Main".to_string(),
+            reason: "Lifecycle functions live in main.stasis.".to_string(),
+        });
+    }
+
+    if let Some(system) = request
+        .system
+        .as_deref()
+        .filter(|system| !system.trim().is_empty())
+    {
+        let system_name = system.trim();
+        return Ok(WorkshopSymbolPlacement {
+            file: format!("src/systems/{}.stasis", snake_case(system_name)),
+            group: title_case_words(system_name),
+            reason: "Cross-struct behavior lives in systems/<system>.stasis.".to_string(),
+        });
+    }
+
+    if let Some(owner) = request
+        .owner
+        .as_deref()
+        .filter(|owner| known_structs.contains(*owner))
+    {
+        return Ok(struct_owned_function_placement(
+            owner,
+            "Receiver-style functions live with their receiver type.",
+        ));
+    }
+
+    if let Some(first_param) = request.params.first() {
+        if known_structs.contains(&first_param.type_name) {
+            return Ok(struct_owned_function_placement(
+                &first_param.type_name,
+                "Functions whose first parameter is a struct view live with that struct type.",
+            ));
+        }
+    }
+
+    if let Some(return_type) = request.return_type.as_deref() {
+        if known_structs.contains(return_type) {
+            return Ok(struct_owned_function_placement(
+                return_type,
+                "Functions that return or create a specific struct live with that struct type.",
+            ));
+        }
+    }
+
+    Ok(WorkshopSymbolPlacement {
+        file: "src/root.stasis".to_string(),
+        group: "Root".to_string(),
+        reason: "No-owner utility functions live in root.stasis.".to_string(),
+    })
+}
+
+fn struct_owned_function_placement(owner: &str, reason: &str) -> WorkshopSymbolPlacement {
+    WorkshopSymbolPlacement {
+        file: format!("src/{}.stasis", snake_case(owner)),
+        group: owner.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+fn collect_workshop_struct_names(files: &[WorkshopSourceFile]) -> Result<BTreeSet<String>, String> {
+    let mut out = BTreeSet::new();
+    for file in files {
+        let layout = parse_top_level_type_layout(&file.source)?;
+        for parsed in layout.structs {
+            out.insert(parsed.name);
+        }
+    }
+    Ok(out)
+}
+
+fn title_case_words(value: &str) -> String {
+    value
+        .split(|ch: char| ch == '_' || ch == '-' || ch.is_ascii_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<String>()
+}
+
 pub fn build_workshop_symbol_tree(
     files: &[WorkshopSourceFile],
 ) -> Result<WorkshopSymbolTree, String> {
@@ -1610,5 +1755,128 @@ mod project_edit_tests {
         let error = apply_ai_code_response_to_project(&files, &response)
             .expect_err("expected target validation error");
         assert!(error.contains("expected struct `Player`"));
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    fn placement_files() -> Vec<WorkshopSourceFile> {
+        vec![
+            WorkshopSourceFile {
+                path: "src/player.stasis".to_string(),
+                source: "struct Player { x: f32; }\n".to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/enemy.stasis".to_string(),
+                source: "struct Enemy { hp: i32; }\n".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn plans_lifecycle_and_root_function_files() {
+        let files = placement_files();
+        let tick = plan_workshop_symbol_placement(
+            &files,
+            &WorkshopSymbolPlacementRequest {
+                kind: WorkshopPlacementSymbolKind::Function,
+                name: "tick".to_string(),
+                params: Vec::new(),
+                return_type: Some("void".to_string()),
+                owner: None,
+                system: None,
+            },
+        )
+        .expect("tick placement");
+        assert_eq!(tick.file, "src/main.stasis");
+        assert_eq!(tick.group, "Main");
+
+        let utility = plan_workshop_symbol_placement(
+            &files,
+            &WorkshopSymbolPlacementRequest {
+                kind: WorkshopPlacementSymbolKind::Function,
+                name: "get_starting_level_index".to_string(),
+                params: Vec::new(),
+                return_type: Some("i32".to_string()),
+                owner: None,
+                system: None,
+            },
+        )
+        .expect("root placement");
+        assert_eq!(utility.file, "src/root.stasis");
+        assert_eq!(utility.group, "Root");
+    }
+
+    #[test]
+    fn plans_struct_owned_function_and_constructor_files() {
+        let files = placement_files();
+        let receiver = plan_workshop_symbol_placement(
+            &files,
+            &WorkshopSymbolPlacementRequest {
+                kind: WorkshopPlacementSymbolKind::Function,
+                name: "jump".to_string(),
+                params: vec![WorkshopFunctionParam {
+                    name: "self".to_string(),
+                    type_name: "Player".to_string(),
+                }],
+                return_type: Some("void".to_string()),
+                owner: None,
+                system: None,
+            },
+        )
+        .expect("receiver placement");
+        assert_eq!(receiver.file, "src/player.stasis");
+        assert_eq!(receiver.group, "Player");
+
+        let constructor = plan_workshop_symbol_placement(
+            &files,
+            &WorkshopSymbolPlacementRequest {
+                kind: WorkshopPlacementSymbolKind::Function,
+                name: "create_default_player".to_string(),
+                params: Vec::new(),
+                return_type: Some("Player".to_string()),
+                owner: None,
+                system: None,
+            },
+        )
+        .expect("constructor placement");
+        assert_eq!(constructor.file, "src/player.stasis");
+        assert!(constructor.reason.contains("return or create"));
+    }
+
+    #[test]
+    fn plans_system_and_struct_definition_files() {
+        let files = placement_files();
+        let system = plan_workshop_symbol_placement(
+            &files,
+            &WorkshopSymbolPlacementRequest {
+                kind: WorkshopPlacementSymbolKind::Function,
+                name: "collision_update".to_string(),
+                params: Vec::new(),
+                return_type: Some("void".to_string()),
+                owner: None,
+                system: Some("collision".to_string()),
+            },
+        )
+        .expect("system placement");
+        assert_eq!(system.file, "src/systems/collision.stasis");
+        assert_eq!(system.group, "Collision");
+
+        let projectile = plan_workshop_symbol_placement(
+            &files,
+            &WorkshopSymbolPlacementRequest {
+                kind: WorkshopPlacementSymbolKind::Struct,
+                name: "Projectile".to_string(),
+                params: Vec::new(),
+                return_type: None,
+                owner: None,
+                system: None,
+            },
+        )
+        .expect("struct placement");
+        assert_eq!(projectile.file, "src/projectile.stasis");
+        assert_eq!(projectile.group, "Projectile");
     }
 }
