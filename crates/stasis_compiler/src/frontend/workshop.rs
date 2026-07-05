@@ -397,6 +397,171 @@ fn token_text<'a>(source: &'a str, token: Token) -> &'a str {
     &source[token.start..token.end]
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AiCodeRequest {
+    pub user_prompt: String,
+    pub selected_symbols: Vec<AiSelectedSymbol>,
+    pub stasis_style_rules: StasisStyleRules,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AiSelectedSymbol {
+    pub kind: AiSelectedSymbolKind,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub file: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiSelectedSymbolKind {
+    Struct,
+    Function,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StasisStyleRules {
+    pub use_function_keyword: bool,
+    pub use_receiver_style_when_possible: bool,
+    pub do_not_use_rust_references: bool,
+    pub struct_functions_live_with_struct: bool,
+    pub lifecycle_functions_live_in_main: bool,
+    pub no_owner_functions_live_in_root: bool,
+}
+
+impl StasisStyleRules {
+    pub fn android_default() -> Self {
+        Self {
+            use_function_keyword: true,
+            use_receiver_style_when_possible: true,
+            do_not_use_rust_references: true,
+            struct_functions_live_with_struct: true,
+            lifecycle_functions_live_in_main: true,
+            no_owner_functions_live_in_root: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AiCodeResponse {
+    pub summary: String,
+    pub edits: Vec<AiCodeEdit>,
+    pub expected_reload: ExpectedReload,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AiCodeEdit {
+    pub kind: AiCodeEditKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub name: String,
+    pub file: String,
+    pub new_source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiCodeEditKind {
+    ReplaceFunction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ExpectedReload {
+    FastReload,
+    ResetRequired,
+}
+
+pub fn selected_symbol_from_workshop_symbol(symbol: &WorkshopSymbol) -> AiSelectedSymbol {
+    AiSelectedSymbol {
+        kind: match symbol.kind {
+            WorkshopSymbolKind::Struct => AiSelectedSymbolKind::Struct,
+            WorkshopSymbolKind::Function => AiSelectedSymbolKind::Function,
+        },
+        name: symbol.name.clone(),
+        owner: symbol.owner.clone(),
+        file: symbol.file.clone(),
+        source: symbol.source.clone(),
+    }
+}
+
+pub fn apply_ai_code_response_to_file(
+    file_path: &str,
+    source: &str,
+    symbols: &[WorkshopSymbol],
+    response: &AiCodeResponse,
+) -> Result<String, String> {
+    let mut replacements = Vec::new();
+    for edit in &response.edits {
+        if edit.file != file_path {
+            continue;
+        }
+        if edit.kind != AiCodeEditKind::ReplaceFunction {
+            return Err(format!("unsupported AI edit kind for {}", edit.name));
+        }
+        validate_replacement_function_source(&edit.new_source)?;
+        let symbol = symbols
+            .iter()
+            .find(|symbol| {
+                symbol.kind == WorkshopSymbolKind::Function
+                    && symbol.name == edit.name
+                    && symbol.owner == edit.owner
+                    && symbol.file == edit.file
+            })
+            .ok_or_else(|| {
+                format!(
+                    "AI edit target not found: owner={:?} name={} file={}",
+                    edit.owner, edit.name, edit.file
+                )
+            })?;
+        replacements.push((
+            symbol.source_span.start as usize..symbol.source_span.end as usize,
+            edit.new_source.clone(),
+        ));
+    }
+
+    if replacements.is_empty() {
+        return Ok(source.to_string());
+    }
+
+    replacements.sort_by_key(|(range, _)| range.start);
+    for pair in replacements.windows(2) {
+        if pair[0].0.end > pair[1].0.start {
+            return Err("AI edits overlap in source file".to_string());
+        }
+    }
+
+    let mut updated = source.to_string();
+    for (range, replacement) in replacements.into_iter().rev() {
+        if range.end > updated.len()
+            || range.start > range.end
+            || !updated.is_char_boundary(range.start)
+            || !updated.is_char_boundary(range.end)
+        {
+            return Err("AI edit target span is invalid for source file".to_string());
+        }
+        updated.replace_range(range, &replacement);
+    }
+    Ok(updated)
+}
+
+fn validate_replacement_function_source(source: &str) -> Result<(), String> {
+    let trimmed = source.trim_start();
+    if !trimmed.starts_with("function ") {
+        return Err("replace_function edit must provide Stasis function source".to_string());
+    }
+    if trimmed.contains("&mut") || trimmed.contains("->") {
+        return Err(
+            "replace_function edit must use Stasis syntax, not Rust reference or arrow syntax"
+                .to_string(),
+        );
+    }
+    parse_top_level_functions(trimmed)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,5 +670,105 @@ function player_overlaps_enemy(player: Player, enemy: Enemy): bool { return true
             .symbols
             .iter()
             .all(|symbol| symbol.owner.is_none()));
+    }
+}
+
+#[cfg(test)]
+mod ai_tests {
+    use super::*;
+
+    #[test]
+    fn serializes_android_ai_request_with_stasis_style_rules() {
+        let symbol = WorkshopSymbol {
+            kind: WorkshopSymbolKind::Function,
+            name: "jump".to_string(),
+            owner: Some("Player".to_string()),
+            file: "src/player.stasis".to_string(),
+            signature: "jump(self: Player): void".to_string(),
+            source_span: WorkshopSourceSpan { start: 0, end: 52 },
+            source: "function jump(self: Player): void { return; }".to_string(),
+        };
+        let request = AiCodeRequest {
+            user_prompt: "Make the player jump higher but prevent repeated jumps.".to_string(),
+            selected_symbols: vec![selected_symbol_from_workshop_symbol(&symbol)],
+            stasis_style_rules: StasisStyleRules::android_default(),
+        };
+
+        let json = serde_json::to_string(&request).expect("serialize request");
+        assert!(json.contains("\"use_function_keyword\":true"));
+        assert!(json.contains("\"use_receiver_style_when_possible\":true"));
+        assert!(json.contains("\"do_not_use_rust_references\":true"));
+        assert!(json.contains("\"owner\":\"Player\""));
+        assert!(!json.contains("&mut"));
+    }
+
+    #[test]
+    fn applies_replace_function_edit_to_selected_symbol_span() {
+        let source = "struct Player { velocity_y: f32; jump_cooldown_ticks: i32; }\n\nfunction jump(self: Player): void {\n    self.velocity_y = -8.5;\n}\n";
+        let file = WorkshopSourceFile {
+            path: "src/player.stasis".to_string(),
+            source: source.to_string(),
+        };
+        let tree = build_workshop_symbol_tree(&[file]).expect("symbol tree");
+        let player = tree
+            .groups
+            .iter()
+            .find(|group| group.name == "Player")
+            .expect("player group");
+        let replacement = "function jump(self: Player): void {\n    self.velocity_y = -10.0;\n    self.jump_cooldown_ticks = 12;\n}";
+        let response = AiCodeResponse {
+            summary: "Increased jump strength and added a short cooldown.".to_string(),
+            edits: vec![AiCodeEdit {
+                kind: AiCodeEditKind::ReplaceFunction,
+                owner: Some("Player".to_string()),
+                name: "jump".to_string(),
+                file: "src/player.stasis".to_string(),
+                new_source: replacement.to_string(),
+            }],
+            expected_reload: ExpectedReload::FastReload,
+            reason: "Only function bodies changed.".to_string(),
+        };
+
+        let updated =
+            apply_ai_code_response_to_file("src/player.stasis", source, &player.symbols, &response)
+                .expect("apply edit");
+        assert!(updated.contains("self.velocity_y = -10.0;"));
+        assert!(updated.contains("self.jump_cooldown_ticks = 12;"));
+        assert!(!updated.contains("self.velocity_y = -8.5;"));
+        assert!(updated.starts_with("struct Player"));
+    }
+
+    #[test]
+    fn rejects_replace_function_edit_with_rust_style_source() {
+        let source = "function jump(self: Player): void { return; }\n";
+        let symbol = WorkshopSymbol {
+            kind: WorkshopSymbolKind::Function,
+            name: "jump".to_string(),
+            owner: Some("Player".to_string()),
+            file: "src/player.stasis".to_string(),
+            signature: "jump(self: Player): void".to_string(),
+            source_span: WorkshopSourceSpan {
+                start: 0,
+                end: source.len() as u32,
+            },
+            source: source.to_string(),
+        };
+        let response = AiCodeResponse {
+            summary: "bad".to_string(),
+            edits: vec![AiCodeEdit {
+                kind: AiCodeEditKind::ReplaceFunction,
+                owner: Some("Player".to_string()),
+                name: "jump".to_string(),
+                file: "src/player.stasis".to_string(),
+                new_source: "fn jump(self: &mut Player) -> void { }".to_string(),
+            }],
+            expected_reload: ExpectedReload::FastReload,
+            reason: "bad syntax".to_string(),
+        };
+
+        let error =
+            apply_ai_code_response_to_file("src/player.stasis", source, &[symbol], &response)
+                .expect_err("expected syntax rejection");
+        assert!(error.contains("Stasis function source"));
     }
 }
