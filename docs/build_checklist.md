@@ -72,7 +72,7 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Deliverable: The compiler frontend can map editable symbols to `.stasis` files and source spans.
 - Tests: Deterministic unit tests over the Android workshop example layout.
 - Done gate: Symbol tree groups match `Main`, `Structs`, `Systems`, and `Root`.
-- Status: `planned`
+- Status: `completed`
 
 #### AW2 - AI Patch Contract and Source Replacement
 - Language: `Rust`.
@@ -80,7 +80,7 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Deliverable: `replace_function` edits can update selected symbols while preserving normal files on disk.
 - Tests: Contract serialization and function-span replacement tests.
 - Done gate: Patch contract prefers receiver-style owner metadata and rejects mismatched symbol/file targets.
-- Status: `planned`
+- Status: `completed`
 
 #### AW3 - Reload Classification for Android UX
 - Language: `Rust`.
@@ -88,7 +88,7 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Deliverable: Compiler/editor can explain reload expectations before or after a patch.
 - Tests: Function-body edit and struct-layout edit tests.
 - Done gate: Classification reason strings identify changed layout/signature facts.
-- Status: `planned`
+- Status: `completed`
 
 #### AW4 - GitHub API Change Summary Model
 - Language: `Rust`.

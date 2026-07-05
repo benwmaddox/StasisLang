@@ -547,6 +547,277 @@ pub fn apply_ai_code_response_to_file(
     Ok(updated)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopReloadClassification {
+    pub expected_reload: ExpectedReload,
+    pub reason: String,
+    pub changed_symbols: Vec<WorkshopChangedSymbol>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopChangedSymbol {
+    pub kind: WorkshopSymbolKind,
+    pub name: String,
+    pub owner: Option<String>,
+    pub file: String,
+    pub signature: String,
+    pub change: WorkshopSymbolChange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkshopSymbolChange {
+    Added,
+    Modified,
+    Removed,
+}
+
+pub fn classify_workshop_reload(
+    before: &[WorkshopSourceFile],
+    after: &[WorkshopSourceFile],
+) -> Result<WorkshopReloadClassification, String> {
+    let before_layout = layout_fingerprint(before)?;
+    let after_layout = layout_fingerprint(after)?;
+    let before_tree = build_workshop_symbol_tree(before)?;
+    let after_tree = build_workshop_symbol_tree(after)?;
+    let changed_symbols = changed_symbols_between(&before_tree, &after_tree);
+
+    if before_layout != after_layout {
+        return Ok(WorkshopReloadClassification {
+            expected_reload: ExpectedReload::ResetRequired,
+            reason: layout_change_reason(before, after)?,
+            changed_symbols,
+        });
+    }
+
+    if let Some(reason) = function_signature_change_reason(&before_tree, &after_tree) {
+        return Ok(WorkshopReloadClassification {
+            expected_reload: ExpectedReload::ResetRequired,
+            reason,
+            changed_symbols,
+        });
+    }
+
+    if changed_symbols.is_empty() {
+        return Ok(WorkshopReloadClassification {
+            expected_reload: ExpectedReload::FastReload,
+            reason: "No symbol changes detected.".to_string(),
+            changed_symbols,
+        });
+    }
+
+    Ok(WorkshopReloadClassification {
+        expected_reload: ExpectedReload::FastReload,
+        reason: "Only function bodies changed; layouts and function signatures are unchanged."
+            .to_string(),
+        changed_symbols,
+    })
+}
+
+fn layout_fingerprint(files: &[WorkshopSourceFile]) -> Result<String, String> {
+    let mut parts = Vec::new();
+    for file in files {
+        let layout = parse_top_level_type_layout(&file.source)?;
+        for parsed in layout.structs {
+            let fields = parsed
+                .fields
+                .iter()
+                .map(|field| format!("{}:{}", field.name, field.type_name))
+                .collect::<Vec<_>>()
+                .join(",");
+            parts.push(format!("{}|struct|{}|{}", file.path, parsed.name, fields));
+        }
+        for parsed in layout.globals {
+            parts.push(format!(
+                "{}|global|{}|{}",
+                file.path, parsed.name, parsed.type_name
+            ));
+        }
+        for parsed in layout.global_blocks {
+            let fields = parsed
+                .fields
+                .iter()
+                .map(|field| format!("{}:{}", field.name, field.type_name))
+                .collect::<Vec<_>>()
+                .join(",");
+            parts.push(format!(
+                "{}|global_block|{}|{}",
+                file.path, parsed.name, fields
+            ));
+        }
+    }
+    parts.sort();
+    Ok(parts.join("\n"))
+}
+
+fn layout_change_reason(
+    before: &[WorkshopSourceFile],
+    after: &[WorkshopSourceFile],
+) -> Result<String, String> {
+    let before_structs = struct_layouts_by_name(before)?;
+    let after_structs = struct_layouts_by_name(after)?;
+    for (name, before_layout) in &before_structs {
+        if after_structs
+            .get(name)
+            .is_some_and(|after_layout| after_layout != before_layout)
+        {
+            return Ok(format!(
+                "{} layout changed. Global memory layout may need to be rebuilt.",
+                name
+            ));
+        }
+    }
+    for name in after_structs.keys() {
+        if !before_structs.contains_key(name) {
+            return Ok(format!(
+                "{} layout was added. Global memory layout may need to be rebuilt.",
+                name
+            ));
+        }
+    }
+    for name in before_structs.keys() {
+        if !after_structs.contains_key(name) {
+            return Ok(format!(
+                "{} layout was removed. Global memory layout may need to be rebuilt.",
+                name
+            ));
+        }
+    }
+    Ok(
+        "Global memory layout changed; current runtime state cannot be blindly preserved."
+            .to_string(),
+    )
+}
+
+fn struct_layouts_by_name(
+    files: &[WorkshopSourceFile],
+) -> Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    for file in files {
+        let layout = parse_top_level_type_layout(&file.source)?;
+        for parsed in layout.structs {
+            let fields = parsed
+                .fields
+                .iter()
+                .map(|field| format!("{}:{}", field.name, field.type_name))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.insert(parsed.name, fields);
+        }
+    }
+    Ok(out)
+}
+
+fn function_signature_change_reason(
+    before_tree: &WorkshopSymbolTree,
+    after_tree: &WorkshopSymbolTree,
+) -> Option<String> {
+    let before = function_symbols_by_identity(before_tree);
+    let after = function_symbols_by_identity(after_tree);
+    for (identity, before_symbol) in before {
+        let Some(after_symbol) = after.get(&identity) else {
+            continue;
+        };
+        if before_symbol.signature != after_symbol.signature {
+            return Some(format!(
+                "{} signature changed from `{}` to `{}`.",
+                before_symbol.name, before_symbol.signature, after_symbol.signature
+            ));
+        }
+    }
+    None
+}
+
+fn changed_symbols_between(
+    before_tree: &WorkshopSymbolTree,
+    after_tree: &WorkshopSymbolTree,
+) -> Vec<WorkshopChangedSymbol> {
+    let before = symbols_by_identity(before_tree);
+    let after = symbols_by_identity(after_tree);
+    let mut changed = Vec::new();
+
+    for (identity, before_symbol) in &before {
+        match after.get(identity) {
+            Some(after_symbol) if after_symbol.source != before_symbol.source => {
+                changed.push(changed_symbol_from(
+                    after_symbol,
+                    WorkshopSymbolChange::Modified,
+                ));
+            }
+            None => changed.push(changed_symbol_from(
+                before_symbol,
+                WorkshopSymbolChange::Removed,
+            )),
+            _ => {}
+        }
+    }
+    for (identity, after_symbol) in &after {
+        if !before.contains_key(identity) {
+            changed.push(changed_symbol_from(
+                after_symbol,
+                WorkshopSymbolChange::Added,
+            ));
+        }
+    }
+    changed.sort_by_key(|symbol| {
+        (
+            symbol.file.clone(),
+            symbol.owner.clone(),
+            symbol.name.clone(),
+        )
+    });
+    changed
+}
+
+fn symbols_by_identity(tree: &WorkshopSymbolTree) -> BTreeMap<SymbolIdentity, &WorkshopSymbol> {
+    let mut out = BTreeMap::new();
+    for group in &tree.groups {
+        for symbol in &group.symbols {
+            out.insert(symbol_identity(symbol), symbol);
+        }
+    }
+    out
+}
+
+fn function_symbols_by_identity(
+    tree: &WorkshopSymbolTree,
+) -> BTreeMap<SymbolIdentity, &WorkshopSymbol> {
+    symbols_by_identity(tree)
+        .into_iter()
+        .filter(|(_, symbol)| symbol.kind == WorkshopSymbolKind::Function)
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SymbolIdentity {
+    kind: WorkshopSymbolKind,
+    file: String,
+    owner: Option<String>,
+    name: String,
+}
+
+fn symbol_identity(symbol: &WorkshopSymbol) -> SymbolIdentity {
+    SymbolIdentity {
+        kind: symbol.kind,
+        file: symbol.file.clone(),
+        owner: symbol.owner.clone(),
+        name: symbol.name.clone(),
+    }
+}
+
+fn changed_symbol_from(
+    symbol: &WorkshopSymbol,
+    change: WorkshopSymbolChange,
+) -> WorkshopChangedSymbol {
+    WorkshopChangedSymbol {
+        kind: symbol.kind,
+        name: symbol.name.clone(),
+        owner: symbol.owner.clone(),
+        file: symbol.file.clone(),
+        signature: symbol.signature.clone(),
+        change,
+    }
+}
+
 fn validate_replacement_function_source(source: &str) -> Result<(), String> {
     let trimmed = source.trim_start();
     if !trimmed.starts_with("function ") {
@@ -770,5 +1041,69 @@ mod ai_tests {
             apply_ai_code_response_to_file("src/player.stasis", source, &[symbol], &response)
                 .expect_err("expected syntax rejection");
         assert!(error.contains("Stasis function source"));
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+
+    fn player_file(source: &str) -> WorkshopSourceFile {
+        WorkshopSourceFile {
+            path: "src/player.stasis".to_string(),
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn classifies_function_body_change_as_fast_reload() {
+        let before = vec![player_file(
+            "struct Player { velocity_y: f32; jump_cooldown_ticks: i32; }\nfunction jump(self: Player): void { self.velocity_y = -8.5; }\n",
+        )];
+        let after = vec![player_file(
+            "struct Player { velocity_y: f32; jump_cooldown_ticks: i32; }\nfunction jump(self: Player): void { self.velocity_y = -10.0; self.jump_cooldown_ticks = 12; }\n",
+        )];
+
+        let classified = classify_workshop_reload(&before, &after).expect("classify");
+        assert_eq!(classified.expected_reload, ExpectedReload::FastReload);
+        assert!(classified.reason.contains("function bodies changed"));
+        assert_eq!(classified.changed_symbols.len(), 1);
+        assert_eq!(classified.changed_symbols[0].name, "jump");
+        assert_eq!(
+            classified.changed_symbols[0].owner.as_deref(),
+            Some("Player")
+        );
+        assert_eq!(
+            classified.changed_symbols[0].change,
+            WorkshopSymbolChange::Modified
+        );
+    }
+
+    #[test]
+    fn classifies_struct_layout_change_as_reset_required() {
+        let before = vec![player_file(
+            "struct Player { velocity_y: f32; jump_cooldown_ticks: i32; }\nfunction jump(self: Player): void { self.velocity_y = -8.5; }\n",
+        )];
+        let after = vec![player_file(
+            "struct Player { velocity_y: f32; jump_cooldown_ticks: i32; dash_cooldown_ticks: i32; }\nfunction jump(self: Player): void { self.velocity_y = -8.5; }\n",
+        )];
+
+        let classified = classify_workshop_reload(&before, &after).expect("classify");
+        assert_eq!(classified.expected_reload, ExpectedReload::ResetRequired);
+        assert!(classified.reason.contains("Player layout changed"));
+    }
+
+    #[test]
+    fn classifies_function_signature_change_as_reset_required() {
+        let before = vec![player_file(
+            "struct Player { velocity_y: f32; }\nfunction jump(self: Player): void { self.velocity_y = -8.5; }\n",
+        )];
+        let after = vec![player_file(
+            "struct Player { velocity_y: f32; }\nfunction jump(self: Player, strength: f32): void { self.velocity_y = strength; }\n",
+        )];
+
+        let classified = classify_workshop_reload(&before, &after).expect("classify");
+        assert_eq!(classified.expected_reload, ExpectedReload::ResetRequired);
+        assert!(classified.reason.contains("jump signature changed"));
     }
 }
