@@ -106,6 +106,14 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Import-closure loading, normalized path ordering, and missing-import diagnostics.
 - Done gate: Unused `.stasis` files outside the import closure are not loaded for symbol editing.
 - Status: `completed`
+
+#### AW6 - Project-Wide Symbol Edit Application
+- Language: `Rust`.
+- Scope: Apply approved AI/editor symbol edits across a loaded Android workshop project, including both `replace_function` and `replace_struct` edits.
+- Deliverable: Android can update normal `.stasis` files by symbol without hand-editing file text, then classify reload expectations from the before/after project sources.
+- Tests: Multi-file project edit application, struct replacement, function replacement, and wrong-target rejection.
+- Done gate: Struct edits can force `ResetRequired` via the existing reload classifier.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

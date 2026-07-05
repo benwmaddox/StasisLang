@@ -605,6 +605,7 @@ pub struct AiCodeEdit {
 #[serde(rename_all = "snake_case")]
 pub enum AiCodeEditKind {
     ReplaceFunction,
+    ReplaceStruct,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -637,16 +638,22 @@ pub fn apply_ai_code_response_to_file(
         if edit.file != file_path {
             continue;
         }
-        if edit.kind != AiCodeEditKind::ReplaceFunction {
-            return Err(format!("unsupported AI edit kind for {}", edit.name));
-        }
-        validate_replacement_function_source(&edit.new_source)?;
+        let expected_kind = match edit.kind {
+            AiCodeEditKind::ReplaceFunction => {
+                validate_replacement_function_source(&edit.name, &edit.new_source)?;
+                WorkshopSymbolKind::Function
+            }
+            AiCodeEditKind::ReplaceStruct => {
+                validate_replacement_struct_source(&edit.name, &edit.new_source)?;
+                WorkshopSymbolKind::Struct
+            }
+        };
         let symbol = symbols
             .iter()
             .find(|symbol| {
-                symbol.kind == WorkshopSymbolKind::Function
+                symbol.kind == expected_kind
                     && symbol.name == edit.name
-                    && symbol.owner == edit.owner
+                    && (symbol.owner == edit.owner || edit.owner.is_none())
                     && symbol.file == edit.file
             })
             .ok_or_else(|| {
@@ -682,6 +689,26 @@ pub fn apply_ai_code_response_to_file(
             return Err("AI edit target span is invalid for source file".to_string());
         }
         updated.replace_range(range, &replacement);
+    }
+    Ok(updated)
+}
+
+pub fn apply_ai_code_response_to_project(
+    files: &[WorkshopSourceFile],
+    response: &AiCodeResponse,
+) -> Result<Vec<WorkshopSourceFile>, String> {
+    let tree = build_workshop_symbol_tree(files)?;
+    let symbols = tree
+        .groups
+        .iter()
+        .flat_map(|group| group.symbols.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut updated = Vec::with_capacity(files.len());
+    for file in files {
+        updated.push(WorkshopSourceFile {
+            path: file.path.clone(),
+            source: apply_ai_code_response_to_file(&file.path, &file.source, &symbols, response)?,
+        });
     }
     Ok(updated)
 }
@@ -1044,18 +1071,52 @@ fn changed_symbol_from(
     }
 }
 
-fn validate_replacement_function_source(source: &str) -> Result<(), String> {
+fn validate_replacement_function_source(expected_name: &str, source: &str) -> Result<(), String> {
     let trimmed = source.trim_start();
     if !trimmed.starts_with("function ") {
         return Err("replace_function edit must provide Stasis function source".to_string());
     }
-    if trimmed.contains("&mut") || trimmed.contains("->") {
-        return Err(
-            "replace_function edit must use Stasis syntax, not Rust reference or arrow syntax"
-                .to_string(),
-        );
+    reject_rust_style_replacement("replace_function", trimmed)?;
+    let functions = parse_top_level_functions(trimmed)?;
+    if !functions
+        .iter()
+        .any(|function| function.name == expected_name)
+    {
+        return Err(format!(
+            "replace_function source does not define expected function `{}`",
+            expected_name
+        ));
     }
-    parse_top_level_functions(trimmed)?;
+    Ok(())
+}
+
+fn validate_replacement_struct_source(expected_name: &str, source: &str) -> Result<(), String> {
+    let trimmed = source.trim_start();
+    if !trimmed.starts_with("struct ") {
+        return Err("replace_struct edit must provide Stasis struct source".to_string());
+    }
+    reject_rust_style_replacement("replace_struct", trimmed)?;
+    let layout = parse_top_level_type_layout(trimmed)?;
+    if !layout
+        .structs
+        .iter()
+        .any(|parsed| parsed.name == expected_name)
+    {
+        return Err(format!(
+            "replace_struct source does not define expected struct `{}`",
+            expected_name
+        ));
+    }
+    Ok(())
+}
+
+fn reject_rust_style_replacement(kind: &str, source: &str) -> Result<(), String> {
+    if source.contains("&mut") || source.contains("->") {
+        return Err(format!(
+            "{} edit must use Stasis syntax, not Rust reference or arrow syntax",
+            kind
+        ));
+    }
     Ok(())
 }
 
@@ -1465,5 +1526,89 @@ mod project_loader_tests {
             .expect_err("expected missing import failure");
         assert!(error.contains("missing.stasis"));
         fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod project_edit_tests {
+    use super::*;
+
+    #[test]
+    fn applies_struct_and_function_edits_across_project_files() {
+        let before = vec![
+            WorkshopSourceFile {
+                path: "src/player.stasis".to_string(),
+                source: "struct Player { velocity_y: f32; }\nfunction jump(self: Player): void { self.velocity_y = -8.5; }\n".to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/enemy.stasis".to_string(),
+                source: "struct Enemy { hp: i32; }\nfunction damage(self: Enemy, amount: i32): void { self.hp -= amount; }\n".to_string(),
+            },
+        ];
+        let response = AiCodeResponse {
+            summary: "Add player jump cooldown and increase enemy damage.".to_string(),
+            edits: vec![
+                AiCodeEdit {
+                    kind: AiCodeEditKind::ReplaceStruct,
+                    owner: None,
+                    name: "Player".to_string(),
+                    file: "src/player.stasis".to_string(),
+                    new_source: "struct Player { velocity_y: f32; jump_cooldown_ticks: i32; }"
+                        .to_string(),
+                },
+                AiCodeEdit {
+                    kind: AiCodeEditKind::ReplaceFunction,
+                    owner: Some("Enemy".to_string()),
+                    name: "damage".to_string(),
+                    file: "src/enemy.stasis".to_string(),
+                    new_source:
+                        "function damage(self: Enemy, amount: i32): void { self.hp -= amount * 2; }"
+                            .to_string(),
+                },
+            ],
+            expected_reload: ExpectedReload::ResetRequired,
+            reason: "Player layout changed.".to_string(),
+        };
+
+        let after =
+            apply_ai_code_response_to_project(&before, &response).expect("apply project edits");
+        let player = after
+            .iter()
+            .find(|file| file.path == "src/player.stasis")
+            .expect("player file");
+        let enemy = after
+            .iter()
+            .find(|file| file.path == "src/enemy.stasis")
+            .expect("enemy file");
+        assert!(player.source.contains("jump_cooldown_ticks: i32"));
+        assert!(enemy.source.contains("amount * 2"));
+
+        let classified = classify_workshop_reload(&before, &after).expect("classify");
+        assert_eq!(classified.expected_reload, ExpectedReload::ResetRequired);
+        assert!(classified.reason.contains("Player layout changed"));
+    }
+
+    #[test]
+    fn rejects_struct_edit_that_targets_wrong_symbol_name() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/player.stasis".to_string(),
+            source: "struct Player { velocity_y: f32; }\n".to_string(),
+        }];
+        let response = AiCodeResponse {
+            summary: "bad".to_string(),
+            edits: vec![AiCodeEdit {
+                kind: AiCodeEditKind::ReplaceStruct,
+                owner: None,
+                name: "Player".to_string(),
+                file: "src/player.stasis".to_string(),
+                new_source: "struct Enemy { hp: i32; }".to_string(),
+            }],
+            expected_reload: ExpectedReload::ResetRequired,
+            reason: "bad".to_string(),
+        };
+
+        let error = apply_ai_code_response_to_project(&files, &response)
+            .expect_err("expected target validation error");
+        assert!(error.contains("expected struct `Player`"));
     }
 }
