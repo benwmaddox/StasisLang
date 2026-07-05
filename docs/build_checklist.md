@@ -122,6 +122,14 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Lifecycle/root placement, struct-owned receiver placement, struct-return constructor placement, system placement, and struct file placement.
 - Done gate: Placement results match the Android Workshop PRD function placement rules.
 - Status: `completed`
+
+#### AW8 - Android Phone Smoke Shell
+- Language: `Android Java + C + Gradle + docs`.
+- Scope: Add the first checked-in Android app shell under `mobile/android` with an arm64-only native JNI smoke library.
+- Deliverable: Developers with Android SDK/NDK/JDK/Gradle can build and install a debug app that loads native code and displays a status string on a phone.
+- Tests: Structural Android shell verifier covering manifest, Gradle config, native CMake, JNI entrypoint, and arm64 ABI selection.
+- Done gate: The shell is installable in principle without linking Stasis runtime or game code yet.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
