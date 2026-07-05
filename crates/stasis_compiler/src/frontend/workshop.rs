@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
@@ -62,6 +63,141 @@ struct PendingSymbol {
     group_kind: WorkshopSymbolGroupKind,
     group_name: String,
     symbol: WorkshopSymbol,
+}
+
+pub fn load_workshop_project(
+    project_root: &Path,
+    entry_file: &Path,
+) -> Result<Vec<WorkshopSourceFile>, String> {
+    let entry_path = if entry_file.is_absolute() {
+        entry_file.to_path_buf()
+    } else {
+        project_root.join(entry_file)
+    };
+    let mut visited = BTreeSet::new();
+    let mut out = Vec::new();
+    load_workshop_project_file(project_root, &entry_path, &mut visited, &mut out)?;
+    out.sort_by_key(|file| file.path.clone());
+    Ok(out)
+}
+
+fn load_workshop_project_file(
+    project_root: &Path,
+    path: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+    out: &mut Vec<WorkshopSourceFile>,
+) -> Result<(), String> {
+    let normalized_path = normalize_filesystem_path(path);
+    if !visited.insert(normalized_path.clone()) {
+        return Ok(());
+    }
+
+    let source = fs::read_to_string(&normalized_path)
+        .map_err(|error| format!("failed reading {}: {error}", normalized_path.display()))?;
+    let relative_path = normalize_workshop_project_path(project_root, &normalized_path);
+    out.push(WorkshopSourceFile {
+        path: relative_path,
+        source: source.clone(),
+    });
+
+    for import_path in parse_workshop_import_paths(&source)? {
+        let base_dir = normalized_path.parent().unwrap_or(project_root);
+        let resolved = normalize_filesystem_path(&base_dir.join(import_path));
+        if resolved
+            .extension()
+            .is_none_or(|ext| !ext.eq_ignore_ascii_case("stasis"))
+        {
+            return Err(format!(
+                "import resolved to non-stasis file: {}",
+                resolved.display()
+            ));
+        }
+        load_workshop_project_file(project_root, &resolved, visited, out)?;
+    }
+    Ok(())
+}
+
+fn parse_workshop_import_paths(source: &str) -> Result<Vec<String>, String> {
+    let tokens = lex(source)?;
+    let mut imports = Vec::new();
+    let mut cursor = 0usize;
+    while cursor + 1 < tokens.len() {
+        let token = tokens[cursor];
+        if token.kind == TokenKind::Identifier && token_text(source, token) == "import" {
+            let literal = tokens[cursor + 1];
+            if literal.kind != TokenKind::StringLiteral {
+                return Err("import must be followed by a string literal path".to_string());
+            }
+            imports.push(parse_workshop_string_literal(token_text(source, literal))?);
+            cursor += 2;
+            continue;
+        }
+        cursor += 1;
+    }
+    Ok(imports)
+}
+
+fn parse_workshop_string_literal(literal: &str) -> Result<String, String> {
+    let bytes = literal.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'"' || *bytes.last().unwrap_or(&0) != b'"' {
+        return Err(format!("invalid import string literal: {literal}"));
+    }
+    let mut out = String::new();
+    let mut cursor = 1usize;
+    while cursor + 1 < bytes.len() {
+        let byte = bytes[cursor];
+        if byte == b'\\' {
+            let Some(escaped) = bytes.get(cursor + 1).copied() else {
+                return Err("unterminated escape in import string literal".to_string());
+            };
+            let decoded = match escaped {
+                b'\\' => '\\',
+                b'"' => '"',
+                b'n' => '\n',
+                b'r' => '\r',
+                b't' => '\t',
+                other => {
+                    return Err(format!(
+                        "unsupported escape sequence '\\{}' in import string literal",
+                        other as char
+                    ));
+                }
+            };
+            out.push(decoded);
+            cursor += 2;
+            continue;
+        }
+        out.push(byte as char);
+        cursor += 1;
+    }
+    Ok(out)
+}
+
+fn normalize_filesystem_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn normalize_workshop_project_path(project_root: &Path, path: &Path) -> String {
+    let normalized_root = normalize_filesystem_path(project_root);
+    let normalized_path = normalize_filesystem_path(path);
+    let relative = normalized_path
+        .strip_prefix(&normalized_root)
+        .unwrap_or(normalized_path.as_path());
+    relative
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .to_string()
 }
 
 pub fn build_workshop_symbol_tree(
@@ -1255,5 +1391,79 @@ mod git_summary_tests {
         let diffs_index = json.find("raw_file_diffs").expect("raw_file_diffs key");
         assert!(symbol_index < files_index);
         assert!(files_index < diffs_index);
+    }
+}
+
+#[cfg(test)]
+mod project_loader_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn loads_project_import_closure_with_normalized_paths() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_workshop_project_{stamp}"));
+        let src = root.join("src");
+        let systems = src.join("systems");
+        fs::create_dir_all(&systems).expect("create project dirs");
+        fs::write(
+            src.join("main.stasis"),
+            "import \"player.stasis\";\nimport \"systems/collision.stasis\";\nfunction main(): void { }\n",
+        )
+        .expect("write main");
+        fs::write(
+            src.join("player.stasis"),
+            "struct Player { x: f32; }\nfunction jump(self: Player): void { }\n",
+        )
+        .expect("write player");
+        fs::write(
+            systems.join("collision.stasis"),
+            "import \"../player.stasis\";\nfunction collision_update(): void { }\n",
+        )
+        .expect("write collision");
+        fs::write(src.join("unused.stasis"), "function unused(): void { }\n")
+            .expect("write unused");
+
+        let files =
+            load_workshop_project(&root, Path::new("src/main.stasis")).expect("load project");
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "src/main.stasis",
+                "src/player.stasis",
+                "src/systems/collision.stasis",
+            ]
+        );
+        let tree = build_workshop_symbol_tree(&files).expect("symbol tree");
+        assert!(tree.groups.iter().any(|group| group.name == "Player"));
+        assert!(tree.groups.iter().any(|group| group.name == "Collision"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_project_reports_missing_import_path() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_workshop_missing_import_{stamp}"));
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create project dirs");
+        fs::write(
+            src.join("main.stasis"),
+            "import \"missing.stasis\";\nfunction main(): void { }\n",
+        )
+        .expect("write main");
+
+        let error = load_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("expected missing import failure");
+        assert!(error.contains("missing.stasis"));
+        fs::remove_dir_all(&root).ok();
     }
 }
