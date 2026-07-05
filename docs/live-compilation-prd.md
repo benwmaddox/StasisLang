@@ -25,6 +25,8 @@ The system must:
 - provide clear visual confirmation of successful swaps
 - operate deterministically using tick-based semantics
 
+Android workshop requirements are tracked in `docs/android_workshop_prd.md`. That document locks the sideload-first Android app direction, symbol-first editor model, Stasis-syntax AI patch contracts, GitHub API v1 Git workflow, and preview-renderer selection criteria.
+
 ### 1.2 Non-Goals
 
 This system does not aim to:
@@ -481,3 +483,4 @@ This system is intentionally:
 - developer-trust-focused
 
 It provides a robust, file-level hot reload pipeline with per-function efficiency, an explicit swap hook, and a deterministic tick-based UI confirmation mechanism.
+

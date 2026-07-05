@@ -3,6 +3,7 @@
 This checklist is the implementation plan and is aligned with:
 - `docs/spec.md`
 - `docs/live-compilation-prd.md`
+- `docs/android_workshop_prd.md`
 
 Status note:
 - This repository's stable compiler is implemented in Rust (`cargo build`, `cargo test`).
@@ -17,6 +18,9 @@ Locked decisions:
 - Backend modes are:
 - Cranelift JIT for development/watch/hot-swap runtime
 - Cranelift AOT for production builds
+- Android workshop v1 is sideload-first and uses symbol-based editing over normal `.stasis` files.
+- Android workshop Git v1 uses GitHub API commit/push/PR flow; full local git can come later.
+- Android workshop preview rendering will be selected by least architectural friction, starting near the existing Stasis runtime unless Android-native preview integration is clearly better.
 
 ## Language Ownership Legend
 
@@ -52,6 +56,47 @@ Release AOT optimization:
 Historical bootstrap/self-host notes below are archival only and do not describe an active compiler track.
 
 ## Slice Plan
+### Android Workshop Track
+
+#### AW0 - Product and Syntax Decisions
+- Language: `docs`.
+- Scope: Lock sideload-first distribution, eventual full Android workshop direction, flexible preview surface decision, GitHub API v1 Git workflow, and Stasis-style syntax examples.
+- Deliverable: `docs/android_workshop_prd.md` is the canonical Android workshop product/editor requirements document.
+- Tests: Documentation-only slice; verify the workspace still compiles before implementation slices land.
+- Done gate: No Android workshop examples use Rust-style `fn`/reference syntax for Stasis source.
+- Status: `completed`
+
+#### AW1 - Symbol Tree and Source Span Index
+- Language: `Rust`.
+- Scope: Expose Android editor-facing symbol metadata for lifecycle functions, receiver-owned struct functions, root utilities, and system files.
+- Deliverable: The compiler frontend can map editable symbols to `.stasis` files and source spans.
+- Tests: Deterministic unit tests over the Android workshop example layout.
+- Done gate: Symbol tree groups match `Main`, `Structs`, `Systems`, and `Root`.
+- Status: `planned`
+
+#### AW2 - AI Patch Contract and Source Replacement
+- Language: `Rust`.
+- Scope: Add serializable AI request/response contract structs and apply validated symbol edits back to `.stasis` source spans.
+- Deliverable: `replace_function` edits can update selected symbols while preserving normal files on disk.
+- Tests: Contract serialization and function-span replacement tests.
+- Done gate: Patch contract prefers receiver-style owner metadata and rejects mismatched symbol/file targets.
+- Status: `planned`
+
+#### AW3 - Reload Classification for Android UX
+- Language: `Rust`.
+- Scope: Add Android-facing reload classifications for changed symbol batches: `FastReload` for function-body-only changes and `ResetRequired` for layout/signature changes.
+- Deliverable: Compiler/editor can explain reload expectations before or after a patch.
+- Tests: Function-body edit and struct-layout edit tests.
+- Done gate: Classification reason strings identify changed layout/signature facts.
+- Status: `planned`
+
+#### AW4 - GitHub API Change Summary Model
+- Language: `Rust`.
+- Scope: Add symbol-first change summary DTOs for Android GitHub API commit/push/PR review.
+- Deliverable: Changed symbols are summarized before changed files, with raw file diffs as advanced review data.
+- Tests: Summary ordering and grouping tests.
+- Done gate: `Player`-owned edits group under `Player`; file list contains affected `.stasis` files.
+- Status: `planned`
 
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
@@ -1001,3 +1046,4 @@ Each PR must include:
 ## Backlog
 
 - Evaluate hard security sandbox options (separate process / OS sandbox / WASM runtime) for adversarial plugin or untrusted code scenarios.
+
