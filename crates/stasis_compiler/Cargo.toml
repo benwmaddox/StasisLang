@@ -16,3 +16,7 @@ cranelift-native.workspace = true
 cranelift-object.workspace = true
 stasis_jit = { path = "../stasis_jit" }
 stasis_dynload = { path = "../stasis_dynload" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
