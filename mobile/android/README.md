@@ -7,9 +7,11 @@ Current scope:
 - Builds one Android app module.
 - Targets `arm64-v8a` only.
 - Loads a tiny native C library through JNI.
-- Shows a native status string on screen.
+- Bundles a small Stasis-style workshop project under Android assets.
+- Shows a native Android symbol browser grouped by Main, Structs, Systems, and Root.
+- Lets a selected symbol display its source from the bundled `.stasis` file.
 
-It does not yet link the Stasis runtime or a compiled Stasis game. That is the next mobile build slice.
+It does not yet link the Stasis runtime or compile a Stasis game on-device. That remains the next mobile runtime bridge slice.
 
 ## Build
 
@@ -44,8 +46,13 @@ Install to a connected device:
 .\build_debug.ps1 -Install
 ```
 
-Expected app text:
+Expected app surface:
 
 ```text
-Stasis Android native smoke loaded
+Stasis Workshop
+Stasis Android native smoke loaded - 8 files - 17 symbols
+Main
+Structs
+Systems
+Root
 ```

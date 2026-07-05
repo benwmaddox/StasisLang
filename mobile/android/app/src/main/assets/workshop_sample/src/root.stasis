@@ -1,0 +1,3 @@
+function get_starting_level_index(): i32 {
+    return 0;
+}

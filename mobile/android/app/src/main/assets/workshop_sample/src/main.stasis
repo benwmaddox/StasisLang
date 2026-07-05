@@ -1,0 +1,33 @@
+import "game_state.stasis";
+import "player.stasis";
+import "enemy.stasis";
+import "input.stasis";
+import "systems/collision.stasis";
+
+function main(): void {
+    init();
+}
+
+function init(): void {
+    GameState.player = create_default_player();
+    GameState.score = 0;
+    GameState.tick_count = 0;
+}
+
+function tick(): void {
+    GameState.tick_count += 1;
+
+    let input = read_input();
+
+    GameState.player.update(input);
+
+    foreach (let enemy in GameState.enemies) {
+        enemy.update();
+    }
+
+    collision_update();
+}
+
+function on_code_swap(): void {
+    // Optional hook after a successful hot swap.
+}

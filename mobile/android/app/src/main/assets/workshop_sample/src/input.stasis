@@ -1,0 +1,11 @@
+struct InputState {
+    jump_pressed: bool;
+}
+
+global Input {
+    current: InputState;
+}
+
+function read_input(): InputState {
+    return Input.current;
+}
