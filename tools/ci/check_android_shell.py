@@ -88,7 +88,10 @@ def main() -> int:
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
     assert "scan_stasis_files" in native
-    assert "CompileNotLinked: native probe read" in native
+    assert "analyze_stasis_file" in native
+    assert "validate_braces" in native
+    assert "CompileChecked: files=" in native
+    assert "CompileError: missing lifecycle root" in native
     assert "Stasis Android native smoke loaded" in native
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")

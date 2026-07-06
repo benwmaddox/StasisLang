@@ -178,6 +178,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers the Java native method, post-Apply invocation, JNI entrypoint, recursive `.stasis` scan helper, and `CompileNotLinked` result string; debug APK builds.
 - Done gate: Android has a tested native compile-call surface that can be replaced with the real compiler bridge.
 - Status: `completed`
+#### AW15 - Android Native Stasis Compile Check
+- Language: `Android C JNI + docs`.
+- Scope: Upgrade the native compile bridge from file scanning to a deterministic Android-side source check pass.
+- Deliverable: `nativeCompileProject` reads `.stasis` files, validates comments/strings/braces, counts functions/structs/globals, checks `main` and `tick` lifecycle roots, and returns `CompileChecked` or `CompileError` diagnostics.
+- Tests: Structural Android shell verifier covers the native analysis helpers and success/error result strings; debug APK builds.
+- Done gate: Android can execute a native compile-check step over saved project files without linking the full compiler yet.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
