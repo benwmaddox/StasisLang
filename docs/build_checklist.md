@@ -206,6 +206,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers artifact directory, stub writer, `CompiledStub` marker, and manifest artifact references; debug APK builds.
 - Done gate: Android compile output has per-function artifact files keyed by body hash for later replacement with real compiled code.
 - Status: `completed`
+#### AW19 - Android Manual Compile Control
+- Language: `Android Java + docs`.
+- Scope: Make the on-device native compile path runnable without requiring a symbol edit.
+- Deliverable: The Android editor controls include a `Compile` button that calls `nativeCompileProject(projectRoot)` and displays the returned compile diagnostics.
+- Tests: Structural Android shell verifier covers the compile control and Java compile runner; debug APK builds.
+- Done gate: Users can explicitly run the Android compile path against saved app-private `.stasis` files.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

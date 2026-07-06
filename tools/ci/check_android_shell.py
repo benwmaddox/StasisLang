@@ -63,6 +63,8 @@ def main() -> int:
     assert "createSymbolRow" in activity
     assert "EditText" in activity
     assert "createEditControls" in activity
+    assert 'compile.setText("Compile")' in activity
+    assert "runNativeCompile" in activity
     assert "applySelectedEdit" in activity
     assert "persistSelectedEdit" in activity
     assert "getFilesDir()" in activity

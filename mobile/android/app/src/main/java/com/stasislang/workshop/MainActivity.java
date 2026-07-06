@@ -233,7 +233,22 @@ public final class MainActivity extends Activity {
         });
         controls.addView(reset, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
 
+        Button compile = new Button(this);
+        compile.setText("Compile");
+        compile.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                runNativeCompile();
+            }
+        });
+        controls.addView(compile, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+
         return controls;
+    }
+
+    private void runNativeCompile() {
+        String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
+        reloadStatus.setText(compileResult);
     }
 
     private void applySelectedEdit() {
