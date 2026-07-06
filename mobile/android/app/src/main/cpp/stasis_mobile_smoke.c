@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <android/log.h>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +15,8 @@
 #define FNV_OFFSET_BASIS 1469598103934665603ULL
 #define FNV_PRIME 1099511628211ULL
 
+typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
+typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef struct CompileStats {
     int file_count;
     int function_count;
@@ -660,6 +663,34 @@ static int write_runtime_tick_count(const char *project_root, int tick_count) {
     return 0;
 }
 
+static int try_rust_bridge_compile(const char *project_root, char *message, size_t message_size) {
+    void *bridge = dlopen("libstasis_android_bridge.so", RTLD_NOW | RTLD_LOCAL);
+    if (bridge == NULL) {
+        return 0;
+    }
+
+    stasis_android_bridge_compile_project_fn compile_project =
+            (stasis_android_bridge_compile_project_fn)dlsym(bridge, "stasis_android_bridge_compile_project");
+    stasis_android_bridge_free_string_fn free_string =
+            (stasis_android_bridge_free_string_fn)dlsym(bridge, "stasis_android_bridge_free_string");
+    if (compile_project == NULL || free_string == NULL) {
+        dlclose(bridge);
+        return 0;
+    }
+
+    char *bridge_message = compile_project(project_root, "src/main.stasis");
+    if (bridge_message == NULL) {
+        dlclose(bridge);
+        snprintf(message, message_size, "CompileError: Rust Android bridge returned null message");
+        return 1;
+    }
+
+    snprintf(message, message_size, "%s", bridge_message);
+    free_string(bridge_message);
+    dlclose(bridge);
+    return 1;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activity_class) {
     (void)activity_class;
@@ -676,6 +707,13 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
         return (*env)->NewStringUTF(env, "CompileError: unable to read project root");
     }
 
+    char message[256];
+    if (try_rust_bridge_compile(root, message, sizeof(message)) != 0) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
+        return (*env)->NewStringUTF(env, message);
+    }
+
     CompileStats stats;
     memset(&stats, 0, sizeof(stats));
     stats.project_hash = FNV_OFFSET_BASIS;
@@ -684,7 +722,6 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
     read_previous_compile_manifest(root, &previous);
     const char *reload_classification = classify_reload(&stats, &previous);
 
-    char message[256];
     if (result != 0 || stats.error[0] != '\0') {
         snprintf(message, sizeof(message), "%s", stats.error[0] == '\0' ? "CompileError: unknown native check failure" : stats.error);
     } else if (stats.file_count == 0) {

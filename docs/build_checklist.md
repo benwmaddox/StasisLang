@@ -262,6 +262,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: `cargo test -p stasis_android_bridge` covers artifact writing, fast-reload runtime-state preservation, and the C ABI compile message; Android shell verifier covers workspace/crate wiring and bridge API references; debug APK builds.
 - Done gate: Android now has a tested Rust bridge crate that reuses compiler structure and can replace the native C scaffold in the JNI layer.
 - Status: `completed`
+#### AW27 - Optional Rust Bridge JNI Loader
+- Language: `Android C JNI + CMake + docs`.
+- Scope: Start routing Android `nativeCompileProject` to the Rust compiler bridge without breaking the current C fallback build.
+- Deliverable: The JNI compile path now attempts to `dlopen("libstasis_android_bridge.so")`, calls `stasis_android_bridge_compile_project(projectRoot, "src/main.stasis")` when available, frees bridge strings through `stasis_android_bridge_free_string`, and falls back to the existing C scaffold when the Rust library is not packaged yet; CMake links `dl` explicitly.
+- Tests: Android shell verifier covers the optional bridge loader and `dl` linkage, `cargo test -p stasis_android_bridge` keeps the bridge API valid, and debug APK builds with the fallback path.
+- Done gate: The Android native layer now has an explicit compiler-bridge handoff point; the remaining step is packaging the Rust Android `.so` into the APK.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

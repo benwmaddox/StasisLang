@@ -6,4 +6,5 @@ option(STASIS_ANDROID_SMOKE_ONLY "Build the standalone Android native smoke entr
 add_library(stasis_mobile_smoke SHARED stasis_mobile_smoke.c)
 
 find_library(log_lib log)
-target_link_libraries(stasis_mobile_smoke PRIVATE ${log_lib})
+find_library(dl_lib dl)
+target_link_libraries(stasis_mobile_smoke PRIVATE ${log_lib} ${dl_lib})

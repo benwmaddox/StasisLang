@@ -17,7 +17,7 @@ Current scope:
 - Resizes and scrolls the editor when the Android keyboard opens so the active source remains visible.
 - Keeps fixed trailing scroll space under the editor as a fallback for phones where IME resize is inconsistent.
 
-It does not yet link the Stasis runtime or compile a Stasis game on-device. The Android C/JNI compile path is a temporary shell; the compiler-owned Android compile plan and artifact renderer now live in `stasis_compiler::frontend::workshop`; `crates/stasis_android_bridge` is the tested Rust/C ABI bridge that the JNI layer should consume next.
+It does not yet link the Stasis runtime or compile a Stasis game on-device. The Android C/JNI compile path is a temporary shell; the compiler-owned Android compile plan and artifact renderer now live in `stasis_compiler::frontend::workshop`; `crates/stasis_android_bridge` is the tested Rust/C ABI bridge; the JNI layer now attempts to load it when packaged and falls back to the C scaffold until the Rust Android `.so` build is wired in.
 
 ## Build
 
