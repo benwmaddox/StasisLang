@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
+use crate::IncrementalCompileOutput;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -858,6 +859,269 @@ pub fn apply_ai_code_response_to_project(
     Ok(updated)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AndroidWorkshopReload {
+    InitialCompile,
+    NoChange,
+    FastReload,
+    ResetRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AndroidWorkshopCompilePlan {
+    pub status: i32,
+    pub reload: AndroidWorkshopReload,
+    pub reason: String,
+    pub project_hash: i32,
+    pub layout_hash: i32,
+    pub entrypoints: Vec<String>,
+    pub functions: Vec<AndroidWorkshopFunctionPlan>,
+    pub errors: Vec<AndroidWorkshopCompileError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AndroidWorkshopFunctionPlan {
+    pub file: String,
+    pub ordinal: usize,
+    pub name: String,
+    pub owner: Option<String>,
+    pub signature: String,
+    pub id_hash: i32,
+    pub signature_hash: i32,
+    pub body_hash: i32,
+    pub return_type_code: i32,
+    pub uses_stub_fallback: bool,
+    pub artifact: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AndroidWorkshopCompileError {
+    pub code: i32,
+    pub pos: i32,
+    pub detail_a: i32,
+    pub detail_b: i32,
+}
+
+pub fn build_android_workshop_compile_plan(
+    files: &[WorkshopSourceFile],
+    compile: &IncrementalCompileOutput,
+    previous: Option<&AndroidWorkshopCompilePlan>,
+) -> Result<AndroidWorkshopCompilePlan, String> {
+    let symbols = workshop_function_symbols_by_path_and_ordinal(files)?;
+    let functions = compile
+        .functions
+        .iter()
+        .map(|function| {
+            let file = compile.file_paths.get(function.file_index).ok_or_else(|| {
+                format!(
+                    "compile output referenced missing file index {}",
+                    function.file_index
+                )
+            })?;
+            let symbol = android_symbol_for_compiler_function(&symbols, file, function.ordinal)
+                .ok_or_else(|| {
+                    format!(
+                        "compile output referenced missing function ordinal {} in {}",
+                        function.ordinal, file
+                    )
+                })?;
+            Ok(AndroidWorkshopFunctionPlan {
+                file: symbol.file.clone(),
+                ordinal: function.ordinal,
+                name: symbol.name.clone(),
+                owner: symbol.owner.clone(),
+                signature: symbol.signature.clone(),
+                id_hash: function.id_hash,
+                signature_hash: function.sig_hash,
+                body_hash: function.body_hash,
+                return_type_code: function.return_type_code,
+                uses_stub_fallback: function.uses_stub_fallback,
+                artifact: format!("build/functions/{:08x}.stub", function.body_hash as u32),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let errors = compile
+        .errors
+        .iter()
+        .map(|error| AndroidWorkshopCompileError {
+            code: error.code,
+            pos: error.pos,
+            detail_a: error.detail_a,
+            detail_b: error.detail_b,
+        })
+        .collect::<Vec<_>>();
+    let layout_hash = android_workshop_layout_hash(files)?;
+    let project_hash = android_compile_project_hash(layout_hash, &functions);
+    let entrypoints = android_workshop_entrypoints(files)?;
+    let (reload, reason) = android_reload_from_previous(project_hash, layout_hash, previous);
+
+    Ok(AndroidWorkshopCompilePlan {
+        status: compile.status,
+        reload,
+        reason,
+        project_hash,
+        layout_hash,
+        entrypoints,
+        functions,
+        errors,
+    })
+}
+
+fn android_symbol_for_compiler_function<'a>(
+    symbols: &'a BTreeMap<(String, usize), WorkshopSymbol>,
+    compiler_file: &str,
+    ordinal: usize,
+) -> Option<&'a WorkshopSymbol> {
+    if let Some(symbol) = symbols.get(&(compiler_file.to_string(), ordinal)) {
+        return Some(symbol);
+    }
+    let normalized_compiler_file = compiler_file.replace('\\', "/");
+    symbols.iter().find_map(|((path, symbol_ordinal), symbol)| {
+        if *symbol_ordinal == ordinal
+            && normalized_compiler_file.ends_with(&path.replace('\\', "/"))
+        {
+            Some(symbol)
+        } else {
+            None
+        }
+    })
+}
+fn android_reload_from_previous(
+    project_hash: i32,
+    layout_hash: i32,
+    previous: Option<&AndroidWorkshopCompilePlan>,
+) -> (AndroidWorkshopReload, String) {
+    let Some(previous) = previous else {
+        return (
+            AndroidWorkshopReload::InitialCompile,
+            "No previous Android compile plan was available.".to_string(),
+        );
+    };
+    if previous.project_hash == project_hash {
+        return (
+            AndroidWorkshopReload::NoChange,
+            "Compiler-owned project hash is unchanged.".to_string(),
+        );
+    }
+    if previous.layout_hash != layout_hash {
+        return (
+            AndroidWorkshopReload::ResetRequired,
+            "Compiler layout hash changed; Android runtime state must be rebuilt.".to_string(),
+        );
+    }
+    (
+        AndroidWorkshopReload::FastReload,
+        "Compiler layout hash is unchanged and reachable function code changed.".to_string(),
+    )
+}
+
+fn android_workshop_layout_hash(files: &[WorkshopSourceFile]) -> Result<i32, String> {
+    Ok(android_stable_text_hash(&layout_fingerprint(files)?))
+}
+
+fn android_stable_text_hash(value: &str) -> i32 {
+    let mut hash = 2_166_136_261u32;
+    for byte in value.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash as i32
+}
+fn android_compile_project_hash(
+    layout_hash: i32,
+    functions: &[AndroidWorkshopFunctionPlan],
+) -> i32 {
+    let mut hash = layout_hash
+        .wrapping_mul(16_777_619)
+        .wrapping_add(2_166_136_261u32 as i32);
+    for function in functions {
+        hash = hash.wrapping_mul(16_777_619) ^ function.id_hash;
+        hash = hash.wrapping_mul(16_777_619) ^ function.signature_hash;
+        hash = hash.wrapping_mul(16_777_619) ^ function.body_hash;
+    }
+    hash
+}
+
+fn android_workshop_entrypoints(files: &[WorkshopSourceFile]) -> Result<Vec<String>, String> {
+    let mut entrypoints = Vec::new();
+    let functions = workshop_function_symbols_by_path_and_ordinal(files)?;
+    for symbol in functions.values() {
+        if is_lifecycle_function(&symbol.name) && !entrypoints.contains(&symbol.name) {
+            entrypoints.push(symbol.name.clone());
+        }
+    }
+    entrypoints.sort_by_key(|name| match name.as_str() {
+        "main" => 0,
+        "tick" => 1,
+        "render" => 2,
+        "on_code_swap" => 3,
+        _ => 4,
+    });
+    Ok(entrypoints)
+}
+
+fn workshop_function_symbols_by_path_and_ordinal(
+    files: &[WorkshopSourceFile],
+) -> Result<BTreeMap<(String, usize), WorkshopSymbol>, String> {
+    let mut struct_names = BTreeSet::new();
+    let mut structs_by_file: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for file in files {
+        let layout = parse_top_level_type_layout(&file.source)?;
+        for parsed in layout.structs {
+            struct_names.insert(parsed.name.clone());
+            structs_by_file
+                .entry(file.path.as_str())
+                .or_default()
+                .push(parsed.name);
+        }
+    }
+
+    let mut out = BTreeMap::new();
+    for file in files {
+        let file_structs = structs_by_file
+            .get(file.path.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        for (ordinal, function) in parse_top_level_functions(&file.source)?
+            .into_iter()
+            .enumerate()
+        {
+            let full_range = function.signature_range.start..function.body_range.end;
+            let source = source_for_range(&file.source, full_range.clone())?;
+            let signature = format_function_signature(
+                &function.name,
+                &function.params,
+                &function.return_type_name,
+            );
+            let owner = function_owner(
+                &file.path,
+                &function.name,
+                function
+                    .params
+                    .first()
+                    .map(|param| param.type_name.as_str()),
+                &function.return_type_name,
+                file_structs,
+                &struct_names,
+            );
+            out.insert(
+                (file.path.clone(), ordinal),
+                WorkshopSymbol {
+                    kind: WorkshopSymbolKind::Function,
+                    name: function.name,
+                    owner,
+                    file: file.path.clone(),
+                    signature,
+                    source_span: span_from_range(full_range)?,
+                    source,
+                },
+            );
+        }
+    }
+    Ok(out)
+}
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkshopReloadClassification {
     pub expected_reload: ExpectedReload,
@@ -1878,5 +2142,127 @@ mod placement_tests {
         .expect("struct placement");
         assert_eq!(projectile.file, "src/projectile.stasis");
         assert_eq!(projectile.group, "Projectile");
+    }
+}
+
+#[cfg(test)]
+mod android_compile_plan_tests {
+    use super::*;
+    use crate::IncrementalCompilerHost;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_project(name: &str) -> std::path::PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_android_plan_{name}_{stamp}"));
+        fs::create_dir_all(root.join("src")).expect("create temp project");
+        root
+    }
+
+    fn write_project_file(root: &Path, relative: &str, source: &str) -> std::path::PathBuf {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent");
+        }
+        fs::write(&path, source).expect("write project file");
+        path
+    }
+
+    #[test]
+    fn android_compile_plan_uses_incremental_compiler_metrics() {
+        let root = temp_project("initial");
+        let main = write_project_file(
+            &root,
+            "src/main.stasis",
+            "struct Player { x: i32; }\n\
+             global State { player: Player; }\n\
+             function main(): i32 { return tick(); }\n\
+             function tick(): i32 { return 7; }\n",
+        );
+        let files = load_workshop_project(&root, Path::new("src/main.stasis")).expect("load");
+        let mut host = IncrementalCompilerHost::new();
+        host.set_required_reachability_roots(&["tick", "on_code_swap"]);
+        let compile = host
+            .compile_changed_files(std::slice::from_ref(&main))
+            .expect("compile");
+
+        let plan = build_android_workshop_compile_plan(&files, &compile, None).expect("plan");
+        assert_eq!(plan.status, 0);
+        assert_eq!(plan.reload, AndroidWorkshopReload::InitialCompile);
+        assert!(plan.entrypoints.contains(&"main".to_string()));
+        assert!(plan.entrypoints.contains(&"tick".to_string()));
+        assert!(plan.functions.iter().any(|function| {
+            function.name == "tick"
+                && function.file == "src/main.stasis"
+                && function.signature == "tick(): i32"
+                && function.artifact.starts_with("build/functions/")
+        }));
+        assert!(plan
+            .functions
+            .iter()
+            .all(|function| function.body_hash != 0));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn android_compile_plan_classifies_compiler_fast_reload_and_reset() {
+        let root = temp_project("reload");
+        let main = write_project_file(
+            &root,
+            "src/main.stasis",
+            "struct Player { x: i32; }\n\
+             global State { player: Player; }\n\
+             function main(): i32 { return tick(); }\n\
+             function tick(): i32 { return 1; }\n",
+        );
+        let mut host = IncrementalCompilerHost::new();
+        host.set_required_reachability_roots(&["tick"]);
+        let first_compile = host
+            .compile_changed_files(std::slice::from_ref(&main))
+            .expect("first compile");
+        let first_files =
+            load_workshop_project(&root, Path::new("src/main.stasis")).expect("load first");
+        let first_plan = build_android_workshop_compile_plan(&first_files, &first_compile, None)
+            .expect("first plan");
+
+        fs::write(
+            &main,
+            "struct Player { x: i32; }\n\
+             global State { player: Player; }\n\
+             function main(): i32 { return tick(); }\n\
+             function tick(): i32 { return 2; }\n",
+        )
+        .expect("write body change");
+        let body_compile = host
+            .compile_changed_files(std::slice::from_ref(&main))
+            .expect("body compile");
+        let body_files =
+            load_workshop_project(&root, Path::new("src/main.stasis")).expect("load body");
+        let body_plan =
+            build_android_workshop_compile_plan(&body_files, &body_compile, Some(&first_plan))
+                .expect("body plan");
+        assert_eq!(body_plan.reload, AndroidWorkshopReload::FastReload);
+
+        fs::write(
+            &main,
+            "struct Player { x: i32; y: i32; }\n\
+             global State { player: Player; }\n\
+             function main(): i32 { return tick(); }\n\
+             function tick(): i32 { return 3; }\n",
+        )
+        .expect("write layout change");
+        let layout_compile = host
+            .compile_changed_files(std::slice::from_ref(&main))
+            .expect("layout compile");
+        let layout_files =
+            load_workshop_project(&root, Path::new("src/main.stasis")).expect("load layout");
+        let layout_plan =
+            build_android_workshop_compile_plan(&layout_files, &layout_compile, Some(&body_plan))
+                .expect("layout plan");
+        assert_eq!(layout_plan.reload, AndroidWorkshopReload::ResetRequired);
+        assert!(layout_plan.reason.contains("layout hash changed"));
+        fs::remove_dir_all(&root).ok();
     }
 }

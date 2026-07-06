@@ -241,6 +241,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers the preview view, Canvas drawing path, tick parser, and Run Tick preview update; debug APK builds.
 - Done gate: A sideloaded Android app now has an editor, compile control, run-tick control, and visible game preview placeholder on one screen.
 - Status: `completed`
+#### AW24 - Compiler-Owned Android Compile Plan
+- Language: `Rust compiler frontend + docs`.
+- Scope: Stop Android compile planning from growing as a parallel C compiler path.
+- Deliverable: `stasis_compiler::frontend::workshop` now exposes `build_android_workshop_compile_plan`, which maps `IncrementalCompilerHost` output back to Android workshop symbols, entrypoints, function hashes, artifact paths, and reload classifications using compiler-owned metadata plus workshop layout fingerprints.
+- Tests: Focused Rust tests compile sample workshop projects through `IncrementalCompilerHost`, build Android compile plans, verify function metadata/artifact paths, and classify `FastReload` versus `ResetRequired`; Android shell verifier and debug APK build continue to pass.
+- Done gate: The next JNI slice has a Rust compiler-owned contract to call instead of expanding the native C scaffold.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
