@@ -93,6 +93,10 @@ def main() -> int:
     assert "CompilePlanned: files=" in native
     assert "STASIS_COMPILE_MANIFEST_RELATIVE_PATH" in native
     assert "write_compile_manifest" in native
+    assert "write_function_manifest_entries" in native
+    assert "append_function_entries_for_project" in native
+    assert "body_hash=%016llx" in native
+    assert "signature_hash=%016llx" in native
     assert "project_hash=%016llx" in native
     assert "status=CompilePlanned" in native
     assert "CompileError: missing lifecycle root" in native

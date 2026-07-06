@@ -192,6 +192,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers manifest path, manifest writer, project hash output, and `CompilePlanned` result string; debug APK builds.
 - Done gate: Android compile has a persistent native output artifact that later compiler/linker stages can consume or replace.
 - Status: `completed`
+#### AW17 - Android Function Compile Manifest Entries
+- Language: `Android C JNI + docs`.
+- Scope: Add function-level compile artifact metadata for later dirty-function and hot-reload decisions.
+- Deliverable: The native compile manifest includes one `function=` entry per Stasis function with source path, signature text, signature hash, and body hash.
+- Tests: Structural Android shell verifier covers function manifest writer, project recursion, signature hash, and body hash markers; debug APK builds.
+- Done gate: Android compile output can distinguish signature changes from body-only changes at function granularity.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
