@@ -90,7 +90,11 @@ def main() -> int:
     assert "scan_stasis_files" in native
     assert "analyze_stasis_file" in native
     assert "validate_braces" in native
-    assert "CompileChecked: files=" in native
+    assert "CompilePlanned: files=" in native
+    assert "STASIS_COMPILE_MANIFEST_RELATIVE_PATH" in native
+    assert "write_compile_manifest" in native
+    assert "project_hash=%016llx" in native
+    assert "status=CompilePlanned" in native
     assert "CompileError: missing lifecycle root" in native
     assert "Stasis Android native smoke loaded" in native
 

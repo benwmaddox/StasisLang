@@ -12,7 +12,7 @@ Current scope:
 - Seeds bundled `.stasis` files into app-private storage on first launch.
 - Lets a selected symbol display and edit its source from the app-private `.stasis` file.
 - Saves selected symbol edits back to the app-private `.stasis` file and reports `FastReload` versus `ResetRequired` expectations.
-- Calls a native compile check after Apply; the probe reads project `.stasis` files, validates basic source structure, checks lifecycle roots, and returns `CompileChecked` or `CompileError` diagnostics.
+- Calls a native compile check after Apply; the probe reads project `.stasis` files, validates basic source structure, checks lifecycle roots, and writes `build/native_compile_manifest.txt`, and returns `CompilePlanned` or `CompileError` diagnostics.
 - Resizes and scrolls the editor when the Android keyboard opens so the active source remains visible.
 - Keeps fixed trailing scroll space under the editor as a fallback for phones where IME resize is inconsistent.
 

@@ -1,12 +1,16 @@
 #include <jni.h>
 #include <android/log.h>
 #include <dirent.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
+#define STASIS_COMPILE_MANIFEST_RELATIVE_PATH "build/native_compile_manifest.txt"
+#define FNV_OFFSET_BASIS 1469598103934665603ULL
+#define FNV_PRIME 1099511628211ULL
 
 typedef struct CompileStats {
     int file_count;
@@ -17,6 +21,7 @@ typedef struct CompileStats {
     int has_tick;
     int has_on_code_swap;
     long byte_count;
+    uint64_t project_hash;
     char error[160];
 } CompileStats;
 
@@ -29,8 +34,11 @@ static int has_suffix(const char *value, const char *suffix) {
     return strcmp(value + value_len - suffix_len, suffix) == 0;
 }
 
-static int starts_with_at(const char *source, size_t index, const char *token) {
-    return strncmp(source + index, token, strlen(token)) == 0;
+static void hash_bytes(CompileStats *stats, const char *value, size_t length) {
+    for (size_t index = 0; index < length; index += 1) {
+        stats->project_hash ^= (unsigned char)value[index];
+        stats->project_hash *= FNV_PRIME;
+    }
 }
 
 static int count_token(const char *source, const char *token) {
@@ -185,6 +193,9 @@ static int analyze_stasis_file(const char *path, CompileStats *stats) {
     stats->function_count += count_token(source, "function ");
     stats->struct_count += count_token(source, "struct ");
     stats->global_count += count_token(source, "global ");
+    hash_bytes(stats, path, strlen(path));
+    hash_bytes(stats, "\n", 1);
+    hash_bytes(stats, source, (size_t)size);
 
     if (strstr(source, "function main(") != NULL) {
         stats->has_main = 1;
@@ -254,6 +265,52 @@ static int scan_stasis_files(const char *path, CompileStats *stats) {
     return 0;
 }
 
+static int ensure_directory(const char *path, CompileStats *stats) {
+    struct stat info;
+    if (stat(path, &info) == 0) {
+        if (S_ISDIR(info.st_mode)) {
+            return 0;
+        }
+        set_error(stats, "CompileError: build path is not a directory", path);
+        return -1;
+    }
+
+    if (mkdir(path, 0700) != 0) {
+        set_error(stats, "CompileError: unable to create build directory", path);
+        return -1;
+    }
+    return 0;
+}
+
+static int write_compile_manifest(const char *project_root, const CompileStats *stats) {
+    char build_dir[1024];
+    snprintf(build_dir, sizeof(build_dir), "%s/build", project_root);
+
+    CompileStats mutable_stats = *stats;
+    if (ensure_directory(build_dir, &mutable_stats) != 0) {
+        return -1;
+    }
+
+    char manifest_path[1200];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/%s", project_root, STASIS_COMPILE_MANIFEST_RELATIVE_PATH);
+
+    FILE *file = fopen(manifest_path, "wb");
+    if (file == NULL) {
+        return -1;
+    }
+
+    fprintf(file, "status=CompilePlanned\n");
+    fprintf(file, "project_hash=%016llx\n", (unsigned long long)stats->project_hash);
+    fprintf(file, "files=%d\n", stats->file_count);
+    fprintf(file, "bytes=%ld\n", stats->byte_count);
+    fprintf(file, "functions=%d\n", stats->function_count);
+    fprintf(file, "structs=%d\n", stats->struct_count);
+    fprintf(file, "globals=%d\n", stats->global_count);
+    fprintf(file, "roots=main,tick%s\n", stats->has_on_code_swap ? ",on_code_swap" : "");
+    fclose(file);
+    return 0;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activity_class) {
     (void)activity_class;
@@ -272,8 +329,8 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
 
     CompileStats stats;
     memset(&stats, 0, sizeof(stats));
+    stats.project_hash = FNV_OFFSET_BASIS;
     int result = scan_stasis_files(root, &stats);
-    (*env)->ReleaseStringUTFChars(env, project_root, root);
 
     char message[256];
     if (result != 0 || stats.error[0] != '\0') {
@@ -282,19 +339,20 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
         snprintf(message, sizeof(message), "CompileError: no .stasis files found");
     } else if (!stats.has_main || !stats.has_tick) {
         snprintf(message, sizeof(message), "CompileError: missing lifecycle root main=%d tick=%d", stats.has_main, stats.has_tick);
+    } else if (write_compile_manifest(root, &stats) != 0) {
+        snprintf(message, sizeof(message), "CompileError: unable to write native compile manifest");
     } else {
         snprintf(
                 message,
                 sizeof(message),
-                "CompileChecked: files=%d bytes=%ld functions=%d structs=%d globals=%d roots=main,tick%s",
+                "CompilePlanned: files=%d functions=%d hash=%016llx manifest=%s",
                 stats.file_count,
-                stats.byte_count,
                 stats.function_count,
-                stats.struct_count,
-                stats.global_count,
-                stats.has_on_code_swap ? ",on_code_swap" : "");
+                (unsigned long long)stats.project_hash,
+                STASIS_COMPILE_MANIFEST_RELATIVE_PATH);
     }
 
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
     return (*env)->NewStringUTF(env, message);
 }
