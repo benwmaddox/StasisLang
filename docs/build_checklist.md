@@ -220,6 +220,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers previous-manifest parsing, reload classifier strings, manifest reload output, and compile diagnostics; debug APK builds.
 - Done gate: Android compile planning now exposes the stateful reload decision needed before replacing compiled stubs with real runtime code.
 - Status: `completed`
+#### AW21 - Android Runtime State Artifact
+- Language: `Android C JNI + docs`.
+- Scope: Give successful Android compile planning a concrete runtime state file and entrypoint table before the run UI is wired in.
+- Deliverable: The native compile manifest now records `entrypoint=main`, `entrypoint=tick`, optional `entrypoint=on_code_swap`, and `runtime_state=build/runtime_state.txt`; the state artifact initializes on `InitialCompile`/`ResetRequired` and is preserved for `NoChange`/`FastReload`.
+- Tests: Structural Android shell verifier covers the runtime-state path, entrypoint manifest lines, state-ready marker, compile result state path, and runtime-state writer; debug APK builds.
+- Done gate: Android compile planning now produces the state artifact the next on-device run/preview control can consume.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

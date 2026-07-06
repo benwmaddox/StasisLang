@@ -99,12 +99,19 @@ def main() -> int:
     assert "append_function_entries_for_project" in native
     assert "body_hash=%016llx" in native
     assert "STASIS_FUNCTION_ARTIFACT_DIR" in native
+    assert "STASIS_RUNTIME_STATE_RELATIVE_PATH" in native
     assert "CompiledStub" in native
     assert "write_function_artifact" in native
     assert "artifact=%s/%016llx.stub" in native
     assert "signature_hash=%016llx" in native
     assert "project_hash=%016llx" in native
     assert "status=CompilePlanned" in native
+    assert "RuntimeStateReady" in native
+    assert "write_runtime_state" in native
+    assert "runtime_state=%s" in native
+    assert "entrypoint=main" in native
+    assert "entrypoint=tick" in native
+    assert "state=%s" in native
     assert "PreviousManifest" in native
     assert "read_previous_compile_manifest" in native
     assert "classify_reload" in native
