@@ -185,6 +185,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers the native analysis helpers and success/error result strings; debug APK builds.
 - Done gate: Android can execute a native compile-check step over saved project files without linking the full compiler yet.
 - Status: `completed`
+#### AW16 - Android Native Compile Manifest
+- Language: `Android C JNI + docs`.
+- Scope: Give the Android native compile path a concrete deterministic output artifact before real codegen is linked.
+- Deliverable: Successful native compile checks write `build/native_compile_manifest.txt` under the app-private project root with status, project hash, declaration counts, byte counts, and lifecycle roots, then return `CompilePlanned` diagnostics to Java.
+- Tests: Structural Android shell verifier covers manifest path, manifest writer, project hash output, and `CompilePlanned` result string; debug APK builds.
+- Done gate: Android compile has a persistent native output artifact that later compiler/linker stages can consume or replace.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
