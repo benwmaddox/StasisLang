@@ -96,6 +96,13 @@ def main() -> int:
     assert "ResetRequired: struct or layout source changed" in activity
     assert "setContentView(status)" not in activity
 
+    workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")
+    assert "build_android_workshop_compile_plan" in workshop
+    assert "AndroidWorkshopCompilePlan" in workshop
+    assert "IncrementalCompileOutput" in workshop
+    assert "AndroidWorkshopReload" in workshop
+    assert "android_compile_plan_tests" in workshop
+
     native = read("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
