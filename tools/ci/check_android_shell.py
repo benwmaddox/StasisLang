@@ -122,6 +122,10 @@ def main() -> int:
     native = read("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
+    assert "try_rust_bridge_compile" in native
+    assert "dlopen(\"libstasis_android_bridge.so\"" in native
+    assert "stasis_android_bridge_compile_project" in native
+    assert "stasis_android_bridge_free_string" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "scan_stasis_files" in native
     assert "analyze_stasis_file" in native
@@ -163,6 +167,8 @@ def main() -> int:
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
     assert "add_library(stasis_mobile_smoke SHARED stasis_mobile_smoke.c)" in cmake
+    assert "find_library(dl_lib dl)" in cmake
+    assert "${dl_lib}" in cmake
 
     for sample in STASIS_SAMPLE_FILES:
         source = read(sample)
