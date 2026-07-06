@@ -163,6 +163,14 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Done gate: Tapping into the source editor has enough trailing scroll room to manually position text above the keyboard.
 - Status: `completed`
 
+#### AW13 - Android App-Private Stasis File Persistence
+- Language: `Android Java + docs`.
+- Scope: Move the phone editor from bundled-asset display to app-private `.stasis` files that survive process restarts.
+- Deliverable: On first launch, bundled sample files are seeded into `getFilesDir()/workshop_project`; selected-symbol Apply replaces the symbol span in the matching `.stasis` file and writes it back to disk.
+- Tests: Structural Android shell verifier covers app-private project root, first-launch seeding, text file read/write helpers, and selected-symbol persistence; debug APK builds.
+- Done gate: Android edits are symbol-based while the backing project remains normal `.stasis` files on disk.
+- Status: `completed`
+
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

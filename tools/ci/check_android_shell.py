@@ -63,6 +63,12 @@ def main() -> int:
     assert "EditText" in activity
     assert "createEditControls" in activity
     assert "applySelectedEdit" in activity
+    assert "persistSelectedEdit" in activity
+    assert "getFilesDir()" in activity
+    assert 'PROJECT_DIR = "workshop_project"' in activity
+    assert "ensureProjectFile" in activity
+    assert "writeTextFile" in activity
+    assert "Saved to .stasis file" in activity
     assert "resetSelectedEdit" in activity
     assert "classifySelectedReload" in activity
     assert "setFillViewport(true)" in activity
