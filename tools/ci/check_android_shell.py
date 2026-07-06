@@ -96,6 +96,10 @@ def main() -> int:
     assert "write_function_manifest_entries" in native
     assert "append_function_entries_for_project" in native
     assert "body_hash=%016llx" in native
+    assert "STASIS_FUNCTION_ARTIFACT_DIR" in native
+    assert "CompiledStub" in native
+    assert "write_function_artifact" in native
+    assert "artifact=%s/%016llx.stub" in native
     assert "signature_hash=%016llx" in native
     assert "project_hash=%016llx" in native
     assert "status=CompilePlanned" in native

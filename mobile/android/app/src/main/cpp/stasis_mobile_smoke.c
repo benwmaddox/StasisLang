@@ -9,6 +9,7 @@
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
 #define STASIS_COMPILE_MANIFEST_RELATIVE_PATH "build/native_compile_manifest.txt"
+#define STASIS_FUNCTION_ARTIFACT_DIR "build/functions"
 #define FNV_OFFSET_BASIS 1469598103934665603ULL
 #define FNV_PRIME 1099511628211ULL
 
@@ -132,7 +133,34 @@ static void write_escaped_manifest_field(FILE *file, const char *start, size_t l
     }
 }
 
-static void write_function_manifest_entries(FILE *manifest, const char *path, const char *source) {
+static int write_function_artifact(
+        const char *artifact_dir,
+        const char *path,
+        const char *signature_start,
+        size_t signature_length,
+        uint64_t signature_hash,
+        uint64_t body_hash) {
+    char artifact_path[1200];
+    snprintf(artifact_path, sizeof(artifact_path), "%s/%016llx.stub", artifact_dir, (unsigned long long)body_hash);
+
+    FILE *artifact = fopen(artifact_path, "wb");
+    if (artifact == NULL) {
+        return -1;
+    }
+
+    fprintf(artifact, "status=CompiledStub\n");
+    fprintf(artifact, "source=");
+    write_escaped_manifest_field(artifact, path, strlen(path));
+    fprintf(artifact, "\n");
+    fprintf(artifact, "signature=");
+    write_escaped_manifest_field(artifact, signature_start, signature_length);
+    fprintf(artifact, "\n");
+    fprintf(artifact, "signature_hash=%016llx\n", (unsigned long long)signature_hash);
+    fprintf(artifact, "body_hash=%016llx\n", (unsigned long long)body_hash);
+    fclose(artifact);
+    return 0;
+}
+static int write_function_manifest_entries(FILE *manifest, const char *artifact_dir, const char *path, const char *source) {
     const char *cursor = source;
     while ((cursor = strstr(cursor, "function ")) != NULL) {
         const char *signature_start = cursor + strlen("function ");
@@ -159,15 +187,28 @@ static void write_function_manifest_entries(FILE *manifest, const char *path, co
         write_escaped_manifest_field(manifest, signature_start, (size_t)(signature_end - signature_start));
         fprintf(
                 manifest,
-                "|signature_hash=%016llx|body_hash=%016llx\n",
+                "|signature_hash=%016llx|body_hash=%016llx|artifact=%s/%016llx.stub\n",
                 (unsigned long long)signature_hash,
+                (unsigned long long)body_hash,
+                STASIS_FUNCTION_ARTIFACT_DIR,
                 (unsigned long long)body_hash);
+
+        if (write_function_artifact(
+                artifact_dir,
+                path,
+                signature_start,
+                (size_t)(signature_end - signature_start),
+                signature_hash,
+                body_hash) != 0) {
+            return -1;
+        }
 
         cursor = body_end;
     }
+    return 0;
 }
 
-static int append_function_entries_for_project(FILE *manifest, const char *path) {
+static int append_function_entries_for_project(FILE *manifest, const char *artifact_dir, const char *path) {
     DIR *dir = opendir(path);
     if (dir == NULL) {
         return -1;
@@ -193,7 +234,7 @@ static int append_function_entries_for_project(FILE *manifest, const char *path)
         struct stat info;
         if (stat(child, &info) == 0) {
             if (S_ISDIR(info.st_mode)) {
-                int result = append_function_entries_for_project(manifest, child);
+                int result = append_function_entries_for_project(manifest, artifact_dir, child);
                 free(child);
                 if (result != 0) {
                     closedir(dir);
@@ -210,7 +251,12 @@ static int append_function_entries_for_project(FILE *manifest, const char *path)
                     closedir(dir);
                     return -1;
                 }
-                write_function_manifest_entries(manifest, child, source);
+                if (write_function_manifest_entries(manifest, artifact_dir, child, source) != 0) {
+                    free(source);
+                    free(child);
+                    closedir(dir);
+                    return -1;
+                }
                 free(source);
             }
         }
@@ -458,6 +504,12 @@ static int write_compile_manifest(const char *project_root, const CompileStats *
 
     CompileStats mutable_stats = *stats;
     if (ensure_directory(build_dir, &mutable_stats) != 0) {
+        return -1;
+    }
+
+    char artifact_dir[1024];
+    snprintf(artifact_dir, sizeof(artifact_dir), "%s/%s", project_root, STASIS_FUNCTION_ARTIFACT_DIR);
+    if (ensure_directory(artifact_dir, &mutable_stats) != 0) {
         return -1;
     }
 
