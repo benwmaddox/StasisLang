@@ -269,6 +269,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Android shell verifier covers the optional bridge loader and `dl` linkage, `cargo test -p stasis_android_bridge` keeps the bridge API valid, and debug APK builds with the fallback path.
 - Done gate: The Android native layer now has an explicit compiler-bridge handoff point; the remaining step is packaging the Rust Android `.so` into the APK.
 - Status: `completed`
+#### AW28 - Package Rust Bridge in Android Debug APK
+- Language: `PowerShell Android build + Rust + docs`.
+- Scope: Build and package the Rust compiler bridge `.so` into the sideloadable Android debug APK.
+- Deliverable: Added `mobile/android/build_rust_bridge.ps1`, which locates the NDK, builds `stasis_android_bridge` for `aarch64-linux-android` with the NDK clang linker, copies `libstasis_android_bridge.so` into `app/src/main/jniLibs/arm64-v8a`, and is called by `build_debug.ps1` before Gradle assembly; generated `jniLibs` output is ignored by git.
+- Tests: `rustup target add aarch64-linux-android` completed locally; `build_debug.ps1` builds/copies the Rust bridge and assembles the APK; APK zip inspection confirms both `lib/arm64-v8a/libstasis_android_bridge.so` and `lib/arm64-v8a/libstasis_mobile_smoke.so` are packaged; Android shell verifier covers the packaging helper.
+- Done gate: A debug APK built from the repo now contains the Rust compiler bridge library that JNI attempts to load first.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
