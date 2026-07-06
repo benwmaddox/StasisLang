@@ -58,6 +58,10 @@ def main() -> int:
     assert "private static native String nativeRunTick(String projectRoot)" in activity
     assert "workshop_sample/" in activity
     assert "createWorkshopView" in activity
+    assert "GamePreviewView" in activity
+    assert "onDraw(Canvas canvas)" in activity
+    assert "extractTickCount" in activity
+    assert "gamePreview.setTickCount" in activity
     assert "ProjectSnapshot.from" in activity
     assert "parseSymbols" in activity
     assert "groupSymbols" in activity
@@ -69,6 +73,8 @@ def main() -> int:
     assert "runNativeCompile" in activity
     assert "runNativeTick" in activity
     assert "nativeRunTick(projectRoot().getAbsolutePath())" in activity
+    assert "canvas.drawRoundRect" in activity
+    assert "canvas.drawText(\"Tick \" + tickCount" in activity
     assert "applySelectedEdit" in activity
     assert "persistSelectedEdit" in activity
     assert "getFilesDir()" in activity
