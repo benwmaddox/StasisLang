@@ -155,6 +155,14 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Done gate: Tapping into the source editor no longer leaves the active text area hidden under the keyboard.
 - Status: `completed`
 
+#### AW12 - Android Source Editor Bottom Spacer
+- Language: `Android Java + docs`.
+- Scope: Add a direct fallback for phones where soft-keyboard resize does not keep the source editor visible.
+- Deliverable: The Android scroll content includes fixed trailing space below the editor controls so users can scroll active source above the keyboard.
+- Tests: Structural Android shell verifier covers the keyboard spacer and spacer height; debug APK builds and installs on a paired phone.
+- Done gate: Tapping into the source editor has enough trailing scroll room to manually position text above the keyboard.
+- Status: `completed`
+
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

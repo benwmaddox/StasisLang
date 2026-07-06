@@ -12,6 +12,7 @@ Current scope:
 - Lets a selected symbol display and edit its source from the bundled `.stasis` file.
 - Applies selected symbol edits in memory and reports `FastReload` versus `ResetRequired` expectations.
 - Resizes and scrolls the editor when the Android keyboard opens so the active source remains visible.
+- Keeps fixed trailing scroll space under the editor as a fallback for phones where IME resize is inconsistent.
 
 It does not yet link the Stasis runtime or compile a Stasis game on-device. That remains the next mobile runtime bridge slice.
 

@@ -68,6 +68,8 @@ def main() -> int:
     assert "setFillViewport(true)" in activity
     assert "setOnFocusChangeListener" in activity
     assert "scrollEditorIntoView" in activity
+    assert "keyboardSpacer" in activity
+    assert "dp(360)" in activity
     assert "smoothScrollTo(0, sourceEditor.getBottom())" in activity
     assert "FastReload: function signature unchanged" in activity
     assert "ResetRequired: function signature changed" in activity
