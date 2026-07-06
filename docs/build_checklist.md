@@ -171,6 +171,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Done gate: Android edits are symbol-based while the backing project remains normal `.stasis` files on disk.
 - Status: `completed`
 
+#### AW14 - Android Native Compile Probe
+- Language: `Android Java + C JNI + docs`.
+- Scope: Establish the first native compile bridge from saved app-private `.stasis` files without linking the Rust compiler/runtime yet.
+- Deliverable: After Apply saves a symbol edit, Java calls `nativeCompileProject(projectRoot)`; the native probe recursively scans readable `.stasis` files and returns deterministic `CompileNotLinked` diagnostics with file and byte counts.
+- Tests: Structural Android shell verifier covers the Java native method, post-Apply invocation, JNI entrypoint, recursive `.stasis` scan helper, and `CompileNotLinked` result string; debug APK builds.
+- Done gate: Android has a tested native compile-call surface that can be replaced with the real compiler bridge.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
