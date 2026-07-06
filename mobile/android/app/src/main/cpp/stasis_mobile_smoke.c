@@ -25,6 +25,8 @@ typedef struct CompileStats {
     char error[160];
 } CompileStats;
 
+static char *read_file_text(const char *path, long *size_out);
+
 static int has_suffix(const char *value, const char *suffix) {
     size_t value_len = strlen(value);
     size_t suffix_len = strlen(suffix);
@@ -49,6 +51,174 @@ static int count_token(const char *source, const char *token) {
         cursor += strlen(token);
     }
     return count;
+}
+static uint64_t hash_slice(const char *source, size_t length) {
+    uint64_t hash = FNV_OFFSET_BASIS;
+    for (size_t index = 0; index < length; index += 1) {
+        hash ^= (unsigned char)source[index];
+        hash *= FNV_PRIME;
+    }
+    return hash;
+}
+
+static const char *find_matching_function_end(const char *body_start) {
+    int depth = 0;
+    int line_comment = 0;
+    int block_comment = 0;
+    int string_literal = 0;
+
+    for (const char *cursor = body_start; *cursor != '\0'; cursor += 1) {
+        char current = *cursor;
+        char next = *(cursor + 1);
+
+        if (line_comment) {
+            if (current == '\n') {
+                line_comment = 0;
+            }
+            continue;
+        }
+        if (block_comment) {
+            if (current == '*' && next == '/') {
+                block_comment = 0;
+                cursor += 1;
+            }
+            continue;
+        }
+        if (string_literal) {
+            if (current == '\\' && next != '\0') {
+                cursor += 1;
+                continue;
+            }
+            if (current == '"') {
+                string_literal = 0;
+            }
+            continue;
+        }
+        if (current == '/' && next == '/') {
+            line_comment = 1;
+            cursor += 1;
+            continue;
+        }
+        if (current == '/' && next == '*') {
+            block_comment = 1;
+            cursor += 1;
+            continue;
+        }
+        if (current == '"') {
+            string_literal = 1;
+            continue;
+        }
+        if (current == '{') {
+            depth += 1;
+        } else if (current == '}') {
+            depth -= 1;
+            if (depth == 0) {
+                return cursor + 1;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+static void write_escaped_manifest_field(FILE *file, const char *start, size_t length) {
+    for (size_t index = 0; index < length; index += 1) {
+        char value = start[index];
+        if (value == '\n' || value == '\r' || value == '|') {
+            fputc(' ', file);
+        } else {
+            fputc(value, file);
+        }
+    }
+}
+
+static void write_function_manifest_entries(FILE *manifest, const char *path, const char *source) {
+    const char *cursor = source;
+    while ((cursor = strstr(cursor, "function ")) != NULL) {
+        const char *signature_start = cursor + strlen("function ");
+        const char *body_start = strchr(signature_start, '{');
+        if (body_start == NULL) {
+            break;
+        }
+
+        const char *body_end = find_matching_function_end(body_start);
+        if (body_end == NULL) {
+            break;
+        }
+
+        const char *signature_end = body_start;
+        while (signature_end > signature_start && (*(signature_end - 1) == ' ' || *(signature_end - 1) == '\n' || *(signature_end - 1) == '\r' || *(signature_end - 1) == '\t')) {
+            signature_end -= 1;
+        }
+
+        uint64_t signature_hash = hash_slice(signature_start, (size_t)(signature_end - signature_start));
+        uint64_t body_hash = hash_slice(body_start, (size_t)(body_end - body_start));
+        fprintf(manifest, "function=");
+        write_escaped_manifest_field(manifest, path, strlen(path));
+        fprintf(manifest, "|");
+        write_escaped_manifest_field(manifest, signature_start, (size_t)(signature_end - signature_start));
+        fprintf(
+                manifest,
+                "|signature_hash=%016llx|body_hash=%016llx\n",
+                (unsigned long long)signature_hash,
+                (unsigned long long)body_hash);
+
+        cursor = body_end;
+    }
+}
+
+static int append_function_entries_for_project(FILE *manifest, const char *path) {
+    DIR *dir = opendir(path);
+    if (dir == NULL) {
+        return -1;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        size_t path_len = strlen(path);
+        size_t name_len = strlen(entry->d_name);
+        char *child = (char *)malloc(path_len + 1 + name_len + 1);
+        if (child == NULL) {
+            closedir(dir);
+            return -1;
+        }
+        memcpy(child, path, path_len);
+        child[path_len] = '/';
+        memcpy(child + path_len + 1, entry->d_name, name_len + 1);
+
+        struct stat info;
+        if (stat(child, &info) == 0) {
+            if (S_ISDIR(info.st_mode)) {
+                int result = append_function_entries_for_project(manifest, child);
+                free(child);
+                if (result != 0) {
+                    closedir(dir);
+                    return result;
+                }
+                continue;
+            }
+            if (S_ISREG(info.st_mode) && has_suffix(entry->d_name, ".stasis")) {
+                long size = 0;
+                char *source = read_file_text(child, &size);
+                (void)size;
+                if (source == NULL) {
+                    free(child);
+                    closedir(dir);
+                    return -1;
+                }
+                write_function_manifest_entries(manifest, child, source);
+                free(source);
+            }
+        }
+        free(child);
+    }
+
+    closedir(dir);
+    return 0;
 }
 
 static void set_error(CompileStats *stats, const char *message, const char *path) {
