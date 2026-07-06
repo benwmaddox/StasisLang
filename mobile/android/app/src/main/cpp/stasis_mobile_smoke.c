@@ -26,6 +26,13 @@ typedef struct CompileStats {
     char error[160];
 } CompileStats;
 
+typedef struct PreviousManifest {
+    int found;
+    int functions;
+    int structs;
+    int globals;
+    uint64_t project_hash;
+} PreviousManifest;
 static char *read_file_text(const char *path, long *size_out);
 
 static int has_suffix(const char *value, const char *suffix) {
@@ -391,6 +398,61 @@ static char *read_file_text(const char *path, long *size_out) {
     return buffer;
 }
 
+static int parse_manifest_i32(const char *manifest, const char *key, int *out) {
+    const char *cursor = strstr(manifest, key);
+    if (cursor == NULL) {
+        return 0;
+    }
+    cursor += strlen(key);
+    *out = atoi(cursor);
+    return 1;
+}
+
+static int parse_manifest_u64(const char *manifest, const char *key, uint64_t *out) {
+    const char *cursor = strstr(manifest, key);
+    if (cursor == NULL) {
+        return 0;
+    }
+    cursor += strlen(key);
+    *out = (uint64_t)strtoull(cursor, NULL, 16);
+    return 1;
+}
+
+static void read_previous_compile_manifest(const char *project_root, PreviousManifest *previous) {
+    memset(previous, 0, sizeof(*previous));
+
+    char manifest_path[1200];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/%s", project_root, STASIS_COMPILE_MANIFEST_RELATIVE_PATH);
+
+    long size = 0;
+    char *manifest = read_file_text(manifest_path, &size);
+    if (manifest == NULL || size == 0) {
+        free(manifest);
+        return;
+    }
+
+    previous->found = 1;
+    parse_manifest_u64(manifest, "project_hash=", &previous->project_hash);
+    parse_manifest_i32(manifest, "functions=", &previous->functions);
+    parse_manifest_i32(manifest, "structs=", &previous->structs);
+    parse_manifest_i32(manifest, "globals=", &previous->globals);
+    free(manifest);
+}
+
+static const char *classify_reload(const CompileStats *stats, const PreviousManifest *previous) {
+    if (!previous->found) {
+        return "InitialCompile";
+    }
+    if (previous->project_hash == stats->project_hash) {
+        return "NoChange";
+    }
+    if (previous->functions != stats->function_count ||
+        previous->structs != stats->struct_count ||
+        previous->globals != stats->global_count) {
+        return "ResetRequired";
+    }
+    return "FastReload";
+}
 static int analyze_stasis_file(const char *path, CompileStats *stats) {
     long size = 0;
     char *source = read_file_text(path, &size);
@@ -498,7 +560,7 @@ static int ensure_directory(const char *path, CompileStats *stats) {
     return 0;
 }
 
-static int write_compile_manifest(const char *project_root, const CompileStats *stats) {
+static int write_compile_manifest(const char *project_root, const CompileStats *stats, const char *reload_classification) {
     char build_dir[1024];
     snprintf(build_dir, sizeof(build_dir), "%s/build", project_root);
 
@@ -522,6 +584,7 @@ static int write_compile_manifest(const char *project_root, const CompileStats *
     }
 
     fprintf(file, "status=CompilePlanned\n");
+    fprintf(file, "reload=%s\n", reload_classification);
     fprintf(file, "project_hash=%016llx\n", (unsigned long long)stats->project_hash);
     fprintf(file, "files=%d\n", stats->file_count);
     fprintf(file, "bytes=%ld\n", stats->byte_count);
@@ -553,6 +616,9 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
     memset(&stats, 0, sizeof(stats));
     stats.project_hash = FNV_OFFSET_BASIS;
     int result = scan_stasis_files(root, &stats);
+    PreviousManifest previous;
+    read_previous_compile_manifest(root, &previous);
+    const char *reload_classification = classify_reload(&stats, &previous);
 
     char message[256];
     if (result != 0 || stats.error[0] != '\0') {
@@ -561,13 +627,14 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
         snprintf(message, sizeof(message), "CompileError: no .stasis files found");
     } else if (!stats.has_main || !stats.has_tick) {
         snprintf(message, sizeof(message), "CompileError: missing lifecycle root main=%d tick=%d", stats.has_main, stats.has_tick);
-    } else if (write_compile_manifest(root, &stats) != 0) {
+    } else if (write_compile_manifest(root, &stats, reload_classification) != 0) {
         snprintf(message, sizeof(message), "CompileError: unable to write native compile manifest");
     } else {
         snprintf(
                 message,
                 sizeof(message),
-                "CompilePlanned: files=%d functions=%d hash=%016llx manifest=%s",
+                "CompilePlanned: reload=%s files=%d functions=%d hash=%016llx manifest=%s",
+                reload_classification,
                 stats.file_count,
                 stats.function_count,
                 (unsigned long long)stats.project_hash,

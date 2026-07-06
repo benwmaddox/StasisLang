@@ -92,7 +92,7 @@ def main() -> int:
     assert "scan_stasis_files" in native
     assert "analyze_stasis_file" in native
     assert "validate_braces" in native
-    assert "CompilePlanned: files=" in native
+    assert "CompilePlanned: reload=%s files=" in native
     assert "STASIS_COMPILE_MANIFEST_RELATIVE_PATH" in native
     assert "write_compile_manifest" in native
     assert "write_function_manifest_entries" in native
@@ -105,6 +105,14 @@ def main() -> int:
     assert "signature_hash=%016llx" in native
     assert "project_hash=%016llx" in native
     assert "status=CompilePlanned" in native
+    assert "PreviousManifest" in native
+    assert "read_previous_compile_manifest" in native
+    assert "classify_reload" in native
+    assert "reload=%s" in native
+    assert "InitialCompile" in native
+    assert "NoChange" in native
+    assert "FastReload" in native
+    assert "ResetRequired" in native
     assert "CompileError: missing lifecycle root" in native
     assert "Stasis Android native smoke loaded" in native
 
