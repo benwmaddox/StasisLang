@@ -54,6 +54,7 @@ def main() -> int:
     activity = read("mobile/android/app/src/main/java/com/stasislang/workshop/MainActivity.java")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "private static native String nativeStatus()" in activity
+    assert "private static native String nativeCompileProject(String projectRoot)" in activity
     assert "workshop_sample/" in activity
     assert "createWorkshopView" in activity
     assert "ProjectSnapshot.from" in activity
@@ -69,6 +70,7 @@ def main() -> int:
     assert "ensureProjectFile" in activity
     assert "writeTextFile" in activity
     assert "Saved to .stasis file" in activity
+    assert "nativeCompileProject(projectRoot().getAbsolutePath())" in activity
     assert "resetSelectedEdit" in activity
     assert "classifySelectedReload" in activity
     assert "setFillViewport(true)" in activity
@@ -84,6 +86,9 @@ def main() -> int:
 
     native = read("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
+    assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
+    assert "scan_stasis_files" in native
+    assert "CompileNotLinked: native probe read" in native
     assert "Stasis Android native smoke loaded" in native
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")

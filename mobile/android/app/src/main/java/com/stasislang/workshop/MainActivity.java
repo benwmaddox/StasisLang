@@ -53,6 +53,7 @@ public final class MainActivity extends Activity {
     }
 
     private static native String nativeStatus();
+    private static native String nativeCompileProject(String projectRoot);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -244,7 +245,8 @@ public final class MainActivity extends Activity {
         String reload = classifySelectedReload(selectedSymbol, editedSource);
         try {
             persistSelectedEdit(selectedSymbol, editedSource);
-            reloadStatus.setText("Saved to .stasis file - " + reload);
+            String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
+            reloadStatus.setText("Saved to .stasis file - " + reload + " - " + compileResult);
         } catch (IOException error) {
             reloadStatus.setText("Save failed: " + error.getMessage());
         }
@@ -294,10 +296,13 @@ public final class MainActivity extends Activity {
         return trimmed.substring("function ".length(), bodyStart).trim();
     }
 
+    private File projectRoot() {
+        return new File(getFilesDir(), PROJECT_DIR);
+    }
     private ProjectSnapshot loadBundledProject() {
         List<SourceFile> files = new ArrayList<>();
         AssetManager assets = getAssets();
-        File projectRoot = new File(getFilesDir(), PROJECT_DIR);
+        File projectRoot = projectRoot();
 
         for (String file : SAMPLE_FILES) {
             File diskFile = new File(projectRoot, file);
