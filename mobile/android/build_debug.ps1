@@ -18,6 +18,8 @@ try {
         throw "Gradle was not found. Install Gradle or open mobile/android in Android Studio."
     }
 
+    & (Join-Path $scriptRoot "build_rust_bridge.ps1")
+
     $task = if ($Install) { ":app:installDebug" } else { ":app:assembleDebug" }
     $args = @($task)
     if ($CompileSdk) { $args += "-Pstasis.compileSdk=$CompileSdk" }

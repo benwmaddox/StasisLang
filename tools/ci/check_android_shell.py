@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[2]
 REQUIRED_FILES = [
     "mobile/android/settings.gradle",
     "mobile/android/build.gradle",
+    "mobile/android/build_rust_bridge.ps1",
     "mobile/android/app/build.gradle",
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/main/java/com/stasislang/workshop/MainActivity.java",
@@ -50,6 +51,16 @@ def main() -> int:
     assert "stasis_android_bridge_compile_project" in bridge
     assert "build_android_workshop_compile_plan" in bridge
     assert "render_android_workshop_artifacts" in bridge
+
+    rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
+    debug_script = read("mobile/android/build_debug.ps1")
+    android_gitignore = read("mobile/android/.gitignore")
+    assert "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER" in rust_bridge_script
+    assert "aarch64-linux-android" in rust_bridge_script
+    assert "libstasis_android_bridge.so" in rust_bridge_script
+    assert "app\\src\\main\\jniLibs\\arm64-v8a" in rust_bridge_script
+    assert "build_rust_bridge.ps1" in debug_script
+    assert "app/src/main/jniLibs/" in android_gitignore
 
     app_gradle = read("mobile/android/app/build.gradle")
     assert "applicationId 'com.stasislang.workshop'" in app_gradle
