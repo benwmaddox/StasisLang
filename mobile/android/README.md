@@ -9,6 +9,7 @@ Current scope:
 - Loads a tiny native C library through JNI.
 - Bundles a small Stasis-style workshop project under Android assets.
 - Shows a native Android symbol browser grouped by Main, Structs, Systems, and Root.
+- Draws a native Android preview surface that advances when `Run Tick` updates runtime state.
 - Seeds bundled `.stasis` files into app-private storage on first launch.
 - Lets a selected symbol display and edit its source from the app-private `.stasis` file.
 - Saves selected symbol edits back to the app-private `.stasis` file and reports `FastReload` versus `ResetRequired` expectations.

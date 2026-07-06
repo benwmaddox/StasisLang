@@ -2,7 +2,10 @@ package com.stasislang.workshop;
 
 import android.app.Activity;
 import android.content.res.AssetManager;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
@@ -46,6 +49,7 @@ public final class MainActivity extends Activity {
     private TextView sourceTitle;
     private EditText sourceEditor;
     private TextView reloadStatus;
+    private GamePreviewView gamePreview;
     private SymbolEntry selectedSymbol;
 
     static {
@@ -83,6 +87,11 @@ public final class MainActivity extends Activity {
         status.setTextSize(13.0f);
         status.setPadding(0, dp(4), 0, dp(12));
         page.addView(status, fullWidth());
+
+        gamePreview = new GamePreviewView(this);
+        page.addView(gamePreview, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(168)));
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -271,7 +280,28 @@ public final class MainActivity extends Activity {
 
     private void runNativeTick() {
         String runResult = nativeRunTick(projectRoot().getAbsolutePath());
+        int tickCount = extractTickCount(runResult);
+        if (tickCount >= 0 && gamePreview != null) {
+            gamePreview.setTickCount(tickCount);
+        }
         reloadStatus.setText(runResult);
+    }
+
+    private static int extractTickCount(String runResult) {
+        String marker = "tick_count=";
+        int start = runResult.indexOf(marker);
+        if (start < 0) {
+            return -1;
+        }
+        start += marker.length();
+        int end = start;
+        while (end < runResult.length() && Character.isDigit(runResult.charAt(end))) {
+            end += 1;
+        }
+        if (end == start) {
+            return -1;
+        }
+        return Integer.parseInt(runResult.substring(start, end));
     }
 
     private void applySelectedEdit() {
@@ -701,6 +731,63 @@ public final class MainActivity extends Activity {
             return value;
         }
         return value.substring(0, 1).toUpperCase(Locale.US) + value.substring(1);
+    }
+
+
+    private static final class GamePreviewView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF rect = new RectF();
+        private int tickCount;
+
+        GamePreviewView(Activity activity) {
+            super(activity);
+            setBackgroundColor(Color.rgb(15, 20, 28));
+        }
+
+        void setTickCount(int value) {
+            tickCount = value;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            int width = getWidth();
+            int height = getHeight();
+            if (width <= 0 || height <= 0) {
+                return;
+            }
+
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.rgb(22, 31, 43));
+            canvas.drawRect(0, 0, width, height, paint);
+
+            paint.setColor(Color.rgb(42, 58, 79));
+            for (int x = 0; x < width; x += 36) {
+                canvas.drawLine(x, 0, x, height, paint);
+            }
+            for (int y = 0; y < height; y += 36) {
+                canvas.drawLine(0, y, width, y, paint);
+            }
+
+            float playerX = 28.0f + (tickCount * 7 % Math.max(1, width - 88));
+            float groundY = height - 34.0f;
+            paint.setColor(Color.rgb(91, 192, 190));
+            rect.set(playerX, groundY - 28.0f, playerX + 44.0f, groundY);
+            canvas.drawRoundRect(rect, 5.0f, 5.0f, paint);
+
+            paint.setColor(Color.rgb(244, 162, 97));
+            for (int index = 0; index < 4; index += 1) {
+                float enemyX = width - 42.0f - ((tickCount * 4 + index * 64) % Math.max(1, width + 64));
+                float enemyY = 34.0f + index * 23.0f;
+                rect.set(enemyX, enemyY, enemyX + 24.0f, enemyY + 18.0f);
+                canvas.drawRoundRect(rect, 4.0f, 4.0f, paint);
+            }
+
+            paint.setTextSize(28.0f);
+            paint.setColor(Color.WHITE);
+            canvas.drawText("Tick " + tickCount, 18.0f, 34.0f, paint);
+        }
     }
 
     private static final class SourceFile {

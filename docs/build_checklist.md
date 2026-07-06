@@ -234,6 +234,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers the Java native binding, Run Tick button, native JNI entrypoint, runtime state tick readers/writers, and run diagnostics; debug APK builds.
 - Done gate: A sideloaded Android app can compile the bundled project and then run a visible native tick loop placeholder against app-private state.
 - Status: `completed`
+#### AW23 - Android Preview Tick Surface
+- Language: `Android Java + docs`.
+- Scope: Add a first native Android game preview surface that responds to the Run Tick path.
+- Deliverable: `MainActivity` now includes a custom `GamePreviewView` that draws a simple arcade scene and updates from parsed `RunTick: tick_count=...` diagnostics after the native runtime state advances.
+- Tests: Structural Android shell verifier covers the preview view, Canvas drawing path, tick parser, and Run Tick preview update; debug APK builds.
+- Done gate: A sideloaded Android app now has an editor, compile control, run-tick control, and visible game preview placeholder on one screen.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
