@@ -9,8 +9,9 @@ Current scope:
 - Loads a tiny native C library through JNI.
 - Bundles a small Stasis-style workshop project under Android assets.
 - Shows a native Android symbol browser grouped by Main, Structs, Systems, and Root.
-- Lets a selected symbol display and edit its source from the bundled `.stasis` file.
-- Applies selected symbol edits in memory and reports `FastReload` versus `ResetRequired` expectations.
+- Seeds bundled `.stasis` files into app-private storage on first launch.
+- Lets a selected symbol display and edit its source from the app-private `.stasis` file.
+- Saves selected symbol edits back to the app-private `.stasis` file and reports `FastReload` versus `ResetRequired` expectations.
 - Resizes and scrolls the editor when the Android keyboard opens so the active source remains visible.
 - Keeps fixed trailing scroll space under the editor as a fallback for phones where IME resize is inconsistent.
 

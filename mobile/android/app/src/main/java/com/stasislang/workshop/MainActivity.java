@@ -14,6 +14,9 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -28,6 +31,7 @@ import java.util.TreeSet;
 
 public final class MainActivity extends Activity {
     private static final String ASSET_ROOT = "workshop_sample/";
+    private static final String PROJECT_DIR = "workshop_project";
     private static final String[] SAMPLE_FILES = new String[] {
             "src/main.stasis",
             "src/root.stasis",
@@ -238,8 +242,22 @@ public final class MainActivity extends Activity {
 
         String editedSource = sourceEditor.getText().toString().trim();
         String reload = classifySelectedReload(selectedSymbol, editedSource);
-        selectedSymbol.source = editedSource;
-        reloadStatus.setText("Applied in memory - " + reload);
+        try {
+            persistSelectedEdit(selectedSymbol, editedSource);
+            reloadStatus.setText("Saved to .stasis file - " + reload);
+        } catch (IOException error) {
+            reloadStatus.setText("Save failed: " + error.getMessage());
+        }
+    }
+
+    private void persistSelectedEdit(SymbolEntry symbol, String editedSource) throws IOException {
+        SourceFile sourceFile = symbol.sourceFile;
+        String before = sourceFile.source.substring(0, symbol.start);
+        String after = sourceFile.source.substring(symbol.end);
+        sourceFile.source = before + editedSource + after;
+        symbol.source = editedSource;
+        symbol.end = symbol.start + editedSource.length();
+        writeTextFile(sourceFile.diskFile, sourceFile.source);
     }
 
     private void resetSelectedEdit() {
@@ -279,31 +297,74 @@ public final class MainActivity extends Activity {
     private ProjectSnapshot loadBundledProject() {
         List<SourceFile> files = new ArrayList<>();
         AssetManager assets = getAssets();
+        File projectRoot = new File(getFilesDir(), PROJECT_DIR);
 
         for (String file : SAMPLE_FILES) {
+            File diskFile = new File(projectRoot, file);
             try {
-                files.add(new SourceFile(file, readAsset(assets, ASSET_ROOT + file)));
+                ensureProjectFile(assets, ASSET_ROOT + file, diskFile);
+                files.add(new SourceFile(file, diskFile, readTextFile(diskFile)));
             } catch (IOException error) {
-                files.add(new SourceFile(file, "// Unable to load " + file + ": " + error.getMessage()));
+                files.add(new SourceFile(file, diskFile, "// Unable to load " + file + ": " + error.getMessage()));
             }
         }
 
         return ProjectSnapshot.from(files);
     }
 
-    private String readAsset(AssetManager assets, String path) throws IOException {
-        InputStream input = assets.open(path);
+    private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile) throws IOException {
+        if (diskFile.isFile()) {
+            return;
+        }
+
+        File parent = diskFile.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+            throw new IOException("failed to create " + parent.getAbsolutePath());
+        }
+
+        writeTextFile(diskFile, readAsset(assets, assetPath));
+    }
+
+    private String readTextFile(File file) throws IOException {
+        FileInputStream input = new FileInputStream(file);
         try {
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
-            byte[] buffer = new byte[4096];
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                output.write(buffer, 0, read);
-            }
-            return new String(output.toByteArray(), StandardCharsets.UTF_8);
+            return readStream(input);
         } finally {
             input.close();
         }
+    }
+
+    private void writeTextFile(File file, String source) throws IOException {
+        File parent = file.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+            throw new IOException("failed to create " + parent.getAbsolutePath());
+        }
+
+        FileOutputStream output = new FileOutputStream(file, false);
+        try {
+            output.write(source.getBytes(StandardCharsets.UTF_8));
+        } finally {
+            output.close();
+        }
+    }
+
+    private String readAsset(AssetManager assets, String path) throws IOException {
+        InputStream input = assets.open(path);
+        try {
+            return readStream(input);
+        } finally {
+            input.close();
+        }
+    }
+
+    private String readStream(InputStream input) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int read;
+        while ((read = input.read(buffer)) != -1) {
+            output.write(buffer, 0, read);
+        }
+        return new String(output.toByteArray(), StandardCharsets.UTF_8);
     }
 
     private LinearLayout.LayoutParams fullWidth() {
@@ -415,7 +476,7 @@ public final class MainActivity extends Activity {
 
         String name = file.source.substring(nameStart, nameEnd);
         String source = file.source.substring(start, end);
-        return new SymbolEntry("struct", name, name, "struct " + name, file.path, source, end);
+        return new SymbolEntry("struct", name, name, "struct " + name, file, file.path, source, start, end);
     }
 
     private static SymbolEntry parseFunction(SourceFile file, int start, TreeSet<String> structs) {
@@ -431,7 +492,7 @@ public final class MainActivity extends Activity {
         String name = paren < 0 ? signature : signature.substring(0, paren).trim();
         String owner = ownerForFunction(file.path, name, signature, structs);
         String source = file.source.substring(start, end);
-        return new SymbolEntry("function", name, owner, signature, file.path, source, end);
+        return new SymbolEntry("function", name, owner, signature, file, file.path, source, start, end);
     }
 
     private static String ownerForFunction(String file, String name, String signature, TreeSet<String> structs) {
@@ -601,10 +662,12 @@ public final class MainActivity extends Activity {
 
     private static final class SourceFile {
         final String path;
-        final String source;
+        final File diskFile;
+        String source;
 
-        SourceFile(String path, String source) {
+        SourceFile(String path, File diskFile, String source) {
             this.path = path;
+            this.diskFile = diskFile;
             this.source = source;
         }
     }
@@ -634,17 +697,21 @@ public final class MainActivity extends Activity {
         final String name;
         final String owner;
         final String signature;
+        final SourceFile sourceFile;
         final String file;
         String source;
-        final int end;
+        final int start;
+        int end;
 
-        SymbolEntry(String kind, String name, String owner, String signature, String file, String source, int end) {
+        SymbolEntry(String kind, String name, String owner, String signature, SourceFile sourceFile, String file, String source, int start, int end) {
             this.kind = kind;
             this.name = name;
             this.owner = owner;
             this.signature = signature;
+            this.sourceFile = sourceFile;
             this.file = file;
             this.source = source;
+            this.start = start;
             this.end = end;
         }
 
