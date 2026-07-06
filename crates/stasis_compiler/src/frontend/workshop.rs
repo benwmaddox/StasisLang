@@ -969,6 +969,100 @@ pub fn build_android_workshop_compile_plan(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AndroidWorkshopArtifactSet {
+    pub manifest_path: String,
+    pub manifest: String,
+    pub runtime_state_path: String,
+    pub runtime_state: Option<String>,
+    pub function_artifacts: Vec<AndroidWorkshopFunctionArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AndroidWorkshopFunctionArtifact {
+    pub path: String,
+    pub source: String,
+}
+
+pub fn render_android_workshop_artifacts(
+    plan: &AndroidWorkshopCompilePlan,
+) -> AndroidWorkshopArtifactSet {
+    let mut manifest = String::new();
+    manifest.push_str("status=CompilePlanned\n");
+    manifest.push_str(&format!(
+        "reload={}\n",
+        android_reload_manifest_name(plan.reload)
+    ));
+    manifest.push_str(&format!("project_hash={:08x}\n", plan.project_hash as u32));
+    manifest.push_str(&format!("layout_hash={:08x}\n", plan.layout_hash as u32));
+    manifest.push_str(&format!("functions={}\n", plan.functions.len()));
+    manifest.push_str(&format!("errors={}\n", plan.errors.len()));
+    manifest.push_str(&format!("roots={}\n", plan.entrypoints.join(",")));
+    for entrypoint in &plan.entrypoints {
+        manifest.push_str(&format!("entrypoint={entrypoint}\n"));
+    }
+    manifest.push_str("runtime_state=build/runtime_state.txt\n");
+    for function in &plan.functions {
+        manifest.push_str(&format!(
+            "function={}|owner={}|file={}|ordinal={}|signature={}|id_hash={:08x}|signature_hash={:08x}|body_hash={:08x}|artifact={}\n",
+            function.name,
+            function.owner.as_deref().unwrap_or(""),
+            function.file,
+            function.ordinal,
+            function.signature,
+            function.id_hash as u32,
+            function.signature_hash as u32,
+            function.body_hash as u32,
+            function.artifact
+        ));
+    }
+
+    let runtime_state = match plan.reload {
+        AndroidWorkshopReload::InitialCompile | AndroidWorkshopReload::ResetRequired => {
+            Some(format!(
+                "status=RuntimeStateReady\nproject_hash={:08x}\nreload={}\ntick_count=0\n",
+                plan.project_hash as u32,
+                android_reload_manifest_name(plan.reload)
+            ))
+        }
+        AndroidWorkshopReload::NoChange | AndroidWorkshopReload::FastReload => None,
+    };
+
+    let function_artifacts = plan
+        .functions
+        .iter()
+        .map(|function| AndroidWorkshopFunctionArtifact {
+            path: function.artifact.clone(),
+            source: format!(
+                "status=CompiledStub\nname={}\nowner={}\nfile={}\nsignature={}\nid_hash={:08x}\nsignature_hash={:08x}\nbody_hash={:08x}\n",
+                function.name,
+                function.owner.as_deref().unwrap_or(""),
+                function.file,
+                function.signature,
+                function.id_hash as u32,
+                function.signature_hash as u32,
+                function.body_hash as u32
+            ),
+        })
+        .collect();
+
+    AndroidWorkshopArtifactSet {
+        manifest_path: "build/native_compile_manifest.txt".to_string(),
+        manifest,
+        runtime_state_path: "build/runtime_state.txt".to_string(),
+        runtime_state,
+        function_artifacts,
+    }
+}
+
+fn android_reload_manifest_name(reload: AndroidWorkshopReload) -> &'static str {
+    match reload {
+        AndroidWorkshopReload::InitialCompile => "InitialCompile",
+        AndroidWorkshopReload::NoChange => "NoChange",
+        AndroidWorkshopReload::FastReload => "FastReload",
+        AndroidWorkshopReload::ResetRequired => "ResetRequired",
+    }
+}
 fn android_symbol_for_compiler_function<'a>(
     symbols: &'a BTreeMap<(String, usize), WorkshopSymbol>,
     compiler_file: &str,
@@ -2244,6 +2338,9 @@ mod android_compile_plan_tests {
             build_android_workshop_compile_plan(&body_files, &body_compile, Some(&first_plan))
                 .expect("body plan");
         assert_eq!(body_plan.reload, AndroidWorkshopReload::FastReload);
+        let body_artifacts = render_android_workshop_artifacts(&body_plan);
+        assert!(body_artifacts.runtime_state.is_none());
+        assert!(body_artifacts.manifest.contains("reload=FastReload\n"));
 
         fs::write(
             &main,
@@ -2263,6 +2360,13 @@ mod android_compile_plan_tests {
                 .expect("layout plan");
         assert_eq!(layout_plan.reload, AndroidWorkshopReload::ResetRequired);
         assert!(layout_plan.reason.contains("layout hash changed"));
+        let layout_artifacts = render_android_workshop_artifacts(&layout_plan);
+        assert!(layout_artifacts
+            .runtime_state
+            .as_deref()
+            .is_some_and(|state| {
+                state.contains("reload=ResetRequired") && state.contains("tick_count=0")
+            }));
         fs::remove_dir_all(&root).ok();
     }
 }
