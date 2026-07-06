@@ -248,6 +248,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Focused Rust tests compile sample workshop projects through `IncrementalCompilerHost`, build Android compile plans, verify function metadata/artifact paths, and classify `FastReload` versus `ResetRequired`; Android shell verifier and debug APK build continue to pass.
 - Done gate: The next JNI slice has a Rust compiler-owned contract to call instead of expanding the native C scaffold.
 - Status: `completed`
+#### AW25 - Compiler-Owned Android Artifact Rendering
+- Language: `Rust compiler frontend + docs`.
+- Scope: Move Android manifest, runtime-state, and function-stub artifact contents into the compiler-owned workshop contract.
+- Deliverable: `stasis_compiler::frontend::workshop` now exposes `render_android_workshop_artifacts`, producing `build/native_compile_manifest.txt`, optional `build/runtime_state.txt`, and per-function `CompiledStub` artifact text from `AndroidWorkshopCompilePlan`.
+- Tests: Focused Rust tests render artifacts from real `IncrementalCompilerHost` output and verify manifest entrypoints, reload strings, runtime-state reset/preserve behavior, and function stub content; Android shell verifier covers the compiler-owned artifact API; debug APK builds.
+- Done gate: JNI can switch from generating Android compile artifacts in C to writing compiler-rendered artifact text.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

@@ -102,6 +102,10 @@ def main() -> int:
     assert "IncrementalCompileOutput" in workshop
     assert "AndroidWorkshopReload" in workshop
     assert "android_compile_plan_tests" in workshop
+    assert "render_android_workshop_artifacts" in workshop
+    assert "AndroidWorkshopArtifactSet" in workshop
+    assert "status=RuntimeStateReady" in workshop
+    assert "status=CompiledStub" in workshop
 
     native = read("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
