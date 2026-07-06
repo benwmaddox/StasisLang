@@ -54,6 +54,7 @@ public final class MainActivity extends Activity {
 
     private static native String nativeStatus();
     private static native String nativeCompileProject(String projectRoot);
+    private static native String nativeRunTick(String projectRoot);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -210,8 +211,11 @@ public final class MainActivity extends Activity {
 
     private LinearLayout createEditControls() {
         LinearLayout controls = new LinearLayout(this);
-        controls.setOrientation(LinearLayout.HORIZONTAL);
+        controls.setOrientation(LinearLayout.VERTICAL);
         controls.setPadding(0, dp(8), 0, 0);
+
+        LinearLayout editRow = new LinearLayout(this);
+        editRow.setOrientation(LinearLayout.HORIZONTAL);
 
         Button apply = new Button(this);
         apply.setText("Apply");
@@ -221,7 +225,7 @@ public final class MainActivity extends Activity {
                 applySelectedEdit();
             }
         });
-        controls.addView(apply, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        editRow.addView(apply, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
 
         Button reset = new Button(this);
         reset.setText("Reset");
@@ -231,7 +235,11 @@ public final class MainActivity extends Activity {
                 resetSelectedEdit();
             }
         });
-        controls.addView(reset, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        editRow.addView(reset, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        controls.addView(editRow, fullWidth());
+
+        LinearLayout runtimeRow = new LinearLayout(this);
+        runtimeRow.setOrientation(LinearLayout.HORIZONTAL);
 
         Button compile = new Button(this);
         compile.setText("Compile");
@@ -241,14 +249,29 @@ public final class MainActivity extends Activity {
                 runNativeCompile();
             }
         });
-        controls.addView(compile, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        runtimeRow.addView(compile, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        Button runTick = new Button(this);
+        runTick.setText("Run Tick");
+        runTick.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                runNativeTick();
+            }
+        });
+        runtimeRow.addView(runTick, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        controls.addView(runtimeRow, fullWidth());
 
         return controls;
     }
-
     private void runNativeCompile() {
         String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
         reloadStatus.setText(compileResult);
+    }
+
+    private void runNativeTick() {
+        String runResult = nativeRunTick(projectRoot().getAbsolutePath());
+        reloadStatus.setText(runResult);
     }
 
     private void applySelectedEdit() {

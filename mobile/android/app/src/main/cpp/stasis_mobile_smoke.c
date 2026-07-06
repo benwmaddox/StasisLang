@@ -629,6 +629,37 @@ static int write_compile_manifest(const char *project_root, const CompileStats *
     return 0;
 }
 
+static int read_runtime_tick_count(const char *project_root, int *tick_count) {
+    char state_path[1200];
+    snprintf(state_path, sizeof(state_path), "%s/%s", project_root, STASIS_RUNTIME_STATE_RELATIVE_PATH);
+
+    long size = 0;
+    char *state = read_file_text(state_path, &size);
+    if (state == NULL || size == 0) {
+        free(state);
+        return -1;
+    }
+
+    int parsed = parse_manifest_i32(state, "tick_count=", tick_count);
+    free(state);
+    return parsed ? 0 : -1;
+}
+
+static int write_runtime_tick_count(const char *project_root, int tick_count) {
+    char state_path[1200];
+    snprintf(state_path, sizeof(state_path), "%s/%s", project_root, STASIS_RUNTIME_STATE_RELATIVE_PATH);
+
+    FILE *state = fopen(state_path, "wb");
+    if (state == NULL) {
+        return -1;
+    }
+
+    fprintf(state, "status=RuntimeStateReady\n");
+    fprintf(state, "tick_count=%d\n", tick_count);
+    fclose(state);
+    return 0;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activity_class) {
     (void)activity_class;
@@ -673,6 +704,30 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
                 (unsigned long long)stats.project_hash,
                 STASIS_COMPILE_MANIFEST_RELATIVE_PATH,
                 STASIS_RUNTIME_STATE_RELATIVE_PATH);
+    }
+
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
+    return (*env)->NewStringUTF(env, message);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass activity_class, jstring project_root) {
+    (void)activity_class;
+
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    if (root == NULL) {
+        return (*env)->NewStringUTF(env, "RunError: unable to read project root");
+    }
+
+    int tick_count = 0;
+    char message[192];
+    if (read_runtime_tick_count(root, &tick_count) != 0) {
+        snprintf(message, sizeof(message), "RunError: compile project before running tick");
+    } else if (write_runtime_tick_count(root, tick_count + 1) != 0) {
+        snprintf(message, sizeof(message), "RunError: unable to update runtime state");
+    } else {
+        snprintf(message, sizeof(message), "RunTick: tick_count=%d state=%s", tick_count + 1, STASIS_RUNTIME_STATE_RELATIVE_PATH);
     }
 
     (*env)->ReleaseStringUTFChars(env, project_root, root);

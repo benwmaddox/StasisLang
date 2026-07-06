@@ -227,6 +227,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers the runtime-state path, entrypoint manifest lines, state-ready marker, compile result state path, and runtime-state writer; debug APK builds.
 - Done gate: Android compile planning now produces the state artifact the next on-device run/preview control can consume.
 - Status: `completed`
+#### AW22 - Android Run Tick Control
+- Language: `Android Java + C JNI + docs`.
+- Scope: Add the first on-device run control that consumes Android compile artifacts.
+- Deliverable: The Android UI now has a `Run Tick` button wired to `nativeRunTick(projectRoot)`; native code requires `build/runtime_state.txt`, increments `tick_count`, persists it, and returns `RunTick` or `RunError` diagnostics.
+- Tests: Structural Android shell verifier covers the Java native binding, Run Tick button, native JNI entrypoint, runtime state tick readers/writers, and run diagnostics; debug APK builds.
+- Done gate: A sideloaded Android app can compile the bundled project and then run a visible native tick loop placeholder against app-private state.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

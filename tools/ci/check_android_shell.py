@@ -55,6 +55,7 @@ def main() -> int:
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
+    assert "private static native String nativeRunTick(String projectRoot)" in activity
     assert "workshop_sample/" in activity
     assert "createWorkshopView" in activity
     assert "ProjectSnapshot.from" in activity
@@ -64,7 +65,10 @@ def main() -> int:
     assert "EditText" in activity
     assert "createEditControls" in activity
     assert 'compile.setText("Compile")' in activity
+    assert 'runTick.setText("Run Tick")' in activity
     assert "runNativeCompile" in activity
+    assert "runNativeTick" in activity
+    assert "nativeRunTick(projectRoot().getAbsolutePath())" in activity
     assert "applySelectedEdit" in activity
     assert "persistSelectedEdit" in activity
     assert "getFilesDir()" in activity
@@ -89,6 +93,7 @@ def main() -> int:
     native = read("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
+    assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "scan_stasis_files" in native
     assert "analyze_stasis_file" in native
     assert "validate_braces" in native
@@ -107,6 +112,10 @@ def main() -> int:
     assert "project_hash=%016llx" in native
     assert "status=CompilePlanned" in native
     assert "RuntimeStateReady" in native
+    assert "read_runtime_tick_count" in native
+    assert "write_runtime_tick_count" in native
+    assert "RunTick: tick_count=%d" in native
+    assert "RunError: compile project before running tick" in native
     assert "write_runtime_state" in native
     assert "runtime_state=%s" in native
     assert "entrypoint=main" in native
