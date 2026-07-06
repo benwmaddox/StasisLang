@@ -213,6 +213,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers the compile control and Java compile runner; debug APK builds.
 - Done gate: Users can explicitly run the Android compile path against saved app-private `.stasis` files.
 - Status: `completed`
+#### AW20 - Android Native Reload Classification
+- Language: `Android C JNI + docs`.
+- Scope: Make native compile planning compare against the previous app-private manifest and report the expected reload class.
+- Deliverable: Successful native compile planning reads the prior `build/native_compile_manifest.txt` when present, writes `reload=<classification>` into the new manifest, and returns `CompilePlanned: reload=...` diagnostics for `InitialCompile`, `NoChange`, `FastReload`, and `ResetRequired` paths.
+- Tests: Structural Android shell verifier covers previous-manifest parsing, reload classifier strings, manifest reload output, and compile diagnostics; debug APK builds.
+- Done gate: Android compile planning now exposes the stateful reload decision needed before replacing compiled stubs with real runtime code.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
