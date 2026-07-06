@@ -12,7 +12,7 @@ Current scope:
 - Seeds bundled `.stasis` files into app-private storage on first launch.
 - Lets a selected symbol display and edit its source from the app-private `.stasis` file.
 - Saves selected symbol edits back to the app-private `.stasis` file and reports `FastReload` versus `ResetRequired` expectations.
-- Adds a dedicated `Compile` control and calls a native compile check after Apply; the probe reads project `.stasis` files, validates basic source structure, checks lifecycle roots, and writes `build/native_compile_manifest.txt` with project counts, per-function signature/body hashes, per-function compiled-stub artifacts under `build/functions`, a `build/runtime_state.txt` state artifact, and a reload classification (`InitialCompile`, `NoChange`, `FastReload`, or `ResetRequired`), then returns `CompilePlanned` or `CompileError` diagnostics.
+- Adds dedicated `Compile` and `Run Tick` controls; `Run Tick` advances the native runtime-state artifact after a successful compile, and Compile calls a native compile check after Apply; the probe reads project `.stasis` files, validates basic source structure, checks lifecycle roots, and writes `build/native_compile_manifest.txt` with project counts, per-function signature/body hashes, per-function compiled-stub artifacts under `build/functions`, a `build/runtime_state.txt` state artifact, and a reload classification (`InitialCompile`, `NoChange`, `FastReload`, or `ResetRequired`), then returns `CompilePlanned` or `CompileError` diagnostics.
 - Resizes and scrolls the editor when the Android keyboard opens so the active source remains visible.
 - Keeps fixed trailing scroll space under the editor as a fallback for phones where IME resize is inconsistent.
 
