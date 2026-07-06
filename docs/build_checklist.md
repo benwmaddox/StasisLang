@@ -255,6 +255,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Focused Rust tests render artifacts from real `IncrementalCompilerHost` output and verify manifest entrypoints, reload strings, runtime-state reset/preserve behavior, and function stub content; Android shell verifier covers the compiler-owned artifact API; debug APK builds.
 - Done gate: JNI can switch from generating Android compile artifacts in C to writing compiler-rendered artifact text.
 - Status: `completed`
+#### AW26 - Rust Android Compiler Bridge Crate
+- Language: `Rust compiler bridge + docs`.
+- Scope: Start replacing Android C compile planning with a Rust bridge that calls the existing compiler/workshop APIs.
+- Deliverable: Added `crates/stasis_android_bridge` as a workspace crate with `rlib`/`cdylib` outputs, a safe `compile_android_workshop_project` API, and C ABI functions that load a workshop project, run `IncrementalCompilerHost`, build the compiler-owned Android compile plan, and write compiler-rendered manifest/runtime/function artifacts.
+- Tests: `cargo test -p stasis_android_bridge` covers artifact writing, fast-reload runtime-state preservation, and the C ABI compile message; Android shell verifier covers workspace/crate wiring and bridge API references; debug APK builds.
+- Done gate: Android now has a tested Rust bridge crate that reuses compiler structure and can replace the native C scaffold in the JNI layer.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
