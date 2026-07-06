@@ -199,6 +199,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers function manifest writer, project recursion, signature hash, and body hash markers; debug APK builds.
 - Done gate: Android compile output can distinguish signature changes from body-only changes at function granularity.
 - Status: `completed`
+#### AW18 - Android Function Compile Stub Artifacts
+- Language: `Android C JNI + docs`.
+- Scope: Give each function-level compile entry a concrete output artifact location before real machine code is emitted.
+- Deliverable: Successful native compile planning writes `build/functions/<body_hash>.stub` files containing source path, signature, signature hash, and body hash, and links each function manifest entry to its stub artifact.
+- Tests: Structural Android shell verifier covers artifact directory, stub writer, `CompiledStub` marker, and manifest artifact references; debug APK builds.
+- Done gate: Android compile output has per-function artifact files keyed by body hash for later replacement with real compiled code.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
