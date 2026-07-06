@@ -48,7 +48,8 @@ def main() -> int:
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
     assert "android.intent.action.MAIN" in manifest
     assert "android.intent.category.LAUNCHER" in manifest
-    assert "android:exported=\"true\"" in manifest
+    assert 'android:exported="true"' in manifest
+    assert 'android:windowSoftInputMode="adjustResize"' in manifest
 
     activity = read("mobile/android/app/src/main/java/com/stasislang/workshop/MainActivity.java")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
@@ -64,6 +65,10 @@ def main() -> int:
     assert "applySelectedEdit" in activity
     assert "resetSelectedEdit" in activity
     assert "classifySelectedReload" in activity
+    assert "setFillViewport(true)" in activity
+    assert "setOnFocusChangeListener" in activity
+    assert "scrollEditorIntoView" in activity
+    assert "smoothScrollTo(0, sourceEditor.getBottom())" in activity
     assert "FastReload: function signature unchanged" in activity
     assert "ResetRequired: function signature changed" in activity
     assert "ResetRequired: struct or layout source changed" in activity
