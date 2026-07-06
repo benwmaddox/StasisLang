@@ -7,6 +7,8 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -38,7 +40,9 @@ public final class MainActivity extends Activity {
     };
 
     private TextView sourceTitle;
-    private TextView sourceText;
+    private EditText sourceEditor;
+    private TextView reloadStatus;
+    private SymbolEntry selectedSymbol;
 
     static {
         System.loadLibrary("stasis_mobile_smoke");
@@ -88,13 +92,24 @@ public final class MainActivity extends Activity {
         sourceTitle.setPadding(0, dp(16), 0, dp(6));
         content.addView(sourceTitle, fullWidth());
 
-        sourceText = new TextView(this);
-        sourceText.setTextColor(Color.rgb(28, 37, 49));
-        sourceText.setTextSize(12.0f);
-        sourceText.setTypeface(Typeface.MONOSPACE);
-        sourceText.setPadding(dp(12), dp(10), dp(12), dp(10));
-        sourceText.setBackground(createPanelBackground(Color.WHITE, Color.rgb(207, 214, 224)));
-        content.addView(sourceText, fullWidth());
+        sourceEditor = new EditText(this);
+        sourceEditor.setTextColor(Color.rgb(28, 37, 49));
+        sourceEditor.setTextSize(12.0f);
+        sourceEditor.setTypeface(Typeface.MONOSPACE);
+        sourceEditor.setMinLines(8);
+        sourceEditor.setGravity(android.view.Gravity.TOP | android.view.Gravity.START);
+        sourceEditor.setPadding(dp(12), dp(10), dp(12), dp(10));
+        sourceEditor.setSingleLine(false);
+        sourceEditor.setBackground(createPanelBackground(Color.WHITE, Color.rgb(207, 214, 224)));
+        content.addView(sourceEditor, fullWidth());
+
+        content.addView(createEditControls(), fullWidth());
+
+        reloadStatus = new TextView(this);
+        reloadStatus.setTextColor(Color.rgb(73, 84, 100));
+        reloadStatus.setTextSize(13.0f);
+        reloadStatus.setPadding(0, dp(8), 0, dp(6));
+        content.addView(reloadStatus, fullWidth());
 
         ScrollView scrollView = new ScrollView(this);
         scrollView.addView(content);
@@ -159,8 +174,83 @@ public final class MainActivity extends Activity {
     }
 
     private void showSymbol(SymbolEntry symbol) {
+        selectedSymbol = symbol;
         sourceTitle.setText(symbol.file + " - " + symbol.displayName());
-        sourceText.setText(symbol.source.trim());
+        sourceEditor.setText(symbol.source.trim());
+        reloadStatus.setText("No pending edit");
+    }
+
+    private LinearLayout createEditControls() {
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.HORIZONTAL);
+        controls.setPadding(0, dp(8), 0, 0);
+
+        Button apply = new Button(this);
+        apply.setText("Apply");
+        apply.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                applySelectedEdit();
+            }
+        });
+        controls.addView(apply, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        Button reset = new Button(this);
+        reset.setText("Reset");
+        reset.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                resetSelectedEdit();
+            }
+        });
+        controls.addView(reset, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        return controls;
+    }
+
+    private void applySelectedEdit() {
+        if (selectedSymbol == null) {
+            return;
+        }
+
+        String editedSource = sourceEditor.getText().toString().trim();
+        String reload = classifySelectedReload(selectedSymbol, editedSource);
+        selectedSymbol.source = editedSource;
+        reloadStatus.setText("Applied in memory - " + reload);
+    }
+
+    private void resetSelectedEdit() {
+        if (selectedSymbol == null) {
+            return;
+        }
+
+        sourceEditor.setText(selectedSymbol.source.trim());
+        reloadStatus.setText("Reset editor to selected symbol");
+    }
+
+    private String classifySelectedReload(SymbolEntry symbol, String editedSource) {
+        if (!"function".equals(symbol.kind)) {
+            return "ResetRequired: struct or layout source changed";
+        }
+
+        String editedSignature = functionSignature(editedSource);
+        if (symbol.signature.equals(editedSignature)) {
+            return "FastReload: function signature unchanged";
+        }
+        return "ResetRequired: function signature changed";
+    }
+
+    private static String functionSignature(String source) {
+        String trimmed = source.trim();
+        if (!trimmed.startsWith("function ")) {
+            return "";
+        }
+
+        int bodyStart = trimmed.indexOf('{');
+        if (bodyStart < 0) {
+            return "";
+        }
+        return trimmed.substring("function ".length(), bodyStart).trim();
     }
 
     private ProjectSnapshot loadBundledProject() {
@@ -522,7 +612,7 @@ public final class MainActivity extends Activity {
         final String owner;
         final String signature;
         final String file;
-        final String source;
+        String source;
         final int end;
 
         SymbolEntry(String kind, String name, String owner, String signature, String file, String source, int end) {

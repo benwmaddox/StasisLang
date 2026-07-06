@@ -9,7 +9,8 @@ Current scope:
 - Loads a tiny native C library through JNI.
 - Bundles a small Stasis-style workshop project under Android assets.
 - Shows a native Android symbol browser grouped by Main, Structs, Systems, and Root.
-- Lets a selected symbol display its source from the bundled `.stasis` file.
+- Lets a selected symbol display and edit its source from the bundled `.stasis` file.
+- Applies selected symbol edits in memory and reports `FastReload` versus `ResetRequired` expectations.
 
 It does not yet link the Stasis runtime or compile a Stasis game on-device. That remains the next mobile runtime bridge slice.
 
@@ -55,4 +56,7 @@ Main
 Structs
 Systems
 Root
+Apply
+Reset
+No pending edit
 ```

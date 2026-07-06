@@ -59,6 +59,14 @@ def main() -> int:
     assert "parseSymbols" in activity
     assert "groupSymbols" in activity
     assert "createSymbolRow" in activity
+    assert "EditText" in activity
+    assert "createEditControls" in activity
+    assert "applySelectedEdit" in activity
+    assert "resetSelectedEdit" in activity
+    assert "classifySelectedReload" in activity
+    assert "FastReload: function signature unchanged" in activity
+    assert "ResetRequired: function signature changed" in activity
+    assert "ResetRequired: struct or layout source changed" in activity
     assert "setContentView(status)" not in activity
 
     native = read("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
