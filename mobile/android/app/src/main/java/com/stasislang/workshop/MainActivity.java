@@ -111,12 +111,22 @@ public final class MainActivity extends Activity {
         reloadStatus.setPadding(0, dp(8), 0, dp(6));
         content.addView(reloadStatus, fullWidth());
 
-        ScrollView scrollView = new ScrollView(this);
+        final ScrollView scrollView = new ScrollView(this);
+        scrollView.setFillViewport(true);
         scrollView.addView(content);
         page.addView(scrollView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
                 1.0f));
+
+        sourceEditor.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override
+            public void onFocusChange(View view, boolean hasFocus) {
+                if (hasFocus) {
+                    scrollEditorIntoView(scrollView);
+                }
+            }
+        });
 
         if (project.firstSymbol != null) {
             showSymbol(project.firstSymbol);
@@ -173,6 +183,14 @@ public final class MainActivity extends Activity {
         return row;
     }
 
+    private void scrollEditorIntoView(final ScrollView scrollView) {
+        scrollView.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                scrollView.smoothScrollTo(0, sourceEditor.getBottom());
+            }
+        }, 250L);
+    }
     private void showSymbol(SymbolEntry symbol) {
         selectedSymbol = symbol;
         sourceTitle.setText(symbol.file + " - " + symbol.displayName());

@@ -147,6 +147,14 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Done gate: Symbol editing is available from the sideloaded app without exposing raw file editing as the primary workflow.
 - Status: `completed`
 
+#### AW11 - Android Source Editor Keyboard Handling
+- Language: `Android Java + manifest + docs`.
+- Scope: Keep the selected-symbol editor usable when the soft keyboard opens on a phone.
+- Deliverable: The Android activity requests keyboard resize behavior and scrolls the focused source editor into view after IME focus.
+- Tests: Structural Android shell verifier covers `adjustResize`, fill-viewport scrolling, editor focus handling, and smooth scroll targeting; debug APK builds and installs on a paired phone.
+- Done gate: Tapping into the source editor no longer leaves the active text area hidden under the keyboard.
+- Status: `completed`
+
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
