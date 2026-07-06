@@ -111,6 +111,11 @@ public final class MainActivity extends Activity {
         reloadStatus.setPadding(0, dp(8), 0, dp(6));
         content.addView(reloadStatus, fullWidth());
 
+        View keyboardSpacer = new View(this);
+        content.addView(keyboardSpacer, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(360)));
+
         final ScrollView scrollView = new ScrollView(this);
         scrollView.setFillViewport(true);
         scrollView.addView(content);
