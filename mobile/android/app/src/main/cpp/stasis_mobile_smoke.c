@@ -10,6 +10,7 @@
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
 #define STASIS_COMPILE_MANIFEST_RELATIVE_PATH "build/native_compile_manifest.txt"
 #define STASIS_FUNCTION_ARTIFACT_DIR "build/functions"
+#define STASIS_RUNTIME_STATE_RELATIVE_PATH "build/runtime_state.txt"
 #define FNV_OFFSET_BASIS 1469598103934665603ULL
 #define FNV_PRIME 1099511628211ULL
 
@@ -560,6 +561,28 @@ static int ensure_directory(const char *path, CompileStats *stats) {
     return 0;
 }
 
+static int write_runtime_state(const char *project_root, const CompileStats *stats, const char *reload_classification) {
+    if (strcmp(reload_classification, "NoChange") == 0 || strcmp(reload_classification, "FastReload") == 0) {
+        return 0;
+    }
+
+    char state_path[1200];
+    snprintf(state_path, sizeof(state_path), "%s/%s", project_root, STASIS_RUNTIME_STATE_RELATIVE_PATH);
+
+    FILE *state = fopen(state_path, "wb");
+    if (state == NULL) {
+        return -1;
+    }
+
+    fprintf(state, "status=RuntimeStateReady\n");
+    fprintf(state, "project_hash=%016llx\n", (unsigned long long)stats->project_hash);
+    fprintf(state, "reload=%s\n", reload_classification);
+    fprintf(state, "tick_count=0\n");
+    fprintf(state, "globals=%d\n", stats->global_count);
+    fclose(state);
+    return 0;
+}
+
 static int write_compile_manifest(const char *project_root, const CompileStats *stats, const char *reload_classification) {
     char build_dir[1024];
     snprintf(build_dir, sizeof(build_dir), "%s/build", project_root);
@@ -592,7 +615,17 @@ static int write_compile_manifest(const char *project_root, const CompileStats *
     fprintf(file, "structs=%d\n", stats->struct_count);
     fprintf(file, "globals=%d\n", stats->global_count);
     fprintf(file, "roots=main,tick%s\n", stats->has_on_code_swap ? ",on_code_swap" : "");
+    fprintf(file, "entrypoint=main\n");
+    fprintf(file, "entrypoint=tick\n");
+    if (stats->has_on_code_swap) {
+        fprintf(file, "entrypoint=on_code_swap\n");
+    }
+    fprintf(file, "runtime_state=%s\n", STASIS_RUNTIME_STATE_RELATIVE_PATH);
     fclose(file);
+
+    if (write_runtime_state(project_root, stats, reload_classification) != 0) {
+        return -1;
+    }
     return 0;
 }
 
@@ -633,12 +666,13 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
         snprintf(
                 message,
                 sizeof(message),
-                "CompilePlanned: reload=%s files=%d functions=%d hash=%016llx manifest=%s",
+                "CompilePlanned: reload=%s files=%d functions=%d hash=%016llx manifest=%s state=%s",
                 reload_classification,
                 stats.file_count,
                 stats.function_count,
                 (unsigned long long)stats.project_hash,
-                STASIS_COMPILE_MANIFEST_RELATIVE_PATH);
+                STASIS_COMPILE_MANIFEST_RELATIVE_PATH,
+                STASIS_RUNTIME_STATE_RELATIVE_PATH);
     }
 
     (*env)->ReleaseStringUTFChars(env, project_root, root);
