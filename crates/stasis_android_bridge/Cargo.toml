@@ -1,0 +1,13 @@
+[package]
+name = "stasis_android_bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+stasis_compiler = { path = "../stasis_compiler" }
+serde_json.workspace = true

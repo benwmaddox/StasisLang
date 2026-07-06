@@ -39,6 +39,18 @@ def main() -> int:
     if missing:
         raise AssertionError(f"missing Android shell files: {missing}")
 
+    workspace = read("Cargo.toml")
+    bridge_toml = read("crates/stasis_android_bridge/Cargo.toml")
+    bridge = read("crates/stasis_android_bridge/src/lib.rs")
+    assert "crates/stasis_android_bridge" in workspace
+    assert "stasis_android_bridge" in bridge_toml
+    assert "stasis_compiler" in bridge_toml
+    assert "crate-type = [\"rlib\", \"cdylib\"]" in bridge_toml
+    assert "compile_android_workshop_project" in bridge
+    assert "stasis_android_bridge_compile_project" in bridge
+    assert "build_android_workshop_compile_plan" in bridge
+    assert "render_android_workshop_artifacts" in bridge
+
     app_gradle = read("mobile/android/app/build.gradle")
     assert "applicationId 'com.stasislang.workshop'" in app_gradle
     assert "abiFilters 'arm64-v8a'" in app_gradle
