@@ -290,6 +290,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers system bar color setup, root inset listener installation, system-window inset reads, display-cutout safe inset reads, and root padding application; debug APK builds.
 - Done gate: The sideloaded preview no longer places visible UI under the bottom navigation bar or camera notch.
 - Status: `completed`
+#### AW31 - Android 60 FPS Runtime Tick Cadence
+- Language: `Android Java + docs`.
+- Scope: Make the Android preview/run loop target the product-default 60 fps cadence instead of the earlier slow smoke-test interval.
+- Deliverable: `MainActivity` now uses a named 16 ms default tick interval for the automatic compile/run loop while keeping the existing placeholder preview unchanged until real runtime rendering replaces it.
+- Tests: Structural Android shell verifier covers the 16 ms tick interval constant and loop scheduling call; debug APK builds.
+- Done gate: The sideloaded app drives runtime ticks at the intended default cadence while runtime integration proceeds.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

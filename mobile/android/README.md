@@ -9,7 +9,7 @@ Current scope:
 - Loads a tiny native C library through JNI.
 - Bundles a small Stasis-style workshop project under Android assets.
 - Opens the native Android symbol browser and source editor from a top-right hamburger overlay grouped by Main, Structs, Systems, and Root.
-- Opens into a full-screen native Android preview surface by default and starts an automatic compile/tick loop so the preview advances without pressing `Compile` and `Run Tick`.
+- Opens into a full-screen native Android preview surface by default and starts an automatic 60 fps compile/tick loop so the preview advances without pressing `Compile` and `Run Tick`.
 - Keeps the preview, status text, and menu button inside Android system-bar and display-cutout safe insets, so they do not sit under the bottom navigation bar or camera notch.
 - Seeds bundled `.stasis` files into app-private storage on first launch.
 - Lets a selected symbol display and edit its source from the app-private `.stasis` file.
