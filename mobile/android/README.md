@@ -8,12 +8,12 @@ Current scope:
 - Targets `arm64-v8a` only.
 - Loads a tiny native C library through JNI.
 - Bundles a small Stasis-style workshop project under Android assets.
-- Shows a native Android symbol browser grouped by Main, Structs, Systems, and Root.
-- Draws a native Android preview surface that advances when `Run Tick` updates runtime state.
+- Opens the native Android symbol browser and source editor from a top-right hamburger overlay grouped by Main, Structs, Systems, and Root.
+- Opens into a full-screen native Android preview surface by default and starts an automatic compile/tick loop so the preview advances without pressing `Compile` and `Run Tick`.
 - Seeds bundled `.stasis` files into app-private storage on first launch.
 - Lets a selected symbol display and edit its source from the app-private `.stasis` file.
 - Saves selected symbol edits back to the app-private `.stasis` file and reports `FastReload` versus `ResetRequired` expectations.
-- Adds dedicated `Compile` and `Run Tick` controls; `Run Tick` advances the native runtime-state artifact after a successful compile, and Compile calls a native compile check after Apply; the probe reads project `.stasis` files, validates basic source structure, checks lifecycle roots, and writes `build/native_compile_manifest.txt` with project counts, per-function signature/body hashes, per-function compiled-stub artifacts under `build/functions`, a `build/runtime_state.txt` state artifact, and a reload classification (`InitialCompile`, `NoChange`, `FastReload`, or `ResetRequired`), then returns `CompilePlanned` or `CompileError` diagnostics.
+- Keeps dedicated `Compile` and `Run Tick` controls inside the editor overlay for manual review; the automatic loop and manual controls both use the native compile/run path. The probe reads project `.stasis` files, validates basic source structure, checks lifecycle roots, and writes `build/native_compile_manifest.txt` with project counts, per-function signature/body hashes, per-function compiled-stub artifacts under `build/functions`, a `build/runtime_state.txt` state artifact, and a reload classification (`InitialCompile`, `NoChange`, `FastReload`, or `ResetRequired`), then returns `CompilePlanned` or `CompileError` diagnostics.
 - Resizes and scrolls the editor when the Android keyboard opens so the active source remains visible.
 - Keeps fixed trailing scroll space under the editor as a fallback for phones where IME resize is inconsistent.
 
@@ -55,13 +55,9 @@ Install to a connected device:
 Expected app surface:
 
 ```text
-Stasis Workshop
-Stasis Android native smoke loaded - 8 files - 17 symbols
-Main
-Structs
-Systems
-Root
-Apply
-Reset
-No pending edit
+RunTick: tick_count=<advancing number>
+[full-screen native preview]
+[top-right menu button]
 ```
+
+Open the top-right menu button to access the symbol tree, source editor, Apply/Reset, and manual Compile/Run Tick controls.

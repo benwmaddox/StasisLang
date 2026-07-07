@@ -9,9 +9,13 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -49,7 +53,13 @@ public final class MainActivity extends Activity {
     private TextView sourceTitle;
     private EditText sourceEditor;
     private TextView reloadStatus;
+    private TextView gameStatus;
     private GamePreviewView gamePreview;
+    private ScrollView editorPanel;
+    private Button editorToggle;
+    private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
+    private Runnable gameLoop;
+    private boolean compileReady;
     private SymbolEntry selectedSymbol;
 
     static {
@@ -68,33 +78,47 @@ public final class MainActivity extends Activity {
         setContentView(createWorkshopView(project));
     }
 
+    @Override
+    protected void onDestroy() {
+        if (gameLoop != null) {
+            gameLoopHandler.removeCallbacks(gameLoop);
+        }
+        super.onDestroy();
+    }
+
     private View createWorkshopView(ProjectSnapshot project) {
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        page.setBackgroundColor(Color.rgb(247, 248, 251));
-        page.setPadding(dp(16), dp(14), dp(16), dp(16));
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.rgb(15, 20, 28));
+
+        gamePreview = new GamePreviewView(this);
+        root.addView(gamePreview, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        gameStatus = new TextView(this);
+        gameStatus.setText(nativeStatus() + " - " + project.files.size() + " files - " + project.symbolCount + " symbols");
+        gameStatus.setTextColor(Color.WHITE);
+        gameStatus.setTextSize(13.0f);
+        gameStatus.setPadding(dp(12), dp(8), dp(72), dp(8));
+        gameStatus.setBackgroundColor(Color.rgb(20, 28, 38));
+        FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.START);
+        root.addView(gameStatus, statusParams);
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(14), dp(12), dp(14), dp(12));
+        content.setBackground(createPanelBackground(Color.rgb(247, 248, 251), Color.rgb(190, 199, 212)));
 
         TextView title = new TextView(this);
         title.setText("Stasis Workshop");
         title.setTextColor(Color.rgb(22, 27, 34));
-        title.setTextSize(24.0f);
+        title.setTextSize(20.0f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        page.addView(title, fullWidth());
-
-        TextView status = new TextView(this);
-        status.setText(nativeStatus() + " - " + project.files.size() + " files - " + project.symbolCount + " symbols");
-        status.setTextColor(Color.rgb(73, 84, 100));
-        status.setTextSize(13.0f);
-        status.setPadding(0, dp(4), 0, dp(12));
-        page.addView(status, fullWidth());
-
-        gamePreview = new GamePreviewView(this);
-        page.addView(gamePreview, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(168)));
-
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
+        title.setPadding(0, 0, 0, dp(8));
+        content.addView(title, fullWidth());
 
         for (SymbolSection section : project.sections) {
             addSection(content, section);
@@ -102,9 +126,9 @@ public final class MainActivity extends Activity {
 
         sourceTitle = new TextView(this);
         sourceTitle.setTextColor(Color.rgb(22, 27, 34));
-        sourceTitle.setTextSize(16.0f);
+        sourceTitle.setTextSize(15.0f);
         sourceTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        sourceTitle.setPadding(0, dp(16), 0, dp(6));
+        sourceTitle.setPadding(0, dp(14), 0, dp(6));
         content.addView(sourceTitle, fullWidth());
 
         sourceEditor = new EditText(this);
@@ -112,7 +136,7 @@ public final class MainActivity extends Activity {
         sourceEditor.setTextSize(12.0f);
         sourceEditor.setTypeface(Typeface.MONOSPACE);
         sourceEditor.setMinLines(8);
-        sourceEditor.setGravity(android.view.Gravity.TOP | android.view.Gravity.START);
+        sourceEditor.setGravity(Gravity.TOP | Gravity.START);
         sourceEditor.setPadding(dp(12), dp(10), dp(12), dp(10));
         sourceEditor.setSingleLine(false);
         sourceEditor.setBackground(createPanelBackground(Color.WHITE, Color.rgb(207, 214, 224)));
@@ -131,19 +155,22 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(360)));
 
-        final ScrollView scrollView = new ScrollView(this);
-        scrollView.setFillViewport(true);
-        scrollView.addView(content);
-        page.addView(scrollView, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1.0f));
+        editorPanel = new ScrollView(this);
+        editorPanel.setFillViewport(false);
+        editorPanel.setVisibility(View.GONE);
+        editorPanel.addView(content);
+        FrameLayout.LayoutParams editorParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.TOP | Gravity.START);
+        editorParams.setMargins(dp(12), dp(64), dp(12), dp(18));
+        root.addView(editorPanel, editorParams);
 
         sourceEditor.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             @Override
             public void onFocusChange(View view, boolean hasFocus) {
                 if (hasFocus) {
-                    scrollEditorIntoView(scrollView);
+                    scrollEditorIntoView(editorPanel);
                 }
             }
         });
@@ -152,9 +179,68 @@ public final class MainActivity extends Activity {
             showSymbol(project.firstSymbol);
         }
 
-        return page;
+        editorToggle = new Button(this);
+        editorToggle.setText("\u2630");
+        editorToggle.setTextSize(20.0f);
+        editorToggle.setTextColor(Color.WHITE);
+        editorToggle.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
+        editorToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                toggleEditorPanel();
+            }
+        });
+        FrameLayout.LayoutParams toggleParams = new FrameLayout.LayoutParams(dp(52), dp(48), Gravity.TOP | Gravity.END);
+        toggleParams.setMargins(0, dp(8), dp(10), 0);
+        root.addView(editorToggle, toggleParams);
+
+        startGameLoop();
+        return root;
+    }
+    private void toggleEditorPanel() {
+        if (editorPanel == null) {
+            return;
+        }
+        boolean opening = editorPanel.getVisibility() != View.VISIBLE;
+        editorPanel.setVisibility(opening ? View.VISIBLE : View.GONE);
+        if (opening) {
+            editorPanel.bringToFront();
+        }
+        if (editorToggle != null) {
+            editorToggle.setText(opening ? "\u00D7" : "\u2630");
+            editorToggle.bringToFront();
+        }
     }
 
+    private void startGameLoop() {
+        if (gameLoop != null) {
+            return;
+        }
+        gameLoop = new Runnable() {
+            @Override
+            public void run() {
+                if (!compileReady) {
+                    String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
+                    compileReady = compileResult.startsWith("CompilePlanned");
+                    setStatusText(compileResult);
+                }
+                if (compileReady) {
+                    runNativeTick();
+                }
+                gameLoopHandler.postDelayed(this, 500L);
+            }
+        };
+        gameLoopHandler.post(gameLoop);
+    }
+
+    private void setStatusText(String status) {
+        if (reloadStatus != null) {
+            reloadStatus.setText(status);
+        }
+        if (gameStatus != null) {
+            gameStatus.setText(status);
+        }
+    }
     private void addSection(LinearLayout content, SymbolSection section) {
         TextView sectionTitle = new TextView(this);
         sectionTitle.setText(section.title);
@@ -215,7 +301,7 @@ public final class MainActivity extends Activity {
         selectedSymbol = symbol;
         sourceTitle.setText(symbol.file + " - " + symbol.displayName());
         sourceEditor.setText(symbol.source.trim());
-        reloadStatus.setText("No pending edit");
+        setStatusText("No pending edit");
     }
 
     private LinearLayout createEditControls() {
@@ -275,7 +361,8 @@ public final class MainActivity extends Activity {
     }
     private void runNativeCompile() {
         String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
-        reloadStatus.setText(compileResult);
+        compileReady = compileResult.startsWith("CompilePlanned");
+        setStatusText(compileResult);
     }
 
     private void runNativeTick() {
@@ -284,7 +371,7 @@ public final class MainActivity extends Activity {
         if (tickCount >= 0 && gamePreview != null) {
             gamePreview.setTickCount(tickCount);
         }
-        reloadStatus.setText(runResult);
+        setStatusText(runResult);
     }
 
     private static int extractTickCount(String runResult) {
@@ -314,9 +401,10 @@ public final class MainActivity extends Activity {
         try {
             persistSelectedEdit(selectedSymbol, editedSource);
             String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
-            reloadStatus.setText("Saved to .stasis file - " + reload + " - " + compileResult);
+            compileReady = compileResult.startsWith("CompilePlanned");
+            setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
         } catch (IOException error) {
-            reloadStatus.setText("Save failed: " + error.getMessage());
+            setStatusText("Save failed: " + error.getMessage());
         }
     }
 
@@ -336,7 +424,7 @@ public final class MainActivity extends Activity {
         }
 
         sourceEditor.setText(selectedSymbol.source.trim());
-        reloadStatus.setText("Reset editor to selected symbol");
+        setStatusText("Reset editor to selected symbol");
     }
 
     private String classifySelectedReload(SymbolEntry symbol, String editedSource) {
