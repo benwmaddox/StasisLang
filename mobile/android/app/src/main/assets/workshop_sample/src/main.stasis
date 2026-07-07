@@ -1,33 +1,212 @@
-import "game_state.stasis";
-import "player.stasis";
-import "enemy.stasis";
-import "input.stasis";
-import "systems/collision.stasis";
+global Input {
+    touch_y: i32;
+    touch_active: i32;
+    screen_w: i32;
+    screen_h: i32;
+}
+
+global GameState {
+    tick_count: i32;
+    screen_w: i32;
+    screen_h: i32;
+    player_y: i32;
+    ai_y: i32;
+    ball_x: i32;
+    ball_y: i32;
+    ball_vx: i32;
+    ball_vy: i32;
+    player_score: i32;
+    ai_score: i32;
+}
+
+global Render {
+    command_count: i32;
+    command0_kind: i32;
+    command0_x: i32;
+    command0_y: i32;
+    command0_w: i32;
+    command0_h: i32;
+    command0_color: i32;
+    command1_kind: i32;
+    command1_x: i32;
+    command1_y: i32;
+    command1_w: i32;
+    command1_h: i32;
+    command1_color: i32;
+    command2_kind: i32;
+    command2_x: i32;
+    command2_y: i32;
+    command2_w: i32;
+    command2_h: i32;
+    command2_color: i32;
+    command3_kind: i32;
+    command3_x: i32;
+    command3_y: i32;
+    command3_w: i32;
+    command3_h: i32;
+    command3_color: i32;
+    command4_kind: i32;
+    command4_x: i32;
+    command4_y: i32;
+    command4_w: i32;
+    command4_h: i32;
+    command4_color: i32;
+}
 
 function main(): void {
     init();
 }
 
 function init(): void {
-    GameState.player = create_default_player();
-    GameState.score = 0;
     GameState.tick_count = 0;
+    GameState.screen_w = 360;
+    GameState.screen_h = 640;
+    GameState.player_y = 320;
+    GameState.ai_y = 320;
+    GameState.ball_x = 180;
+    GameState.ball_y = 320;
+    GameState.ball_vx = 5;
+    GameState.ball_vy = 4;
+    GameState.player_score = 0;
+    GameState.ai_score = 0;
 }
 
 function tick(): void {
     GameState.tick_count += 1;
 
-    let input = read_input();
+    update_input();
+    update_player_paddle();
+    update_enemy_paddle();
+    update_ball();
+}
 
-    GameState.player.update(input);
-
-    foreach (let enemy in GameState.enemies) {
-        enemy.update();
+function update_input(): void {
+    if (Input.screen_w > 0) {
+        GameState.screen_w = Input.screen_w;
     }
 
-    collision_update();
+    if (Input.screen_h > 0) {
+        GameState.screen_h = Input.screen_h;
+    }
+}
+
+function update_player_paddle(): void {
+    if (Input.touch_active != 0) {
+        GameState.player_y = Input.touch_y;
+    }
+
+    if (GameState.player_y < 36) {
+        GameState.player_y = 36;
+    }
+
+    if (GameState.player_y > GameState.screen_h - 36) {
+        GameState.player_y = GameState.screen_h - 36;
+    }
+}
+
+function update_enemy_paddle(): void {
+    if (GameState.ai_y < GameState.ball_y) {
+        GameState.ai_y += 5;
+    }
+
+    if (GameState.ai_y > GameState.ball_y) {
+        GameState.ai_y -= 5;
+    }
+
+    if (GameState.ai_y < 36) {
+        GameState.ai_y = 36;
+    }
+
+    if (GameState.ai_y > GameState.screen_h - 36) {
+        GameState.ai_y = GameState.screen_h - 36;
+    }
+}
+
+function update_ball(): void {
+    GameState.ball_x += GameState.ball_vx;
+    GameState.ball_y += GameState.ball_vy;
+
+    if (GameState.ball_y < 12) {
+        GameState.ball_y = 12;
+        GameState.ball_vy = 0 - GameState.ball_vy;
+    }
+
+    if (GameState.ball_y > GameState.screen_h - 12) {
+        GameState.ball_y = GameState.screen_h - 12;
+        GameState.ball_vy = 0 - GameState.ball_vy;
+    }
+
+    if (ball_overlaps_vertical_paddle(28, GameState.player_y) && GameState.ball_vx < 0) {
+        GameState.ball_vx = 5;
+    }
+
+    if (ball_overlaps_vertical_paddle(GameState.screen_w - 28, GameState.ai_y) && GameState.ball_vx > 0) {
+        GameState.ball_vx = -5;
+    }
+
+    if (GameState.ball_x < 0) {
+        GameState.ai_score += 1;
+        reset_ball();
+    }
+
+    if (GameState.ball_x > GameState.screen_w) {
+        GameState.player_score += 1;
+        reset_ball();
+    }
+}
+
+function ball_overlaps_vertical_paddle(paddle_x: i32, paddle_y: i32): bool {
+    let dx = GameState.ball_x - paddle_x;
+    let dy = GameState.ball_y - paddle_y;
+
+    return dx * dx < 324 && dy * dy < 2116;
+}
+
+function reset_ball(): void {
+    GameState.ball_x = GameState.screen_w / 2;
+    GameState.ball_y = GameState.screen_h / 2;
+    GameState.ball_vx = 0 - GameState.ball_vx;
+}
+
+function render(): void {
+    Render.command_count = 5;
+
+    Render.command0_kind = 1;
+    Render.command0_x = 0;
+    Render.command0_y = 0;
+    Render.command0_w = GameState.screen_w;
+    Render.command0_h = GameState.screen_h;
+    Render.command0_color = 990236;
+
+    Render.command1_kind = 1;
+    Render.command1_x = 24;
+    Render.command1_y = GameState.player_y - 36;
+    Render.command1_w = 10;
+    Render.command1_h = 72;
+    Render.command1_color = 6013118;
+
+    Render.command2_kind = 1;
+    Render.command2_x = GameState.screen_w - 34;
+    Render.command2_y = GameState.ai_y - 36;
+    Render.command2_w = 10;
+    Render.command2_h = 72;
+    Render.command2_color = 6013118;
+
+    Render.command3_kind = 1;
+    Render.command3_x = GameState.ball_x - 7;
+    Render.command3_y = GameState.ball_y - 7;
+    Render.command3_w = 14;
+    Render.command3_h = 14;
+    Render.command3_color = 16032865;
+
+    Render.command4_kind = 1;
+    Render.command4_x = (GameState.screen_w / 2) - 1;
+    Render.command4_y = 0;
+    Render.command4_w = 2;
+    Render.command4_h = GameState.screen_h;
+    Render.command4_color = 4473924;
 }
 
 function on_code_swap(): void {
-    // Optional hook after a successful hot swap.
+    render();
 }

@@ -295,6 +295,11 @@ impl JitProcess {
     pub fn read_i32_global_path(&self, path: &str) -> i32 {
         stasis_dynload::stasis_jit_global_i32_load(hash_global_path(path))
     }
+
+    pub fn write_i32_global_path(&self, path: &str, value: i32) {
+        stasis_dynload::stasis_jit_global_i32_store(hash_global_path(path), value);
+    }
+
     pub fn execute_bool_noarg_by_name(&self, name: &str) -> Result<bool, String> {
         let function = self
             .compiler

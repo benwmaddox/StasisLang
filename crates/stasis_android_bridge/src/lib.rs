@@ -12,12 +12,34 @@ use stasis_compiler::frontend::workshop::{
 };
 use stasis_compiler::IncrementalCompilerHost;
 
+pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AndroidBridgeTickInput {
+    pub touch_y: i32,
+    pub touch_active: i32,
+    pub screen_w: i32,
+    pub screen_h: i32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AndroidBridgeRenderCommand {
+    pub kind: i32,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub color: i32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AndroidBridgeRunTickResult {
     pub tick_count: i32,
     pub recompiled: bool,
     pub initialized: bool,
     pub observed_game_tick_count: i32,
+    pub render_command_count: i32,
+    pub render_commands: [AndroidBridgeRenderCommand; ANDROID_RENDER_COMMAND_CAPACITY],
 }
 
 struct AndroidRuntimeSession {
@@ -124,6 +146,7 @@ pub fn compile_android_workshop_project(
 pub fn run_android_workshop_tick(
     project_root: impl AsRef<Path>,
     entry_file: impl AsRef<Path>,
+    input: AndroidBridgeTickInput,
 ) -> Result<AndroidBridgeRunTickResult, String> {
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
@@ -153,16 +176,39 @@ pub fn run_android_workshop_tick(
             session.initialized = true;
             true
         };
+        session
+            .jit
+            .write_i32_global_path("Input.touch_y", input.touch_y);
+        session
+            .jit
+            .write_i32_global_path("Input.touch_active", input.touch_active);
+        session
+            .jit
+            .write_i32_global_path("Input.screen_w", input.screen_w);
+        session
+            .jit
+            .write_i32_global_path("Input.screen_h", input.screen_h);
         execute_lifecycle_noarg(&session.jit, "tick")?;
         session.tick_count = session.tick_count.saturating_add(1);
+        execute_optional_lifecycle_noarg(&session.jit, "render")?;
         let observed_game_tick_count = session.jit.read_i32_global_path("GameState.tick_count");
-        write_jit_runtime_state(project_root, session.tick_count, observed_game_tick_count)?;
+        let render_command_count = session.jit.read_i32_global_path("Render.command_count");
+        let render_commands = read_render_commands(&session.jit);
+        write_jit_runtime_state(
+            project_root,
+            session.tick_count,
+            observed_game_tick_count,
+            render_command_count,
+            &render_commands,
+        )?;
 
         Ok(AndroidBridgeRunTickResult {
             tick_count: session.tick_count,
             recompiled: needs_recompile,
             initialized,
             observed_game_tick_count,
+            render_command_count,
+            render_commands,
         })
     })
 }
@@ -209,6 +255,59 @@ fn execute_lifecycle_noarg(jit: &JitProcess, name: &str) -> Result<(), String> {
     }
 }
 
+fn execute_optional_lifecycle_noarg(jit: &JitProcess, name: &str) -> Result<(), String> {
+    match execute_lifecycle_noarg(jit, name) {
+        Ok(()) => Ok(()),
+        Err(error) if error.contains("function '") && error.contains("not found") => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_render_commands(
+    jit: &JitProcess,
+) -> [AndroidBridgeRenderCommand; ANDROID_RENDER_COMMAND_CAPACITY] {
+    let mut commands = [AndroidBridgeRenderCommand::default(); ANDROID_RENDER_COMMAND_CAPACITY];
+    for (index, command) in commands.iter_mut().enumerate() {
+        command.kind = jit.read_i32_global_path(&format!("Render.command{index}_kind"));
+        command.x = jit.read_i32_global_path(&format!("Render.command{index}_x"));
+        command.y = jit.read_i32_global_path(&format!("Render.command{index}_y"));
+        command.w = jit.read_i32_global_path(&format!("Render.command{index}_w"));
+        command.h = jit.read_i32_global_path(&format!("Render.command{index}_h"));
+        command.color = jit.read_i32_global_path(&format!("Render.command{index}_color"));
+    }
+    commands
+}
+
+fn render_command_state_lines(
+    render_command_count: i32,
+    render_commands: &[AndroidBridgeRenderCommand; ANDROID_RENDER_COMMAND_CAPACITY],
+) -> String {
+    let mut lines = format!("render_command_count={render_command_count}\n");
+    let count = render_command_count.clamp(0, ANDROID_RENDER_COMMAND_CAPACITY as i32) as usize;
+    for (index, command) in render_commands.iter().enumerate().take(count) {
+        lines.push_str(&format!(
+            "render{index}_kind={}\nrender{index}_x={}\nrender{index}_y={}\nrender{index}_w={}\nrender{index}_h={}\nrender{index}_color={}\n",
+            command.kind, command.x, command.y, command.w, command.h, command.color
+        ));
+    }
+    lines
+}
+
+fn render_command_message_fields(
+    render_command_count: i32,
+    render_commands: &[AndroidBridgeRenderCommand; ANDROID_RENDER_COMMAND_CAPACITY],
+) -> String {
+    let count = render_command_count.clamp(0, ANDROID_RENDER_COMMAND_CAPACITY as i32) as usize;
+    let mut fields = format!("render_command_count={count}");
+    for (index, command) in render_commands.iter().enumerate().take(count) {
+        fields.push_str(&format!(
+            " render{index}_kind={} render{index}_x={} render{index}_y={} render{index}_w={} render{index}_h={} render{index}_color={}",
+            command.kind, command.x, command.y, command.w, command.h, command.color
+        ));
+    }
+    fields
+}
+
 fn fingerprint_workshop_sources(files: &[WorkshopSourceFile]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for file in files {
@@ -222,6 +321,8 @@ fn write_jit_runtime_state(
     project_root: &Path,
     tick_count: i32,
     observed_game_tick_count: i32,
+    render_command_count: i32,
+    render_commands: &[AndroidBridgeRenderCommand; ANDROID_RENDER_COMMAND_CAPACITY],
 ) -> Result<(), String> {
     let runtime_state_path = project_root.join("build/runtime_state.txt");
     if let Some(parent) = runtime_state_path.parent() {
@@ -235,7 +336,8 @@ fn write_jit_runtime_state(
     fs::write(
         &runtime_state_path,
         format!(
-            "status=RuntimeStateReady\nmode=JitExecuted\ntick_count={tick_count}\ngame_tick_count={observed_game_tick_count}\n"
+            "status=RuntimeStateReady\nmode=JitExecuted\ntick_count={tick_count}\ngame_tick_count={observed_game_tick_count}\n{}",
+            render_command_state_lines(render_command_count, render_commands)
         ),
     )
     .map_err(|error| {
@@ -326,15 +428,31 @@ unsafe fn compile_project_from_c(
 pub extern "C" fn stasis_android_bridge_run_tick(
     project_root: *const c_char,
     entry_file: *const c_char,
+    touch_y: i32,
+    touch_active: i32,
+    screen_w: i32,
+    screen_h: i32,
 ) -> *mut c_char {
-    let result = unsafe { run_tick_from_c(project_root, entry_file) };
+    let result = unsafe {
+        run_tick_from_c(
+            project_root,
+            entry_file,
+            AndroidBridgeTickInput {
+                touch_y,
+                touch_active,
+                screen_w,
+                screen_h,
+            },
+        )
+    };
     let message = match result {
         Ok(result) => format!(
-            "RunTick: tick_count={} game_tick_count={} mode=JitExecuted recompiled={} initialized={}",
+            "RunTick: tick_count={} game_tick_count={} mode=JitExecuted recompiled={} initialized={} {}",
             result.tick_count,
             result.observed_game_tick_count,
             result.recompiled,
-            result.initialized
+            result.initialized,
+            render_command_message_fields(result.render_command_count, &result.render_commands)
         ),
         Err(error) => format!("RunError: {error}"),
     };
@@ -346,6 +464,7 @@ pub extern "C" fn stasis_android_bridge_run_tick(
 unsafe fn run_tick_from_c(
     project_root: *const c_char,
     entry_file: *const c_char,
+    input: AndroidBridgeTickInput,
 ) -> Result<AndroidBridgeRunTickResult, String> {
     if project_root.is_null() || entry_file.is_null() {
         return Err("null project root or entry file".to_string());
@@ -356,7 +475,7 @@ unsafe fn run_tick_from_c(
     let entry_file = CStr::from_ptr(entry_file)
         .to_str()
         .map_err(|error| format!("entry file was not UTF-8: {error}"))?;
-    run_android_workshop_tick(project_root, entry_file)
+    run_android_workshop_tick(project_root, entry_file, input)
 }
 #[no_mangle]
 pub extern "C" fn stasis_android_bridge_free_string(value: *mut c_char) {
@@ -385,6 +504,15 @@ mod tests {
         RUNTIME_SESSION.with(|session| {
             *session.borrow_mut() = None;
         });
+    }
+
+    fn default_tick_input() -> AndroidBridgeTickInput {
+        AndroidBridgeTickInput {
+            touch_y: 120,
+            touch_active: 1,
+            screen_w: 360,
+            screen_h: 640,
+        }
     }
     fn temp_project(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -467,15 +595,17 @@ mod tests {
         )
         .expect("write source");
 
-        let first = run_android_workshop_tick(&root, Path::new("src/main.stasis"))
-            .expect("first real tick");
+        let first =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("first real tick");
         assert_eq!(first.tick_count, 1);
         assert!(first.recompiled);
         assert!(first.initialized);
         assert_eq!(first.observed_game_tick_count, 11);
 
-        let second = run_android_workshop_tick(&root, Path::new("src/main.stasis"))
-            .expect("second real tick");
+        let second =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("second real tick");
         assert_eq!(second.tick_count, 2);
         assert!(!second.recompiled);
         assert!(!second.initialized);
@@ -490,6 +620,72 @@ mod tests {
     }
 
     #[test]
+    fn bridge_run_tick_passes_input_to_stasis_and_exports_render_commands() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("touch_render_tick");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global Input { touch_y: i32; touch_active: i32; screen_w: i32; screen_h: i32; }\nglobal GameState { tick_count: i32; paddle_y: i32; }\nglobal Render { command_count: i32; command0_kind: i32; command0_x: i32; command0_y: i32; command0_w: i32; command0_h: i32; command0_color: i32; }\nfunction main(): void { GameState.paddle_y = 40; }\nfunction tick(): void { GameState.tick_count += 1; if (Input.touch_active != 0) { GameState.paddle_y = Input.touch_y; } }\nfunction render(): void { Render.command_count = 1; Render.command0_kind = 1; Render.command0_x = 12; Render.command0_y = GameState.paddle_y; Render.command0_w = 8; Render.command0_h = 64; Render.command0_color = 65535; }\n",
+        )
+        .expect("write source");
+
+        let result = run_android_workshop_tick(
+            &root,
+            Path::new("src/main.stasis"),
+            AndroidBridgeTickInput {
+                touch_y: 222,
+                touch_active: 1,
+                screen_w: 400,
+                screen_h: 700,
+            },
+        )
+        .expect("touch render tick");
+        assert!(result.observed_game_tick_count >= 1);
+        assert_eq!(result.render_command_count, 1);
+        assert_eq!(result.render_commands[0].kind, 1);
+        assert_eq!(result.render_commands[0].x, 12);
+        assert_eq!(result.render_commands[0].y, 222);
+        assert_eq!(result.render_commands[0].w, 8);
+        assert_eq!(result.render_commands[0].h, 64);
+        assert_eq!(result.render_commands[0].color, 65535);
+
+        let state = fs::read_to_string(root.join("build/runtime_state.txt"))
+            .expect("read JIT runtime state");
+        assert!(state.contains("render_command_count=1"));
+        assert!(state.contains("render0_y=222"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn android_bundled_touch_pong_sample_runs_and_exports_render_commands() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mobile/android/app/src/main/assets/workshop_sample")
+            .canonicalize()
+            .expect("bundled sample root");
+
+        let result = run_android_workshop_tick(
+            &root,
+            Path::new("src/main.stasis"),
+            AndroidBridgeTickInput {
+                touch_y: 240,
+                touch_active: 1,
+                screen_w: 360,
+                screen_h: 640,
+            },
+        )
+        .expect("bundled pong tick");
+
+        assert_eq!(result.render_command_count, 5);
+        assert_eq!(result.render_commands[0].kind, 1);
+        assert_eq!(result.render_commands[0].w, 360);
+        assert_eq!(result.render_commands[1].y, 204);
+        assert_eq!(result.render_commands[3].kind, 1);
+        assert!(result.observed_game_tick_count >= 1);
+    }
+    #[test]
     fn c_bridge_run_tick_returns_jit_executed_message() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
@@ -501,7 +697,8 @@ mod tests {
         .expect("write source");
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
         let entry_c = CString::new("src/main.stasis").expect("entry cstr");
-        let ptr = stasis_android_bridge_run_tick(root_c.as_ptr(), entry_c.as_ptr());
+        let ptr =
+            stasis_android_bridge_run_tick(root_c.as_ptr(), entry_c.as_ptr(), 144, 1, 360, 640);
         assert!(!ptr.is_null());
         let message = unsafe { CStr::from_ptr(ptr) }
             .to_str()

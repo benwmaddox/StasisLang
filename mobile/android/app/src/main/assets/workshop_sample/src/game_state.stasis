@@ -1,6 +1,1 @@
-global GameState {
-    player: Player;
-    enemies: Enemy[32];
-    score: i32;
-    tick_count: i32;
-}
+// Pong runtime state lives in main.stasis for the first Android JIT slice.
