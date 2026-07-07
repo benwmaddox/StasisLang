@@ -276,6 +276,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: `rustup target add aarch64-linux-android` completed locally; `build_debug.ps1` builds/copies the Rust bridge and assembles the APK; APK zip inspection confirms both `lib/arm64-v8a/libstasis_android_bridge.so` and `lib/arm64-v8a/libstasis_mobile_smoke.so` are packaged; Android shell verifier covers the packaging helper.
 - Done gate: A debug APK built from the repo now contains the Rust compiler bridge library that JNI attempts to load first.
 - Status: `completed`
+#### AW29 - Android Game-First Preview Surface
+- Language: `Android Java + docs`.
+- Scope: Make the Android app run the preview by default and move symbol editing into a top-right hamburger overlay.
+- Deliverable: `MainActivity` now uses a full-screen native preview root, hides the editor panel until the menu button opens it, keeps the keyboard spacer inside the overlay, and starts an automatic compile/tick loop on launch while retaining manual Compile and Run Tick controls for review.
+- Tests: Structural Android shell verifier covers the full-screen `FrameLayout`, hidden editor overlay, hamburger toggle, automatic tick loop, and compile-ready state; debug APK builds.
+- Done gate: A sideloaded app opens into the running preview first, with code editing available as an overlay instead of the default screen.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
@@ -1224,4 +1231,3 @@ Each PR must include:
 ## Backlog
 
 - Evaluate hard security sandbox options (separate process / OS sandbox / WASM runtime) for adversarial plugin or untrusted code scenarios.
-

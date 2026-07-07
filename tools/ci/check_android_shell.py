@@ -108,7 +108,17 @@ def main() -> int:
     assert "nativeCompileProject(projectRoot().getAbsolutePath())" in activity
     assert "resetSelectedEdit" in activity
     assert "classifySelectedReload" in activity
-    assert "setFillViewport(true)" in activity
+    assert "FrameLayout root = new FrameLayout(this)" in activity
+    assert "FrameLayout.LayoutParams.MATCH_PARENT" in activity
+    assert "editorPanel.setFillViewport(false)" in activity
+    assert "editorPanel.setVisibility(View.GONE)" in activity
+    assert "editorToggle.setText(\"\\u2630\")" in activity
+    assert "editorToggle.setText(opening ? \"\\u00D7\" : \"\\u2630\")" in activity
+    assert "toggleEditorPanel" in activity
+    assert "startGameLoop" in activity
+    assert "gameLoopHandler.postDelayed(this, 500L)" in activity
+    assert "compileReady = compileResult.startsWith(\"CompilePlanned\")" in activity
+    assert "setStatusText" in activity
     assert "setOnFocusChangeListener" in activity
     assert "scrollEditorIntoView" in activity
     assert "keyboardSpacer" in activity
