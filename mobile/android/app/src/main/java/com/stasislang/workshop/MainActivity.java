@@ -43,6 +43,7 @@ import java.util.TreeSet;
 public final class MainActivity extends Activity {
     private static final String ASSET_ROOT = "workshop_sample/";
     private static final String PROJECT_DIR = "workshop_project";
+    private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final String[] SAMPLE_FILES = new String[] {
             "src/main.stasis",
             "src/root.stasis",
@@ -262,7 +263,7 @@ public final class MainActivity extends Activity {
                 if (compileReady) {
                     runNativeTick();
                 }
-                gameLoopHandler.postDelayed(this, 500L);
+                gameLoopHandler.postDelayed(this, DEFAULT_TICK_INTERVAL_MS);
             }
         };
         gameLoopHandler.post(gameLoop);

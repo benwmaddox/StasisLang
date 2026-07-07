@@ -126,7 +126,8 @@ def main() -> int:
     assert "editorToggle.setText(opening ? \"\\u00D7\" : \"\\u2630\")" in activity
     assert "toggleEditorPanel" in activity
     assert "startGameLoop" in activity
-    assert "gameLoopHandler.postDelayed(this, 500L)" in activity
+    assert "private static final long DEFAULT_TICK_INTERVAL_MS = 16L" in activity
+    assert "gameLoopHandler.postDelayed(this, DEFAULT_TICK_INTERVAL_MS)" in activity
     assert "compileReady = compileResult.startsWith(\"CompilePlanned\")" in activity
     assert "setStatusText" in activity
     assert "setOnFocusChangeListener" in activity
