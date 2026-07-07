@@ -8,11 +8,15 @@ import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.View;
+import android.view.Window;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -74,6 +78,10 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        Window window = getWindow();
+        window.setStatusBarColor(Color.BLACK);
+        window.setNavigationBarColor(Color.BLACK);
+
         ProjectSnapshot project = loadBundledProject();
         setContentView(createWorkshopView(project));
     }
@@ -89,6 +97,7 @@ public final class MainActivity extends Activity {
     private View createWorkshopView(ProjectSnapshot project) {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(15, 20, 28));
+        installSystemInsetGuard(root);
 
         gamePreview = new GamePreviewView(this);
         root.addView(gamePreview, new FrameLayout.LayoutParams(
@@ -196,6 +205,32 @@ public final class MainActivity extends Activity {
 
         startGameLoop();
         return root;
+    }
+
+    private void installSystemInsetGuard(final View root) {
+        root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View view, WindowInsets insets) {
+                int left = insets.getSystemWindowInsetLeft();
+                int top = insets.getSystemWindowInsetTop();
+                int right = insets.getSystemWindowInsetRight();
+                int bottom = insets.getSystemWindowInsetBottom();
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    DisplayCutout cutout = insets.getDisplayCutout();
+                    if (cutout != null) {
+                        left = Math.max(left, cutout.getSafeInsetLeft());
+                        top = Math.max(top, cutout.getSafeInsetTop());
+                        right = Math.max(right, cutout.getSafeInsetRight());
+                        bottom = Math.max(bottom, cutout.getSafeInsetBottom());
+                    }
+                }
+
+                view.setPadding(left, top, right, bottom);
+                return insets;
+            }
+        });
+        root.requestApplyInsets();
     }
     private void toggleEditorPanel() {
         if (editorPanel == null) {
