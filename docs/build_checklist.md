@@ -297,6 +297,14 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers the 16 ms tick interval constant and loop scheduling call; debug APK builds.
 - Done gate: The sideloaded app drives runtime ticks at the intended default cadence while runtime integration proceeds.
 - Status: `completed`
+#### AW32 - Android Real JIT Tick Bridge
+- Language: `Rust + Android C JNI + docs`.
+- Scope: Move Android `Run Tick` beyond the C runtime-state counter by invoking real compiled Stasis lifecycle functions through the existing JIT compiler structure.
+- Deliverable: `JitProcess` exposes no-arg void lifecycle invocation and global i32 reads; `stasis_android_bridge` keeps a thread-local runtime session, compiles app-private `.stasis` files with `JitProcess`, runs `main()` once, runs `tick()` each frame, writes `mode=JitExecuted` runtime state, and JNI routes `nativeRunTick` through `stasis_android_bridge_run_tick` before the C fallback.
+- Tests: Rust bridge tests prove `main()`/`tick()` mutate Stasis global state through JIT and the C ABI returns `JitExecuted`; Android shell verifier covers the bridge/JNI symbols; debug APK builds.
+- Done gate: The sideloaded Android app's tick path executes real Stasis code when the Rust bridge is packaged.
+- Mobile input note: Android example games must be playable without a hardware keyboard; sample game input should be touch-friendly before phone testing.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
