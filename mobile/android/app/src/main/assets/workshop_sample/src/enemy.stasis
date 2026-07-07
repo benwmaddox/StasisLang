@@ -1,22 +1,3 @@
-struct Enemy {
-    x: f32;
-    y: f32;
-    hp: i32;
-    active: bool;
-}
-
-function update(self: Enemy): void {
-    if (!self.active) {
-        return;
-    }
-
-    self.x -= 1.0;
-}
-
-function damage(self: Enemy, amount: i32): void {
-    self.hp -= amount;
-
-    if (self.hp <= 0) {
-        self.active = false;
-    }
+struct EnemyPaddle {
+    y: i32;
 }

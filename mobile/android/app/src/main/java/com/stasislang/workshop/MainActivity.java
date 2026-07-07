@@ -14,6 +14,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.DisplayCutout;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -73,7 +74,7 @@ public final class MainActivity extends Activity {
 
     private static native String nativeStatus();
     private static native String nativeCompileProject(String projectRoot);
-    private static native String nativeRunTick(String projectRoot);
+    private static native String nativeRunTick(String projectRoot, int touchY, int touchActive, int screenWidth, int screenHeight);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -402,29 +403,40 @@ public final class MainActivity extends Activity {
     }
 
     private void runNativeTick() {
-        String runResult = nativeRunTick(projectRoot().getAbsolutePath());
-        int tickCount = extractTickCount(runResult);
-        if (tickCount >= 0 && gamePreview != null) {
-            gamePreview.setTickCount(tickCount);
+        int touchY = gamePreview == null ? 0 : gamePreview.touchY();
+        int touchActive = gamePreview == null ? 0 : gamePreview.touchActive();
+        int screenWidth = gamePreview == null ? 0 : gamePreview.getWidth();
+        int screenHeight = gamePreview == null ? 0 : gamePreview.getHeight();
+        String runResult = nativeRunTick(
+                projectRoot().getAbsolutePath(),
+                touchY,
+                touchActive,
+                screenWidth,
+                screenHeight);
+        if (gamePreview != null) {
+            gamePreview.setRenderFrame(RenderFrame.fromRunResult(runResult));
         }
         setStatusText(runResult);
     }
 
-    private static int extractTickCount(String runResult) {
-        String marker = "tick_count=";
-        int start = runResult.indexOf(marker);
+    private static int extractIntField(String text, String key, int fallback) {
+        String marker = key + "=";
+        int start = text.indexOf(marker);
         if (start < 0) {
-            return -1;
+            return fallback;
         }
         start += marker.length();
         int end = start;
-        while (end < runResult.length() && Character.isDigit(runResult.charAt(end))) {
+        if (end < text.length() && text.charAt(end) == '-') {
             end += 1;
         }
-        if (end == start) {
-            return -1;
+        while (end < text.length() && Character.isDigit(text.charAt(end))) {
+            end += 1;
         }
-        return Integer.parseInt(runResult.substring(start, end));
+        if (end == start || (end == start + 1 && text.charAt(start) == '-')) {
+            return fallback;
+        }
+        return Integer.parseInt(text.substring(start, end));
     }
 
     private void applySelectedEdit() {
@@ -861,16 +873,35 @@ public final class MainActivity extends Activity {
     private static final class GamePreviewView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final RectF rect = new RectF();
-        private int tickCount;
+        private RenderFrame frame = RenderFrame.empty();
+        private int touchY;
+        private boolean touchActive;
 
         GamePreviewView(Activity activity) {
             super(activity);
             setBackgroundColor(Color.rgb(15, 20, 28));
+            setFocusable(true);
         }
 
-        void setTickCount(int value) {
-            tickCount = value;
+        int touchY() {
+            return touchY;
+        }
+
+        int touchActive() {
+            return touchActive ? 1 : 0;
+        }
+
+        void setRenderFrame(RenderFrame value) {
+            frame = value;
             invalidate();
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent event) {
+            touchY = Math.round(event.getY());
+            int action = event.getActionMasked();
+            touchActive = action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL;
+            return true;
         }
 
         @Override
@@ -883,37 +914,82 @@ public final class MainActivity extends Activity {
             }
 
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.rgb(22, 31, 43));
+            paint.setColor(Color.rgb(15, 20, 28));
             canvas.drawRect(0, 0, width, height, paint);
 
-            paint.setColor(Color.rgb(42, 58, 79));
-            for (int x = 0; x < width; x += 36) {
-                canvas.drawLine(x, 0, x, height, paint);
+            for (int index = 0; index < frame.commandCount; index += 1) {
+                RenderCommand command = frame.commands[index];
+                if (command.kind == 1) {
+                    paint.setColor(Color.rgb((command.color >> 16) & 255, (command.color >> 8) & 255, command.color & 255));
+                    rect.set(command.x, command.y, command.x + command.w, command.y + command.h);
+                    canvas.drawRect(rect, paint);
+                }
             }
-            for (int y = 0; y < height; y += 36) {
-                canvas.drawLine(0, y, width, y, paint);
-            }
-
-            float playerX = 28.0f + (tickCount * 7 % Math.max(1, width - 88));
-            float groundY = height - 34.0f;
-            paint.setColor(Color.rgb(91, 192, 190));
-            rect.set(playerX, groundY - 28.0f, playerX + 44.0f, groundY);
-            canvas.drawRoundRect(rect, 5.0f, 5.0f, paint);
-
-            paint.setColor(Color.rgb(244, 162, 97));
-            for (int index = 0; index < 4; index += 1) {
-                float enemyX = width - 42.0f - ((tickCount * 4 + index * 64) % Math.max(1, width + 64));
-                float enemyY = 34.0f + index * 23.0f;
-                rect.set(enemyX, enemyY, enemyX + 24.0f, enemyY + 18.0f);
-                canvas.drawRoundRect(rect, 4.0f, 4.0f, paint);
-            }
-
-            paint.setTextSize(28.0f);
-            paint.setColor(Color.WHITE);
-            canvas.drawText("Tick " + tickCount, 18.0f, 34.0f, paint);
         }
     }
 
+    private static final class RenderFrame {
+        private static final int MAX_COMMANDS = 8;
+        final int tickCount;
+        final int commandCount;
+        final RenderCommand[] commands;
+
+        RenderFrame(int tickCount, int commandCount, RenderCommand[] commands) {
+            this.tickCount = tickCount;
+            this.commandCount = commandCount;
+            this.commands = commands;
+        }
+
+        static RenderFrame empty() {
+            return new RenderFrame(0, 0, emptyCommands());
+        }
+
+        static RenderFrame fromRunResult(String runResult) {
+            RenderCommand[] commands = emptyCommands();
+            int count = Math.max(0, Math.min(MAX_COMMANDS, extractIntField(runResult, "render_command_count", 0)));
+            for (int index = 0; index < count; index += 1) {
+                String prefix = "render" + index + "_";
+                commands[index] = new RenderCommand(
+                        extractIntField(runResult, prefix + "kind", 0),
+                        extractIntField(runResult, prefix + "x", 0),
+                        extractIntField(runResult, prefix + "y", 0),
+                        extractIntField(runResult, prefix + "w", 0),
+                        extractIntField(runResult, prefix + "h", 0),
+                        extractIntField(runResult, prefix + "color", Color.WHITE));
+            }
+            return new RenderFrame(extractIntField(runResult, "tick_count", 0), count, commands);
+        }
+
+        private static RenderCommand[] emptyCommands() {
+            RenderCommand[] commands = new RenderCommand[MAX_COMMANDS];
+            for (int index = 0; index < commands.length; index += 1) {
+                commands[index] = RenderCommand.empty();
+            }
+            return commands;
+        }
+    }
+
+    private static final class RenderCommand {
+        final int kind;
+        final int x;
+        final int y;
+        final int w;
+        final int h;
+        final int color;
+
+        RenderCommand(int kind, int x, int y, int w, int h, int color) {
+            this.kind = kind;
+            this.x = x;
+            this.y = y;
+            this.w = w;
+            this.h = h;
+            this.color = color;
+        }
+
+        static RenderCommand empty() {
+            return new RenderCommand(0, 0, 0, 0, 0, Color.TRANSPARENT);
+        }
+    }
     private static final class SourceFile {
         final String path;
         final File diskFile;

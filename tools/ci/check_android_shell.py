@@ -25,11 +25,7 @@ REQUIRED_FILES = [
 
 STASIS_SAMPLE_FILES = [
     "mobile/android/app/src/main/assets/workshop_sample/src/main.stasis",
-    "mobile/android/app/src/main/assets/workshop_sample/src/player.stasis",
-    "mobile/android/app/src/main/assets/workshop_sample/src/enemy.stasis",
-    "mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis",
 ]
-
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8-sig")
@@ -78,13 +74,13 @@ def main() -> int:
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
-    assert "private static native String nativeRunTick(String projectRoot)" in activity
+    assert "private static native String nativeRunTick(String projectRoot, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
     assert "workshop_sample/" in activity
     assert "createWorkshopView" in activity
     assert "GamePreviewView" in activity
     assert "onDraw(Canvas canvas)" in activity
-    assert "extractTickCount" in activity
-    assert "gamePreview.setTickCount" in activity
+    assert "extractIntField" in activity
+    assert "gamePreview.setRenderFrame(RenderFrame.fromRunResult(runResult))" in activity
     assert "ProjectSnapshot.from" in activity
     assert "parseSymbols" in activity
     assert "groupSymbols" in activity
@@ -95,9 +91,13 @@ def main() -> int:
     assert 'runTick.setText("Run Tick")' in activity
     assert "runNativeCompile" in activity
     assert "runNativeTick" in activity
-    assert "nativeRunTick(projectRoot().getAbsolutePath())" in activity
-    assert "canvas.drawRoundRect" in activity
-    assert "canvas.drawText(\"Tick \" + tickCount" in activity
+    assert "nativeRunTick(" in activity
+    assert "gamePreview.touchY()" in activity
+    assert "gamePreview.touchActive()" in activity
+    assert "MotionEvent" in activity
+    assert "RenderFrame.fromRunResult" in activity
+    assert "render_command_count" in activity
+    assert "canvas.drawRect(rect, paint)" in activity
     assert "applySelectedEdit" in activity
     assert "persistSelectedEdit" in activity
     assert "getFilesDir()" in activity
@@ -186,6 +186,9 @@ def main() -> int:
     assert "entrypoint=main" in native
     assert "entrypoint=tick" in native
     assert "state=%s" in native
+    assert "touch_y" in bridge
+    assert "render_command_count" in bridge
+    assert "Render.command0_kind" in bridge
     assert "PreviousManifest" in native
     assert "read_previous_compile_manifest" in native
     assert "classify_reload" in native
@@ -209,11 +212,10 @@ def main() -> int:
         assert "&mut" not in source
 
     player = read("mobile/android/app/src/main/assets/workshop_sample/src/player.stasis")
-    assert "function update(self: Player, input: InputState): void" in player
-    assert "self.jump();" in player
+    assert "struct PlayerPaddle" in player
 
     collision = read("mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis")
-    assert "enemy.damage(1);" in collision
+    assert "Collision logic lives" in collision
 
     print("android shell structure ok")
     return 0
