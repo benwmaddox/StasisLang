@@ -283,6 +283,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural Android shell verifier covers the full-screen `FrameLayout`, hidden editor overlay, hamburger toggle, automatic tick loop, and compile-ready state; debug APK builds.
 - Done gate: A sideloaded app opens into the running preview first, with code editing available as an overlay instead of the default screen.
 - Status: `completed`
+#### AW30 - Android System-Bar Safe Preview Insets
+- Language: `Android Java + docs`.
+- Scope: Keep the game-first preview and overlay controls out of Android system bars and display cutouts.
+- Deliverable: `MainActivity` colors the system bars black and applies root padding from `WindowInsets`, including display-cutout safe insets when available, so the preview, status row, hamburger button, and editor overlay are laid out inside the usable screen area.
+- Tests: Structural Android shell verifier covers system bar color setup, root inset listener installation, system-window inset reads, display-cutout safe inset reads, and root padding application; debug APK builds.
+- Done gate: The sideloaded preview no longer places visible UI under the bottom navigation bar or camera notch.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

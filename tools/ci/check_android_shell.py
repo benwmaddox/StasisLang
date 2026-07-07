@@ -109,6 +109,16 @@ def main() -> int:
     assert "resetSelectedEdit" in activity
     assert "classifySelectedReload" in activity
     assert "FrameLayout root = new FrameLayout(this)" in activity
+    assert "window.setStatusBarColor(Color.BLACK)" in activity
+    assert "window.setNavigationBarColor(Color.BLACK)" in activity
+    assert "installSystemInsetGuard(root)" in activity
+    assert "setOnApplyWindowInsetsListener" in activity
+    assert "getSystemWindowInsetTop" in activity
+    assert "getSystemWindowInsetBottom" in activity
+    assert "getDisplayCutout" in activity
+    assert "getSafeInsetTop" in activity
+    assert "getSafeInsetBottom" in activity
+    assert "view.setPadding(left, top, right, bottom)" in activity
     assert "FrameLayout.LayoutParams.MATCH_PARENT" in activity
     assert "editorPanel.setFillViewport(false)" in activity
     assert "editorPanel.setVisibility(View.GONE)" in activity
