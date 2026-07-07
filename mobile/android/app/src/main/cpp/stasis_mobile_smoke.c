@@ -16,6 +16,7 @@
 #define FNV_PRIME 1099511628211ULL
 
 typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
+typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef struct CompileStats {
     int file_count;
@@ -691,6 +692,33 @@ static int try_rust_bridge_compile(const char *project_root, char *message, size
     return 1;
 }
 
+static int try_rust_bridge_run_tick(const char *project_root, char *message, size_t message_size) {
+    void *bridge = dlopen("libstasis_android_bridge.so", RTLD_NOW | RTLD_LOCAL);
+    if (bridge == NULL) {
+        return 0;
+    }
+
+    stasis_android_bridge_run_tick_fn run_tick =
+            (stasis_android_bridge_run_tick_fn)dlsym(bridge, "stasis_android_bridge_run_tick");
+    stasis_android_bridge_free_string_fn free_string =
+            (stasis_android_bridge_free_string_fn)dlsym(bridge, "stasis_android_bridge_free_string");
+    if (run_tick == NULL || free_string == NULL) {
+        dlclose(bridge);
+        return 0;
+    }
+
+    char *bridge_message = run_tick(project_root, "src/main.stasis");
+    if (bridge_message == NULL) {
+        dlclose(bridge);
+        snprintf(message, message_size, "RunError: Rust Android bridge returned null message");
+        return 1;
+    }
+
+    snprintf(message, message_size, "%s", bridge_message);
+    free_string(bridge_message);
+    dlclose(bridge);
+    return 1;
+}
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activity_class) {
     (void)activity_class;
@@ -757,8 +785,14 @@ Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass acti
         return (*env)->NewStringUTF(env, "RunError: unable to read project root");
     }
 
+    char message[256];
+    if (try_rust_bridge_run_tick(root, message, sizeof(message)) != 0) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
+        return (*env)->NewStringUTF(env, message);
+    }
+
     int tick_count = 0;
-    char message[192];
     if (read_runtime_tick_count(root, &tick_count) != 0) {
         snprintf(message, sizeof(message), "RunError: compile project before running tick");
     } else if (write_runtime_tick_count(root, tick_count + 1) != 0) {

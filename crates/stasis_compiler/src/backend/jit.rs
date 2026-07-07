@@ -267,6 +267,34 @@ impl JitProcess {
         Ok((raw as u32) as i32)
     }
 
+    pub fn execute_void_noarg_by_name(&self, name: &str) -> Result<(), String> {
+        let function = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .ok_or_else(|| format!("function '{name}' not found"))?;
+        if function.return_type != TYPE_ID_VOID {
+            return Err(format!(
+                "function '{name}' is not void-returning (type id {})",
+                function.return_type
+            ));
+        }
+        if !function.params.is_empty() {
+            return Err(format!(
+                "function '{name}' is not a no-argument function (param count {})",
+                function.params.len()
+            ));
+        }
+        let artifact = self
+            .artifact_for_function_id(function.id)
+            .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
+        stasis_dynload::invoke_noarg_void(artifact.code_ptr as usize)
+    }
+
+    pub fn read_i32_global_path(&self, path: &str) -> i32 {
+        stasis_dynload::stasis_jit_global_i32_load(hash_global_path(path))
+    }
     pub fn execute_bool_noarg_by_name(&self, name: &str) -> Result<bool, String> {
         let function = self
             .compiler
@@ -1195,7 +1223,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "function take_text(value: utf8[]): i32 { return 9; }\nfunction main(): i32 { return take_text(\"cafÃ© â˜•\"); }\n",
+            "function take_text(value: utf8[]): i32 { return 9; }\nfunction main(): i32 { return take_text(\"cafÃƒÂ© Ã¢Ëœâ€¢\"); }\n",
         );
         process.compile().expect("compile");
         let value = process
