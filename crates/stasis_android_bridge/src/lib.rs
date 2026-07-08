@@ -49,6 +49,7 @@ struct AndroidRuntimeSession {
     source_fingerprint: u64,
     jit: JitProcess,
     initialized: bool,
+    pending_code_swap: bool,
     tick_count: i32,
 }
 
@@ -136,6 +137,8 @@ pub fn compile_android_workshop_project(
         })?;
     }
 
+    warm_or_reload_runtime_session(project_root, &files, fingerprint_workshop_sources(&files))?;
+
     Ok(AndroidBridgeCompileResult {
         status: plan.status,
         reload: plan.reload,
@@ -152,34 +155,32 @@ pub fn run_android_workshop_tick(
 ) -> Result<AndroidBridgeRunTickResult, String> {
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
-    let files = load_workshop_project(project_root, entry_file)?;
-    let source_fingerprint = fingerprint_workshop_sources(&files);
 
     RUNTIME_SESSION.with(|session_cell| {
         let mut session_slot = session_cell.borrow_mut();
         let mut recompiled = false;
-        let mut swapped_code = false;
-        match session_slot.as_mut() {
-            Some(session) if session.project_root == project_root => {
-                if session.source_fingerprint != source_fingerprint {
-                    recompile_runtime_session(session, project_root, &files, source_fingerprint)?;
-                    recompiled = true;
-                    swapped_code = session.initialized;
-                }
-            }
-            _ => {
-                *session_slot = Some(build_runtime_session(
-                    project_root,
-                    &files,
-                    source_fingerprint,
-                )?);
-                recompiled = true;
-            }
+        let needs_lazy_build = session_slot
+            .as_ref()
+            .is_none_or(|session| session.project_root != project_root);
+        if needs_lazy_build {
+            let files = load_workshop_project(project_root, entry_file)?;
+            let source_fingerprint = fingerprint_workshop_sources(&files);
+            *session_slot = Some(build_runtime_session(
+                project_root,
+                &files,
+                source_fingerprint,
+            )?);
+            recompiled = true;
         }
 
         let session = session_slot
             .as_mut()
             .ok_or_else(|| "Android runtime session was not initialized".to_string())?;
+        let swapped_code = session.pending_code_swap;
+        if swapped_code {
+            recompiled = true;
+        }
+        session.pending_code_swap = false;
         let initialized = if session.initialized {
             false
         } else {
@@ -244,7 +245,32 @@ fn build_runtime_session(
         source_fingerprint,
         jit,
         initialized: false,
+        pending_code_swap: false,
         tick_count: 0,
+    })
+}
+
+fn warm_or_reload_runtime_session(
+    project_root: &Path,
+    files: &[WorkshopSourceFile],
+    source_fingerprint: u64,
+) -> Result<(), String> {
+    RUNTIME_SESSION.with(|session_cell| {
+        let mut session_slot = session_cell.borrow_mut();
+        match session_slot.as_mut() {
+            Some(session) if session.project_root == project_root => {
+                recompile_runtime_session(session, project_root, files, source_fingerprint)?;
+                session.pending_code_swap = session.initialized;
+            }
+            _ => {
+                *session_slot = Some(build_runtime_session(
+                    project_root,
+                    files,
+                    source_fingerprint,
+                )?);
+            }
+        }
+        Ok(())
     })
 }
 
@@ -693,6 +719,8 @@ mod tests {
             "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 2; }\nfunction on_code_swap(): void { GameState.tick_count += 100; }\n",
         )
         .expect("write hot reload source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("compile hot reload source");
 
         let hot =
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
