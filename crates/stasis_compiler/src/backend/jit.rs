@@ -1,3 +1,4 @@
+use crate::backend::emit::RuntimeHelperLinkage;
 use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::indexer::hash_text;
@@ -5,6 +6,7 @@ use crate::frontend::types::{
     TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_I32, TYPE_ID_VOID,
 };
 use crate::ir::hir::FunctionHIR;
+use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Module};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -801,6 +803,218 @@ fn seed_collection_max_length(path: &str, max_length: i32) {
     stasis_dynload::stasis_jit_global_i32_store(hash_global_path(&max_length_path), max_length);
 }
 
+fn new_stasis_jit_builder() -> Result<JITBuilder, String> {
+    let mut flag_builder = settings::builder();
+    flag_builder
+        .set("is_pic", "false")
+        .map_err(|error| format!("failed to configure non-PIC JIT: {error}"))?;
+    let isa_builder = cranelift_native::builder()
+        .map_err(|message| format!("host machine is not supported by Cranelift: {message}"))?;
+    let isa = isa_builder
+        .finish(settings::Flags::new(flag_builder))
+        .map_err(|error| format!("failed to construct native JIT ISA: {error}"))?;
+    Ok(JITBuilder::with_isa(isa, default_libcall_names()))
+}
+fn runtime_helper_addresses() -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    out.insert(
+        "stasis_jit_call_i32_0".to_string(),
+        stasis_dynload::stasis_jit_call_i32_0 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_1".to_string(),
+        stasis_dynload::stasis_jit_call_i32_1 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_2".to_string(),
+        stasis_dynload::stasis_jit_call_i32_2 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_3".to_string(),
+        stasis_dynload::stasis_jit_call_i32_3 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_4".to_string(),
+        stasis_dynload::stasis_jit_call_i32_4 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_5".to_string(),
+        stasis_dynload::stasis_jit_call_i32_5 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_6".to_string(),
+        stasis_dynload::stasis_jit_call_i32_6 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_7".to_string(),
+        stasis_dynload::stasis_jit_call_i32_7 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_8".to_string(),
+        stasis_dynload::stasis_jit_call_i32_8 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_f32_1".to_string(),
+        stasis_dynload::stasis_jit_call_i32_f32_1 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_f32_2".to_string(),
+        stasis_dynload::stasis_jit_call_i32_f32_2 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_f32_3".to_string(),
+        stasis_dynload::stasis_jit_call_i32_f32_3 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_f32_4".to_string(),
+        stasis_dynload::stasis_jit_call_i32_f32_4 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_f32_5".to_string(),
+        stasis_dynload::stasis_jit_call_i32_f32_5 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_f32_6".to_string(),
+        stasis_dynload::stasis_jit_call_i32_f32_6 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_f32_7".to_string(),
+        stasis_dynload::stasis_jit_call_i32_f32_7 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_i32_f32_8".to_string(),
+        stasis_dynload::stasis_jit_call_i32_f32_8 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_f32_0".to_string(),
+        stasis_dynload::stasis_jit_call_f32_0 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_f32_1".to_string(),
+        stasis_dynload::stasis_jit_call_f32_1 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_f32_2".to_string(),
+        stasis_dynload::stasis_jit_call_f32_2 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_f32_3".to_string(),
+        stasis_dynload::stasis_jit_call_f32_3 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_f32_4".to_string(),
+        stasis_dynload::stasis_jit_call_f32_4 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_f32_5".to_string(),
+        stasis_dynload::stasis_jit_call_f32_5 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_f32_6".to_string(),
+        stasis_dynload::stasis_jit_call_f32_6 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_f32_7".to_string(),
+        stasis_dynload::stasis_jit_call_f32_7 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_f32_8".to_string(),
+        stasis_dynload::stasis_jit_call_f32_8 as usize,
+    );
+    out.insert(
+        "stasis_jit_call_f32_i32_1".to_string(),
+        stasis_dynload::stasis_jit_call_f32_i32_1 as usize,
+    );
+    out.insert(
+        "stasis_jit_print_i32".to_string(),
+        stasis_dynload::stasis_jit_print_i32 as usize,
+    );
+    out.insert(
+        "stasis_jit_print_string".to_string(),
+        stasis_dynload::stasis_jit_print_string as usize,
+    );
+    out.insert(
+        "stasis_jit_lookup_code_ptr".to_string(),
+        stasis_dynload::stasis_jit_lookup_code_ptr as usize,
+    );
+    out.insert(
+        "stasis_jit_sin_fast".to_string(),
+        stasis_dynload::stasis_jit_sin_fast as usize,
+    );
+    out.insert(
+        "stasis_jit_cos_fast".to_string(),
+        stasis_dynload::stasis_jit_cos_fast as usize,
+    );
+    out.insert(
+        "stasis_jit_global_i32_load".to_string(),
+        stasis_dynload::stasis_jit_global_i32_load as usize,
+    );
+    out.insert(
+        "stasis_jit_global_i32_store".to_string(),
+        stasis_dynload::stasis_jit_global_i32_store as usize,
+    );
+    out.insert(
+        "stasis_jit_global_f32_load".to_string(),
+        stasis_dynload::stasis_jit_global_f32_load as usize,
+    );
+    out.insert(
+        "stasis_jit_global_f32_store".to_string(),
+        stasis_dynload::stasis_jit_global_f32_store as usize,
+    );
+    out.insert(
+        "stasis_jit_global_f64_load".to_string(),
+        stasis_dynload::stasis_jit_global_f64_load as usize,
+    );
+    out.insert(
+        "stasis_jit_global_f64_store".to_string(),
+        stasis_dynload::stasis_jit_global_f64_store as usize,
+    );
+    out.insert(
+        "stasis_jit_collection_i32_load".to_string(),
+        stasis_dynload::stasis_jit_collection_i32_load as usize,
+    );
+    out.insert(
+        "stasis_jit_collection_i32_store".to_string(),
+        stasis_dynload::stasis_jit_collection_i32_store as usize,
+    );
+    out.insert(
+        "stasis_jit_global_i32_array_load".to_string(),
+        stasis_dynload::stasis_jit_global_i32_array_load as usize,
+    );
+    out.insert(
+        "stasis_jit_global_i32_array_store".to_string(),
+        stasis_dynload::stasis_jit_global_i32_array_store as usize,
+    );
+    out.insert(
+        "stasis_jit_global_i32_array_ptr".to_string(),
+        stasis_dynload::stasis_jit_global_i32_array_ptr as usize,
+    );
+    out.insert(
+        "stasis_jit_global_f32_array_load".to_string(),
+        stasis_dynload::stasis_jit_global_f32_array_load as usize,
+    );
+    out.insert(
+        "stasis_jit_global_f32_array_store".to_string(),
+        stasis_dynload::stasis_jit_global_f32_array_store as usize,
+    );
+    out.insert(
+        "stasis_jit_global_f32_array_ptr".to_string(),
+        stasis_dynload::stasis_jit_global_f32_array_ptr as usize,
+    );
+    out.insert(
+        "stasis_jit_global_f64_array_load".to_string(),
+        stasis_dynload::stasis_jit_global_f64_array_load as usize,
+    );
+    out.insert(
+        "stasis_jit_global_f64_array_store".to_string(),
+        stasis_dynload::stasis_jit_global_f64_array_store as usize,
+    );
+    out.insert(
+        "stasis_jit_global_f64_array_ptr".to_string(),
+        stasis_dynload::stasis_jit_global_f64_array_ptr as usize,
+    );
+    out
+}
 fn compile_function_to_jit_module(
     meta: &FunctionMeta,
     hir: &FunctionHIR,
@@ -813,8 +1027,7 @@ fn compile_function_to_jit_module(
     named_struct_field_types: &NamedStructFieldTypeMap,
     extern_symbol_addresses: &ExternSymbolAddressMap,
 ) -> Result<(JITModule, u64), String> {
-    let mut jit_builder = JITBuilder::new(default_libcall_names())
-        .map_err(|error| format!("failed to construct JIT builder: {error}"))?;
+    let mut jit_builder = new_stasis_jit_builder()?;
     jit_builder.symbol(
         "stasis_jit_call_i32_0",
         stasis_dynload::stasis_jit_call_i32_0 as *const u8,
@@ -1017,11 +1230,13 @@ fn compile_function_to_jit_module(
         }
         jit_builder.symbol(extern_symbol, *address as *const u8);
     }
+    let runtime_helper_addresses = runtime_helper_addresses();
     compile_function_with_module(
         JITModule::new(jit_builder),
         meta,
         hir,
         symbol,
+        RuntimeHelperLinkage::LocalTrampolines(&runtime_helper_addresses),
         SharedCompileBackendMode::Jit,
         call_signatures,
         type_table,

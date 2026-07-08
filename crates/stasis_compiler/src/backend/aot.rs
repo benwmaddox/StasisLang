@@ -544,6 +544,7 @@ fn compile_function_to_object_bytes(
         meta,
         hir,
         symbol,
+        RuntimeHelperLinkage::Imported,
         SharedCompileBackendMode::AotDirect,
         call_signatures,
         type_table,
@@ -1023,7 +1024,9 @@ mod tests {
 
         for expected_literal in case.expected_string_literals {
             assert!(
-                aot.string_literals().values().any(|value| value == expected_literal),
+                aot.string_literals()
+                    .values()
+                    .any(|value| value == expected_literal),
                 "missing string literal {:?} in fixture '{}'",
                 expected_literal,
                 case.label
@@ -1040,9 +1043,9 @@ mod tests {
         }
 
         for (function_name, markers) in case.expected_clif_markers {
-            let clif = captured_clif
-                .get(*function_name)
-                .unwrap_or_else(|| panic!("missing captured CLIF for function '{}'", function_name));
+            let clif = captured_clif.get(*function_name).unwrap_or_else(|| {
+                panic!("missing captured CLIF for function '{}'", function_name)
+            });
             for marker in *markers {
                 assert!(
                     clif.contains(marker),
