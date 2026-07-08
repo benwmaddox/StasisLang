@@ -58,14 +58,14 @@ def main() -> int:
     assert "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER" in rust_bridge_script
     assert "aarch64-linux-android" in rust_bridge_script
     assert "libstasis_android_bridge.so" in rust_bridge_script
-    assert "app\\src\\main\\jniLibs\\arm64-v8a" in rust_bridge_script
+    assert "app\\src\\workshop\\jniLibs\\arm64-v8a" in rust_bridge_script
     assert "build_rust_bridge.ps1" in debug_script
     assert ":app:assembleWorkshopDebug" in debug_script
     assert ":app:assemblePublishedRelease" in published_script
     assert ":app:installPublishedDebug" in published_script
     assert "ValidateAot" in published_script
     assert "aot_engine_bundle_writes_manifest_and_required_entrypoints" in published_script
-    assert "app/src/main/jniLibs/" in android_gitignore
+    assert "app/src/*/jniLibs/" in android_gitignore
 
     app_gradle = read("mobile/android/app/build.gradle")
     assert "flavorDimensions 'mode'" in app_gradle
@@ -77,6 +77,8 @@ def main() -> int:
     assert "abiFilters 'arm64-v8a'" in app_gradle
     assert "externalNativeBuild" in app_gradle
     assert "STASIS_ANDROID_SMOKE_ONLY=ON" in app_gradle
+    assert "generatePublishedAotBundle" in app_gradle
+    assert "STASIS_ANDROID_PUBLISHED_AOT=ON" in app_gradle
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
     workshop_manifest = read("mobile/android/app/src/workshop/AndroidManifest.xml")
@@ -362,6 +364,8 @@ def main() -> int:
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
     assert "add_library(stasis_mobile_smoke SHARED stasis_mobile_smoke.c)" in cmake
+    assert "STASIS_ANDROID_PUBLISHED_AOT" in cmake
+    assert "published_aot_objects.cmake" in cmake
     assert "find_library(dl_lib dl)" in cmake
     assert "${dl_lib}" in cmake
 

@@ -1,1 +1,2 @@
-app/src/main/jniLibs/
+app/src/*/jniLibs/
+app/src/main/assets/workshop_sample/build/
