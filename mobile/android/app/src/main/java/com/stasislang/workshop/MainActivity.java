@@ -728,6 +728,7 @@ public final class MainActivity extends Activity {
 
     private String runAiAgentLoop(String apiKey, String model, String initialRequestJson) throws Exception {
         String currentRequestJson = initialRequestJson;
+        AiAgentSession session = new AiAgentSession();
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             String responseBody = callOpenAiResponsesApi(apiKey, model, currentRequestJson);
             String aiJson = extractAiJsonResponse(responseBody);
@@ -738,7 +739,7 @@ public final class MainActivity extends Activity {
                 return aiJson;
             }
 
-            JSONArray observations = executeAiToolCalls(toolCalls);
+            JSONArray observations = executeAiToolCalls(toolCalls, session);
             JSONObject followup = new JSONObject();
             followup.put("original_request", new JSONObject(initialRequestJson));
             followup.put("tool_observations", observations);
@@ -748,7 +749,7 @@ public final class MainActivity extends Activity {
         throw new IOException("AI agent reached tool-call limit before returning edits");
     }
 
-    private JSONArray executeAiToolCalls(JSONArray toolCalls) throws Exception {
+    private JSONArray executeAiToolCalls(JSONArray toolCalls, AiAgentSession session) throws Exception {
         JSONArray observations = new JSONArray();
         for (int index = 0; index < toolCalls.length(); index += 1) {
             JSONObject call = toolCalls.getJSONObject(index);
@@ -756,7 +757,7 @@ public final class MainActivity extends Activity {
             String tool = call.optString("tool", "");
             observation.put("tool", tool);
             try {
-                observation.put("result", executeAiToolCall(tool, call));
+                observation.put("result", executeAiToolCall(tool, call, session));
             } catch (Exception error) {
                 observation.put("error", error.getMessage());
             }
@@ -765,18 +766,18 @@ public final class MainActivity extends Activity {
         return observations;
     }
 
-    private JSONObject executeAiToolCall(String tool, JSONObject call) throws Exception {
+    private JSONObject executeAiToolCall(String tool, JSONObject call, AiAgentSession session) throws Exception {
         if ("list_symbols".equals(tool)) {
-            return aiToolListSymbols();
+            return aiToolListSymbols(session);
         }
         if ("read_symbol".equals(tool)) {
-            return aiToolReadSymbol(call);
+            return aiToolReadSymbol(session, call);
         }
         if ("read_file".equals(tool)) {
-            return aiToolReadFile(call);
+            return aiToolReadFile(session, call);
         }
         if ("write_symbol".equals(tool)) {
-            return aiToolWriteSymbol(call);
+            return aiToolWriteSymbol(session, call);
         }
         if ("take_screenshot".equals(tool)) {
             return aiToolTakeScreenshot();
@@ -784,8 +785,8 @@ public final class MainActivity extends Activity {
         throw new IOException("Unsupported AI tool: " + tool);
     }
 
-    private JSONObject aiToolListSymbols() throws Exception {
-        ProjectSnapshot project = loadBundledProject();
+    private JSONObject aiToolListSymbols(AiAgentSession session) throws Exception {
+        ProjectSnapshot project = session.project();
         JSONArray symbols = new JSONArray();
         for (SymbolSection section : project.sections) {
             for (SymbolGroup group : section.groups) {
@@ -799,24 +800,24 @@ public final class MainActivity extends Activity {
                 .put("symbols", symbols);
     }
 
-    private JSONObject aiToolReadSymbol(JSONObject call) throws Exception {
-        ProjectSnapshot project = loadBundledProject();
+    private JSONObject aiToolReadSymbol(AiAgentSession session, JSONObject call) throws Exception {
+        ProjectSnapshot project = session.project();
         String kind = call.optString("kind", "function");
         String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
         SymbolEntry target = findSymbolForAiEdit(project, expectedKind, call, selectedSymbol);
         return symbolToJson(target, true);
     }
 
-    private JSONObject aiToolReadFile(JSONObject call) throws Exception {
-        ProjectSnapshot project = loadBundledProject();
+    private JSONObject aiToolReadFile(AiAgentSession session, JSONObject call) throws Exception {
+        ProjectSnapshot project = session.project();
         SourceFile sourceFile = findProjectFile(project, call.optString("file", ""));
         return new JSONObject()
                 .put("file", sourceFile.path)
                 .put("source", sourceFile.source);
     }
 
-    private JSONObject aiToolWriteSymbol(JSONObject call) throws Exception {
-        ProjectSnapshot project = loadBundledProject();
+    private JSONObject aiToolWriteSymbol(AiAgentSession session, JSONObject call) throws Exception {
+        ProjectSnapshot project = session.project();
         String kind = call.optString("kind", "replace_function");
         String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
         SymbolEntry target = findSymbolForAiEdit(project, expectedKind, call, selectedSymbol);
@@ -824,6 +825,7 @@ public final class MainActivity extends Activity {
         String newSource = call.getString("new_source").trim();
         validateAiReplacementSource(editKind, target.name, newSource);
         persistSelectedEdit(target, newSource);
+        session.invalidateProject();
         return new JSONObject()
                 .put("file", target.file)
                 .put("kind", target.kind)
@@ -1402,6 +1404,20 @@ public final class MainActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
+    private final class AiAgentSession {
+        private ProjectSnapshot cachedProject;
+
+        ProjectSnapshot project() {
+            if (cachedProject == null) {
+                cachedProject = loadBundledProject();
+            }
+            return cachedProject;
+        }
+
+        void invalidateProject() {
+            cachedProject = null;
+        }
+    }
     private static final class ProjectSnapshot {
         final List<SourceFile> files;
         final List<SymbolSection> sections;
