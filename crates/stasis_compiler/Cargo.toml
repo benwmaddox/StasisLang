@@ -14,6 +14,7 @@ cranelift-jit.workspace = true
 cranelift-module.workspace = true
 cranelift-native.workspace = true
 cranelift-object.workspace = true
+target-lexicon.workspace = true
 stasis_jit = { path = "../stasis_jit" }
 stasis_dynload = { path = "../stasis_dynload" }
 serde.workspace = true
