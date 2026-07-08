@@ -56,11 +56,15 @@ public final class MainActivity extends Activity {
     private static final String AI_PREFS = "ai_settings";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_MODEL = "openai_model";
+    private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int MAX_AI_AGENT_TURNS = 15;
+    private static final double GPT_5_4_MINI_INPUT_USD_PER_MILLION = 0.75;
+    private static final double GPT_5_4_MINI_CACHED_INPUT_USD_PER_MILLION = 0.075;
+    private static final double GPT_5_4_MINI_OUTPUT_USD_PER_MILLION = 4.50;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
     private static final int RENDER_FRAME_I32_CAPACITY =
@@ -676,11 +680,11 @@ public final class MainActivity extends Activity {
             @Override
             public void run() {
                 try {
-                    final String aiJson = runAiAgentLoop(requestApiKey, requestModel, requestJson);
+                    final AiAgentResult aiResult = runAiAgentLoop(requestApiKey, requestModel, requestJson);
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            applyAiCodeResponse(aiJson, symbol);
+                            applyAiCodeResponse(aiResult, symbol);
                         }
                     });
                 } catch (final Exception error) {
@@ -744,17 +748,19 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private String runAiAgentLoop(String apiKey, String model, String initialRequestJson) throws Exception {
+    private AiAgentResult runAiAgentLoop(String apiKey, String model, String initialRequestJson) throws Exception {
         String currentRequestJson = initialRequestJson;
         AiAgentSession session = new AiAgentSession();
+        AiUsageAccumulator usage = new AiUsageAccumulator();
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
-            String responseBody = callOpenAiResponsesApi(apiKey, model, currentRequestJson);
-            String aiJson = extractAiJsonResponse(responseBody);
+            AiApiResponse apiResponse = callOpenAiResponsesApi(apiKey, model, currentRequestJson);
+            usage.add(model, apiResponse.usage);
+            String aiJson = extractAiJsonResponse(apiResponse.body);
             JSONObject response = new JSONObject(aiJson);
             JSONArray toolCalls = response.optJSONArray("tool_calls");
             String mode = response.optString("mode", "edits");
             if (!"tool_calls".equals(mode) || toolCalls == null || toolCalls.length() == 0) {
-                return aiJson;
+                return new AiAgentResult(aiJson, usage.toJson(model), usage.summary());
             }
 
             JSONArray observations = executeAiToolCalls(toolCalls, session);
@@ -1138,7 +1144,7 @@ public final class MainActivity extends Activity {
         }
         return json;
     }
-    private static String callOpenAiResponsesApi(String apiKey, String model, String requestJson) throws Exception {
+    private static AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
@@ -1164,7 +1170,7 @@ public final class MainActivity extends Activity {
         if (status < 200 || status >= 300) {
             throw new IOException("OpenAI HTTP " + status + ": " + response);
         }
-        return response;
+        return new AiApiResponse(response, extractAiUsage(response));
     }
 
     private static JSONObject buildAiResponseTextFormat() throws Exception {
@@ -1287,9 +1293,74 @@ public final class MainActivity extends Activity {
         return text.substring(start, end + 1);
     }
 
-    private void applyAiCodeResponse(String aiJson, SymbolEntry fallbackSymbol) {
+    private static JSONObject extractAiUsage(String responseBody) {
         try {
-            JSONObject response = new JSONObject(aiJson);
+            JSONObject response = new JSONObject(responseBody);
+            JSONObject usage = response.optJSONObject("usage");
+            return usage == null ? new JSONObject() : usage;
+        } catch (Exception error) {
+            return new JSONObject();
+        }
+    }
+
+    private void saveLastAiUsage(JSONObject usageJson) {
+        getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                .edit()
+                .putString(AI_PREF_LAST_USAGE, usageJson.toString())
+                .apply();
+    }
+
+    private static long usageTokenCount(JSONObject usage, String primaryName, String fallbackName) {
+        if (usage == null) {
+            return 0L;
+        }
+        if (usage.has(primaryName)) {
+            return usage.optLong(primaryName, 0L);
+        }
+        return usage.optLong(fallbackName, 0L);
+    }
+
+    private static long cachedInputTokenCount(JSONObject usage) {
+        if (usage == null) {
+            return 0L;
+        }
+        JSONObject details = usage.optJSONObject("input_tokens_details");
+        if (details == null) {
+            details = usage.optJSONObject("prompt_tokens_details");
+        }
+        return details == null ? 0L : details.optLong("cached_tokens", 0L);
+    }
+
+    private static boolean hasKnownAiPricing(String model) {
+        return "gpt-5.4-mini".equals(model);
+    }
+
+    private static double estimateAiCostUsd(String model, long inputTokens, long cachedInputTokens, long outputTokens) {
+        if (!hasKnownAiPricing(model)) {
+            return 0.0;
+        }
+        long uncachedInputTokens = Math.max(0L, inputTokens - cachedInputTokens);
+        double inputCost = uncachedInputTokens * GPT_5_4_MINI_INPUT_USD_PER_MILLION;
+        double cachedInputCost = cachedInputTokens * GPT_5_4_MINI_CACHED_INPUT_USD_PER_MILLION;
+        double outputCost = outputTokens * GPT_5_4_MINI_OUTPUT_USD_PER_MILLION;
+        return (inputCost + cachedInputCost + outputCost) / 1000000.0;
+    }
+
+    private static String formatAiCostUsd(double costUsd) {
+        long millionths = Math.round(costUsd * 1000000.0);
+        String fraction = Long.toString(millionths % 1000000L);
+        StringBuilder builder = new StringBuilder();
+        builder.append('$').append(millionths / 1000000L).append('.');
+        for (int index = fraction.length(); index < 6; index += 1) {
+            builder.append('0');
+        }
+        builder.append(fraction);
+        return builder.toString();
+    }
+    private void applyAiCodeResponse(AiAgentResult aiResult, SymbolEntry fallbackSymbol) {
+        try {
+            saveLastAiUsage(aiResult.usageJson);
+            JSONObject response = new JSONObject(aiResult.aiJson);
             JSONArray edits = response.getJSONArray("edits");
             ProjectSnapshot project = loadBundledProject();
             SymbolEntry lastEdited = fallbackSymbol;
@@ -1317,7 +1388,7 @@ public final class MainActivity extends Activity {
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
-            setStatusText("AI edit applied: " + response.optString("summary", "updated selected symbol") + " - " + compileResult);
+            setStatusText("AI edit applied: " + response.optString("summary", "updated selected symbol") + " - " + compileResult + " - " + aiResult.usageSummary);
         } catch (Exception error) {
             setStatusText("AI edit apply failed: " + error.getMessage());
         }
@@ -1676,6 +1747,92 @@ public final class MainActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
+    private static final class AiApiResponse {
+        final String body;
+        final JSONObject usage;
+
+        AiApiResponse(String body, JSONObject usage) {
+            this.body = body;
+            this.usage = usage;
+        }
+    }
+
+    private static final class AiAgentResult {
+        final String aiJson;
+        final JSONObject usageJson;
+        final String usageSummary;
+
+        AiAgentResult(String aiJson, JSONObject usageJson, String usageSummary) {
+            this.aiJson = aiJson;
+            this.usageJson = usageJson;
+            this.usageSummary = usageSummary;
+        }
+    }
+
+    private static final class AiUsageAccumulator {
+        private final JSONArray calls = new JSONArray();
+        private long inputTokens;
+        private long cachedInputTokens;
+        private long outputTokens;
+        private double estimatedCostUsd;
+        private boolean costAvailable = true;
+
+        void add(String model, JSONObject usage) throws Exception {
+            long callInputTokens = usageTokenCount(usage, "input_tokens", "prompt_tokens");
+            long callCachedInputTokens = cachedInputTokenCount(usage);
+            long callOutputTokens = usageTokenCount(usage, "output_tokens", "completion_tokens");
+            boolean callCostAvailable = hasKnownAiPricing(model);
+            double callEstimatedCostUsd = estimateAiCostUsd(model, callInputTokens, callCachedInputTokens, callOutputTokens);
+
+            JSONObject call = new JSONObject();
+            call.put("turn", calls.length() + 1);
+            call.put("model", model);
+            call.put("input_tokens", callInputTokens);
+            call.put("cached_input_tokens", callCachedInputTokens);
+            call.put("output_tokens", callOutputTokens);
+            call.put("estimated_cost_usd", callEstimatedCostUsd);
+            call.put("cost_available", callCostAvailable);
+            calls.put(call);
+
+            inputTokens += callInputTokens;
+            cachedInputTokens += callCachedInputTokens;
+            outputTokens += callOutputTokens;
+            estimatedCostUsd += callEstimatedCostUsd;
+            costAvailable = costAvailable && callCostAvailable;
+        }
+
+        JSONObject toJson(String model) throws Exception {
+            JSONObject json = new JSONObject();
+            json.put("model", model);
+            json.put("calls", calls);
+            json.put("turns", calls.length());
+            json.put("input_tokens", inputTokens);
+            json.put("cached_input_tokens", cachedInputTokens);
+            json.put("output_tokens", outputTokens);
+            json.put("estimated_cost_usd", estimatedCostUsd);
+            json.put("cost_available", costAvailable);
+            return json;
+        }
+
+        String summary() {
+            StringBuilder builder = new StringBuilder();
+            builder.append("AI usage: ")
+                    .append(calls.length())
+                    .append(" calls, input=")
+                    .append(inputTokens)
+                    .append(", cached=")
+                    .append(cachedInputTokens)
+                    .append(", output=")
+                    .append(outputTokens)
+                    .append(", estimated=");
+            if (costAvailable) {
+                builder.append(formatAiCostUsd(estimatedCostUsd));
+            } else {
+                builder.append("unavailable");
+            }
+            return builder.toString();
+        }
+    }
     private final class AiAgentSession {
         private ProjectSnapshot cachedProject;
 

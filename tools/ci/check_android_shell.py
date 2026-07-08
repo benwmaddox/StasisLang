@@ -99,6 +99,16 @@ def main() -> int:
     assert "https://api.openai.com/v1/responses" in activity
     assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
     assert "private static final int MAX_AI_AGENT_TURNS = 15" in activity
+    assert "AI_PREF_LAST_USAGE" in activity
+    assert "private static final double GPT_5_4_MINI_INPUT_USD_PER_MILLION = 0.75" in activity
+    assert "private static AiApiResponse callOpenAiResponsesApi" in activity
+    assert "extractAiUsage(response)" in activity
+    assert "saveLastAiUsage(aiResult.usageJson)" in activity
+    assert "usageTokenCount(usage, \"input_tokens\", \"prompt_tokens\")" in activity
+    assert "cachedInputTokenCount" in activity
+    assert "estimated_cost_usd" in activity
+    assert "AI usage: " in activity
+    assert "aiResult.usageSummary" in activity
     assert "runAiAgentLoop" in activity
     assert "executeAiToolCalls" in activity
     assert "private final class AiAgentSession" in activity
