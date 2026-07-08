@@ -65,6 +65,7 @@ def main() -> int:
     assert "STASIS_ANDROID_SMOKE_ONLY=ON" in app_gradle
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
+    assert "android.permission.INTERNET" in manifest
     assert "android.intent.action.MAIN" in manifest
     assert "android.intent.category.LAUNCHER" in manifest
     assert 'android:exported="true"' in manifest
@@ -93,9 +94,20 @@ def main() -> int:
     assert "RenderFrame.fromNativeFrame" not in activity
     assert "new RenderCommand" not in activity
     assert "ProjectSnapshot.from" in activity
+    assert "createAiControls" in activity
+    assert "AI Patch Selected Symbol" in activity
+    assert "https://api.openai.com/v1/responses" in activity
+    assert "replace_function" in activity
+    assert "replace_struct" in activity
+    assert "SharedPreferences" in activity
+    assert "AI_PREF_API_KEY" in activity
+    assert "saveAiSettings(apiKey, model)" in activity
     assert "private LinearLayout symbolList" in activity
     assert "rebuildSymbolList(refreshedProject)" in activity
     assert "findMatchingSymbol(refreshedProject, editedSymbol)" in activity
+    assert "formatChangeSummary" in activity
+    assert "Changed symbols:" in activity
+    assert "Changed files:" in activity
     assert "parseSymbols" in activity
     assert "groupSymbols" in activity
     assert "createSymbolRow" in activity

@@ -1,6 +1,7 @@
 package com.stasislang.workshop;
 
 import android.app.Activity;
+import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.graphics.Color;
 import android.opengl.GLES20;
@@ -30,9 +31,12 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -43,9 +47,15 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.TreeSet;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 public final class MainActivity extends Activity {
     private static final String ASSET_ROOT = "workshop_sample/";
     private static final String PROJECT_DIR = "workshop_project";
+    private static final String AI_PREFS = "ai_settings";
+    private static final String AI_PREF_API_KEY = "openai_api_key";
+    private static final String AI_PREF_MODEL = "openai_model";
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
@@ -76,7 +86,11 @@ public final class MainActivity extends Activity {
 
     private TextView sourceTitle;
     private EditText sourceEditor;
+    private EditText aiPromptEditor;
+    private EditText aiApiKeyEditor;
+    private EditText aiModelEditor;
     private TextView reloadStatus;
+    private TextView changeSummary;
     private TextView gameStatus;
     private GamePreviewView gamePreview;
     private LinearLayout symbolList;
@@ -187,6 +201,7 @@ public final class MainActivity extends Activity {
         sourceEditor.setBackground(createPanelBackground(Color.WHITE, Color.rgb(207, 214, 224)));
         content.addView(sourceEditor, fullWidth());
 
+        content.addView(createAiControls(), fullWidth());
         content.addView(createEditControls(), fullWidth());
 
         reloadStatus = new TextView(this);
@@ -194,6 +209,14 @@ public final class MainActivity extends Activity {
         reloadStatus.setTextSize(13.0f);
         reloadStatus.setPadding(0, dp(8), 0, dp(6));
         content.addView(reloadStatus, fullWidth());
+
+        changeSummary = new TextView(this);
+        changeSummary.setTextColor(Color.rgb(73, 84, 100));
+        changeSummary.setTextSize(12.0f);
+        changeSummary.setTypeface(Typeface.MONOSPACE);
+        changeSummary.setPadding(0, dp(6), 0, dp(6));
+        content.addView(changeSummary, fullWidth());
+        refreshChangeSummary(project);
 
         View keyboardSpacer = new View(this);
         content.addView(keyboardSpacer, new LinearLayout.LayoutParams(
@@ -440,6 +463,48 @@ public final class MainActivity extends Activity {
         setStatusText("No pending edit");
     }
 
+    private LinearLayout createAiControls() {
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.VERTICAL);
+        controls.setPadding(0, dp(8), 0, 0);
+
+        TextView aiTitle = new TextView(this);
+        aiTitle.setText("AI Edit");
+        aiTitle.setTextColor(Color.rgb(35, 45, 60));
+        aiTitle.setTextSize(14.0f);
+        aiTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        controls.addView(aiTitle, fullWidth());
+
+        aiPromptEditor = new EditText(this);
+        aiPromptEditor.setHint("Describe a game change for the selected symbol");
+        aiPromptEditor.setSingleLine(false);
+        aiPromptEditor.setMinLines(2);
+        aiPromptEditor.setTextSize(12.0f);
+        controls.addView(aiPromptEditor, fullWidth());
+
+        aiApiKeyEditor = new EditText(this);
+        aiApiKeyEditor.setHint("OpenAI API key");
+        aiApiKeyEditor.setSingleLine(true);
+        aiApiKeyEditor.setTextSize(12.0f);
+        controls.addView(aiApiKeyEditor, fullWidth());
+
+        aiModelEditor = new EditText(this);
+        aiModelEditor.setSingleLine(true);
+        aiModelEditor.setText("gpt-5.1");
+        aiModelEditor.setTextSize(12.0f);
+        controls.addView(aiModelEditor, fullWidth());
+
+        Button aiPatch = new Button(this);
+        aiPatch.setText("AI Patch Selected Symbol");
+        aiPatch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                runAiPatch();
+            }
+        });
+        controls.addView(aiPatch, fullWidth());
+        return controls;
+    }
     private LinearLayout createEditControls() {
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.VERTICAL);
@@ -468,6 +533,16 @@ public final class MainActivity extends Activity {
         });
         editRow.addView(reset, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         controls.addView(editRow, fullWidth());
+
+        Button refreshChanges = new Button(this);
+        refreshChanges.setText("Changes");
+        refreshChanges.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                refreshChangeSummary(loadBundledProject());
+            }
+        });
+        controls.addView(refreshChanges, fullWidth());
 
         Button resetProject = new Button(this);
         resetProject.setText("Reset Project");
@@ -561,6 +636,201 @@ public final class MainActivity extends Activity {
         return Integer.parseInt(text.substring(start, end));
     }
 
+    private void runAiPatch() {
+        if (selectedSymbol == null) {
+            setStatusText("AI edit requires a selected symbol");
+            return;
+        }
+        String apiKey = aiApiKeyEditor == null ? "" : aiApiKeyEditor.getText().toString().trim();
+        String prompt = aiPromptEditor == null ? "" : aiPromptEditor.getText().toString().trim();
+        String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
+        if (apiKey.isEmpty() || prompt.isEmpty()) {
+            setStatusText("AI edit requires an API key and prompt");
+            return;
+        }
+        if (model.isEmpty()) {
+            model = "gpt-5.1";
+        }
+        saveAiSettings(apiKey, model);
+        final SymbolEntry symbol = selectedSymbol;
+        final String selectedSource = sourceEditor.getText().toString().trim();
+        final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource);
+        final String requestModel = model;
+        final String requestApiKey = apiKey;
+        setStatusText("AI edit: sending selected symbol context");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    String responseBody = callOpenAiResponsesApi(requestApiKey, requestModel, requestJson);
+                    final String aiJson = extractAiJsonResponse(responseBody);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            applyAiCodeResponse(aiJson, symbol);
+                        }
+                    });
+                } catch (final Exception error) {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            setStatusText("AI edit failed: " + error.getMessage());
+                        }
+                    });
+                }
+            }
+        }).start();
+    }
+
+    private void saveAiSettings(String apiKey, String model) {
+        getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                .edit()
+                .putString(AI_PREF_API_KEY, apiKey)
+                .putString(AI_PREF_MODEL, model)
+                .apply();
+    }
+
+    private static String buildAiCodeRequestJson(String prompt, SymbolEntry symbol, String selectedSource) {
+        try {
+            JSONObject selected = new JSONObject();
+            selected.put("kind", symbol.kind);
+            selected.put("name", symbol.name);
+            selected.put("owner", symbol.owner);
+            selected.put("file", symbol.file);
+            selected.put("source", selectedSource);
+
+            JSONObject rules = new JSONObject();
+            rules.put("use_function_keyword", true);
+            rules.put("use_receiver_style_when_possible", true);
+            rules.put("do_not_use_rust_references", true);
+            rules.put("struct_functions_live_with_struct", true);
+            rules.put("lifecycle_functions_live_in_main", true);
+            rules.put("no_owner_functions_live_in_root", true);
+
+            JSONObject request = new JSONObject();
+            request.put("user_prompt", prompt);
+            request.put("selected_symbols", new JSONArray().put(selected));
+            request.put("stasis_style_rules", rules);
+            return request.toString();
+        } catch (Exception error) {
+            return "{}";
+        }
+    }
+
+    private static String callOpenAiResponsesApi(String apiKey, String model, String requestJson) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("model", model);
+        payload.put("input", "Return only one JSON object matching the Stasis AI Code Response format. Supported edits are replace_function and replace_struct. Do not use markdown. Request: " + requestJson);
+        byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+
+        HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
+        connection.setRequestMethod("POST");
+        connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+        connection.setRequestProperty("Content-Type", "application/json");
+        connection.setDoOutput(true);
+        OutputStream output = connection.getOutputStream();
+        try {
+            output.write(body);
+        } finally {
+            output.close();
+        }
+
+        int status = connection.getResponseCode();
+        InputStream input = status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream();
+        String response = input == null ? "" : readStreamStatic(input);
+        connection.disconnect();
+        if (status < 200 || status >= 300) {
+            throw new IOException("OpenAI HTTP " + status + ": " + response);
+        }
+        return response;
+    }
+
+    private static String extractAiJsonResponse(String responseBody) throws Exception {
+        JSONObject response = new JSONObject(responseBody);
+        String text = response.optString("output_text", "");
+        if (text.isEmpty()) {
+            JSONArray output = response.optJSONArray("output");
+            if (output != null) {
+                StringBuilder builder = new StringBuilder();
+                for (int index = 0; index < output.length(); index += 1) {
+                    JSONObject item = output.optJSONObject(index);
+                    if (item == null) {
+                        continue;
+                    }
+                    JSONArray content = item.optJSONArray("content");
+                    if (content == null) {
+                        continue;
+                    }
+                    for (int contentIndex = 0; contentIndex < content.length(); contentIndex += 1) {
+                        JSONObject part = content.optJSONObject(contentIndex);
+                        if (part != null) {
+                            builder.append(part.optString("text", ""));
+                        }
+                    }
+                }
+                text = builder.toString();
+            }
+        }
+        int start = text.indexOf('{');
+        int end = text.lastIndexOf('}');
+        if (start < 0 || end < start) {
+            throw new IOException("AI response did not include JSON edits");
+        }
+        return text.substring(start, end + 1);
+    }
+
+    private void applyAiCodeResponse(String aiJson, SymbolEntry fallbackSymbol) {
+        try {
+            JSONObject response = new JSONObject(aiJson);
+            JSONArray edits = response.getJSONArray("edits");
+            ProjectSnapshot project = loadBundledProject();
+            SymbolEntry lastEdited = fallbackSymbol;
+            for (int index = 0; index < edits.length(); index += 1) {
+                JSONObject edit = edits.getJSONObject(index);
+                String kind = edit.getString("kind");
+                if (!"replace_function".equals(kind) && !"replace_struct".equals(kind)) {
+                    throw new IOException("Unsupported AI edit kind: " + kind);
+                }
+                String expectedKind = "replace_struct".equals(kind) ? "struct" : "function";
+                SymbolEntry target = findSymbolForAiEdit(project, expectedKind, edit, fallbackSymbol);
+                String newSource = edit.getString("new_source").trim();
+                persistSelectedEdit(target, newSource);
+                lastEdited = target;
+                project = loadBundledProject();
+            }
+            rebuildSymbolList(project);
+            SymbolEntry refreshed = findMatchingSymbol(project, lastEdited);
+            if (refreshed != null) {
+                showSymbol(refreshed);
+            }
+            refreshChangeSummary(project);
+            String compileResult = nativeCompileProject(projectRootPath());
+            compileReady = isRunnableCompile(compileResult);
+            compileAttempted = true;
+            setStatusText("AI edit applied: " + response.optString("summary", "updated selected symbol") + " - " + compileResult);
+        } catch (Exception error) {
+            setStatusText("AI edit apply failed: " + error.getMessage());
+        }
+    }
+
+    private static SymbolEntry findSymbolForAiEdit(ProjectSnapshot project, String expectedKind, JSONObject edit, SymbolEntry fallback) throws Exception {
+        String file = edit.optString("file", fallback.file);
+        String name = edit.optString("name", fallback.name);
+        String owner = edit.optString("owner", fallback.owner);
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (symbol.kind.equals(expectedKind)
+                            && symbol.file.equals(file)
+                            && symbol.name.equals(name)
+                            && (owner.isEmpty() || symbol.owner.equals(owner))) {
+                        return symbol;
+                    }
+                }
+            }
+        }
+        throw new IOException("AI edit target not found: " + file + " " + name);
+    }
     private void applySelectedEdit() {
         if (selectedSymbol == null) {
             return;
@@ -597,12 +867,103 @@ public final class MainActivity extends Activity {
         writeTextFile(sourceFile.diskFile, sourceFile.source);
     }
 
+    private void refreshChangeSummary(ProjectSnapshot currentProject) {
+        if (changeSummary == null) {
+            return;
+        }
+        try {
+            ProjectSnapshot baseline = loadBundledAssetSnapshot();
+            changeSummary.setText(formatChangeSummary(baseline, currentProject));
+        } catch (IOException error) {
+            changeSummary.setText("Changed symbols:\n  Unable to read bundled baseline: " + error.getMessage());
+        }
+    }
+
+    private ProjectSnapshot loadBundledAssetSnapshot() throws IOException {
+        List<SourceFile> files = new ArrayList<>();
+        AssetManager assets = getAssets();
+        File projectRoot = projectRoot();
+        for (String file : SAMPLE_FILES) {
+            files.add(new SourceFile(file, new File(projectRoot, file), readAsset(assets, ASSET_ROOT + file)));
+        }
+        return ProjectSnapshot.from(files);
+    }
+
+    private static String formatChangeSummary(ProjectSnapshot baseline, ProjectSnapshot current) {
+        Map<String, SymbolEntry> baselineSymbols = symbolsByIdentity(baseline);
+        Map<String, SymbolEntry> currentSymbols = symbolsByIdentity(current);
+        TreeSet<String> changedFiles = new TreeSet<>();
+        Map<String, List<String>> changedByGroup = new LinkedHashMap<>();
+        for (SymbolEntry symbol : currentSymbols.values()) {
+            SymbolEntry before = baselineSymbols.get(symbol.identityKey());
+            String change = null;
+            if (before == null) {
+                change = "added";
+            } else if (!before.source.equals(symbol.source)) {
+                change = "modified";
+            }
+            if (change != null) {
+                addChangedSymbol(changedByGroup, symbol.owner, change + " " + symbol.displayName());
+                changedFiles.add(symbol.file);
+            }
+        }
+        for (SymbolEntry symbol : baselineSymbols.values()) {
+            if (!currentSymbols.containsKey(symbol.identityKey())) {
+                addChangedSymbol(changedByGroup, symbol.owner, "removed " + symbol.displayName());
+                changedFiles.add(symbol.file);
+            }
+        }
+
+        StringBuilder builder = new StringBuilder();
+        builder.append("Changed symbols:");
+        if (changedByGroup.isEmpty()) {
+            builder.append(" none");
+        } else {
+            for (Map.Entry<String, List<String>> group : changedByGroup.entrySet()) {
+                builder.append('\n').append("  ").append(group.getKey());
+                for (String line : group.getValue()) {
+                    builder.append('\n').append("    ").append(line);
+                }
+            }
+        }
+        builder.append('\n').append("Changed files:");
+        if (changedFiles.isEmpty()) {
+            builder.append(" none");
+        } else {
+            for (String file : changedFiles) {
+                builder.append('\n').append("  ").append(file);
+            }
+        }
+        return builder.toString();
+    }
+
+    private static void addChangedSymbol(Map<String, List<String>> changedByGroup, String group, String line) {
+        List<String> lines = changedByGroup.get(group);
+        if (lines == null) {
+            lines = new ArrayList<>();
+            changedByGroup.put(group, lines);
+        }
+        lines.add(line);
+    }
+
+    private static Map<String, SymbolEntry> symbolsByIdentity(ProjectSnapshot project) {
+        Map<String, SymbolEntry> symbols = new LinkedHashMap<>();
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    symbols.put(symbol.identityKey(), symbol);
+                }
+            }
+        }
+        return symbols;
+    }
     private void resetProjectFiles() {
         ProjectSnapshot project = loadBundledProject(true);
         rebuildSymbolList(project);
         if (project.firstSymbol != null) {
             showSymbol(project.firstSymbol);
         }
+        refreshChangeSummary(project);
         compileReady = false;
         compileAttempted = false;
         setStatusText("Reset project from bundled sample");
@@ -736,6 +1097,10 @@ public final class MainActivity extends Activity {
     }
 
     private String readStream(InputStream input) throws IOException {
+        return readStreamStatic(input);
+    }
+
+    private static String readStreamStatic(InputStream input) throws IOException {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         byte[] buffer = new byte[4096];
         int read;
@@ -1463,6 +1828,10 @@ public final class MainActivity extends Activity {
                 return signature;
             }
             return signature;
+        }
+
+        String identityKey() {
+            return kind + "|" + file + "|" + owner + "|" + name;
         }
     }
 }
