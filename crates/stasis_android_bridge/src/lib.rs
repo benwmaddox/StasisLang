@@ -212,13 +212,15 @@ pub fn run_android_workshop_tick(
         let observed_game_tick_count = session.jit.read_i32_global_path("GameState.tick_count");
         let render_command_count = session.jit.read_i32_global_path("Render.command_count");
         let render_commands = read_render_commands(&session.jit);
-        write_jit_runtime_state(
-            project_root,
-            session.tick_count,
-            observed_game_tick_count,
-            render_command_count,
-            &render_commands,
-        )?;
+        if should_write_jit_runtime_state(session.tick_count, initialized, recompiled) {
+            write_jit_runtime_state(
+                project_root,
+                session.tick_count,
+                observed_game_tick_count,
+                render_command_count,
+                &render_commands,
+            )?;
+        }
 
         Ok(AndroidBridgeRunTickResult {
             tick_count: session.tick_count,
@@ -377,6 +379,10 @@ fn fingerprint_workshop_sources(files: &[WorkshopSourceFile]) -> u64 {
         file.source.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+fn should_write_jit_runtime_state(tick_count: i32, initialized: bool, recompiled: bool) -> bool {
+    initialized || recompiled || tick_count % 60 == 0
 }
 
 fn write_jit_runtime_state(
@@ -658,6 +664,14 @@ mod tests {
     }
 
     #[test]
+    fn jit_runtime_state_write_policy_skips_ordinary_frames() {
+        assert!(should_write_jit_runtime_state(1, true, false));
+        assert!(should_write_jit_runtime_state(7, false, true));
+        assert!(should_write_jit_runtime_state(60, false, false));
+        assert!(!should_write_jit_runtime_state(2, false, false));
+    }
+
+    #[test]
     fn bridge_run_tick_executes_real_void_lifecycle_functions() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
@@ -687,8 +701,8 @@ mod tests {
         let state = fs::read_to_string(root.join("build/runtime_state.txt"))
             .expect("read JIT runtime state");
         assert!(state.contains("mode=JitExecuted"));
-        assert!(state.contains("tick_count=2"));
-        assert!(state.contains("game_tick_count=12"));
+        assert!(state.contains("tick_count=1"));
+        assert!(state.contains("game_tick_count=11"));
         fs::remove_dir_all(&root).ok();
     }
 
