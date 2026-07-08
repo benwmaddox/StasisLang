@@ -571,6 +571,11 @@ fn compile_function_to_object_bytes(
     flag_builder
         .set("opt_level", optimization_profile.as_cranelift_opt_level())
         .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
+    if !matches!(target, AotTarget::Native) {
+        flag_builder
+            .set("is_pic", "true")
+            .map_err(|error| format!("failed to configure Cranelift PIC mode: {error}"))?;
+    }
     let flags = settings::Flags::new(flag_builder);
     let isa_builder = isa_builder_for_aot_target(target)?;
     let isa = isa_builder

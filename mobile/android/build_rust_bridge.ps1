@@ -62,7 +62,7 @@ if (-not (Test-Path $source)) {
     throw "Rust bridge output was not produced: $source"
 }
 
-$destDir = Join-Path $scriptRoot "app\src\main\jniLibs\arm64-v8a"
+$destDir = Join-Path $scriptRoot "app\src\workshop\jniLibs\arm64-v8a"
 New-Item -ItemType Directory -Force $destDir | Out-Null
 $dest = Join-Path $destDir "libstasis_android_bridge.so"
 Copy-Item -Force $source $dest

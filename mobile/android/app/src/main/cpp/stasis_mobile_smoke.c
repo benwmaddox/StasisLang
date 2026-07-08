@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if STASIS_ANDROID_PUBLISHED_AOT
+#include "published_aot_symbols.h"
+#endif
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
 #define STASIS_COMPILE_MANIFEST_RELATIVE_PATH "build/native_compile_manifest.txt"
@@ -53,6 +56,185 @@ typedef struct RustBridgeApi {
 } RustBridgeApi;
 
 static RustBridgeApi rust_bridge_api = {0};
+#if STASIS_ANDROID_PUBLISHED_AOT
+typedef struct PublishedRenderCommand {
+    int32_t kind;
+    int32_t x;
+    int32_t y;
+    int32_t w;
+    int32_t h;
+    int32_t color;
+    int32_t asset;
+} PublishedRenderCommand;
+
+typedef struct PublishedI32Global {
+    const char *path;
+    int32_t *value;
+    int32_t hash;
+} PublishedI32Global;
+
+static int32_t published_input_touch_x;
+static int32_t published_input_touch_y;
+static int32_t published_input_touch_active;
+static int32_t published_input_screen_w;
+static int32_t published_input_screen_h;
+static int32_t published_game_tick_count;
+static int32_t published_game_screen_w;
+static int32_t published_game_screen_h;
+static int32_t published_game_player_y;
+static int32_t published_game_ai_y;
+static int32_t published_game_ball_x;
+static int32_t published_game_ball_y;
+static int32_t published_game_ball_vx;
+static int32_t published_game_ball_vy;
+static int32_t published_game_player_score;
+static int32_t published_game_ai_score;
+static int32_t published_render_command_count;
+static PublishedRenderCommand published_render_commands[8];
+static int published_aot_globals_initialized;
+static int published_aot_main_ran;
+static int32_t published_runtime_tick_count;
+
+#define RENDER_GLOBALS(index) \
+    {"Render.command" #index "_kind", &published_render_commands[index].kind, 0}, \
+    {"Render.command" #index "_x", &published_render_commands[index].x, 0}, \
+    {"Render.command" #index "_y", &published_render_commands[index].y, 0}, \
+    {"Render.command" #index "_w", &published_render_commands[index].w, 0}, \
+    {"Render.command" #index "_h", &published_render_commands[index].h, 0}, \
+    {"Render.command" #index "_color", &published_render_commands[index].color, 0}, \
+    {"Render.command" #index "_asset", &published_render_commands[index].asset, 0}
+
+static PublishedI32Global published_i32_globals[] = {
+    {"Input.touch_x", &published_input_touch_x, 0},
+    {"Input.touch_y", &published_input_touch_y, 0},
+    {"Input.touch_active", &published_input_touch_active, 0},
+    {"Input.screen_w", &published_input_screen_w, 0},
+    {"Input.screen_h", &published_input_screen_h, 0},
+    {"GameState.tick_count", &published_game_tick_count, 0},
+    {"GameState.screen_w", &published_game_screen_w, 0},
+    {"GameState.screen_h", &published_game_screen_h, 0},
+    {"GameState.player_y", &published_game_player_y, 0},
+    {"GameState.ai_y", &published_game_ai_y, 0},
+    {"GameState.ball_x", &published_game_ball_x, 0},
+    {"GameState.ball_y", &published_game_ball_y, 0},
+    {"GameState.ball_vx", &published_game_ball_vx, 0},
+    {"GameState.ball_vy", &published_game_ball_vy, 0},
+    {"GameState.player_score", &published_game_player_score, 0},
+    {"GameState.ai_score", &published_game_ai_score, 0},
+    {"Render.command_count", &published_render_command_count, 0},
+    RENDER_GLOBALS(0),
+    RENDER_GLOBALS(1),
+    RENDER_GLOBALS(2),
+    RENDER_GLOBALS(3),
+    RENDER_GLOBALS(4),
+    RENDER_GLOBALS(5),
+    RENDER_GLOBALS(6),
+    RENDER_GLOBALS(7)
+};
+
+#undef RENDER_GLOBALS
+
+static int32_t stasis_published_hash_path(const char *path) {
+    uint32_t hash = 2166136261U;
+    const unsigned char *cursor = (const unsigned char *)path;
+    while (*cursor != '\0') {
+        hash ^= (uint32_t)(*cursor);
+        hash *= 16777619U;
+        cursor += 1;
+    }
+    return (int32_t)hash;
+}
+
+static void stasis_published_init_globals(void) {
+    if (published_aot_globals_initialized) {
+        return;
+    }
+    size_t count = sizeof(published_i32_globals) / sizeof(published_i32_globals[0]);
+    for (size_t index = 0; index < count; index += 1) {
+        published_i32_globals[index].hash = stasis_published_hash_path(published_i32_globals[index].path);
+    }
+    published_aot_globals_initialized = 1;
+}
+
+static int32_t *stasis_published_find_i32_global(int32_t path_hash) {
+    stasis_published_init_globals();
+    size_t count = sizeof(published_i32_globals) / sizeof(published_i32_globals[0]);
+    for (size_t index = 0; index < count; index += 1) {
+        if (published_i32_globals[index].hash == path_hash) {
+            return published_i32_globals[index].value;
+        }
+    }
+    return NULL;
+}
+
+int32_t stasis_jit_global_i32_load(int32_t path_hash) {
+    int32_t *value = stasis_published_find_i32_global(path_hash);
+    return value == NULL ? 0 : *value;
+}
+
+void stasis_jit_global_i32_store(int32_t path_hash, int32_t value) {
+    int32_t *target = stasis_published_find_i32_global(path_hash);
+    if (target != NULL) {
+        *target = value;
+    }
+}
+
+int64_t stasis_jit_lookup_code_ptr(int32_t fn_id_raw) {
+    (void)fn_id_raw;
+    return 0;
+}
+
+static void stasis_published_pack_frame(int32_t *out, uintptr_t out_len) {
+    if (out_len < 62) {
+        return;
+    }
+    memset(out, 0, sizeof(int32_t) * 62);
+    int32_t command_count = published_render_command_count;
+    if (command_count < 0) {
+        command_count = 0;
+    }
+    if (command_count > 8) {
+        command_count = 8;
+    }
+    out[0] = 0;
+    out[1] = published_runtime_tick_count;
+    out[2] = published_game_tick_count;
+    out[3] = 0;
+    out[4] = published_aot_main_ran ? 1 : 0;
+    out[5] = command_count;
+    for (int32_t index = 0; index < command_count; index += 1) {
+        int base = 6 + index * 7;
+        out[base] = published_render_commands[index].kind;
+        out[base + 1] = published_render_commands[index].x;
+        out[base + 2] = published_render_commands[index].y;
+        out[base + 3] = published_render_commands[index].w;
+        out[base + 4] = published_render_commands[index].h;
+        out[base + 5] = published_render_commands[index].color;
+        out[base + 6] = published_render_commands[index].asset;
+    }
+}
+
+static int stasis_published_run_tick_frame(int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len) {
+    if (out_values == NULL || out_len < 62) {
+        return -1;
+    }
+    stasis_published_init_globals();
+    published_input_touch_x = touch_x;
+    published_input_touch_y = touch_y;
+    published_input_touch_active = touch_active;
+    published_input_screen_w = screen_w;
+    published_input_screen_h = screen_h;
+    if (!published_aot_main_ran) {
+        STASIS_AOT_MAIN();
+        published_aot_main_ran = 1;
+    }
+    STASIS_AOT_TICK();
+    STASIS_AOT_RENDER();
+    published_runtime_tick_count += 1;
+    stasis_published_pack_frame(out_values, out_len);
+    return 0;
+}
+#endif
 static char *read_file_text(const char *path, long *size_out);
 
 static int has_suffix(const char *value, const char *suffix) {
@@ -840,6 +1022,11 @@ Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activ
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jclass activity_class, jstring project_root) {
     (void)activity_class;
+#if STASIS_ANDROID_PUBLISHED_AOT
+    (void)project_root;
+    stasis_published_init_globals();
+    return (*env)->NewStringUTF(env, "CompilePlanned: reload=PublishedAot files=0 functions=0 hash=0000000000000000 manifest=published_aot state=compiled status=0");
+#else
 
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
     if (root == NULL) {
@@ -885,8 +1072,8 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
     (*env)->ReleaseStringUTFChars(env, project_root, root);
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
     return (*env)->NewStringUTF(env, message);
+#endif
 }
-
 JNIEXPORT jint JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jintArray frame_values) {
     (void)activity_class;
@@ -898,6 +1085,10 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
         return -1;
     }
 
+#if STASIS_ANDROID_PUBLISHED_AOT
+    (void)project_root;
+    int status = stasis_published_run_tick_frame((int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h, values, frame_len);
+#else
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
     if (root == NULL) {
         values[0] = -1;
@@ -907,6 +1098,7 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
 
     int status = try_rust_bridge_run_tick_frame(root, (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h, values, frame_len);
     (*env)->ReleaseStringUTFChars(env, project_root, root);
+#endif
     if (status != 0) {
         values[0] = -1;
     }

@@ -2,6 +2,9 @@ plugins {
     id 'com.android.application'
 }
 
+def repoRootDir = rootProject.projectDir.parentFile.parentFile
+def publishedAotDir = layout.buildDirectory.dir('generated/stasisAot/publishedArm64')
+
 android {
     namespace 'com.stasislang.workshop'
     compileSdk = (project.findProperty('stasis.compileSdk') ?: '35').toString().toInteger()
@@ -35,12 +38,22 @@ android {
             applicationId 'com.stasislang.workshop'
             manifestPlaceholders = [appLabel: 'Stasis Workshop']
             buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'false'
+            externalNativeBuild {
+                cmake {
+                    arguments '-DSTASIS_ANDROID_PUBLISHED_AOT=OFF'
+                }
+            }
         }
         published {
             dimension 'mode'
             applicationId 'com.stasislang.workshop.published'
             manifestPlaceholders = [appLabel: 'Stasis Game']
             buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'true'
+            externalNativeBuild {
+                cmake {
+                    arguments '-DSTASIS_ANDROID_PUBLISHED_AOT=ON', "-DSTASIS_PUBLISHED_AOT_DIR=${projectDir}/build/generated/stasisAot/publishedArm64"
+                }
+            }
         }
     }
 
@@ -48,5 +61,21 @@ android {
         cmake {
             path file('src/main/cpp/CMakeLists.txt')
         }
+    }
+}
+
+tasks.register('generatePublishedAotBundle', Exec) {
+    def outputDir = publishedAotDir.get().asFile
+    inputs.dir(file('src/main/assets/workshop_sample'))
+    outputs.dir(outputDir)
+    workingDir repoRootDir
+    commandLine 'cargo', 'run', '-p', 'stasis', '--', 'android-aot-bundle',
+            '--project-dir', file('src/main/assets/workshop_sample').absolutePath,
+            '--out-dir', outputDir.absolutePath
+}
+
+tasks.configureEach { task ->
+    if (task.name.startsWith('prePublished') || (task.name.startsWith('configureCMake') && task.name.contains('Published'))) {
+        task.dependsOn(tasks.named('generatePublishedAotBundle'))
     }
 }
