@@ -112,6 +112,15 @@ def main() -> int:
     assert "write_symbol" in activity
     assert "compile_project" in activity
     assert "get_diagnostics" in activity
+    assert "set_input_state" in activity
+    assert "run_frame" in activity
+    assert "run_for_ticks" in activity
+    assert "inspect_runtime_state" in activity
+    assert "aiToolSetInputState" in activity
+    assert "aiToolRunForTicks" in activity
+    assert "runtimeStateJson" in activity
+    assert "frameValuesToJson" in activity
+    assert "set_input_state controls simulated test input" in activity
     assert "aiToolCompileProject" in activity
     assert "aiToolGetDiagnostics" in activity
     assert "compileResultToJson" in activity

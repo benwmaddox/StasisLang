@@ -108,6 +108,11 @@ public final class MainActivity extends Activity {
     private boolean compileReady;
     private boolean compileAttempted;
     private String lastCompileResult = "CompileNotRun";
+    private int aiSimTouchX;
+    private int aiSimTouchY;
+    private int aiSimTouchActive;
+    private int aiSimScreenWidth;
+    private int aiSimScreenHeight;
     private long lastDebugUpdateNanos;
     private SymbolEntry selectedSymbol;
 
@@ -723,6 +728,10 @@ public final class MainActivity extends Activity {
                     .put("write_symbol")
                     .put("compile_project")
                     .put("get_diagnostics")
+                    .put("set_input_state")
+                    .put("run_frame")
+                    .put("run_for_ticks")
+                    .put("inspect_runtime_state")
                     .put("take_screenshot"));
             request.put("stasis_style_rules", rules);
             return request.toString();
@@ -789,6 +798,18 @@ public final class MainActivity extends Activity {
         }
         if ("get_diagnostics".equals(tool)) {
             return aiToolGetDiagnostics();
+        }
+        if ("set_input_state".equals(tool)) {
+            return aiToolSetInputState(call);
+        }
+        if ("run_frame".equals(tool)) {
+            return aiToolRunFrame();
+        }
+        if ("run_for_ticks".equals(tool)) {
+            return aiToolRunForTicks(call);
+        }
+        if ("inspect_runtime_state".equals(tool)) {
+            return aiToolInspectRuntimeState();
         }
         if ("take_screenshot".equals(tool)) {
             return aiToolTakeScreenshot();
@@ -899,6 +920,145 @@ public final class MainActivity extends Activity {
                 .put("raw", result)
                 .put("kind", result.startsWith("CompileError") ? "compile_error" : "compile_result");
     }
+    private JSONObject aiToolSetInputState(JSONObject call) throws Exception {
+        aiSimTouchX = call.optInt("x", aiSimTouchX);
+        aiSimTouchY = call.optInt("y", aiSimTouchY);
+        aiSimTouchActive = call.optInt("active", aiSimTouchActive);
+        aiSimScreenWidth = call.optInt("screen_w", currentPreviewWidth());
+        aiSimScreenHeight = call.optInt("screen_h", currentPreviewHeight());
+        return currentInputStateJson();
+    }
+
+    private JSONObject aiToolRunFrame() throws Exception {
+        ensureAiTestCompileReady();
+        int[] frame = new int[RENDER_FRAME_I32_CAPACITY];
+        int status = nativeRunFrameInto(
+                projectRootPath(),
+                aiSimTouchX,
+                aiSimTouchY,
+                aiSimTouchActive,
+                currentAiScreenWidth(),
+                currentAiScreenHeight(),
+                frame);
+        System.arraycopy(frame, 0, nativeFrameValues, 0, RENDER_FRAME_I32_CAPACITY);
+        if (gamePreview != null) {
+            gamePreview.setRenderFrameValues(nativeFrameValues);
+        }
+        return new JSONObject()
+                .put("status", status)
+                .put("input", currentInputStateJson())
+                .put("frame", frameValuesToJson(frame))
+                .put("runtime_state", runtimeStateJson());
+    }
+
+    private JSONObject aiToolRunForTicks(JSONObject call) throws Exception {
+        int requested = Math.max(1, Math.min(600, call.optInt("ticks", 1)));
+        JSONObject lastFrame = null;
+        int ran = 0;
+        for (int index = 0; index < requested; index += 1) {
+            lastFrame = aiToolRunFrame();
+            ran += 1;
+            if (lastFrame.optInt("status", -1) != 0) {
+                break;
+            }
+        }
+        return new JSONObject()
+                .put("ticks_requested", requested)
+                .put("ticks_run", ran)
+                .put("input", currentInputStateJson())
+                .put("last_frame", lastFrame == null ? new JSONObject() : lastFrame)
+                .put("runtime_state", runtimeStateJson());
+    }
+
+    private JSONObject aiToolInspectRuntimeState() throws Exception {
+        return new JSONObject()
+                .put("input", currentInputStateJson())
+                .put("runtime_state", runtimeStateJson())
+                .put("frame", frameValuesToJson(nativeFrameValues));
+    }
+
+    private void ensureAiTestCompileReady() throws Exception {
+        if (compileReady) {
+            return;
+        }
+        JSONObject diagnostics = aiToolCompileProject();
+        if (!diagnostics.optBoolean("ok", false)) {
+            throw new IOException("compile_project failed: " + diagnostics.optString("raw", "unknown error"));
+        }
+    }
+
+    private int currentPreviewWidth() {
+        return gamePreview == null || gamePreview.getWidth() <= 0 ? 360 : gamePreview.getWidth();
+    }
+
+    private int currentPreviewHeight() {
+        return gamePreview == null || gamePreview.getHeight() <= 0 ? 640 : gamePreview.getHeight();
+    }
+
+    private int currentAiScreenWidth() {
+        return aiSimScreenWidth > 0 ? aiSimScreenWidth : currentPreviewWidth();
+    }
+
+    private int currentAiScreenHeight() {
+        return aiSimScreenHeight > 0 ? aiSimScreenHeight : currentPreviewHeight();
+    }
+
+    private JSONObject currentInputStateJson() throws Exception {
+        return new JSONObject()
+                .put("touch_x", aiSimTouchX)
+                .put("touch_y", aiSimTouchY)
+                .put("touch_active", aiSimTouchActive)
+                .put("screen_w", currentAiScreenWidth())
+                .put("screen_h", currentAiScreenHeight());
+    }
+
+    private JSONObject runtimeStateJson() throws Exception {
+        File stateFile = new File(projectRoot(), "build/runtime_state.txt");
+        JSONObject values = new JSONObject();
+        String raw = "";
+        if (stateFile.isFile()) {
+            raw = readTextFile(stateFile);
+            String[] lines = raw.split("\\r?\\n");
+            for (String line : lines) {
+                int equals = line.indexOf('=');
+                if (equals > 0) {
+                    values.put(line.substring(0, equals), line.substring(equals + 1));
+                }
+            }
+        }
+        return new JSONObject()
+                .put("file", "build/runtime_state.txt")
+                .put("exists", stateFile.isFile())
+                .put("raw", raw)
+                .put("values", values);
+    }
+
+    private static JSONObject frameValuesToJson(int[] frame) throws Exception {
+        JSONArray values = new JSONArray();
+        for (int index = 0; index < frame.length; index += 1) {
+            values.put(frame[index]);
+        }
+        JSONArray commands = new JSONArray();
+        int commandCount = frame.length > 5 ? Math.max(0, Math.min(MAX_RENDER_COMMANDS, frame[5])) : 0;
+        for (int index = 0; index < commandCount; index += 1) {
+            int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
+            commands.put(new JSONObject()
+                    .put("kind", frame[base])
+                    .put("x", frame[base + 1])
+                    .put("y", frame[base + 2])
+                    .put("w", frame[base + 3])
+                    .put("h", frame[base + 4])
+                    .put("color", frame[base + 5])
+                    .put("asset", frame[base + 6]));
+        }
+        return new JSONObject()
+                .put("status", frame.length > 0 ? frame[0] : -1)
+                .put("tick_count", frame.length > 1 ? frame[1] : 0)
+                .put("game_tick_count", frame.length > 2 ? frame[2] : 0)
+                .put("command_count", commandCount)
+                .put("commands", commands)
+                .put("raw_values", values);
+    }
     private JSONObject aiToolTakeScreenshot() throws Exception {
         int width = gamePreview == null ? 0 : gamePreview.getWidth();
         int height = gamePreview == null ? 0 : gamePreview.getHeight();
@@ -941,7 +1101,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, take_screenshot. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. For no-argument tools, send empty strings for kind, owner, name, file, and new_source. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. set_input_state controls simulated test input; run_for_ticks advances the game and returns runtime/render state. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. For no-argument tools, send empty strings for kind, owner, name, file, and new_source. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -995,12 +1155,22 @@ public final class MainActivity extends Activity {
                 .put("write_symbol")
                 .put("compile_project")
                 .put("get_diagnostics")
+                .put("set_input_state")
+                .put("run_frame")
+                .put("run_for_ticks")
+                .put("inspect_runtime_state")
                 .put("take_screenshot")));
         toolProperties.put("kind", new JSONObject().put("type", "string"));
         toolProperties.put("owner", new JSONObject().put("type", "string"));
         toolProperties.put("name", new JSONObject().put("type", "string"));
         toolProperties.put("file", new JSONObject().put("type", "string"));
         toolProperties.put("new_source", new JSONObject().put("type", "string"));
+        toolProperties.put("x", new JSONObject().put("type", "integer"));
+        toolProperties.put("y", new JSONObject().put("type", "integer"));
+        toolProperties.put("active", new JSONObject().put("type", "integer"));
+        toolProperties.put("ticks", new JSONObject().put("type", "integer"));
+        toolProperties.put("screen_w", new JSONObject().put("type", "integer"));
+        toolProperties.put("screen_h", new JSONObject().put("type", "integer"));
 
         JSONObject toolSchema = new JSONObject();
         toolSchema.put("type", "object");
@@ -1011,7 +1181,13 @@ public final class MainActivity extends Activity {
                 .put("owner")
                 .put("name")
                 .put("file")
-                .put("new_source"));
+                .put("new_source")
+                .put("x")
+                .put("y")
+                .put("active")
+                .put("ticks")
+                .put("screen_w")
+                .put("screen_h"));
         toolSchema.put("properties", toolProperties);
 
         JSONObject responseProperties = new JSONObject();
