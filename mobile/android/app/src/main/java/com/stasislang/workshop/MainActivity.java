@@ -107,6 +107,7 @@ public final class MainActivity extends Activity {
     private final RollingMetric renderMetric = new RollingMetric();
     private boolean compileReady;
     private boolean compileAttempted;
+    private String lastCompileResult = "CompileNotRun";
     private long lastDebugUpdateNanos;
     private SymbolEntry selectedSymbol;
 
@@ -316,6 +317,7 @@ public final class MainActivity extends Activity {
             public void run() {
                 if (!compileReady && !compileAttempted) {
                     String compileResult = nativeCompileProject(projectRootPath());
+                    lastCompileResult = compileResult;
                     compileReady = isRunnableCompile(compileResult);
                     compileAttempted = true;
                     setStatusText(compileResult);
@@ -586,6 +588,7 @@ public final class MainActivity extends Activity {
     }
     private void runNativeCompile() {
         String compileResult = nativeCompileProject(projectRootPath());
+        lastCompileResult = compileResult;
         compileReady = isRunnableCompile(compileResult);
         compileAttempted = true;
         setStatusText(compileResult);
@@ -718,6 +721,8 @@ public final class MainActivity extends Activity {
                     .put("read_symbol")
                     .put("read_file")
                     .put("write_symbol")
+                    .put("compile_project")
+                    .put("get_diagnostics")
                     .put("take_screenshot"));
             request.put("stasis_style_rules", rules);
             return request.toString();
@@ -779,6 +784,12 @@ public final class MainActivity extends Activity {
         if ("write_symbol".equals(tool)) {
             return aiToolWriteSymbol(session, call);
         }
+        if ("compile_project".equals(tool)) {
+            return aiToolCompileProject();
+        }
+        if ("get_diagnostics".equals(tool)) {
+            return aiToolGetDiagnostics();
+        }
         if ("take_screenshot".equals(tool)) {
             return aiToolTakeScreenshot();
         }
@@ -834,6 +845,25 @@ public final class MainActivity extends Activity {
                 .put("status", "written");
     }
 
+    private JSONObject aiToolCompileProject() throws Exception {
+        String compileResult = nativeCompileProject(projectRootPath());
+        lastCompileResult = compileResult;
+        compileReady = isRunnableCompile(compileResult);
+        compileAttempted = true;
+        return compileResultToJson(compileResult);
+    }
+
+    private JSONObject aiToolGetDiagnostics() throws Exception {
+        return compileResultToJson(lastCompileResult);
+    }
+
+    private static JSONObject compileResultToJson(String compileResult) throws Exception {
+        String result = compileResult == null || compileResult.isEmpty() ? "CompileNotRun" : compileResult;
+        return new JSONObject()
+                .put("ok", isRunnableCompile(result))
+                .put("raw", result)
+                .put("kind", result.startsWith("CompileError") ? "compile_error" : "compile_result");
+    }
     private JSONObject aiToolTakeScreenshot() throws Exception {
         int width = gamePreview == null ? 0 : gamePreview.getWidth();
         int height = gamePreview == null ? 0 : gamePreview.getHeight();
@@ -876,7 +906,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, take_screenshot. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, take_screenshot. For no-argument tools, send empty strings for kind, owner, name, file, and new_source. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -928,6 +958,8 @@ public final class MainActivity extends Activity {
                 .put("read_symbol")
                 .put("read_file")
                 .put("write_symbol")
+                .put("compile_project")
+                .put("get_diagnostics")
                 .put("take_screenshot")));
         toolProperties.put("kind", new JSONObject().put("type", "string"));
         toolProperties.put("owner", new JSONObject().put("type", "string"));
@@ -1044,6 +1076,7 @@ public final class MainActivity extends Activity {
             }
             refreshChangeSummary(project);
             String compileResult = nativeCompileProject(projectRootPath());
+            lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
             setStatusText("AI edit applied: " + response.optString("summary", "updated selected symbol") + " - " + compileResult);
@@ -1126,6 +1159,7 @@ public final class MainActivity extends Activity {
                 showSymbol(refreshedProject.firstSymbol);
             }
             String compileResult = nativeCompileProject(projectRootPath());
+            lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
             setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
