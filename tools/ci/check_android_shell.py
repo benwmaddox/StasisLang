@@ -101,6 +101,10 @@ def main() -> int:
     assert "MAX_AI_AGENT_TURNS" in activity
     assert "runAiAgentLoop" in activity
     assert "executeAiToolCalls" in activity
+    assert "private final class AiAgentSession" in activity
+    assert "ProjectSnapshot cachedProject" in activity
+    assert "session.project()" in activity
+    assert "session.invalidateProject()" in activity
     assert "available_tools" in activity
     assert "list_symbols" in activity
     assert "read_symbol" in activity
