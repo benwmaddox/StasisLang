@@ -78,6 +78,7 @@ public final class MainActivity extends Activity {
     private static native String nativeStatus();
     private static native String nativeCompileProject(String projectRoot);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
+    private static native int[] nativeRunFrame(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -433,7 +434,7 @@ public final class MainActivity extends Activity {
         int screenWidth = gamePreview == null ? 0 : gamePreview.getWidth();
         int screenHeight = gamePreview == null ? 0 : gamePreview.getHeight();
         long tickStartNanos = System.nanoTime();
-        String runResult = nativeRunTick(
+        int[] frameValues = nativeRunFrame(
                 projectRoot().getAbsolutePath(),
                 touchX,
                 touchY,
@@ -442,17 +443,17 @@ public final class MainActivity extends Activity {
                 screenHeight);
         long tickEndNanos = System.nanoTime();
         tickMetric.add(tickEndNanos, tickEndNanos - tickStartNanos);
-        RenderFrame frame = RenderFrame.fromRunResult(runResult);
+        if (frameValues == null || frameValues.length == 0 || frameValues[0] != 0) {
+            compileReady = false;
+            compileAttempted = true;
+            setStatusText("RunError: native frame tick failed");
+            return;
+        }
+        RenderFrame frame = RenderFrame.fromNativeFrame(frameValues);
         if (gamePreview != null) {
             gamePreview.setRenderFrame(frame);
         }
-        if (runResult.startsWith("RunError")) {
-            compileReady = false;
-            compileAttempted = true;
-            setStatusText(runResult);
-        } else {
-            updateGameDebugText(frame);
-        }
+        updateGameDebugText(frame);
     }
 
     private static int extractIntField(String text, String key, int fallback) {
@@ -1038,6 +1039,22 @@ public final class MainActivity extends Activity {
 
         static RenderFrame empty() {
             return new RenderFrame(0, 0, emptyCommands());
+        }
+
+        static RenderFrame fromNativeFrame(int[] frameValues) {
+            RenderCommand[] commands = emptyCommands();
+            int count = Math.max(0, Math.min(MAX_COMMANDS, frameValues[5]));
+            for (int index = 0; index < count; index += 1) {
+                int base = 6 + index * 6;
+                commands[index] = new RenderCommand(
+                        frameValues[base],
+                        frameValues[base + 1],
+                        frameValues[base + 2],
+                        frameValues[base + 3],
+                        frameValues[base + 4],
+                        frameValues[base + 5]);
+            }
+            return new RenderFrame(frameValues[1], count, commands);
         }
 
         static RenderFrame fromRunResult(String runResult) {

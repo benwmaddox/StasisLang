@@ -17,6 +17,7 @@
 
 typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
 typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h);
+typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef struct CompileStats {
     int file_count;
@@ -42,6 +43,7 @@ typedef struct RustBridgeApi {
     void *handle;
     stasis_android_bridge_compile_project_fn compile_project;
     stasis_android_bridge_run_tick_fn run_tick;
+    stasis_android_bridge_run_tick_frame_fn run_tick_frame;
     stasis_android_bridge_free_string_fn free_string;
     int attempted;
 } RustBridgeApi;
@@ -689,6 +691,8 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_compile_project_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_compile_project");
     rust_bridge_api.run_tick =
             (stasis_android_bridge_run_tick_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick");
+    rust_bridge_api.run_tick_frame =
+            (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
     if (rust_bridge_api.compile_project == NULL ||
@@ -733,6 +737,14 @@ static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int t
     snprintf(message, message_size, "%s", bridge_message);
     bridge->free_string(bridge_message);
     return 1;
+}
+
+static int try_rust_bridge_run_tick_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len) {
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->run_tick_frame == NULL) {
+        return -1;
+    }
+    return bridge->run_tick_frame(project_root, "src/main.stasis", touch_x, touch_y, touch_active, screen_w, screen_h, out_values, out_len);
 }
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activity_class) {
@@ -789,6 +801,33 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
     (*env)->ReleaseStringUTFChars(env, project_root, root);
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
     return (*env)->NewStringUTF(env, message);
+}
+
+JNIEXPORT jintArray JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h) {
+    (void)activity_class;
+    const int frame_len = 54;
+    jintArray result = (*env)->NewIntArray(env, frame_len);
+    if (result == NULL) {
+        return NULL;
+    }
+    int32_t values[54];
+    memset(values, 0, sizeof(values));
+
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    if (root == NULL) {
+        values[0] = -1;
+        (*env)->SetIntArrayRegion(env, result, 0, frame_len, (const jint *)values);
+        return result;
+    }
+
+    int status = try_rust_bridge_run_tick_frame(root, (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h, values, frame_len);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (status != 0) {
+        values[0] = -1;
+    }
+    (*env)->SetIntArrayRegion(env, result, 0, frame_len, (const jint *)values);
+    return result;
 }
 
 JNIEXPORT jstring JNICALL
