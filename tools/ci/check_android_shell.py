@@ -80,7 +80,8 @@ def main() -> int:
     assert "GamePreviewView" in activity
     assert "onDraw(Canvas canvas)" in activity
     assert "extractIntField" in activity
-    assert "gamePreview.setRenderFrame(RenderFrame.fromRunResult(runResult))" in activity
+    assert "RenderFrame frame = RenderFrame.fromRunResult(runResult)" in activity
+    assert "gamePreview.setRenderFrame(frame)" in activity
     assert "ProjectSnapshot.from" in activity
     assert "parseSymbols" in activity
     assert "groupSymbols" in activity
@@ -228,3 +229,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

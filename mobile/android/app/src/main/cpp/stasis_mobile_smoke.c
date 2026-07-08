@@ -803,7 +803,9 @@ Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass acti
     char message[1024];
     if (try_rust_bridge_run_tick(root, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h, message, sizeof(message)) != 0) {
         (*env)->ReleaseStringUTFChars(env, project_root, root);
-        __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
+        if (strncmp(message, "RunError", 8) == 0) {
+            __android_log_print(ANDROID_LOG_ERROR, STASIS_ANDROID_LOG_TAG, "%s", message);
+        }
         return (*env)->NewStringUTF(env, message);
     }
 
@@ -817,6 +819,9 @@ Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass acti
     }
 
     (*env)->ReleaseStringUTFChars(env, project_root, root);
-    __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
+    if (strncmp(message, "RunError", 8) == 0) {
+        __android_log_print(ANDROID_LOG_ERROR, STASIS_ANDROID_LOG_TAG, "%s", message);
+    }
     return (*env)->NewStringUTF(env, message);
 }
+
