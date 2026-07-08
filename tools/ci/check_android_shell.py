@@ -83,6 +83,9 @@ def main() -> int:
     assert "onDrawFrame" in activity
     assert "extractIntField" in activity
     assert "private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY]" in activity
+    assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in activity
+    assert "budget=--%" in activity
+    assert "debugColorForBudget" in activity
     assert "private String projectRootPath" in activity
     assert "nativeCompileProject(projectRootPath())" in activity
     assert "String.format" not in activity
@@ -90,6 +93,9 @@ def main() -> int:
     assert "RenderFrame.fromNativeFrame" not in activity
     assert "new RenderCommand" not in activity
     assert "ProjectSnapshot.from" in activity
+    assert "private LinearLayout symbolList" in activity
+    assert "rebuildSymbolList(refreshedProject)" in activity
+    assert "findMatchingSymbol(refreshedProject, editedSymbol)" in activity
     assert "parseSymbols" in activity
     assert "groupSymbols" in activity
     assert "createSymbolRow" in activity
@@ -121,6 +127,8 @@ def main() -> int:
     assert 'PROJECT_DIR = "workshop_project"' in activity
     assert "ensureProjectFile" in activity
     assert "writeTextFile" in activity
+    assert "resetProject.setText(\"Reset Project\")" in activity
+    assert "if (diskFile.isFile())" in activity
     assert "Saved to .stasis file" in activity
     assert "nativeCompileProject(projectRootPath())" in activity
     assert "resetSelectedEdit" in activity
@@ -150,6 +158,7 @@ def main() -> int:
     assert "RunError: native frame tick failed" in activity
     assert "!compileReady && !compileAttempted" in activity
     assert "compileResult.contains(\"status=0\")" in activity
+    assert "if (resetProject)" in activity
     assert "deleteProjectDirectory(projectRoot)" in activity
     assert "setStatusText" in activity
     assert "setOnFocusChangeListener" in activity
