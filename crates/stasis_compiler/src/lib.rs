@@ -498,7 +498,10 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
             .unwrap_or_default();
         if function.name == "main" {
             main_decl_count += 1;
-            if function.params.is_empty() && return_type_code == RETURN_TYPE_CODE_I32 {
+            if function.params.is_empty()
+                && (return_type_code == RETURN_TYPE_CODE_I32
+                    || return_type_code == RETURN_TYPE_CODE_VOID)
+            {
                 main_valid_count += 1;
             } else {
                 main_invalid_count += 1;
