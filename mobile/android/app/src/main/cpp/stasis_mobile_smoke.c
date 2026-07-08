@@ -38,6 +38,15 @@ typedef struct PreviousManifest {
     int globals;
     uint64_t project_hash;
 } PreviousManifest;
+typedef struct RustBridgeApi {
+    void *handle;
+    stasis_android_bridge_compile_project_fn compile_project;
+    stasis_android_bridge_run_tick_fn run_tick;
+    stasis_android_bridge_free_string_fn free_string;
+    int attempted;
+} RustBridgeApi;
+
+static RustBridgeApi rust_bridge_api = {0};
 static char *read_file_text(const char *path, long *size_out);
 
 static int has_suffix(const char *value, const char *suffix) {
@@ -664,59 +673,65 @@ static int write_runtime_tick_count(const char *project_root, int tick_count) {
     return 0;
 }
 
+static RustBridgeApi *load_rust_bridge_api(void) {
+    if (rust_bridge_api.attempted) {
+        return rust_bridge_api.handle == NULL ? NULL : &rust_bridge_api;
+    }
+
+    rust_bridge_api.attempted = 1;
+    rust_bridge_api.handle = dlopen("libstasis_android_bridge.so", RTLD_NOW | RTLD_LOCAL);
+    if (rust_bridge_api.handle == NULL) {
+        __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG, "Rust Android bridge unavailable: %s", dlerror());
+        return NULL;
+    }
+
+    rust_bridge_api.compile_project =
+            (stasis_android_bridge_compile_project_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_compile_project");
+    rust_bridge_api.run_tick =
+            (stasis_android_bridge_run_tick_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick");
+    rust_bridge_api.free_string =
+            (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
+    if (rust_bridge_api.compile_project == NULL ||
+        rust_bridge_api.run_tick == NULL ||
+        rust_bridge_api.free_string == NULL) {
+        __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG, "Rust Android bridge missing required symbols");
+        return NULL;
+    }
+
+    return &rust_bridge_api;
+}
+
 static int try_rust_bridge_compile(const char *project_root, char *message, size_t message_size) {
-    void *bridge = dlopen("libstasis_android_bridge.so", RTLD_NOW | RTLD_LOCAL);
-    if (bridge == NULL) {
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->compile_project == NULL || bridge->free_string == NULL) {
         return 0;
     }
 
-    stasis_android_bridge_compile_project_fn compile_project =
-            (stasis_android_bridge_compile_project_fn)dlsym(bridge, "stasis_android_bridge_compile_project");
-    stasis_android_bridge_free_string_fn free_string =
-            (stasis_android_bridge_free_string_fn)dlsym(bridge, "stasis_android_bridge_free_string");
-    if (compile_project == NULL || free_string == NULL) {
-        dlclose(bridge);
-        return 0;
-    }
-
-    char *bridge_message = compile_project(project_root, "src/main.stasis");
+    char *bridge_message = bridge->compile_project(project_root, "src/main.stasis");
     if (bridge_message == NULL) {
-        dlclose(bridge);
         snprintf(message, message_size, "CompileError: Rust Android bridge returned null message");
         return 1;
     }
 
     snprintf(message, message_size, "%s", bridge_message);
-    free_string(bridge_message);
-    dlclose(bridge);
+    bridge->free_string(bridge_message);
     return 1;
 }
 
 static int try_rust_bridge_run_tick(const char *project_root, int touch_y, int touch_active, int screen_w, int screen_h, char *message, size_t message_size) {
-    void *bridge = dlopen("libstasis_android_bridge.so", RTLD_NOW | RTLD_LOCAL);
-    if (bridge == NULL) {
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->run_tick == NULL || bridge->free_string == NULL) {
         return 0;
     }
 
-    stasis_android_bridge_run_tick_fn run_tick =
-            (stasis_android_bridge_run_tick_fn)dlsym(bridge, "stasis_android_bridge_run_tick");
-    stasis_android_bridge_free_string_fn free_string =
-            (stasis_android_bridge_free_string_fn)dlsym(bridge, "stasis_android_bridge_free_string");
-    if (run_tick == NULL || free_string == NULL) {
-        dlclose(bridge);
-        return 0;
-    }
-
-    char *bridge_message = run_tick(project_root, "src/main.stasis", touch_y, touch_active, screen_w, screen_h);
+    char *bridge_message = bridge->run_tick(project_root, "src/main.stasis", touch_y, touch_active, screen_w, screen_h);
     if (bridge_message == NULL) {
-        dlclose(bridge);
         snprintf(message, message_size, "RunError: Rust Android bridge returned null message");
         return 1;
     }
 
     snprintf(message, message_size, "%s", bridge_message);
-    free_string(bridge_message);
-    dlclose(bridge);
+    bridge->free_string(bridge_message);
     return 1;
 }
 JNIEXPORT jstring JNICALL
