@@ -65,6 +65,8 @@ public final class MainActivity extends Activity {
     private Button editorToggle;
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
     private Runnable gameLoop;
+    private final RollingMetric tickMetric = new RollingMetric();
+    private final RollingMetric renderMetric = new RollingMetric();
     private boolean compileReady;
     private boolean compileAttempted;
     private SymbolEntry selectedSymbol;
@@ -108,15 +110,17 @@ public final class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
         gameStatus = new TextView(this);
-        gameStatus.setText(nativeStatus() + " - " + project.files.size() + " files - " + project.symbolCount + " symbols");
+        gameStatus.setText("tick=0  tick=-- ms  render=-- ms");
         gameStatus.setTextColor(Color.WHITE);
-        gameStatus.setTextSize(13.0f);
-        gameStatus.setPadding(dp(12), dp(8), dp(72), dp(8));
-        gameStatus.setBackgroundColor(Color.rgb(20, 28, 38));
+        gameStatus.setTextSize(12.0f);
+        gameStatus.setSingleLine(true);
+        gameStatus.setPadding(dp(10), dp(6), dp(10), dp(6));
+        gameStatus.setBackgroundColor(Color.argb(150, 20, 28, 38));
         FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.START);
+        statusParams.setMargins(dp(8), dp(8), dp(68), 0);
         root.addView(gameStatus, statusParams);
 
         LinearLayout content = new LinearLayout(this);
@@ -280,9 +284,22 @@ public final class MainActivity extends Activity {
         if (reloadStatus != null) {
             reloadStatus.setText(status);
         }
-        if (gameStatus != null) {
-            gameStatus.setText(status);
+    }
+
+    private void updateGameDebugText(RenderFrame frame) {
+        if (gameStatus == null) {
+            return;
         }
+        gameStatus.setText(String.format(
+                Locale.US,
+                "tick=%d  tick=%.2f ms  render=%.2f ms",
+                frame.tickCount,
+                tickMetric.averageMillis(),
+                renderMetric.averageMillis()));
+    }
+
+    private void recordRenderTimeNanos(long durationNanos) {
+        renderMetric.add(System.nanoTime(), durationNanos);
     }
     private void addSection(LinearLayout content, SymbolSection section) {
         TextView sectionTitle = new TextView(this);
@@ -414,12 +431,15 @@ public final class MainActivity extends Activity {
         int touchActive = gamePreview == null ? 0 : gamePreview.touchActive();
         int screenWidth = gamePreview == null ? 0 : gamePreview.getWidth();
         int screenHeight = gamePreview == null ? 0 : gamePreview.getHeight();
+        long tickStartNanos = System.nanoTime();
         String runResult = nativeRunTick(
                 projectRoot().getAbsolutePath(),
                 touchY,
                 touchActive,
                 screenWidth,
                 screenHeight);
+        long tickEndNanos = System.nanoTime();
+        tickMetric.add(tickEndNanos, tickEndNanos - tickStartNanos);
         RenderFrame frame = RenderFrame.fromRunResult(runResult);
         if (gamePreview != null) {
             gamePreview.setRenderFrame(frame);
@@ -428,8 +448,8 @@ public final class MainActivity extends Activity {
             compileReady = false;
             compileAttempted = true;
             setStatusText(runResult);
-        } else if (frame.tickCount > 0 && frame.tickCount % 60 == 0) {
-            setStatusText(String.format(Locale.US, "Running Stasis JIT - tick=%d commands=%d", frame.tickCount, frame.commandCount));
+        } else {
+            updateGameDebugText(frame);
         }
     }
 
@@ -900,14 +920,16 @@ public final class MainActivity extends Activity {
 
 
     private static final class GamePreviewView extends View {
+        private final MainActivity activity;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final RectF rect = new RectF();
         private RenderFrame frame = RenderFrame.empty();
         private int touchY;
         private boolean touchActive;
 
-        GamePreviewView(Activity activity) {
+        GamePreviewView(MainActivity activity) {
             super(activity);
+            this.activity = activity;
             setBackgroundColor(Color.rgb(15, 20, 28));
             setFocusable(true);
         }
@@ -935,10 +957,12 @@ public final class MainActivity extends Activity {
 
         @Override
         protected void onDraw(Canvas canvas) {
+            long renderStartNanos = System.nanoTime();
             super.onDraw(canvas);
             int width = getWidth();
             int height = getHeight();
             if (width <= 0 || height <= 0) {
+                activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
                 return;
             }
 
@@ -954,6 +978,41 @@ public final class MainActivity extends Activity {
                     canvas.drawRect(rect, paint);
                 }
             }
+            activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
+        }
+    }
+
+    private static final class RollingMetric {
+        private static final long WINDOW_NANOS = 5_000_000_000L;
+        private static final int CAPACITY = 600;
+        private final long[] timestamps = new long[CAPACITY];
+        private final long[] durations = new long[CAPACITY];
+        private int next;
+        private int count;
+
+        void add(long timestampNanos, long durationNanos) {
+            timestamps[next] = timestampNanos;
+            durations[next] = durationNanos;
+            next = (next + 1) % CAPACITY;
+            if (count < CAPACITY) {
+                count += 1;
+            }
+        }
+
+        double averageMillis() {
+            long now = System.nanoTime();
+            long total = 0L;
+            int samples = 0;
+            for (int index = 0; index < count; index += 1) {
+                if (now - timestamps[index] <= WINDOW_NANOS) {
+                    total += durations[index];
+                    samples += 1;
+                }
+            }
+            if (samples == 0) {
+                return 0.0;
+            }
+            return total / (samples * 1_000_000.0);
         }
     }
 
