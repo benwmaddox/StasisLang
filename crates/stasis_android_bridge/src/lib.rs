@@ -14,6 +14,10 @@ use stasis_compiler::frontend::workshop::{
 use stasis_compiler::IncrementalCompilerHost;
 
 pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
+pub const ANDROID_RENDER_FRAME_HEADER_SIZE: usize = 6;
+pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 6;
+pub const ANDROID_RENDER_FRAME_I32_CAPACITY: usize = ANDROID_RENDER_FRAME_HEADER_SIZE
+    + ANDROID_RENDER_COMMAND_CAPACITY * ANDROID_RENDER_COMMAND_STRIDE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AndroidBridgeTickInput {
@@ -357,6 +361,43 @@ fn render_command_state_lines(
     lines
 }
 
+fn write_render_frame_i32s(
+    out: &mut [i32],
+    result: &AndroidBridgeRunTickResult,
+) -> Result<(), String> {
+    if out.len() < ANDROID_RENDER_FRAME_I32_CAPACITY {
+        return Err(format!(
+            "render frame output buffer too small: got {}, need {}",
+            out.len(),
+            ANDROID_RENDER_FRAME_I32_CAPACITY
+        ));
+    }
+    out[0] = 0;
+    out[1] = result.tick_count;
+    out[2] = result.observed_game_tick_count;
+    out[3] = if result.recompiled { 1 } else { 0 };
+    out[4] = if result.initialized { 1 } else { 0 };
+    out[5] = result
+        .render_command_count
+        .clamp(0, ANDROID_RENDER_COMMAND_CAPACITY as i32);
+    let count = out[5] as usize;
+    for index in 0..ANDROID_RENDER_COMMAND_CAPACITY {
+        let base = ANDROID_RENDER_FRAME_HEADER_SIZE + index * ANDROID_RENDER_COMMAND_STRIDE;
+        let command = if index < count {
+            result.render_commands[index]
+        } else {
+            AndroidBridgeRenderCommand::default()
+        };
+        out[base] = command.kind;
+        out[base + 1] = command.x;
+        out[base + 2] = command.y;
+        out[base + 3] = command.w;
+        out[base + 4] = command.h;
+        out[base + 5] = command.color;
+    }
+    Ok(())
+}
+
 fn render_command_message_fields(
     render_command_count: i32,
     render_commands: &[AndroidBridgeRenderCommand; ANDROID_RENDER_COMMAND_CAPACITY],
@@ -490,6 +531,54 @@ unsafe fn compile_project_from_c(
         .to_str()
         .map_err(|error| format!("entry file was not UTF-8: {error}"))?;
     compile_android_workshop_project(project_root, entry_file)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_run_tick_frame(
+    project_root: *const c_char,
+    entry_file: *const c_char,
+    touch_x: i32,
+    touch_y: i32,
+    touch_active: i32,
+    screen_w: i32,
+    screen_h: i32,
+    out_values: *mut i32,
+    out_len: usize,
+) -> i32 {
+    if out_values.is_null() {
+        return -1;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        run_tick_from_c(
+            project_root,
+            entry_file,
+            AndroidBridgeTickInput {
+                touch_x,
+                touch_y,
+                touch_active,
+                screen_w,
+                screen_h,
+            },
+        )
+    }));
+    let out = unsafe { std::slice::from_raw_parts_mut(out_values, out_len) };
+    match result {
+        Ok(Ok(result)) => match write_render_frame_i32s(out, &result) {
+            Ok(()) => 0,
+            Err(_) => {
+                if !out.is_empty() {
+                    out[0] = -1;
+                }
+                -1
+            }
+        },
+        Ok(Err(_)) | Err(_) => {
+            if !out.is_empty() {
+                out[0] = -1;
+            }
+            -1
+        }
+    }
 }
 
 #[no_mangle]
@@ -830,6 +919,46 @@ mod tests {
         assert_eq!(result.render_commands[3].kind, 1);
         assert!(result.observed_game_tick_count >= 1);
     }
+    #[test]
+    fn c_bridge_run_tick_frame_writes_packed_render_data() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("ffi_frame_tick");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global GameState { tick_count: i32; }
+global Render { command_count: i32; command0_kind: i32; command0_x: i32; command0_y: i32; command0_w: i32; command0_h: i32; command0_color: i32; }
+function main(): void { GameState.tick_count = 4; }
+function tick(): void { GameState.tick_count += 1; }
+function render(): void { Render.command_count = 1; Render.command0_kind = 1; Render.command0_x = 9; Render.command0_y = 8; Render.command0_w = 7; Render.command0_h = 6; Render.command0_color = 5; }
+",
+        )
+        .expect("write source");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let mut frame = [0i32; ANDROID_RENDER_FRAME_I32_CAPACITY];
+        let status = stasis_android_bridge_run_tick_frame(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            72,
+            144,
+            1,
+            360,
+            640,
+            frame.as_mut_ptr(),
+            frame.len(),
+        );
+        assert_eq!(status, 0);
+        assert_eq!(frame[0], 0);
+        assert_eq!(frame[1], 1);
+        assert_eq!(frame[2], 5);
+        assert_eq!(frame[5], 1);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE], 1);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 1], 9);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 5], 5);
+        fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn c_bridge_run_tick_returns_jit_executed_message() {
         let _guard = bridge_runtime_test_guard();
