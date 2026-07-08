@@ -107,7 +107,7 @@ def main() -> int:
     assert "usageTokenCount(usage, \"input_tokens\", \"prompt_tokens\")" in activity
     assert "cachedInputTokenCount" in activity
     assert "estimated_cost_usd" in activity
-    assert "AI usage: " in activity
+    assert "estimated cost=" in activity
     assert "aiResult.usageSummary" in activity
     assert "runAiAgentLoop" in activity
     assert "executeAiToolCalls" in activity

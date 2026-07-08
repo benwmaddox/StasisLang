@@ -1816,15 +1816,7 @@ public final class MainActivity extends Activity {
 
         String summary() {
             StringBuilder builder = new StringBuilder();
-            builder.append("AI usage: ")
-                    .append(calls.length())
-                    .append(" calls, input=")
-                    .append(inputTokens)
-                    .append(", cached=")
-                    .append(cachedInputTokens)
-                    .append(", output=")
-                    .append(outputTokens)
-                    .append(", estimated=");
+            builder.append("estimated cost=");
             if (costAvailable) {
                 builder.append(formatAiCostUsd(estimatedCostUsd));
             } else {
