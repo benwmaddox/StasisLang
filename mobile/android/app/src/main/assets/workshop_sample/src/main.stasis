@@ -28,30 +28,35 @@ global Render {
     command0_w: i32;
     command0_h: i32;
     command0_color: i32;
+    command0_asset: i32;
     command1_kind: i32;
     command1_x: i32;
     command1_y: i32;
     command1_w: i32;
     command1_h: i32;
     command1_color: i32;
+    command1_asset: i32;
     command2_kind: i32;
     command2_x: i32;
     command2_y: i32;
     command2_w: i32;
     command2_h: i32;
     command2_color: i32;
+    command2_asset: i32;
     command3_kind: i32;
     command3_x: i32;
     command3_y: i32;
     command3_w: i32;
     command3_h: i32;
     command3_color: i32;
+    command3_asset: i32;
     command4_kind: i32;
     command4_x: i32;
     command4_y: i32;
     command4_w: i32;
     command4_h: i32;
     command4_color: i32;
+    command4_asset: i32;
 }
 
 function main(): void {
@@ -177,6 +182,7 @@ function render(): void {
     Render.command0_y = 0;
     Render.command0_w = GameState.screen_w;
     Render.command0_h = GameState.screen_h;
+    Render.command0_asset = 0;
     Render.command0_color = 990236;
 
     Render.command1_kind = 1;
@@ -184,6 +190,7 @@ function render(): void {
     Render.command1_y = GameState.player_y - 36;
     Render.command1_w = 10;
     Render.command1_h = 72;
+    Render.command1_asset = 0;
     Render.command1_color = 6013118;
 
     Render.command2_kind = 1;
@@ -191,13 +198,15 @@ function render(): void {
     Render.command2_y = GameState.ai_y - 36;
     Render.command2_w = 10;
     Render.command2_h = 72;
+    Render.command2_asset = 0;
     Render.command2_color = 6013118;
 
-    Render.command3_kind = 1;
+    Render.command3_kind = 2;
     Render.command3_x = GameState.ball_x - 7;
     Render.command3_y = GameState.ball_y - 7;
     Render.command3_w = 14;
     Render.command3_h = 14;
+    Render.command3_asset = 1;
     Render.command3_color = 16032865;
 
     Render.command4_kind = 1;
@@ -205,6 +214,7 @@ function render(): void {
     Render.command4_y = 0;
     Render.command4_w = 2;
     Render.command4_h = GameState.screen_h;
+    Render.command4_asset = 0;
     Render.command4_color = 4473924;
 }
 

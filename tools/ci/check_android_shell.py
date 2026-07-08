@@ -104,12 +104,17 @@ def main() -> int:
     assert "gamePreview.touchY()" in activity
     assert "gamePreview.touchActive()" in activity
     assert "MotionEvent" in activity
+    assert "RENDER_COMMAND_STRIDE = 7" in activity
     assert "frameValues[5]" in activity
+    assert "frameValues[base + 6]" in activity
     assert "GLES20.glDrawArrays" in activity
     assert "GL_TRIANGLES" in activity
     assert "glUniform4f" not in activity
     assert "attribute vec4 aColor" in activity
     assert "drawBatch(vertexCount)" in activity
+    assert "TEXTURE_FRAGMENT_SHADER" in activity
+    assert "drawSpriteBatch(spriteVertexCount)" in activity
+    assert "glTexImage2D" in activity
     assert "applySelectedEdit" in activity
     assert "persistSelectedEdit" in activity
     assert "getFilesDir()" in activity
@@ -177,6 +182,7 @@ def main() -> int:
     assert "stasis_android_bridge_free_string" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
+    assert "const int frame_len = 62" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv" not in native
     assert "scan_stasis_files" in native
     assert "analyze_stasis_file" in native
@@ -208,6 +214,7 @@ def main() -> int:
     assert "touch_y" in bridge
     assert "render_command_count" in bridge
     assert "Render.command0_kind" in bridge
+    assert "Render.command{index}_asset" in bridge
     assert "PreviousManifest" in native
     assert "read_previous_compile_manifest" in native
     assert "classify_reload" in native
@@ -232,6 +239,11 @@ def main() -> int:
 
     player = read("mobile/android/app/src/main/assets/workshop_sample/src/player.stasis")
     assert "struct PlayerPaddle" in player
+
+    sample_main = read("mobile/android/app/src/main/assets/workshop_sample/src/main.stasis")
+    assert "command3_asset" in sample_main
+    assert "Render.command3_kind = 2" in sample_main
+    assert "Render.command3_asset = 1" in sample_main
 
     collision = read("mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis")
     assert "Collision logic lives" in collision

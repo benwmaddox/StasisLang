@@ -50,7 +50,7 @@ public final class MainActivity extends Activity {
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
-    private static final int RENDER_COMMAND_STRIDE = 6;
+    private static final int RENDER_COMMAND_STRIDE = 7;
     private static final int RENDER_FRAME_I32_CAPACITY =
             RENDER_FRAME_HEADER_SIZE + MAX_RENDER_COMMANDS * RENDER_COMMAND_STRIDE;
     private static final int RECT_VERTICES = 6;
@@ -58,6 +58,10 @@ public final class MainActivity extends Activity {
     private static final int RENDER_VERTEX_BYTES = RENDER_VERTEX_FLOATS * 4;
     private static final int RENDER_VERTEX_BUFFER_FLOATS =
             MAX_RENDER_COMMANDS * RECT_VERTICES * RENDER_VERTEX_FLOATS;
+    private static final int SPRITE_VERTEX_FLOATS = 8;
+    private static final int SPRITE_VERTEX_BYTES = SPRITE_VERTEX_FLOATS * 4;
+    private static final int SPRITE_VERTEX_BUFFER_FLOATS =
+            MAX_RENDER_COMMANDS * RECT_VERTICES * SPRITE_VERTEX_FLOATS;
     private static final String[] SAMPLE_FILES = new String[] {
             "src/main.stasis",
             "src/root.stasis",
@@ -1022,10 +1026,36 @@ public final class MainActivity extends Activity {
                 "void main() {" +
                 "  gl_FragColor = vColor;" +
                 "}";
+        private static final String TEXTURE_VERTEX_SHADER =
+                "attribute vec2 aPosition;" +
+                "attribute vec2 aTexCoord;" +
+                "attribute vec4 aColor;" +
+                "uniform vec2 uResolution;" +
+                "varying vec2 vTexCoord;" +
+                "varying vec4 vColor;" +
+                "void main() {" +
+                "  vec2 zeroToOne = aPosition / uResolution;" +
+                "  vec2 clip = zeroToOne * 2.0 - 1.0;" +
+                "  vTexCoord = aTexCoord;" +
+                "  vColor = aColor;" +
+                "  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);" +
+                "}";
+        private static final String TEXTURE_FRAGMENT_SHADER =
+                "precision mediump float;" +
+                "uniform sampler2D uTexture;" +
+                "varying vec2 vTexCoord;" +
+                "varying vec4 vColor;" +
+                "void main() {" +
+                "  gl_FragColor = texture2D(uTexture, vTexCoord) * vColor;" +
+                "}";
 
         private final MainActivity activity;
         private final FloatBuffer vertexBuffer = ByteBuffer
                 .allocateDirect(RENDER_VERTEX_BUFFER_FLOATS * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer();
+        private final FloatBuffer spriteVertexBuffer = ByteBuffer
+                .allocateDirect(SPRITE_VERTEX_BUFFER_FLOATS * 4)
                 .order(ByteOrder.nativeOrder())
                 .asFloatBuffer();
         private final int[] frameValues = new int[RENDER_FRAME_I32_CAPACITY];
@@ -1033,6 +1063,13 @@ public final class MainActivity extends Activity {
         private int positionHandle;
         private int resolutionHandle;
         private int colorHandle;
+        private int textureProgram;
+        private int texturePositionHandle;
+        private int textureCoordHandle;
+        private int textureColorHandle;
+        private int textureResolutionHandle;
+        private int textureSamplerHandle;
+        private int ballTexture;
         private int surfaceWidth = 1;
         private int surfaceHeight = 1;
 
@@ -1050,6 +1087,15 @@ public final class MainActivity extends Activity {
             positionHandle = GLES20.glGetAttribLocation(program, "aPosition");
             resolutionHandle = GLES20.glGetUniformLocation(program, "uResolution");
             colorHandle = GLES20.glGetAttribLocation(program, "aColor");
+            textureProgram = createProgram(TEXTURE_VERTEX_SHADER, TEXTURE_FRAGMENT_SHADER);
+            texturePositionHandle = GLES20.glGetAttribLocation(textureProgram, "aPosition");
+            textureCoordHandle = GLES20.glGetAttribLocation(textureProgram, "aTexCoord");
+            textureColorHandle = GLES20.glGetAttribLocation(textureProgram, "aColor");
+            textureResolutionHandle = GLES20.glGetUniformLocation(textureProgram, "uResolution");
+            textureSamplerHandle = GLES20.glGetUniformLocation(textureProgram, "uTexture");
+            ballTexture = createCircleTexture();
+            GLES20.glEnable(GLES20.GL_BLEND);
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
             GLES20.glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
         }
 
@@ -1068,20 +1114,30 @@ public final class MainActivity extends Activity {
             GLES20.glUniform2f(resolutionHandle, (float)surfaceWidth, (float)surfaceHeight);
 
             vertexBuffer.clear();
+            spriteVertexBuffer.clear();
             int vertexCount = 0;
+            int spriteVertexCount = 0;
             synchronized (this) {
                 int commandCount = Math.max(0, Math.min(MAX_RENDER_COMMANDS, frameValues[5]));
                 for (int index = 0; index < commandCount; index += 1) {
                     int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
-                    if (frameValues[base] == 1) {
+                    int kind = frameValues[base];
+                    if (kind == 1) {
                         appendRect(base);
                         vertexCount += RECT_VERTICES;
+                    } else if (kind == 2 && frameValues[base + 6] != 0) {
+                        appendSprite(base);
+                        spriteVertexCount += RECT_VERTICES;
                     }
                 }
             }
             vertexBuffer.flip();
+            spriteVertexBuffer.flip();
             if (vertexCount > 0) {
                 drawBatch(vertexCount);
+            }
+            if (spriteVertexCount > 0) {
+                drawSpriteBatch(spriteVertexCount);
             }
             activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
         }
@@ -1107,6 +1163,26 @@ public final class MainActivity extends Activity {
             vertexBuffer.put(x).put(y).put(red).put(green).put(blue).put(1.0f);
         }
 
+        private void appendSprite(int base) {
+            int color = frameValues[base + 5];
+            float red = ((color >> 16) & 255) / 255.0f;
+            float green = ((color >> 8) & 255) / 255.0f;
+            float blue = (color & 255) / 255.0f;
+            float left = frameValues[base + 1];
+            float top = frameValues[base + 2];
+            float right = frameValues[base + 1] + frameValues[base + 3];
+            float bottom = frameValues[base + 2] + frameValues[base + 4];
+            putSpriteVertex(left, top, 0.0f, 0.0f, red, green, blue);
+            putSpriteVertex(right, top, 1.0f, 0.0f, red, green, blue);
+            putSpriteVertex(left, bottom, 0.0f, 1.0f, red, green, blue);
+            putSpriteVertex(right, top, 1.0f, 0.0f, red, green, blue);
+            putSpriteVertex(right, bottom, 1.0f, 1.0f, red, green, blue);
+            putSpriteVertex(left, bottom, 0.0f, 1.0f, red, green, blue);
+        }
+
+        private void putSpriteVertex(float x, float y, float u, float v, float red, float green, float blue) {
+            spriteVertexBuffer.put(x).put(y).put(u).put(v).put(red).put(green).put(blue).put(1.0f);
+        }
         private void drawBatch(int vertexCount) {
             GLES20.glEnableVertexAttribArray(positionHandle);
             GLES20.glEnableVertexAttribArray(colorHandle);
@@ -1118,6 +1194,55 @@ public final class MainActivity extends Activity {
             vertexBuffer.position(0);
             GLES20.glDisableVertexAttribArray(colorHandle);
             GLES20.glDisableVertexAttribArray(positionHandle);
+        }
+
+        private void drawSpriteBatch(int vertexCount) {
+            GLES20.glUseProgram(textureProgram);
+            GLES20.glUniform2f(textureResolutionHandle, (float)surfaceWidth, (float)surfaceHeight);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ballTexture);
+            GLES20.glUniform1i(textureSamplerHandle, 0);
+            GLES20.glEnableVertexAttribArray(texturePositionHandle);
+            GLES20.glEnableVertexAttribArray(textureCoordHandle);
+            GLES20.glEnableVertexAttribArray(textureColorHandle);
+            spriteVertexBuffer.position(0);
+            GLES20.glVertexAttribPointer(texturePositionHandle, 2, GLES20.GL_FLOAT, false, SPRITE_VERTEX_BYTES, spriteVertexBuffer);
+            spriteVertexBuffer.position(2);
+            GLES20.glVertexAttribPointer(textureCoordHandle, 2, GLES20.GL_FLOAT, false, SPRITE_VERTEX_BYTES, spriteVertexBuffer);
+            spriteVertexBuffer.position(4);
+            GLES20.glVertexAttribPointer(textureColorHandle, 4, GLES20.GL_FLOAT, false, SPRITE_VERTEX_BYTES, spriteVertexBuffer);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
+            spriteVertexBuffer.position(0);
+            GLES20.glDisableVertexAttribArray(textureColorHandle);
+            GLES20.glDisableVertexAttribArray(textureCoordHandle);
+            GLES20.glDisableVertexAttribArray(texturePositionHandle);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+
+        private static int createCircleTexture() {
+            final int size = 32;
+            ByteBuffer pixels = ByteBuffer.allocateDirect(size * size * 4);
+            float center = (size - 1) / 2.0f;
+            float radius = center - 1.0f;
+            for (int y = 0; y < size; y += 1) {
+                for (int x = 0; x < size; x += 1) {
+                    float dx = x - center;
+                    float dy = y - center;
+                    int alpha = dx * dx + dy * dy <= radius * radius ? 255 : 0;
+                    pixels.put((byte)255).put((byte)255).put((byte)255).put((byte)alpha);
+                }
+            }
+            pixels.flip();
+            int[] textures = new int[1];
+            GLES20.glGenTextures(1, textures, 0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0]);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, size, size, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+            return textures[0];
         }
 
         private static int createProgram(String vertexSource, String fragmentSource) {
