@@ -75,15 +75,17 @@ def main() -> int:
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
-    assert "private static native int[] nativeRunFrame(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
+    assert "private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues)" in activity
     assert "workshop_sample/" in activity
     assert "createWorkshopView" in activity
     assert "GamePreviewView" in activity
     assert "GLSurfaceView" in activity
     assert "onDrawFrame" in activity
     assert "extractIntField" in activity
-    assert "RenderFrame frame = RenderFrame.fromNativeFrame(frameValues)" in activity
-    assert "gamePreview.setRenderFrame(frame)" in activity
+    assert "private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY]" in activity
+    assert "gamePreview.setRenderFrameValues(nativeFrameValues)" in activity
+    assert "RenderFrame.fromNativeFrame" not in activity
+    assert "new RenderCommand" not in activity
     assert "ProjectSnapshot.from" in activity
     assert "parseSymbols" in activity
     assert "groupSymbols" in activity
@@ -94,13 +96,12 @@ def main() -> int:
     assert 'runTick.setText("Run Tick")' in activity
     assert "runNativeCompile" in activity
     assert "runNativeTick" in activity
-    assert "nativeRunFrame(" in activity
+    assert "nativeRunFrameInto(" in activity
     assert "gamePreview.touchX()" in activity
     assert "gamePreview.touchY()" in activity
     assert "gamePreview.touchActive()" in activity
     assert "MotionEvent" in activity
-    assert "RenderFrame.fromNativeFrame" in activity
-    assert "render_command_count" in activity
+    assert "frameValues[5]" in activity
     assert "GLES20.glDrawArrays" in activity
     assert "GL_TRIANGLE_STRIP" in activity
     assert "applySelectedEdit" in activity
@@ -169,7 +170,7 @@ def main() -> int:
     assert "stasis_android_bridge_compile_project" in native
     assert "stasis_android_bridge_free_string" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
-    assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrame" in native
+    assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
     assert "scan_stasis_files" in native
     assert "analyze_stasis_file" in native
     assert "validate_braces" in native
@@ -234,5 +235,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
