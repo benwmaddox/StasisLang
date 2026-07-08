@@ -3,6 +3,7 @@ use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32};
 use crate::ir::hir::FunctionHIR;
+use cranelift_codegen::isa;
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
 use cranelift_module::{default_libcall_names, Module};
@@ -10,8 +11,10 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
+use target_lexicon::Triple;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AotArtifact {
@@ -26,6 +29,7 @@ pub struct AotArtifact {
 pub struct AotProcess {
     compiler: Compiler,
     optimization_profile: AotOptimizationProfile,
+    target: AotTarget,
     next_object_index: u32,
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
@@ -43,15 +47,48 @@ pub struct AotEngineBundle {
     pub optimization_profile: AotOptimizationProfile,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AotTarget {
+    Native,
+    Triple(String),
+}
+
+impl Default for AotTarget {
+    fn default() -> Self {
+        Self::Native
+    }
+}
+
+impl AotTarget {
+    pub fn android_arm64() -> Self {
+        Self::Triple("aarch64-linux-android".to_string())
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Native => "native",
+            Self::Triple(triple) => triple,
+        }
+    }
+}
+
 impl AotProcess {
     pub fn new() -> Self {
         Self::with_optimization_profile(AotOptimizationProfile::Speed)
     }
 
     pub fn with_optimization_profile(optimization_profile: AotOptimizationProfile) -> Self {
+        Self::with_optimization_profile_and_target(optimization_profile, AotTarget::Native)
+    }
+
+    pub fn with_optimization_profile_and_target(
+        optimization_profile: AotOptimizationProfile,
+        target: AotTarget,
+    ) -> Self {
         Self {
             compiler: Compiler::new(),
             optimization_profile,
+            target,
             next_object_index: 0,
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
@@ -136,6 +173,7 @@ impl AotProcess {
             artifacts,
             object_bytes,
             optimization_profile,
+            target,
             string_literals,
         ) = (
             &mut self.compiler,
@@ -143,6 +181,7 @@ impl AotProcess {
             &mut self.artifacts,
             &mut self.object_bytes,
             self.optimization_profile,
+            self.target.clone(),
             &mut self.string_literals,
         );
         let emit = compiler.emit_pass_for_ids_with(&emit_function_ids, &mut |meta, hir| {
@@ -154,6 +193,7 @@ impl AotProcess {
                 hir,
                 &symbol,
                 optimization_profile,
+                &target,
                 &analysis.call_signatures,
                 &mut type_table,
                 &analysis.global_path_types,
@@ -247,6 +287,10 @@ impl AotProcess {
 
     pub fn optimization_profile(&self) -> AotOptimizationProfile {
         self.optimization_profile
+    }
+
+    pub fn target(&self) -> &AotTarget {
+        &self.target
     }
 
     pub fn link_executable_for_i32_noarg_function(
@@ -514,6 +558,7 @@ fn compile_function_to_object_bytes(
     hir: &FunctionHIR,
     symbol: &str,
     optimization_profile: AotOptimizationProfile,
+    target: &AotTarget,
     call_signatures: &CallSignatureMap,
     type_table: &mut TypeTable,
     global_path_types: &GlobalPathTypeMap,
@@ -527,8 +572,7 @@ fn compile_function_to_object_bytes(
         .set("opt_level", optimization_profile.as_cranelift_opt_level())
         .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
     let flags = settings::Flags::new(flag_builder);
-    let isa_builder = cranelift_native::builder()
-        .map_err(|error| format!("failed to construct native ISA builder: {error}"))?;
+    let isa_builder = isa_builder_for_aot_target(target)?;
     let isa = isa_builder
         .finish(flags)
         .map_err(|error| format!("failed to finalize native ISA: {error}"))?;
@@ -596,6 +640,18 @@ fn maybe_invoke_clif_dump_hook(meta: &FunctionMeta, func: &cranelift_codegen::ir
     hook(meta, func);
 }
 
+fn isa_builder_for_aot_target(target: &AotTarget) -> Result<isa::Builder, String> {
+    match target {
+        AotTarget::Native => cranelift_native::builder()
+            .map_err(|error| format!("failed to construct native ISA builder: {error}")),
+        AotTarget::Triple(triple) => {
+            let triple = Triple::from_str(triple)
+                .map_err(|error| format!("failed to parse AOT target triple: {error}"))?;
+            isa::lookup(triple)
+                .map_err(|error| format!("failed to construct target ISA builder: {error}"))
+        }
+    }
+}
 fn record_string_literal(out: &mut BTreeMap<i32, String>, value: &str) -> Result<(), String> {
     let id = hash_string_literal(value);
     if let Some(existing) = out.get(&id) {
@@ -1349,6 +1405,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn aot_process_can_emit_android_arm64_objects() {
+        let mut process = AotProcess::with_optimization_profile_and_target(
+            AotOptimizationProfile::SpeedAndSize,
+            AotTarget::android_arm64(),
+        );
+        process.upsert_file("sample.stasis", "function main(): i32 { return 7; }\n");
+        process.compile().expect("compile android arm64 object");
+
+        assert_eq!(process.target(), &AotTarget::android_arm64());
+        assert_eq!(process.artifacts().len(), 1);
+        assert!(
+            process.artifacts()[0].object_bytes_len > 0,
+            "expected non-empty android arm64 object bytes"
+        );
+    }
     #[test]
     fn aot_engine_bundle_writes_manifest_and_required_entrypoints() {
         let mut process = AotProcess::new();

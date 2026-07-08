@@ -698,6 +698,7 @@ dependencies = [
  "serde_json",
  "stasis_dynload",
  "stasis_jit",
+ "target-lexicon",
 ]
 
 [[package]]
