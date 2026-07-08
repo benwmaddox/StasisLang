@@ -103,7 +103,10 @@ def main() -> int:
     assert "MotionEvent" in activity
     assert "frameValues[5]" in activity
     assert "GLES20.glDrawArrays" in activity
-    assert "GL_TRIANGLE_STRIP" in activity
+    assert "GL_TRIANGLES" in activity
+    assert "glUniform4f" not in activity
+    assert "attribute vec4 aColor" in activity
+    assert "drawBatch(vertexCount)" in activity
     assert "applySelectedEdit" in activity
     assert "persistSelectedEdit" in activity
     assert "getFilesDir()" in activity

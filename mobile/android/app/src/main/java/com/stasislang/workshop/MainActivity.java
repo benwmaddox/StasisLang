@@ -52,6 +52,11 @@ public final class MainActivity extends Activity {
     private static final int RENDER_COMMAND_STRIDE = 6;
     private static final int RENDER_FRAME_I32_CAPACITY =
             RENDER_FRAME_HEADER_SIZE + MAX_RENDER_COMMANDS * RENDER_COMMAND_STRIDE;
+    private static final int RECT_VERTICES = 6;
+    private static final int RENDER_VERTEX_FLOATS = 6;
+    private static final int RENDER_VERTEX_BYTES = RENDER_VERTEX_FLOATS * 4;
+    private static final int RENDER_VERTEX_BUFFER_FLOATS =
+            MAX_RENDER_COMMANDS * RECT_VERTICES * RENDER_VERTEX_FLOATS;
     private static final String[] SAMPLE_FILES = new String[] {
             "src/main.stasis",
             "src/root.stasis",
@@ -975,22 +980,25 @@ public final class MainActivity extends Activity {
     private static final class PreviewRenderer implements GLSurfaceView.Renderer {
         private static final String VERTEX_SHADER =
                 "attribute vec2 aPosition;" +
+                "attribute vec4 aColor;" +
                 "uniform vec2 uResolution;" +
+                "varying vec4 vColor;" +
                 "void main() {" +
                 "  vec2 zeroToOne = aPosition / uResolution;" +
                 "  vec2 clip = zeroToOne * 2.0 - 1.0;" +
+                "  vColor = aColor;" +
                 "  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);" +
                 "}";
         private static final String FRAGMENT_SHADER =
                 "precision mediump float;" +
-                "uniform vec4 uColor;" +
+                "varying vec4 vColor;" +
                 "void main() {" +
-                "  gl_FragColor = uColor;" +
+                "  gl_FragColor = vColor;" +
                 "}";
 
         private final MainActivity activity;
         private final FloatBuffer vertexBuffer = ByteBuffer
-                .allocateDirect(8 * 4)
+                .allocateDirect(RENDER_VERTEX_BUFFER_FLOATS * 4)
                 .order(ByteOrder.nativeOrder())
                 .asFloatBuffer();
         private final int[] frameValues = new int[RENDER_FRAME_I32_CAPACITY];
@@ -1014,7 +1022,7 @@ public final class MainActivity extends Activity {
             program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER);
             positionHandle = GLES20.glGetAttribLocation(program, "aPosition");
             resolutionHandle = GLES20.glGetUniformLocation(program, "uResolution");
-            colorHandle = GLES20.glGetUniformLocation(program, "uColor");
+            colorHandle = GLES20.glGetAttribLocation(program, "aColor");
             GLES20.glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
         }
 
@@ -1032,40 +1040,56 @@ public final class MainActivity extends Activity {
             GLES20.glUseProgram(program);
             GLES20.glUniform2f(resolutionHandle, (float)surfaceWidth, (float)surfaceHeight);
 
+            vertexBuffer.clear();
+            int vertexCount = 0;
             synchronized (this) {
                 int commandCount = Math.max(0, Math.min(MAX_RENDER_COMMANDS, frameValues[5]));
                 for (int index = 0; index < commandCount; index += 1) {
                     int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
                     if (frameValues[base] == 1) {
-                        drawRect(base);
+                        appendRect(base);
+                        vertexCount += RECT_VERTICES;
                     }
                 }
+            }
+            vertexBuffer.flip();
+            if (vertexCount > 0) {
+                drawBatch(vertexCount);
             }
             activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
         }
 
-        private void drawRect(int base) {
+        private void appendRect(int base) {
             int color = frameValues[base + 5];
+            float red = ((color >> 16) & 255) / 255.0f;
+            float green = ((color >> 8) & 255) / 255.0f;
+            float blue = (color & 255) / 255.0f;
             float left = frameValues[base + 1];
             float top = frameValues[base + 2];
             float right = frameValues[base + 1] + frameValues[base + 3];
             float bottom = frameValues[base + 2] + frameValues[base + 4];
-            vertexBuffer.clear();
-            vertexBuffer.put(left).put(top);
-            vertexBuffer.put(right).put(top);
-            vertexBuffer.put(left).put(bottom);
-            vertexBuffer.put(right).put(bottom);
-            vertexBuffer.flip();
+            putVertex(left, top, red, green, blue);
+            putVertex(right, top, red, green, blue);
+            putVertex(left, bottom, red, green, blue);
+            putVertex(right, top, red, green, blue);
+            putVertex(right, bottom, red, green, blue);
+            putVertex(left, bottom, red, green, blue);
+        }
 
+        private void putVertex(float x, float y, float red, float green, float blue) {
+            vertexBuffer.put(x).put(y).put(red).put(green).put(blue).put(1.0f);
+        }
+
+        private void drawBatch(int vertexCount) {
             GLES20.glEnableVertexAttribArray(positionHandle);
-            GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer);
-            GLES20.glUniform4f(
-                    colorHandle,
-                    ((color >> 16) & 255) / 255.0f,
-                    ((color >> 8) & 255) / 255.0f,
-                    (color & 255) / 255.0f,
-                    1.0f);
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+            GLES20.glEnableVertexAttribArray(colorHandle);
+            vertexBuffer.position(0);
+            GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, RENDER_VERTEX_BYTES, vertexBuffer);
+            vertexBuffer.position(2);
+            GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, RENDER_VERTEX_BYTES, vertexBuffer);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
+            vertexBuffer.position(0);
+            GLES20.glDisableVertexAttribArray(colorHandle);
             GLES20.glDisableVertexAttribArray(positionHandle);
         }
 
