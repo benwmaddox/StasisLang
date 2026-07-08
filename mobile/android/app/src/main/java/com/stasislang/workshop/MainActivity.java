@@ -723,6 +723,7 @@ public final class MainActivity extends Activity {
     private static String callOpenAiResponsesApi(String apiKey, String model, String requestJson) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
+        payload.put("text", buildAiResponseTextFormat());
         payload.put("input", "Return only one JSON object matching the Stasis AI Code Response format. Supported edits are replace_function and replace_struct. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
@@ -748,8 +749,58 @@ public final class MainActivity extends Activity {
         return response;
     }
 
+    private static JSONObject buildAiResponseTextFormat() throws Exception {
+        JSONObject editProperties = new JSONObject();
+        editProperties.put("kind", new JSONObject().put("type", "string").put("enum", new JSONArray()
+                .put("replace_function")
+                .put("replace_struct")));
+        editProperties.put("owner", new JSONObject().put("type", "string"));
+        editProperties.put("name", new JSONObject().put("type", "string"));
+        editProperties.put("file", new JSONObject().put("type", "string"));
+        editProperties.put("new_source", new JSONObject().put("type", "string"));
+
+        JSONObject editSchema = new JSONObject();
+        editSchema.put("type", "object");
+        editSchema.put("additionalProperties", false);
+        editSchema.put("required", new JSONArray()
+                .put("kind")
+                .put("owner")
+                .put("name")
+                .put("file")
+                .put("new_source"));
+        editSchema.put("properties", editProperties);
+
+        JSONObject responseProperties = new JSONObject();
+        responseProperties.put("summary", new JSONObject().put("type", "string"));
+        responseProperties.put("edits", new JSONObject().put("type", "array").put("items", editSchema));
+        responseProperties.put("expected_reload", new JSONObject().put("type", "string").put("enum", new JSONArray()
+                .put("FastReload")
+                .put("ResetRequired")));
+        responseProperties.put("reason", new JSONObject().put("type", "string"));
+
+        JSONObject schema = new JSONObject();
+        schema.put("type", "object");
+        schema.put("additionalProperties", false);
+        schema.put("required", new JSONArray()
+                .put("summary")
+                .put("edits")
+                .put("expected_reload")
+                .put("reason"));
+        schema.put("properties", responseProperties);
+
+        JSONObject format = new JSONObject();
+        format.put("type", "json_schema");
+        format.put("name", "stasis_ai_code_response");
+        format.put("strict", true);
+        format.put("schema", schema);
+        return new JSONObject().put("format", format);
+    }
+
     private static String extractAiJsonResponse(String responseBody) throws Exception {
         JSONObject response = new JSONObject(responseBody);
+        if (response.has("edits")) {
+            return response.toString();
+        }
         String text = response.optString("output_text", "");
         if (text.isEmpty()) {
             JSONArray output = response.optJSONArray("output");
@@ -768,6 +819,7 @@ public final class MainActivity extends Activity {
                         JSONObject part = content.optJSONObject(contentIndex);
                         if (part != null) {
                             builder.append(part.optString("text", ""));
+                            builder.append(part.optString("output_text", ""));
                         }
                     }
                 }
@@ -797,6 +849,7 @@ public final class MainActivity extends Activity {
                 String expectedKind = "replace_struct".equals(kind) ? "struct" : "function";
                 SymbolEntry target = findSymbolForAiEdit(project, expectedKind, edit, fallbackSymbol);
                 String newSource = edit.getString("new_source").trim();
+                validateAiReplacementSource(kind, target.name, newSource);
                 persistSelectedEdit(target, newSource);
                 lastEdited = target;
                 project = loadBundledProject();
@@ -834,6 +887,43 @@ public final class MainActivity extends Activity {
         }
         throw new IOException("AI edit target not found: " + file + " " + name);
     }
+
+    private static void validateAiReplacementSource(String editKind, String expectedName, String newSource) throws Exception {
+        if (newSource.contains("&mut") || newSource.contains("->") || newSource.contains("fn ")) {
+            throw new IOException("AI edit must use Stasis syntax, not Rust syntax");
+        }
+        if ("replace_struct".equals(editKind)) {
+            if (!newSource.trim().startsWith("struct ") || !expectedName.equals(extractDeclarationName(newSource, "struct"))) {
+                throw new IOException("AI replace_struct source does not define expected struct: " + expectedName);
+            }
+            return;
+        }
+        if (!newSource.trim().startsWith("function ") || !expectedName.equals(extractDeclarationName(newSource, "function"))) {
+            throw new IOException("AI replace_function source does not define expected function: " + expectedName);
+        }
+    }
+
+    private static String extractDeclarationName(String source, String keyword) {
+        String trimmed = source.trim();
+        String prefix = keyword + " ";
+        if (!trimmed.startsWith(prefix)) {
+            return "";
+        }
+        int cursor = prefix.length();
+        while (cursor < trimmed.length() && Character.isWhitespace(trimmed.charAt(cursor))) {
+            cursor += 1;
+        }
+        int start = cursor;
+        while (cursor < trimmed.length()) {
+            char value = trimmed.charAt(cursor);
+            if (!Character.isLetterOrDigit(value) && value != '_') {
+                break;
+            }
+            cursor += 1;
+        }
+        return trimmed.substring(start, cursor);
+    }
+
     private void applySelectedEdit() {
         if (selectedSymbol == null) {
             return;
