@@ -96,6 +96,11 @@ def main() -> int:
     assert "workshop_sample/" in activity
     assert "createWorkshopView" in activity
     assert "BuildConfig.STASIS_PUBLISHED_BUILD" in activity
+    assert "installGameStatusOverlay(root, false)" in activity
+    assert "installGameStatusOverlay(root, true)" in activity
+    assert "toggleBenchmarkHudFromPreview" in activity
+    assert "MotionEvent.ACTION_POINTER_DOWN" in activity
+    assert "event.getPointerCount() >= 3" in activity
     assert "startGameLoop();" in activity
     assert "GamePreviewView" in activity
     assert "GLSurfaceView" in activity
