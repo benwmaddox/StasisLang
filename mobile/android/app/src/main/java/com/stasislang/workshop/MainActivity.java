@@ -90,6 +90,8 @@ public final class MainActivity extends Activity {
     };
 
     private TextView sourceTitle;
+    private LinearLayout selectedSourcePanel;
+    private LinearLayout manualEditBody;
     private EditText sourceEditor;
     private EditText aiPromptEditor;
     private EditText aiApiKeyEditor;
@@ -191,17 +193,33 @@ public final class MainActivity extends Activity {
         title.setPadding(0, 0, 0, dp(8));
         content.addView(title, fullWidth());
 
-        symbolList = new LinearLayout(this);
-        symbolList.setOrientation(LinearLayout.VERTICAL);
-        content.addView(symbolList, fullWidth());
-        rebuildSymbolList(project);
+        content.addView(createAiControls(), fullWidth());
+
+        Button manualToggle = new Button(this);
+        manualToggle.setText("Manual Symbols and Source");
+        manualToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                toggleManualEditSection();
+            }
+        });
+        content.addView(manualToggle, fullWidth());
+
+        manualEditBody = new LinearLayout(this);
+        manualEditBody.setOrientation(LinearLayout.VERTICAL);
+        manualEditBody.setVisibility(View.GONE);
+        content.addView(manualEditBody, fullWidth());
+
+        selectedSourcePanel = new LinearLayout(this);
+        selectedSourcePanel.setOrientation(LinearLayout.VERTICAL);
+        selectedSourcePanel.setPadding(0, 0, 0, dp(6));
 
         sourceTitle = new TextView(this);
         sourceTitle.setTextColor(Color.rgb(22, 27, 34));
         sourceTitle.setTextSize(15.0f);
         sourceTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        sourceTitle.setPadding(0, dp(14), 0, dp(6));
-        content.addView(sourceTitle, fullWidth());
+        sourceTitle.setPadding(0, dp(8), 0, dp(6));
+        selectedSourcePanel.addView(sourceTitle, fullWidth());
 
         sourceEditor = new EditText(this);
         sourceEditor.setTextColor(Color.rgb(28, 37, 49));
@@ -212,11 +230,13 @@ public final class MainActivity extends Activity {
         sourceEditor.setPadding(dp(12), dp(10), dp(12), dp(10));
         sourceEditor.setSingleLine(false);
         sourceEditor.setBackground(createPanelBackground(Color.WHITE, Color.rgb(207, 214, 224)));
-        content.addView(sourceEditor, fullWidth());
+        selectedSourcePanel.addView(sourceEditor, fullWidth());
+        selectedSourcePanel.addView(createEditControls(), fullWidth());
 
-        content.addView(createAiControls(), fullWidth());
-        content.addView(createEditControls(), fullWidth());
-
+        symbolList = new LinearLayout(this);
+        symbolList.setOrientation(LinearLayout.VERTICAL);
+        manualEditBody.addView(symbolList, fullWidth());
+        rebuildSymbolList(project);
         reloadStatus = new TextView(this);
         reloadStatus.setTextColor(Color.rgb(73, 84, 100));
         reloadStatus.setTextSize(13.0f);
@@ -436,6 +456,9 @@ public final class MainActivity extends Activity {
 
             for (SymbolEntry symbol : group.symbols) {
                 content.addView(createSymbolRow(symbol), fullWidth());
+                if (selectedSymbol != null && sameSymbolIdentity(symbol, selectedSymbol) && selectedSourcePanel != null) {
+                    content.addView(selectedSourcePanel, fullWidth());
+                }
             }
         }
     }
@@ -451,6 +474,9 @@ public final class MainActivity extends Activity {
             @Override
             public void onClick(View view) {
                 showSymbol(symbol);
+                if (manualEditBody != null) {
+                    manualEditBody.setVisibility(View.VISIBLE);
+                }
             }
         });
 
@@ -474,7 +500,15 @@ public final class MainActivity extends Activity {
         selectedSymbol = symbol;
         sourceTitle.setText(symbol.file + " - " + symbol.displayName());
         sourceEditor.setText(symbol.source.trim());
+        rebuildSymbolList(loadBundledProject());
         setStatusText("No pending edit");
+    }
+
+    private void toggleManualEditSection() {
+        if (manualEditBody == null) {
+            return;
+        }
+        manualEditBody.setVisibility(manualEditBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
     }
 
     private LinearLayout createAiControls() {
@@ -571,19 +605,6 @@ public final class MainActivity extends Activity {
         });
         controls.addView(resetProject, fullWidth());
 
-        LinearLayout runtimeRow = new LinearLayout(this);
-        runtimeRow.setOrientation(LinearLayout.HORIZONTAL);
-
-        Button compile = new Button(this);
-        compile.setText("Compile");
-        compile.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                runNativeCompile();
-            }
-        });
-        runtimeRow.addView(compile, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
-
         Button runTick = new Button(this);
         runTick.setText("Run Tick");
         runTick.setOnClickListener(new View.OnClickListener() {
@@ -592,9 +613,7 @@ public final class MainActivity extends Activity {
                 runNativeTick();
             }
         });
-        runtimeRow.addView(runTick, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
-        controls.addView(runtimeRow, fullWidth());
-
+        controls.addView(runTick, fullWidth());
         return controls;
     }
     private void runNativeCompile() {
