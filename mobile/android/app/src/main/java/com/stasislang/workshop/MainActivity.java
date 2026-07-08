@@ -490,7 +490,7 @@ public final class MainActivity extends Activity {
 
         aiModelEditor = new EditText(this);
         aiModelEditor.setSingleLine(true);
-        aiModelEditor.setText("gpt-5.1");
+        aiModelEditor.setText("gpt-5.4-mini");
         aiModelEditor.setTextSize(12.0f);
         controls.addView(aiModelEditor, fullWidth());
 
@@ -649,7 +649,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (model.isEmpty()) {
-            model = "gpt-5.1";
+            model = "gpt-5.4-mini";
         }
         saveAiSettings(apiKey, model);
         final SymbolEntry symbol = selectedSymbol;
