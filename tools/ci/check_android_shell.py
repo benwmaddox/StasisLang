@@ -98,7 +98,7 @@ def main() -> int:
     assert "AI Patch Selected Symbol" in activity
     assert "https://api.openai.com/v1/responses" in activity
     assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
-    assert "private static final int MAX_AI_AGENT_TURNS = 50" in activity
+    assert "private static final int MAX_AI_AGENT_TURNS = 15" in activity
     assert "runAiAgentLoop" in activity
     assert "executeAiToolCalls" in activity
     assert "private final class AiAgentSession" in activity

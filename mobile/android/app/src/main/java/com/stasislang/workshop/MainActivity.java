@@ -60,7 +60,7 @@ public final class MainActivity extends Activity {
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
-    private static final int MAX_AI_AGENT_TURNS = 50;
+    private static final int MAX_AI_AGENT_TURNS = 15;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
     private static final int RENDER_FRAME_I32_CAPACITY =
