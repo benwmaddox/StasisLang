@@ -1,8 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.INTERNET" />
     <application
         android:allowBackup="false"
-        android:label="Stasis Workshop"
+        android:label="${appLabel}"
         android:theme="@style/AppTheme">
         <activity
             android:name=".MainActivity"

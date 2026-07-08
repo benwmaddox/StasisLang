@@ -166,6 +166,11 @@ public final class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
+        if (BuildConfig.STASIS_PUBLISHED_BUILD) {
+            startGameLoop();
+            return root;
+        }
+
         gameStatus = new TextView(this);
         gameStatus.setText("tick=-- ms  render=-- ms  budget=--%");
         gameStatus.setTextColor(Color.WHITE);

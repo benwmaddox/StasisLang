@@ -1,5 +1,6 @@
 param(
     [switch]$Install,
+    [switch]$ValidateAot,
     [string]$CompileSdk = "",
     [string]$TargetSdk = ""
 )
@@ -20,7 +21,17 @@ try {
 
     & (Join-Path $scriptRoot "build_rust_bridge.ps1")
 
-    $task = if ($Install) { ":app:installWorkshopDebug" } else { ":app:assembleWorkshopDebug" }
+    if ($ValidateAot) {
+        Push-Location (Join-Path $scriptRoot "..\..")
+        try {
+            cargo test -p stasis_compiler backend::aot::tests::aot_engine_bundle_writes_manifest_and_required_entrypoints
+        }
+        finally {
+            Pop-Location
+        }
+    }
+
+    $task = if ($Install) { ":app:installPublishedDebug" } else { ":app:assemblePublishedRelease" }
     $args = @($task)
     if ($CompileSdk) { $args += "-Pstasis.compileSdk=$CompileSdk" }
     if ($TargetSdk) { $args += "-Pstasis.targetSdk=$TargetSdk" }
