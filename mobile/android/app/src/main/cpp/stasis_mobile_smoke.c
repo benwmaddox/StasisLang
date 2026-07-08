@@ -806,8 +806,8 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
 JNIEXPORT jint JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jintArray frame_values) {
     (void)activity_class;
-    const int frame_len = 54;
-    int32_t values[54];
+    const int frame_len = 62;
+    int32_t values[62];
     memset(values, 0, sizeof(values));
 
     if (frame_values == NULL || (*env)->GetArrayLength(env, frame_values) < frame_len) {

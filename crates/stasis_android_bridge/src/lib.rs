@@ -15,7 +15,7 @@ use stasis_compiler::IncrementalCompilerHost;
 
 pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
 pub const ANDROID_RENDER_FRAME_HEADER_SIZE: usize = 6;
-pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 6;
+pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 7;
 pub const ANDROID_RENDER_FRAME_I32_CAPACITY: usize = ANDROID_RENDER_FRAME_HEADER_SIZE
     + ANDROID_RENDER_COMMAND_CAPACITY * ANDROID_RENDER_COMMAND_STRIDE;
 
@@ -36,6 +36,7 @@ pub struct AndroidBridgeRenderCommand {
     pub w: i32,
     pub h: i32,
     pub color: i32,
+    pub asset: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,6 +343,7 @@ fn read_render_commands(
         command.w = jit.read_i32_global_path(&format!("Render.command{index}_w"));
         command.h = jit.read_i32_global_path(&format!("Render.command{index}_h"));
         command.color = jit.read_i32_global_path(&format!("Render.command{index}_color"));
+        command.asset = jit.read_i32_global_path(&format!("Render.command{index}_asset"));
     }
     commands
 }
@@ -354,8 +356,8 @@ fn render_command_state_lines(
     let count = render_command_count.clamp(0, ANDROID_RENDER_COMMAND_CAPACITY as i32) as usize;
     for (index, command) in render_commands.iter().enumerate().take(count) {
         lines.push_str(&format!(
-            "render{index}_kind={}\nrender{index}_x={}\nrender{index}_y={}\nrender{index}_w={}\nrender{index}_h={}\nrender{index}_color={}\n",
-            command.kind, command.x, command.y, command.w, command.h, command.color
+            "render{index}_kind={}\nrender{index}_x={}\nrender{index}_y={}\nrender{index}_w={}\nrender{index}_h={}\nrender{index}_color={}\nrender{index}_asset={}\n",
+            command.kind, command.x, command.y, command.w, command.h, command.color, command.asset
         ));
     }
     lines
@@ -394,6 +396,7 @@ fn write_render_frame_i32s(
         out[base + 3] = command.w;
         out[base + 4] = command.h;
         out[base + 5] = command.color;
+        out[base + 6] = command.asset;
     }
     Ok(())
 }
@@ -406,8 +409,8 @@ fn render_command_message_fields(
     let mut fields = format!("render_command_count={count}");
     for (index, command) in render_commands.iter().enumerate().take(count) {
         fields.push_str(&format!(
-            " render{index}_kind={} render{index}_x={} render{index}_y={} render{index}_w={} render{index}_h={} render{index}_color={}",
-            command.kind, command.x, command.y, command.w, command.h, command.color
+            " render{index}_kind={} render{index}_x={} render{index}_y={} render{index}_w={} render{index}_h={} render{index}_color={} render{index}_asset={}",
+            command.kind, command.x, command.y, command.w, command.h, command.color, command.asset
         ));
     }
     fields
@@ -866,6 +869,7 @@ mod tests {
         assert_eq!(result.render_commands[0].w, 8);
         assert_eq!(result.render_commands[0].h, 64);
         assert_eq!(result.render_commands[0].color, 65535);
+        assert_eq!(result.render_commands[0].asset, 0);
 
         let state = fs::read_to_string(root.join("build/runtime_state.txt"))
             .expect("read JIT runtime state");
@@ -916,7 +920,8 @@ mod tests {
         assert_eq!(result.render_commands[0].kind, 1);
         assert_eq!(result.render_commands[0].w, 360);
         assert_eq!(result.render_commands[1].y, 204);
-        assert_eq!(result.render_commands[3].kind, 1);
+        assert_eq!(result.render_commands[3].kind, 2);
+        assert_eq!(result.render_commands[3].asset, 1);
         assert!(result.observed_game_tick_count >= 1);
     }
     #[test]
@@ -956,6 +961,7 @@ function render(): void { Render.command_count = 1; Render.command0_kind = 1; Re
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE], 1);
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 1], 9);
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 5], 5);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 6], 0);
         fs::remove_dir_all(&root).ok();
     }
 
