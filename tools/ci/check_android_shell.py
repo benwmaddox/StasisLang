@@ -6,8 +6,10 @@ REQUIRED_FILES = [
     "mobile/android/settings.gradle",
     "mobile/android/build.gradle",
     "mobile/android/build_rust_bridge.ps1",
+    "mobile/android/build_published.ps1",
     "mobile/android/app/build.gradle",
     "mobile/android/app/src/main/AndroidManifest.xml",
+    "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/main/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -50,22 +52,36 @@ def main() -> int:
 
     rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
     debug_script = read("mobile/android/build_debug.ps1")
+    published_script = read("mobile/android/build_published.ps1")
     android_gitignore = read("mobile/android/.gitignore")
     assert "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER" in rust_bridge_script
     assert "aarch64-linux-android" in rust_bridge_script
     assert "libstasis_android_bridge.so" in rust_bridge_script
     assert "app\\src\\main\\jniLibs\\arm64-v8a" in rust_bridge_script
     assert "build_rust_bridge.ps1" in debug_script
+    assert ":app:assembleWorkshopDebug" in debug_script
+    assert ":app:assemblePublishedRelease" in published_script
+    assert ":app:installPublishedDebug" in published_script
+    assert "ValidateAot" in published_script
+    assert "aot_engine_bundle_writes_manifest_and_required_entrypoints" in published_script
     assert "app/src/main/jniLibs/" in android_gitignore
 
     app_gradle = read("mobile/android/app/build.gradle")
+    assert "flavorDimensions 'mode'" in app_gradle
+    assert "workshop {" in app_gradle
+    assert "published {" in app_gradle
     assert "applicationId 'com.stasislang.workshop'" in app_gradle
+    assert "applicationId 'com.stasislang.workshop.published'" in app_gradle
+    assert "STASIS_PUBLISHED_BUILD" in app_gradle
     assert "abiFilters 'arm64-v8a'" in app_gradle
     assert "externalNativeBuild" in app_gradle
     assert "STASIS_ANDROID_SMOKE_ONLY=ON" in app_gradle
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
-    assert "android.permission.INTERNET" in manifest
+    workshop_manifest = read("mobile/android/app/src/workshop/AndroidManifest.xml")
+    assert "android.permission.INTERNET" not in manifest
+    assert "android.permission.INTERNET" in workshop_manifest
+    assert "${appLabel}" in manifest
     assert "android.intent.action.MAIN" in manifest
     assert "android.intent.category.LAUNCHER" in manifest
     assert 'android:exported="true"' in manifest
@@ -79,6 +95,8 @@ def main() -> int:
     assert "private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues)" in activity
     assert "workshop_sample/" in activity
     assert "createWorkshopView" in activity
+    assert "BuildConfig.STASIS_PUBLISHED_BUILD" in activity
+    assert "startGameLoop();" in activity
     assert "GamePreviewView" in activity
     assert "GLSurfaceView" in activity
     assert "onDrawFrame" in activity

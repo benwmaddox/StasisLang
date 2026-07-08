@@ -24,6 +24,26 @@ android {
         }
     }
 
+    buildFeatures {
+        buildConfig true
+    }
+
+    flavorDimensions 'mode'
+    productFlavors {
+        workshop {
+            dimension 'mode'
+            applicationId 'com.stasislang.workshop'
+            manifestPlaceholders = [appLabel: 'Stasis Workshop']
+            buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'false'
+        }
+        published {
+            dimension 'mode'
+            applicationId 'com.stasislang.workshop.published'
+            manifestPlaceholders = [appLabel: 'Stasis Game']
+            buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'true'
+        }
+    }
+
     externalNativeBuild {
         cmake {
             path file('src/main/cpp/CMakeLists.txt')
