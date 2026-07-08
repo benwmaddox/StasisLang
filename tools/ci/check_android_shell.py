@@ -110,6 +110,12 @@ def main() -> int:
     assert "read_symbol" in activity
     assert "read_file" in activity
     assert "write_symbol" in activity
+    assert "compile_project" in activity
+    assert "get_diagnostics" in activity
+    assert "aiToolCompileProject" in activity
+    assert "aiToolGetDiagnostics" in activity
+    assert "compileResultToJson" in activity
+    assert "lastCompileResult = compileResult" in activity
     assert "take_screenshot" in activity
     assert "aiToolWriteSymbol" in activity
     assert "preview_metadata" in activity
