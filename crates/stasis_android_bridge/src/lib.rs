@@ -238,6 +238,58 @@ pub fn run_android_workshop_tick(
     })
 }
 
+fn with_initialized_runtime_session<R>(
+    project_root: &Path,
+    entry_file: &Path,
+    operation: impl FnOnce(&mut AndroidRuntimeSession) -> Result<R, String>,
+) -> Result<R, String> {
+    RUNTIME_SESSION.with(|session_cell| {
+        let mut session_slot = session_cell.borrow_mut();
+        let needs_lazy_build = session_slot
+            .as_ref()
+            .is_none_or(|session| session.project_root != project_root);
+        if needs_lazy_build {
+            let files = load_workshop_project(project_root, entry_file)?;
+            let source_fingerprint = fingerprint_workshop_sources(&files);
+            *session_slot = Some(build_runtime_session(
+                project_root,
+                &files,
+                source_fingerprint,
+            )?);
+        }
+
+        let session = session_slot
+            .as_mut()
+            .ok_or_else(|| "Android runtime session was not initialized".to_string())?;
+        if !session.initialized {
+            execute_lifecycle_noarg(&session.jit, "main")?;
+            session.initialized = true;
+        }
+        operation(session)
+    })
+}
+
+pub fn set_android_workshop_i32_global(
+    project_root: impl AsRef<Path>,
+    entry_file: impl AsRef<Path>,
+    path: &str,
+    value: i32,
+) -> Result<(), String> {
+    with_initialized_runtime_session(project_root.as_ref(), entry_file.as_ref(), |session| {
+        session.jit.write_i32_global_path(path, value);
+        Ok(())
+    })
+}
+
+pub fn get_android_workshop_i32_global(
+    project_root: impl AsRef<Path>,
+    entry_file: impl AsRef<Path>,
+    path: &str,
+) -> Result<i32, String> {
+    with_initialized_runtime_session(project_root.as_ref(), entry_file.as_ref(), |session| {
+        Ok(session.jit.read_i32_global_path(path))
+    })
+}
 fn build_runtime_session(
     project_root: &Path,
     files: &[WorkshopSourceFile],
@@ -537,6 +589,70 @@ unsafe fn compile_project_from_c(
 }
 
 #[no_mangle]
+pub extern "C" fn stasis_android_bridge_set_i32_global(
+    project_root: *const c_char,
+    entry_file: *const c_char,
+    path: *const c_char,
+    value: i32,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        if project_root.is_null() || entry_file.is_null() || path.is_null() {
+            return Err("null project root, entry file, or path".to_string());
+        }
+        let project_root = CStr::from_ptr(project_root)
+            .to_str()
+            .map_err(|error| format!("project root was not UTF-8: {error}"))?;
+        let entry_file = CStr::from_ptr(entry_file)
+            .to_str()
+            .map_err(|error| format!("entry file was not UTF-8: {error}"))?;
+        let path = CStr::from_ptr(path)
+            .to_str()
+            .map_err(|error| format!("global path was not UTF-8: {error}"))?;
+        set_android_workshop_i32_global(project_root, entry_file, path, value)?;
+        Ok(format!("StateSet: path={path} value={value}"))
+    }));
+    let message = match result {
+        Ok(Ok(message)) => message,
+        Ok(Err(error)) => format!("StateError: {error}"),
+        Err(_) => "StateError: panic while setting Android runtime global".to_string(),
+    };
+    CString::new(message)
+        .unwrap_or_else(|_| CString::new("StateError: invalid bridge message").unwrap())
+        .into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_get_i32_global(
+    project_root: *const c_char,
+    entry_file: *const c_char,
+    path: *const c_char,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        if project_root.is_null() || entry_file.is_null() || path.is_null() {
+            return Err("null project root, entry file, or path".to_string());
+        }
+        let project_root = CStr::from_ptr(project_root)
+            .to_str()
+            .map_err(|error| format!("project root was not UTF-8: {error}"))?;
+        let entry_file = CStr::from_ptr(entry_file)
+            .to_str()
+            .map_err(|error| format!("entry file was not UTF-8: {error}"))?;
+        let path = CStr::from_ptr(path)
+            .to_str()
+            .map_err(|error| format!("global path was not UTF-8: {error}"))?;
+        let value = get_android_workshop_i32_global(project_root, entry_file, path)?;
+        Ok(format!("StateGet: path={path} value={value}"))
+    }));
+    let message = match result {
+        Ok(Ok(message)) => message,
+        Ok(Err(error)) => format!("StateError: {error}"),
+        Err(_) => "StateError: panic while getting Android runtime global".to_string(),
+    };
+    CString::new(message)
+        .unwrap_or_else(|_| CString::new("StateError: invalid bridge message").unwrap())
+        .into_raw()
+}
+#[no_mangle]
 pub extern "C" fn stasis_android_bridge_run_tick_frame(
     project_root: *const c_char,
     entry_file: *const c_char,
@@ -763,6 +879,28 @@ mod tests {
         assert!(!should_write_jit_runtime_state(2, false, false));
     }
 
+    #[test]
+    fn bridge_can_set_and_get_i32_global_state_for_tests() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("state_set_get");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global GameState { score: i32; tick_count: i32; }\nfunction main(): void { GameState.score = 1; }\nfunction tick(): void { GameState.tick_count += 1; }\n",
+        )
+        .expect("write source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("compile bridge");
+
+        set_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "GameState.score", 42)
+            .expect("set score");
+        let score =
+            get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "GameState.score")
+                .expect("get score");
+        assert_eq!(score, 42);
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
     #[test]
     fn bridge_run_tick_executes_real_void_lifecycle_functions() {
         let _guard = bridge_runtime_test_guard();
