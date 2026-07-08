@@ -66,6 +66,7 @@ public final class MainActivity extends Activity {
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
     private Runnable gameLoop;
     private boolean compileReady;
+    private boolean compileAttempted;
     private SymbolEntry selectedSymbol;
 
     static {
@@ -256,9 +257,10 @@ public final class MainActivity extends Activity {
         gameLoop = new Runnable() {
             @Override
             public void run() {
-                if (!compileReady) {
+                if (!compileReady && !compileAttempted) {
                     String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
-                    compileReady = compileResult.startsWith("CompilePlanned");
+                    compileReady = isRunnableCompile(compileResult);
+                    compileAttempted = true;
                     setStatusText(compileResult);
                 }
                 if (compileReady) {
@@ -268,6 +270,10 @@ public final class MainActivity extends Activity {
             }
         };
         gameLoopHandler.post(gameLoop);
+    }
+
+    private static boolean isRunnableCompile(String compileResult) {
+        return compileResult.startsWith("CompilePlanned") && compileResult.contains("status=0");
     }
 
     private void setStatusText(String status) {
@@ -398,7 +404,8 @@ public final class MainActivity extends Activity {
     }
     private void runNativeCompile() {
         String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
-        compileReady = compileResult.startsWith("CompilePlanned");
+        compileReady = isRunnableCompile(compileResult);
+        compileAttempted = true;
         setStatusText(compileResult);
     }
 
@@ -415,6 +422,10 @@ public final class MainActivity extends Activity {
                 screenHeight);
         if (gamePreview != null) {
             gamePreview.setRenderFrame(RenderFrame.fromRunResult(runResult));
+        }
+        if (runResult.startsWith("RunError")) {
+            compileReady = false;
+            compileAttempted = true;
         }
         setStatusText(runResult);
     }
@@ -449,7 +460,8 @@ public final class MainActivity extends Activity {
         try {
             persistSelectedEdit(selectedSymbol, editedSource);
             String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
-            compileReady = compileResult.startsWith("CompilePlanned");
+            compileReady = isRunnableCompile(compileResult);
+            compileAttempted = true;
             setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
         } catch (IOException error) {
             setStatusText("Save failed: " + error.getMessage());
@@ -507,6 +519,7 @@ public final class MainActivity extends Activity {
         List<SourceFile> files = new ArrayList<>();
         AssetManager assets = getAssets();
         File projectRoot = projectRoot();
+        deleteProjectDirectory(projectRoot);
 
         for (String file : SAMPLE_FILES) {
             File diskFile = new File(projectRoot, file);
@@ -522,16 +535,29 @@ public final class MainActivity extends Activity {
     }
 
     private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile) throws IOException {
-        if (diskFile.isFile()) {
-            return;
-        }
-
         File parent = diskFile.getParentFile();
         if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
             throw new IOException("failed to create " + parent.getAbsolutePath());
         }
 
         writeTextFile(diskFile, readAsset(assets, assetPath));
+    }
+
+    private void deleteProjectDirectory(File file) {
+        if (!file.exists()) {
+            return;
+        }
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    deleteProjectDirectory(child);
+                }
+            }
+        }
+        if (!file.delete() && file.exists()) {
+            setStatusText("Unable to refresh bundled project file: " + file.getAbsolutePath());
+        }
     }
 
     private String readTextFile(File file) throws IOException {

@@ -3,6 +3,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::ffi::{c_char, CStr, CString};
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use stasis_compiler::backend::jit::JitProcess;
@@ -433,7 +434,7 @@ pub extern "C" fn stasis_android_bridge_run_tick(
     screen_w: i32,
     screen_h: i32,
 ) -> *mut c_char {
-    let result = unsafe {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
         run_tick_from_c(
             project_root,
             entry_file,
@@ -444,9 +445,9 @@ pub extern "C" fn stasis_android_bridge_run_tick(
                 screen_h,
             },
         )
-    };
+    }));
     let message = match result {
-        Ok(result) => format!(
+        Ok(Ok(result)) => format!(
             "RunTick: tick_count={} game_tick_count={} mode=JitExecuted recompiled={} initialized={} {}",
             result.tick_count,
             result.observed_game_tick_count,
@@ -454,7 +455,15 @@ pub extern "C" fn stasis_android_bridge_run_tick(
             result.initialized,
             render_command_message_fields(result.render_command_count, &result.render_commands)
         ),
-        Err(error) => format!("RunError: {error}"),
+        Ok(Err(error)) => format!("RunError: {error}"),
+        Err(payload) => {
+            let panic_message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            format!("RunError: panic while running Android tick: {panic_message}")
+        }
     };
     CString::new(message)
         .unwrap_or_else(|_| CString::new("RunError: invalid bridge message").unwrap())
@@ -655,6 +664,22 @@ mod tests {
         assert!(state.contains("render_command_count=1"));
         assert!(state.contains("render0_y=222"));
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn android_bundled_touch_pong_sample_compile_plan_is_runnable() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mobile/android/app/src/main/assets/workshop_sample")
+            .canonicalize()
+            .expect("bundled sample root");
+
+        let result = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("compile bundled pong sample");
+        let manifest = fs::read_to_string(root.join("build/native_compile_manifest.txt"))
+            .expect("read bundled sample manifest");
+
+        assert_eq!(result.status, 0, "{manifest}");
+        assert!(result.function_artifact_count >= 5, "{manifest}");
     }
 
     #[test]

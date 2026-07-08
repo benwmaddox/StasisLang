@@ -997,6 +997,12 @@ pub fn render_android_workshop_artifacts(
     manifest.push_str(&format!("layout_hash={:08x}\n", plan.layout_hash as u32));
     manifest.push_str(&format!("functions={}\n", plan.functions.len()));
     manifest.push_str(&format!("errors={}\n", plan.errors.len()));
+    for error in &plan.errors {
+        manifest.push_str(&format!(
+            "error=code:{}|pos:{}|detail_a:{}|detail_b:{}\n",
+            error.code, error.pos, error.detail_a, error.detail_b
+        ));
+    }
     manifest.push_str(&format!("roots={}\n", plan.entrypoints.join(",")));
     for entrypoint in &plan.entrypoints {
         manifest.push_str(&format!("entrypoint={entrypoint}\n"));

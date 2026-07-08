@@ -128,7 +128,12 @@ def main() -> int:
     assert "startGameLoop" in activity
     assert "private static final long DEFAULT_TICK_INTERVAL_MS = 16L" in activity
     assert "gameLoopHandler.postDelayed(this, DEFAULT_TICK_INTERVAL_MS)" in activity
-    assert "compileReady = compileResult.startsWith(\"CompilePlanned\")" in activity
+    assert "compileReady = isRunnableCompile(compileResult)" in activity
+    assert "compileAttempted = true" in activity
+    assert "runResult.startsWith(\"RunError\")" in activity
+    assert "!compileReady && !compileAttempted" in activity
+    assert "compileResult.contains(\"status=0\")" in activity
+    assert "deleteProjectDirectory(projectRoot)" in activity
     assert "setStatusText" in activity
     assert "setOnFocusChangeListener" in activity
     assert "scrollEditorIntoView" in activity
