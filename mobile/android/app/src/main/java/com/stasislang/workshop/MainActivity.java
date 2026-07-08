@@ -773,9 +773,14 @@ public final class MainActivity extends Activity {
             JSONObject call = toolCalls.getJSONObject(index);
             JSONObject observation = new JSONObject();
             String tool = call.optString("tool", "");
+            JSONObject args = call.optJSONObject("args");
+            if (args == null) {
+                args = new JSONObject();
+            }
             observation.put("tool", tool);
+            observation.put("args", args);
             try {
-                observation.put("result", executeAiToolCall(tool, call, session));
+                observation.put("result", executeAiToolCall(tool, args, session));
             } catch (Exception error) {
                 observation.put("error", error.getMessage());
             }
@@ -784,18 +789,18 @@ public final class MainActivity extends Activity {
         return observations;
     }
 
-    private JSONObject executeAiToolCall(String tool, JSONObject call, AiAgentSession session) throws Exception {
+    private JSONObject executeAiToolCall(String tool, JSONObject args, AiAgentSession session) throws Exception {
         if ("list_symbols".equals(tool)) {
             return aiToolListSymbols(session);
         }
         if ("read_symbol".equals(tool)) {
-            return aiToolReadSymbol(session, call);
+            return aiToolReadSymbol(session, args);
         }
         if ("read_file".equals(tool)) {
-            return aiToolReadFile(session, call);
+            return aiToolReadFile(session, args);
         }
         if ("write_symbol".equals(tool)) {
-            return aiToolWriteSymbol(session, call);
+            return aiToolWriteSymbol(session, args);
         }
         if ("compile_project".equals(tool)) {
             return aiToolCompileProject();
@@ -804,19 +809,19 @@ public final class MainActivity extends Activity {
             return aiToolGetDiagnostics();
         }
         if ("set_input_state".equals(tool)) {
-            return aiToolSetInputState(call);
+            return aiToolSetInputState(args);
         }
         if ("set_runtime_i32".equals(tool)) {
-            return aiToolSetRuntimeI32(call);
+            return aiToolSetRuntimeI32(args);
         }
         if ("get_runtime_i32".equals(tool)) {
-            return aiToolGetRuntimeI32(call);
+            return aiToolGetRuntimeI32(args);
         }
         if ("run_frame".equals(tool)) {
             return aiToolRunFrame();
         }
         if ("run_for_ticks".equals(tool)) {
-            return aiToolRunForTicks(call);
+            return aiToolRunForTicks(args);
         }
         if ("inspect_runtime_state".equals(tool)) {
             return aiToolInspectRuntimeState();
@@ -1137,7 +1142,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. For no-argument tools, send empty strings for kind, owner, name, file, path, and new_source. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -1183,6 +1188,11 @@ public final class MainActivity extends Activity {
                 .put("new_source"));
         editSchema.put("properties", editProperties);
 
+        JSONObject toolArgsSchema = new JSONObject();
+        toolArgsSchema.put("type", "object");
+        toolArgsSchema.put("additionalProperties", true);
+        toolArgsSchema.put("properties", new JSONObject());
+
         JSONObject toolProperties = new JSONObject();
         toolProperties.put("tool", new JSONObject().put("type", "string").put("enum", new JSONArray()
                 .put("list_symbols")
@@ -1198,40 +1208,15 @@ public final class MainActivity extends Activity {
                 .put("run_for_ticks")
                 .put("inspect_runtime_state")
                 .put("take_screenshot")));
-        toolProperties.put("kind", new JSONObject().put("type", "string"));
-        toolProperties.put("owner", new JSONObject().put("type", "string"));
-        toolProperties.put("name", new JSONObject().put("type", "string"));
-        toolProperties.put("file", new JSONObject().put("type", "string"));
-        toolProperties.put("new_source", new JSONObject().put("type", "string"));
-        toolProperties.put("path", new JSONObject().put("type", "string"));
-        toolProperties.put("value", new JSONObject().put("type", "integer"));
-        toolProperties.put("x", new JSONObject().put("type", "integer"));
-        toolProperties.put("y", new JSONObject().put("type", "integer"));
-        toolProperties.put("active", new JSONObject().put("type", "integer"));
-        toolProperties.put("ticks", new JSONObject().put("type", "integer"));
-        toolProperties.put("screen_w", new JSONObject().put("type", "integer"));
-        toolProperties.put("screen_h", new JSONObject().put("type", "integer"));
+        toolProperties.put("args", toolArgsSchema);
 
         JSONObject toolSchema = new JSONObject();
         toolSchema.put("type", "object");
         toolSchema.put("additionalProperties", false);
         toolSchema.put("required", new JSONArray()
                 .put("tool")
-                .put("kind")
-                .put("owner")
-                .put("name")
-                .put("file")
-                .put("new_source")
-                .put("path")
-                .put("value")
-                .put("x")
-                .put("y")
-                .put("active")
-                .put("ticks")
-                .put("screen_w")
-                .put("screen_h"));
+                .put("args"));
         toolSchema.put("properties", toolProperties);
-
         JSONObject responseProperties = new JSONObject();
         responseProperties.put("mode", new JSONObject().put("type", "string").put("enum", new JSONArray()
                 .put("tool_calls")
@@ -1259,7 +1244,7 @@ public final class MainActivity extends Activity {
         JSONObject format = new JSONObject();
         format.put("type", "json_schema");
         format.put("name", "stasis_ai_code_response");
-        format.put("strict", true);
+        format.put("strict", false);
         format.put("schema", schema);
         return new JSONObject().put("format", format);
     }
