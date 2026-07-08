@@ -829,33 +829,6 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
     (*env)->SetIntArrayRegion(env, frame_values, 0, frame_len, (const jint *)values);
     return (jint)status;
 }
-JNIEXPORT jintArray JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h) {
-    (void)activity_class;
-    const int frame_len = 54;
-    jintArray result = (*env)->NewIntArray(env, frame_len);
-    if (result == NULL) {
-        return NULL;
-    }
-    int32_t values[54];
-    memset(values, 0, sizeof(values));
-
-    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
-    if (root == NULL) {
-        values[0] = -1;
-        (*env)->SetIntArrayRegion(env, result, 0, frame_len, (const jint *)values);
-        return result;
-    }
-
-    int status = try_rust_bridge_run_tick_frame(root, (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h, values, frame_len);
-    (*env)->ReleaseStringUTFChars(env, project_root, root);
-    if (status != 0) {
-        values[0] = -1;
-    }
-    (*env)->SetIntArrayRegion(env, result, 0, frame_len, (const jint *)values);
-    return result;
-}
-
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h) {
     (void)activity_class;

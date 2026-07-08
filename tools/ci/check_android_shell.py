@@ -83,6 +83,9 @@ def main() -> int:
     assert "onDrawFrame" in activity
     assert "extractIntField" in activity
     assert "private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY]" in activity
+    assert "private String projectRootPath" in activity
+    assert "nativeCompileProject(projectRootPath())" in activity
+    assert "String.format" not in activity
     assert "gamePreview.setRenderFrameValues(nativeFrameValues)" in activity
     assert "RenderFrame.fromNativeFrame" not in activity
     assert "new RenderCommand" not in activity
@@ -114,7 +117,7 @@ def main() -> int:
     assert "ensureProjectFile" in activity
     assert "writeTextFile" in activity
     assert "Saved to .stasis file" in activity
-    assert "nativeCompileProject(projectRoot().getAbsolutePath())" in activity
+    assert "nativeCompileProject(projectRootPath())" in activity
     assert "resetSelectedEdit" in activity
     assert "classifySelectedReload" in activity
     assert "FrameLayout root = new FrameLayout(this)" in activity
@@ -174,6 +177,7 @@ def main() -> int:
     assert "stasis_android_bridge_free_string" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
+    assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv" not in native
     assert "scan_stasis_files" in native
     assert "analyze_stasis_file" in native
     assert "validate_braces" in native

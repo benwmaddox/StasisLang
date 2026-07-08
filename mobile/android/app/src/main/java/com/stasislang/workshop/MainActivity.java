@@ -47,6 +47,7 @@ public final class MainActivity extends Activity {
     private static final String ASSET_ROOT = "workshop_sample/";
     private static final String PROJECT_DIR = "workshop_project";
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
+    private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 6;
@@ -73,15 +74,19 @@ public final class MainActivity extends Activity {
     private TextView reloadStatus;
     private TextView gameStatus;
     private GamePreviewView gamePreview;
+    private File projectRootFile;
+    private String projectRootPath;
     private ScrollView editorPanel;
     private Button editorToggle;
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
     private Runnable gameLoop;
     private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY];
+    private final StringBuilder debugTextBuilder = new StringBuilder(64);
     private final RollingMetric tickMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
     private boolean compileReady;
     private boolean compileAttempted;
+    private long lastDebugUpdateNanos;
     private SymbolEntry selectedSymbol;
 
     static {
@@ -96,6 +101,9 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        projectRootFile = new File(getFilesDir(), PROJECT_DIR);
+        projectRootPath = projectRootFile.getAbsolutePath();
 
         Window window = getWindow();
         window.setStatusBarColor(Color.BLACK);
@@ -276,7 +284,7 @@ public final class MainActivity extends Activity {
             @Override
             public void run() {
                 if (!compileReady && !compileAttempted) {
-                    String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
+                    String compileResult = nativeCompileProject(projectRootPath());
                     compileReady = isRunnableCompile(compileResult);
                     compileAttempted = true;
                     setStatusText(compileResult);
@@ -304,14 +312,29 @@ public final class MainActivity extends Activity {
         if (gameStatus == null) {
             return;
         }
-        gameStatus.setText(String.format(
-                Locale.US,
-                "tick=%d  tick=%.2f ms  render=%.2f ms",
-                tickCount,
-                tickMetric.averageMillis(),
-                renderMetric.averageMillis()));
+        long now = System.nanoTime();
+        if (now - lastDebugUpdateNanos < DEBUG_UPDATE_INTERVAL_NANOS) {
+            return;
+        }
+        lastDebugUpdateNanos = now;
+        debugTextBuilder.setLength(0);
+        debugTextBuilder.append("tick=").append(tickCount).append("  tick=");
+        appendMillis(debugTextBuilder, tickMetric.averageMillis());
+        debugTextBuilder.append(" ms  render=");
+        appendMillis(debugTextBuilder, renderMetric.averageMillis());
+        debugTextBuilder.append(" ms");
+        gameStatus.setText(debugTextBuilder.toString());
     }
 
+    private static void appendMillis(StringBuilder builder, double millis) {
+        int hundredths = Math.max(0, (int)(millis * 100.0 + 0.5));
+        builder.append(hundredths / 100).append('.');
+        int fraction = hundredths % 100;
+        if (fraction < 10) {
+            builder.append('0');
+        }
+        builder.append(fraction);
+    }
     private void recordRenderTimeNanos(long durationNanos) {
         renderMetric.add(System.nanoTime(), durationNanos);
     }
@@ -434,7 +457,7 @@ public final class MainActivity extends Activity {
         return controls;
     }
     private void runNativeCompile() {
-        String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
+        String compileResult = nativeCompileProject(projectRootPath());
         compileReady = isRunnableCompile(compileResult);
         compileAttempted = true;
         setStatusText(compileResult);
@@ -448,7 +471,7 @@ public final class MainActivity extends Activity {
         int screenHeight = gamePreview == null ? 0 : gamePreview.getHeight();
         long tickStartNanos = System.nanoTime();
         int frameStatus = nativeRunFrameInto(
-                projectRoot().getAbsolutePath(),
+                projectRootPath(),
                 touchX,
                 touchY,
                 touchActive,
@@ -498,7 +521,7 @@ public final class MainActivity extends Activity {
         String reload = classifySelectedReload(selectedSymbol, editedSource);
         try {
             persistSelectedEdit(selectedSymbol, editedSource);
-            String compileResult = nativeCompileProject(projectRoot().getAbsolutePath());
+            String compileResult = nativeCompileProject(projectRootPath());
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
             setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
@@ -552,7 +575,11 @@ public final class MainActivity extends Activity {
     }
 
     private File projectRoot() {
-        return new File(getFilesDir(), PROJECT_DIR);
+        return projectRootFile;
+    }
+
+    private String projectRootPath() {
+        return projectRootPath;
     }
     private ProjectSnapshot loadBundledProject() {
         List<SourceFile> files = new ArrayList<>();
