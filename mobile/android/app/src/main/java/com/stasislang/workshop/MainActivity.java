@@ -48,6 +48,7 @@ public final class MainActivity extends Activity {
     private static final String PROJECT_DIR = "workshop_project";
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
+    private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
@@ -78,6 +79,7 @@ public final class MainActivity extends Activity {
     private TextView reloadStatus;
     private TextView gameStatus;
     private GamePreviewView gamePreview;
+    private LinearLayout symbolList;
     private File projectRootFile;
     private String projectRootPath;
     private ScrollView editorPanel;
@@ -136,7 +138,7 @@ public final class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
         gameStatus = new TextView(this);
-        gameStatus.setText("tick=0  tick=-- ms  render=-- ms");
+        gameStatus.setText("tick=-- ms  render=-- ms  budget=--%");
         gameStatus.setTextColor(Color.WHITE);
         gameStatus.setTextSize(12.0f);
         gameStatus.setSingleLine(true);
@@ -162,9 +164,10 @@ public final class MainActivity extends Activity {
         title.setPadding(0, 0, 0, dp(8));
         content.addView(title, fullWidth());
 
-        for (SymbolSection section : project.sections) {
-            addSection(content, section);
-        }
+        symbolList = new LinearLayout(this);
+        symbolList.setOrientation(LinearLayout.VERTICAL);
+        content.addView(symbolList, fullWidth());
+        rebuildSymbolList(project);
 
         sourceTitle = new TextView(this);
         sourceTitle.setTextColor(Color.rgb(22, 27, 34));
@@ -312,7 +315,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void updateGameDebugText(int tickCount) {
+    private void updateGameDebugText() {
         if (gameStatus == null) {
             return;
         }
@@ -321,13 +324,35 @@ public final class MainActivity extends Activity {
             return;
         }
         lastDebugUpdateNanos = now;
+        double tickMillis = tickMetric.averageMillis();
+        double renderMillis = renderMetric.averageMillis();
+        int budgetPercent = Math.max(0, (int)(((tickMillis + renderMillis) * 100.0 / FRAME_BUDGET_MILLIS) + 0.5));
         debugTextBuilder.setLength(0);
-        debugTextBuilder.append("tick=").append(tickCount).append("  tick=");
-        appendMillis(debugTextBuilder, tickMetric.averageMillis());
+        debugTextBuilder.append("tick=");
+        appendMillis(debugTextBuilder, tickMillis);
         debugTextBuilder.append(" ms  render=");
-        appendMillis(debugTextBuilder, renderMetric.averageMillis());
-        debugTextBuilder.append(" ms");
+        appendMillis(debugTextBuilder, renderMillis);
+        debugTextBuilder.append(" ms  budget=");
+        appendPercent(debugTextBuilder, budgetPercent);
+        gameStatus.setTextColor(debugColorForBudget(budgetPercent));
         gameStatus.setText(debugTextBuilder.toString());
+    }
+
+    private static int debugColorForBudget(int budgetPercent) {
+        if (budgetPercent >= 100) {
+            return Color.rgb(186, 104, 255);
+        }
+        if (budgetPercent >= 80) {
+            return Color.rgb(255, 91, 91);
+        }
+        if (budgetPercent >= 50) {
+            return Color.rgb(255, 214, 102);
+        }
+        return Color.WHITE;
+    }
+
+    private static void appendPercent(StringBuilder builder, int percent) {
+        builder.append(percent).append('%');
     }
 
     private static void appendMillis(StringBuilder builder, double millis) {
@@ -342,6 +367,16 @@ public final class MainActivity extends Activity {
     private void recordRenderTimeNanos(long durationNanos) {
         renderMetric.add(System.nanoTime(), durationNanos);
     }
+    private void rebuildSymbolList(ProjectSnapshot project) {
+        if (symbolList == null) {
+            return;
+        }
+        symbolList.removeAllViews();
+        for (SymbolSection section : project.sections) {
+            addSection(symbolList, section);
+        }
+    }
+
     private void addSection(LinearLayout content, SymbolSection section) {
         TextView sectionTitle = new TextView(this);
         sectionTitle.setText(section.title);
@@ -434,6 +469,16 @@ public final class MainActivity extends Activity {
         editRow.addView(reset, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         controls.addView(editRow, fullWidth());
 
+        Button resetProject = new Button(this);
+        resetProject.setText("Reset Project");
+        resetProject.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                resetProjectFiles();
+            }
+        });
+        controls.addView(resetProject, fullWidth());
+
         LinearLayout runtimeRow = new LinearLayout(this);
         runtimeRow.setOrientation(LinearLayout.HORIZONTAL);
 
@@ -493,7 +538,7 @@ public final class MainActivity extends Activity {
         if (gamePreview != null) {
             gamePreview.setRenderFrameValues(nativeFrameValues);
         }
-        updateGameDebugText(nativeFrameValues[1]);
+        updateGameDebugText();
     }
 
     private static int extractIntField(String text, String key, int fallback) {
@@ -521,10 +566,19 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        SymbolEntry editedSymbol = selectedSymbol;
         String editedSource = sourceEditor.getText().toString().trim();
-        String reload = classifySelectedReload(selectedSymbol, editedSource);
+        String reload = classifySelectedReload(editedSymbol, editedSource);
         try {
-            persistSelectedEdit(selectedSymbol, editedSource);
+            persistSelectedEdit(editedSymbol, editedSource);
+            ProjectSnapshot refreshedProject = loadBundledProject();
+            rebuildSymbolList(refreshedProject);
+            SymbolEntry refreshedSymbol = findMatchingSymbol(refreshedProject, editedSymbol);
+            if (refreshedSymbol != null) {
+                showSymbol(refreshedSymbol);
+            } else if (refreshedProject.firstSymbol != null) {
+                showSymbol(refreshedProject.firstSymbol);
+            }
             String compileResult = nativeCompileProject(projectRootPath());
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
@@ -533,7 +587,6 @@ public final class MainActivity extends Activity {
             setStatusText("Save failed: " + error.getMessage());
         }
     }
-
     private void persistSelectedEdit(SymbolEntry symbol, String editedSource) throws IOException {
         SourceFile sourceFile = symbol.sourceFile;
         String before = sourceFile.source.substring(0, symbol.start);
@@ -542,6 +595,17 @@ public final class MainActivity extends Activity {
         symbol.source = editedSource;
         symbol.end = symbol.start + editedSource.length();
         writeTextFile(sourceFile.diskFile, sourceFile.source);
+    }
+
+    private void resetProjectFiles() {
+        ProjectSnapshot project = loadBundledProject(true);
+        rebuildSymbolList(project);
+        if (project.firstSymbol != null) {
+            showSymbol(project.firstSymbol);
+        }
+        compileReady = false;
+        compileAttempted = false;
+        setStatusText("Reset project from bundled sample");
     }
 
     private void resetSelectedEdit() {
@@ -586,10 +650,16 @@ public final class MainActivity extends Activity {
         return projectRootPath;
     }
     private ProjectSnapshot loadBundledProject() {
+        return loadBundledProject(false);
+    }
+
+    private ProjectSnapshot loadBundledProject(boolean resetProject) {
         List<SourceFile> files = new ArrayList<>();
         AssetManager assets = getAssets();
         File projectRoot = projectRoot();
-        deleteProjectDirectory(projectRoot);
+        if (resetProject) {
+            deleteProjectDirectory(projectRoot);
+        }
 
         for (String file : SAMPLE_FILES) {
             File diskFile = new File(projectRoot, file);
@@ -605,6 +675,9 @@ public final class MainActivity extends Activity {
     }
 
     private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile) throws IOException {
+        if (diskFile.isFile()) {
+            return;
+        }
         File parent = diskFile.getParentFile();
         if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
             throw new IOException("failed to create " + parent.getAbsolutePath());
@@ -720,6 +793,25 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private static SymbolEntry findMatchingSymbol(ProjectSnapshot project, SymbolEntry previous) {
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (sameSymbolIdentity(symbol, previous)) {
+                        return symbol;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean sameSymbolIdentity(SymbolEntry left, SymbolEntry right) {
+        return left.kind.equals(right.kind)
+                && left.file.equals(right.file)
+                && left.owner.equals(right.owner)
+                && left.name.equals(right.name);
+    }
     private static List<String> parseStructNames(String source) {
         List<String> names = new ArrayList<>();
         int cursor = 0;
