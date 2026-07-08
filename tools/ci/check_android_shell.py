@@ -141,6 +141,10 @@ def main() -> int:
     assert "logical_render_snapshot" in activity
     assert "take_screenshot returns a compact logical render snapshot" in activity
     assert "json_schema" in activity
+    assert "toolArgsSchema" in activity
+    assert "toolProperties.put(\"args\", toolArgsSchema)" in activity
+    assert "observation.put(\"args\", args)" in activity
+    assert "format.put(\"strict\", false)" in activity
     assert "stasis_ai_code_response" in activity
     assert "response.has(\"edits\")" in activity
     assert "part.optString(\"output_text\", \"\")" in activity
