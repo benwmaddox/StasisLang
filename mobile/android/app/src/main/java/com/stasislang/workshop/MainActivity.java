@@ -835,16 +835,51 @@ public final class MainActivity extends Activity {
         String editKind = "struct".equals(expectedKind) ? "replace_struct" : "replace_function";
         String newSource = call.getString("new_source").trim();
         validateAiReplacementSource(editKind, target.name, newSource);
+        return writeSymbolTransaction(session, target, newSource);
+    }
+
+    private JSONObject writeSymbolTransaction(AiAgentSession session, SymbolEntry target, String newSource) throws Exception {
+        SourceFile sourceFile = target.sourceFile;
+        String originalFileSource = sourceFile.source;
+        String originalSymbolSource = target.source;
+        int originalEnd = target.end;
+
         persistSelectedEdit(target, newSource);
         session.invalidateProject();
+
+        String compileResult = nativeCompileProject(projectRootPath());
+        lastCompileResult = compileResult;
+        compileReady = isRunnableCompile(compileResult);
+        compileAttempted = true;
+        JSONObject diagnostics = compileResultToJson(compileResult);
+        if (!compileReady) {
+            sourceFile.source = originalFileSource;
+            target.source = originalSymbolSource;
+            target.end = originalEnd;
+            writeTextFile(sourceFile.diskFile, originalFileSource);
+            session.invalidateProject();
+            String restoredCompile = nativeCompileProject(projectRootPath());
+            lastCompileResult = restoredCompile;
+            compileReady = isRunnableCompile(restoredCompile);
+            compileAttempted = true;
+            return new JSONObject()
+                    .put("file", target.file)
+                    .put("kind", target.kind)
+                    .put("name", target.name)
+                    .put("owner", target.owner)
+                    .put("status", "rolled_back")
+                    .put("diagnostics", diagnostics)
+                    .put("restored_diagnostics", compileResultToJson(restoredCompile));
+        }
+
         return new JSONObject()
                 .put("file", target.file)
                 .put("kind", target.kind)
                 .put("name", target.name)
                 .put("owner", target.owner)
-                .put("status", "written");
+                .put("status", "written")
+                .put("diagnostics", diagnostics);
     }
-
     private JSONObject aiToolCompileProject() throws Exception {
         String compileResult = nativeCompileProject(projectRootPath());
         lastCompileResult = compileResult;
@@ -906,7 +941,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, take_screenshot. For no-argument tools, send empty strings for kind, owner, name, file, and new_source. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, take_screenshot. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. For no-argument tools, send empty strings for kind, owner, name, file, and new_source. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
