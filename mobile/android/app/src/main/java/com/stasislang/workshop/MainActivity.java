@@ -2,10 +2,9 @@ package com.stasislang.workshop;
 
 import android.app.Activity;
 import android.content.res.AssetManager;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.RectF;
+import android.opengl.GLES20;
+import android.opengl.GLSurfaceView;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -31,6 +30,9 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -922,19 +924,18 @@ public final class MainActivity extends Activity {
     }
 
 
-    private static final class GamePreviewView extends View {
-        private final MainActivity activity;
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF rect = new RectF();
-        private RenderFrame frame = RenderFrame.empty();
+    private static final class GamePreviewView extends GLSurfaceView {
+        private final PreviewRenderer renderer;
         private int touchX;
         private int touchY;
         private boolean touchActive;
 
         GamePreviewView(MainActivity activity) {
             super(activity);
-            this.activity = activity;
-            setBackgroundColor(Color.rgb(15, 20, 28));
+            setEGLContextClientVersion(2);
+            renderer = new PreviewRenderer(activity);
+            setRenderer(renderer);
+            setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
             setFocusable(true);
         }
 
@@ -951,8 +952,8 @@ public final class MainActivity extends Activity {
         }
 
         void setRenderFrame(RenderFrame value) {
-            frame = value;
-            invalidate();
+            renderer.setFrame(value);
+            requestRender();
         }
 
         @Override
@@ -963,31 +964,134 @@ public final class MainActivity extends Activity {
             touchActive = action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL;
             return true;
         }
+    }
+
+    private static final class PreviewRenderer implements GLSurfaceView.Renderer {
+        private static final String VERTEX_SHADER =
+                "attribute vec2 aPosition;" +
+                "uniform vec2 uResolution;" +
+                "void main() {" +
+                "  vec2 zeroToOne = aPosition / uResolution;" +
+                "  vec2 clip = zeroToOne * 2.0 - 1.0;" +
+                "  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);" +
+                "}";
+        private static final String FRAGMENT_SHADER =
+                "precision mediump float;" +
+                "uniform vec4 uColor;" +
+                "void main() {" +
+                "  gl_FragColor = uColor;" +
+                "}";
+
+        private final MainActivity activity;
+        private final FloatBuffer vertexBuffer = ByteBuffer
+                .allocateDirect(8 * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer();
+        private RenderFrame frame = RenderFrame.empty();
+        private int program;
+        private int positionHandle;
+        private int resolutionHandle;
+        private int colorHandle;
+        private int surfaceWidth = 1;
+        private int surfaceHeight = 1;
+
+        PreviewRenderer(MainActivity activity) {
+            this.activity = activity;
+        }
+
+        synchronized void setFrame(RenderFrame value) {
+            frame = value;
+        }
 
         @Override
-        protected void onDraw(Canvas canvas) {
+        public void onSurfaceCreated(javax.microedition.khronos.opengles.GL10 gl, javax.microedition.khronos.egl.EGLConfig config) {
+            program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER);
+            positionHandle = GLES20.glGetAttribLocation(program, "aPosition");
+            resolutionHandle = GLES20.glGetUniformLocation(program, "uResolution");
+            colorHandle = GLES20.glGetUniformLocation(program, "uColor");
+            GLES20.glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
+        }
+
+        @Override
+        public void onSurfaceChanged(javax.microedition.khronos.opengles.GL10 gl, int width, int height) {
+            surfaceWidth = Math.max(1, width);
+            surfaceHeight = Math.max(1, height);
+            GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+        }
+
+        @Override
+        public void onDrawFrame(javax.microedition.khronos.opengles.GL10 gl) {
             long renderStartNanos = System.nanoTime();
-            super.onDraw(canvas);
-            int width = getWidth();
-            int height = getHeight();
-            if (width <= 0 || height <= 0) {
-                activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
-                return;
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            GLES20.glUseProgram(program);
+            GLES20.glUniform2f(resolutionHandle, (float)surfaceWidth, (float)surfaceHeight);
+
+            RenderFrame current;
+            synchronized (this) {
+                current = frame;
             }
-
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.rgb(15, 20, 28));
-            canvas.drawRect(0, 0, width, height, paint);
-
-            for (int index = 0; index < frame.commandCount; index += 1) {
-                RenderCommand command = frame.commands[index];
+            for (int index = 0; index < current.commandCount; index += 1) {
+                RenderCommand command = current.commands[index];
                 if (command.kind == 1) {
-                    paint.setColor(Color.rgb((command.color >> 16) & 255, (command.color >> 8) & 255, command.color & 255));
-                    rect.set(command.x, command.y, command.x + command.w, command.y + command.h);
-                    canvas.drawRect(rect, paint);
+                    drawRect(command);
                 }
             }
             activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
+        }
+
+        private void drawRect(RenderCommand command) {
+            float left = command.x;
+            float top = command.y;
+            float right = command.x + command.w;
+            float bottom = command.y + command.h;
+            vertexBuffer.clear();
+            vertexBuffer.put(left).put(top);
+            vertexBuffer.put(right).put(top);
+            vertexBuffer.put(left).put(bottom);
+            vertexBuffer.put(right).put(bottom);
+            vertexBuffer.flip();
+
+            GLES20.glEnableVertexAttribArray(positionHandle);
+            GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer);
+            GLES20.glUniform4f(
+                    colorHandle,
+                    ((command.color >> 16) & 255) / 255.0f,
+                    ((command.color >> 8) & 255) / 255.0f,
+                    (command.color & 255) / 255.0f,
+                    1.0f);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+            GLES20.glDisableVertexAttribArray(positionHandle);
+        }
+
+        private static int createProgram(String vertexSource, String fragmentSource) {
+            int vertexShader = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource);
+            int fragmentShader = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource);
+            int program = GLES20.glCreateProgram();
+            GLES20.glAttachShader(program, vertexShader);
+            GLES20.glAttachShader(program, fragmentShader);
+            GLES20.glLinkProgram(program);
+            int[] linked = new int[1];
+            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0);
+            if (linked[0] == 0) {
+                String log = GLES20.glGetProgramInfoLog(program);
+                GLES20.glDeleteProgram(program);
+                throw new IllegalStateException("OpenGL program link failed: " + log);
+            }
+            return program;
+        }
+
+        private static int compileShader(int type, String source) {
+            int shader = GLES20.glCreateShader(type);
+            GLES20.glShaderSource(shader, source);
+            GLES20.glCompileShader(shader);
+            int[] compiled = new int[1];
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0);
+            if (compiled[0] == 0) {
+                String log = GLES20.glGetShaderInfoLog(shader);
+                GLES20.glDeleteShader(shader);
+                throw new IllegalStateException("OpenGL shader compile failed: " + log);
+            }
+            return shader;
         }
     }
 

@@ -79,7 +79,8 @@ def main() -> int:
     assert "workshop_sample/" in activity
     assert "createWorkshopView" in activity
     assert "GamePreviewView" in activity
-    assert "onDraw(Canvas canvas)" in activity
+    assert "GLSurfaceView" in activity
+    assert "onDrawFrame" in activity
     assert "extractIntField" in activity
     assert "RenderFrame frame = RenderFrame.fromNativeFrame(frameValues)" in activity
     assert "gamePreview.setRenderFrame(frame)" in activity
@@ -100,7 +101,8 @@ def main() -> int:
     assert "MotionEvent" in activity
     assert "RenderFrame.fromNativeFrame" in activity
     assert "render_command_count" in activity
-    assert "canvas.drawRect(rect, paint)" in activity
+    assert "GLES20.glDrawArrays" in activity
+    assert "GL_TRIANGLE_STRIP" in activity
     assert "applySelectedEdit" in activity
     assert "persistSelectedEdit" in activity
     assert "getFilesDir()" in activity
