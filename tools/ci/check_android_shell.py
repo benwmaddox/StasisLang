@@ -98,6 +98,17 @@ def main() -> int:
     assert "AI Patch Selected Symbol" in activity
     assert "https://api.openai.com/v1/responses" in activity
     assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
+    assert "MAX_AI_AGENT_TURNS" in activity
+    assert "runAiAgentLoop" in activity
+    assert "executeAiToolCalls" in activity
+    assert "available_tools" in activity
+    assert "list_symbols" in activity
+    assert "read_symbol" in activity
+    assert "read_file" in activity
+    assert "write_symbol" in activity
+    assert "take_screenshot" in activity
+    assert "aiToolWriteSymbol" in activity
+    assert "preview_metadata" in activity
     assert "json_schema" in activity
     assert "stasis_ai_code_response" in activity
     assert "response.has(\"edits\")" in activity

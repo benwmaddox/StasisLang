@@ -60,6 +60,7 @@ public final class MainActivity extends Activity {
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
+    private static final int MAX_AI_AGENT_TURNS = 4;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
     private static final int RENDER_FRAME_I32_CAPACITY =
@@ -665,8 +666,7 @@ public final class MainActivity extends Activity {
             @Override
             public void run() {
                 try {
-                    String responseBody = callOpenAiResponsesApi(requestApiKey, requestModel, requestJson);
-                    final String aiJson = extractAiJsonResponse(responseBody);
+                    final String aiJson = runAiAgentLoop(requestApiKey, requestModel, requestJson);
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
@@ -713,6 +713,12 @@ public final class MainActivity extends Activity {
             JSONObject request = new JSONObject();
             request.put("user_prompt", prompt);
             request.put("selected_symbols", new JSONArray().put(selected));
+            request.put("available_tools", new JSONArray()
+                    .put("list_symbols")
+                    .put("read_symbol")
+                    .put("read_file")
+                    .put("write_symbol")
+                    .put("take_screenshot"));
             request.put("stasis_style_rules", rules);
             return request.toString();
         } catch (Exception error) {
@@ -720,11 +726,155 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private String runAiAgentLoop(String apiKey, String model, String initialRequestJson) throws Exception {
+        String currentRequestJson = initialRequestJson;
+        for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
+            String responseBody = callOpenAiResponsesApi(apiKey, model, currentRequestJson);
+            String aiJson = extractAiJsonResponse(responseBody);
+            JSONObject response = new JSONObject(aiJson);
+            JSONArray toolCalls = response.optJSONArray("tool_calls");
+            String mode = response.optString("mode", "edits");
+            if (!"tool_calls".equals(mode) || toolCalls == null || toolCalls.length() == 0) {
+                return aiJson;
+            }
+
+            JSONArray observations = executeAiToolCalls(toolCalls);
+            JSONObject followup = new JSONObject();
+            followup.put("original_request", new JSONObject(initialRequestJson));
+            followup.put("tool_observations", observations);
+            followup.put("instruction", "Use the tool observations to either request more tools or return final edits. Return mode=edits when ready to write final changes.");
+            currentRequestJson = followup.toString();
+        }
+        throw new IOException("AI agent reached tool-call limit before returning edits");
+    }
+
+    private JSONArray executeAiToolCalls(JSONArray toolCalls) throws Exception {
+        JSONArray observations = new JSONArray();
+        for (int index = 0; index < toolCalls.length(); index += 1) {
+            JSONObject call = toolCalls.getJSONObject(index);
+            JSONObject observation = new JSONObject();
+            String tool = call.optString("tool", "");
+            observation.put("tool", tool);
+            try {
+                observation.put("result", executeAiToolCall(tool, call));
+            } catch (Exception error) {
+                observation.put("error", error.getMessage());
+            }
+            observations.put(observation);
+        }
+        return observations;
+    }
+
+    private JSONObject executeAiToolCall(String tool, JSONObject call) throws Exception {
+        if ("list_symbols".equals(tool)) {
+            return aiToolListSymbols();
+        }
+        if ("read_symbol".equals(tool)) {
+            return aiToolReadSymbol(call);
+        }
+        if ("read_file".equals(tool)) {
+            return aiToolReadFile(call);
+        }
+        if ("write_symbol".equals(tool)) {
+            return aiToolWriteSymbol(call);
+        }
+        if ("take_screenshot".equals(tool)) {
+            return aiToolTakeScreenshot();
+        }
+        throw new IOException("Unsupported AI tool: " + tool);
+    }
+
+    private JSONObject aiToolListSymbols() throws Exception {
+        ProjectSnapshot project = loadBundledProject();
+        JSONArray symbols = new JSONArray();
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    symbols.put(symbolToJson(symbol, false));
+                }
+            }
+        }
+        return new JSONObject()
+                .put("symbol_count", symbols.length())
+                .put("symbols", symbols);
+    }
+
+    private JSONObject aiToolReadSymbol(JSONObject call) throws Exception {
+        ProjectSnapshot project = loadBundledProject();
+        String kind = call.optString("kind", "function");
+        String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
+        SymbolEntry target = findSymbolForAiEdit(project, expectedKind, call, selectedSymbol);
+        return symbolToJson(target, true);
+    }
+
+    private JSONObject aiToolReadFile(JSONObject call) throws Exception {
+        ProjectSnapshot project = loadBundledProject();
+        SourceFile sourceFile = findProjectFile(project, call.optString("file", ""));
+        return new JSONObject()
+                .put("file", sourceFile.path)
+                .put("source", sourceFile.source);
+    }
+
+    private JSONObject aiToolWriteSymbol(JSONObject call) throws Exception {
+        ProjectSnapshot project = loadBundledProject();
+        String kind = call.optString("kind", "replace_function");
+        String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
+        SymbolEntry target = findSymbolForAiEdit(project, expectedKind, call, selectedSymbol);
+        String editKind = "struct".equals(expectedKind) ? "replace_struct" : "replace_function";
+        String newSource = call.getString("new_source").trim();
+        validateAiReplacementSource(editKind, target.name, newSource);
+        persistSelectedEdit(target, newSource);
+        return new JSONObject()
+                .put("file", target.file)
+                .put("kind", target.kind)
+                .put("name", target.name)
+                .put("owner", target.owner)
+                .put("status", "written");
+    }
+
+    private JSONObject aiToolTakeScreenshot() throws Exception {
+        int width = gamePreview == null ? 0 : gamePreview.getWidth();
+        int height = gamePreview == null ? 0 : gamePreview.getHeight();
+        JSONArray frame = new JSONArray();
+        for (int index = 0; index < nativeFrameValues.length; index += 1) {
+            frame.put(nativeFrameValues[index]);
+        }
+        return new JSONObject()
+                .put("kind", "preview_metadata")
+                .put("width", width)
+                .put("height", height)
+                .put("touch_x", gamePreview == null ? 0 : gamePreview.touchX())
+                .put("touch_y", gamePreview == null ? 0 : gamePreview.touchY())
+                .put("touch_active", gamePreview != null && gamePreview.touchActive() == 1)
+                .put("frame_values", frame);
+    }
+
+    private static SourceFile findProjectFile(ProjectSnapshot project, String file) throws Exception {
+        for (SourceFile sourceFile : project.files) {
+            if (sourceFile.path.equals(file)) {
+                return sourceFile;
+            }
+        }
+        throw new IOException("AI file target not found: " + file);
+    }
+
+    private static JSONObject symbolToJson(SymbolEntry symbol, boolean includeSource) throws Exception {
+        JSONObject json = new JSONObject()
+                .put("kind", symbol.kind)
+                .put("name", symbol.name)
+                .put("owner", symbol.owner)
+                .put("file", symbol.file)
+                .put("signature", symbol.signature);
+        if (includeSource) {
+            json.put("source", symbol.source);
+        }
+        return json;
+    }
     private static String callOpenAiResponsesApi(String apiKey, String model, String requestJson) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object matching the Stasis AI Code Response format. Supported edits are replace_function and replace_struct. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, take_screenshot. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -770,8 +920,37 @@ public final class MainActivity extends Activity {
                 .put("new_source"));
         editSchema.put("properties", editProperties);
 
+        JSONObject toolProperties = new JSONObject();
+        toolProperties.put("tool", new JSONObject().put("type", "string").put("enum", new JSONArray()
+                .put("list_symbols")
+                .put("read_symbol")
+                .put("read_file")
+                .put("write_symbol")
+                .put("take_screenshot")));
+        toolProperties.put("kind", new JSONObject().put("type", "string"));
+        toolProperties.put("owner", new JSONObject().put("type", "string"));
+        toolProperties.put("name", new JSONObject().put("type", "string"));
+        toolProperties.put("file", new JSONObject().put("type", "string"));
+        toolProperties.put("new_source", new JSONObject().put("type", "string"));
+
+        JSONObject toolSchema = new JSONObject();
+        toolSchema.put("type", "object");
+        toolSchema.put("additionalProperties", false);
+        toolSchema.put("required", new JSONArray()
+                .put("tool")
+                .put("kind")
+                .put("owner")
+                .put("name")
+                .put("file")
+                .put("new_source"));
+        toolSchema.put("properties", toolProperties);
+
         JSONObject responseProperties = new JSONObject();
+        responseProperties.put("mode", new JSONObject().put("type", "string").put("enum", new JSONArray()
+                .put("tool_calls")
+                .put("edits")));
         responseProperties.put("summary", new JSONObject().put("type", "string"));
+        responseProperties.put("tool_calls", new JSONObject().put("type", "array").put("items", toolSchema));
         responseProperties.put("edits", new JSONObject().put("type", "array").put("items", editSchema));
         responseProperties.put("expected_reload", new JSONObject().put("type", "string").put("enum", new JSONArray()
                 .put("FastReload")
@@ -782,7 +961,9 @@ public final class MainActivity extends Activity {
         schema.put("type", "object");
         schema.put("additionalProperties", false);
         schema.put("required", new JSONArray()
+                .put("mode")
                 .put("summary")
+                .put("tool_calls")
                 .put("edits")
                 .put("expected_reload")
                 .put("reason"));
