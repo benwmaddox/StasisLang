@@ -47,6 +47,11 @@ public final class MainActivity extends Activity {
     private static final String ASSET_ROOT = "workshop_sample/";
     private static final String PROJECT_DIR = "workshop_project";
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
+    private static final int MAX_RENDER_COMMANDS = 8;
+    private static final int RENDER_FRAME_HEADER_SIZE = 6;
+    private static final int RENDER_COMMAND_STRIDE = 6;
+    private static final int RENDER_FRAME_I32_CAPACITY =
+            RENDER_FRAME_HEADER_SIZE + MAX_RENDER_COMMANDS * RENDER_COMMAND_STRIDE;
     private static final String[] SAMPLE_FILES = new String[] {
             "src/main.stasis",
             "src/root.stasis",
@@ -67,6 +72,7 @@ public final class MainActivity extends Activity {
     private Button editorToggle;
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
     private Runnable gameLoop;
+    private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY];
     private final RollingMetric tickMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
     private boolean compileReady;
@@ -80,7 +86,7 @@ public final class MainActivity extends Activity {
     private static native String nativeStatus();
     private static native String nativeCompileProject(String projectRoot);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
-    private static native int[] nativeRunFrame(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
+    private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -289,14 +295,14 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void updateGameDebugText(RenderFrame frame) {
+    private void updateGameDebugText(int tickCount) {
         if (gameStatus == null) {
             return;
         }
         gameStatus.setText(String.format(
                 Locale.US,
                 "tick=%d  tick=%.2f ms  render=%.2f ms",
-                frame.tickCount,
+                tickCount,
                 tickMetric.averageMillis(),
                 renderMetric.averageMillis()));
     }
@@ -436,26 +442,26 @@ public final class MainActivity extends Activity {
         int screenWidth = gamePreview == null ? 0 : gamePreview.getWidth();
         int screenHeight = gamePreview == null ? 0 : gamePreview.getHeight();
         long tickStartNanos = System.nanoTime();
-        int[] frameValues = nativeRunFrame(
+        int frameStatus = nativeRunFrameInto(
                 projectRoot().getAbsolutePath(),
                 touchX,
                 touchY,
                 touchActive,
                 screenWidth,
-                screenHeight);
+                screenHeight,
+                nativeFrameValues);
         long tickEndNanos = System.nanoTime();
         tickMetric.add(tickEndNanos, tickEndNanos - tickStartNanos);
-        if (frameValues == null || frameValues.length == 0 || frameValues[0] != 0) {
+        if (frameStatus != 0 || nativeFrameValues[0] != 0) {
             compileReady = false;
             compileAttempted = true;
             setStatusText("RunError: native frame tick failed");
             return;
         }
-        RenderFrame frame = RenderFrame.fromNativeFrame(frameValues);
         if (gamePreview != null) {
-            gamePreview.setRenderFrame(frame);
+            gamePreview.setRenderFrameValues(nativeFrameValues);
         }
-        updateGameDebugText(frame);
+        updateGameDebugText(nativeFrameValues[1]);
     }
 
     private static int extractIntField(String text, String key, int fallback) {
@@ -951,8 +957,8 @@ public final class MainActivity extends Activity {
             return touchActive ? 1 : 0;
         }
 
-        void setRenderFrame(RenderFrame value) {
-            renderer.setFrame(value);
+        void setRenderFrameValues(int[] frameValues) {
+            renderer.setFrameValues(frameValues);
             requestRender();
         }
 
@@ -987,7 +993,7 @@ public final class MainActivity extends Activity {
                 .allocateDirect(8 * 4)
                 .order(ByteOrder.nativeOrder())
                 .asFloatBuffer();
-        private RenderFrame frame = RenderFrame.empty();
+        private final int[] frameValues = new int[RENDER_FRAME_I32_CAPACITY];
         private int program;
         private int positionHandle;
         private int resolutionHandle;
@@ -999,8 +1005,8 @@ public final class MainActivity extends Activity {
             this.activity = activity;
         }
 
-        synchronized void setFrame(RenderFrame value) {
-            frame = value;
+        synchronized void setFrameValues(int[] values) {
+            System.arraycopy(values, 0, frameValues, 0, RENDER_FRAME_I32_CAPACITY);
         }
 
         @Override
@@ -1026,24 +1032,24 @@ public final class MainActivity extends Activity {
             GLES20.glUseProgram(program);
             GLES20.glUniform2f(resolutionHandle, (float)surfaceWidth, (float)surfaceHeight);
 
-            RenderFrame current;
             synchronized (this) {
-                current = frame;
-            }
-            for (int index = 0; index < current.commandCount; index += 1) {
-                RenderCommand command = current.commands[index];
-                if (command.kind == 1) {
-                    drawRect(command);
+                int commandCount = Math.max(0, Math.min(MAX_RENDER_COMMANDS, frameValues[5]));
+                for (int index = 0; index < commandCount; index += 1) {
+                    int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
+                    if (frameValues[base] == 1) {
+                        drawRect(base);
+                    }
                 }
             }
             activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
         }
 
-        private void drawRect(RenderCommand command) {
-            float left = command.x;
-            float top = command.y;
-            float right = command.x + command.w;
-            float bottom = command.y + command.h;
+        private void drawRect(int base) {
+            int color = frameValues[base + 5];
+            float left = frameValues[base + 1];
+            float top = frameValues[base + 2];
+            float right = frameValues[base + 1] + frameValues[base + 3];
+            float bottom = frameValues[base + 2] + frameValues[base + 4];
             vertexBuffer.clear();
             vertexBuffer.put(left).put(top);
             vertexBuffer.put(right).put(top);
@@ -1055,9 +1061,9 @@ public final class MainActivity extends Activity {
             GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer);
             GLES20.glUniform4f(
                     colorHandle,
-                    ((command.color >> 16) & 255) / 255.0f,
-                    ((command.color >> 8) & 255) / 255.0f,
-                    (command.color & 255) / 255.0f,
+                    ((color >> 16) & 255) / 255.0f,
+                    ((color >> 8) & 255) / 255.0f,
+                    (color & 255) / 255.0f,
                     1.0f);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
             GLES20.glDisableVertexAttribArray(positionHandle);
@@ -1129,84 +1135,6 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static final class RenderFrame {
-        private static final int MAX_COMMANDS = 8;
-        final int tickCount;
-        final int commandCount;
-        final RenderCommand[] commands;
-
-        RenderFrame(int tickCount, int commandCount, RenderCommand[] commands) {
-            this.tickCount = tickCount;
-            this.commandCount = commandCount;
-            this.commands = commands;
-        }
-
-        static RenderFrame empty() {
-            return new RenderFrame(0, 0, emptyCommands());
-        }
-
-        static RenderFrame fromNativeFrame(int[] frameValues) {
-            RenderCommand[] commands = emptyCommands();
-            int count = Math.max(0, Math.min(MAX_COMMANDS, frameValues[5]));
-            for (int index = 0; index < count; index += 1) {
-                int base = 6 + index * 6;
-                commands[index] = new RenderCommand(
-                        frameValues[base],
-                        frameValues[base + 1],
-                        frameValues[base + 2],
-                        frameValues[base + 3],
-                        frameValues[base + 4],
-                        frameValues[base + 5]);
-            }
-            return new RenderFrame(frameValues[1], count, commands);
-        }
-
-        static RenderFrame fromRunResult(String runResult) {
-            RenderCommand[] commands = emptyCommands();
-            int count = Math.max(0, Math.min(MAX_COMMANDS, extractIntField(runResult, "render_command_count", 0)));
-            for (int index = 0; index < count; index += 1) {
-                String prefix = "render" + index + "_";
-                commands[index] = new RenderCommand(
-                        extractIntField(runResult, prefix + "kind", 0),
-                        extractIntField(runResult, prefix + "x", 0),
-                        extractIntField(runResult, prefix + "y", 0),
-                        extractIntField(runResult, prefix + "w", 0),
-                        extractIntField(runResult, prefix + "h", 0),
-                        extractIntField(runResult, prefix + "color", Color.WHITE));
-            }
-            return new RenderFrame(extractIntField(runResult, "tick_count", 0), count, commands);
-        }
-
-        private static RenderCommand[] emptyCommands() {
-            RenderCommand[] commands = new RenderCommand[MAX_COMMANDS];
-            for (int index = 0; index < commands.length; index += 1) {
-                commands[index] = RenderCommand.empty();
-            }
-            return commands;
-        }
-    }
-
-    private static final class RenderCommand {
-        final int kind;
-        final int x;
-        final int y;
-        final int w;
-        final int h;
-        final int color;
-
-        RenderCommand(int kind, int x, int y, int w, int h, int color) {
-            this.kind = kind;
-            this.x = x;
-            this.y = y;
-            this.w = w;
-            this.h = h;
-            this.color = color;
-        }
-
-        static RenderCommand empty() {
-            return new RenderCommand(0, 0, 0, 0, 0, Color.TRANSPARENT);
-        }
-    }
     private static final class SourceFile {
         final String path;
         final File diskFile;
@@ -1270,4 +1198,3 @@ public final class MainActivity extends Activity {
         }
     }
 }
-
