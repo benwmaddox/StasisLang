@@ -1100,12 +1100,15 @@ public final class MainActivity extends Activity {
             frame.put(nativeFrameValues[index]);
         }
         return new JSONObject()
-                .put("kind", "preview_metadata")
+                .put("kind", "logical_render_snapshot")
                 .put("width", width)
                 .put("height", height)
                 .put("touch_x", gamePreview == null ? 0 : gamePreview.touchX())
                 .put("touch_y", gamePreview == null ? 0 : gamePreview.touchY())
                 .put("touch_active", gamePreview != null && gamePreview.touchActive() == 1)
+                .put("input", currentInputStateJson())
+                .put("runtime_state", runtimeStateJson())
+                .put("frame", frameValuesToJson(nativeFrameValues))
                 .put("frame_values", frame);
     }
 
@@ -1134,7 +1137,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. For no-argument tools, send empty strings for kind, owner, name, file, path, and new_source. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. For no-argument tools, send empty strings for kind, owner, name, file, path, and new_source. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
