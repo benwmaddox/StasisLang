@@ -101,6 +101,8 @@ def main() -> int:
     assert "replace_struct" in activity
     assert "SharedPreferences" in activity
     assert "AI_PREF_API_KEY" in activity
+    assert "aiPrefs.getString(AI_PREF_API_KEY" in activity
+    assert "aiPrefs.getString(AI_PREF_MODEL" in activity
     assert "gpt-5.4-mini" in activity
     assert "saveAiSettings(apiKey, model)" in activity
     assert "private LinearLayout symbolList" in activity

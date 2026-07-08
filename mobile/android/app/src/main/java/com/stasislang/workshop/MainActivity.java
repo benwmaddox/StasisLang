@@ -475,6 +475,8 @@ public final class MainActivity extends Activity {
         aiTitle.setTypeface(Typeface.DEFAULT_BOLD);
         controls.addView(aiTitle, fullWidth());
 
+        SharedPreferences aiPrefs = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+
         aiPromptEditor = new EditText(this);
         aiPromptEditor.setHint("Describe a game change for the selected symbol");
         aiPromptEditor.setSingleLine(false);
@@ -485,12 +487,13 @@ public final class MainActivity extends Activity {
         aiApiKeyEditor = new EditText(this);
         aiApiKeyEditor.setHint("OpenAI API key");
         aiApiKeyEditor.setSingleLine(true);
+        aiApiKeyEditor.setText(aiPrefs.getString(AI_PREF_API_KEY, ""));
         aiApiKeyEditor.setTextSize(12.0f);
         controls.addView(aiApiKeyEditor, fullWidth());
 
         aiModelEditor = new EditText(this);
         aiModelEditor.setSingleLine(true);
-        aiModelEditor.setText("gpt-5.4-mini");
+        aiModelEditor.setText(aiPrefs.getString(AI_PREF_MODEL, "gpt-5.4-mini"));
         aiModelEditor.setTextSize(12.0f);
         controls.addView(aiModelEditor, fullWidth());
 
