@@ -96,6 +96,11 @@ def main() -> int:
     assert "ProjectSnapshot.from" in activity
     assert "createAiControls" in activity
     assert "AI Patch Selected Symbol" in activity
+    assert "Manual Symbols and Source" in activity
+    assert "manualEditBody.setVisibility(View.GONE)" in activity
+    assert "selectedSourcePanel.addView(sourceEditor" in activity
+    assert "sameSymbolIdentity(symbol, selectedSymbol)" in activity
+    assert "compile.setText(\"Compile\")" not in activity
     assert "https://api.openai.com/v1/responses" in activity
     assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
     assert "private static final int MAX_AI_AGENT_TURNS = 15" in activity
@@ -180,7 +185,7 @@ def main() -> int:
     assert "createSymbolRow" in activity
     assert "EditText" in activity
     assert "createEditControls" in activity
-    assert 'compile.setText("Compile")' in activity
+    assert 'compile.setText("Compile")' not in activity
     assert 'runTick.setText("Run Tick")' in activity
     assert "runNativeCompile" in activity
     assert "runNativeTick" in activity
