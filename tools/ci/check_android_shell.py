@@ -113,6 +113,13 @@ def main() -> int:
     assert "compile_project" in activity
     assert "get_diagnostics" in activity
     assert "set_input_state" in activity
+    assert "set_runtime_i32" in activity
+    assert "get_runtime_i32" in activity
+    assert "nativeSetRuntimeI32" in activity
+    assert "nativeGetRuntimeI32" in activity
+    assert "aiToolSetRuntimeI32" in activity
+    assert "runtimeI32ResultToJson" in activity
+    assert "Stasis global paths" in activity
     assert "run_frame" in activity
     assert "run_for_ticks" in activity
     assert "inspect_runtime_state" in activity
@@ -245,6 +252,9 @@ def main() -> int:
     assert "try_rust_bridge_compile" in native
     assert "dlopen(\"libstasis_android_bridge.so\"" in native
     assert "stasis_android_bridge_compile_project" in native
+    assert "stasis_android_bridge_set_i32_global" in native
+    assert "stasis_android_bridge_get_i32_global" in native
+    assert "Java_com_stasislang_workshop_MainActivity_nativeSetRuntimeI32" in native
     assert "stasis_android_bridge_free_string" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native

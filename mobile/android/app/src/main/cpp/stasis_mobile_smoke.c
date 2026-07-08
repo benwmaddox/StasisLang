@@ -18,6 +18,8 @@
 typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
 typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h);
 typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len);
+typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_root, const char *entry_file, const char *path, int value);
+typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef struct CompileStats {
     int file_count;
@@ -44,6 +46,8 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_compile_project_fn compile_project;
     stasis_android_bridge_run_tick_fn run_tick;
     stasis_android_bridge_run_tick_frame_fn run_tick_frame;
+    stasis_android_bridge_set_i32_global_fn set_i32_global;
+    stasis_android_bridge_get_i32_global_fn get_i32_global;
     stasis_android_bridge_free_string_fn free_string;
     int attempted;
 } RustBridgeApi;
@@ -693,6 +697,10 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_run_tick_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick");
     rust_bridge_api.run_tick_frame =
             (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame");
+    rust_bridge_api.set_i32_global =
+            (stasis_android_bridge_set_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_set_i32_global");
+    rust_bridge_api.get_i32_global =
+            (stasis_android_bridge_get_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_get_i32_global");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
     if (rust_bridge_api.compile_project == NULL ||
@@ -739,12 +747,88 @@ static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int t
     return 1;
 }
 
+static int try_rust_bridge_set_i32_global(const char *project_root, const char *path, int value, char *message, size_t message_size) {
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->set_i32_global == NULL || bridge->free_string == NULL) {
+        snprintf(message, message_size, "StateError: Rust Android bridge set_i32_global unavailable");
+        return 0;
+    }
+
+    char *bridge_message = bridge->set_i32_global(project_root, "src/main.stasis", path, value);
+    if (bridge_message == NULL) {
+        snprintf(message, message_size, "StateError: Rust Android bridge returned null message");
+        return 1;
+    }
+
+    snprintf(message, message_size, "%s", bridge_message);
+    bridge->free_string(bridge_message);
+    return 1;
+}
+
+static int try_rust_bridge_get_i32_global(const char *project_root, const char *path, char *message, size_t message_size) {
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->get_i32_global == NULL || bridge->free_string == NULL) {
+        snprintf(message, message_size, "StateError: Rust Android bridge get_i32_global unavailable");
+        return 0;
+    }
+
+    char *bridge_message = bridge->get_i32_global(project_root, "src/main.stasis", path);
+    if (bridge_message == NULL) {
+        snprintf(message, message_size, "StateError: Rust Android bridge returned null message");
+        return 1;
+    }
+
+    snprintf(message, message_size, "%s", bridge_message);
+    bridge->free_string(bridge_message);
+    return 1;
+}
 static int try_rust_bridge_run_tick_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len) {
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->run_tick_frame == NULL) {
         return -1;
     }
     return bridge->run_tick_frame(project_root, "src/main.stasis", touch_x, touch_y, touch_active, screen_w, screen_h, out_values, out_len);
+}
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeSetRuntimeI32(JNIEnv *env, jclass activity_class, jstring project_root, jstring path, jint value) {
+    (void)activity_class;
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    const char *global_path = (*env)->GetStringUTFChars(env, path, NULL);
+    if (root == NULL || global_path == NULL) {
+        if (root != NULL) {
+            (*env)->ReleaseStringUTFChars(env, project_root, root);
+        }
+        if (global_path != NULL) {
+            (*env)->ReleaseStringUTFChars(env, path, global_path);
+        }
+        return (*env)->NewStringUTF(env, "StateError: unable to read project root or path");
+    }
+    char message[512];
+    try_rust_bridge_set_i32_global(root, global_path, (int)value, message, sizeof(message));
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    (*env)->ReleaseStringUTFChars(env, path, global_path);
+    return (*env)->NewStringUTF(env, message);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeGetRuntimeI32(JNIEnv *env, jclass activity_class, jstring project_root, jstring path) {
+    (void)activity_class;
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    const char *global_path = (*env)->GetStringUTFChars(env, path, NULL);
+    if (root == NULL || global_path == NULL) {
+        if (root != NULL) {
+            (*env)->ReleaseStringUTFChars(env, project_root, root);
+        }
+        if (global_path != NULL) {
+            (*env)->ReleaseStringUTFChars(env, path, global_path);
+        }
+        return (*env)->NewStringUTF(env, "StateError: unable to read project root or path");
+    }
+    char message[512];
+    try_rust_bridge_get_i32_global(root, global_path, message, sizeof(message));
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    (*env)->ReleaseStringUTFChars(env, path, global_path);
+    return (*env)->NewStringUTF(env, message);
 }
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activity_class) {

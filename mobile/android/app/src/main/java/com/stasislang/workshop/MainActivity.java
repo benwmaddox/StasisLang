@@ -124,6 +124,8 @@ public final class MainActivity extends Activity {
     private static native String nativeCompileProject(String projectRoot);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
+    private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
+    private static native String nativeGetRuntimeI32(String projectRoot, String path);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -729,6 +731,8 @@ public final class MainActivity extends Activity {
                     .put("compile_project")
                     .put("get_diagnostics")
                     .put("set_input_state")
+                    .put("set_runtime_i32")
+                    .put("get_runtime_i32")
                     .put("run_frame")
                     .put("run_for_ticks")
                     .put("inspect_runtime_state")
@@ -801,6 +805,12 @@ public final class MainActivity extends Activity {
         }
         if ("set_input_state".equals(tool)) {
             return aiToolSetInputState(call);
+        }
+        if ("set_runtime_i32".equals(tool)) {
+            return aiToolSetRuntimeI32(call);
+        }
+        if ("get_runtime_i32".equals(tool)) {
+            return aiToolGetRuntimeI32(call);
         }
         if ("run_frame".equals(tool)) {
             return aiToolRunFrame();
@@ -929,6 +939,29 @@ public final class MainActivity extends Activity {
         return currentInputStateJson();
     }
 
+    private JSONObject aiToolSetRuntimeI32(JSONObject call) throws Exception {
+        ensureAiTestCompileReady();
+        String path = call.getString("path");
+        int value = call.optInt("value", 0);
+        String result = nativeSetRuntimeI32(projectRootPath(), path, value);
+        return runtimeI32ResultToJson(result, path);
+    }
+
+    private JSONObject aiToolGetRuntimeI32(JSONObject call) throws Exception {
+        ensureAiTestCompileReady();
+        String path = call.getString("path");
+        String result = nativeGetRuntimeI32(projectRootPath(), path);
+        return runtimeI32ResultToJson(result, path);
+    }
+
+    private static JSONObject runtimeI32ResultToJson(String result, String path) throws Exception {
+        String raw = result == null ? "StateError: empty result" : result;
+        return new JSONObject()
+                .put("ok", !raw.startsWith("StateError"))
+                .put("path", path)
+                .put("value", extractIntField(raw, "value", 0))
+                .put("raw", raw);
+    }
     private JSONObject aiToolRunFrame() throws Exception {
         ensureAiTestCompileReady();
         int[] frame = new int[RENDER_FRAME_I32_CAPACITY];
@@ -1101,7 +1134,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. set_input_state controls simulated test input; run_for_ticks advances the game and returns runtime/render state. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. For no-argument tools, send empty strings for kind, owner, name, file, and new_source. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. For no-argument tools, send empty strings for kind, owner, name, file, path, and new_source. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -1156,6 +1189,8 @@ public final class MainActivity extends Activity {
                 .put("compile_project")
                 .put("get_diagnostics")
                 .put("set_input_state")
+                .put("set_runtime_i32")
+                .put("get_runtime_i32")
                 .put("run_frame")
                 .put("run_for_ticks")
                 .put("inspect_runtime_state")
@@ -1165,6 +1200,8 @@ public final class MainActivity extends Activity {
         toolProperties.put("name", new JSONObject().put("type", "string"));
         toolProperties.put("file", new JSONObject().put("type", "string"));
         toolProperties.put("new_source", new JSONObject().put("type", "string"));
+        toolProperties.put("path", new JSONObject().put("type", "string"));
+        toolProperties.put("value", new JSONObject().put("type", "integer"));
         toolProperties.put("x", new JSONObject().put("type", "integer"));
         toolProperties.put("y", new JSONObject().put("type", "integer"));
         toolProperties.put("active", new JSONObject().put("type", "integer"));
@@ -1182,6 +1219,8 @@ public final class MainActivity extends Activity {
                 .put("name")
                 .put("file")
                 .put("new_source")
+                .put("path")
+                .put("value")
                 .put("x")
                 .put("y")
                 .put("active")
