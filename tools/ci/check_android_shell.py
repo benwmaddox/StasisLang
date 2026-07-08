@@ -97,6 +97,14 @@ def main() -> int:
     assert "createAiControls" in activity
     assert "AI Patch Selected Symbol" in activity
     assert "https://api.openai.com/v1/responses" in activity
+    assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
+    assert "json_schema" in activity
+    assert "stasis_ai_code_response" in activity
+    assert "response.has(\"edits\")" in activity
+    assert "part.optString(\"output_text\", \"\")" in activity
+    assert "validateAiReplacementSource(kind, target.name, newSource)" in activity
+    assert "AI edit must use Stasis syntax, not Rust syntax" in activity
+    assert "extractDeclarationName(newSource, \"function\")" in activity
     assert "replace_function" in activity
     assert "replace_struct" in activity
     assert "SharedPreferences" in activity
