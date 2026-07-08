@@ -167,24 +167,12 @@ public final class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
         if (BuildConfig.STASIS_PUBLISHED_BUILD) {
+            installGameStatusOverlay(root, false);
             startGameLoop();
             return root;
         }
 
-        gameStatus = new TextView(this);
-        gameStatus.setText("tick=-- ms  render=-- ms  budget=--%");
-        gameStatus.setTextColor(Color.WHITE);
-        gameStatus.setTextSize(12.0f);
-        gameStatus.setSingleLine(true);
-        gameStatus.setPadding(dp(10), dp(6), dp(10), dp(6));
-        gameStatus.setBackgroundColor(Color.argb(150, 20, 28, 38));
-        FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP | Gravity.START);
-        statusParams.setMargins(dp(8), dp(8), dp(68), 0);
-        root.addView(gameStatus, statusParams);
-
+        installGameStatusOverlay(root, true);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(14), dp(12), dp(14), dp(12));
@@ -304,6 +292,32 @@ public final class MainActivity extends Activity {
         return root;
     }
 
+    private void installGameStatusOverlay(FrameLayout root, boolean visible) {
+        gameStatus = new TextView(this);
+        gameStatus.setText("tick=-- ms  render=-- ms  budget=--%");
+        gameStatus.setTextColor(Color.WHITE);
+        gameStatus.setTextSize(12.0f);
+        gameStatus.setSingleLine(true);
+        gameStatus.setPadding(dp(10), dp(6), dp(10), dp(6));
+        gameStatus.setBackgroundColor(Color.argb(150, 20, 28, 38));
+        gameStatus.setVisibility(visible ? View.VISIBLE : View.GONE);
+        FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.START);
+        statusParams.setMargins(dp(8), dp(8), dp(68), 0);
+        root.addView(gameStatus, statusParams);
+    }
+
+    private void toggleBenchmarkHudFromPreview() {
+        if (gameStatus == null) {
+            return;
+        }
+        gameStatus.setVisibility(gameStatus.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+        if (gameStatus.getVisibility() == View.VISIBLE) {
+            updateGameDebugText();
+        }
+    }
     private void installSystemInsetGuard(final View root) {
         root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
             @Override
@@ -2159,6 +2173,7 @@ public final class MainActivity extends Activity {
 
 
     private static final class GamePreviewView extends GLSurfaceView {
+        private final MainActivity activity;
         private final PreviewRenderer renderer;
         private int touchX;
         private int touchY;
@@ -2166,6 +2181,7 @@ public final class MainActivity extends Activity {
 
         GamePreviewView(MainActivity activity) {
             super(activity);
+            this.activity = activity;
             setEGLContextClientVersion(2);
             renderer = new PreviewRenderer(activity);
             setRenderer(renderer);
@@ -2195,6 +2211,9 @@ public final class MainActivity extends Activity {
             touchX = Math.round(event.getX());
             touchY = Math.round(event.getY());
             int action = event.getActionMasked();
+            if (BuildConfig.STASIS_PUBLISHED_BUILD && action == MotionEvent.ACTION_POINTER_DOWN && event.getPointerCount() >= 3) {
+                activity.toggleBenchmarkHudFromPreview();
+            }
             touchActive = action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL;
             return true;
         }
