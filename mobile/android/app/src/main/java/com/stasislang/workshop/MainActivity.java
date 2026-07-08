@@ -420,14 +420,17 @@ public final class MainActivity extends Activity {
                 touchActive,
                 screenWidth,
                 screenHeight);
+        RenderFrame frame = RenderFrame.fromRunResult(runResult);
         if (gamePreview != null) {
-            gamePreview.setRenderFrame(RenderFrame.fromRunResult(runResult));
+            gamePreview.setRenderFrame(frame);
         }
         if (runResult.startsWith("RunError")) {
             compileReady = false;
             compileAttempted = true;
+            setStatusText(runResult);
+        } else if (frame.tickCount > 0 && frame.tickCount % 60 == 0) {
+            setStatusText(String.format(Locale.US, "Running Stasis JIT - tick=%d commands=%d", frame.tickCount, frame.commandCount));
         }
-        setStatusText(runResult);
     }
 
     private static int extractIntField(String text, String key, int fallback) {
@@ -1079,3 +1082,4 @@ public final class MainActivity extends Activity {
         }
     }
 }
+
