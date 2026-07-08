@@ -10,7 +10,8 @@ REQUIRED_FILES = [
     "mobile/android/app/build.gradle",
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/workshop/AndroidManifest.xml",
-    "mobile/android/app/src/main/java/com/stasislang/workshop/MainActivity.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
+    "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
     "mobile/android/app/src/main/res/values/styles.xml",
@@ -87,7 +88,7 @@ def main() -> int:
     assert 'android:exported="true"' in manifest
     assert 'android:windowSoftInputMode="adjustResize"' in manifest
 
-    activity = read("mobile/android/app/src/main/java/com/stasislang/workshop/MainActivity.java")
+    activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
@@ -278,6 +279,20 @@ def main() -> int:
     assert "ResetRequired: struct or layout source changed" in activity
     assert "setContentView(status)" not in activity
 
+    published_activity = read("mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java")
+    assert "System.loadLibrary(\"stasis_mobile_smoke\")" in published_activity
+    assert "nativeCompileProject(String projectRoot)" in published_activity
+    assert "nativeRunFrameInto(String projectRoot" in published_activity
+    assert "https://api.openai.com" not in published_activity
+    assert "SharedPreferences" not in published_activity
+    assert "createAiControls" not in published_activity
+    assert "Manual Symbols and Source" not in published_activity
+    assert "GameSurfaceView" in published_activity
+    assert "GLSurfaceView" in published_activity
+    assert "onDrawFrame" in published_activity
+    assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in published_activity
+    assert "event.getPointerCount() >= 3" in published_activity
+    assert "PROJECT_DIR = \"published_project\"" in published_activity
     workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")
     assert "build_android_workshop_compile_plan" in workshop
     assert "AndroidWorkshopCompilePlan" in workshop
