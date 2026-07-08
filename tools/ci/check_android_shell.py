@@ -118,6 +118,10 @@ def main() -> int:
     assert "lastCompileResult = compileResult" in activity
     assert "take_screenshot" in activity
     assert "aiToolWriteSymbol" in activity
+    assert "writeSymbolTransaction" in activity
+    assert "status\", \"rolled_back" in activity
+    assert "restored_diagnostics" in activity
+    assert "write_symbol compiles immediately" in activity
     assert "preview_metadata" in activity
     assert "json_schema" in activity
     assert "stasis_ai_code_response" in activity
