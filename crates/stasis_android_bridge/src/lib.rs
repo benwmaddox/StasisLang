@@ -156,15 +156,24 @@ pub fn run_android_workshop_tick(
 
     RUNTIME_SESSION.with(|session_cell| {
         let mut session_slot = session_cell.borrow_mut();
-        let needs_recompile = session_slot.as_ref().is_none_or(|session| {
-            session.project_root != project_root || session.source_fingerprint != source_fingerprint
-        });
-        if needs_recompile {
-            *session_slot = Some(build_runtime_session(
-                project_root,
-                &files,
-                source_fingerprint,
-            )?);
+        let mut recompiled = false;
+        let mut swapped_code = false;
+        match session_slot.as_mut() {
+            Some(session) if session.project_root == project_root => {
+                if session.source_fingerprint != source_fingerprint {
+                    recompile_runtime_session(session, project_root, &files, source_fingerprint)?;
+                    recompiled = true;
+                    swapped_code = session.initialized;
+                }
+            }
+            _ => {
+                *session_slot = Some(build_runtime_session(
+                    project_root,
+                    &files,
+                    source_fingerprint,
+                )?);
+                recompiled = true;
+            }
         }
 
         let session = session_slot
@@ -177,6 +186,9 @@ pub fn run_android_workshop_tick(
             session.initialized = true;
             true
         };
+        if swapped_code && !initialized {
+            execute_optional_lifecycle_noarg(&session.jit, "on_code_swap")?;
+        }
         session
             .jit
             .write_i32_global_path("Input.touch_y", input.touch_y);
@@ -205,7 +217,7 @@ pub fn run_android_workshop_tick(
 
         Ok(AndroidBridgeRunTickResult {
             tick_count: session.tick_count,
-            recompiled: needs_recompile,
+            recompiled,
             initialized,
             observed_game_tick_count,
             render_command_count,
@@ -220,6 +232,34 @@ fn build_runtime_session(
     source_fingerprint: u64,
 ) -> Result<AndroidRuntimeSession, String> {
     let mut jit = JitProcess::new();
+    configure_runtime_jit(&mut jit, project_root, files);
+    jit.compile()
+        .map_err(|error| format!("Android JIT compile failed: {error:?}"))?;
+    Ok(AndroidRuntimeSession {
+        project_root: project_root.to_path_buf(),
+        source_fingerprint,
+        jit,
+        initialized: false,
+        tick_count: 0,
+    })
+}
+
+fn recompile_runtime_session(
+    session: &mut AndroidRuntimeSession,
+    project_root: &Path,
+    files: &[WorkshopSourceFile],
+    source_fingerprint: u64,
+) -> Result<(), String> {
+    configure_runtime_jit(&mut session.jit, project_root, files);
+    session
+        .jit
+        .compile()
+        .map_err(|error| format!("Android JIT hot reload failed: {error:?}"))?;
+    session.source_fingerprint = source_fingerprint;
+    Ok(())
+}
+
+fn configure_runtime_jit(jit: &mut JitProcess, project_root: &Path, files: &[WorkshopSourceFile]) {
     jit.set_required_emit_roots(&[
         "main".to_string(),
         "tick".to_string(),
@@ -233,15 +273,6 @@ fn build_runtime_session(
             file.source.clone(),
         );
     }
-    jit.compile()
-        .map_err(|error| format!("Android JIT compile failed: {error:?}"))?;
-    Ok(AndroidRuntimeSession {
-        project_root: project_root.to_path_buf(),
-        source_fingerprint,
-        jit,
-        initialized: false,
-        tick_count: 0,
-    })
 }
 
 fn execute_lifecycle_noarg(jit: &JitProcess, name: &str) -> Result<(), String> {
@@ -628,6 +659,44 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    #[test]
+    fn bridge_run_tick_hot_reloads_without_rerunning_main() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("hot_reload_tick");
+        let source = root.join("src/main.stasis");
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 1; }\nfunction on_code_swap(): void { GameState.tick_count += 100; }\n",
+        )
+        .expect("write first source");
+
+        let first =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("first real tick");
+        assert_eq!(first.observed_game_tick_count, 11);
+
+        let second =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("second real tick");
+        assert_eq!(second.observed_game_tick_count, 12);
+
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 2; }\nfunction on_code_swap(): void { GameState.tick_count += 100; }\n",
+        )
+        .expect("write hot reload source");
+
+        let hot =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("hot reload tick");
+        assert_eq!(hot.tick_count, 3);
+        assert!(hot.recompiled);
+        assert!(!hot.initialized);
+        assert_eq!(hot.observed_game_tick_count, 114);
+
+        fs::remove_dir_all(&root).ok();
+    }
     #[test]
     fn bridge_run_tick_passes_input_to_stasis_and_exports_render_commands() {
         let _guard = bridge_runtime_test_guard();
