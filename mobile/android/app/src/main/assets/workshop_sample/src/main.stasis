@@ -1,4 +1,5 @@
 global Input {
+    touch_x: i32;
     touch_y: i32;
     touch_active: i32;
     screen_w: i32;

@@ -16,7 +16,7 @@
 #define FNV_PRIME 1099511628211ULL
 
 typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
-typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file, int touch_y, int touch_active, int screen_w, int screen_h);
+typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef struct CompileStats {
     int file_count;
@@ -718,13 +718,13 @@ static int try_rust_bridge_compile(const char *project_root, char *message, size
     return 1;
 }
 
-static int try_rust_bridge_run_tick(const char *project_root, int touch_y, int touch_active, int screen_w, int screen_h, char *message, size_t message_size) {
+static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, char *message, size_t message_size) {
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->run_tick == NULL || bridge->free_string == NULL) {
         return 0;
     }
 
-    char *bridge_message = bridge->run_tick(project_root, "src/main.stasis", touch_y, touch_active, screen_w, screen_h);
+    char *bridge_message = bridge->run_tick(project_root, "src/main.stasis", touch_x, touch_y, touch_active, screen_w, screen_h);
     if (bridge_message == NULL) {
         snprintf(message, message_size, "RunError: Rust Android bridge returned null message");
         return 1;
@@ -792,7 +792,7 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_y, jint touch_active, jint screen_w, jint screen_h) {
+Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h) {
     (void)activity_class;
 
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
@@ -801,7 +801,7 @@ Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass acti
     }
 
     char message[1024];
-    if (try_rust_bridge_run_tick(root, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h, message, sizeof(message)) != 0) {
+    if (try_rust_bridge_run_tick(root, (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h, message, sizeof(message)) != 0) {
         (*env)->ReleaseStringUTFChars(env, project_root, root);
         if (strncmp(message, "RunError", 8) == 0) {
             __android_log_print(ANDROID_LOG_ERROR, STASIS_ANDROID_LOG_TAG, "%s", message);

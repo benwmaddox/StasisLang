@@ -77,7 +77,7 @@ public final class MainActivity extends Activity {
 
     private static native String nativeStatus();
     private static native String nativeCompileProject(String projectRoot);
-    private static native String nativeRunTick(String projectRoot, int touchY, int touchActive, int screenWidth, int screenHeight);
+    private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -427,6 +427,7 @@ public final class MainActivity extends Activity {
     }
 
     private void runNativeTick() {
+        int touchX = gamePreview == null ? 0 : gamePreview.touchX();
         int touchY = gamePreview == null ? 0 : gamePreview.touchY();
         int touchActive = gamePreview == null ? 0 : gamePreview.touchActive();
         int screenWidth = gamePreview == null ? 0 : gamePreview.getWidth();
@@ -434,6 +435,7 @@ public final class MainActivity extends Activity {
         long tickStartNanos = System.nanoTime();
         String runResult = nativeRunTick(
                 projectRoot().getAbsolutePath(),
+                touchX,
                 touchY,
                 touchActive,
                 screenWidth,
@@ -924,6 +926,7 @@ public final class MainActivity extends Activity {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final RectF rect = new RectF();
         private RenderFrame frame = RenderFrame.empty();
+        private int touchX;
         private int touchY;
         private boolean touchActive;
 
@@ -932,6 +935,10 @@ public final class MainActivity extends Activity {
             this.activity = activity;
             setBackgroundColor(Color.rgb(15, 20, 28));
             setFocusable(true);
+        }
+
+        int touchX() {
+            return touchX;
         }
 
         int touchY() {
@@ -949,6 +956,7 @@ public final class MainActivity extends Activity {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
+            touchX = Math.round(event.getX());
             touchY = Math.round(event.getY());
             int action = event.getActionMasked();
             touchActive = action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL;

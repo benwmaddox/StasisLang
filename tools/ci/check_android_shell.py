@@ -74,7 +74,7 @@ def main() -> int:
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
-    assert "private static native String nativeRunTick(String projectRoot, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
+    assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
     assert "workshop_sample/" in activity
     assert "createWorkshopView" in activity
     assert "GamePreviewView" in activity
@@ -93,6 +93,7 @@ def main() -> int:
     assert "runNativeCompile" in activity
     assert "runNativeTick" in activity
     assert "nativeRunTick(" in activity
+    assert "gamePreview.touchX()" in activity
     assert "gamePreview.touchY()" in activity
     assert "gamePreview.touchActive()" in activity
     assert "MotionEvent" in activity
