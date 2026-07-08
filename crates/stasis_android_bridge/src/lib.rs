@@ -17,6 +17,7 @@ pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AndroidBridgeTickInput {
+    pub touch_x: i32,
     pub touch_y: i32,
     pub touch_active: i32,
     pub screen_w: i32,
@@ -189,6 +190,9 @@ pub fn run_android_workshop_tick(
         if swapped_code && !initialized {
             execute_optional_lifecycle_noarg(&session.jit, "on_code_swap")?;
         }
+        session
+            .jit
+            .write_i32_global_path("Input.touch_x", input.touch_x);
         session
             .jit
             .write_i32_global_path("Input.touch_y", input.touch_y);
@@ -460,6 +464,7 @@ unsafe fn compile_project_from_c(
 pub extern "C" fn stasis_android_bridge_run_tick(
     project_root: *const c_char,
     entry_file: *const c_char,
+    touch_x: i32,
     touch_y: i32,
     touch_active: i32,
     screen_w: i32,
@@ -470,6 +475,7 @@ pub extern "C" fn stasis_android_bridge_run_tick(
             project_root,
             entry_file,
             AndroidBridgeTickInput {
+                touch_x,
                 touch_y,
                 touch_active,
                 screen_w,
@@ -548,6 +554,7 @@ mod tests {
 
     fn default_tick_input() -> AndroidBridgeTickInput {
         AndroidBridgeTickInput {
+            touch_x: 80,
             touch_y: 120,
             touch_active: 1,
             screen_w: 360,
@@ -704,7 +711,7 @@ mod tests {
         let root = temp_project("touch_render_tick");
         fs::write(
             root.join("src/main.stasis"),
-            "global Input { touch_y: i32; touch_active: i32; screen_w: i32; screen_h: i32; }\nglobal GameState { tick_count: i32; paddle_y: i32; }\nglobal Render { command_count: i32; command0_kind: i32; command0_x: i32; command0_y: i32; command0_w: i32; command0_h: i32; command0_color: i32; }\nfunction main(): void { GameState.paddle_y = 40; }\nfunction tick(): void { GameState.tick_count += 1; if (Input.touch_active != 0) { GameState.paddle_y = Input.touch_y; } }\nfunction render(): void { Render.command_count = 1; Render.command0_kind = 1; Render.command0_x = 12; Render.command0_y = GameState.paddle_y; Render.command0_w = 8; Render.command0_h = 64; Render.command0_color = 65535; }\n",
+            "global Input { touch_x: i32; touch_y: i32; touch_active: i32; screen_w: i32; screen_h: i32; }\nglobal GameState { tick_count: i32; paddle_y: i32; }\nglobal Render { command_count: i32; command0_kind: i32; command0_x: i32; command0_y: i32; command0_w: i32; command0_h: i32; command0_color: i32; }\nfunction main(): void { GameState.paddle_y = 40; }\nfunction tick(): void { GameState.tick_count += 1; if (Input.touch_active != 0) { GameState.paddle_y = Input.touch_y; } }\nfunction render(): void { Render.command_count = 1; Render.command0_kind = 1; Render.command0_x = Input.touch_x; Render.command0_y = GameState.paddle_y; Render.command0_w = 8; Render.command0_h = 64; Render.command0_color = 65535; }\n",
         )
         .expect("write source");
 
@@ -712,6 +719,7 @@ mod tests {
             &root,
             Path::new("src/main.stasis"),
             AndroidBridgeTickInput {
+                touch_x: 111,
                 touch_y: 222,
                 touch_active: 1,
                 screen_w: 400,
@@ -722,7 +730,7 @@ mod tests {
         assert!(result.observed_game_tick_count >= 1);
         assert_eq!(result.render_command_count, 1);
         assert_eq!(result.render_commands[0].kind, 1);
-        assert_eq!(result.render_commands[0].x, 12);
+        assert_eq!(result.render_commands[0].x, 111);
         assert_eq!(result.render_commands[0].y, 222);
         assert_eq!(result.render_commands[0].w, 8);
         assert_eq!(result.render_commands[0].h, 64);
@@ -764,6 +772,7 @@ mod tests {
             &root,
             Path::new("src/main.stasis"),
             AndroidBridgeTickInput {
+                touch_x: 180,
                 touch_y: 240,
                 touch_active: 1,
                 screen_w: 360,
@@ -792,7 +801,7 @@ mod tests {
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
         let entry_c = CString::new("src/main.stasis").expect("entry cstr");
         let ptr =
-            stasis_android_bridge_run_tick(root_c.as_ptr(), entry_c.as_ptr(), 144, 1, 360, 640);
+            stasis_android_bridge_run_tick(root_c.as_ptr(), entry_c.as_ptr(), 72, 144, 1, 360, 640);
         assert!(!ptr.is_null());
         let message = unsafe { CStr::from_ptr(ptr) }
             .to_str()
