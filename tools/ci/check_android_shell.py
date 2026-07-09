@@ -195,6 +195,8 @@ def main() -> int:
     assert "avoid_global_tick_for_per_entity_progression" in activity
     assert "architecture_recommendations" in activity
     assert "Use command/event-style functions" in activity
+    assert "durable gameplay concepts" in activity
+    assert "spawn_actor" in activity
     assert "Follow architecture_recommendations" in activity
     assert "Apply code changes with write_symbol before final edits" in activity
     assert "Tool errors are not final" in activity
