@@ -138,6 +138,10 @@ def main() -> int:
     assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
     assert "private static final int MAX_AI_AGENT_TURNS = 15" in activity
     assert "AI_PREF_LAST_USAGE" in activity
+    assert "AI_TRACE_LOG" in activity
+    assert "appendAiTrace" in activity
+    assert "llm_request" in activity
+    assert "tool_observations" in activity
     assert "private static final double GPT_5_4_MINI_INPUT_USD_PER_MILLION = 0.75" in activity
     assert "private static AiApiResponse callOpenAiResponsesApi" in activity
     assert "extractAiUsage(response)" in activity
