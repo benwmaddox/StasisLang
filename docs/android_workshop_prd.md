@@ -47,6 +47,17 @@ Priority order:
 
 The detailed editor, settings, GitHub review, and voice surfaces should preserve the current app-private `.stasis` project as the source of truth and must not bypass local compile/test validation.
 
+Workshop completion also requires:
+
+- Durable per-project command history, cancellation/retry, and explicit AI token/cost budgets.
+- Audio import/recording and lightweight editing alongside image assets.
+- Autosave, process-death recovery, offline/background behavior, and battery/network-aware long-running work.
+- First-run onboarding, templates, and a complete manual workflow that does not require AI.
+- Accessible, adaptive phone/tablet/foldable layouts and screen-reader/keyboard support.
+- Permission minimization, explicit external-upload consent, credential revocation, and user-controlled deletion of projects, traces, caches, and history.
+- Versioned project metadata with rollback-safe migrations across Workshop/compiler upgrades.
+- Redacted crash recovery/support bundles that exclude secrets and unapproved source or media.
+
 ## Source Organization
 
 Example project layout:

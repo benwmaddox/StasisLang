@@ -437,6 +437,38 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Scope: Accept AI-generated or AI-edited image outputs into a temporary review area with before/after preview, accept/reject, undo, project persistence, export, and GitHub sync.
 - Done gate: AI image work cannot overwrite an accepted project asset without review and a recoverable prior version.
 - Status: `planned`
+#### AW57 - Android Audio Asset Workflow
+- Scope: Import/record, preview, trim, normalize, rename, delete, reference-check, export, and GitHub-sync bounded sound/music assets; expose selected audio to multimodal-capable AI only with explicit consent.
+- Done gate: A user can add and manage game audio without arbitrary device paths, silent transcoding surprises, or orphaned Stasis references.
+- Status: `planned`
+#### AW58 - Android Command History, Sessions, and AI Budget Controls
+- Scope: Persist chat/command history per project, expose cancel/retry, retain tool/test outcomes, show token/cost estimates, and enforce configurable per-run/monthly spend limits.
+- Done gate: Users can understand, resume, cancel, and audit AI work while preventing accidental budget overruns.
+- Status: `planned`
+#### AW59 - Android Lifecycle, Autosave, and Background Work
+- Scope: Define autosave points, process-death recovery, pause/resume behavior, foreground-service/notification rules for long work, battery/network constraints, and safe cancellation.
+- Done gate: Rotation, backgrounding, process death, offline transitions, and app upgrades do not lose accepted project edits or falsely report work complete.
+- Status: `planned`
+#### AW60 - Android Onboarding, Templates, and First-Run Setup
+- Scope: Provide a first-run path, sample/template selection, API/GitHub setup guidance, permission explanations, and a zero-AI manual tutorial.
+- Done gate: A new user can create/open a project, run it, make a tested change, and understand optional AI/sync configuration without external documentation.
+- Status: `planned`
+#### AW61 - Android Accessibility and Adaptive Layout
+- Scope: Add content descriptions, scalable text/touch targets, contrast/focus support, screen-reader/keyboard navigation, orientation handling, and phone/tablet/foldable layouts.
+- Done gate: Core preview, command, editor, test, asset, and review workflows pass accessibility checks and remain usable across supported display sizes.
+- Status: `planned`
+#### AW62 - Android Privacy, Permissions, and Data Management
+- Scope: Minimize permissions, disclose exactly what code/media is sent externally, provide attachment consent and credential revocation, and support project/cache/history/trace deletion.
+- Done gate: Users can inspect and erase stored data and secrets, and no project/media leaves the device without an explicit configured action.
+- Status: `planned`
+#### AW63 - Android Project Format Versioning and Migration
+- Scope: Version project/workshop metadata and migrate app-private projects, settings, manifests, assets, tests, and sync state across app/compiler upgrades with rollback-safe backups.
+- Done gate: Upgrading the Workshop preserves existing projects or stops with a recoverable, actionable migration diagnostic.
+- Status: `planned`
+#### AW64 - Android Crash Recovery and Support Bundle
+- Scope: Capture bounded local crash/compile/sync diagnostics, detect interrupted operations, offer recovery, and export a redacted support bundle without secrets or unapproved source/media.
+- Done gate: A failure can be diagnosed and recovered from without exposing credentials or requiring raw Android log access.
+- Status: `planned`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
