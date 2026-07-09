@@ -121,7 +121,7 @@ def main() -> int:
     assert "new RenderCommand" not in activity
     assert "ProjectSnapshot.from" in activity
     assert "createAiControls" in activity
-    assert "AI Patch Selected Symbol" in activity
+    assert "AI Edit Workspace" in activity
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity
