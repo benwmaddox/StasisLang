@@ -212,6 +212,10 @@ def main() -> int:
     assert "TestUpdated: run tests to validate" in activity
     assert "sections.put(\"Tests\"" in activity
     assert "readAsset(assets, ASSET_ROOT + file)" in activity
+    assert "newTest.setText(\"New Test\")" in activity
+    assert "createManualTest();" in activity
+    assert "Created failing test template; edit it, then Run Tests" in activity
+    assert "findSymbolByIdentity" in activity
     assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
     assert "list_owner_symbols" in activity
