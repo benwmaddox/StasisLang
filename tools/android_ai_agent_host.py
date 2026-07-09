@@ -718,13 +718,22 @@ def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events:
     payload = {
         "model": model,
         "prompt_cache_key": PROMPT_CACHE_KEY,
-        "prompt_cache_retention": "24h",
+        "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
         "text": {"format": {"type": "json_schema", "name": "stasis_host_ai_response", "strict": False, "schema": schema}},
         "input": [
-            {"role": "system", "content": stable_instruction},
-            {"role": "user", "content": "Stable request.shared_context: " + json.dumps(shared_context, separators=(",", ":"))},
-            {"type": "prompt_cache_breakpoint", "name": "stasis_host_stable_instructions"},
-            {"role": "user", "content": "Volatile request.turn_state: " + json.dumps(turn_state, separators=(",", ":"))},
+            {"role": "system", "content": [{"type": "input_text", "text": stable_instruction}]},
+            {
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "Stable request.shared_context: " + json.dumps(shared_context, separators=(",", ":")),
+                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                }],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Volatile request.turn_state: " + json.dumps(turn_state, separators=(",", ":"))}],
+            },
         ],
     }
     req = urllib.request.Request(
