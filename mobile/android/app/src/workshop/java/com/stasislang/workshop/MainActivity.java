@@ -1741,7 +1741,7 @@ public final class MainActivity extends Activity {
                 .put("scenario_results", scenarioResults)
                 .put("stasis_test_files", stasisTests)
                 .put("new_passing_tests", newPassing)
-                .put("all_runnable_tests_passed", failed == 0 && compileJson.optBoolean("ok", false));
+                .put("all_runnable_tests_passed", passed > 0 && failed == 0 && compileJson.optBoolean("ok", false));
     }
 
     private JSONObject runAiScenarioTest(AiAgentSession session, File file, String relative, boolean compileOk) throws Exception {
