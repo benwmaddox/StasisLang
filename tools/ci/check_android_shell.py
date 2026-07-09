@@ -155,6 +155,8 @@ def main() -> int:
     assert "executeAiToolCalls" in activity
     assert "recordAiToolResult" in activity
     assert "tool_call_limit_after_successful_writes" in activity
+    assert "repeated_tool_calls" in activity
+    assert "repeated tools" in activity
     assert "successful_writes" in activity
     assert "private final class AiAgentSession" in activity
     assert "ProjectSnapshot cachedProject" in activity
