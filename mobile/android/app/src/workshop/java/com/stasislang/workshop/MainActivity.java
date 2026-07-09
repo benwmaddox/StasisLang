@@ -2117,25 +2117,6 @@ public final class MainActivity extends Activity {
                 .put("runtime_state", runtimeStateJson());
     }
 
-    private JSONObject aiToolRunForTicks(JSONObject call) throws Exception {
-        int requested = Math.max(1, Math.min(600, call.optInt("ticks", 1)));
-        JSONObject lastFrame = null;
-        int ran = 0;
-        for (int index = 0; index < requested; index += 1) {
-            lastFrame = aiToolRunFrame();
-            ran += 1;
-            if (lastFrame.optInt("status", -1) != 0) {
-                break;
-            }
-        }
-        return new JSONObject()
-                .put("ticks_requested", requested)
-                .put("ticks_run", ran)
-                .put("input", currentInputStateJson())
-                .put("last_frame", lastFrame == null ? new JSONObject() : lastFrame)
-                .put("runtime_state", runtimeStateJson());
-    }
-
     private JSONObject aiToolInspectRuntimeState() throws Exception {
         return new JSONObject()
                 .put("input", currentInputStateJson())
