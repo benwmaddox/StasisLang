@@ -898,6 +898,22 @@ public final class MainActivity extends Activity {
             gameRules.put("avoid_global_tick_for_per_entity_progression", true);
             gameRules.put("inspect_creation_and_update_paths_together", true);
 
+            JSONArray architectureRecommendations = new JSONArray()
+                    .put("Keep host assumptions out of Stasis game edits; Stasis owns simulation state, rules, and render commands.")
+                    .put("Use tick() as the deterministic simulation step and keep render() as a projection of current state.")
+                    .put("Put persistent gameplay state in explicit Stasis globals or structs with plain inspectable fields.")
+                    .put("Use lifecycle-local state for entity/event timing; reset counters in creation/reset functions and increment them during tick.")
+                    .put("Prefer feature-owned data and functions; put cross-entity rules in systems/*.stasis.")
+                    .put("When a feature grows, split toward files such as ball.stasis, player.stasis, enemy.stasis, score.stasis, and systems/collision.stasis.")
+                    .put("Preserve hot reload when possible by preferring function-body changes and tuning constants; call out struct/global layout changes as ResetRequired.")
+                    .put("Use command/event-style functions for lifecycle boundaries, such as spawn_ball(), reset_ball(), score_point(side), and start_wave().")
+                    .put("Before writing, inspect the full feature path: state definition, creation/reset, tick update, render output, and test/input path.")
+                    .put("Keep mobile input abstracted through Stasis Input globals and helper functions so logic can move across platforms.")
+                    .put("Add or use testable invariants by setting input/state, running ticks, and checking state or render output.")
+                    .put("Avoid broad rewrites; make the smallest structural change that gives the feature a clear owner.")
+                    .put("Prefer data-oriented clarity over deep abstractions: arrays, IDs, counters, and explicit update loops.")
+                    .put("Avoid per-tick allocation/object churn and keep new systems within the visible 60 fps budget.");
+
             JSONObject request = new JSONObject();
             request.put("user_prompt", prompt);
             request.put("scope", "entire_workspace");
@@ -919,6 +935,7 @@ public final class MainActivity extends Activity {
                     .put("take_screenshot"));
             request.put("stasis_style_rules", rules);
             request.put("game_design_rules", gameRules);
+            request.put("architecture_recommendations", architectureRecommendations);
             return request.toString();
         } catch (Exception error) {
             return "{}";
@@ -1371,7 +1388,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. Before writing, inspect the current target with list_symbols and read_symbol/read_file unless the exact current source was already provided in selected_symbols or tool observations. For behavior that depends on time since an entity, ball, wave, or event was created, prefer local lifecycle state that is reset on creation and incremented by tick over using overall game tick count; inspect creation and update paths together. write_symbol creates or replaces a symbol, compiles immediately, and returns status=rolled_back with diagnostics if the edit breaks compilation. Apply code changes with write_symbol before final edits so failed writes return observations you can correct. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol has successfully written and compiled the intended changes. If the requested work is already complete or no code changes are needed, return mode=done with empty tool_calls and empty edits. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. Before writing, inspect the current target with list_symbols and read_symbol/read_file unless the exact current source was already provided in selected_symbols or tool observations. For behavior that depends on time since an entity, ball, wave, or event was created, prefer local lifecycle state that is reset on creation and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol, compiles immediately, and returns status=rolled_back with diagnostics if the edit breaks compilation. Apply code changes with write_symbol before final edits so failed writes return observations you can correct. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol has successfully written and compiled the intended changes. If the requested work is already complete or no code changes are needed, return mode=done with empty tool_calls and empty edits. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();

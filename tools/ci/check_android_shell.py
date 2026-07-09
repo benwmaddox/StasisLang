@@ -190,6 +190,9 @@ def main() -> int:
     assert "game_design_rules" in activity
     assert "prefer_lifecycle_local_state" in activity
     assert "avoid_global_tick_for_per_entity_progression" in activity
+    assert "architecture_recommendations" in activity
+    assert "Use command/event-style functions" in activity
+    assert "Follow architecture_recommendations" in activity
     assert "Apply code changes with write_symbol before final edits" in activity
     assert "Tool errors are not final" in activity
     assert "mode=done" in activity
