@@ -26,6 +26,7 @@ _ReSharper.Caches/
 artifacts/
 scratch/
 logs/nightshift/
+out/
 
 # Build artifacts
 *.dll
@@ -71,7 +72,8 @@ mobile/android/.gradle/
 mobile/android/build/
 mobile/android/app/build/
 mobile/android/**/.cxx/
-mobile/android/local.propertiesandroid/out/
+mobile/android/local.properties
+android/out/
 android/build/
 android/**/app/build/
 *.apk
