@@ -149,6 +149,9 @@ def main() -> int:
     assert "aiResult.usageSummary" in activity
     assert "runAiAgentLoop" in activity
     assert "executeAiToolCalls" in activity
+    assert "recordAiToolResult" in activity
+    assert "tool_call_limit_after_successful_writes" in activity
+    assert "successful_writes" in activity
     assert "private final class AiAgentSession" in activity
     assert "ProjectSnapshot cachedProject" in activity
     assert "session.project()" in activity
