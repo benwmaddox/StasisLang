@@ -193,28 +193,27 @@ def main() -> int:
     assert "pending_android_bridge_test_runner" in activity
     assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
+    assert "list_owner_symbols" in activity
+    assert "preferredFunctionCall" in activity
+    assert "preferred_call" in activity
     assert "read_symbol" in activity
     assert "read_file" in activity
     assert "write_symbol" in activity
-    assert "compile_project" in activity
     assert "get_diagnostics" in activity
     assert "set_input_state" in activity
-    assert "set_runtime_i32" in activity
-    assert "get_runtime_i32" in activity
     assert "nativeSetRuntimeI32" in activity
     assert "nativeGetRuntimeI32" in activity
     assert "aiToolSetRuntimeI32" in activity
     assert "runtimeI32ResultToJson" in activity
-    assert "Stasis global paths" in activity
     assert "run_frame" in activity
     assert "run_for_ticks" in activity
     assert "inspect_runtime_state" in activity
     assert "aiToolSetInputState" in activity
     assert "aiToolRunForTicks" in activity
+    assert "The app compiles after each write and runs tests after each tool-call batch" in activity
+    assert "Use on_code_swap() for post-hot-swap migration" in activity
     assert "runtimeStateJson" in activity
     assert "frameValuesToJson" in activity
-    assert "set_input_state controls simulated test input" in activity
-    assert "aiToolCompileProject" in activity
     assert "aiToolGetDiagnostics" in activity
     assert "compileResultToJson" in activity
     assert "lastCompileResult = compileResult" in activity
