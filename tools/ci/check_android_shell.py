@@ -153,6 +153,17 @@ def main() -> int:
     assert "maxOutputTokensForBudget" in activity
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
+    assert "Cancel AI" in activity
+    assert "aiRunActive" in activity
+    assert "aiCancelRequested" in activity
+    assert "AI run already active; cancel it before starting another" in activity
+    assert "throwIfAiCancelled()" in activity
+    assert "if (!batchHasWrites) throwIfAiCancelled()" in activity
+    assert "finishing any active call or atomic write batch" in activity
+    assert "activeAiConnection" in activity
+    assert "AI_CONNECT_TIMEOUT_MS" in activity
+    assert "AI_READ_TIMEOUT_MS" in activity
+    assert "completed calls remain in usage totals" in activity
     assert "installVoiceChangeControls(root)" in activity
     assert "SpeechRecognizer.createSpeechRecognizer(this)" in activity
     assert "VOICE_RECORD_PERMISSION_REQUEST" in activity
@@ -234,7 +245,7 @@ def main() -> int:
     assert "AI read_symbol target ambiguous or not found" not in activity
     assert "private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50" in activity
     assert "private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125" in activity
-    assert "private static AiApiResponse callOpenAiResponsesApi" in activity
+    assert "private AiApiResponse callOpenAiResponsesApi" in activity
     assert "extractAiUsage(response)" in activity
     assert "saveLastAiUsage(aiResult.usageJson)" in activity
     assert "usageTokenCount(usage, \"input_tokens\", \"prompt_tokens\")" in activity
