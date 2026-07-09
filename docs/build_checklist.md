@@ -391,8 +391,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress (authenticated validation deferred)`
 #### AW45 - Android GitHub Review and Pull Request Flow
 - Scope: Create a review branch/PR from the configured project, with symbol-first and raw-diff review before submission.
+- Deliverable: GitHub settings now expose an explicit review step that displays the symbol summary and raw file diffs and fingerprints that exact change set. Submission rejects missing or stale review, creates or reuses a deterministic Workshop branch from the configured base, uploads changed project files serially, and creates or finds the matching open pull request. Remote failures do not modify local project files.
+- Tests: Android shell verifier covers the review controls, fingerprint gate, branch/ref API, serial upload path, and create-or-find PR API; Java sources compile. Authenticated repository/device validation remains deferred.
 - Done gate: A configured workshop can create or update a GitHub PR without losing local edits.
-- Status: `planned`
+- Status: `in progress (authenticated validation deferred)`
 #### AW46 - Android Sync Reliability and Credential Protection
 - Scope: Queue serial sync work, persist retry/error state, and move API keys/tokens from plain preferences to Android credential storage.
 - Done gate: Interrupted/offline sync never loses local source; secrets are not stored in plain text.
