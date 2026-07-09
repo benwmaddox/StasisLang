@@ -203,6 +203,18 @@ Examples:
 - rendering commands
 - audio events
 
+### First-Class Sprite and Audio Assets
+
+Sprite and audio support is a cross-platform runtime contract, not an editor-only feature.
+
+- Project-relative asset paths resolve through a versioned asset manifest with deterministic IDs/hashes.
+- JIT, AOT, desktop, Android Workshop, and published Android builds use the same asset identity and packaging rules.
+- Sprite loading supports bounded decode, texture lifetime management, batching, hot reload, missing-asset diagnostics, and safe fallback rendering.
+- Audio supports decoded sound/music assets, bounded voices/streams, volume/pan/loop controls, deterministic event submission, device lifecycle handling, underrun diagnostics, and graceful unavailable-device behavior.
+- Asset hot reload swaps only complete decoded resources and preserves the previous accepted resource on failure.
+- Headless tests validate asset manifests/events without requiring graphics or audio hardware; representative device tests validate actual pixels and sound.
+- Host-set permissions remain deny-by-default for file/device access; Stasis code addresses packaged project assets rather than arbitrary host paths.
+
 The runtime API:
 
 - uses ABI-stable primitive types

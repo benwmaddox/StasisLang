@@ -469,6 +469,41 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Scope: Capture bounded local crash/compile/sync diagnostics, detect interrupted operations, offer recovery, and export a redacted support bundle without secrets or unapproved source/media.
 - Done gate: A failure can be diagnosed and recovered from without exposing credentials or requiring raw Android log access.
 - Status: `planned`
+
+### Cross-Platform Sprite and Audio Track
+
+#### AS0 - Versioned Asset Manifest and Stable Handles
+- Scope: Define project-relative sprite/audio entries, content hashes, stable runtime handles, format metadata, dependency tracking, and missing/invalid diagnostics.
+- Done gate: JIT/AOT/desktop/Android resolve the same manifest to the same asset identities without arbitrary filesystem access.
+- Status: `planned`
+#### AS1 - Sprite Decode, Texture Upload, and Lifetime
+- Scope: Implement bounded PNG/SVG sprite decoding, GPU upload, handle ownership, release, fallback texture, and deterministic load errors across supported render backends.
+- Done gate: A packaged sprite loads and renders identically on desktop and Android, and malformed/missing assets fail safely.
+- Status: `planned`
+#### AS2 - Sprite Batching and Hot Reload
+- Scope: Complete command batching, ordering, transforms, alpha, clipping/atlas policy, resource-generation swaps, and failed-reload preservation.
+- Done gate: A changed sprite becomes visible without restarting while the prior texture remains active if decode/upload fails.
+- Status: `planned`
+#### AS3 - Audio Decode, Mixer, and Playback API
+- Scope: Add bounded sound/music decode, voices/streams, play/stop/pause, loop, volume/pan, mixing, asset handles, and deterministic audio-event submission.
+- Done gate: Stasis code can play overlapping effects and streaming music through a real mixer rather than the current unavailable stub.
+- Status: `planned`
+#### AS4 - Desktop and Android Audio Backends
+- Scope: Implement device initialization, callback/queue integration, focus/interruption handling, pause/resume, route changes, latency, underrun recovery, and clean shutdown.
+- Done gate: The same audio sample plays on desktop and Android and recovers correctly from Android lifecycle/audio-focus events.
+- Status: `planned`
+#### AS5 - Asset Packaging and JIT/AOT Parity
+- Scope: Package referenced assets for dev/JIT, production/AOT, Android Workshop, published APK, import/export, and GitHub sync with reachability and size diagnostics.
+- Done gate: A representative game uses the same source/manifest in every execution mode with no missing runtime-only asset path.
+- Status: `planned`
+#### AS6 - Headless Asset and Event Tests
+- Scope: Add deterministic manifest/decode/event/mixer tests, golden sprite output, audio buffer checks, corruption/limit cases, and host-set denial tests without requiring hardware.
+- Done gate: CI proves asset semantics, hot-reload safety, and audio mixing deterministically; hardware checks are a separate acceptance layer.
+- Status: `planned`
+#### AS7 - Sprite and Audio End-to-End Sample Acceptance
+- Scope: Upgrade a representative game (Brickout Revenge) to load real sprites and audio, hot reload assets, run in JIT/AOT, and pass desktop plus Android acceptance checks.
+- Done gate: The sample is visibly rendered with sprites and audibly produces music/effects on supported devices in dev and published builds.
+- Status: `planned`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
