@@ -179,6 +179,7 @@ def main() -> int:
     assert "session.invalidateProject()" in activity
     assert "available_tools" in activity
     assert "tool_specs" in activity
+    assert "Use tool_specs in the request for required_args, optional_args, and examples" in activity
     assert "aiToolSpecs" in activity
     assert "list_tests" in activity
     assert "read_test_file" in activity
