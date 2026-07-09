@@ -167,7 +167,7 @@ def main() -> int:
     assert "validation_error" in activity
     assert "accepted_shape" in activity
     assert "required_args" in activity
-    assert "Tool errors and validation_error observations are not final" in activity
+    assert "Tool errors, validation_error observations, and test_observation failures are not final" in activity
     assert "recordAiToolResult" in activity
     assert "tool_call_limit_after_successful_writes" in activity
     assert "repeated_tool_calls" in activity
@@ -178,6 +178,17 @@ def main() -> int:
     assert "session.project()" in activity
     assert "session.invalidateProject()" in activity
     assert "available_tools" in activity
+    assert "tool_specs" in activity
+    assert "aiToolSpecs" in activity
+    assert "list_tests" in activity
+    assert "read_test_file" in activity
+    assert "write_test_file" in activity
+    assert "run_tests" in activity
+    assert "test_observation" in activity
+    assert "runAiTestsAfterBatch" in activity
+    assert "new_passing_tests" in activity
+    assert "pending_android_bridge_test_runner" in activity
+    assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
     assert "read_symbol" in activity
     assert "read_file" in activity
@@ -219,8 +230,8 @@ def main() -> int:
     assert "durable gameplay concepts" in activity
     assert "spawn_actor" in activity
     assert "Follow architecture_recommendations" in activity
-    assert "Apply code changes with write_symbol or write_imports before final edits" in activity
-    assert "Tool errors and validation_error observations are not final" in activity
+    assert "Apply code changes with write_symbol, write_imports, or write_test_file before final edits" in activity
+    assert "Tool errors, validation_error observations, and test_observation failures are not final" in activity
     assert "mode=done" in activity
     assert "AI edit complete" in activity
     assert "status=rolled_back with diagnostics" in activity
