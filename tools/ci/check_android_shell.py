@@ -136,7 +136,7 @@ def main() -> int:
     assert "compile.setText(\"Compile\")" not in activity
     assert "https://api.openai.com/v1/responses" in activity
     assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
-    assert "private static final int MAX_AI_AGENT_TURNS = 15" in activity
+    assert "private static final int MAX_AI_AGENT_TURNS = 5" in activity
     assert "AI_PREF_LAST_USAGE" in activity
     assert "AI_TRACE_LOG" in activity
     assert "appendAiTrace" in activity

@@ -63,7 +63,7 @@ public final class MainActivity extends Activity {
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
-    private static final int MAX_AI_AGENT_TURNS = 15;
+    private static final int MAX_AI_AGENT_TURNS = 5;
     private static final double GPT_5_4_MINI_INPUT_USD_PER_MILLION = 0.75;
     private static final double GPT_5_4_MINI_CACHED_INPUT_USD_PER_MILLION = 0.075;
     private static final double GPT_5_4_MINI_OUTPUT_USD_PER_MILLION = 4.50;
@@ -694,7 +694,7 @@ public final class MainActivity extends Activity {
         LinearLayout progressRow = new LinearLayout(this);
         progressRow.setOrientation(LinearLayout.HORIZONTAL);
         progressRow.setGravity(Gravity.LEFT);
-        aiStepPill = createAiProgressPill("step 0/15");
+        aiStepPill = createAiProgressPill("step 0/" + MAX_AI_AGENT_TURNS);
         aiActionPill = createAiProgressPill("actions 0");
         aiPhasePill = createAiProgressPill("idle");
         aiElapsedPill = createAiProgressPill("time 0.0s");
@@ -1160,7 +1160,10 @@ public final class MainActivity extends Activity {
         String kind = call.optString("kind", "replace_function");
         String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
         String editKind = "struct".equals(expectedKind) ? "replace_struct" : "replace_function";
-        String newSource = call.getString("new_source").trim();
+        String newSource = call.optString("new_source", call.optString("source", "")).trim();
+        if (newSource.isEmpty()) {
+            throw new IOException("No value for new_source");
+        }
         boolean existed = findSymbolForAiEditOrNull(project, expectedKind, call, selectedSymbol) != null;
         try {
             SymbolEntry target = resolveAiEditTarget(project, editKind, expectedKind, call, selectedSymbol, newSource);
