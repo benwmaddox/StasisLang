@@ -932,7 +932,7 @@ public final class MainActivity extends Activity {
 
             JSONArray architectureRecommendations = new JSONArray()
                     .put("Keep host assumptions out of Stasis game edits; Stasis owns simulation state, rules, and render commands.")
-                    .put("Use tick() as the deterministic simulation step and keep render() as a projection of current state.")
+                    .put("Use tick() as the deterministic simulation step, render() as a projection of current state, and on_code_swap() for post-hot-swap state migration/reinitialization.")
                     .put("Put persistent gameplay state in explicit Stasis globals or structs with plain inspectable fields.")
                     .put("Use lifecycle-local state for entity/event timing; reset counters in creation/reset functions and increment them during tick.")
                     .put("Prefer feature-owned data and functions; put cross-entity rules in systems/*.stasis.")
@@ -1109,19 +1109,20 @@ public final class MainActivity extends Activity {
 
     private static JSONArray requiredArgsForAiTool(String tool) {
         if ("list_symbols".equals(tool)
-                || "compile_project".equals(tool)
                 || "get_diagnostics".equals(tool)
                 || "run_frame".equals(tool)
                 || "inspect_runtime_state".equals(tool)
                 || "take_screenshot".equals(tool)
                 || "set_input_state".equals(tool)
-                || "run_for_ticks".equals(tool)
                 || "list_tests".equals(tool)
                 || "run_tests".equals(tool)) {
             return new JSONArray();
         }
         if ("read_symbol".equals(tool)) {
             return new JSONArray().put("name");
+        }
+        if ("list_owner_symbols".equals(tool)) {
+            return new JSONArray().put("owner");
         }
         if ("read_file".equals(tool) || "read_imports".equals(tool) || "read_test_file".equals(tool)) {
             return new JSONArray().put("file");
@@ -1135,30 +1136,22 @@ public final class MainActivity extends Activity {
         if ("write_symbol".equals(tool)) {
             return new JSONArray().put("file").put("name").put("new_source");
         }
-        if ("set_runtime_i32".equals(tool)) {
-            return new JSONArray().put("path");
-        }
-        if ("get_runtime_i32".equals(tool)) {
-            return new JSONArray().put("path");
-        }
+
         return null;
     }
 
     private static JSONArray supportedAiTools() {
         return new JSONArray()
                 .put("list_symbols")
+                .put("list_owner_symbols")
                 .put("read_symbol")
                 .put("read_file")
                 .put("read_imports")
                 .put("write_imports")
                 .put("write_symbol")
-                .put("compile_project")
                 .put("get_diagnostics")
                 .put("set_input_state")
-                .put("set_runtime_i32")
-                .put("get_runtime_i32")
                 .put("run_frame")
-                .put("run_for_ticks")
                 .put("inspect_runtime_state")
                 .put("take_screenshot")
                 .put("list_tests")
@@ -1170,18 +1163,15 @@ public final class MainActivity extends Activity {
     private static JSONArray aiToolSpecs() throws Exception {
         JSONArray specs = new JSONArray();
         specs.put(aiToolSpec("list_symbols", "List all editable symbols, including globals.", new JSONArray(), new JSONArray(), new JSONObject()));
+        specs.put(aiToolSpec("list_owner_symbols", "List compact symbols owned by a type/group such as Player, Main, Root, Globals, or a system owner. Use this to discover receiver-style functions available for a type.", new JSONArray().put("owner"), new JSONArray(), new JSONObject().put("owner", "Player")));
         specs.put(aiToolSpec("read_symbol", "Read one function, struct, or global symbol. Globals include backing_struct_source.", new JSONArray().put("name"), new JSONArray().put("kind").put("file").put("owner"), new JSONObject().put("name", "GameState").put("kind", "global")));
         specs.put(aiToolSpec("read_file", "Read a project source file.", new JSONArray().put("file"), new JSONArray(), new JSONObject().put("file", "src/main.stasis")));
         specs.put(aiToolSpec("read_imports", "Read one file's import block as import paths.", new JSONArray().put("file"), new JSONArray(), new JSONObject().put("file", "src/main.stasis")));
         specs.put(aiToolSpec("write_imports", "Replace one file's top import block, compile, and roll back on failure.", new JSONArray().put("file").put("imports"), new JSONArray().put("source").put("import_source"), new JSONObject().put("file", "src/main.stasis").put("imports", new JSONArray().put("game_state.stasis").put("systems/collision.stasis"))));
         specs.put(aiToolSpec("write_symbol", "Create or replace a function/struct symbol, compile, and roll back on failure.", new JSONArray().put("file").put("name").put("new_source"), new JSONArray().put("kind").put("owner").put("source"), new JSONObject().put("file", "src/main.stasis").put("name", "tick").put("kind", "replace_function").put("owner", "Main").put("new_source", "function tick(): void {\n    // ...\n}")));
-        specs.put(aiToolSpec("compile_project", "Compile the current project.", new JSONArray(), new JSONArray(), new JSONObject()));
         specs.put(aiToolSpec("get_diagnostics", "Return the last compile diagnostics.", new JSONArray(), new JSONArray(), new JSONObject()));
         specs.put(aiToolSpec("set_input_state", "Set simulated mobile input for tests.", new JSONArray(), new JSONArray().put("x").put("y").put("active").put("screen_w").put("screen_h"), new JSONObject().put("x", 180).put("y", 320).put("active", 1)));
-        specs.put(aiToolSpec("set_runtime_i32", "Set an i32 Stasis global path before running frames/tests.", new JSONArray().put("path"), new JSONArray().put("value"), new JSONObject().put("path", "GameState.score").put("value", 0)));
-        specs.put(aiToolSpec("get_runtime_i32", "Read an i32 Stasis global path.", new JSONArray().put("path"), new JSONArray(), new JSONObject().put("path", "GameState.score")));
         specs.put(aiToolSpec("run_frame", "Run one tick/render frame with current simulated input.", new JSONArray(), new JSONArray(), new JSONObject()));
-        specs.put(aiToolSpec("run_for_ticks", "Run one or more ticks with current simulated input.", new JSONArray(), new JSONArray().put("ticks"), new JSONObject().put("ticks", 60)));
         specs.put(aiToolSpec("inspect_runtime_state", "Read compact runtime state and last frame.", new JSONArray(), new JSONArray(), new JSONObject()));
         specs.put(aiToolSpec("take_screenshot", "Return a logical render snapshot, decoded commands, runtime state, and input.", new JSONArray(), new JSONArray(), new JSONObject()));
         specs.put(aiToolSpec("list_tests", "List AI scenario tests and Stasis .test.stasis files.", new JSONArray(), new JSONArray(), new JSONObject()));
@@ -1202,7 +1192,9 @@ public final class MainActivity extends Activity {
     private static JSONObject aiToolValidationError(String tool, JSONObject args, String error, JSONArray requiredArgs) throws Exception {
         JSONObject acceptedArgs = new JSONObject();
         String normalizedTool = tool == null ? "" : tool;
-        if ("read_symbol".equals(normalizedTool)) {
+        if ("list_owner_symbols".equals(normalizedTool)) {
+            acceptedArgs.put("owner", "Player");
+        } else if ("read_symbol".equals(normalizedTool)) {
             acceptedArgs.put("name", "symbol_name").put("kind", "function_struct_or_global_optional").put("file", "src/main.stasis_optional").put("owner", "owner_optional");
         } else if ("read_file".equals(normalizedTool)) {
             acceptedArgs.put("file", "src/main.stasis");
@@ -1216,14 +1208,8 @@ public final class MainActivity extends Activity {
             acceptedArgs.put("file", "tests/paddle.ai_test.json").put("source", "{\"name\":\"paddle follows touch\",\"steps\":[{\"tool\":\"set_input_state\",\"args\":{\"x\":80,\"y\":320,\"active\":1}},{\"tool\":\"run_for_ticks\",\"args\":{\"ticks\":1}},{\"assert_runtime_i32\":{\"path\":\"GameState.player_y\",\"equals\":320}}]}");
         } else if ("write_symbol".equals(normalizedTool)) {
             acceptedArgs.put("file", "src/main.stasis").put("name", "function_name").put("kind", "replace_function").put("owner", "Root").put("new_source", "function function_name(): void {\n    // ...\n}");
-        } else if ("set_runtime_i32".equals(normalizedTool)) {
-            acceptedArgs.put("path", "GameState.field").put("value", 0);
-        } else if ("get_runtime_i32".equals(normalizedTool)) {
-            acceptedArgs.put("path", "GameState.field");
         } else if ("set_input_state".equals(normalizedTool)) {
             acceptedArgs.put("x", 180).put("y", 320).put("active", 1).put("screen_w", 360).put("screen_h", 640);
-        } else if ("run_for_ticks".equals(normalizedTool)) {
-            acceptedArgs.put("ticks", 1);
         }
         return new JSONObject()
                 .put("kind", "validation_error")
@@ -1261,6 +1247,9 @@ public final class MainActivity extends Activity {
         if ("list_symbols".equals(tool)) {
             return aiToolListSymbols(session);
         }
+        if ("list_owner_symbols".equals(tool)) {
+            return aiToolListOwnerSymbols(session, args);
+        }
         if ("read_symbol".equals(tool)) {
             return aiToolReadSymbol(session, args);
         }
@@ -1276,27 +1265,18 @@ public final class MainActivity extends Activity {
         if ("write_symbol".equals(tool)) {
             return aiToolWriteSymbol(session, args);
         }
-        if ("compile_project".equals(tool)) {
-            return aiToolCompileProject();
-        }
+
         if ("get_diagnostics".equals(tool)) {
             return aiToolGetDiagnostics();
         }
         if ("set_input_state".equals(tool)) {
             return aiToolSetInputState(args);
         }
-        if ("set_runtime_i32".equals(tool)) {
-            return aiToolSetRuntimeI32(args);
-        }
-        if ("get_runtime_i32".equals(tool)) {
-            return aiToolGetRuntimeI32(args);
-        }
+
         if ("run_frame".equals(tool)) {
             return aiToolRunFrame();
         }
-        if ("run_for_ticks".equals(tool)) {
-            return aiToolRunForTicks(args);
-        }
+
         if ("inspect_runtime_state".equals(tool)) {
             return aiToolInspectRuntimeState();
         }
@@ -1333,6 +1313,44 @@ public final class MainActivity extends Activity {
                 .put("symbols", symbols);
     }
 
+    private JSONObject aiToolListOwnerSymbols(AiAgentSession session, JSONObject call) throws Exception {
+        ProjectSnapshot project = session.project();
+        String owner = call.optString("owner", "").trim();
+        if (owner.isEmpty()) {
+            throw new IOException("list_owner_symbols requires owner");
+        }
+        JSONArray structs = new JSONArray();
+        JSONArray globals = new JSONArray();
+        JSONArray functions = new JSONArray();
+        JSONArray others = new JSONArray();
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (!owner.equals(symbol.owner) && !owner.equals(symbol.name)) {
+                        continue;
+                    }
+                    JSONObject entry = symbolToJson(symbol, false);
+                    if ("function".equals(symbol.kind)) {
+                        entry.put("preferred_call", preferredFunctionCall(symbol));
+                        functions.put(entry);
+                    } else if ("struct".equals(symbol.kind)) {
+                        structs.put(entry);
+                    } else if ("global".equals(symbol.kind)) {
+                        globals.put(entry);
+                    } else {
+                        others.put(entry);
+                    }
+                }
+            }
+        }
+        return new JSONObject()
+                .put("owner", owner)
+                .put("structs", structs)
+                .put("globals", globals)
+                .put("functions", functions)
+                .put("others", others)
+                .put("symbol_count", structs.length() + globals.length() + functions.length() + others.length());
+    }
     private JSONObject aiToolReadSymbol(AiAgentSession session, JSONObject call) throws Exception {
         ProjectSnapshot project = session.project();
         String kind = call.optString("kind", "");
@@ -1487,7 +1505,7 @@ public final class MainActivity extends Activity {
     private JSONObject runAiScenarioStep(AiAgentSession session, JSONObject step) throws Exception {
         if (step.has("tool")) {
             String tool = step.getString("tool");
-            if (!"set_input_state".equals(tool) && !"set_runtime_i32".equals(tool) && !"get_runtime_i32".equals(tool)
+            if (!"set_input_state".equals(tool)
                     && !"run_frame".equals(tool) && !"run_for_ticks".equals(tool) && !"inspect_runtime_state".equals(tool)
                     && !"take_screenshot".equals(tool)) {
                 return new JSONObject().put("ok", false).put("error", "Unsupported test step tool: " + tool);
@@ -1496,7 +1514,12 @@ public final class MainActivity extends Activity {
             if (args == null) {
                 args = new JSONObject();
             }
-            JSONObject value = executeAiToolCall(tool, args, session);
+            JSONObject value;
+            if ("run_for_ticks".equals(tool)) {
+                value = aiToolRunForTicks(args);
+            } else {
+                value = executeAiToolCall(tool, args, session);
+            }
             return new JSONObject().put("ok", true).put("tool", tool).put("result", value);
         }
         JSONObject assertion = step.optJSONObject("assert_runtime_i32");
@@ -1991,6 +2014,53 @@ public final class MainActivity extends Activity {
         return json;
     }
 
+    private static String preferredFunctionCall(SymbolEntry symbol) {
+        if (!"function".equals(symbol.kind)) {
+            return symbol.name;
+        }
+        String first = firstParameter(symbol.signature);
+        if (first != null) {
+            String[] parts = first.split(":", 2);
+            if (parts.length == 2 && "self".equals(parts[0].trim()) && parts[1].trim().equals(symbol.owner)) {
+                return lowerFirst(symbol.owner) + "." + symbol.name + "(" + callArgumentList(symbol.signature, true) + ")";
+            }
+        }
+        return symbol.name + "(" + callArgumentList(symbol.signature, false) + ")";
+    }
+
+    private static String callArgumentList(String signature, boolean skipFirst) {
+        int open = signature.indexOf('(');
+        int close = signature.indexOf(')', open + 1);
+        if (open < 0 || close < 0 || close <= open + 1) {
+            return "";
+        }
+        String parameters = signature.substring(open + 1, close).trim();
+        if (parameters.isEmpty()) {
+            return "";
+        }
+        String[] parts = parameters.split(",");
+        StringBuilder builder = new StringBuilder();
+        for (int index = skipFirst ? 1 : 0; index < parts.length; index += 1) {
+            String parameter = parts[index].trim();
+            int colon = parameter.indexOf(':');
+            String name = colon > 0 ? parameter.substring(0, colon).trim() : parameter;
+            if (name.isEmpty()) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append(", ");
+            }
+            builder.append(name);
+        }
+        return builder.toString();
+    }
+
+    private static String lowerFirst(String text) {
+        if (text == null || text.isEmpty()) {
+            return "value";
+        }
+        return Character.toLowerCase(text.charAt(0)) + text.substring(1);
+    }
     private static String aiLookupExpectedKind(String kind) {
         if ("replace_struct".equals(kind) || "struct".equals(kind)) {
             return "struct";
@@ -2004,7 +2074,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, read_imports, write_imports, write_symbol, list_tests, read_test_file, write_test_file, run_tests, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. Before writing, inspect the current target with list_symbols and read_symbol/read_file unless the exact current source was already provided in selected_symbols or tool observations. For behavior that depends on time since an entity, encounter, projectile, effect, resource, objective, mode, or event was created/entered, prefer local lifecycle state that is reset on creation/entry and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol, compiles immediately, and returns status=rolled_back with diagnostics if the edit breaks compilation. read_imports returns the imports for one file; write_imports replaces that file import block using an imports JSON array, compiles immediately, and rolls back on failure. list_tests/read_test_file/write_test_file let you create tests under tests/; run_tests executes Android AI scenario tests and reports .test.stasis files awaiting native bridge execution. Apply code changes with write_symbol, write_imports, or write_test_file before final edits so failed writes and test_observation results return observations you can correct. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests. If the requested work is already complete or no code changes are needed, return mode=done with empty tool_calls and empty edits. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_file, read_imports, write_imports, write_symbol, list_tests, read_test_file, write_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect the current target with list_symbols, list_owner_symbols, and read_symbol/read_file unless the exact current source was already provided in selected_symbols or tool observations. For behavior that depends on time since an entity, encounter, projectile, effect, resource, objective, mode, or event was created/entered, prefer local lifecycle state that is reset on creation/entry and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol, compiles immediately, and returns status=rolled_back with diagnostics if the edit breaks compilation. read_imports returns the imports for one file; write_imports replaces that file import block using an imports JSON array, compiles immediately, and rolls back on failure. list_tests/read_test_file/write_test_file let you create tests under tests/; run_tests executes Android AI scenario tests and reports .test.stasis files awaiting native bridge execution. Apply code changes with write_symbol, write_imports, or write_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles after each write and runs tests after each tool-call batch; use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() for post-hot-swap migration, reinitialization, or compatibility work when a running game needs state adjusted after code changes. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests. If the requested work is already complete or no code changes are needed, return mode=done with empty tool_calls and empty edits. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -2058,18 +2128,15 @@ public final class MainActivity extends Activity {
         JSONObject toolProperties = new JSONObject();
         toolProperties.put("tool", new JSONObject().put("type", "string").put("enum", new JSONArray()
                 .put("list_symbols")
+                .put("list_owner_symbols")
                 .put("read_symbol")
                 .put("read_file")
                 .put("read_imports")
                 .put("write_imports")
                 .put("write_symbol")
-                .put("compile_project")
                 .put("get_diagnostics")
                 .put("set_input_state")
-                .put("set_runtime_i32")
-                .put("get_runtime_i32")
                 .put("run_frame")
-                .put("run_for_ticks")
                 .put("inspect_runtime_state")
                 .put("take_screenshot")
                 .put("list_tests")
