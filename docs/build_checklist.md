@@ -354,6 +354,20 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Android shell verifier covers the control, root-function template, and successful creation status; Java sources compile.
 - Done gate: A manual user can add an ordinary root helper without an AI request while retaining compile safety.
 - Status: `completed`
+#### AW40 - Android Pull-Down Workspace Priorities
+- Language: `Android Java + docs`.
+- Scope: Reorder the game overlay around chat and command entry first, with API configuration collapsed, manual source/browser secondary, and compact background GitHub sync state.
+- Deliverable: The pull-down workspace makes chat/commands the immediate interaction surface while retaining manual editing, settings, diagnostics, and review behind clear secondary controls.
+- Tests: Structural UI verifier plus debug APK build; focused local tests for persisted settings and command state where applicable.
+- Done gate: Opening the workshop makes commands immediately available without hiding source, settings, or sync review.
+- Status: `planned`
+#### AW41 - Android Voice Change Shortcut
+- Language: `Android Java + platform voice integration + docs`.
+- Scope: Add a top-game shortcut for a voice change request with explicit recording, cancel, and run states.
+- Deliverable: Voice capture can be started from the preview, cancelled without edits, or submitted through the same validated change workflow as typed commands.
+- Tests: Structural UI verifier, permission/error paths, and debug APK build; device validation when voice hardware is available.
+- Done gate: A user can start, cancel, or run a voice change request without accidental code application.
+- Status: `planned`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

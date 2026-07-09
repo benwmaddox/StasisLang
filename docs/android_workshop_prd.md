@@ -32,6 +32,21 @@ Recommended first prototype:
 - Start with the path closest to the existing Stasis runtime.
 - Allow replacement with Android-native preview if the bridge gets awkward.
 
+## Workshop Surface Priorities
+
+The game preview remains the default surface. The workshop overlay is a pull-down workspace whose primary job is to accept intent and execute commands, not to expose every developer setting at once.
+
+Priority order:
+
+1. Chat and commands are the first content in the pull-down workspace. They should be immediately available for short requests, command entry, progress, diagnostics, and recent outcomes.
+2. AI API key/model configuration is a collapsed secondary settings area. It is normally set once and should not compete with chat/command controls.
+3. Manual source and symbol browsing remains available in the pull-down workspace, but is secondary to chat/commands because real code is inspected less frequently.
+4. GitHub backup/code-sync activity is frequent but mostly background work. The UI should show compact sync state and errors without making commit/push controls the foreground workflow; detailed review remains available when needed.
+5. A top-of-game voice shortcut will start a voice-change request. Its active state must expose explicit `Cancel` and `Run` actions before any edit is applied. Voice capture/transcription implementation may follow the initial layout slice.
+6. Starting an AI run must provide a clear, persistent status message that identifies the active phase (for example, preparing, running commands, validating tests, applying, completed, or failed) and shows the latest actionable result.
+
+The detailed editor, settings, GitHub review, and voice surfaces should preserve the current app-private `.stasis` project as the source of truth and must not bypass local compile/test validation.
+
 ## Source Organization
 
 Example project layout:
