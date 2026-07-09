@@ -357,6 +357,53 @@ def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, 
     return parse_json_object(text)
 
 
+def validate_tool_call_response(response: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    errors: list[dict[str, Any]] = []
+    if response.get("mode") != "tool_calls":
+        return [], errors
+    if "tool_calls" not in response:
+        errors.append({
+            "kind": "validation_error",
+            "error": "mode=tool_calls requires top-level tool_calls array; do not use calls/type/name/arguments aliases",
+            "received_keys": sorted(response.keys()),
+            "accepted_shape": {"mode": "tool_calls", "tool_calls": [{"tool": "read_file", "args": {"file": "src/main.stasis"}}]},
+        })
+        return [], errors
+    raw_calls = response.get("tool_calls")
+    if not isinstance(raw_calls, list):
+        errors.append({
+            "kind": "validation_error",
+            "error": "tool_calls must be an array",
+            "received_tool_calls_type": type(raw_calls).__name__,
+            "accepted_shape": {"tool": "read_file", "args": {"file": "src/main.stasis"}},
+        })
+        return [], errors
+    normalized: list[dict[str, Any]] = []
+    for index, call in enumerate(raw_calls):
+        if not isinstance(call, dict):
+            errors.append({"kind": "validation_error", "index": index, "error": "each tool call must be an object with tool and args"})
+            continue
+        extra = sorted(set(call.keys()) - {"tool", "args"})
+        if extra:
+            errors.append({
+                "kind": "validation_error",
+                "index": index,
+                "error": "tool call contains unsupported top-level properties",
+                "unsupported_properties": extra,
+                "accepted_shape": {"tool": "read_file", "args": {"file": "src/main.stasis"}},
+            })
+            continue
+        tool = call.get("tool")
+        args = call.get("args")
+        if not isinstance(tool, str) or not tool:
+            errors.append({"kind": "validation_error", "index": index, "error": "tool call requires non-empty string property: tool"})
+            continue
+        if not isinstance(args, dict):
+            errors.append({"kind": "validation_error", "index": index, "error": "tool call requires object property: args"})
+            continue
+        normalized.append({"tool": tool, "args": args})
+    return normalized, errors
+
 def summarize_observations(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     summary = []
     for observation in observations:
@@ -424,8 +471,14 @@ def main() -> int:
     for turn in range(1, MAX_TURNS + 1):
         response = call_openai(api_key, args.model, request)
         mode = response.get("mode")
-        tool_calls = response.get("tool_calls") or []
-        print(json.dumps({"turn": turn, "mode": mode, "response_keys": sorted(response.keys()), "summary": response.get("summary", ""), "tool_call_count": len(tool_calls), "edit_count": len(response.get("edits") or [])}, indent=2))
+        tool_calls, response_validation_errors = validate_tool_call_response(response)
+        print(json.dumps({"turn": turn, "mode": mode, "response_keys": sorted(response.keys()), "summary": response.get("summary", ""), "tool_call_count": len(tool_calls), "validation_error_count": len(response_validation_errors), "edit_count": len(response.get("edits") or [])}, indent=2))
+        if response_validation_errors:
+            print(json.dumps({"response_validation_errors": response_validation_errors}, indent=2))
+            if turn >= MAX_TURNS:
+                return 1
+            request = {"original_request": build_request(project, args.prompt), "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, or type."}
+            continue
         if mode == "edits" or (mode != "tool_calls" and response.get("edits")):
             observations = []
             for edit in response.get("edits") or []:
