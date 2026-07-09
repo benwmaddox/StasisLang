@@ -16,10 +16,10 @@ global GameState {
     ball_y: i32;
     ball_vx: i32;
     ball_vy: i32;
-    player_score: i32;
-    ai_score: i32;
     ball_age_ticks: i32;
     enemy_paddle_speed_x100: i32;
+    player_score: i32;
+    ai_score: i32;
 }
 
 global Render {
@@ -75,10 +75,10 @@ function init(): void {
     GameState.ball_y = 320;
     GameState.ball_vx = 5;
     GameState.ball_vy = 4;
-    GameState.player_score = 0;
-    GameState.ai_score = 0;
     GameState.ball_age_ticks = 0;
     GameState.enemy_paddle_speed_x100 = 1500;
+    GameState.player_score = 0;
+    GameState.ai_score = 0;
 }
 
 function tick(): void {
@@ -115,6 +115,18 @@ function update_player_paddle(): void {
 }
 
 function update_enemy_paddle(): void {
+    if (GameState.ball_age_ticks <= 0) {
+        GameState.enemy_paddle_speed_x100 = 1500;
+    } else if (GameState.ball_age_ticks >= 3600) {
+        GameState.enemy_paddle_speed_x100 = 250;
+    } else {
+        GameState.enemy_paddle_speed_x100 = 1500 - ((GameState.ball_age_ticks * 1250) / 3600);
+    }
+
+    if (GameState.enemy_paddle_speed_x100 < 250) {
+        GameState.enemy_paddle_speed_x100 = 250;
+    }
+
     let enemy_speed = GameState.enemy_paddle_speed_x100 / 100;
 
     if (GameState.ai_y < GameState.ball_y) {
@@ -136,7 +148,6 @@ function update_enemy_paddle(): void {
 
 function update_ball(): void {
     GameState.ball_age_ticks += 1;
-    GameState.enemy_paddle_speed_x100 = get_enemy_paddle_speed_x100(GameState.ball_age_ticks);
 
     GameState.ball_x += GameState.ball_vx;
     GameState.ball_y += GameState.ball_vy;
@@ -231,14 +242,4 @@ function render(): void {
 
 function on_code_swap(): void {
     render();
-}
-
-function get_enemy_paddle_speed_x100(ball_age_ticks: i32): i32 {
-    let speed = 1500 - ((ball_age_ticks * 1250) / 3600);
-
-    if (speed < 250) {
-        return 250;
-    }
-
-    return speed;
 }

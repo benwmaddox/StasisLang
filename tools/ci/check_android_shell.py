@@ -237,7 +237,7 @@ def main() -> int:
     assert "durable gameplay concepts" in activity
     assert "spawn_actor" in activity
     assert "Follow architecture_recommendations" in activity
-    assert "Apply code changes with write_symbol, write_imports, or write_test_file before final edits" in activity
+    assert "Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits" in activity
     assert "Tool errors, validation_error observations, and test_observation failures are not final" in activity
     assert "mode=done" in activity
     assert "AI edit complete" in activity

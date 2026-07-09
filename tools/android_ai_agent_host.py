@@ -217,8 +217,124 @@ def behavior_test_expectations() -> dict[str, Any]:
     }
 
 
-def run_behavior_tests() -> dict[str, Any]:
+def test_file_path(project: Path, file: str) -> Path:
+    relative = Path(file.replace("\\", "/"))
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts or relative.parts[0] != "tests":
+        raise ValueError("test file path must be under tests/")
+    return project / relative
+
+
+def list_test_files(project: Path) -> list[dict[str, Any]]:
+    root = project / "tests"
+    if not root.is_dir():
+        return []
+    files: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(project).as_posix()
+        files.append({
+            "file": relative,
+            "kind": "ai_scenario" if relative.endswith(".ai_test.json") else "stasis_test" if relative.endswith(".test.stasis") else "unknown",
+            "runnable_on_android": relative.endswith(".ai_test.json"),
+        })
+    return files
+
+
+def validate_ai_scenario_source(source: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        parsed = json.loads(source)
+    except json.JSONDecodeError as error:
+        return None, f"invalid JSON test file: {error}"
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("steps"), list):
+        return None, "AI scenario test requires a JSON object with steps array"
+    supported_tools = {"set_input_state", "run_frame", "run_for_ticks", "inspect_runtime_state", "take_screenshot"}
+    for index, step in enumerate(parsed["steps"]):
+        if not isinstance(step, dict):
+            return None, f"step {index} must be an object"
+        if "tool" in step:
+            tool = step.get("tool")
+            if tool not in supported_tools:
+                return None, f"step {index} uses unsupported tool {tool}; use one of {sorted(supported_tools)}"
+            args = step.get("args", {})
+            if not isinstance(args, dict):
+                return None, f"step {index} args must be an object"
+            continue
+        if "set_runtime_i32" in step:
+            value = step["set_runtime_i32"]
+            if not isinstance(value, dict) or not isinstance(value.get("path"), str) or not isinstance(value.get("value"), int):
+                return None, f"step {index} set_runtime_i32 requires path string and value integer"
+            continue
+        if "assert_runtime_i32" in step:
+            value = step["assert_runtime_i32"]
+            if not isinstance(value, dict) or not isinstance(value.get("path"), str):
+                return None, f"step {index} assert_runtime_i32 requires path string"
+            if "equals" not in value and "max" not in value:
+                return None, f"step {index} assert_runtime_i32 requires equals or max"
+            if "equals" in value and not isinstance(value.get("equals"), int):
+                return None, f"step {index} assert_runtime_i32 equals must be an integer"
+            if "max" in value and not isinstance(value.get("max"), int):
+                return None, f"step {index} assert_runtime_i32 max must be an integer"
+            continue
+        return None, f"step {index} has unsupported shape; use tool, set_runtime_i32, or assert_runtime_i32"
+    return parsed, None
+
+def write_test_file(project: Path, file: str, source: str) -> dict[str, Any]:
+    if not source.strip():
+        return {"status": "validation_error", "file": file, "error": "write_test_file requires non-empty source"}
+    path = test_file_path(project, file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if file.endswith(".ai_test.json"):
+        _parsed, error = validate_ai_scenario_source(source)
+        if error is not None:
+            return {"status": "validation_error", "file": file, "error": error, "accepted_shapes": [
+                {"tool": "run_for_ticks", "args": {"ticks": 1}},
+                {"set_runtime_i32": {"path": "GameState.score", "value": 0}},
+                {"assert_runtime_i32": {"path": "GameState.score", "equals": 0}},
+                {"assert_runtime_i32": {"path": "GameState.ball_age_ticks", "max": 1}},
+            ]}
+    write_text(path, source.rstrip() + "\n")
+    return {"status": "written", "file": path.relative_to(project).as_posix(), "kind": "ai_scenario" if file.endswith(".ai_test.json") else "stasis_test", "runnable_on_android": file.endswith(".ai_test.json")}
+
+
+def read_test_file(project: Path, file: str) -> dict[str, Any]:
+    path = test_file_path(project, file)
+    return {"file": path.relative_to(project).as_posix(), "exists": path.is_file(), "source": read_text(path) if path.is_file() else ""}
+
+
+def reset_paddle_speed_feature(project: Path) -> None:
+    path = project / "src/main.stasis"
+    source = read_text(path)
+    source = re.sub(r"\n    ball_age_ticks: i32;\n    enemy_paddle_speed_x100: i32;", "", source)
+    source = re.sub(r"\n    GameState\.ball_age_ticks = 0;\n    GameState\.enemy_paddle_speed_x100 = 1500;", "", source)
+    source = re.sub(
+        r"function update_enemy_paddle\(\): void \{.*?\n\}\n\nfunction update_ball",
+        "function update_enemy_paddle(): void {\n    let enemy_speed = 4;\n\n    if (GameState.ai_y < GameState.ball_y) {\n        GameState.ai_y += enemy_speed;\n    }\n\n    if (GameState.ai_y > GameState.ball_y) {\n        GameState.ai_y -= enemy_speed;\n    }\n\n    if (GameState.ai_y < 36) {\n        GameState.ai_y = 36;\n    }\n\n    if (GameState.ai_y > GameState.screen_h - 36) {\n        GameState.ai_y = GameState.screen_h - 36;\n    }\n}\n\nfunction update_ball",
+        source,
+        count=1,
+        flags=re.S,
+    )
+    source = re.sub(
+        r"function update_ball\(\): void \{\n    GameState\.ball_age_ticks \+= 1;\n    GameState\.enemy_paddle_speed_x100 = get_enemy_paddle_speed_x100\(GameState\.ball_age_ticks\);\n\n",
+        "function update_ball(): void {\n",
+        source,
+        count=1,
+    )
+    source = re.sub(r"\n    GameState\.ball_age_ticks = 0;\n    GameState\.enemy_paddle_speed_x100 = 1500;", "", source)
+    source = re.sub(r"\n\nfunction get_enemy_paddle_speed_x100\(ball_age_ticks: i32\): i32 \{.*?\n\}\s*$", "\n", source, flags=re.S)
+    write_text(path, source.rstrip() + "\n")
+    for generated_test in (project / "tests").glob("*enemy_paddle_speed*.ai_test.json"):
+        generated_test.unlink()
+
+def run_behavior_tests(project: Path) -> dict[str, Any]:
     result = run_command(["cargo", "test", "-p", "stasis_android_bridge", "android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear", "--", "--ignored", "--nocapture"])
+    tests = list_test_files(project)
+    ai_tests = [test for test in tests if test.get("kind") == "ai_scenario"]
+    result["test_files"] = tests
+    result["ai_test_file_count"] = len(ai_tests)
+    if not ai_tests:
+        result["ok"] = False
+        result["missing_test"] = "Add or update at least one tests/*.ai_test.json file that verifies the requested behavior before returning done."
     if not result.get("ok"):
         result["behavior_test_expectations"] = behavior_test_expectations()
     return result
@@ -244,6 +360,40 @@ def validate_single_replacement_source(name: str, new_source: str) -> tuple[bool
     if "function " in body or "struct " in body or "global " in body:
         return False, "replacement body must not contain nested function, struct, or global declarations"
     return True, "ok"
+
+def delete_symbol(project: Path, name: str, file: str = "", owner: str = "", kind: str = "", compile_after_write: bool = True) -> dict[str, Any]:
+    symbols = [s for s in parse_symbols(project) if s.name == name]
+    if file:
+        symbols = [s for s in symbols if s.file == file]
+    if owner:
+        symbols = [s for s in symbols if s.owner == owner]
+    if kind:
+        expected = "global" if kind == "global" else "struct" if kind in {"struct", "replace_struct"} else "function" if kind in {"function", "replace_function"} else kind
+        symbols = [s for s in symbols if s.kind == expected]
+    if not symbols:
+        return {"status": "not_found", "name": name, "available_names": [s.name for s in parse_symbols(project)]}
+    if len(symbols) > 1:
+        return {"status": "ambiguous", "name": name, "matches": [symbol_json(s, False) for s in symbols]}
+    target = symbols[0]
+    path = project / target.file
+    source = read_text(path)
+    updated = source[:target.start].rstrip() + "\n\n" + source[target.end:].lstrip()
+    write_text(path, updated.rstrip() + "\n")
+    if not compile_after_write:
+        return {"status": "deleted", "file": target.file, "name": target.name, "kind": target.kind, "compile": {"status": "pending_batch_compile"}}
+    compile_result = run_compile_check()
+    if not compile_result.get("ok"):
+        write_text(path, source)
+        return {"status": "rolled_back", "file": target.file, "name": target.name, "kind": target.kind, "compile": compile_result}
+    return {"status": "deleted", "file": target.file, "name": target.name, "kind": target.kind, "compile": compile_result}
+
+
+def delete_test_file(project: Path, file: str) -> dict[str, Any]:
+    path = test_file_path(project, file)
+    if not path.is_file():
+        return {"status": "not_found", "file": path.relative_to(project).as_posix()}
+    path.unlink()
+    return {"status": "deleted", "file": path.relative_to(project).as_posix()}
 
 def replace_symbol(project: Path, name: str, file: str, new_source: str, compile_after_write: bool = True) -> dict[str, Any]:
     valid, validation_message = validate_single_replacement_source(name, new_source)
@@ -291,9 +441,13 @@ def tool_specs() -> list[dict[str, Any]]:
         spec("list_symbols", "List editable symbols compactly.", [], [], {}),
         spec("list_owner_symbols", "List symbols and preferred receiver calls for one owner/type.", ["owner"], [], {"owner": "GameState"}),
         spec("read_symbol", "Read one symbol source.", ["name"], ["kind", "file", "owner"], {"name": "update_enemy_paddle"}),
-        spec("read_file", "Read a source file.", ["file"], [], {"file": "src/main.stasis"}),
         spec("write_symbol", "Create or replace exactly one Stasis function/global/struct. Writes in one tool-call batch compile together after all batch tools run and roll back together on compile failure. The new_source must not contain additional top-level or nested declarations.", ["file", "name", "new_source"], ["kind", "owner"], {"file": "src/main.stasis", "name": "tick", "new_source": "function tick(): void {\n}"}),
-        spec("run_tests", "Run the local host behavior test for the requested edit. Failed results include behavior_test_expectations with required globals and expected values.", [], [], {}),
+        spec("delete_symbol", "Delete exactly one Stasis function/global/struct by name, with optional file/owner/kind disambiguation. Source deletes batch-compile and roll back on compile failure.", ["name"], ["file", "owner", "kind"], {"name": "unused_helper", "file": "src/main.stasis", "kind": "function"}),
+        spec("list_tests", "List test files under tests/.", [], [], {}),
+        spec("read_test_file", "Read one test file under tests/.", ["file"], [], {"file": "tests/paddle_speed.ai_test.json"}),
+        spec("write_test_file", "Create or replace a test file under tests/. Add or update an AI scenario test for every behavior-changing request before returning done.", ["file", "source"], [], {"file": "tests/paddle_speed.ai_test.json", "source": "{\"name\":\"enemy paddle speed schedule\",\"steps\":[{\"tool\":\"run_frame\",\"args\":{}},{\"assert_runtime_i32\":{\"path\":\"GameState.enemy_paddle_speed_x100\",\"equals\":1500}},{\"set_runtime_i32\":{\"path\":\"GameState.ball_age_ticks\",\"value\":1800}},{\"tool\":\"run_frame\",\"args\":{}},{\"assert_runtime_i32\":{\"path\":\"GameState.enemy_paddle_speed_x100\",\"equals\":875}}]}"}),
+        spec("delete_test_file", "Delete one obsolete or duplicate test file under tests/.", ["file"], [], {"file": "tests/obsolete.ai_test.json"}),
+        spec("run_tests", "Run the local host behavior test for the requested edit. This is successful only when the behavior passes and at least one tests/*.ai_test.json file exists.", [], [], {}),
         spec("get_diagnostics", "Return last local diagnostics.", [], [], {}),
     ]
 
@@ -303,12 +457,13 @@ def response_contract() -> dict[str, Any]:
     return {
         "required": "Return exactly one JSON object. The top-level object must match one of the accepted_response_shapes.",
         "accepted_response_shapes": [
-            {"mode": "tool_calls", "summary": "short optional status", "tool_calls": [{"tool": "read_file", "args": {"file": "src/main.stasis"}}]},
+            {"mode": "tool_calls", "summary": "short optional status", "tool_calls": [{"tool": "read_symbol", "args": {"name": "tick"}}]},
             {"mode": "done", "summary": "what was verified"},
             {"mode": "edits", "summary": "short change summary", "edits": [{"kind": "replace_function", "owner": "Player", "name": "jump", "file": "src/player.stasis", "new_source": "function jump(self: Player): void {\n}"}]},
         ],
         "tool_call_rules": [
             "Use the exact top-level property tool_calls for tool use.",
+            "Do not use read_file; inspect source with list_symbols/list_owner_symbols/read_symbol and inspect tests with list_tests/read_test_file.",
             "Each tool call must contain exactly tool and args.",
             "tool must be a non-empty string matching one entry in tool_specs.",
             "args must be an object containing that tool's documented arguments.",
@@ -425,11 +580,11 @@ def response_json_schema() -> dict[str, Any]:
 def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, Any]:
     prompt = (
         "Return only one JSON object matching request.response_contract exactly. "
-        "Use mode=tool_calls to inspect/write with the provided tools. "
+        "Use mode=tool_calls to inspect/write with the provided fine-grained symbol, import, and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/read_imports/list_tests/read_test_file instead. "
         "For tool calls, the top-level key is tool_calls and each call is exactly {\"tool\":\"name\",\"args\":{...}}. "
         "Do not use aliases such as calls, name, function, arguments, type, or source. "
         "After a tool-call batch with writes, compile runs locally once and failed compiles roll back the whole batch. Use run_tests to verify the behavior. "
-        "Return mode=tool_calls for tools, mode=edits with edits if returning direct edits, or mode=done only when tests pass. "
+        "For behavior-changing requests, add or update a tests/*.ai_test.json test before returning done. Return mode=tool_calls for tools, mode=edits with edits if returning direct edits, or mode=done only when tests pass. "
         "Use Stasis syntax only. Request: " + json.dumps(request, separators=(",", ":"))
     )
     schema = response_json_schema()
@@ -486,7 +641,7 @@ def validate_response_shape(response: dict[str, Any]) -> tuple[list[dict[str, An
             continue
         extra = sorted(set(call.keys()) - {"tool", "args"})
         if extra:
-            errors.append({"kind": "validation_error", "index": index, "error": "tool call contains unsupported top-level properties", "unsupported_properties": extra, "accepted_shape": {"tool": "read_file", "args": {"file": "src/main.stasis"}}, "response_contract": contract})
+            errors.append({"kind": "validation_error", "index": index, "error": "tool call contains unsupported top-level properties", "unsupported_properties": extra, "accepted_shape": {"tool": "read_symbol", "args": {"name": "tick"}}, "response_contract": contract})
             continue
         tool = call.get("tool")
         args = call.get("args")
@@ -517,7 +672,7 @@ def execute_tool_batch(project: Path, tool_calls: list[dict[str, Any]], last_dia
     original_sources: dict[Path, str] = {}
     observations: list[dict[str, Any]] = []
     pending_run_tests: list[int] = []
-    wrote = False
+    wrote_source = False
 
     def snapshot_file(file: str) -> None:
         path = project / file
@@ -527,33 +682,48 @@ def execute_tool_batch(project: Path, tool_calls: list[dict[str, Any]], last_dia
     for call in tool_calls:
         tool = call.get("tool", "")
         tool_args = call.get("args") or {}
-        if tool == "run_tests":
+        if tool == "run_tests" and wrote_source:
             observations.append({"tool": tool, "args": tool_args, "result": {"status": "pending_batch_compile"}})
             pending_run_tests.append(len(observations) - 1)
             continue
         if tool == "write_symbol":
             snapshot_file(tool_args.get("file", ""))
             result = replace_symbol(project, tool_args.get("name", ""), tool_args.get("file", ""), tool_args.get("new_source", ""), compile_after_write=False)
-            wrote = result.get("status") in {"written", "created"} or wrote
+            wrote_source = result.get("status") in {"written", "created"} or wrote_source
+        elif tool == "delete_symbol":
+            target_file = tool_args.get("file", "")
+            if not target_file:
+                candidates = [s for s in parse_symbols(project) if s.name == tool_args.get("name", "")]
+                if tool_args.get("owner", ""):
+                    candidates = [s for s in candidates if s.owner == tool_args.get("owner", "")]
+                if tool_args.get("kind", ""):
+                    expected = "global" if tool_args.get("kind") == "global" else "struct" if tool_args.get("kind") in {"struct", "replace_struct"} else "function" if tool_args.get("kind") in {"function", "replace_function"} else tool_args.get("kind")
+                    candidates = [s for s in candidates if s.kind == expected]
+                if len(candidates) == 1:
+                    target_file = candidates[0].file
+            if target_file:
+                snapshot_file(target_file)
+            result = delete_symbol(project, tool_args.get("name", ""), target_file, tool_args.get("owner", ""), tool_args.get("kind", ""), compile_after_write=False)
+            wrote_source = result.get("status") == "deleted" or wrote_source
         elif tool == "write_file":
             snapshot_file(tool_args.get("file", ""))
             result = write_project_file(project, tool_args.get("file", ""), tool_args.get("source", ""), compile_after_write=False)
-            wrote = result.get("status") == "written" or wrote
+            wrote_source = result.get("status") == "written" or wrote_source
         else:
             result = execute_tool(project, tool, tool_args, last_diagnostics)
         observations.append({"tool": tool, "args": tool_args, "result": result})
 
     batch_compile: dict[str, Any] | None = None
-    if wrote:
+    if wrote_source:
         batch_compile = run_compile_check()
         if not batch_compile.get("ok"):
             for path, source in original_sources.items():
                 write_text(path, source)
             restored_compile = run_compile_check()
             for observation in observations:
-                if observation.get("tool") in {"write_symbol", "write_file"}:
+                if observation.get("tool") in {"write_symbol", "delete_symbol", "write_file"}:
                     result = observation.get("result", {})
-                    if isinstance(result, dict) and result.get("status") in {"written", "created"}:
+                    if isinstance(result, dict) and result.get("status") in {"written", "created", "deleted"}:
                         result["status"] = "rolled_back"
                         result["compile"] = batch_compile
                         result["restored_compile"] = restored_compile
@@ -561,18 +731,17 @@ def execute_tool_batch(project: Path, tool_calls: list[dict[str, Any]], last_dia
                     observation["result"] = {"status": "blocked_by_compile_failure", "compile": batch_compile}
             return observations, batch_compile
         for observation in observations:
-            if observation.get("tool") in {"write_symbol", "write_file"}:
+            if observation.get("tool") in {"write_symbol", "delete_symbol", "write_file"}:
                 result = observation.get("result", {})
-                if isinstance(result, dict) and result.get("status") in {"written", "created"}:
+                if isinstance(result, dict) and result.get("status") in {"written", "created", "deleted"}:
                     result["compile"] = batch_compile
 
     latest_diagnostics = batch_compile or last_diagnostics
     for index in pending_run_tests:
-        test_result = run_behavior_tests()
+        test_result = run_behavior_tests(project)
         observations[index]["result"] = test_result
         latest_diagnostics = test_result
     return observations, latest_diagnostics
-
 def execute_tool(project: Path, tool: str, args: dict[str, Any], last_diagnostics: dict[str, Any]) -> dict[str, Any]:
     symbols = parse_symbols(project)
     if tool == "list_symbols":
@@ -592,15 +761,22 @@ def execute_tool(project: Path, tool: str, args: dict[str, Any], last_diagnostic
         if len(candidates) > 1:
             return {"status": "ambiguous", "matches": [symbol_json(s, False) for s in candidates]}
         return symbol_json(candidates[0], True)
-    if tool == "read_file":
-        file = args.get("file", "")
-        return {"file": file, "source": read_text(project / file)}
+    if tool == "list_tests":
+        return {"test_count": len(list_test_files(project)), "files": list_test_files(project)}
+    if tool == "read_test_file":
+        return read_test_file(project, args.get("file", ""))
+    if tool == "write_test_file":
+        return write_test_file(project, args.get("file", ""), args.get("source", ""))
     if tool == "write_symbol":
         return replace_symbol(project, args.get("name", ""), args.get("file", ""), args.get("new_source", ""))
+    if tool == "delete_symbol":
+        return delete_symbol(project, args.get("name", ""), args.get("file", ""), args.get("owner", ""), args.get("kind", ""))
+    if tool == "delete_test_file":
+        return delete_test_file(project, args.get("file", ""))
     if tool == "write_file":
         return write_project_file(project, args.get("file", ""), args.get("source", ""))
     if tool == "run_tests":
-        return run_behavior_tests()
+        return run_behavior_tests(project)
     if tool == "get_diagnostics":
         return last_diagnostics
     return {"status": "unsupported_tool", "tool": tool, "supported_tools": [s["tool"] for s in tool_specs()]}
@@ -611,6 +787,7 @@ def main() -> int:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--reset-paddle-speed-feature", action="store_true", help="Reset the bundled Pong sample to the baseline before the requested paddle-speed feature.")
     args = parser.parse_args()
     load_env_file(ROOT / ".env")
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -619,6 +796,8 @@ def main() -> int:
         return 2
 
     project = args.project_root.resolve()
+    if args.reset_paddle_speed_feature:
+        reset_paddle_speed_feature(project)
     request = build_request(project, args.prompt)
     last_diagnostics: dict[str, Any] = {}
     total_actions = 0
@@ -638,7 +817,7 @@ def main() -> int:
             for edit in response.get("edits") or []:
                 result = replace_symbol(project, edit.get("name", ""), edit.get("file", ""), edit.get("new_source", ""))
                 observations.append({"tool": "edit", "args": {"file": edit.get("file", ""), "name": edit.get("name", "")}, "result": result})
-            final = run_behavior_tests()
+            final = run_behavior_tests(project)
             print(json.dumps({"edit_observations": summarize_observations(observations), "final_test": final}, indent=2))
             if final.get("ok"):
                 return 0
@@ -652,7 +831,7 @@ def main() -> int:
             }
             continue
         if mode != "tool_calls" or not tool_calls:
-            final = run_behavior_tests()
+            final = run_behavior_tests(project)
             print(json.dumps({"final_test": final}, indent=2))
             if final.get("ok"):
                 return 0
