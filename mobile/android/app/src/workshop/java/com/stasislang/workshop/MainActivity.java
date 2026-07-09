@@ -793,6 +793,16 @@ public final class MainActivity extends Activity {
         });
         controls.addView(deleteTest, fullWidth());
 
+        Button newHelper = new Button(this);
+        newHelper.setText("New Helper");
+        newHelper.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                createManualHelper();
+            }
+        });
+        controls.addView(newHelper, fullWidth());
+
         Button resetProject = new Button(this);
         resetProject.setText("Reset Project");
         resetProject.setOnClickListener(new View.OnClickListener() {
@@ -3283,6 +3293,43 @@ public final class MainActivity extends Activity {
             setStatusText("Deleted user-created test");
         } catch (IOException error) {
             setStatusText("Delete Test failed: " + error.getMessage());
+        }
+    }
+
+    private void createManualHelper() {
+        try {
+            ProjectSnapshot project = loadBundledProject();
+            int number = 1;
+            String name;
+            do {
+                name = "manual_helper_" + number;
+                number += 1;
+            } while (findSymbolByIdentity(project, "function", "src/root.stasis", "Root", name) != null);
+
+            String source = "function " + name + "(): void {\n}\n";
+            SourceFile rootFile = findProjectFile(project, "src/root.stasis");
+            String originalSource = rootFile.source;
+            appendAiFunction(project, "src/root.stasis", source);
+            String compileResult = nativeCompileProject(projectRootPath());
+            if (!isRunnableCompile(compileResult)) {
+                rootFile.source = originalSource;
+                writeTextFile(rootFile.diskFile, originalSource);
+                throw new IOException("new helper compile failed: " + compileResult);
+            }
+
+            lastCompileResult = compileResult;
+            compileReady = true;
+            compileAttempted = true;
+            ProjectSnapshot refreshedProject = loadBundledProject();
+            rebuildSymbolList(refreshedProject);
+            SymbolEntry created = findSymbolByIdentity(refreshedProject, "function", "src/root.stasis", "Root", name);
+            if (created != null) {
+                showSymbol(created);
+            }
+            refreshChangeSummary(refreshedProject);
+            setStatusText("Created root helper - " + compileResult);
+        } catch (Exception error) {
+            setStatusText("Create helper failed: " + error.getMessage());
         }
     }
 

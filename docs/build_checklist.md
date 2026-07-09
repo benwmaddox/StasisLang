@@ -347,6 +347,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Android shell verifier covers the deletion control, user-created-test path, bundled-test guard, and completion status; Java sources compile.
 - Done gate: A phone-only manual user can create, edit, run, review, revert, and discard draft Stasis tests safely.
 - Status: `completed`
+#### AW39 - Android Manual Root Helper Creation
+- Language: `Android Java + docs`.
+- Scope: Let manual workshop users add normal Stasis code according to the PRD's no-owner helper placement rule.
+- Deliverable: `New Helper` creates a uniquely named `manual_helper_N` void function in `src/root.stasis`, compiles it transactionally, and selects it for editing. A compile failure restores the original root source.
+- Tests: Android shell verifier covers the control, root-function template, and successful creation status; Java sources compile.
+- Done gate: A manual user can add an ordinary root helper without an AI request while retaining compile safety.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
