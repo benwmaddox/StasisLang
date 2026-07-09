@@ -312,6 +312,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: `android_bridge_runs_bundled_stasis_tests`, the bounded desktop `stasis test --dir mobile/android/app/src/main/assets/workshop_sample/tests` command, and the Android shell verifier cover the bridge, valid Stasis test syntax, and UI control; debug APK builds and installs on a paired phone.
 - Done gate: A sideloaded workshop can run bundled real Stasis tests without JSON scenario files, and test success requires at least one passing test with no failures.
 - Status: `completed`
+#### AW34 - Android Manual Raw-Diff Review
+- Language: `Android Java + docs`.
+- Scope: Complete the PRD's manual Git-review preparation flow by making raw changed-file diffs available alongside the existing symbol-first change summary.
+- Deliverable: The editor's `Raw Diffs` control compares the app-private project to the bundled baseline and presents deterministic unified diff hunks for every changed `.stasis` file.
+- Tests: Android shell verifier covers the review control and unified-diff formatter; debug APK compiles.
+- Done gate: A manual editor user can inspect both changed symbols/files and the corresponding advanced raw file diffs without using an AI call or phone-hosted service.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
