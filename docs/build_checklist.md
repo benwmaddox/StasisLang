@@ -340,6 +340,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Android shell verifier covers the control, immutable-baseline restore path, and user-created-symbol guard; Java sources compile.
 - Done gate: A manual user can distinguish discarding unsaved editor text from reverting a saved bundled symbol on disk.
 - Status: `completed`
+#### AW38 - Android Manual Test Deletion
+- Language: `Android Java + docs`.
+- Scope: Complete the manual test lifecycle without making reset-project the only way to discard a draft test.
+- Deliverable: `Delete Test` removes the selected user-created test file and refreshes the symbol tree/review. Bundled tests are guarded from deletion and can instead be restored with `Revert Saved`.
+- Tests: Android shell verifier covers the deletion control, user-created-test path, bundled-test guard, and completion status; Java sources compile.
+- Done gate: A phone-only manual user can create, edit, run, review, revert, and discard draft Stasis tests safely.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

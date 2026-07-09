@@ -783,6 +783,16 @@ public final class MainActivity extends Activity {
         });
         controls.addView(newTest, fullWidth());
 
+        Button deleteTest = new Button(this);
+        deleteTest.setText("Delete Test");
+        deleteTest.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                deleteSelectedManualTest();
+            }
+        });
+        controls.addView(deleteTest, fullWidth());
+
         Button resetProject = new Button(this);
         resetProject.setText("Reset Project");
         resetProject.setOnClickListener(new View.OnClickListener() {
@@ -3247,6 +3257,32 @@ public final class MainActivity extends Activity {
             setStatusText("Created failing test template; edit it, then Run Tests");
         } catch (IOException error) {
             setStatusText("Create test failed: " + error.getMessage());
+        }
+    }
+
+    private void deleteSelectedManualTest() {
+        if (selectedSymbol == null || !"test".equals(selectedSymbol.kind)) {
+            setStatusText("Delete Test unavailable: select a user-created test first");
+            return;
+        }
+        try {
+            if (findMatchingSymbol(loadBundledAssetSnapshot(), selectedSymbol) != null) {
+                setStatusText("Delete Test unavailable: bundled tests can be reverted, not deleted");
+                return;
+            }
+            File file = selectedSymbol.sourceFile.diskFile;
+            if (!file.delete()) {
+                throw new IOException("failed to delete " + file.getAbsolutePath());
+            }
+            ProjectSnapshot project = loadBundledProject();
+            rebuildSymbolList(project);
+            if (project.firstSymbol != null) {
+                showSymbol(project.firstSymbol);
+            }
+            refreshChangeSummary(project);
+            setStatusText("Deleted user-created test");
+        } catch (IOException error) {
+            setStatusText("Delete Test failed: " + error.getMessage());
         }
     }
 
