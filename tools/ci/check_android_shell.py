@@ -207,6 +207,11 @@ def main() -> int:
     assert "formatRawFileDiffs" in activity
     assert "appendUnifiedFileDiff" in activity
     assert "splitSourceLines" in activity
+    assert "SAMPLE_TEST_FILES" in activity
+    assert "parseTest" in activity
+    assert "TestUpdated: run tests to validate" in activity
+    assert "sections.put(\"Tests\"" in activity
+    assert "readAsset(assets, ASSET_ROOT + file)" in activity
     assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
     assert "list_owner_symbols" in activity

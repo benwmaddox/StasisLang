@@ -319,6 +319,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Android shell verifier covers the review control and unified-diff formatter; debug APK compiles.
 - Done gate: A manual editor user can inspect both changed symbols/files and the corresponding advanced raw file diffs without using an AI call or phone-hosted service.
 - Status: `completed`
+#### AW35 - Android Manual Stasis Test Editing
+- Language: `Android Java + docs`.
+- Scope: Make bundled and user-authored `.test.stasis` files first-class manual workshop sources instead of AI-only files.
+- Deliverable: The app-private project seeds the bundled test fixture, includes project tests in the symbol tree, parses valid `test `name`(): bool` declarations into a `Tests` section, and marks saved test edits as requiring the native `Run Tests` validation. Change and raw-diff baselines read immutable bundled assets rather than current app-private files.
+- Tests: Android shell verifier covers bundled test seeding, test-declaration parsing, test reload guidance, and immutable asset reads; Java sources compile.
+- Done gate: A phone-only manual editor user can find, edit, review, and run real Stasis tests from the same app-private project used by the runtime.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

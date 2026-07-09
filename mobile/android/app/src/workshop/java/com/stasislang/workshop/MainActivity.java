@@ -95,6 +95,9 @@ public final class MainActivity extends Activity {
             "src/assets.stasis",
             "src/systems/collision.stasis"
     };
+    private static final String[] SAMPLE_TEST_FILES = new String[] {
+            "tests/enemy_paddle_speed_schedule.test.stasis"
+    };
 
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
@@ -3029,22 +3032,21 @@ public final class MainActivity extends Activity {
         List<SourceFile> files = new ArrayList<>();
         AssetManager assets = getAssets();
         File projectRoot = projectRoot();
-        TreeSet<String> seen = new TreeSet<>();
         for (String file : SAMPLE_FILES) {
             File diskFile = new File(projectRoot, file);
             try {
-                ensureProjectFile(assets, ASSET_ROOT + file, diskFile);
-                files.add(new SourceFile(file, diskFile, readTextFile(diskFile)));
-                seen.add(file);
+                files.add(new SourceFile(file, diskFile, readAsset(assets, ASSET_ROOT + file)));
             } catch (IOException error) {
                 files.add(new SourceFile(file, diskFile, "// Unable to load " + file + ": " + error.getMessage()));
-                seen.add(file);
             }
         }
-        try {
-            collectProjectStasisFiles(new File(projectRoot, "tests"), files, seen);
-        } catch (IOException ignored) {
-            // Extra AI-authored test files should not prevent the source tree from loading.
+        for (String file : SAMPLE_TEST_FILES) {
+            File diskFile = new File(projectRoot, file);
+            try {
+                files.add(new SourceFile(file, diskFile, readAsset(assets, ASSET_ROOT + file)));
+            } catch (IOException error) {
+                files.add(new SourceFile(file, diskFile, "// Unable to load " + file + ": " + error.getMessage()));
+            }
         }
 
         return ProjectSnapshot.from(files);
@@ -3205,6 +3207,9 @@ public final class MainActivity extends Activity {
     }
 
     private String classifySelectedReload(SymbolEntry symbol, String editedSource) {
+        if ("test".equals(symbol.kind)) {
+            return "TestUpdated: run tests to validate";
+        }
         if (!"function".equals(symbol.kind)) {
             return "ResetRequired: struct or layout source changed";
         }
@@ -3331,6 +3336,24 @@ public final class MainActivity extends Activity {
             } catch (IOException error) {
                 files.add(new SourceFile(file, diskFile, "// Unable to load " + file + ": " + error.getMessage()));
             }
+        }
+        for (String file : SAMPLE_TEST_FILES) {
+            File diskFile = new File(projectRoot, file);
+            try {
+                ensureProjectFile(assets, ASSET_ROOT + file, diskFile);
+                files.add(new SourceFile(file, diskFile, readTextFile(diskFile)));
+            } catch (IOException error) {
+                files.add(new SourceFile(file, diskFile, "// Unable to load " + file + ": " + error.getMessage()));
+            }
+        }
+        try {
+            TreeSet<String> seen = new TreeSet<>();
+            for (SourceFile file : files) {
+                seen.add(file.path);
+            }
+            collectProjectStasisFiles(new File(projectRoot, "tests"), files, seen);
+        } catch (IOException ignored) {
+            // Extra user-authored test files should not prevent the source tree from loading.
         }
 
         return ProjectSnapshot.from(files);
@@ -3665,7 +3688,8 @@ public final class MainActivity extends Activity {
             int nextStruct = file.source.indexOf("struct ", cursor);
             int nextFunction = file.source.indexOf("function ", cursor);
             int nextGlobal = file.source.indexOf("global ", cursor);
-            int next = minPositive(minPositive(nextStruct, nextFunction), nextGlobal);
+            int nextTest = file.source.indexOf("test ", cursor);
+            int next = minPositive(minPositive(nextStruct, nextFunction), minPositive(nextGlobal, nextTest));
             if (next < 0) {
                 break;
             }
@@ -3685,6 +3709,14 @@ public final class MainActivity extends Activity {
                     cursor = symbol.end;
                 } else {
                     cursor = next + "global ".length();
+                }
+            } else if (next == nextTest) {
+                SymbolEntry symbol = parseTest(file, next);
+                if (symbol != null) {
+                    symbols.add(symbol);
+                    cursor = symbol.end;
+                } else {
+                    cursor = next + "test ".length();
                 }
             } else {
                 SymbolEntry symbol = parseFunction(file, next, structs);
@@ -3743,6 +3775,25 @@ public final class MainActivity extends Activity {
         return new SymbolEntry("function", name, owner, signature, file, file.path, source, start, end);
     }
 
+    private static SymbolEntry parseTest(SourceFile file, int start) {
+        int signatureStart = start + "test ".length();
+        int bodyStart = file.source.indexOf('{', signatureStart);
+        int end = findMatchingBrace(file.source, bodyStart);
+        if (bodyStart < 0 || end < 0) {
+            return null;
+        }
+
+        String signature = file.source.substring(signatureStart, bodyStart).trim();
+        int nameStart = signature.indexOf('`');
+        int nameEnd = nameStart < 0 ? -1 : signature.indexOf('`', nameStart + 1);
+        if (nameStart < 0 || nameEnd <= nameStart + 1) {
+            return null;
+        }
+        String name = signature.substring(nameStart + 1, nameEnd);
+        String source = file.source.substring(start, end);
+        return new SymbolEntry("test", name, "Tests", "test " + signature, file, file.path, source, start, end);
+    }
+
     private static String ownerForFunction(String file, String name, String signature, TreeSet<String> structs) {
         if (isLifecycle(name)) {
             return "Main";
@@ -3772,6 +3823,7 @@ public final class MainActivity extends Activity {
         sections.put("Globals", new LinkedHashMap<String, List<SymbolEntry>>());
         sections.put("Systems", new LinkedHashMap<String, List<SymbolEntry>>());
         sections.put("Root", new LinkedHashMap<String, List<SymbolEntry>>());
+        sections.put("Tests", new LinkedHashMap<String, List<SymbolEntry>>());
 
         for (SymbolEntry symbol : symbols) {
             String section = sectionFor(symbol);
@@ -3798,6 +3850,9 @@ public final class MainActivity extends Activity {
     }
 
     private static String sectionFor(SymbolEntry symbol) {
+        if ("test".equals(symbol.kind)) {
+            return "Tests";
+        }
         if ("Main".equals(symbol.owner)) {
             return "Main";
         }
