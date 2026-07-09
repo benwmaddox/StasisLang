@@ -215,10 +215,10 @@ def main() -> int:
     assert "aiToolSetRuntimeI32" in activity
     assert "runtimeI32ResultToJson" in activity
     assert "run_frame" in activity
-    assert "run_for_ticks" in activity
     assert "inspect_runtime_state" in activity
     assert "aiToolSetInputState" in activity
-    assert "aiToolRunForTicks" in activity
+    assert "nativeRunTests" in activity
+    assert "test `name`(): bool" in activity
     assert "The app compiles once after each tool-call batch that contains writes and runs tests after each tool-call batch" in activity
     assert "Use on_code_swap() for post-hot-swap migration" in activity
     assert "runtimeStateJson" in activity
