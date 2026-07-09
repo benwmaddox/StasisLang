@@ -60,7 +60,7 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_MODEL = "openai_model";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
-    private static final String DEFAULT_AI_MODEL = "gpt-5.6-luna";
+    private static final String DEFAULT_AI_MODEL = "gpt-5.6-terra";
     private static final String AI_PROMPT_CACHE_KEY = "stasis-android-workshop-v2";
     private static final long AI_TRACE_RETENTION_MS = 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
@@ -68,10 +68,10 @@ public final class MainActivity extends Activity {
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int MAX_AI_AGENT_TURNS = 15;
-    private static final double GPT_5_6_LUNA_INPUT_USD_PER_MILLION = 1.00;
-    private static final double GPT_5_6_LUNA_CACHED_INPUT_USD_PER_MILLION = 0.10;
-    private static final double GPT_5_6_LUNA_CACHE_WRITE_USD_PER_MILLION = 1.25;
-    private static final double GPT_5_6_LUNA_OUTPUT_USD_PER_MILLION = 6.00;
+    private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
+    private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
+    private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125;
+    private static final double GPT_5_6_TERRA_OUTPUT_USD_PER_MILLION = 15.00;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
     private static final int RENDER_FRAME_I32_CAPACITY =
@@ -2734,10 +2734,10 @@ public final class MainActivity extends Activity {
         if (!hasKnownAiPricing(model)) {
             return 0.0;
         }
-        double inputCost = Math.max(0L, inputTokens - cachedInputTokens - cacheWriteInputTokens) * GPT_5_6_LUNA_INPUT_USD_PER_MILLION;
-        double cachedInputCost = cachedInputTokens * GPT_5_6_LUNA_CACHED_INPUT_USD_PER_MILLION;
-        double cacheWriteCost = cacheWriteInputTokens * GPT_5_6_LUNA_CACHE_WRITE_USD_PER_MILLION;
-        double outputCost = outputTokens * GPT_5_6_LUNA_OUTPUT_USD_PER_MILLION;
+        double inputCost = Math.max(0L, inputTokens - cachedInputTokens - cacheWriteInputTokens) * GPT_5_6_TERRA_INPUT_USD_PER_MILLION;
+        double cachedInputCost = cachedInputTokens * GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION;
+        double cacheWriteCost = cacheWriteInputTokens * GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION;
+        double outputCost = outputTokens * GPT_5_6_TERRA_OUTPUT_USD_PER_MILLION;
         return (inputCost + cachedInputCost + cacheWriteCost + outputCost) / 1000000.0;
     }
 

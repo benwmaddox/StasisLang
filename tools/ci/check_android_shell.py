@@ -152,8 +152,8 @@ def main() -> int:
     assert "AI read_symbol target ambiguous: " in activity
     assert "AI read_symbol target not found: " in activity
     assert "AI read_symbol target ambiguous or not found" not in activity
-    assert "private static final double GPT_5_6_LUNA_INPUT_USD_PER_MILLION = 1.00" in activity
-    assert "private static final double GPT_5_6_LUNA_CACHE_WRITE_USD_PER_MILLION = 1.25" in activity
+    assert "private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50" in activity
+    assert "private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125" in activity
     assert "private static AiApiResponse callOpenAiResponsesApi" in activity
     assert "extractAiUsage(response)" in activity
     assert "saveLastAiUsage(aiResult.usageJson)" in activity
@@ -270,7 +270,9 @@ def main() -> int:
     assert "AI_PREF_API_KEY" in activity
     assert "aiPrefs.getString(AI_PREF_API_KEY" in activity
     assert "aiPrefs.getString(AI_PREF_MODEL" in activity
-    assert "gpt-5.6-luna" in activity
+    assert "gpt-5.6-terra" in activity
+    assert 'DEFAULT_MODEL = "gpt-5.6-terra"' in host_agent
+    assert '"cache_write": 3.125' in host_agent
     assert "prompt_cache_key" in activity
     assert "prompt_cache_breakpoint" in activity
     assert 'content.put("prompt_cache_breakpoint", new JSONObject().put("mode", "explicit"))' in activity
