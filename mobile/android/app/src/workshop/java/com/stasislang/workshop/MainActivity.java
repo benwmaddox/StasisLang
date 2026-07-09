@@ -46,6 +46,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -67,6 +68,10 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_MODEL = "openai_model";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
     private static final String AI_PREF_COMMAND_HISTORY_PREFIX = "command_history_";
+    private static final String AI_PREF_MAX_RUN_USD = "max_run_usd";
+    private static final String AI_PREF_MONTHLY_LIMIT_USD = "monthly_limit_usd";
+    private static final String AI_PREF_MONTH_KEY = "monthly_spend_month";
+    private static final String AI_PREF_MONTH_SPEND_USD = "monthly_spend_usd";
     private static final String GITHUB_PREFS = "github_sync_settings";
     private static final String GITHUB_PREF_TOKEN = "github_token";
     private static final String GITHUB_PREF_REPOSITORY = "github_repository";
@@ -80,6 +85,7 @@ public final class MainActivity extends Activity {
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int MAX_AI_AGENT_TURNS = 15;
+    private static final int MAX_AI_OUTPUT_TOKENS = 8192;
     private static final int MAX_COMMAND_HISTORY = 20;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
     private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
@@ -120,6 +126,9 @@ public final class MainActivity extends Activity {
     private EditText aiPromptEditor;
     private EditText aiApiKeyEditor;
     private EditText aiModelEditor;
+    private EditText aiMaxRunUsdEditor;
+    private EditText aiMonthlyLimitUsdEditor;
+    private TextView aiBudgetStatus;
     private TextView aiStepPill;
     private TextView aiActionPill;
     private TextView aiPhasePill;
@@ -899,6 +908,13 @@ public final class MainActivity extends Activity {
         progressRow.addView(aiElapsedPill);
         controls.addView(progressRow, fullWidth());
 
+        aiBudgetStatus = new TextView(this);
+        aiBudgetStatus.setTextSize(12.0f);
+        aiBudgetStatus.setTextColor(Color.rgb(73, 84, 100));
+        aiBudgetStatus.setPadding(0, dp(4), 0, dp(2));
+        controls.addView(aiBudgetStatus, fullWidth());
+        refreshAiBudgetStatus();
+
         Button historyToggle = new Button(this);
         historyToggle.setText("Recent Commands");
         historyToggle.setOnClickListener(new View.OnClickListener() {
@@ -955,6 +971,18 @@ public final class MainActivity extends Activity {
         aiModelEditor.setText(aiPrefs.getString(AI_PREF_MODEL, DEFAULT_AI_MODEL));
         aiModelEditor.setTextSize(12.0f);
         aiSettingsBody.addView(aiModelEditor, fullWidth());
+
+        aiMaxRunUsdEditor = new EditText(this);
+        aiMaxRunUsdEditor.setHint("Maximum USD per AI run");
+        aiMaxRunUsdEditor.setSingleLine(true);
+        aiMaxRunUsdEditor.setText(aiPrefs.getString(AI_PREF_MAX_RUN_USD, "0.25"));
+        aiSettingsBody.addView(aiMaxRunUsdEditor, fullWidth());
+
+        aiMonthlyLimitUsdEditor = new EditText(this);
+        aiMonthlyLimitUsdEditor.setHint("Monthly AI limit USD");
+        aiMonthlyLimitUsdEditor.setSingleLine(true);
+        aiMonthlyLimitUsdEditor.setText(aiPrefs.getString(AI_PREF_MONTHLY_LIMIT_USD, "5.00"));
+        aiSettingsBody.addView(aiMonthlyLimitUsdEditor, fullWidth());
 
         Button saveSettings = new Button(this);
         saveSettings.setText("Save AI Settings");
@@ -1201,12 +1229,64 @@ public final class MainActivity extends Activity {
     private void saveAiSettingsFromEditors() {
         String apiKey = aiApiKeyEditor == null ? "" : aiApiKeyEditor.getText().toString().trim();
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
+        String maxRunText = aiMaxRunUsdEditor == null ? "0.25" : aiMaxRunUsdEditor.getText().toString().trim();
+        String monthlyLimitText = aiMonthlyLimitUsdEditor == null ? "5.00" : aiMonthlyLimitUsdEditor.getText().toString().trim();
         if (apiKey.isEmpty()) {
             setStatusText("AI settings need an API key before a run can start");
             return;
         }
+        if (parseNonNegativeUsd(maxRunText) < 0.0 || parseNonNegativeUsd(monthlyLimitText) < 0.0) {
+            setStatusText("AI budget limits must be non-negative USD values");
+            return;
+        }
         saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model);
+        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                .putString(AI_PREF_MAX_RUN_USD, maxRunText)
+                .putString(AI_PREF_MONTHLY_LIMIT_USD, monthlyLimitText)
+                .apply();
+        refreshAiBudgetStatus();
         setStatusText("AI settings saved");
+    }
+
+    private static double parseNonNegativeUsd(String value) {
+        try {
+            double parsed = Double.parseDouble(value);
+            return Double.isFinite(parsed) && parsed >= 0.0 ? parsed : -1.0;
+        } catch (Exception ignored) {
+            return -1.0;
+        }
+    }
+
+    private static String currentMonthKey() {
+        Calendar now = Calendar.getInstance();
+        return now.get(Calendar.YEAR) + "-" + (now.get(Calendar.MONTH) + 1);
+    }
+
+    private double monthlyAiSpendUsd() {
+        SharedPreferences prefs = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+        if (!currentMonthKey().equals(prefs.getString(AI_PREF_MONTH_KEY, ""))) return 0.0;
+        return Math.max(0.0, parseNonNegativeUsd(prefs.getString(AI_PREF_MONTH_SPEND_USD, "0")));
+    }
+
+    private void recordMonthlyAiSpend(double costUsd) {
+        if (costUsd <= 0.0) return;
+        SharedPreferences prefs = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+        double updated = monthlyAiSpendUsd() + costUsd;
+        prefs.edit().putString(AI_PREF_MONTH_KEY, currentMonthKey())
+                .putString(AI_PREF_MONTH_SPEND_USD, Double.toString(updated)).apply();
+        runOnUiThread(new Runnable() { @Override public void run() { refreshAiBudgetStatus(); } });
+    }
+
+    private double configuredAiLimit(String key, String fallback) {
+        double value = parseNonNegativeUsd(getSharedPreferences(AI_PREFS, MODE_PRIVATE).getString(key, fallback));
+        return value < 0.0 ? Double.parseDouble(fallback) : value;
+    }
+
+    private void refreshAiBudgetStatus() {
+        if (aiBudgetStatus == null) return;
+        double monthlyLimit = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
+        double spent = monthlyAiSpendUsd();
+        aiBudgetStatus.setText("AI budget: " + formatAiCostUsd(spent) + " / " + formatAiCostUsd(monthlyLimit) + " this month");
     }
     private LinearLayout createEditControls() {
         LinearLayout controls = new LinearLayout(this);
@@ -1406,6 +1486,18 @@ public final class MainActivity extends Activity {
         }
         if (model.isEmpty()) {
             model = DEFAULT_AI_MODEL;
+        }
+        double maxRunUsd = configuredAiLimit(AI_PREF_MAX_RUN_USD, "0.25");
+        double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
+        if (!hasKnownAiPricing(model)) {
+            setStatusText("AI run blocked: pricing is unavailable for " + model);
+            updateAiProgress(0, 0, "budget blocked");
+            return;
+        }
+        if (maxRunUsd <= 0.0 || monthlyLimitUsd <= 0.0 || monthlyAiSpendUsd() >= monthlyLimitUsd) {
+            setStatusText("AI run blocked by configured spending limit; open AI Settings");
+            updateAiProgress(0, 0, "budget blocked");
+            return;
         }
         recordCommandHistory(prompt);
         saveAiSettings(apiKey, model);
@@ -1677,14 +1769,22 @@ public final class MainActivity extends Activity {
         AiUsageAccumulator usage = new AiUsageAccumulator();
         String previousToolCallBatch = "";
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
+            double maxRunUsd = configuredAiLimit(AI_PREF_MAX_RUN_USD, "0.25");
+            double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
+            if (usage.estimatedCostUsd >= maxRunUsd || monthlyAiSpendUsd() >= monthlyLimitUsd) {
+                throw new IOException("AI spending limit reached before agent turn " + (turn + 1));
+            }
             session.currentStep = turn + 1;
             postAiProgress(session.currentStep, session.actionCount, "calling AI");
             appendAiTrace("llm_request", new JSONObject()
                     .put("turn", session.currentStep)
                     .put("model", model)
                     .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
-            AiApiResponse apiResponse = callOpenAiResponsesApi(apiKey, model, currentRequestJson);
+            double remainingUsd = Math.min(maxRunUsd - usage.estimatedCostUsd, monthlyLimitUsd - monthlyAiSpendUsd());
+            int maxOutputTokens = maxOutputTokensForBudget(currentRequestJson, remainingUsd);
+            AiApiResponse apiResponse = callOpenAiResponsesApi(apiKey, model, currentRequestJson, maxOutputTokens);
             usage.add(model, apiResponse.usage);
+            if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
             String aiJson = extractAiJsonResponse(apiResponse.body);
             JSONObject response = new JSONObject(aiJson);
             appendAiTrace("llm_response", new JSONObject()
@@ -2921,9 +3021,22 @@ public final class MainActivity extends Activity {
         return new JSONObject().put("role", role).put("content", new JSONArray().put(content));
     }
 
-    private static AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson) throws Exception {
+    private static int maxOutputTokensForBudget(String requestJson, double remainingUsd) throws Exception {
+        byte[] inputBytes = buildAiOpenAiInput(requestJson).toString().getBytes(StandardCharsets.UTF_8);
+        double inputRate = Math.max(GPT_5_6_TERRA_INPUT_USD_PER_MILLION, GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION);
+        double conservativeInputCost = inputBytes.length * inputRate / 1000000.0;
+        double outputBudget = remainingUsd - conservativeInputCost;
+        int outputTokens = (int)Math.floor(outputBudget * 1000000.0 / GPT_5_6_TERRA_OUTPUT_USD_PER_MILLION);
+        if (outputTokens < 64) {
+            throw new IOException("AI spending limit leaves insufficient budget for another response");
+        }
+        return Math.min(MAX_AI_OUTPUT_TOKENS, outputTokens);
+    }
+
+    private static AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson, int maxOutputTokens) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
+        payload.put("max_output_tokens", maxOutputTokens);
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
         payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
         payload.put("text", buildAiResponseTextFormat());
@@ -4242,6 +4355,8 @@ public final class MainActivity extends Activity {
         private long outputTokens;
         private double estimatedCostUsd;
         private boolean costAvailable = true;
+        private double lastCallEstimatedCostUsd;
+        private boolean lastCallCostAvailable;
 
         void add(String model, JSONObject usage) throws Exception {
             long callInputTokens = usageTokenCount(usage, "input_tokens", "prompt_tokens");
@@ -4250,6 +4365,8 @@ public final class MainActivity extends Activity {
             long callOutputTokens = usageTokenCount(usage, "output_tokens", "completion_tokens");
             boolean callCostAvailable = hasKnownAiPricing(model);
             double callEstimatedCostUsd = estimateAiCostUsd(model, callInputTokens, callCachedInputTokens, callCacheWriteInputTokens, callOutputTokens);
+            lastCallEstimatedCostUsd = callEstimatedCostUsd;
+            lastCallCostAvailable = callCostAvailable;
 
             JSONObject call = new JSONObject();
             call.put("turn", calls.length() + 1);
