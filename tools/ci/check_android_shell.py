@@ -140,10 +140,21 @@ def main() -> int:
     assert "AI run started: preparing workspace and command context" in activity
     assert "AI run needs both a request and an API key" in activity
     assert "Recent Commands" in activity
-    assert "Clear Command History" in activity
+    assert "Clear Commands + Outcomes" in activity
     assert "MAX_COMMAND_HISTORY = 20" in activity
     assert "recordCommandHistory(prompt)" in activity
-    assert "Command history cleared for this project" in activity
+    assert "Command and AI outcome history cleared for this project" in activity
+    assert "AI_PREF_OUTCOME_HISTORY_PREFIX" in activity
+    assert "AI outcomes:" in activity
+    assert "Retry Last AI" in activity
+    assert "recordAiOutcome" in activity
+    assert 'put("trace_path", aiTraceLogPath())' in activity
+    assert "updated.length() < MAX_COMMAND_HISTORY" in activity
+    assert '"started".equals(prior.optString("status", ""))' in activity
+    assert "Retrying last AI request as a new budget-checked run" in activity
+    assert 'recordAiOutcome(activeAiPrompt, "cancelled"' in activity
+    assert 'recordAiOutcome(activeAiPrompt, "applied"' in activity
+    assert 'recordAiOutcome(activeAiPrompt, "rolled_back"' in activity
     assert "Maximum USD per AI run" in activity
     assert "Monthly AI limit USD" in activity
     assert "AI budget:" in activity
