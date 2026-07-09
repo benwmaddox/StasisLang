@@ -385,10 +385,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 #### AW44 - Android Background GitHub Contents Sync
 - Language: `Android Java + GitHub REST API + docs`.
 - Scope: Use saved GitHub settings to sync changed app-private project files serially in the background, with compact progress/error state and no false success claim.
-- Deliverable: Local project changes become authenticated GitHub commits using the configured branch and Contents-write permission; conflict/error paths preserve the local project and remain visible in the compact status.
+- Deliverable: A configured Workshop can now manually start serial Contents API uploads for changed app-private files, using the configured branch, Base64 content, and existing remote SHA when replacing a file. Local files are never modified by upload failure; compact status reports queued, progress, complete, or error. Automatic scheduling, deletion sync, and authenticated repository validation remain pending.
 - Tests: Isolated request/response helpers, serial sync scheduling, conflict/error paths, structural verifier, and debug APK build; authenticated repository validation when configured.
 - Done gate: A configured Workshop can back up changed Stasis sources to GitHub without making sync controls the foreground editor workflow.
-- Status: `planned`
+- Status: `in progress (authenticated validation deferred)`
 #### AW45 - Android GitHub Review and Pull Request Flow
 - Scope: Create a review branch/PR from the configured project, with symbol-first and raw-diff review before submission.
 - Done gate: A configured workshop can create or update a GitHub PR without losing local edits.

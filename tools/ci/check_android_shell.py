@@ -150,6 +150,11 @@ def main() -> int:
     assert "GitHub sync: not configured" in activity
     assert "GitHub sync: ready for " in activity
     assert "Save GitHub Sync Settings" in activity
+    assert "Sync GitHub Now" in activity
+    assert "queueGitHubSync" in activity
+    assert "uploadGitHubFile" in activity
+    assert "GitHub sync: queued" in activity
+    assert "GitHub sync error:" in activity
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity
