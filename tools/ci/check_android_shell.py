@@ -169,6 +169,18 @@ def main() -> int:
     assert "uploadGitHubFile" in activity
     assert "GitHub sync: queued" in activity
     assert "GitHub sync error:" in activity
+    assert "Review GitHub Changes" in activity
+    assert "Create / Update Pull Request" in activity
+    assert "reviewedGitHubChangeFingerprint" in activity
+    assert 'MessageDigest.getInstance("SHA-256")' in activity
+    assert "GITHUB_NETWORK_TIMEOUT_MS" in activity
+    assert "GitHub pull request: review current changes first" in activity
+    assert "ensureGitHubReviewBranch" in activity
+    assert "stasis-workshop-" in activity
+    assert "createOrFindGitHubPullRequest" in activity
+    assert 'githubApiUrl(repository, "/git/refs")' in activity
+    assert 'githubApiUrl(repository, "/pulls")' in activity
+    assert "GitHub pull request: ready " in activity
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity

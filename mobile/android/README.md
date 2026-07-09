@@ -94,3 +94,5 @@ tick=<avg ms> render=<avg ms> budget=<tick+render % of 60 fps frame>
 ```
 
 Open the top-right menu button to access the AI prompt first, with manual symbols/source collapsed below it. Manual Apply/Reset, Changes, Reset Project, and Run Tick live with the selected manual symbol editor; Apply compiles immediately.
+
+GitHub settings remain collapsed below the command workflow. After configuring a token, `owner/repository`, and base branch, `Sync GitHub Now` uploads changed project files directly to that branch. For reviewed work, use `Review GitHub Changes` first; it shows the symbol summary and raw diffs and records the exact reviewed change set. `Create / Update Pull Request` then creates or reuses the deterministic Workshop review branch, uploads those reviewed files, and creates or finds its open pull request. If local files change after review, submission stops until they are reviewed again.

@@ -44,7 +44,10 @@ import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
@@ -87,6 +90,7 @@ public final class MainActivity extends Activity {
     private static final int MAX_AI_AGENT_TURNS = 15;
     private static final int MAX_AI_OUTPUT_TOKENS = 8192;
     private static final int MAX_COMMAND_HISTORY = 20;
+    private static final int GITHUB_NETWORK_TIMEOUT_MS = 15_000;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
     private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
     private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
@@ -141,6 +145,7 @@ public final class MainActivity extends Activity {
     private EditText githubRepositoryEditor;
     private EditText githubBranchEditor;
     private TextView githubSyncStatus;
+    private String reviewedGitHubChangeFingerprint = "";
     private TextView reloadStatus;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -1039,6 +1044,18 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { queueGitHubSync(); }
         });
         githubSettingsBody.addView(syncNow, fullWidth());
+        Button reviewGitHubChanges = new Button(this);
+        reviewGitHubChanges.setText("Review GitHub Changes");
+        reviewGitHubChanges.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { reviewGitHubPullRequestChanges(); }
+        });
+        githubSettingsBody.addView(reviewGitHubChanges, fullWidth());
+        Button createPullRequest = new Button(this);
+        createPullRequest.setText("Create / Update Pull Request");
+        createPullRequest.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { queueGitHubPullRequest(); }
+        });
+        githubSettingsBody.addView(createPullRequest, fullWidth());
         controls.addView(githubSettingsBody, fullWidth());
         return controls;
     }
@@ -1190,6 +1207,194 @@ public final class MainActivity extends Activity {
         return changed;
     }
 
+    private void reviewGitHubPullRequestChanges() {
+        try {
+            ProjectSnapshot baseline = loadBundledAssetSnapshot();
+            ProjectSnapshot current = loadBundledProject();
+            Map<String, String> changes = changedProjectSources(baseline, current);
+            if (changes.isEmpty()) {
+                reviewedGitHubChangeFingerprint = "";
+                githubSyncStatus.setText("GitHub review: no local changes");
+                return;
+            }
+            reviewedGitHubChangeFingerprint = githubChangeFingerprint(changes);
+            changeSummary.setText(formatChangeSummary(baseline, current)
+                    + "\n\n" + formatRawFileDiffs(baseline, current));
+            githubSyncStatus.setText("GitHub review: ready (" + changes.size() + " files)");
+        } catch (IOException error) {
+            reviewedGitHubChangeFingerprint = "";
+            githubSyncStatus.setText("GitHub review error: " + error.getMessage());
+        }
+    }
+
+    private void queueGitHubPullRequest() {
+        final SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        final String token = prefs.getString(GITHUB_PREF_TOKEN, "").trim();
+        final String repository = prefs.getString(GITHUB_PREF_REPOSITORY, "").trim();
+        final String baseBranch = prefs.getString(GITHUB_PREF_BRANCH, "main").trim();
+        if (token.isEmpty() || repository.indexOf('/') <= 0) {
+            setStatusText("GitHub pull request needs configured settings");
+            return;
+        }
+        final Map<String, String> changes;
+        try {
+            changes = changedProjectSources(loadBundledAssetSnapshot(), loadBundledProject());
+        } catch (IOException error) {
+            githubSyncStatus.setText("GitHub pull request error: unable to read local changes");
+            return;
+        }
+        if (changes.isEmpty()) {
+            githubSyncStatus.setText("GitHub pull request: no local changes");
+            return;
+        }
+        if (!githubChangeFingerprint(changes).equals(reviewedGitHubChangeFingerprint)) {
+            githubSyncStatus.setText("GitHub pull request: review current changes first");
+            return;
+        }
+        final String reviewBranch = githubReviewBranchName();
+        githubSyncStatus.setText("GitHub pull request: queued");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    ensureGitHubReviewBranch(token, repository, baseBranch, reviewBranch);
+                    int completed = 0;
+                    for (Map.Entry<String, String> entry : changes.entrySet()) {
+                        completed += 1;
+                        postGitHubSyncStatus("GitHub pull request: uploading " + completed + "/" + changes.size());
+                        uploadGitHubFile(token, repository, reviewBranch, entry.getKey(), entry.getValue());
+                    }
+                    String url = createOrFindGitHubPullRequest(token, repository, baseBranch, reviewBranch,
+                            formatGitHubPullRequestBody(changes));
+                    postGitHubSyncStatus("GitHub pull request: ready " + url);
+                } catch (Exception error) {
+                    postGitHubSyncStatus("GitHub pull request error: " + error.getMessage());
+                }
+            }
+        }).start();
+    }
+
+    private static String githubChangeFingerprint(Map<String, String> changes) {
+        StringBuilder fingerprint = new StringBuilder();
+        for (Map.Entry<String, String> entry : changes.entrySet()) {
+            fingerprint.append(entry.getKey()).append('\n').append(entry.getValue()).append('\n');
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(fingerprint.toString().getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            String digits = "0123456789abcdef";
+            for (byte value : digest) {
+                int unsigned = value & 0xff;
+                hex.append(digits.charAt(unsigned >>> 4));
+                hex.append(digits.charAt(unsigned & 0x0f));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException unavailable) {
+            return fingerprint.toString();
+        }
+    }
+
+    private static String githubReviewBranchName() {
+        return "stasis-workshop-" + PROJECT_DIR.replace('_', '-');
+    }
+
+    private static String formatGitHubPullRequestBody(Map<String, String> changes) {
+        StringBuilder body = new StringBuilder("Updated from Stasis Workshop for Android.\n\nChanged files:");
+        for (String path : changes.keySet()) body.append("\n- `").append(path).append('`');
+        return body.toString();
+    }
+
+    private static void ensureGitHubReviewBranch(String token, String repository, String baseBranch, String reviewBranch) throws Exception {
+        String reviewRefUrl = githubApiUrl(repository, "/git/ref/heads/" + encodeGitHubPath(reviewBranch));
+        int reviewCode = githubGetCode(token, reviewRefUrl);
+        if (reviewCode == 200) return;
+        if (reviewCode != 404) throw new IOException("review branch HTTP " + reviewCode);
+
+        JSONObject baseRef = githubGetJson(token,
+                githubApiUrl(repository, "/git/ref/heads/" + encodeGitHubPath(baseBranch)));
+        String baseSha = baseRef.optJSONObject("object") == null
+                ? "" : baseRef.optJSONObject("object").optString("sha", "");
+        if (baseSha.isEmpty()) throw new IOException("base branch has no commit SHA");
+        githubWriteJson(token, "POST", githubApiUrl(repository, "/git/refs"),
+                new JSONObject().put("ref", "refs/heads/" + reviewBranch).put("sha", baseSha), 201);
+    }
+
+    private static String createOrFindGitHubPullRequest(String token, String repository, String baseBranch,
+            String reviewBranch, String body) throws Exception {
+        String owner = repository.substring(0, repository.indexOf('/'));
+        String query = "?state=open&head=" + encodeGitHubQuery(owner + ":" + reviewBranch)
+                + "&base=" + encodeGitHubQuery(baseBranch);
+        JSONArray existing = githubGetArray(token, githubApiUrl(repository, "/pulls" + query));
+        if (existing.length() > 0) return existing.getJSONObject(0).optString("html_url", "existing PR");
+        JSONObject created = githubWriteJson(token, "POST", githubApiUrl(repository, "/pulls"),
+                new JSONObject().put("title", "Stasis Workshop Android changes")
+                        .put("head", reviewBranch).put("base", baseBranch).put("body", body), 201);
+        return created.optString("html_url", "created PR");
+    }
+
+    private static String githubApiUrl(String repository, String path) {
+        return "https://api.github.com/repos/" + repository + path;
+    }
+
+    private static String encodeGitHubPath(String value) throws Exception {
+        return encodeGitHubQuery(value).replace("%2F", "/");
+    }
+
+    private static String encodeGitHubQuery(String value) throws Exception {
+        return URLEncoder.encode(value, "UTF-8").replace("+", "%20");
+    }
+
+    private static void configureGitHubConnection(HttpURLConnection connection, String token) {
+        connection.setConnectTimeout(GITHUB_NETWORK_TIMEOUT_MS);
+        connection.setReadTimeout(GITHUB_NETWORK_TIMEOUT_MS);
+        connection.setRequestProperty("Accept", "application/vnd.github+json");
+        connection.setRequestProperty("Authorization", "Bearer " + token);
+        connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
+    }
+
+    private static int githubGetCode(String token, String url) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
+        configureGitHubConnection(connection, token);
+        int code = connection.getResponseCode();
+        connection.disconnect();
+        return code;
+    }
+
+    private static JSONObject githubGetJson(String token, String url) throws Exception {
+        return new JSONObject(githubRead(token, url));
+    }
+
+    private static JSONArray githubGetArray(String token, String url) throws Exception {
+        return new JSONArray(githubRead(token, url));
+    }
+
+    private static String githubRead(String token, String url) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
+        configureGitHubConnection(connection, token);
+        int code = connection.getResponseCode();
+        if (code != 200) throw new IOException("GitHub read HTTP " + code);
+        String response = readStreamStatic(connection.getInputStream());
+        connection.disconnect();
+        return response;
+    }
+
+    private static JSONObject githubWriteJson(String token, String method, String url, JSONObject body,
+            int expectedCode) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
+        connection.setRequestMethod(method);
+        connection.setDoOutput(true);
+        configureGitHubConnection(connection, token);
+        connection.setRequestProperty("Content-Type", "application/json");
+        OutputStream output = connection.getOutputStream();
+        output.write(body.toString().getBytes(StandardCharsets.UTF_8));
+        output.close();
+        int code = connection.getResponseCode();
+        if (code != expectedCode) throw new IOException("GitHub write HTTP " + code);
+        String response = readStreamStatic(connection.getInputStream());
+        connection.disconnect();
+        return new JSONObject(response);
+    }
+
     private void postGitHubSyncStatus(final String status) {
         runOnUiThread(new Runnable() {
             @Override public void run() { if (githubSyncStatus != null) githubSyncStatus.setText(status); }
@@ -1197,10 +1402,9 @@ public final class MainActivity extends Activity {
     }
 
     private static void uploadGitHubFile(String token, String repository, String branch, String path, String source) throws Exception {
-        String base = "https://api.github.com/repos/" + repository + "/contents/" + path;
-        HttpURLConnection get = (HttpURLConnection)new URL(base + "?ref=" + branch).openConnection();
-        get.setRequestProperty("Accept", "application/vnd.github+json");
-        get.setRequestProperty("Authorization", "Bearer " + token);
+        String base = githubApiUrl(repository, "/contents/" + encodeGitHubPath(path));
+        HttpURLConnection get = (HttpURLConnection)new URL(base + "?ref=" + encodeGitHubQuery(branch)).openConnection();
+        configureGitHubConnection(get, token);
         String sha = "";
         int getCode = get.getResponseCode();
         if (getCode == 200) sha = new JSONObject(readStreamStatic(get.getInputStream())).optString("sha", "");
@@ -1211,9 +1415,8 @@ public final class MainActivity extends Activity {
         if (!sha.isEmpty()) body.put("sha", sha);
         HttpURLConnection put = (HttpURLConnection)new URL(base).openConnection();
         put.setRequestMethod("PUT"); put.setDoOutput(true);
-        put.setRequestProperty("Accept", "application/vnd.github+json");
+        configureGitHubConnection(put, token);
         put.setRequestProperty("Content-Type", "application/json");
-        put.setRequestProperty("Authorization", "Bearer " + token);
         OutputStream output = put.getOutputStream(); output.write(body.toString().getBytes(StandardCharsets.UTF_8)); output.close();
         int putCode = put.getResponseCode();
         if (putCode != 200 && putCode != 201) throw new IOException("write " + path + " HTTP " + putCode);
