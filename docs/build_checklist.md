@@ -333,6 +333,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Android shell verifier covers the control, creation path, selection helper, and intentional failing-template guidance; Java sources compile.
 - Done gate: Users can create, edit, review, and run a real Stasis test entirely through manual Android workshop controls.
 - Status: `completed`
+#### AW37 - Android Manual Saved-Symbol Revert
+- Language: `Android Java + docs`.
+- Scope: Let manual workshop users safely undo a persisted change without resetting the whole app-private project.
+- Deliverable: `Revert Saved` restores the selected bundled symbol source from immutable assets, refreshes the symbol tree/change review, and recompiles the project. User-created symbols report that a bundled revert is unavailable instead of deleting content implicitly.
+- Tests: Android shell verifier covers the control, immutable-baseline restore path, and user-created-symbol guard; Java sources compile.
+- Done gate: A manual user can distinguish discarding unsaved editor text from reverting a saved bundled symbol on disk.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
