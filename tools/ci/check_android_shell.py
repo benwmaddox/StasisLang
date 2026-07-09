@@ -187,6 +187,9 @@ def main() -> int:
     assert "restored_diagnostics" in activity
     assert "write_symbol creates or replaces a symbol" in activity
     assert "Before writing, inspect the current target" in activity
+    assert "game_design_rules" in activity
+    assert "prefer_lifecycle_local_state" in activity
+    assert "avoid_global_tick_for_per_entity_progression" in activity
     assert "Apply code changes with write_symbol before final edits" in activity
     assert "Tool errors are not final" in activity
     assert "mode=done" in activity

@@ -891,6 +891,13 @@ public final class MainActivity extends Activity {
             rules.put("lifecycle_functions_live_in_main", true);
             rules.put("no_owner_functions_live_in_root", true);
 
+            JSONObject gameRules = new JSONObject();
+            gameRules.put("prefer_lifecycle_local_state", true);
+            gameRules.put("time_since_spawn_uses_entity_or_event_state", true);
+            gameRules.put("reset_lifecycle_timers_when_entity_is_created", true);
+            gameRules.put("avoid_global_tick_for_per_entity_progression", true);
+            gameRules.put("inspect_creation_and_update_paths_together", true);
+
             JSONObject request = new JSONObject();
             request.put("user_prompt", prompt);
             request.put("scope", "entire_workspace");
@@ -911,6 +918,7 @@ public final class MainActivity extends Activity {
                     .put("inspect_runtime_state")
                     .put("take_screenshot"));
             request.put("stasis_style_rules", rules);
+            request.put("game_design_rules", gameRules);
             return request.toString();
         } catch (Exception error) {
             return "{}";
@@ -1363,7 +1371,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. Before writing, inspect the current target with list_symbols and read_symbol/read_file unless the exact current source was already provided in selected_symbols or tool observations. write_symbol creates or replaces a symbol, compiles immediately, and returns status=rolled_back with diagnostics if the edit breaks compilation. Apply code changes with write_symbol before final edits so failed writes return observations you can correct. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol has successfully written and compiled the intended changes. If the requested work is already complete or no code changes are needed, return mode=done with empty tool_calls and empty edits. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. Before writing, inspect the current target with list_symbols and read_symbol/read_file unless the exact current source was already provided in selected_symbols or tool observations. For behavior that depends on time since an entity, ball, wave, or event was created, prefer local lifecycle state that is reset on creation and incremented by tick over using overall game tick count; inspect creation and update paths together. write_symbol creates or replaces a symbol, compiles immediately, and returns status=rolled_back with diagnostics if the edit breaks compilation. Apply code changes with write_symbol before final edits so failed writes return observations you can correct. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol has successfully written and compiled the intended changes. If the requested work is already complete or no code changes are needed, return mode=done with empty tool_calls and empty edits. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
