@@ -146,6 +146,7 @@ public final class MainActivity extends Activity {
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
     private static native String nativeGetRuntimeI32(String projectRoot, String path);
+    private static native String nativeRunTests(String projectRoot);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -1701,6 +1702,7 @@ public final class MainActivity extends Activity {
         int passed = 0;
         int failed = 0;
         int pending = 0;
+        JSONObject bridgeTestRun = null;
         for (File file : listProjectTestFiles()) {
             String relative = relativeProjectPath(file);
             if (relative.endsWith(".ai_test.json")) {
@@ -1713,11 +1715,12 @@ public final class MainActivity extends Activity {
                     failed += 1;
                 }
             } else if (relative.endsWith(".test.stasis")) {
-                pending += 1;
-                stasisTests.put(new JSONObject()
-                        .put("file", relative)
-                        .put("status", "pending_android_bridge_test_runner")
-                        .put("reason", "Android bridge currently exposes compile/tick/global access, not the desktop .test.stasis executor."));
+                if (bridgeTestRun == null) {
+                    bridgeTestRun = new JSONObject(nativeRunTests(projectRootPath()));
+                    stasisTests.put(bridgeTestRun);
+                    passed += bridgeTestRun.optInt("passed", 0);
+                    failed += bridgeTestRun.optInt("failed", 0);
+                }
             }
         }
 
