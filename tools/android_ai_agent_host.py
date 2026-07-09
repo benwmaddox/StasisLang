@@ -36,6 +36,19 @@ class Symbol:
     end: int
 
 
+def load_env_file(path: Path) -> None:
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        value = value.strip().strip("'\"")
+        if name and name not in os.environ:
+            os.environ[name] = value
+
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -308,6 +321,7 @@ def main() -> int:
     parser.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     args = parser.parse_args()
+    load_env_file(ROOT / ".env")
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         print("OPENAI_API_KEY is required", file=sys.stderr)
