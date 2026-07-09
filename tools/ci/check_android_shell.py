@@ -199,7 +199,7 @@ def main() -> int:
     assert "test_observation" in activity
     assert "runAiTestsAfterBatch" in activity
     assert "new_passing_tests" in activity
-    assert "pending_android_bridge_test_runner" in activity
+    assert "nativeRunTests(projectRootPath())" in activity
     assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
     assert "list_owner_symbols" in activity
