@@ -202,6 +202,11 @@ def main() -> int:
     assert "nativeRunTests(projectRootPath())" in activity
     assert "runTests.setText(\"Run Tests\")" in activity
     assert "runNativeTests();" in activity
+    assert "rawDiffs.setText(\"Raw Diffs\")" in activity
+    assert "showRawDiffReview();" in activity
+    assert "formatRawFileDiffs" in activity
+    assert "appendUnifiedFileDiff" in activity
+    assert "splitSourceLines" in activity
     assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
     assert "list_owner_symbols" in activity

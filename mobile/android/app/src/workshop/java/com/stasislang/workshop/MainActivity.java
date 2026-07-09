@@ -750,6 +750,16 @@ public final class MainActivity extends Activity {
         });
         controls.addView(refreshChanges, fullWidth());
 
+        Button rawDiffs = new Button(this);
+        rawDiffs.setText("Raw Diffs");
+        rawDiffs.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                showRawDiffReview();
+            }
+        });
+        controls.addView(rawDiffs, fullWidth());
+
         Button resetProject = new Button(this);
         resetProject.setText("Reset Project");
         resetProject.setOnClickListener(new View.OnClickListener() {
@@ -3004,6 +3014,17 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void showRawDiffReview() {
+        if (changeSummary == null) {
+            return;
+        }
+        try {
+            changeSummary.setText(formatRawFileDiffs(loadBundledAssetSnapshot(), loadBundledProject()));
+        } catch (IOException error) {
+            changeSummary.setText("Raw file diffs:\n  Unable to read bundled baseline: " + error.getMessage());
+        }
+    }
+
     private ProjectSnapshot loadBundledAssetSnapshot() throws IOException {
         List<SourceFile> files = new ArrayList<>();
         AssetManager assets = getAssets();
@@ -3075,6 +3096,71 @@ public final class MainActivity extends Activity {
             }
         }
         return builder.toString();
+    }
+
+    private static String formatRawFileDiffs(ProjectSnapshot baseline, ProjectSnapshot current) {
+        Map<String, String> baselineFiles = sourcesByFile(baseline);
+        Map<String, String> currentFiles = sourcesByFile(current);
+        TreeSet<String> files = new TreeSet<>();
+        files.addAll(baselineFiles.keySet());
+        files.addAll(currentFiles.keySet());
+
+        StringBuilder builder = new StringBuilder("Raw file diffs:");
+        boolean found = false;
+        for (String file : files) {
+            String before = baselineFiles.containsKey(file) ? baselineFiles.get(file) : "";
+            String after = currentFiles.containsKey(file) ? currentFiles.get(file) : "";
+            if (before.equals(after)) {
+                continue;
+            }
+            found = true;
+            appendUnifiedFileDiff(builder, file, before, after);
+        }
+        if (!found) {
+            builder.append(" none");
+        }
+        return builder.toString();
+    }
+
+    private static Map<String, String> sourcesByFile(ProjectSnapshot project) {
+        Map<String, String> sources = new LinkedHashMap<>();
+        for (SourceFile file : project.files) {
+            sources.put(file.path, file.source);
+        }
+        return sources;
+    }
+
+    private static void appendUnifiedFileDiff(StringBuilder builder, String file, String before, String after) {
+        String[] beforeLines = splitSourceLines(before);
+        String[] afterLines = splitSourceLines(after);
+        int prefix = 0;
+        while (prefix < beforeLines.length && prefix < afterLines.length
+                && beforeLines[prefix].equals(afterLines[prefix])) {
+            prefix += 1;
+        }
+        int beforeEnd = beforeLines.length;
+        int afterEnd = afterLines.length;
+        while (beforeEnd > prefix && afterEnd > prefix
+                && beforeLines[beforeEnd - 1].equals(afterLines[afterEnd - 1])) {
+            beforeEnd -= 1;
+            afterEnd -= 1;
+        }
+
+        builder.append("\n\ndiff --stasis ").append(file);
+        builder.append("\n--- a/").append(file);
+        builder.append("\n+++ b/").append(file);
+        builder.append("\n@@ -").append(prefix + 1).append(',').append(beforeEnd - prefix);
+        builder.append(" +").append(prefix + 1).append(',').append(afterEnd - prefix).append(" @@");
+        for (int index = prefix; index < beforeEnd; index += 1) {
+            builder.append('\n').append('-').append(beforeLines[index]);
+        }
+        for (int index = prefix; index < afterEnd; index += 1) {
+            builder.append('\n').append('+').append(afterLines[index]);
+        }
+    }
+
+    private static String[] splitSourceLines(String source) {
+        return source.isEmpty() ? new String[0] : source.split("\\n", -1);
     }
 
     private static void addChangedSymbol(Map<String, List<String>> changedByGroup, String group, String line) {
