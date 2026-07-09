@@ -162,6 +162,8 @@ def main() -> int:
     assert "aiToolReadImports" in activity
     assert "aiToolWriteImports" in activity
     assert "backing_struct_source" in activity
+    assert "project_globals" in activity
+    assert "backing_struct_type" in activity
     assert "parseGlobal" in activity
     assert "sections.put(\"Globals\"" in activity
     assert "validation_error" in activity

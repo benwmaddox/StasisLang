@@ -837,7 +837,8 @@ public final class MainActivity extends Activity {
         saveAiSettings(apiKey, model);
         final SymbolEntry symbol = selectedSymbol;
         final String selectedSource = symbol == null || sourceEditor == null ? "" : sourceEditor.getText().toString().trim();
-        final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource);
+        final ProjectSnapshot aiProject = loadBundledProject();
+        final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject);
         final String requestModel = model;
         final String requestApiKey = apiKey;
         aiStartedAtNanos = System.nanoTime();
@@ -878,7 +879,30 @@ public final class MainActivity extends Activity {
                 .apply();
     }
 
-    private static String buildAiCodeRequestJson(String prompt, SymbolEntry symbol, String selectedSource) {
+    private static JSONArray aiProjectGlobals(ProjectSnapshot project) throws Exception {
+        JSONArray globals = new JSONArray();
+        if (project == null) {
+            return globals;
+        }
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (!"global".equals(symbol.kind)) {
+                        continue;
+                    }
+                    globals.put(new JSONObject()
+                            .put("kind", "global")
+                            .put("name", symbol.name)
+                            .put("file", symbol.file)
+                            .put("backing_struct_type", symbol.name)
+                            .put("backing_struct_source", symbol.backingStructSource));
+                }
+            }
+        }
+        return globals;
+    }
+
+    private static String buildAiCodeRequestJson(String prompt, SymbolEntry symbol, String selectedSource, ProjectSnapshot project) {
         try {
             JSONArray selectedSymbols = new JSONArray();
             if (symbol != null) {
@@ -923,15 +947,16 @@ public final class MainActivity extends Activity {
                     .put("Avoid per-tick allocation/object churn and keep new systems within the visible 60 fps budget.");
 
             JSONObject request = new JSONObject();
-            request.put("user_prompt", prompt);
             request.put("scope", "entire_workspace");
-            request.put("selected_symbols", selectedSymbols);
-            request.put("selected_symbols_are_context_only", true);
             request.put("available_tools", supportedAiTools());
             request.put("tool_specs", aiToolSpecs());
             request.put("stasis_style_rules", rules);
             request.put("game_design_rules", gameRules);
             request.put("architecture_recommendations", architectureRecommendations);
+            request.put("project_globals", aiProjectGlobals(project));
+            request.put("user_prompt", prompt);
+            request.put("selected_symbols", selectedSymbols);
+            request.put("selected_symbols_are_context_only", true);
             return request.toString();
         } catch (Exception error) {
             return "{}";
