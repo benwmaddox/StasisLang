@@ -179,6 +179,7 @@ def main() -> int:
     assert "status\", \"rolled_back" in activity
     assert "restored_diagnostics" in activity
     assert "write_symbol creates or replaces a symbol" in activity
+    assert "Before writing, inspect the current target" in activity
     assert "AI edit apply failed and rolled back" in activity
     assert "appendAiFunction" in activity
     assert "\"created\"" in activity
