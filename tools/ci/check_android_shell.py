@@ -281,6 +281,12 @@ def main() -> int:
     assert '"prompt_cache_breakpoint": {"mode": "explicit"}' in host_agent
     assert '"type": "prompt_cache_breakpoint"' not in host_agent
     assert '"prompt_cache_retention"' not in host_agent
+    assert 'DEFAULT_TRACE_DIR = ROOT / "artifacts/android_ai_runs"' in host_agent
+    assert 'parser.add_argument("--preflight"' in host_agent
+    assert 'trace_file = args.trace_file or default_trace_file()' in host_agent
+    assert '"kind": "api_error"' in host_agent
+    assert '"kind": "openai_request"' in host_agent
+    assert 'def summarize_openai_payload' in host_agent
     assert "saveAiSettings(apiKey, model)" in activity
     assert "private LinearLayout symbolList" in activity
     assert "rebuildSymbolList(refreshedProject)" in activity
