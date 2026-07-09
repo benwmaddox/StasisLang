@@ -99,6 +99,7 @@ public final class MainActivity extends Activity {
     private TextView aiStepPill;
     private TextView aiActionPill;
     private TextView aiPhasePill;
+    private TextView aiElapsedPill;
     private TextView reloadStatus;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -123,6 +124,7 @@ public final class MainActivity extends Activity {
     private int aiSimScreenWidth;
     private int aiSimScreenHeight;
     private long lastDebugUpdateNanos;
+    private long aiStartedAtNanos;
     private SymbolEntry selectedSymbol;
 
     static {
@@ -423,8 +425,71 @@ public final class MainActivity extends Activity {
         if (aiPhasePill != null) {
             aiPhasePill.setText(phase);
         }
+        if (aiElapsedPill != null) {
+            aiElapsedPill.setText("time " + currentAiElapsedText());
+        }
     }
 
+    private String currentAiElapsedText() {
+        if (aiStartedAtNanos == 0L) {
+            return "0.0s";
+        }
+        return formatElapsedMillis((System.nanoTime() - aiStartedAtNanos) / 1_000_000L);
+    }
+
+    private static String formatElapsedMillis(long millis) {
+        long tenths = (millis + 50L) / 100L;
+        return Long.toString(tenths / 10L) + "." + Long.toString(tenths % 10L) + "s";
+    }
+
+    private static String reloadKind(String compileResult) {
+        if (compileResult == null) {
+            return "unknown";
+        }
+        String marker = "reload=";
+        int start = compileResult.indexOf(marker);
+        if (start < 0) {
+            return "unknown";
+        }
+        start += marker.length();
+        int end = start;
+        while (end < compileResult.length()) {
+            char value = compileResult.charAt(end);
+            if (!Character.isLetterOrDigit(value)) {
+                break;
+            }
+            end += 1;
+        }
+        return end > start ? compileResult.substring(start, end) : "unknown";
+    }
+
+    private static String aiReloadPhase(String compileResult) {
+        String reload = reloadKind(compileResult);
+        if ("FastReload".equals(reload)) {
+            return "hot swapped";
+        }
+        if ("NoChange".equals(reload)) {
+            return "no change";
+        }
+        if ("ResetRequired".equals(reload)) {
+            return "reset reload";
+        }
+        if ("InitialCompile".equals(reload)) {
+            return "compiled";
+        }
+        return "applied";
+    }
+
+    private static String aiReloadSummary(String compileResult) {
+        String reload = reloadKind(compileResult);
+        if ("FastReload".equals(reload)) {
+            return "hot swap=FastReload";
+        }
+        if ("NoChange".equals(reload)) {
+            return "hot swap=NoChange";
+        }
+        return "reload=" + reload;
+    }
     private void postAiProgress(final int step, final int actions, final String phase) {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             updateAiProgress(step, actions, phase);
@@ -626,9 +691,11 @@ public final class MainActivity extends Activity {
         aiStepPill = createAiProgressPill("step 0/15");
         aiActionPill = createAiProgressPill("actions 0");
         aiPhasePill = createAiProgressPill("idle");
+        aiElapsedPill = createAiProgressPill("time 0.0s");
         progressRow.addView(aiStepPill);
         progressRow.addView(aiActionPill);
         progressRow.addView(aiPhasePill);
+        progressRow.addView(aiElapsedPill);
         controls.addView(progressRow, fullWidth());
         return controls;
     }
@@ -767,6 +834,7 @@ public final class MainActivity extends Activity {
         final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource);
         final String requestModel = model;
         final String requestApiKey = apiKey;
+        aiStartedAtNanos = System.nanoTime();
         setStatusText("AI edit: sending workspace context");
         updateAiProgress(0, 0, "queued");
         new Thread(new Runnable() {
@@ -784,8 +852,9 @@ public final class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
+                            String elapsed = currentAiElapsedText();
                             updateAiProgress(0, 0, "failed");
-                            setStatusText("AI edit failed: " + error.getMessage());
+                            setStatusText("AI edit failed: elapsed=" + elapsed + " - " + error.getMessage());
                         }
                     });
                 }
@@ -1522,8 +1591,9 @@ public final class MainActivity extends Activity {
                 lastCompileResult = compileResult;
                 compileReady = isRunnableCompile(compileResult);
                 compileAttempted = true;
-                updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "done");
-                setStatusText("AI edit complete: " + response.optString("summary", "no actions") + " - no actions - " + compileResult + " - " + aiResult.usageSummary);
+                String elapsed = currentAiElapsedText();
+                updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, aiReloadPhase(compileResult));
+                setStatusText("AI edit complete: " + response.optString("summary", "no actions") + " - no actions - " + aiReloadSummary(compileResult) + " - elapsed=" + elapsed + " - " + compileResult + " - " + aiResult.usageSummary);
                 return;
             }
             ProjectSnapshot project = loadBundledProject();
@@ -1560,8 +1630,9 @@ public final class MainActivity extends Activity {
                 }
             }
             refreshChangeSummary(project);
-            updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "applied");
-            setStatusText("AI edit applied: " + response.optString("summary", "updated workspace") + " - " + compileResult + " - " + aiResult.usageSummary);
+            String elapsed = currentAiElapsedText();
+            updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, aiReloadPhase(compileResult));
+            setStatusText("AI edit applied: " + response.optString("summary", "updated workspace") + " - " + aiReloadSummary(compileResult) + " - elapsed=" + elapsed + " - " + compileResult + " - " + aiResult.usageSummary);
         } catch (Exception error) {
             if (originalSources != null) {
                 try {
@@ -1574,13 +1645,15 @@ public final class MainActivity extends Activity {
                     compileReady = isRunnableCompile(restoredCompile);
                     compileAttempted = true;
                 } catch (Exception restoreError) {
+                    String elapsed = currentAiElapsedText();
                     updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "rollback failed");
-                    setStatusText("AI edit apply failed and rollback failed: " + error.getMessage() + " / " + restoreError.getMessage());
+                    setStatusText("AI edit apply failed and rollback failed: elapsed=" + elapsed + " - " + error.getMessage() + " / " + restoreError.getMessage());
                     return;
                 }
             }
+            String elapsed = currentAiElapsedText();
             updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "rolled back");
-            setStatusText("AI edit apply failed and rolled back: " + error.getMessage());
+            setStatusText("AI edit apply failed and rolled back: elapsed=" + elapsed + " - " + error.getMessage());
         }
     }
 
