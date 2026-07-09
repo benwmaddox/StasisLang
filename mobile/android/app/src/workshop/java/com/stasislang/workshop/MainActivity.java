@@ -125,6 +125,8 @@ public final class MainActivity extends Activity {
     private int aiSimScreenHeight;
     private long lastDebugUpdateNanos;
     private long aiStartedAtNanos;
+    private int aiProgressStep;
+    private int aiProgressActions;
     private SymbolEntry selectedSymbol;
 
     static {
@@ -416,6 +418,8 @@ public final class MainActivity extends Activity {
     }
 
     private void updateAiProgress(int step, int actions, String phase) {
+        aiProgressStep = step;
+        aiProgressActions = actions;
         if (aiStepPill != null) {
             aiStepPill.setText("step " + step + "/" + MAX_AI_AGENT_TURNS);
         }
@@ -853,7 +857,7 @@ public final class MainActivity extends Activity {
                         @Override
                         public void run() {
                             String elapsed = currentAiElapsedText();
-                            updateAiProgress(0, 0, "failed");
+                            updateAiProgress(aiProgressStep, aiProgressActions, "failed");
                             setStatusText("AI edit failed: elapsed=" + elapsed + " - " + error.getMessage());
                         }
                     });
@@ -969,7 +973,23 @@ public final class MainActivity extends Activity {
             currentRequestJson = followup.toString();
         }
         postAiProgress(MAX_AI_AGENT_TURNS, session.actionCount, "limit hit");
-        throw new IOException("AI agent reached tool-call limit before returning edits");
+        if (session.successfulWriteCount > 0 && compileReady) {
+            String summary = "Applied " + session.successfulWriteCount + " tool write(s) before response limit";
+            JSONObject synthetic = new JSONObject()
+                    .put("mode", "done")
+                    .put("summary", summary)
+                    .put("tool_calls", new JSONArray())
+                    .put("edits", new JSONArray())
+                    .put("expected_reload", reloadKind(lastCompileResult))
+                    .put("reason", "The model reached the tool-call limit after successful write_symbol calls; accepted compiled tool writes.")
+                    .put("warning", "tool_call_limit_after_successful_writes")
+                    .put("successful_writes", session.successfulWriteCount)
+                    .put("rolled_back_writes", session.rolledBackWriteCount)
+                    .put("last_tool", session.lastToolSummary)
+                    .put("last_error", session.lastToolError);
+            return new AiAgentResult(synthetic.toString(), usage.toJson(model), usage.summary(), MAX_AI_AGENT_TURNS, session.actionCount);
+        }
+        throw new IOException("AI agent reached tool-call limit before returning edits; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
     }
 
     private JSONArray executeAiToolCalls(JSONArray toolCalls, AiAgentSession session) throws Exception {
@@ -987,8 +1007,11 @@ public final class MainActivity extends Activity {
             session.actionCount += 1;
             postAiProgress(session.currentStep, session.actionCount, tool.isEmpty() ? "tool" : tool);
             try {
-                observation.put("result", executeAiToolCall(tool, args, session));
+                JSONObject result = executeAiToolCall(tool, args, session);
+                observation.put("result", result);
+                recordAiToolResult(session, tool, result);
             } catch (Exception error) {
+                session.lastToolError = error.getMessage();
                 observation.put("error", error.getMessage());
             }
             observations.put(observation);
@@ -996,6 +1019,29 @@ public final class MainActivity extends Activity {
         return observations;
     }
 
+
+    private void recordAiToolResult(AiAgentSession session, String tool, JSONObject result) {
+        session.lastToolSummary = tool;
+        if (result == null) {
+            return;
+        }
+        String status = result.optString("status", "");
+        String file = result.optString("file", "");
+        String name = result.optString("name", "");
+        if (!file.isEmpty() || !name.isEmpty() || !status.isEmpty()) {
+            session.lastToolSummary = tool + " " + file + " " + name + " " + status;
+        }
+        if ("write_symbol".equals(tool)) {
+            if ("written".equals(status) || "created".equals(status)) {
+                session.successfulWriteCount += 1;
+                session.lastToolError = "";
+            } else if ("rolled_back".equals(status)) {
+                session.rolledBackWriteCount += 1;
+                JSONObject diagnostics = result.optJSONObject("diagnostics");
+                session.lastToolError = diagnostics == null ? "rolled_back" : diagnostics.optString("raw", "rolled_back");
+            }
+        }
+    }
     private JSONObject executeAiToolCall(String tool, JSONObject args, AiAgentSession session) throws Exception {
         if ("list_symbols".equals(tool)) {
             return aiToolListSymbols(session);
@@ -2187,6 +2233,10 @@ public final class MainActivity extends Activity {
     private final class AiAgentSession {
         int currentStep;
         int actionCount;
+        int successfulWriteCount;
+        int rolledBackWriteCount;
+        String lastToolSummary = "none";
+        String lastToolError = "";
         private ProjectSnapshot cachedProject;
 
         ProjectSnapshot project() {
