@@ -375,6 +375,20 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Android shell verifier covers the control, source guard, bundled-helper protection, and success status; Java sources compile.
 - Done gate: Manual users can create, edit, review, and safely discard draft root helpers without resetting the project.
 - Status: `completed`
+#### AW43 - Android GitHub Sync Configuration
+- Language: `Android Java + docs`.
+- Scope: Establish a background-sync configuration contract without claiming that a remote backup has completed before an authenticated API write exists.
+- Deliverable: The command-first pull-down shows compact GitHub sync state and exposes collapsed settings for a GitHub token, `owner/repository`, and branch. Valid saved settings report `ready`; missing settings report `not configured`.
+- Tests: Android shell verifier covers persisted sync settings, collapsed configuration, and truthful status states; Java sources compile.
+- Done gate: A user can configure the repository target once without displacing chat/commands from the primary workflow.
+- Status: `completed`
+#### AW44 - Android Background GitHub Contents Sync
+- Language: `Android Java + GitHub REST API + docs`.
+- Scope: Use saved GitHub settings to sync changed app-private project files serially in the background, with compact progress/error state and no false success claim.
+- Deliverable: Local project changes become authenticated GitHub commits using the configured branch and Contents-write permission; conflict/error paths preserve the local project and remain visible in the compact status.
+- Tests: Isolated request/response helpers, serial sync scheduling, conflict/error paths, structural verifier, and debug APK build; authenticated repository validation when configured.
+- Done gate: A configured Workshop can back up changed Stasis sources to GitHub without making sync controls the foreground editor workflow.
+- Status: `planned`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
