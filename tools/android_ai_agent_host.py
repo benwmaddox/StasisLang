@@ -245,7 +245,7 @@ def validate_single_replacement_source(name: str, new_source: str) -> tuple[bool
         return False, "replacement body must not contain nested function, struct, or global declarations"
     return True, "ok"
 
-def replace_symbol(project: Path, name: str, file: str, new_source: str) -> dict[str, Any]:
+def replace_symbol(project: Path, name: str, file: str, new_source: str, compile_after_write: bool = True) -> dict[str, Any]:
     valid, validation_message = validate_single_replacement_source(name, new_source)
     if not valid:
         return {"status": "validation_error", "file": file, "name": name, "error": validation_message}
@@ -260,6 +260,8 @@ def replace_symbol(project: Path, name: str, file: str, new_source: str) -> dict
         updated = source.rstrip() + "\n\n" + new_source.rstrip() + "\n"
         status = "created"
     write_text(path, updated)
+    if not compile_after_write:
+        return {"status": status, "file": file, "name": name, "compile": {"status": "pending_batch_compile"}}
     compile_result = run_compile_check()
     if not compile_result["ok"]:
         write_text(path, source)
@@ -267,12 +269,14 @@ def replace_symbol(project: Path, name: str, file: str, new_source: str) -> dict
     return {"status": status, "file": file, "name": name, "compile": compile_result}
 
 
-def write_project_file(project: Path, file: str, source: str) -> dict[str, Any]:
+def write_project_file(project: Path, file: str, source: str, compile_after_write: bool = True) -> dict[str, Any]:
     path = project / file
     if not path.is_file():
         return {"status": "not_found", "file": file}
     original = read_text(path)
     write_text(path, source.rstrip() + "\n")
+    if not compile_after_write:
+        return {"status": "written", "file": file, "compile": {"status": "pending_batch_compile"}}
     compile_result = run_compile_check()
     if not compile_result["ok"]:
         write_text(path, original)
@@ -288,7 +292,7 @@ def tool_specs() -> list[dict[str, Any]]:
         spec("list_owner_symbols", "List symbols and preferred receiver calls for one owner/type.", ["owner"], [], {"owner": "GameState"}),
         spec("read_symbol", "Read one symbol source.", ["name"], ["kind", "file", "owner"], {"name": "update_enemy_paddle"}),
         spec("read_file", "Read a source file.", ["file"], [], {"file": "src/main.stasis"}),
-        spec("write_symbol", "Create or replace exactly one Stasis function/global/struct, then compile locally and roll back on compile failure. The new_source must not contain additional top-level or nested declarations.", ["file", "name", "new_source"], ["kind", "owner"], {"file": "src/main.stasis", "name": "tick", "new_source": "function tick(): void {\n}"}),
+        spec("write_symbol", "Create or replace exactly one Stasis function/global/struct. Writes in one tool-call batch compile together after all batch tools run and roll back together on compile failure. The new_source must not contain additional top-level or nested declarations.", ["file", "name", "new_source"], ["kind", "owner"], {"file": "src/main.stasis", "name": "tick", "new_source": "function tick(): void {\n}"}),
         spec("run_tests", "Run the local host behavior test for the requested edit. Failed results include behavior_test_expectations with required globals and expected values.", [], [], {}),
         spec("get_diagnostics", "Return last local diagnostics.", [], [], {}),
     ]
@@ -334,7 +338,7 @@ def build_request(project: Path, prompt: str) -> dict[str, Any]:
         "stasis_style_rules": {"use_function_keyword": True, "use_receiver_style_when_possible": True, "do_not_use_rust_references": True},
         "behavior_test_expectations": behavior_test_expectations(),
         "architecture_recommendations": [
-            "write_symbol compiles immediately after each write; create helper functions before editing callers that invoke them.",
+            "write_symbol writes are compiled once after the whole tool-call batch, so a batch may create helpers and edit callers together.",
             "Use lifecycle-local state for time since creation; reset it in reset/create functions and increment it during tick.",
             "Use on_code_swap() for post-hot-swap migration or reinitialization if running state needs adjustment.",
             "Make the smallest structural change with clear state fields and testable invariants.",
@@ -424,7 +428,7 @@ def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, 
         "Use mode=tool_calls to inspect/write with the provided tools. "
         "For tool calls, the top-level key is tool_calls and each call is exactly {\"tool\":\"name\",\"args\":{...}}. "
         "Do not use aliases such as calls, name, function, arguments, type, or source. "
-        "After write_symbol, compile runs locally and failed compiles roll back. Create helper functions before callers that use them. Use run_tests to verify the behavior. "
+        "After a tool-call batch with writes, compile runs locally once and failed compiles roll back the whole batch. Use run_tests to verify the behavior. "
         "Return mode=tool_calls for tools, mode=edits with edits if returning direct edits, or mode=done only when tests pass. "
         "Use Stasis syntax only. Request: " + json.dumps(request, separators=(",", ":"))
     )
@@ -508,6 +512,66 @@ def summarize_observations(observations: list[dict[str, Any]]) -> list[dict[str,
             "error_tail": (compile_result or result).get("output_tail", "")[-600:] if isinstance((compile_result or result), dict) else "",
         })
     return summary
+
+def execute_tool_batch(project: Path, tool_calls: list[dict[str, Any]], last_diagnostics: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    original_sources: dict[Path, str] = {}
+    observations: list[dict[str, Any]] = []
+    pending_run_tests: list[int] = []
+    wrote = False
+
+    def snapshot_file(file: str) -> None:
+        path = project / file
+        if path.is_file() and path not in original_sources:
+            original_sources[path] = read_text(path)
+
+    for call in tool_calls:
+        tool = call.get("tool", "")
+        tool_args = call.get("args") or {}
+        if tool == "run_tests":
+            observations.append({"tool": tool, "args": tool_args, "result": {"status": "pending_batch_compile"}})
+            pending_run_tests.append(len(observations) - 1)
+            continue
+        if tool == "write_symbol":
+            snapshot_file(tool_args.get("file", ""))
+            result = replace_symbol(project, tool_args.get("name", ""), tool_args.get("file", ""), tool_args.get("new_source", ""), compile_after_write=False)
+            wrote = result.get("status") in {"written", "created"} or wrote
+        elif tool == "write_file":
+            snapshot_file(tool_args.get("file", ""))
+            result = write_project_file(project, tool_args.get("file", ""), tool_args.get("source", ""), compile_after_write=False)
+            wrote = result.get("status") == "written" or wrote
+        else:
+            result = execute_tool(project, tool, tool_args, last_diagnostics)
+        observations.append({"tool": tool, "args": tool_args, "result": result})
+
+    batch_compile: dict[str, Any] | None = None
+    if wrote:
+        batch_compile = run_compile_check()
+        if not batch_compile.get("ok"):
+            for path, source in original_sources.items():
+                write_text(path, source)
+            restored_compile = run_compile_check()
+            for observation in observations:
+                if observation.get("tool") in {"write_symbol", "write_file"}:
+                    result = observation.get("result", {})
+                    if isinstance(result, dict) and result.get("status") in {"written", "created"}:
+                        result["status"] = "rolled_back"
+                        result["compile"] = batch_compile
+                        result["restored_compile"] = restored_compile
+                if observation.get("tool") == "run_tests":
+                    observation["result"] = {"status": "blocked_by_compile_failure", "compile": batch_compile}
+            return observations, batch_compile
+        for observation in observations:
+            if observation.get("tool") in {"write_symbol", "write_file"}:
+                result = observation.get("result", {})
+                if isinstance(result, dict) and result.get("status") in {"written", "created"}:
+                    result["compile"] = batch_compile
+
+    latest_diagnostics = batch_compile or last_diagnostics
+    for index in pending_run_tests:
+        test_result = run_behavior_tests()
+        observations[index]["result"] = test_result
+        latest_diagnostics = test_result
+    return observations, latest_diagnostics
 
 def execute_tool(project: Path, tool: str, args: dict[str, Any], last_diagnostics: dict[str, Any]) -> dict[str, Any]:
     symbols = parse_symbols(project)
@@ -601,15 +665,8 @@ def main() -> int:
                 "instruction": "The model returned done or an unsupported shape, but the required local behavior test failed. Inspect behavior_test_expectations and current source, then fix it using tool calls. Fix duplicate or misplaced symbols with precise write_symbol calls; write_file is not part of the normal tool list.",
             }
             continue
-        observations = []
-        for call in tool_calls:
-            tool = call.get("tool", "")
-            tool_args = call.get("args") or {}
-            result = execute_tool(project, tool, tool_args, last_diagnostics)
-            total_actions += 1
-            if tool in {"write_symbol", "run_tests"}:
-                last_diagnostics = result
-            observations.append({"tool": tool, "args": tool_args, "result": result})
+        observations, last_diagnostics = execute_tool_batch(project, tool_calls, last_diagnostics)
+        total_actions += len(tool_calls)
         print(json.dumps({"tool_observations": summarize_observations(observations)}, indent=2))
         request = {"original_request": build_request(project, args.prompt), "tool_observations": observations, "instruction": "Use observations to continue or return mode=done. If tests fail, inspect behavior_test_expectations and fix the exact required state/checks. Do not repeat identical tool calls."}
     print(json.dumps({"error": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
