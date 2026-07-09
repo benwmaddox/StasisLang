@@ -125,6 +125,9 @@ def main() -> int:
     assert "postAiProgress" in activity
     assert "actions " in activity
     assert "calling AI" in activity
+    assert "time 0.0s" in activity
+    assert "hot swap=FastReload" in activity
+    assert "aiReloadPhase" in activity
     assert "AI Edit Workspace" in activity
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
