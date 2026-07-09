@@ -180,6 +180,11 @@ def main() -> int:
     assert "restored_diagnostics" in activity
     assert "write_symbol creates or replaces a symbol" in activity
     assert "Before writing, inspect the current target" in activity
+    assert "Apply code changes with write_symbol before final edits" in activity
+    assert "Tool errors are not final" in activity
+    assert "mode=done" in activity
+    assert "AI edit complete" in activity
+    assert "status=rolled_back with diagnostics" in activity
     assert "AI edit apply failed and rolled back" in activity
     assert "appendAiFunction" in activity
     assert "\"created\"" in activity
