@@ -142,6 +142,9 @@ def main() -> int:
     assert "appendAiTrace" in activity
     assert "llm_request" in activity
     assert "tool_observations" in activity
+    assert "AI read_symbol target ambiguous: " in activity
+    assert "AI read_symbol target not found: " in activity
+    assert "AI read_symbol target ambiguous or not found" not in activity
     assert "private static final double GPT_5_4_MINI_INPUT_USD_PER_MILLION = 0.75" in activity
     assert "private static AiApiResponse callOpenAiResponsesApi" in activity
     assert "extractAiUsage(response)" in activity
