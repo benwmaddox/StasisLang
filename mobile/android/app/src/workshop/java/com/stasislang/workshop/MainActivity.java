@@ -911,13 +911,52 @@ public final class MainActivity extends Activity {
 
     private JSONObject aiToolWriteSymbol(AiAgentSession session, JSONObject call) throws Exception {
         ProjectSnapshot project = session.project();
+        Map<String, String> originalSources = snapshotProjectSources(project);
         String kind = call.optString("kind", "replace_function");
         String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
-        SymbolEntry target = findSymbolForAiEdit(project, expectedKind, call, selectedSymbol);
         String editKind = "struct".equals(expectedKind) ? "replace_struct" : "replace_function";
         String newSource = call.getString("new_source").trim();
-        validateAiReplacementSource(editKind, target.name, newSource);
-        return writeSymbolTransaction(session, target, newSource);
+        boolean existed = findSymbolForAiEditOrNull(project, expectedKind, call, selectedSymbol) != null;
+        try {
+            SymbolEntry target = resolveAiEditTarget(project, editKind, expectedKind, call, selectedSymbol, newSource);
+            validateAiReplacementSource(editKind, target.name, newSource);
+            persistSelectedEdit(target, newSource);
+            session.invalidateProject();
+
+            String compileResult = nativeCompileProject(projectRootPath());
+            lastCompileResult = compileResult;
+            compileReady = isRunnableCompile(compileResult);
+            compileAttempted = true;
+            JSONObject diagnostics = compileResultToJson(compileResult);
+            if (!compileReady) {
+                restoreProjectSources(originalSources);
+                session.invalidateProject();
+                String restoredCompile = nativeCompileProject(projectRootPath());
+                lastCompileResult = restoredCompile;
+                compileReady = isRunnableCompile(restoredCompile);
+                compileAttempted = true;
+                return new JSONObject()
+                        .put("file", target.file)
+                        .put("kind", target.kind)
+                        .put("name", target.name)
+                        .put("owner", target.owner)
+                        .put("status", "rolled_back")
+                        .put("diagnostics", diagnostics)
+                        .put("restored_diagnostics", compileResultToJson(restoredCompile));
+            }
+
+            return new JSONObject()
+                    .put("file", target.file)
+                    .put("kind", target.kind)
+                    .put("name", target.name)
+                    .put("owner", target.owner)
+                    .put("status", existed ? "written" : "created")
+                    .put("diagnostics", diagnostics);
+        } catch (Exception error) {
+            restoreProjectSources(originalSources);
+            session.invalidateProject();
+            throw error;
+        }
     }
 
     private JSONObject writeSymbolTransaction(AiAgentSession session, SymbolEntry target, String newSource) throws Exception {
@@ -1188,7 +1227,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. write_symbol creates or replaces a symbol, compiles immediately, and returns status=rolled_back if the edit breaks compilation. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits when finished. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -1398,11 +1437,13 @@ public final class MainActivity extends Activity {
         return builder.toString();
     }
     private void applyAiCodeResponse(AiAgentResult aiResult, SymbolEntry fallbackSymbol) {
+        Map<String, String> originalSources = null;
         try {
             saveLastAiUsage(aiResult.usageJson);
             JSONObject response = new JSONObject(aiResult.aiJson);
             JSONArray edits = response.getJSONArray("edits");
             ProjectSnapshot project = loadBundledProject();
+            originalSources = snapshotProjectSources(project);
             SymbolEntry lastEdited = fallbackSymbol;
             for (int index = 0; index < edits.length(); index += 1) {
                 JSONObject edit = edits.getJSONObject(index);
@@ -1411,13 +1452,22 @@ public final class MainActivity extends Activity {
                     throw new IOException("Unsupported AI edit kind: " + kind);
                 }
                 String expectedKind = "replace_struct".equals(kind) ? "struct" : "function";
-                SymbolEntry target = findSymbolForAiEdit(project, expectedKind, edit, fallbackSymbol);
                 String newSource = edit.getString("new_source").trim();
+                SymbolEntry target = resolveAiEditTarget(project, kind, expectedKind, edit, fallbackSymbol, newSource);
                 validateAiReplacementSource(kind, target.name, newSource);
                 persistSelectedEdit(target, newSource);
                 lastEdited = target;
                 project = loadBundledProject();
             }
+
+            String compileResult = nativeCompileProject(projectRootPath());
+            lastCompileResult = compileResult;
+            compileReady = isRunnableCompile(compileResult);
+            compileAttempted = true;
+            if (!compileReady) {
+                throw new IOException("AI edit compile failed: " + compileResult);
+            }
+
             rebuildSymbolList(project);
             if (lastEdited != null) {
                 SymbolEntry refreshed = findMatchingSymbol(project, lastEdited);
@@ -1426,38 +1476,113 @@ public final class MainActivity extends Activity {
                 }
             }
             refreshChangeSummary(project);
-            String compileResult = nativeCompileProject(projectRootPath());
-            lastCompileResult = compileResult;
-            compileReady = isRunnableCompile(compileResult);
-            compileAttempted = true;
             setStatusText("AI edit applied: " + response.optString("summary", "updated workspace") + " - " + compileResult + " - " + aiResult.usageSummary);
         } catch (Exception error) {
-            setStatusText("AI edit apply failed: " + error.getMessage());
+            if (originalSources != null) {
+                try {
+                    restoreProjectSources(originalSources);
+                    ProjectSnapshot restoredProject = loadBundledProject();
+                    rebuildSymbolList(restoredProject);
+                    refreshChangeSummary(restoredProject);
+                    String restoredCompile = nativeCompileProject(projectRootPath());
+                    lastCompileResult = restoredCompile;
+                    compileReady = isRunnableCompile(restoredCompile);
+                    compileAttempted = true;
+                } catch (Exception restoreError) {
+                    setStatusText("AI edit apply failed and rollback failed: " + error.getMessage() + " / " + restoreError.getMessage());
+                    return;
+                }
+            }
+            setStatusText("AI edit apply failed and rolled back: " + error.getMessage());
+        }
+    }
+
+    private SymbolEntry resolveAiEditTarget(ProjectSnapshot project, String editKind, String expectedKind, JSONObject edit, SymbolEntry fallback, String newSource) throws Exception {
+        SymbolEntry target = findSymbolForAiEditOrNull(project, expectedKind, edit, fallback);
+        if (target != null) {
+            return target;
+        }
+        if (!"replace_function".equals(editKind)) {
+            throw new IOException("AI edit target not found: " + edit.optString("file", "") + " " + edit.optString("name", ""));
+        }
+
+        String file = edit.optString("file", fallback == null ? "" : fallback.file);
+        String name = edit.optString("name", extractDeclarationName(newSource, "function"));
+        if (file.isEmpty() || name.isEmpty()) {
+            throw new IOException("AI add function target requires file and name");
+        }
+        validateAiReplacementSource(editKind, name, newSource);
+        appendAiFunction(project, file, newSource);
+        ProjectSnapshot refreshedProject = loadBundledProject();
+        JSONObject lookup = new JSONObject()
+                .put("kind", "replace_function")
+                .put("file", file)
+                .put("name", name);
+        return findSymbolForAiEdit(refreshedProject, expectedKind, lookup, null);
+    }
+
+    private void appendAiFunction(ProjectSnapshot project, String file, String newSource) throws Exception {
+        SourceFile sourceFile = findProjectFile(project, file);
+        String separator = sourceFile.source.endsWith("\n") ? "\n" : "\n\n";
+        sourceFile.source = sourceFile.source + separator + newSource.trim() + "\n";
+        writeTextFile(sourceFile.diskFile, sourceFile.source);
+    }
+
+    private static Map<String, String> snapshotProjectSources(ProjectSnapshot project) {
+        Map<String, String> sources = new LinkedHashMap<>();
+        for (SourceFile sourceFile : project.files) {
+            sources.put(sourceFile.path, sourceFile.source);
+        }
+        return sources;
+    }
+
+    private void restoreProjectSources(Map<String, String> sources) throws IOException {
+        File root = projectRoot();
+        for (Map.Entry<String, String> entry : sources.entrySet()) {
+            writeTextFile(new File(root, entry.getKey()), entry.getValue());
         }
     }
 
     private static SymbolEntry findSymbolForAiEdit(ProjectSnapshot project, String expectedKind, JSONObject edit, SymbolEntry fallback) throws Exception {
+        SymbolEntry symbol = findSymbolForAiEditOrNull(project, expectedKind, edit, fallback);
+        if (symbol != null) {
+            return symbol;
+        }
+        String file = edit.optString("file", fallback == null ? "" : fallback.file);
+        String name = edit.optString("name", fallback == null ? "" : fallback.name);
+        if (file.isEmpty() || name.isEmpty()) {
+            throw new IOException("AI edit target requires file and name when no symbol is selected");
+        }
+        throw new IOException("AI edit target not found: " + file + " " + name);
+    }
+
+    private static SymbolEntry findSymbolForAiEditOrNull(ProjectSnapshot project, String expectedKind, JSONObject edit, SymbolEntry fallback) {
         String file = edit.optString("file", fallback == null ? "" : fallback.file);
         String name = edit.optString("name", fallback == null ? "" : fallback.name);
         String owner = edit.optString("owner", fallback == null ? "" : fallback.owner);
         if (file.isEmpty() || name.isEmpty()) {
-            throw new IOException("AI edit target requires file and name when no symbol is selected");
+            return null;
         }
+
+        SymbolEntry fileNameMatch = null;
+        int fileNameMatches = 0;
         for (SymbolSection section : project.sections) {
             for (SymbolGroup group : section.groups) {
                 for (SymbolEntry symbol : group.symbols) {
                     if (symbol.kind.equals(expectedKind)
                             && symbol.file.equals(file)
-                            && symbol.name.equals(name)
-                            && (owner.isEmpty() || symbol.owner.equals(owner))) {
-                        return symbol;
+                            && symbol.name.equals(name)) {
+                        if (owner.isEmpty() || symbol.owner.equals(owner)) {
+                            return symbol;
+                        }
+                        fileNameMatch = symbol;
+                        fileNameMatches += 1;
                     }
                 }
             }
         }
-        throw new IOException("AI edit target not found: " + file + " " + name);
+        return fileNameMatches == 1 ? fileNameMatch : null;
     }
-
     private static void validateAiReplacementSource(String editKind, String expectedName, String newSource) throws Exception {
         if (newSource.contains("&mut") || newSource.contains("->") || newSource.contains("fn ")) {
             throw new IOException("AI edit must use Stasis syntax, not Rust syntax");
