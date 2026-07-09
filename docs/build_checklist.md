@@ -368,6 +368,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Structural UI verifier covers permission, recognizer, cancel/run, and start state; Java sources compile. Device microphone/transcription validation remains pending while the phone is unavailable.
 - Done gate: A user can start, cancel, or run a voice change request without accidental code application.
 - Status: `in progress (device validation deferred)`
+#### AW42 - Android Manual Root Helper Deletion
+- Language: `Android Java + docs`.
+- Scope: Complete the lifecycle for manually created no-owner helpers without exposing destructive deletion for bundled source.
+- Deliverable: `Delete Helper` removes a selected user-created function in `src/root.stasis`, recompiles transactionally, restores the original source on failure, and protects bundled helpers with the existing revert path.
+- Tests: Android shell verifier covers the control, source guard, bundled-helper protection, and success status; Java sources compile.
+- Done gate: Manual users can create, edit, review, and safely discard draft root helpers without resetting the project.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

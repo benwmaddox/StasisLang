@@ -1031,6 +1031,16 @@ public final class MainActivity extends Activity {
         });
         controls.addView(newHelper, fullWidth());
 
+        Button deleteHelper = new Button(this);
+        deleteHelper.setText("Delete Helper");
+        deleteHelper.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                deleteSelectedManualHelper();
+            }
+        });
+        controls.addView(deleteHelper, fullWidth());
+
         Button resetProject = new Button(this);
         resetProject.setText("Reset Project");
         resetProject.setOnClickListener(new View.OnClickListener() {
@@ -3558,6 +3568,44 @@ public final class MainActivity extends Activity {
             setStatusText("Created root helper - " + compileResult);
         } catch (Exception error) {
             setStatusText("Create helper failed: " + error.getMessage());
+        }
+    }
+
+    private void deleteSelectedManualHelper() {
+        if (selectedSymbol == null || !"function".equals(selectedSymbol.kind)
+                || !"Root".equals(selectedSymbol.owner) || !"src/root.stasis".equals(selectedSymbol.file)) {
+            setStatusText("Delete Helper unavailable: select a user-created root helper first");
+            return;
+        }
+        try {
+            if (findMatchingSymbol(loadBundledAssetSnapshot(), selectedSymbol) != null) {
+                setStatusText("Delete Helper unavailable: bundled helpers can be reverted, not deleted");
+                return;
+            }
+            SourceFile sourceFile = selectedSymbol.sourceFile;
+            String originalSource = sourceFile.source;
+            sourceFile.source = originalSource.substring(0, selectedSymbol.start)
+                    + originalSource.substring(selectedSymbol.end);
+            writeTextFile(sourceFile.diskFile, sourceFile.source);
+            String compileResult = nativeCompileProject(projectRootPath());
+            if (!isRunnableCompile(compileResult)) {
+                sourceFile.source = originalSource;
+                writeTextFile(sourceFile.diskFile, originalSource);
+                throw new IOException("delete helper compile failed: " + compileResult);
+            }
+
+            lastCompileResult = compileResult;
+            compileReady = true;
+            compileAttempted = true;
+            ProjectSnapshot project = loadBundledProject();
+            rebuildSymbolList(project);
+            if (project.firstSymbol != null) {
+                showSymbol(project.firstSymbol);
+            }
+            refreshChangeSummary(project);
+            setStatusText("Deleted user-created root helper - " + compileResult);
+        } catch (IOException error) {
+            setStatusText("Delete Helper failed: " + error.getMessage());
         }
     }
 

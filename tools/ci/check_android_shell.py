@@ -237,6 +237,10 @@ def main() -> int:
     assert "createManualHelper();" in activity
     assert "function \" + name + \"(): void" in activity
     assert "Created root helper" in activity
+    assert "deleteHelper.setText(\"Delete Helper\")" in activity
+    assert "deleteSelectedManualHelper();" in activity
+    assert "bundled helpers can be reverted, not deleted" in activity
+    assert "Deleted user-created root helper" in activity
     assert "revertSaved.setText(\"Revert Saved\")" in activity
     assert "revertSelectedToBundled();" in activity
     assert "Reverted saved symbol to bundled baseline" in activity
