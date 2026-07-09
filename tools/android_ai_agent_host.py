@@ -276,7 +276,9 @@ def default_trace_file() -> Path:
     return DEFAULT_TRACE_DIR / f"android_ai_run_{timestamp}.json"
 
 def run_command(args: list[str]) -> dict[str, Any]:
-    proc = subprocess.run(args, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    environment = os.environ.copy()
+    environment["CARGO_INCREMENTAL"] = "0"
+    proc = subprocess.run(args, cwd=ROOT, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return {"ok": proc.returncode == 0, "returncode": proc.returncode, "output_tail": proc.stdout[-6000:]}
 
 
@@ -287,18 +289,9 @@ def run_compile_check() -> dict[str, Any]:
 def behavior_test_expectations() -> dict[str, Any]:
     return {
         "test_name": "android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear",
-        "required_state": [
-            "GameState.ball_age_ticks",
-            "GameState.enemy_paddle_speed_x100",
-        ],
-        "expected_checks": [
-            {"after": "first tick after ball creation", "global": "GameState.enemy_paddle_speed_x100", "expected": 1500, "meaning": "3x a 5 px/tick ball speed, scaled by 100"},
-            {"after": "set GameState.ball_age_ticks to 1800 then tick", "global": "GameState.enemy_paddle_speed_x100", "expected": 875, "meaning": "halfway between 3x and 0.5x after 30 seconds at 60 fps"},
-            {"after": "set GameState.ball_age_ticks to 3600 then tick", "global": "GameState.enemy_paddle_speed_x100", "expected": 250, "meaning": "0.5x a 5 px/tick ball speed after 60 seconds"},
-            {"after": "set GameState.ball_age_ticks past 3600 then tick", "global": "GameState.enemy_paddle_speed_x100", "expected": 250, "meaning": "speed stays clamped at 0.5x after 60 seconds"},
-            {"after": "force ball reset by setting GameState.ball_x past the right edge", "global": "GameState.enemy_paddle_speed_x100", "expected": 1500, "meaning": "each new ball restarts at 3x"},
-            {"after": "forced ball reset", "global": "GameState.ball_age_ticks", "expected_max": 1, "meaning": "ball age resets when a new ball is created"},
-        ],
+        "required_file": "tests/enemy_paddle_speed_schedule.test.stasis",
+        "syntax": "test `descriptive name`(): bool { if (condition) { return false; } return true; }",
+        "expected_checks": ["1500 at ball age 0", "875 at ball age 1800", "250 at ball age 3600 and above", "reset_ball restores age 0 and speed 1500"],
         "implementation_hint": "Use persistent GameState fields for ball_age_ticks and enemy_paddle_speed_x100. Reset ball_age_ticks in reset_ball(), increment it once per tick/update_ball while the ball is alive, and update enemy_paddle_speed_x100 from ball_age_ticks before moving the enemy paddle. Clamp enemy_paddle_speed_x100 so it never drops below 250 after 60 seconds.",
     }
 
@@ -321,66 +314,23 @@ def list_test_files(project: Path) -> list[dict[str, Any]]:
         relative = path.relative_to(project).as_posix()
         files.append({
             "file": relative,
-            "kind": "ai_scenario" if relative.endswith(".ai_test.json") else "stasis_test" if relative.endswith(".test.stasis") else "unknown",
-            "runnable_on_android": relative.endswith(".ai_test.json"),
+            "kind": "stasis_test" if relative.endswith(".test.stasis") else "unknown",
+            "runnable_on_host": relative.endswith(".test.stasis"),
         })
     return files
 
 
-def validate_ai_scenario_source(source: str) -> tuple[dict[str, Any] | None, str | None]:
-    try:
-        parsed = json.loads(source)
-    except json.JSONDecodeError as error:
-        return None, f"invalid JSON test file: {error}"
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("steps"), list):
-        return None, "AI scenario test requires a JSON object with steps array"
-    supported_tools = {"set_input_state", "run_frame", "run_for_ticks", "inspect_runtime_state", "take_screenshot"}
-    for index, step in enumerate(parsed["steps"]):
-        if not isinstance(step, dict):
-            return None, f"step {index} must be an object"
-        if "tool" in step:
-            tool = step.get("tool")
-            if tool not in supported_tools:
-                return None, f"step {index} uses unsupported tool {tool}; use one of {sorted(supported_tools)}"
-            args = step.get("args", {})
-            if not isinstance(args, dict):
-                return None, f"step {index} args must be an object"
-            continue
-        if "set_runtime_i32" in step:
-            value = step["set_runtime_i32"]
-            if not isinstance(value, dict) or not isinstance(value.get("path"), str) or not isinstance(value.get("value"), int):
-                return None, f"step {index} set_runtime_i32 requires path string and value integer"
-            continue
-        if "assert_runtime_i32" in step:
-            value = step["assert_runtime_i32"]
-            if not isinstance(value, dict) or not isinstance(value.get("path"), str):
-                return None, f"step {index} assert_runtime_i32 requires path string"
-            if "equals" not in value and "max" not in value:
-                return None, f"step {index} assert_runtime_i32 requires equals or max"
-            if "equals" in value and not isinstance(value.get("equals"), int):
-                return None, f"step {index} assert_runtime_i32 equals must be an integer"
-            if "max" in value and not isinstance(value.get("max"), int):
-                return None, f"step {index} assert_runtime_i32 max must be an integer"
-            continue
-        return None, f"step {index} has unsupported shape; use tool, set_runtime_i32, or assert_runtime_i32"
-    return parsed, None
-
 def write_test_file(project: Path, file: str, source: str) -> dict[str, Any]:
     if not source.strip():
         return {"status": "validation_error", "file": file, "error": "write_test_file requires non-empty source"}
+    if not file.endswith(".test.stasis"):
+        return {"status": "validation_error", "file": file, "error": "AI tests must use the .test.stasis extension and return bool from each test declaration"}
     path = test_file_path(project, file)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if file.endswith(".ai_test.json"):
-        _parsed, error = validate_ai_scenario_source(source)
-        if error is not None:
-            return {"status": "validation_error", "file": file, "error": error, "accepted_shapes": [
-                {"tool": "run_for_ticks", "args": {"ticks": 1}},
-                {"set_runtime_i32": {"path": "GameState.score", "value": 0}},
-                {"assert_runtime_i32": {"path": "GameState.score", "equals": 0}},
-                {"assert_runtime_i32": {"path": "GameState.ball_age_ticks", "max": 1}},
-            ]}
+    if not re.search(r"\btest\s+`[^`]+`\s*\(\s*\)\s*:\s*bool\s*\{", source):
+        return {"status": "validation_error", "file": file, "error": "test source must declare test `name`(): bool { ... } and return true or false"}
     write_text(path, source.rstrip() + "\n")
-    return {"status": "written", "file": path.relative_to(project).as_posix(), "kind": "ai_scenario" if file.endswith(".ai_test.json") else "stasis_test", "runnable_on_android": file.endswith(".ai_test.json")}
+    return {"status": "written", "file": path.relative_to(project).as_posix(), "kind": "stasis_test", "runnable_on_host": True}
 
 
 def read_test_file(project: Path, file: str) -> dict[str, Any]:
@@ -409,18 +359,18 @@ def reset_paddle_speed_feature(project: Path) -> None:
     source = re.sub(r"\n    GameState\.ball_age_ticks = 0;\n    GameState\.enemy_paddle_speed_x100 = 1500;", "", source)
     source = re.sub(r"\n\nfunction get_enemy_paddle_speed_x100\(ball_age_ticks: i32\): i32 \{.*?\n\}\s*$", "\n", source, flags=re.S)
     write_text(path, source.rstrip() + "\n")
-    for generated_test in (project / "tests").glob("*enemy_paddle_speed*.ai_test.json"):
+    for generated_test in (project / "tests").glob("*enemy_paddle_speed*.test.stasis"):
         generated_test.unlink()
 
 def run_behavior_tests(project: Path) -> dict[str, Any]:
-    result = run_command(["cargo", "test", "-p", "stasis_android_bridge", "android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear", "--", "--ignored", "--nocapture"])
+    result = run_command(["cargo", "run", "-p", "stasis", "--release", "--", "test", "--dir", str(project / "tests")])
     tests = list_test_files(project)
-    ai_tests = [test for test in tests if test.get("kind") == "ai_scenario"]
+    stasis_tests = [test for test in tests if test.get("kind") == "stasis_test"]
     result["test_files"] = tests
-    result["ai_test_file_count"] = len(ai_tests)
-    if not ai_tests:
+    result["stasis_test_file_count"] = len(stasis_tests)
+    if not stasis_tests:
         result["ok"] = False
-        result["missing_test"] = "Add or update at least one tests/*.ai_test.json file that verifies the requested behavior before returning done."
+        result["missing_test"] = "Add or update at least one tests/*.test.stasis file that returns bool before returning done."
     if not result.get("ok"):
         result["behavior_test_expectations"] = behavior_test_expectations()
     return result
@@ -530,10 +480,10 @@ def tool_specs() -> list[dict[str, Any]]:
         spec("write_symbol", "Create or replace exactly one Stasis function/global/struct. Writes in one tool-call batch compile together after all batch tools run and roll back together on compile failure. The new_source must not contain additional top-level or nested declarations.", ["file", "name", "new_source"], ["kind", "owner"], {"file": "src/main.stasis", "name": "tick", "new_source": "function tick(): void {\n}"}),
         spec("delete_symbol", "Delete exactly one Stasis function/global/struct by name, with optional file/owner/kind disambiguation. Source deletes batch-compile and roll back on compile failure.", ["name"], ["file", "owner", "kind"], {"name": "unused_helper", "file": "src/main.stasis", "kind": "function"}),
         spec("list_tests", "List test files under tests/.", [], [], {}),
-        spec("read_test_file", "Read one test file under tests/.", ["file"], [], {"file": "tests/paddle_speed.ai_test.json"}),
-        spec("write_test_file", "Create or replace a test file under tests/. Add or update an AI scenario test for every behavior-changing request before returning done.", ["file", "source"], [], {"file": "tests/paddle_speed.ai_test.json", "source": "{\"name\":\"enemy paddle speed schedule\",\"steps\":[{\"tool\":\"run_frame\",\"args\":{}},{\"assert_runtime_i32\":{\"path\":\"GameState.enemy_paddle_speed_x100\",\"equals\":1500}},{\"set_runtime_i32\":{\"path\":\"GameState.ball_age_ticks\",\"value\":1800}},{\"tool\":\"run_frame\",\"args\":{}},{\"assert_runtime_i32\":{\"path\":\"GameState.enemy_paddle_speed_x100\",\"equals\":875}}]}"}),
-        spec("delete_test_file", "Delete one obsolete or duplicate test file under tests/.", ["file"], [], {"file": "tests/obsolete.ai_test.json"}),
-        spec("run_tests", "Run the local host behavior test for the requested edit. This is successful only when the behavior passes and at least one tests/*.ai_test.json file exists.", [], [], {}),
+        spec("read_test_file", "Read one Stasis test file under tests/.", ["file"], [], {"file": "tests/paddle_speed.test.stasis"}),
+        spec("write_test_file", "Create or replace a real Stasis test under tests/. Use test `name`(): bool and return true or false; never write JSON assertions or assert_runtime helpers.", ["file", "source"], [], {"file": "tests/paddle_speed.test.stasis", "source": "import \"../src/main.stasis\";\n\ntest `enemy paddle speed`(): bool {\n    init();\n    update_enemy_paddle();\n    return GameState.enemy_paddle_speed_x100 == 1500;\n}"}),
+        spec("delete_test_file", "Delete one obsolete or duplicate Stasis test file under tests/.", ["file"], [], {"file": "tests/obsolete.test.stasis"}),
+        spec("run_tests", "Run the one-shot local Stasis JIT test runner (never watch mode). This is successful only when real tests/*.test.stasis declarations return true.", [], [], {}),
         spec("get_diagnostics", "Return last local diagnostics.", [], [], {}),
     ]
 
@@ -715,7 +665,7 @@ def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
         "For tool calls, the top-level key is tool_calls and each call is exactly {\"tool\":\"name\",\"args\":{...}}. "
         "Do not use aliases such as calls, name, function, arguments, type, or source. "
         "After a tool-call batch with writes, compile runs locally once and failed compiles roll back the whole batch. Use run_tests to verify the behavior. "
-        "For behavior-changing requests, add or update a tests/*.ai_test.json test before returning done. Return mode=tool_calls for tools, mode=edits with edits if returning direct edits, or mode=done only when tests pass. "
+        "For behavior-changing requests, add or update a tests/*.test.stasis test using test `name`(): bool and return true or false; assert_runtime helpers and JSON scenario tests are not Stasis syntax. Return mode=tool_calls for tools, mode=edits with edits if returning direct edits, or mode=done only when tests pass. "
         "Use Stasis syntax only."
     )
     shared_context = request.get("shared_context", {})

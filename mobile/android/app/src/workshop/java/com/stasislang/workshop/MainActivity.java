@@ -1424,11 +1424,11 @@ public final class MainActivity extends Activity {
         specs.put(aiToolSpec("run_frame", "Run one tick/render frame with current simulated input.", new JSONArray(), new JSONArray(), new JSONObject()));
         specs.put(aiToolSpec("inspect_runtime_state", "Read compact runtime state and last frame.", new JSONArray(), new JSONArray(), new JSONObject()));
         specs.put(aiToolSpec("take_screenshot", "Return a logical render snapshot, decoded commands, runtime state, and input.", new JSONArray(), new JSONArray(), new JSONObject()));
-        specs.put(aiToolSpec("list_tests", "List AI scenario tests and Stasis .test.stasis files.", new JSONArray(), new JSONArray(), new JSONObject()));
-        specs.put(aiToolSpec("read_test_file", "Read one test file under tests/.", new JSONArray().put("file"), new JSONArray(), new JSONObject().put("file", "tests/paddle.ai_test.json")));
-        specs.put(aiToolSpec("write_test_file", "Create or replace a test file under tests/. AI scenario JSON tests run on Android now; .test.stasis files are tracked for the future native test runner.", new JSONArray().put("file").put("source"), new JSONArray(), new JSONObject().put("file", "tests/paddle.ai_test.json").put("source", "{\"name\":\"paddle follows touch\",\"steps\":[{\"tool\":\"set_input_state\",\"args\":{\"x\":80,\"y\":320,\"active\":1}},{\"tool\":\"run_for_ticks\",\"args\":{\"ticks\":1}},{\"assert_runtime_i32\":{\"path\":\"GameState.player_y\",\"equals\":320}}]}")));
-        specs.put(aiToolSpec("delete_test_file", "Delete one obsolete or duplicate test file under tests/.", new JSONArray().put("file"), new JSONArray(), new JSONObject().put("file", "tests/obsolete.ai_test.json")));
-        specs.put(aiToolSpec("run_tests", "Run compile plus AI scenario tests. Also reports discovered .test.stasis files and whether bridge execution is available.", new JSONArray(), new JSONArray(), new JSONObject()));
+        specs.put(aiToolSpec("list_tests", "List Stasis .test.stasis files.", new JSONArray(), new JSONArray(), new JSONObject()));
+        specs.put(aiToolSpec("read_test_file", "Read one Stasis test file under tests/.", new JSONArray().put("file"), new JSONArray(), new JSONObject().put("file", "tests/paddle.test.stasis")));
+        specs.put(aiToolSpec("write_test_file", "Create or replace a Stasis test under tests/. Use test `name`(): bool and return true or false; assert_runtime helpers and JSON scenarios are not Stasis syntax.", new JSONArray().put("file").put("source"), new JSONArray(), new JSONObject().put("file", "tests/paddle.test.stasis").put("source", "import \"../src/main.stasis\";\n\ntest `paddle follows touch`(): bool {\n    return true;\n}")));
+        specs.put(aiToolSpec("delete_test_file", "Delete one obsolete or duplicate Stasis test file under tests/.", new JSONArray().put("file"), new JSONArray(), new JSONObject().put("file", "tests/obsolete.test.stasis")));
+        specs.put(aiToolSpec("run_tests", "Compile the Android project and report Stasis test files for host JIT execution.", new JSONArray(), new JSONArray(), new JSONObject()));
         return specs;
     }
 
@@ -1452,11 +1452,11 @@ public final class MainActivity extends Activity {
         } else if ("write_imports".equals(normalizedTool)) {
             acceptedArgs.put("file", "src/main.stasis").put("imports", new JSONArray().put("game_state.stasis").put("systems/collision.stasis"));
         } else if ("read_test_file".equals(normalizedTool)) {
-            acceptedArgs.put("file", "tests/paddle.ai_test.json");
+            acceptedArgs.put("file", "tests/paddle.test.stasis");
         } else if ("write_test_file".equals(normalizedTool)) {
-            acceptedArgs.put("file", "tests/paddle.ai_test.json").put("source", "{\"name\":\"paddle follows touch\",\"steps\":[{\"tool\":\"set_input_state\",\"args\":{\"x\":80,\"y\":320,\"active\":1}},{\"tool\":\"run_for_ticks\",\"args\":{\"ticks\":1}},{\"assert_runtime_i32\":{\"path\":\"GameState.player_y\",\"equals\":320}}]}");
+            acceptedArgs.put("file", "tests/paddle.test.stasis").put("source", "import \"../src/main.stasis\";\n\ntest `paddle follows touch`(): bool {\n    return true;\n}");
         } else if ("delete_test_file".equals(normalizedTool)) {
-            acceptedArgs.put("file", "tests/obsolete.ai_test.json");
+            acceptedArgs.put("file", "tests/obsolete.test.stasis");
         } else if ("delete_symbol".equals(normalizedTool)) {
             acceptedArgs.put("file", "src/main.stasis").put("name", "unused_helper").put("kind", "function").put("owner", "Root");
         } else if ("write_symbol".equals(normalizedTool)) {
@@ -2443,6 +2443,7 @@ public final class MainActivity extends Activity {
             }
         }
         String stableInstruction = "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect the current target with list_symbols, list_owner_symbols, read_symbol, read_imports, list_tests, and read_test_file unless the exact current source was already provided in selected_symbols or tool observations. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior that depends on time since an entity, encounter, projectile, effect, resource, objective, mode, or event was created/entered, prefer local lifecycle state that is reset on creation/entry and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol. All write_symbol/delete_symbol/write_imports calls in one tool-call batch compile together after the batch; if the batch breaks compilation, the app rolls back the whole batch and returns diagnostics. read_imports returns the imports for one file; write_imports replaces that file import block using an imports JSON array and participates in the same batch compile/rollback as write_symbol. list_tests/read_test_file/write_test_file let you create tests under tests/; for behavior-changing requests, add or update a tests/*.ai_test.json scenario before returning done. run_tests executes Android AI scenario tests and reports .test.stasis files awaiting native bridge execution. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes and runs tests after each tool-call batch; use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() for post-hot-swap migration, reinitialization, or compatibility work when a running game needs state adjusted after code changes. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
+        stableInstruction += " Tests must be real tests/*.test.stasis files using test `name`(): bool and return true or false. Do not create .ai_test.json files and do not use assert_runtime helpers; they are not Stasis syntax. The Android app records these tests for host JIT execution.";
         return new JSONArray()
                 .put(aiInputMessage("system", stableInstruction, false))
                 .put(aiInputMessage("user", "Stable request context: " + stableRequest.toString(), true))
@@ -3258,8 +3259,8 @@ public final class MainActivity extends Activity {
         if (!normalized.startsWith("tests/") || normalized.contains("..")) {
             throw new IOException("AI test files must live under tests/: " + normalized);
         }
-        if (!normalized.endsWith(".ai_test.json") && !normalized.endsWith(".test.stasis")) {
-            throw new IOException("AI test files must end with .ai_test.json or .test.stasis: " + normalized);
+        if (!normalized.endsWith(".test.stasis")) {
+            throw new IOException("AI test files must end with .test.stasis: " + normalized);
         }
         File file = new File(projectRoot(), normalized.replace('/', File.separatorChar));
         relativeProjectPath(file);

@@ -1,0 +1,25 @@
+import "../src/main.stasis";
+
+test `enemy paddle speed schedule is linear`(): bool {
+    init();
+    update_enemy_paddle();
+    if (GameState.enemy_paddle_speed_x100 != 1500) { return false; }
+
+    GameState.ball_age_ticks = 1800;
+    update_enemy_paddle();
+    if (GameState.enemy_paddle_speed_x100 != 875) { return false; }
+
+    GameState.ball_age_ticks = 3600;
+    update_enemy_paddle();
+    if (GameState.enemy_paddle_speed_x100 != 250) { return false; }
+
+    GameState.ball_age_ticks = 7200;
+    update_enemy_paddle();
+    if (GameState.enemy_paddle_speed_x100 != 250) { return false; }
+
+    GameState.ball_age_ticks = 1800;
+    GameState.ball_x = GameState.screen_w + 1;
+    update_ball();
+    if (GameState.enemy_paddle_speed_x100 != 1500) { return false; }
+    return GameState.ball_age_ticks == 0;
+}
