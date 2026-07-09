@@ -157,6 +157,13 @@ def main() -> int:
     assert "runAiAgentLoop" in activity
     assert "executeAiToolCalls" in activity
     assert "validateAiToolCall" in activity
+    assert "read_imports" in activity
+    assert "write_imports" in activity
+    assert "aiToolReadImports" in activity
+    assert "aiToolWriteImports" in activity
+    assert "backing_struct_source" in activity
+    assert "parseGlobal" in activity
+    assert "sections.put(\"Globals\"" in activity
     assert "validation_error" in activity
     assert "accepted_shape" in activity
     assert "required_args" in activity
@@ -212,7 +219,7 @@ def main() -> int:
     assert "durable gameplay concepts" in activity
     assert "spawn_actor" in activity
     assert "Follow architecture_recommendations" in activity
-    assert "Apply code changes with write_symbol before final edits" in activity
+    assert "Apply code changes with write_symbol or write_imports before final edits" in activity
     assert "Tool errors and validation_error observations are not final" in activity
     assert "mode=done" in activity
     assert "AI edit complete" in activity

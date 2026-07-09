@@ -931,6 +931,8 @@ public final class MainActivity extends Activity {
                     .put("list_symbols")
                     .put("read_symbol")
                     .put("read_file")
+                    .put("read_imports")
+                    .put("write_imports")
                     .put("write_symbol")
                     .put("compile_project")
                     .put("get_diagnostics")
@@ -1001,7 +1003,7 @@ public final class MainActivity extends Activity {
             JSONObject followup = new JSONObject();
             followup.put("original_request", new JSONObject(initialRequestJson));
             followup.put("tool_observations", observations);
-            followup.put("instruction", "Use the tool observations to either request more tools or return final edits. Inspect current symbols before writing unless the exact current source is already available. Apply code changes with write_symbol before final edits so compile failures return observations you can correct. Tool errors and validation_error observations are not final; use accepted_shape, required_args, and the error observation to choose another tool call or corrected write. Return mode=edits only after the intended code has been written and compiled successfully. If no further action is needed, return mode=done with empty tool_calls and empty edits.");
+            followup.put("instruction", "Use the tool observations to either request more tools or return final edits. Inspect current symbols before writing unless the exact current source is already available. Apply code changes with write_symbol or write_imports before final edits so compile failures return observations you can correct. Tool errors and validation_error observations are not final; use accepted_shape, required_args, and the error observation to choose another tool call or corrected write. Return mode=edits only after the intended code has been written and compiled successfully. If no further action is needed, return mode=done with empty tool_calls and empty edits.");
             currentRequestJson = followup.toString();
         }
         postAiProgress(MAX_AI_AGENT_TURNS, session.actionCount, "limit hit");
@@ -1075,6 +1077,10 @@ public final class MainActivity extends Activity {
                 if (!hasTextArg(args, "new_source") && !hasTextArg(args, "source")) {
                     return aiToolValidationError(tool, args, "Tool " + tool + " requires new_source, or source as a compatibility alias", required);
                 }
+            } else if ("imports".equals(name)) {
+                if (!args.has("imports") && !hasTextArg(args, "source") && !hasTextArg(args, "import_source")) {
+                    return aiToolValidationError(tool, args, "Tool " + tool + " requires imports array, or source/import_source as a compatibility alias", required);
+                }
             } else if (!hasTextArg(args, name)) {
                 return aiToolValidationError(tool, args, "Tool " + tool + " requires arg: " + name, required);
             }
@@ -1100,8 +1106,11 @@ public final class MainActivity extends Activity {
         if ("read_symbol".equals(tool)) {
             return new JSONArray().put("name");
         }
-        if ("read_file".equals(tool)) {
+        if ("read_file".equals(tool) || "read_imports".equals(tool)) {
             return new JSONArray().put("file");
+        }
+        if ("write_imports".equals(tool)) {
+            return new JSONArray().put("file").put("imports");
         }
         if ("write_symbol".equals(tool)) {
             return new JSONArray().put("file").put("name").put("new_source");
@@ -1120,6 +1129,8 @@ public final class MainActivity extends Activity {
                 .put("list_symbols")
                 .put("read_symbol")
                 .put("read_file")
+                .put("read_imports")
+                .put("write_imports")
                 .put("write_symbol")
                 .put("compile_project")
                 .put("get_diagnostics")
@@ -1136,9 +1147,13 @@ public final class MainActivity extends Activity {
         JSONObject acceptedArgs = new JSONObject();
         String normalizedTool = tool == null ? "" : tool;
         if ("read_symbol".equals(normalizedTool)) {
-            acceptedArgs.put("name", "symbol_name").put("kind", "function_or_struct_optional").put("file", "src/main.stasis_optional").put("owner", "owner_optional");
+            acceptedArgs.put("name", "symbol_name").put("kind", "function_struct_or_global_optional").put("file", "src/main.stasis_optional").put("owner", "owner_optional");
         } else if ("read_file".equals(normalizedTool)) {
             acceptedArgs.put("file", "src/main.stasis");
+        } else if ("read_imports".equals(normalizedTool)) {
+            acceptedArgs.put("file", "src/main.stasis");
+        } else if ("write_imports".equals(normalizedTool)) {
+            acceptedArgs.put("file", "src/main.stasis").put("imports", new JSONArray().put("game_state.stasis").put("systems/collision.stasis"));
         } else if ("write_symbol".equals(normalizedTool)) {
             acceptedArgs.put("file", "src/main.stasis").put("name", "function_name").put("kind", "replace_function").put("owner", "Root").put("new_source", "function function_name(): void {\n    // ...\n}");
         } else if ("set_runtime_i32".equals(normalizedTool)) {
@@ -1171,7 +1186,7 @@ public final class MainActivity extends Activity {
         if (!file.isEmpty() || !name.isEmpty() || !status.isEmpty()) {
             session.lastToolSummary = tool + " " + file + " " + name + " " + status;
         }
-        if ("write_symbol".equals(tool)) {
+        if ("write_symbol".equals(tool) || "write_imports".equals(tool)) {
             if ("written".equals(status) || "created".equals(status)) {
                 session.successfulWriteCount += 1;
                 session.lastToolError = "";
@@ -1191,6 +1206,12 @@ public final class MainActivity extends Activity {
         }
         if ("read_file".equals(tool)) {
             return aiToolReadFile(session, args);
+        }
+        if ("read_imports".equals(tool)) {
+            return aiToolReadImports(session, args);
+        }
+        if ("write_imports".equals(tool)) {
+            return aiToolWriteImports(session, args);
         }
         if ("write_symbol".equals(tool)) {
             return aiToolWriteSymbol(session, args);
@@ -1247,7 +1268,7 @@ public final class MainActivity extends Activity {
         if (kind.isEmpty()) {
             target = findAnySymbolForAiLookup(project, call, selectedSymbol);
         } else {
-            String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
+            String expectedKind = aiLookupExpectedKind(kind);
             target = findSymbolForAiEdit(project, expectedKind, call, selectedSymbol);
         }
         return symbolToJson(target, true);
@@ -1261,6 +1282,155 @@ public final class MainActivity extends Activity {
                 .put("source", sourceFile.source);
     }
 
+    private JSONObject aiToolReadImports(AiAgentSession session, JSONObject call) throws Exception {
+        ProjectSnapshot project = session.project();
+        SourceFile sourceFile = findProjectFile(project, call.optString("file", ""));
+        return importsToJson(sourceFile);
+    }
+
+    private JSONObject aiToolWriteImports(AiAgentSession session, JSONObject call) throws Exception {
+        ProjectSnapshot project = session.project();
+        SourceFile sourceFile = findProjectFile(project, call.optString("file", ""));
+        Map<String, String> originalSources = snapshotProjectSources(project);
+        JSONArray imports = normalizedImportPaths(call);
+        String updatedSource = replaceImportBlock(sourceFile.source, imports);
+        try {
+            sourceFile.source = updatedSource;
+            writeTextFile(sourceFile.diskFile, updatedSource);
+            session.invalidateProject();
+
+            String compileResult = nativeCompileProject(projectRootPath());
+            lastCompileResult = compileResult;
+            compileReady = isRunnableCompile(compileResult);
+            compileAttempted = true;
+            JSONObject diagnostics = compileResultToJson(compileResult);
+            if (!compileReady) {
+                restoreProjectSources(originalSources);
+                session.invalidateProject();
+                String restoredCompile = nativeCompileProject(projectRootPath());
+                lastCompileResult = restoredCompile;
+                compileReady = isRunnableCompile(restoredCompile);
+                compileAttempted = true;
+                return importsToJson(new SourceFile(sourceFile.path, sourceFile.diskFile, originalSources.get(sourceFile.path)))
+                        .put("status", "rolled_back")
+                        .put("diagnostics", diagnostics)
+                        .put("restored_diagnostics", compileResultToJson(restoredCompile));
+            }
+            return importsToJson(sourceFile)
+                    .put("status", "written")
+                    .put("diagnostics", diagnostics);
+        } catch (Exception error) {
+            restoreProjectSources(originalSources);
+            session.invalidateProject();
+            throw error;
+        }
+    }
+
+    private static JSONObject importsToJson(SourceFile sourceFile) throws Exception {
+        JSONArray imports = parseImportPaths(sourceFile.source);
+        return new JSONObject()
+                .put("file", sourceFile.path)
+                .put("kind", "imports")
+                .put("imports", imports)
+                .put("source", importBlockSource(imports));
+    }
+
+    private static JSONArray normalizedImportPaths(JSONObject call) throws Exception {
+        JSONArray out = new JSONArray();
+        JSONArray imports = call.optJSONArray("imports");
+        if (imports != null) {
+            for (int index = 0; index < imports.length(); index += 1) {
+                String path = normalizeImportPath(imports.getString(index));
+                if (!path.isEmpty()) {
+                    out.put(path);
+                }
+            }
+            return out;
+        }
+        String source = call.optString("source", call.optString("import_source", ""));
+        String[] lines = source.split("\\r?\\n");
+        for (String line : lines) {
+            String path = normalizeImportPath(line);
+            if (!path.isEmpty()) {
+                out.put(path);
+            }
+        }
+        return out;
+    }
+
+    private static JSONArray parseImportPaths(String source) throws Exception {
+        JSONArray imports = new JSONArray();
+        String[] lines = source.split("\\r?\\n");
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            if (!trimmed.startsWith("import ")) {
+                break;
+            }
+            String path = normalizeImportPath(trimmed);
+            if (!path.isEmpty()) {
+                imports.put(path);
+            }
+        }
+        return imports;
+    }
+
+    private static String normalizeImportPath(String value) throws IOException {
+        String trimmed = value == null ? "" : value.trim();
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+        if (trimmed.startsWith("import ")) {
+            int firstQuote = trimmed.indexOf('"');
+            int secondQuote = firstQuote < 0 ? -1 : trimmed.indexOf('"', firstQuote + 1);
+            if (firstQuote < 0 || secondQuote <= firstQuote + 1) {
+                throw new IOException("Invalid import line: " + trimmed);
+            }
+            return trimmed.substring(firstQuote + 1, secondQuote);
+        }
+        if (trimmed.indexOf('"') >= 0 || trimmed.indexOf(';') >= 0) {
+            throw new IOException("Import paths should not include quotes or semicolons: " + trimmed);
+        }
+        return trimmed;
+    }
+
+    private static String importBlockSource(JSONArray imports) throws Exception {
+        StringBuilder builder = new StringBuilder();
+        for (int index = 0; index < imports.length(); index += 1) {
+            builder.append("import \"").append(imports.getString(index)).append("\";\n");
+        }
+        return builder.toString();
+    }
+
+    private static String replaceImportBlock(String source, JSONArray imports) throws Exception {
+        int blockEnd = importBlockEnd(source);
+        String rest = source.substring(blockEnd);
+        while (rest.startsWith("\r\n") || rest.startsWith("\n")) {
+            rest = rest.startsWith("\r\n") ? rest.substring(2) : rest.substring(1);
+        }
+        String importBlock = importBlockSource(imports);
+        if (!importBlock.isEmpty() && !rest.isEmpty()) {
+            importBlock += "\n";
+        }
+        return importBlock + rest;
+    }
+
+    private static int importBlockEnd(String source) {
+        int offset = 0;
+        while (offset < source.length()) {
+            int lineEnd = source.indexOf('\n', offset);
+            int nextOffset = lineEnd < 0 ? source.length() : lineEnd + 1;
+            String line = source.substring(offset, lineEnd < 0 ? source.length() : lineEnd).trim();
+            if (line.isEmpty() || line.startsWith("import ")) {
+                offset = nextOffset;
+                continue;
+            }
+            break;
+        }
+        return offset;
+    }
     private JSONObject aiToolWriteSymbol(AiAgentSession session, JSONObject call) throws Exception {
         ProjectSnapshot project = session.project();
         Map<String, String> originalSources = snapshotProjectSources(project);
@@ -1573,16 +1743,33 @@ public final class MainActivity extends Activity {
                 .put("owner", symbol.owner)
                 .put("file", symbol.file)
                 .put("signature", symbol.signature);
+        if ("global".equals(symbol.kind)) {
+            json.put("backing_kind", "struct");
+            json.put("backing_struct_name", symbol.name);
+        }
         if (includeSource) {
             json.put("source", symbol.source);
+            if ("global".equals(symbol.kind)) {
+                json.put("backing_struct_source", symbol.backingStructSource);
+            }
         }
         return json;
+    }
+
+    private static String aiLookupExpectedKind(String kind) {
+        if ("replace_struct".equals(kind) || "struct".equals(kind)) {
+            return "struct";
+        }
+        if ("global".equals(kind)) {
+            return "global";
+        }
+        return "function";
     }
     private static AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. Before writing, inspect the current target with list_symbols and read_symbol/read_file unless the exact current source was already provided in selected_symbols or tool observations. For behavior that depends on time since an entity, encounter, projectile, effect, resource, objective, mode, or event was created/entered, prefer local lifecycle state that is reset on creation/entry and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol, compiles immediately, and returns status=rolled_back with diagnostics if the edit breaks compilation. Apply code changes with write_symbol before final edits so failed writes return observations you can correct. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol has successfully written and compiled the intended changes. If the requested work is already complete or no code changes are needed, return mode=done with empty tool_calls and empty edits. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, read_imports, write_imports, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. Before writing, inspect the current target with list_symbols and read_symbol/read_file unless the exact current source was already provided in selected_symbols or tool observations. For behavior that depends on time since an entity, encounter, projectile, effect, resource, objective, mode, or event was created/entered, prefer local lifecycle state that is reset on creation/entry and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol, compiles immediately, and returns status=rolled_back with diagnostics if the edit breaks compilation. read_imports returns the imports for one file; write_imports replaces that file import block using an imports JSON array, compiles immediately, and rolls back on failure. Apply code changes with write_symbol before final edits so failed writes return observations you can correct. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/write_imports has successfully written and compiled the intended changes. If the requested work is already complete or no code changes are needed, return mode=done with empty tool_calls and empty edits. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -1638,6 +1825,8 @@ public final class MainActivity extends Activity {
                 .put("list_symbols")
                 .put("read_symbol")
                 .put("read_file")
+                .put("read_imports")
+                .put("write_imports")
                 .put("write_symbol")
                 .put("compile_project")
                 .put("get_diagnostics")
@@ -2586,7 +2775,8 @@ public final class MainActivity extends Activity {
         while (cursor < file.source.length()) {
             int nextStruct = file.source.indexOf("struct ", cursor);
             int nextFunction = file.source.indexOf("function ", cursor);
-            int next = minPositive(nextStruct, nextFunction);
+            int nextGlobal = file.source.indexOf("global ", cursor);
+            int next = minPositive(minPositive(nextStruct, nextFunction), nextGlobal);
             if (next < 0) {
                 break;
             }
@@ -2598,6 +2788,14 @@ public final class MainActivity extends Activity {
                     cursor = symbol.end;
                 } else {
                     cursor = next + "struct ".length();
+                }
+            } else if (next == nextGlobal) {
+                SymbolEntry symbol = parseGlobal(file, next);
+                if (symbol != null) {
+                    symbols.add(symbol);
+                    cursor = symbol.end;
+                } else {
+                    cursor = next + "global ".length();
                 }
             } else {
                 SymbolEntry symbol = parseFunction(file, next, structs);
@@ -2626,6 +2824,20 @@ public final class MainActivity extends Activity {
         return new SymbolEntry("struct", name, name, "struct " + name, file, file.path, source, start, end);
     }
 
+    private static SymbolEntry parseGlobal(SourceFile file, int start) {
+        int nameStart = start + "global ".length();
+        int nameEnd = readIdentifierEnd(file.source, nameStart);
+        int bodyStart = file.source.indexOf('{', nameEnd);
+        int end = findMatchingBrace(file.source, bodyStart);
+        if (nameEnd <= nameStart || bodyStart < 0 || end < 0) {
+            return null;
+        }
+
+        String name = file.source.substring(nameStart, nameEnd);
+        String source = file.source.substring(start, end);
+        String backingStructSource = "struct " + name + " " + file.source.substring(bodyStart, end);
+        return new SymbolEntry("global", name, "Globals", "global " + name, file, file.path, source, start, end, backingStructSource);
+    }
     private static SymbolEntry parseFunction(SourceFile file, int start, TreeSet<String> structs) {
         int signatureStart = start + "function ".length();
         int bodyStart = file.source.indexOf('{', signatureStart);
@@ -2668,6 +2880,7 @@ public final class MainActivity extends Activity {
         Map<String, Map<String, List<SymbolEntry>>> sections = new LinkedHashMap<>();
         sections.put("Main", new LinkedHashMap<String, List<SymbolEntry>>());
         sections.put("Structs", new LinkedHashMap<String, List<SymbolEntry>>());
+        sections.put("Globals", new LinkedHashMap<String, List<SymbolEntry>>());
         sections.put("Systems", new LinkedHashMap<String, List<SymbolEntry>>());
         sections.put("Root", new LinkedHashMap<String, List<SymbolEntry>>());
 
@@ -2701,6 +2914,9 @@ public final class MainActivity extends Activity {
         }
         if ("Root".equals(symbol.owner)) {
             return "Root";
+        }
+        if ("global".equals(symbol.kind)) {
+            return "Globals";
         }
         if (symbol.file.startsWith("src/systems/")) {
             return "Systems";
@@ -3198,10 +3414,15 @@ public final class MainActivity extends Activity {
         final SourceFile sourceFile;
         final String file;
         String source;
+        final String backingStructSource;
         final int start;
         int end;
 
         SymbolEntry(String kind, String name, String owner, String signature, SourceFile sourceFile, String file, String source, int start, int end) {
+            this(kind, name, owner, signature, sourceFile, file, source, start, end, "");
+        }
+
+        SymbolEntry(String kind, String name, String owner, String signature, SourceFile sourceFile, String file, String source, int start, int end, String backingStructSource) {
             this.kind = kind;
             this.name = name;
             this.owner = owner;
@@ -3211,6 +3432,7 @@ public final class MainActivity extends Activity {
             this.source = source;
             this.start = start;
             this.end = end;
+            this.backingStructSource = backingStructSource;
         }
 
         String displayName() {
