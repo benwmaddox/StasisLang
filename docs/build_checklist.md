@@ -389,6 +389,34 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Isolated request/response helpers, serial sync scheduling, conflict/error paths, structural verifier, and debug APK build; authenticated repository validation when configured.
 - Done gate: A configured Workshop can back up changed Stasis sources to GitHub without making sync controls the foreground editor workflow.
 - Status: `planned`
+#### AW45 - Android GitHub Review and Pull Request Flow
+- Scope: Create a review branch/PR from the configured project, with symbol-first and raw-diff review before submission.
+- Done gate: A configured workshop can create or update a GitHub PR without losing local edits.
+- Status: `planned`
+#### AW46 - Android Sync Reliability and Credential Protection
+- Scope: Queue serial sync work, persist retry/error state, and move API keys/tokens from plain preferences to Android credential storage.
+- Done gate: Interrupted/offline sync never loses local source; secrets are not stored in plain text.
+- Status: `planned`
+#### AW47 - Android Project Import, Export, and Switching
+- Scope: Support multiple normal Stasis projects, import/export archives, project metadata, and explicit project switching.
+- Done gate: A user can open, back up, restore, and switch projects while retaining symbol editing, tests, and compile behavior.
+- Status: `planned`
+#### AW48 - Android Preview and Touch Gameplay Parity
+- Scope: Replace placeholder preview assumptions with a renderer/runtime contract that displays real game output and supports touch-first sample gameplay.
+- Done gate: A representative Stasis game renders and is playable on a phone using touch input through the same runtime used by the workshop.
+- Status: `planned`
+#### AW49 - Android Diagnostics and Change Recovery UX
+- Scope: Provide structured compiler/test diagnostics, source locations, safe rollback/recovery history, and clear hot-reload/reset explanations.
+- Done gate: A user can identify, navigate to, and recover from a failed edit without raw log hunting.
+- Status: `planned`
+#### AW50 - Android Published Build and Release Validation
+- Scope: Validate the published/AOT flavor, signing/install workflow, runtime assets, and release performance/error reporting.
+- Done gate: A signed sideloadable published build runs a representative game without developer workshop dependencies.
+- Status: `planned`
+#### AW51 - Android Device Acceptance Suite
+- Scope: Add a repeatable device validation checklist/automation for editor, tests, voice, touch preview, sync, and lifecycle recovery.
+- Done gate: Every user-facing workshop slice has an on-device proof or an explicitly recorded hardware/environment limitation.
+- Status: `planned`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
