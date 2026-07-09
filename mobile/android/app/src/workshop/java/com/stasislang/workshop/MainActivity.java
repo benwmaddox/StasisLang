@@ -24,6 +24,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.util.Base64;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -977,6 +978,12 @@ public final class MainActivity extends Activity {
             }
         });
         githubSettingsBody.addView(saveGitHubSettings, fullWidth());
+        Button syncNow = new Button(this);
+        syncNow.setText("Sync GitHub Now");
+        syncNow.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { queueGitHubSync(); }
+        });
+        githubSettingsBody.addView(syncNow, fullWidth());
         controls.addView(githubSettingsBody, fullWidth());
         return controls;
     }
@@ -1016,6 +1023,85 @@ public final class MainActivity extends Activity {
             return;
         }
         githubSyncStatus.setText("GitHub sync: ready for " + repository);
+    }
+
+    private void queueGitHubSync() {
+        final SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        final String token = prefs.getString(GITHUB_PREF_TOKEN, "").trim();
+        final String repository = prefs.getString(GITHUB_PREF_REPOSITORY, "").trim();
+        final String branch = prefs.getString(GITHUB_PREF_BRANCH, "main").trim();
+        if (token.isEmpty() || repository.indexOf('/') <= 0) {
+            setStatusText("GitHub sync needs configured settings");
+            return;
+        }
+        final Map<String, String> files;
+        try {
+            files = changedProjectSources(loadBundledAssetSnapshot(), loadBundledProject());
+        } catch (IOException error) {
+            githubSyncStatus.setText("GitHub sync error: unable to read local baseline");
+            return;
+        }
+        if (files.isEmpty()) {
+            githubSyncStatus.setText("GitHub sync: no local changes");
+            return;
+        }
+        githubSyncStatus.setText("GitHub sync: queued (" + files.size() + " files)");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    int completed = 0;
+                    for (Map.Entry<String, String> entry : files.entrySet()) {
+                        completed += 1;
+                        postGitHubSyncStatus("GitHub sync: " + completed + "/" + files.size());
+                        uploadGitHubFile(token, repository, branch, entry.getKey(), entry.getValue());
+                    }
+                    postGitHubSyncStatus("GitHub sync: complete (" + completed + " files)");
+                } catch (final Exception error) {
+                    postGitHubSyncStatus("GitHub sync error: " + error.getMessage());
+                }
+            }
+        }).start();
+    }
+
+    private static Map<String, String> changedProjectSources(ProjectSnapshot baseline, ProjectSnapshot current) {
+        Map<String, String> before = sourcesByFile(baseline);
+        Map<String, String> after = sourcesByFile(current);
+        Map<String, String> changed = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : after.entrySet()) {
+            if (!entry.getValue().equals(before.get(entry.getKey()))) {
+                changed.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return changed;
+    }
+
+    private void postGitHubSyncStatus(final String status) {
+        runOnUiThread(new Runnable() {
+            @Override public void run() { if (githubSyncStatus != null) githubSyncStatus.setText(status); }
+        });
+    }
+
+    private static void uploadGitHubFile(String token, String repository, String branch, String path, String source) throws Exception {
+        String base = "https://api.github.com/repos/" + repository + "/contents/" + path;
+        HttpURLConnection get = (HttpURLConnection)new URL(base + "?ref=" + branch).openConnection();
+        get.setRequestProperty("Accept", "application/vnd.github+json");
+        get.setRequestProperty("Authorization", "Bearer " + token);
+        String sha = "";
+        int getCode = get.getResponseCode();
+        if (getCode == 200) sha = new JSONObject(readStreamStatic(get.getInputStream())).optString("sha", "");
+        else if (getCode != 404) throw new IOException("read " + path + " HTTP " + getCode);
+        JSONObject body = new JSONObject().put("message", "stasis workshop sync: " + path)
+                .put("content", Base64.encodeToString(source.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP))
+                .put("branch", branch);
+        if (!sha.isEmpty()) body.put("sha", sha);
+        HttpURLConnection put = (HttpURLConnection)new URL(base).openConnection();
+        put.setRequestMethod("PUT"); put.setDoOutput(true);
+        put.setRequestProperty("Accept", "application/vnd.github+json");
+        put.setRequestProperty("Content-Type", "application/json");
+        put.setRequestProperty("Authorization", "Bearer " + token);
+        OutputStream output = put.getOutputStream(); output.write(body.toString().getBytes(StandardCharsets.UTF_8)); output.close();
+        int putCode = put.getResponseCode();
+        if (putCode != 200 && putCode != 201) throw new IOException("write " + path + " HTTP " + putCode);
     }
 
     private void toggleAiSettings() {
