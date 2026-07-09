@@ -178,7 +178,10 @@ def main() -> int:
     assert "writeSymbolTransaction" in activity
     assert "status\", \"rolled_back" in activity
     assert "restored_diagnostics" in activity
-    assert "write_symbol compiles immediately" in activity
+    assert "write_symbol creates or replaces a symbol" in activity
+    assert "AI edit apply failed and rolled back" in activity
+    assert "appendAiFunction" in activity
+    assert "\"created\"" in activity
     assert "logical_render_snapshot" in activity
     assert "take_screenshot returns a compact logical render snapshot" in activity
     assert "json_schema" in activity
