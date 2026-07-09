@@ -220,6 +220,10 @@ def main() -> int:
     assert "deleteSelectedManualTest();" in activity
     assert "bundled tests can be reverted, not deleted" in activity
     assert "Deleted user-created test" in activity
+    assert "newHelper.setText(\"New Helper\")" in activity
+    assert "createManualHelper();" in activity
+    assert "function \" + name + \"(): void" in activity
+    assert "Created root helper" in activity
     assert "revertSaved.setText(\"Revert Saved\")" in activity
     assert "revertSelectedToBundled();" in activity
     assert "Reverted saved symbol to bundled baseline" in activity
