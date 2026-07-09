@@ -1113,6 +1113,16 @@ mod tests {
             "after 60 seconds, speed reaches 0.5x a 5px/tick ball speed"
         );
 
+        set_android_workshop_i32_global(&root, entry, "GameState.ball_age_ticks", 7200)
+            .expect("set over age");
+        run_android_workshop_tick(&root, entry, default_tick_input()).expect("over-age tick");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "GameState.enemy_paddle_speed_x100")
+                .expect("over-age enemy speed"),
+            250,
+            "after 60 seconds, speed stays clamped at 0.5x a 5px/tick ball speed"
+        );
+
         set_android_workshop_i32_global(&root, entry, "GameState.ball_age_ticks", 1800)
             .expect("set stale age before reset");
         set_android_workshop_i32_global(&root, entry, "GameState.ball_x", 361)

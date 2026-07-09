@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +22,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROJECT = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
 DEFAULT_MODEL = "gpt-5.4-mini"
-MAX_TURNS = 5
+MAX_TURNS = 15
 
 
 @dataclass
@@ -147,14 +148,14 @@ def parse_symbols(project: Path) -> list[Symbol]:
                 continue
             full_source = source[start:end]
             if token == "struct ":
-                symbols.append(Symbol("struct", name, name, f"struct {name}", rel, full_source, start, end))
+                symbols.append(Symbol("struct", name, name, rel, f"struct {name}", full_source, start, end))
             elif token == "global ":
-                symbols.append(Symbol("global", name, "Globals", f"global {name}", rel, full_source, start, end))
+                symbols.append(Symbol("global", name, "Globals", rel, f"global {name}", full_source, start, end))
             else:
                 signature = source[start + len(token):body_start].strip()
                 func_name = signature.split("(", 1)[0].strip()
                 owner = owner_for_function(rel, func_name, signature, structs)
-                symbols.append(Symbol("function", func_name, owner, signature, rel, full_source, start, end))
+                symbols.append(Symbol("function", func_name, owner, rel, signature, full_source, start, end))
             cursor = end
     return symbols
 
@@ -197,9 +198,30 @@ def run_compile_check() -> dict[str, Any]:
     return run_command(["cargo", "test", "-p", "stasis_android_bridge", "android_bundled_touch_pong_sample_compile_plan_is_runnable", "--", "--nocapture"])
 
 
-def run_behavior_tests() -> dict[str, Any]:
-    return run_command(["cargo", "test", "-p", "stasis_android_bridge", "android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear", "--", "--ignored", "--nocapture"])
+def behavior_test_expectations() -> dict[str, Any]:
+    return {
+        "test_name": "android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear",
+        "required_state": [
+            "GameState.ball_age_ticks",
+            "GameState.enemy_paddle_speed_x100",
+        ],
+        "expected_checks": [
+            {"after": "first tick after ball creation", "global": "GameState.enemy_paddle_speed_x100", "expected": 1500, "meaning": "3x a 5 px/tick ball speed, scaled by 100"},
+            {"after": "set GameState.ball_age_ticks to 1800 then tick", "global": "GameState.enemy_paddle_speed_x100", "expected": 875, "meaning": "halfway between 3x and 0.5x after 30 seconds at 60 fps"},
+            {"after": "set GameState.ball_age_ticks to 3600 then tick", "global": "GameState.enemy_paddle_speed_x100", "expected": 250, "meaning": "0.5x a 5 px/tick ball speed after 60 seconds"},
+            {"after": "set GameState.ball_age_ticks past 3600 then tick", "global": "GameState.enemy_paddle_speed_x100", "expected": 250, "meaning": "speed stays clamped at 0.5x after 60 seconds"},
+            {"after": "force ball reset by setting GameState.ball_x past the right edge", "global": "GameState.enemy_paddle_speed_x100", "expected": 1500, "meaning": "each new ball restarts at 3x"},
+            {"after": "forced ball reset", "global": "GameState.ball_age_ticks", "expected_max": 1, "meaning": "ball age resets when a new ball is created"},
+        ],
+        "implementation_hint": "Use persistent GameState fields for ball_age_ticks and enemy_paddle_speed_x100. Reset ball_age_ticks in reset_ball(), increment it once per tick/update_ball while the ball is alive, and update enemy_paddle_speed_x100 from ball_age_ticks before moving the enemy paddle. Clamp enemy_paddle_speed_x100 so it never drops below 250 after 60 seconds.",
+    }
 
+
+def run_behavior_tests() -> dict[str, Any]:
+    result = run_command(["cargo", "test", "-p", "stasis_android_bridge", "android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear", "--", "--ignored", "--nocapture"])
+    if not result.get("ok"):
+        result["behavior_test_expectations"] = behavior_test_expectations()
+    return result
 
 def validate_single_replacement_source(name: str, new_source: str) -> tuple[bool, str]:
     stripped = new_source.strip()
@@ -267,10 +289,35 @@ def tool_specs() -> list[dict[str, Any]]:
         spec("read_symbol", "Read one symbol source.", ["name"], ["kind", "file", "owner"], {"name": "update_enemy_paddle"}),
         spec("read_file", "Read a source file.", ["file"], [], {"file": "src/main.stasis"}),
         spec("write_symbol", "Create or replace exactly one Stasis function/global/struct, then compile locally and roll back on compile failure. The new_source must not contain additional top-level or nested declarations.", ["file", "name", "new_source"], ["kind", "owner"], {"file": "src/main.stasis", "name": "tick", "new_source": "function tick(): void {\n}"}),
-        spec("run_tests", "Run the local host behavior test for the requested edit.", [], [], {}),
+        spec("run_tests", "Run the local host behavior test for the requested edit. Failed results include behavior_test_expectations with required globals and expected values.", [], [], {}),
         spec("get_diagnostics", "Return last local diagnostics.", [], [], {}),
     ]
 
+
+
+def response_contract() -> dict[str, Any]:
+    return {
+        "required": "Return exactly one JSON object. The top-level object must match one of the accepted_response_shapes.",
+        "accepted_response_shapes": [
+            {"mode": "tool_calls", "summary": "short optional status", "tool_calls": [{"tool": "read_file", "args": {"file": "src/main.stasis"}}]},
+            {"mode": "done", "summary": "what was verified"},
+            {"mode": "edits", "summary": "short change summary", "edits": [{"kind": "replace_function", "owner": "Player", "name": "jump", "file": "src/player.stasis", "new_source": "function jump(self: Player): void {\n}"}]},
+        ],
+        "tool_call_rules": [
+            "Use the exact top-level property tool_calls for tool use.",
+            "Each tool call must contain exactly tool and args.",
+            "tool must be a non-empty string matching one entry in tool_specs.",
+            "args must be an object containing that tool's documented arguments.",
+        ],
+        "invalid_aliases": {
+            "calls": "Use tool_calls instead.",
+            "name": "Inside each tool call, use tool instead.",
+            "function": "Inside each tool call, use tool instead.",
+            "arguments": "Inside each tool call, use args instead.",
+            "type": "Do not use type for tool calls.",
+            "source": "For write_symbol, use new_source instead.",
+        },
+    }
 
 def build_request(project: Path, prompt: str) -> dict[str, Any]:
     symbols = parse_symbols(project)
@@ -281,10 +328,13 @@ def build_request(project: Path, prompt: str) -> dict[str, Any]:
             globals_payload.append({"kind": "global", "name": symbol.name, "file": symbol.file, "backing_struct_type": symbol.name, "backing_struct_source": f"struct {symbol.name} {body}"})
     return {
         "scope": "entire_workspace",
+        "response_contract": response_contract(),
         "available_tools": [s["tool"] for s in tool_specs()],
         "tool_specs": tool_specs(),
         "stasis_style_rules": {"use_function_keyword": True, "use_receiver_style_when_possible": True, "do_not_use_rust_references": True},
+        "behavior_test_expectations": behavior_test_expectations(),
         "architecture_recommendations": [
+            "write_symbol compiles immediately after each write; create helper functions before editing callers that invoke them.",
             "Use lifecycle-local state for time since creation; reset it in reset/create functions and increment it during tick.",
             "Use on_code_swap() for post-hot-swap migration or reinitialization if running state needs adjustment.",
             "Make the smallest structural change with clear state fields and testable invariants.",
@@ -329,14 +379,56 @@ def parse_json_object(text: str) -> dict[str, Any]:
                 return json.loads(stripped[start:index + 1])
     raise ValueError(f"Unclosed JSON object in model response: {stripped[:200]}")
 
+
+def response_json_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string"},
+            "summary": {"type": "string"},
+            "tool_calls": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "tool": {"type": "string"},
+                        "args": {"type": "object", "additionalProperties": True},
+                    },
+                    "required": ["tool", "args"],
+                    "additionalProperties": False,
+                },
+            },
+            "edits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "owner": {"type": "string"},
+                        "name": {"type": "string"},
+                        "file": {"type": "string"},
+                        "new_source": {"type": "string"},
+                    },
+                    "required": ["kind", "name", "file", "new_source"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["mode"],
+        "additionalProperties": False,
+    }
+
 def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, Any]:
     prompt = (
-        "Return only one JSON object. Use mode=tool_calls to inspect/write with the provided tools. "
-        "After write_symbol, compile runs locally and failed compiles roll back. Use run_tests to verify the behavior. "
+        "Return only one JSON object matching request.response_contract exactly. "
+        "Use mode=tool_calls to inspect/write with the provided tools. "
+        "For tool calls, the top-level key is tool_calls and each call is exactly {\"tool\":\"name\",\"args\":{...}}. "
+        "Do not use aliases such as calls, name, function, arguments, type, or source. "
+        "After write_symbol, compile runs locally and failed compiles roll back. Create helper functions before callers that use them. Use run_tests to verify the behavior. "
         "Return mode=tool_calls for tools, mode=edits with edits if returning direct edits, or mode=done only when tests pass. "
         "Use Stasis syntax only. Request: " + json.dumps(request, separators=(",", ":"))
     )
-    schema = {"type": "object", "additionalProperties": True}
+    schema = response_json_schema()
     payload = {"model": model, "text": {"format": {"type": "json_schema", "name": "stasis_host_ai_response", "strict": False, "schema": schema}}, "input": prompt}
     req = urllib.request.Request(
         "https://api.openai.com/v1/responses",
@@ -344,8 +436,12 @@ def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, 
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=120) as response:
-        body = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=120) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OpenAI request failed with HTTP {error.code}: {detail}") from error
     text = body.get("output_text", "")
     if not text:
         chunks: list[str] = []
@@ -357,26 +453,27 @@ def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, 
     return parse_json_object(text)
 
 
-def validate_tool_call_response(response: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def validate_response_shape(response: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     errors: list[dict[str, Any]] = []
-    if response.get("mode") != "tool_calls":
+    contract = response_contract()
+    mode = response.get("mode")
+    if mode not in {"tool_calls", "done", "edits"}:
+        errors.append({"kind": "validation_error", "error": "response requires top-level mode equal to tool_calls, done, or edits", "received_keys": sorted(response.keys()), "received_mode": mode, "response_contract": contract})
         return [], errors
-    if "tool_calls" not in response:
-        errors.append({
-            "kind": "validation_error",
-            "error": "mode=tool_calls requires top-level tool_calls array; do not use calls/type/name/arguments aliases",
-            "received_keys": sorted(response.keys()),
-            "accepted_shape": {"mode": "tool_calls", "tool_calls": [{"tool": "read_file", "args": {"file": "src/main.stasis"}}]},
-        })
+    allowed_top_level = {"tool_calls": {"mode", "summary", "tool_calls"}, "done": {"mode", "summary"}, "edits": {"mode", "summary", "edits"}}[mode]
+    extra_top_level = sorted(set(response.keys()) - allowed_top_level)
+    if extra_top_level:
+        errors.append({"kind": "validation_error", "error": "response contains unsupported top-level properties for this mode", "mode": mode, "unsupported_properties": extra_top_level, "accepted_top_level_properties": sorted(allowed_top_level), "response_contract": contract})
+        return [], errors
+    if mode == "done":
+        return [], errors
+    if mode == "edits":
+        if not isinstance(response.get("edits"), list):
+            errors.append({"kind": "validation_error", "error": "mode=edits requires top-level edits array", "received_edits_type": type(response.get("edits")).__name__, "response_contract": contract})
         return [], errors
     raw_calls = response.get("tool_calls")
     if not isinstance(raw_calls, list):
-        errors.append({
-            "kind": "validation_error",
-            "error": "tool_calls must be an array",
-            "received_tool_calls_type": type(raw_calls).__name__,
-            "accepted_shape": {"tool": "read_file", "args": {"file": "src/main.stasis"}},
-        })
+        errors.append({"kind": "validation_error", "error": "mode=tool_calls requires top-level tool_calls array", "received_tool_calls_type": type(raw_calls).__name__, "response_contract": contract})
         return [], errors
     normalized: list[dict[str, Any]] = []
     for index, call in enumerate(raw_calls):
@@ -385,13 +482,7 @@ def validate_tool_call_response(response: dict[str, Any]) -> tuple[list[dict[str
             continue
         extra = sorted(set(call.keys()) - {"tool", "args"})
         if extra:
-            errors.append({
-                "kind": "validation_error",
-                "index": index,
-                "error": "tool call contains unsupported top-level properties",
-                "unsupported_properties": extra,
-                "accepted_shape": {"tool": "read_file", "args": {"file": "src/main.stasis"}},
-            })
+            errors.append({"kind": "validation_error", "index": index, "error": "tool call contains unsupported top-level properties", "unsupported_properties": extra, "accepted_shape": {"tool": "read_file", "args": {"file": "src/main.stasis"}}, "response_contract": contract})
             continue
         tool = call.get("tool")
         args = call.get("args")
@@ -403,7 +494,6 @@ def validate_tool_call_response(response: dict[str, Any]) -> tuple[list[dict[str
             continue
         normalized.append({"tool": tool, "args": args})
     return normalized, errors
-
 def summarize_observations(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     summary = []
     for observation in observations:
@@ -442,7 +532,7 @@ def execute_tool(project: Path, tool: str, args: dict[str, Any], last_diagnostic
         file = args.get("file", "")
         return {"file": file, "source": read_text(project / file)}
     if tool == "write_symbol":
-        return replace_symbol(project, args.get("name", ""), args.get("file", ""), args.get("new_source") or args.get("source", ""))
+        return replace_symbol(project, args.get("name", ""), args.get("file", ""), args.get("new_source", ""))
     if tool == "write_file":
         return write_project_file(project, args.get("file", ""), args.get("source", ""))
     if tool == "run_tests":
@@ -471,13 +561,13 @@ def main() -> int:
     for turn in range(1, MAX_TURNS + 1):
         response = call_openai(api_key, args.model, request)
         mode = response.get("mode")
-        tool_calls, response_validation_errors = validate_tool_call_response(response)
+        tool_calls, response_validation_errors = validate_response_shape(response)
         print(json.dumps({"turn": turn, "mode": mode, "response_keys": sorted(response.keys()), "summary": response.get("summary", ""), "tool_call_count": len(tool_calls), "validation_error_count": len(response_validation_errors), "edit_count": len(response.get("edits") or [])}, indent=2))
         if response_validation_errors:
             print(json.dumps({"response_validation_errors": response_validation_errors}, indent=2))
             if turn >= MAX_TURNS:
                 return 1
-            request = {"original_request": build_request(project, args.prompt), "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, or type."}
+            request = {"original_request": build_request(project, args.prompt), "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching original_request.response_contract. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."}
             continue
         if mode == "edits" or (mode != "tool_calls" and response.get("edits")):
             observations = []
@@ -494,7 +584,7 @@ def main() -> int:
                 "original_request": build_request(project, args.prompt),
                 "tool_observations": observations,
                 "test_observation": final,
-                "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Inspect the current source and fix it using tool calls. Use precise write_symbol calls; write_file is reserved for host recovery and is not part of the normal tool list.",
+                "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Inspect behavior_test_expectations and current source, then fix it using tool calls. Use precise write_symbol calls; write_file is reserved for host recovery and is not part of the normal tool list.",
             }
             continue
         if mode != "tool_calls" or not tool_calls:
@@ -508,7 +598,7 @@ def main() -> int:
                 "original_request": build_request(project, args.prompt),
                 "tool_observations": [],
                 "test_observation": final,
-                "instruction": "The model returned done or an unsupported shape, but the required local behavior test failed. Inspect the current source and fix it using tool calls. Fix duplicate or misplaced symbols with precise write_symbol calls; write_file is not part of the normal tool list.",
+                "instruction": "The model returned done or an unsupported shape, but the required local behavior test failed. Inspect behavior_test_expectations and current source, then fix it using tool calls. Fix duplicate or misplaced symbols with precise write_symbol calls; write_file is not part of the normal tool list.",
             }
             continue
         observations = []
@@ -521,7 +611,7 @@ def main() -> int:
                 last_diagnostics = result
             observations.append({"tool": tool, "args": tool_args, "result": result})
         print(json.dumps({"tool_observations": summarize_observations(observations)}, indent=2))
-        request = {"original_request": build_request(project, args.prompt), "tool_observations": observations, "instruction": "Use observations to continue or return mode=done. If tests fail, inspect and fix. Do not repeat identical tool calls."}
+        request = {"original_request": build_request(project, args.prompt), "tool_observations": observations, "instruction": "Use observations to continue or return mode=done. If tests fail, inspect behavior_test_expectations and fix the exact required state/checks. Do not repeat identical tool calls."}
     print(json.dumps({"error": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
     return 1
 
