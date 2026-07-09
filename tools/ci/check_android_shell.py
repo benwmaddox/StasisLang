@@ -215,7 +215,7 @@ def main() -> int:
     assert "inspect_runtime_state" in activity
     assert "aiToolSetInputState" in activity
     assert "aiToolRunForTicks" in activity
-    assert "The app compiles after each write and runs tests after each tool-call batch" in activity
+    assert "The app compiles once after each tool-call batch that contains writes and runs tests after each tool-call batch" in activity
     assert "Use on_code_swap() for post-hot-swap migration" in activity
     assert "runtimeStateJson" in activity
     assert "frameValuesToJson" in activity
@@ -241,7 +241,7 @@ def main() -> int:
     assert "Tool errors, validation_error observations, and test_observation failures are not final" in activity
     assert "mode=done" in activity
     assert "AI edit complete" in activity
-    assert "status=rolled_back with diagnostics" in activity
+    assert "rolls back the whole batch and returns diagnostics" in activity
     assert "AI edit apply failed and rolled back" in activity
     assert "appendAiFunction" in activity
     assert "\"created\"" in activity

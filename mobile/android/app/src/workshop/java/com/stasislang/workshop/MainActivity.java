@@ -1186,40 +1186,132 @@ public final class MainActivity extends Activity {
 
     private JSONArray executeAiToolCalls(JSONArray toolCalls, AiAgentSession session) throws Exception {
         JSONArray observations = new JSONArray();
+        boolean batchHasWrites = false;
+        ArrayList<Integer> pendingRunTestObservationIndexes = new ArrayList<>();
         for (int index = 0; index < toolCalls.length(); index += 1) {
             JSONObject call = toolCalls.getJSONObject(index);
-            JSONObject observation = new JSONObject();
             String tool = call.optString("tool", "");
-            JSONObject args = call.optJSONObject("args");
-            if (args == null) {
-                args = new JSONObject();
+            if (isAiWriteTool(tool)) {
+                batchHasWrites = true;
+                break;
             }
-            observation.put("tool", tool);
-            observation.put("args", args);
-            session.actionCount += 1;
-            postAiProgress(session.currentStep, session.actionCount, tool.isEmpty() ? "tool" : tool);
-            JSONObject validationError = validateAiToolCall(tool, args);
-            if (validationError != null) {
-                session.lastToolSummary = tool.isEmpty() ? "invalid_tool_call" : "invalid_tool_call " + tool;
-                session.lastToolError = validationError.optString("error", "invalid tool call");
-                observation.put("error", session.lastToolError);
-                observation.put("validation", validationError);
-                observations.put(observation);
-                continue;
-            }
-            try {
-                JSONObject result = executeAiToolCall(tool, args, session);
-                observation.put("result", result);
-                recordAiToolResult(session, tool, result);
-            } catch (Exception error) {
-                session.lastToolError = error.getMessage();
-                observation.put("error", error.getMessage());
-            }
-            observations.put(observation);
         }
+
+        Map<String, String> batchOriginalSources = batchHasWrites ? snapshotProjectSources(session.project()) : null;
+        session.deferBatchCompile = batchHasWrites;
+        try {
+            for (int index = 0; index < toolCalls.length(); index += 1) {
+                JSONObject call = toolCalls.getJSONObject(index);
+                JSONObject observation = new JSONObject();
+                String tool = call.optString("tool", "");
+                JSONObject args = call.optJSONObject("args");
+                if (args == null) {
+                    args = new JSONObject();
+                }
+                observation.put("tool", tool);
+                observation.put("args", args);
+                session.actionCount += 1;
+                postAiProgress(session.currentStep, session.actionCount, tool.isEmpty() ? "tool" : tool);
+                JSONObject validationError = validateAiToolCall(tool, args);
+                if (validationError != null) {
+                    session.lastToolSummary = tool.isEmpty() ? "invalid_tool_call" : "invalid_tool_call " + tool;
+                    session.lastToolError = validationError.optString("error", "invalid tool call");
+                    observation.put("error", session.lastToolError);
+                    observation.put("validation", validationError);
+                    observations.put(observation);
+                    continue;
+                }
+                if (batchHasWrites && "run_tests".equals(tool)) {
+                    observation.put("result", new JSONObject().put("status", "pending_batch_compile"));
+                    observations.put(observation);
+                    pendingRunTestObservationIndexes.add(observations.length() - 1);
+                    continue;
+                }
+                try {
+                    JSONObject result = executeAiToolCall(tool, args, session);
+                    observation.put("result", result);
+                    if (!batchHasWrites || !isAiWriteTool(tool)) {
+                        recordAiToolResult(session, tool, result);
+                    }
+                } catch (Exception error) {
+                    session.lastToolError = error.getMessage();
+                    observation.put("error", error.getMessage());
+                }
+                observations.put(observation);
+            }
+        } finally {
+            session.deferBatchCompile = false;
+        }
+
+        if (!batchHasWrites) {
+            return observations;
+        }
+
+        String compileResult = nativeCompileProject(projectRootPath());
+        lastCompileResult = compileResult;
+        compileReady = isRunnableCompile(compileResult);
+        compileAttempted = true;
+        JSONObject diagnostics = compileResultToJson(compileResult);
+        if (!compileReady) {
+            restoreProjectSources(batchOriginalSources);
+            session.invalidateProject();
+            String restoredCompile = nativeCompileProject(projectRootPath());
+            lastCompileResult = restoredCompile;
+            compileReady = isRunnableCompile(restoredCompile);
+            compileAttempted = true;
+            JSONObject restoredDiagnostics = compileResultToJson(restoredCompile);
+            annotateAiBatchWriteResults(observations, "rolled_back", diagnostics, restoredDiagnostics, session);
+            annotatePendingRunTestsBlocked(observations, pendingRunTestObservationIndexes, diagnostics);
+            return observations;
+        }
+
+        annotateAiBatchWriteResults(observations, "compiled", diagnostics, null, session);
+        runPendingBatchTests(observations, pendingRunTestObservationIndexes, session);
         return observations;
     }
 
+    private void annotatePendingRunTestsBlocked(JSONArray observations, ArrayList<Integer> indexes, JSONObject diagnostics) throws Exception {
+        for (int index : indexes) {
+            observations.getJSONObject(index).put("result", new JSONObject()
+                    .put("status", "blocked_by_compile_failure")
+                    .put("diagnostics", diagnostics));
+        }
+    }
+
+    private void runPendingBatchTests(JSONArray observations, ArrayList<Integer> indexes, AiAgentSession session) throws Exception {
+        for (int index : indexes) {
+            observations.getJSONObject(index).put("result", aiToolRunTests(session));
+        }
+    }
+    private static boolean isAiWriteTool(String tool) {
+        return "write_symbol".equals(tool) || "write_imports".equals(tool) || "write_test_file".equals(tool);
+    }
+
+    private void annotateAiBatchWriteResults(JSONArray observations, String batchStatus, JSONObject diagnostics, JSONObject restoredDiagnostics, AiAgentSession session) throws Exception {
+        for (int index = 0; index < observations.length(); index += 1) {
+            JSONObject observation = observations.getJSONObject(index);
+            String tool = observation.optString("tool", "");
+            if (!isAiWriteTool(tool)) {
+                continue;
+            }
+            JSONObject result = observation.optJSONObject("result");
+            if (result == null) {
+                continue;
+            }
+            String status = result.optString("status", "");
+            if (!"written".equals(status) && !"created".equals(status)) {
+                continue;
+            }
+            result.put("diagnostics", diagnostics);
+            if ("rolled_back".equals(batchStatus)) {
+                result.put("status", "rolled_back");
+                if (restoredDiagnostics != null) {
+                    result.put("restored_diagnostics", restoredDiagnostics);
+                }
+            }
+            recordAiToolResult(session, tool, result);
+        }
+    }
     private static JSONObject validateAiToolCall(String tool, JSONObject args) throws Exception {
         if (tool == null || tool.trim().isEmpty()) {
             return aiToolValidationError(tool, args, "Tool call is missing required string field: tool", new JSONArray().put("tool").put("args"));
@@ -1309,8 +1401,8 @@ public final class MainActivity extends Activity {
         specs.put(aiToolSpec("read_symbol", "Read one function, struct, or global symbol. Globals include backing_struct_source.", new JSONArray().put("name"), new JSONArray().put("kind").put("file").put("owner"), new JSONObject().put("name", "GameState").put("kind", "global")));
         specs.put(aiToolSpec("read_file", "Read a project source file.", new JSONArray().put("file"), new JSONArray(), new JSONObject().put("file", "src/main.stasis")));
         specs.put(aiToolSpec("read_imports", "Read one file's import block as import paths.", new JSONArray().put("file"), new JSONArray(), new JSONObject().put("file", "src/main.stasis")));
-        specs.put(aiToolSpec("write_imports", "Replace one file's top import block, compile, and roll back on failure.", new JSONArray().put("file").put("imports"), new JSONArray().put("source").put("import_source"), new JSONObject().put("file", "src/main.stasis").put("imports", new JSONArray().put("game_state.stasis").put("systems/collision.stasis"))));
-        specs.put(aiToolSpec("write_symbol", "Create or replace a function/struct symbol, compile, and roll back on failure.", new JSONArray().put("file").put("name").put("new_source"), new JSONArray().put("kind").put("owner").put("source"), new JSONObject().put("file", "src/main.stasis").put("name", "tick").put("kind", "replace_function").put("owner", "Main").put("new_source", "function tick(): void {\n    // ...\n}")));
+        specs.put(aiToolSpec("write_imports", "Replace one file's top import block. Writes in one tool-call batch compile together and roll back together on failure.", new JSONArray().put("file").put("imports"), new JSONArray(), new JSONObject().put("file", "src/main.stasis").put("imports", new JSONArray().put("game_state.stasis").put("systems/collision.stasis"))));
+        specs.put(aiToolSpec("write_symbol", "Create or replace a function/struct symbol. Writes in one tool-call batch compile together and roll back together on failure.", new JSONArray().put("file").put("name").put("new_source"), new JSONArray().put("kind").put("owner"), new JSONObject().put("file", "src/main.stasis").put("name", "tick").put("kind", "replace_function").put("owner", "Main").put("new_source", "function tick(): void {\n    // ...\n}")));
         specs.put(aiToolSpec("get_diagnostics", "Return the last compile diagnostics.", new JSONArray(), new JSONArray(), new JSONObject()));
         specs.put(aiToolSpec("set_input_state", "Set simulated mobile input for tests.", new JSONArray(), new JSONArray().put("x").put("y").put("active").put("screen_w").put("screen_h"), new JSONObject().put("x", 180).put("y", 320).put("active", 1)));
         specs.put(aiToolSpec("run_frame", "Run one tick/render frame with current simulated input.", new JSONArray(), new JSONArray(), new JSONObject()));
@@ -1699,6 +1791,12 @@ public final class MainActivity extends Activity {
             writeTextFile(sourceFile.diskFile, updatedSource);
             session.invalidateProject();
 
+            if (session.deferBatchCompile) {
+                return importsToJson(sourceFile)
+                        .put("status", "written")
+                        .put("diagnostics", new JSONObject().put("status", "pending_batch_compile"));
+            }
+
             String compileResult = nativeCompileProject(projectRootPath());
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
@@ -1839,6 +1937,16 @@ public final class MainActivity extends Activity {
             validateAiReplacementSource(editKind, target.name, newSource);
             persistSelectedEdit(target, newSource);
             session.invalidateProject();
+
+            if (session.deferBatchCompile) {
+                return new JSONObject()
+                        .put("file", target.file)
+                        .put("kind", target.kind)
+                        .put("name", target.name)
+                        .put("owner", target.owner)
+                        .put("status", existed ? "written" : "created")
+                        .put("diagnostics", new JSONObject().put("status", "pending_batch_compile"));
+            }
 
             String compileResult = nativeCompileProject(projectRootPath());
             lastCompileResult = compileResult;
@@ -2208,7 +2316,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_file, read_imports, write_imports, write_symbol, list_tests, read_test_file, write_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect the current target with list_symbols, list_owner_symbols, and read_symbol/read_file unless the exact current source was already provided in selected_symbols or tool observations. For behavior that depends on time since an entity, encounter, projectile, effect, resource, objective, mode, or event was created/entered, prefer local lifecycle state that is reset on creation/entry and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol, compiles immediately, and returns status=rolled_back with diagnostics if the edit breaks compilation. read_imports returns the imports for one file; write_imports replaces that file import block using an imports JSON array, compiles immediately, and rolls back on failure. list_tests/read_test_file/write_test_file let you create tests under tests/; run_tests executes Android AI scenario tests and reports .test.stasis files awaiting native bridge execution. Apply code changes with write_symbol, write_imports, or write_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles after each write and runs tests after each tool-call batch; use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() for post-hot-swap migration, reinitialization, or compatibility work when a running game needs state adjusted after code changes. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_file, read_imports, write_imports, write_symbol, list_tests, read_test_file, write_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect the current target with list_symbols, list_owner_symbols, and read_symbol/read_file unless the exact current source was already provided in selected_symbols or tool observations. For behavior that depends on time since an entity, encounter, projectile, effect, resource, objective, mode, or event was created/entered, prefer local lifecycle state that is reset on creation/entry and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol. All write_symbol/write_imports calls in one tool-call batch compile together after the batch; if the batch breaks compilation, the app rolls back the whole batch and returns diagnostics. read_imports returns the imports for one file; write_imports replaces that file import block using an imports JSON array and participates in the same batch compile/rollback as write_symbol. list_tests/read_test_file/write_test_file let you create tests under tests/; run_tests executes Android AI scenario tests and reports .test.stasis files awaiting native bridge execution. Apply code changes with write_symbol, write_imports, or write_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes and runs tests after each tool-call batch; use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() for post-hot-swap migration, reinitialization, or compatibility work when a running game needs state adjusted after code changes. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -3236,6 +3344,7 @@ public final class MainActivity extends Activity {
         String lastToolError = "";
         TreeSet<String> lastPassingTestKeys = new TreeSet<>();
         JSONObject latestTestObservation = new JSONObject();
+        boolean deferBatchCompile;
         private ProjectSnapshot cachedProject;
 
         ProjectSnapshot project() {
