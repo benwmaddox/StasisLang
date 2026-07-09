@@ -96,6 +96,9 @@ public final class MainActivity extends Activity {
     private EditText aiPromptEditor;
     private EditText aiApiKeyEditor;
     private EditText aiModelEditor;
+    private TextView aiStepPill;
+    private TextView aiActionPill;
+    private TextView aiPhasePill;
     private TextView reloadStatus;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -391,6 +394,49 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private TextView createAiProgressPill(String text) {
+        TextView pill = new TextView(this);
+        pill.setText(text);
+        pill.setTextSize(11.0f);
+        pill.setTextColor(Color.rgb(35, 45, 60));
+        pill.setTypeface(Typeface.DEFAULT_BOLD);
+        pill.setGravity(Gravity.CENTER);
+        pill.setPadding(dp(10), dp(4), dp(10), dp(4));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Color.rgb(228, 234, 242));
+        background.setStroke(dp(1), Color.rgb(180, 192, 208));
+        background.setCornerRadius(dp(14));
+        pill.setBackground(background);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, dp(6), dp(6), dp(2));
+        pill.setLayoutParams(params);
+        return pill;
+    }
+
+    private void updateAiProgress(int step, int actions, String phase) {
+        if (aiStepPill != null) {
+            aiStepPill.setText("step " + step + "/" + MAX_AI_AGENT_TURNS);
+        }
+        if (aiActionPill != null) {
+            aiActionPill.setText("actions " + actions);
+        }
+        if (aiPhasePill != null) {
+            aiPhasePill.setText(phase);
+        }
+    }
+
+    private void postAiProgress(final int step, final int actions, final String phase) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            updateAiProgress(step, actions, phase);
+            return;
+        }
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                updateAiProgress(step, actions, phase);
+            }
+        });
+    }
     private void updateGameDebugText() {
         if (gameStatus == null) {
             return;
@@ -573,6 +619,17 @@ public final class MainActivity extends Activity {
             }
         });
         controls.addView(aiPatch, fullWidth());
+
+        LinearLayout progressRow = new LinearLayout(this);
+        progressRow.setOrientation(LinearLayout.HORIZONTAL);
+        progressRow.setGravity(Gravity.LEFT);
+        aiStepPill = createAiProgressPill("step 0/15");
+        aiActionPill = createAiProgressPill("actions 0");
+        aiPhasePill = createAiProgressPill("idle");
+        progressRow.addView(aiStepPill);
+        progressRow.addView(aiActionPill);
+        progressRow.addView(aiPhasePill);
+        controls.addView(progressRow, fullWidth());
         return controls;
     }
     private LinearLayout createEditControls() {
@@ -698,6 +755,7 @@ public final class MainActivity extends Activity {
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
         if (apiKey.isEmpty() || prompt.isEmpty()) {
             setStatusText("AI edit requires an API key and prompt");
+            updateAiProgress(0, 0, "needs input");
             return;
         }
         if (model.isEmpty()) {
@@ -710,6 +768,7 @@ public final class MainActivity extends Activity {
         final String requestModel = model;
         final String requestApiKey = apiKey;
         setStatusText("AI edit: sending workspace context");
+        updateAiProgress(0, 0, "queued");
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -725,6 +784,7 @@ public final class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
+                            updateAiProgress(0, 0, "failed");
                             setStatusText("AI edit failed: " + error.getMessage());
                         }
                     });
@@ -793,6 +853,8 @@ public final class MainActivity extends Activity {
         AiAgentSession session = new AiAgentSession();
         AiUsageAccumulator usage = new AiUsageAccumulator();
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
+            session.currentStep = turn + 1;
+            postAiProgress(session.currentStep, session.actionCount, "calling AI");
             AiApiResponse apiResponse = callOpenAiResponsesApi(apiKey, model, currentRequestJson);
             usage.add(model, apiResponse.usage);
             String aiJson = extractAiJsonResponse(apiResponse.body);
@@ -800,9 +862,11 @@ public final class MainActivity extends Activity {
             JSONArray toolCalls = response.optJSONArray("tool_calls");
             String mode = response.optString("mode", "edits");
             if (!"tool_calls".equals(mode) || toolCalls == null || toolCalls.length() == 0) {
-                return new AiAgentResult(aiJson, usage.toJson(model), usage.summary());
+                postAiProgress(session.currentStep, session.actionCount, "finalizing");
+                return new AiAgentResult(aiJson, usage.toJson(model), usage.summary(), session.currentStep, session.actionCount);
             }
 
+            postAiProgress(session.currentStep, session.actionCount, "tools " + toolCalls.length());
             JSONArray observations = executeAiToolCalls(toolCalls, session);
             JSONObject followup = new JSONObject();
             followup.put("original_request", new JSONObject(initialRequestJson));
@@ -810,6 +874,7 @@ public final class MainActivity extends Activity {
             followup.put("instruction", "Use the tool observations to either request more tools or return final edits. Inspect current symbols before writing unless the exact current source is already available. Apply code changes with write_symbol before final edits so compile failures return observations you can correct. Tool errors are not final; use the error observation to choose another tool call or corrected write. Return mode=edits only after the intended code has been written and compiled successfully. If no further action is needed, return mode=done with empty tool_calls and empty edits.");
             currentRequestJson = followup.toString();
         }
+        postAiProgress(MAX_AI_AGENT_TURNS, session.actionCount, "limit hit");
         throw new IOException("AI agent reached tool-call limit before returning edits");
     }
 
@@ -825,6 +890,8 @@ public final class MainActivity extends Activity {
             }
             observation.put("tool", tool);
             observation.put("args", args);
+            session.actionCount += 1;
+            postAiProgress(session.currentStep, session.actionCount, tool.isEmpty() ? "tool" : tool);
             try {
                 observation.put("result", executeAiToolCall(tool, args, session));
             } catch (Exception error) {
@@ -1455,6 +1522,7 @@ public final class MainActivity extends Activity {
                 lastCompileResult = compileResult;
                 compileReady = isRunnableCompile(compileResult);
                 compileAttempted = true;
+                updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "done");
                 setStatusText("AI edit complete: " + response.optString("summary", "no actions") + " - no actions - " + compileResult + " - " + aiResult.usageSummary);
                 return;
             }
@@ -1492,6 +1560,7 @@ public final class MainActivity extends Activity {
                 }
             }
             refreshChangeSummary(project);
+            updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "applied");
             setStatusText("AI edit applied: " + response.optString("summary", "updated workspace") + " - " + compileResult + " - " + aiResult.usageSummary);
         } catch (Exception error) {
             if (originalSources != null) {
@@ -1505,10 +1574,12 @@ public final class MainActivity extends Activity {
                     compileReady = isRunnableCompile(restoredCompile);
                     compileAttempted = true;
                 } catch (Exception restoreError) {
+                    updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "rollback failed");
                     setStatusText("AI edit apply failed and rollback failed: " + error.getMessage() + " / " + restoreError.getMessage());
                     return;
                 }
             }
+            updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "rolled back");
             setStatusText("AI edit apply failed and rolled back: " + error.getMessage());
         }
     }
@@ -1947,11 +2018,15 @@ public final class MainActivity extends Activity {
         final String aiJson;
         final JSONObject usageJson;
         final String usageSummary;
+        final int finalStep;
+        final int finalActionCount;
 
-        AiAgentResult(String aiJson, JSONObject usageJson, String usageSummary) {
+        AiAgentResult(String aiJson, JSONObject usageJson, String usageSummary, int finalStep, int finalActionCount) {
             this.aiJson = aiJson;
             this.usageJson = usageJson;
             this.usageSummary = usageSummary;
+            this.finalStep = finalStep;
+            this.finalActionCount = finalActionCount;
         }
     }
 
@@ -2012,6 +2087,8 @@ public final class MainActivity extends Activity {
         }
     }
     private final class AiAgentSession {
+        int currentStep;
+        int actionCount;
         private ProjectSnapshot cachedProject;
 
         ProjectSnapshot project() {
