@@ -23,8 +23,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROJECT = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
-DEFAULT_MODEL = "gpt-5.4-mini"
+DEFAULT_MODEL = "gpt-5.6-luna"
 MAX_TURNS = 15
+PROMPT_CACHE_KEY = "stasis-android-ai-agent-v2"
 
 
 @dataclass
@@ -192,11 +193,12 @@ def preferred_call(symbol: Symbol) -> str:
 
 
 DEFAULT_MODEL_PRICING_PER_MILLION = {
-    "gpt-5.4-mini": {
-        "input": 0.75,
-        "cached_input": 0.075,
-        "output": 4.50,
-        "source": "User-provided OpenAI standard short-context pricing on 2026-07-09: gpt-5.4-mini $0.75 input / $0.075 cached input / $4.50 output per 1M tokens.",
+    "gpt-5.6-luna": {
+        "input": 1.00,
+        "cached_input": 0.10,
+        "cache_write": 1.25,
+        "output": 6.00,
+        "source": "User-provided OpenAI standard short-context pricing on 2026-07-09: gpt-5.6-luna $1.00 input / $0.10 cached input / $1.25 cache writes / $6.00 output per 1M tokens.",
     }
 }
 
@@ -211,34 +213,39 @@ def response_usage_from_body(body: dict[str, Any]) -> dict[str, int]:
     if not isinstance(input_details, dict):
         input_details = {}
     cached_tokens = int(input_details.get("cached_tokens") or 0)
+    cache_write_tokens = int(input_details.get("cache_write_tokens") or 0)
     return {
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_tokens,
-        "uncached_input_tokens": max(input_tokens - cached_tokens, 0),
+        "cache_write_input_tokens": cache_write_tokens,
+        "uncached_input_tokens": max(input_tokens - cached_tokens - cache_write_tokens, 0),
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
     }
 
 
 def aggregate_trace_usage(trace_events: list[dict[str, Any]], model: str) -> dict[str, Any]:
-    totals = {"input_tokens": 0, "cached_input_tokens": 0, "uncached_input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    totals = {"input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "uncached_input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     calls = 0
     per_call = []
     for event in trace_events:
-        if event.get("kind") != "openai_response_raw":
+        if event.get("kind") == "openai_exchange":
+            usage = event.get("usage", {})
+            if not isinstance(usage, dict):
+                usage = {}
+        else:
             continue
-        body = event.get("body", {})
-        usage = response_usage_from_body(body if isinstance(body, dict) else {})
         calls += 1
         per_call.append({"turn": event.get("turn"), **usage})
         for key in totals:
-            totals[key] += usage[key]
+            totals[key] += int(usage.get(key) or 0)
     pricing = DEFAULT_MODEL_PRICING_PER_MILLION.get(model, {})
     cost = None
     if pricing:
         cost = (
             totals["uncached_input_tokens"] * float(pricing["input"])
             + totals["cached_input_tokens"] * float(pricing["cached_input"])
+            + totals["cache_write_input_tokens"] * float(pricing.get("cache_write", pricing["input"]))
             + totals["output_tokens"] * float(pricing["output"])
         ) / 1_000_000.0
     return {
@@ -551,7 +558,7 @@ def response_contract() -> dict[str, Any]:
         },
     }
 
-def build_request(project: Path, prompt: str) -> dict[str, Any]:
+def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
     symbols = parse_symbols(project)
     globals_payload = []
     for symbol in symbols:
@@ -559,22 +566,35 @@ def build_request(project: Path, prompt: str) -> dict[str, Any]:
             body = symbol.source[symbol.source.find("{"):]
             globals_payload.append({"kind": "global", "name": symbol.name, "file": symbol.file, "backing_struct_type": symbol.name, "backing_struct_source": f"struct {symbol.name} {body}"})
     return {
-        "scope": "entire_workspace",
-        "response_contract": response_contract(),
-        "available_tools": [s["tool"] for s in tool_specs()],
-        "tool_specs": tool_specs(),
-        "stasis_style_rules": {"use_function_keyword": True, "use_receiver_style_when_possible": True, "do_not_use_rust_references": True},
-        "behavior_test_expectations": behavior_test_expectations(),
-        "architecture_recommendations": [
-            "write_symbol writes are compiled once after the whole tool-call batch, so a batch may create helpers and edit callers together.",
-            "Use lifecycle-local state for time since creation; reset it in reset/create functions and increment it during tick.",
-            "Use on_code_swap() for post-hot-swap migration or reinitialization if running state needs adjustment.",
-            "Make the smallest structural change with clear state fields and testable invariants.",
-        ],
-        "project_globals": globals_payload,
-        "user_prompt": prompt,
-        "selected_symbols": [],
-        "selected_symbols_are_context_only": True,
+        "cache_layout": "Stable shared context is first. Volatile per-turn tool observations live in turn_state after this object.",
+        "protocol": {
+            "response_contract": response_contract(),
+            "available_tools": [s["tool"] for s in tool_specs()],
+            "tool_specs": tool_specs(),
+            "stasis_style_rules": {"use_function_keyword": True, "use_receiver_style_when_possible": True, "do_not_use_rust_references": True},
+        },
+        "workflow_rules": {
+            "behavior_test_expectations": behavior_test_expectations(),
+            "architecture_recommendations": [
+                "write_symbol writes are compiled once after the whole tool-call batch, so a batch may create helpers and edit callers together.",
+                "Use lifecycle-local state for time since creation; reset it in reset/create functions and increment it during tick.",
+                "Use on_code_swap() for post-hot-swap migration or reinitialization if running state needs adjustment.",
+                "Make the smallest structural change with clear state fields and testable invariants.",
+            ],
+        },
+        "user_request": {"scope": "entire_workspace", "user_prompt": prompt},
+        "project_context": {
+            "project_globals": globals_payload,
+            "selected_symbols": [],
+            "selected_symbols_are_context_only": True,
+        },
+    }
+
+
+def build_agent_request(project: Path, prompt: str, turn_state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "shared_context": build_shared_context(project, prompt),
+        "turn_state": turn_state,
     }
 
 
@@ -650,20 +670,63 @@ def response_json_schema() -> dict[str, Any]:
         "additionalProperties": False,
     }
 
+def summarize_request_for_trace(request: dict[str, Any]) -> dict[str, Any]:
+    shared_context = request.get("shared_context", {})
+    protocol = shared_context.get("protocol", {}) if isinstance(shared_context, dict) else {}
+    project_context = shared_context.get("project_context", {}) if isinstance(shared_context, dict) else {}
+    turn_state = request.get("turn_state", {})
+    globals_payload = project_context.get("project_globals", []) if isinstance(project_context, dict) else []
+    selected_symbols = project_context.get("selected_symbols", []) if isinstance(project_context, dict) else []
+    return {
+        "shared_context_keys": sorted(shared_context.keys()) if isinstance(shared_context, dict) else [],
+        "available_tools": protocol.get("available_tools", []) if isinstance(protocol, dict) else [],
+        "project_global_count": len(globals_payload) if isinstance(globals_payload, list) else 0,
+        "selected_symbol_count": len(selected_symbols) if isinstance(selected_symbols, list) else 0,
+        "turn_phase": turn_state.get("phase") if isinstance(turn_state, dict) else None,
+        "turn_state_keys": sorted(turn_state.keys()) if isinstance(turn_state, dict) else [],
+        "cache_breakpoint_after": "shared_context",
+    }
+
+
+def summarize_response_for_trace(body: dict[str, Any], parsed: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "response_id": body.get("id"),
+        "response_model": body.get("model"),
+        "status": body.get("status"),
+        "usage": response_usage_from_body(body),
+        "mode": parsed.get("mode"),
+        "summary": parsed.get("summary", ""),
+        "tool_call_count": len(parsed.get("tool_calls") or []),
+        "edit_count": len(parsed.get("edits") or []),
+        "response_keys": sorted(parsed.keys()),
+    }
+
+
 def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events: list[dict[str, Any]] | None = None, turn: int = 0) -> dict[str, Any]:
-    prompt = (
-        "Return only one JSON object matching request.response_contract exactly. "
+    stable_instruction = (
+        "Return only one JSON object matching request.shared_context.protocol.response_contract exactly. "
         "Use mode=tool_calls to inspect/write with the provided fine-grained symbol, import, and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/read_imports/list_tests/read_test_file instead. "
         "For tool calls, the top-level key is tool_calls and each call is exactly {\"tool\":\"name\",\"args\":{...}}. "
         "Do not use aliases such as calls, name, function, arguments, type, or source. "
         "After a tool-call batch with writes, compile runs locally once and failed compiles roll back the whole batch. Use run_tests to verify the behavior. "
         "For behavior-changing requests, add or update a tests/*.ai_test.json test before returning done. Return mode=tool_calls for tools, mode=edits with edits if returning direct edits, or mode=done only when tests pass. "
-        "Use Stasis syntax only. Request: " + json.dumps(request, separators=(",", ":"))
+        "Use Stasis syntax only."
     )
+    shared_context = request.get("shared_context", {})
+    turn_state = request.get("turn_state", {})
     schema = response_json_schema()
-    payload = {"model": model, "text": {"format": {"type": "json_schema", "name": "stasis_host_ai_response", "strict": False, "schema": schema}}, "input": prompt}
-    if trace_events is not None:
-        trace_events.append({"kind": "openai_request", "turn": turn, "payload": payload})
+    payload = {
+        "model": model,
+        "prompt_cache_key": PROMPT_CACHE_KEY,
+        "prompt_cache_retention": "24h",
+        "text": {"format": {"type": "json_schema", "name": "stasis_host_ai_response", "strict": False, "schema": schema}},
+        "input": [
+            {"role": "system", "content": stable_instruction},
+            {"role": "user", "content": "Stable request.shared_context: " + json.dumps(shared_context, separators=(",", ":"))},
+            {"type": "prompt_cache_breakpoint", "name": "stasis_host_stable_instructions"},
+            {"role": "user", "content": "Volatile request.turn_state: " + json.dumps(turn_state, separators=(",", ":"))},
+        ],
+    }
     req = urllib.request.Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(payload).encode("utf-8"),
@@ -673,8 +736,6 @@ def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events:
     try:
         with urllib.request.urlopen(req, timeout=120) as response:
             body = json.loads(response.read().decode("utf-8"))
-            if trace_events is not None:
-                trace_events.append({"kind": "openai_response_raw", "turn": turn, "body": body})
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"OpenAI request failed with HTTP {error.code}: {detail}") from error
@@ -688,7 +749,7 @@ def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events:
         text = "".join(chunks)
     parsed = parse_json_object(text)
     if trace_events is not None:
-        trace_events.append({"kind": "openai_response_parsed", "turn": turn, "response": parsed})
+        trace_events.append({"kind": "openai_exchange", "turn": turn, "request": summarize_request_for_trace(request), "response": summarize_response_for_trace(body, parsed), "usage": response_usage_from_body(body)})
     return parsed
 
 
@@ -879,12 +940,12 @@ def main() -> int:
     project = args.project_root.resolve()
     if args.reset_paddle_speed_feature:
         reset_paddle_speed_feature(project)
-    request = build_request(project, args.prompt)
+    request = build_agent_request(project, args.prompt, {"phase": "initial", "instruction": "Inspect the workspace with fine-grained tools, make the requested behavior change, add or update tests, run tests, then return done only after tests pass."})
     trace_events: list[dict[str, Any]] = []
     trace_meta = {"prompt": args.prompt, "model": args.model, "project_root": str(project), "reset_paddle_speed_feature": bool(args.reset_paddle_speed_feature)}
     if args.trace_file:
         trace_events.append({"kind": "trace_meta", "meta": trace_meta})
-        trace_events.append({"kind": "initial_request", "request": request})
+        trace_events.append({"kind": "initial_request", "summary": summarize_request_for_trace(request)})
     last_diagnostics: dict[str, Any] = {}
     total_actions = 0
     started_at_iso = datetime.now(timezone.utc).isoformat()
@@ -902,9 +963,9 @@ def main() -> int:
                 if args.trace_file:
                     write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = {"original_request": build_request(project, args.prompt), "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching original_request.response_contract. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."}
+            request = build_agent_request(project, args.prompt, {"phase": "response_validation_error", "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching shared_context.protocol.response_contract. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."})
             if args.trace_file:
-                trace_events.append({"kind": "next_request", "turn": turn, "request": request})
+                trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
             continue
         if mode == "edits" or (mode != "tool_calls" and response.get("edits")):
             observations = []
@@ -923,12 +984,7 @@ def main() -> int:
                 if args.trace_file:
                     write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = {
-                "original_request": build_request(project, args.prompt),
-                "tool_observations": observations,
-                "test_observation": final,
-                "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Inspect behavior_test_expectations and current source, then fix it using tool calls. Use precise write_symbol calls; write_file is reserved for host recovery and is not part of the normal tool list.",
-            }
+            request = build_agent_request(project, args.prompt, {"phase": "direct_edit_test_failure", "tool_observations": observations, "test_observation": final, "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Inspect shared_context.workflow_rules.behavior_test_expectations and current source, then fix it using tool calls. Use precise write_symbol calls; write_file is reserved for host recovery and is not part of the normal tool list."})
             continue
         if mode != "tool_calls" or not tool_calls:
             final = run_behavior_tests(project)
@@ -943,21 +999,16 @@ def main() -> int:
                 if args.trace_file:
                     write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = {
-                "original_request": build_request(project, args.prompt),
-                "tool_observations": [],
-                "test_observation": final,
-                "instruction": "The model returned done or an unsupported shape, but the required local behavior test failed. Inspect behavior_test_expectations and current source, then fix it using tool calls. Fix duplicate or misplaced symbols with precise write_symbol calls; write_file is not part of the normal tool list.",
-            }
+            request = build_agent_request(project, args.prompt, {"phase": "done_or_empty_test_failure", "tool_observations": [], "test_observation": final, "instruction": "The model returned done or an unsupported shape, but the required local behavior test failed. Inspect shared_context.workflow_rules.behavior_test_expectations and current source, then fix it using tool calls. Fix duplicate or misplaced symbols with precise write_symbol calls; write_file is not part of the normal tool list."})
             continue
         observations, last_diagnostics = execute_tool_batch(project, tool_calls, last_diagnostics)
         total_actions += len(tool_calls)
         print(json.dumps({"tool_observations": summarize_observations(observations)}, indent=2))
         if args.trace_file:
             trace_events.append({"kind": "tool_observations", "turn": turn, "observations": observations, "summary": summarize_observations(observations)})
-        request = {"original_request": build_request(project, args.prompt), "tool_observations": observations, "instruction": "Use observations to continue or return mode=done. If tests fail, inspect behavior_test_expectations and fix the exact required state/checks. Do not repeat identical tool calls."}
+        request = build_agent_request(project, args.prompt, {"phase": "tool_observations", "tool_observations": observations, "instruction": "Use observations to continue or return mode=done. If tests fail, inspect shared_context.workflow_rules.behavior_test_expectations and fix the exact required state/checks. Do not repeat identical tool calls."})
         if args.trace_file:
-            trace_events.append({"kind": "next_request", "turn": turn, "request": request})
+            trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
     print(json.dumps({"error": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
     if args.trace_file:
         trace_events.append({"kind": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics})

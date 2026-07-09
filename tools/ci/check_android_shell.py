@@ -143,19 +143,21 @@ def main() -> int:
     assert "llm_request" in activity
     assert "tool_observations" in activity
     assert "response_contract" in activity
-    assert "Return exactly one JSON object matching original_request.response_contract" in activity
+    assert "Return exactly one JSON object matching the stable request response_contract" in activity
     assert "Use tool_calls instead." in activity
     assert "requires imports array, or source/import_source as a compatibility alias" not in activity
     assert "call.optString(\"new_source\", call.optString(\"source\", \"\"))" not in activity
     assert "AI read_symbol target ambiguous: " in activity
     assert "AI read_symbol target not found: " in activity
     assert "AI read_symbol target ambiguous or not found" not in activity
-    assert "private static final double GPT_5_4_MINI_INPUT_USD_PER_MILLION = 0.75" in activity
+    assert "private static final double GPT_5_6_LUNA_INPUT_USD_PER_MILLION = 1.00" in activity
+    assert "private static final double GPT_5_6_LUNA_CACHE_WRITE_USD_PER_MILLION = 1.25" in activity
     assert "private static AiApiResponse callOpenAiResponsesApi" in activity
     assert "extractAiUsage(response)" in activity
     assert "saveLastAiUsage(aiResult.usageJson)" in activity
     assert "usageTokenCount(usage, \"input_tokens\", \"prompt_tokens\")" in activity
     assert "cachedInputTokenCount" in activity
+    assert "cacheWriteInputTokenCount" in activity
     assert "estimated_cost_usd" in activity
     assert "estimated cost=" in activity
     assert "aiResult.usageSummary" in activity
@@ -266,7 +268,9 @@ def main() -> int:
     assert "AI_PREF_API_KEY" in activity
     assert "aiPrefs.getString(AI_PREF_API_KEY" in activity
     assert "aiPrefs.getString(AI_PREF_MODEL" in activity
-    assert "gpt-5.4-mini" in activity
+    assert "gpt-5.6-luna" in activity
+    assert "prompt_cache_key" in activity
+    assert "prompt_cache_breakpoint" in activity
     assert "saveAiSettings(apiKey, model)" in activity
     assert "private LinearLayout symbolList" in activity
     assert "rebuildSymbolList(refreshedProject)" in activity

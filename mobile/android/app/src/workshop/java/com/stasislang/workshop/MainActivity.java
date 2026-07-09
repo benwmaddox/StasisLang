@@ -60,15 +60,18 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_MODEL = "openai_model";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
+    private static final String DEFAULT_AI_MODEL = "gpt-5.6-luna";
+    private static final String AI_PROMPT_CACHE_KEY = "stasis-android-workshop-v2";
     private static final long AI_TRACE_RETENTION_MS = 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int MAX_AI_AGENT_TURNS = 15;
-    private static final double GPT_5_4_MINI_INPUT_USD_PER_MILLION = 0.75;
-    private static final double GPT_5_4_MINI_CACHED_INPUT_USD_PER_MILLION = 0.075;
-    private static final double GPT_5_4_MINI_OUTPUT_USD_PER_MILLION = 4.50;
+    private static final double GPT_5_6_LUNA_INPUT_USD_PER_MILLION = 1.00;
+    private static final double GPT_5_6_LUNA_CACHED_INPUT_USD_PER_MILLION = 0.10;
+    private static final double GPT_5_6_LUNA_CACHE_WRITE_USD_PER_MILLION = 1.25;
+    private static final double GPT_5_6_LUNA_OUTPUT_USD_PER_MILLION = 6.00;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
     private static final int RENDER_FRAME_I32_CAPACITY =
@@ -679,7 +682,7 @@ public final class MainActivity extends Activity {
 
         aiModelEditor = new EditText(this);
         aiModelEditor.setSingleLine(true);
-        aiModelEditor.setText(aiPrefs.getString(AI_PREF_MODEL, "gpt-5.4-mini"));
+        aiModelEditor.setText(aiPrefs.getString(AI_PREF_MODEL, DEFAULT_AI_MODEL));
         aiModelEditor.setTextSize(12.0f);
         controls.addView(aiModelEditor, fullWidth());
 
@@ -834,7 +837,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (model.isEmpty()) {
-            model = "gpt-5.4-mini";
+            model = DEFAULT_AI_MODEL;
         }
         saveAiSettings(apiKey, model);
         final SymbolEntry symbol = selectedSymbol;
@@ -949,6 +952,7 @@ public final class MainActivity extends Activity {
                     .put("Avoid per-tick allocation/object churn and keep new systems within the visible 60 fps budget.");
 
             JSONObject request = new JSONObject();
+            request.put("cache_layout", "Stable request context is first. Volatile tool observations are sent after the prompt cache breakpoint.");
             request.put("scope", "entire_workspace");
             request.put("response_contract", aiResponseContract());
             request.put("available_tools", supportedAiTools());
@@ -1097,13 +1101,18 @@ public final class MainActivity extends Activity {
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             session.currentStep = turn + 1;
             postAiProgress(session.currentStep, session.actionCount, "calling AI");
-            appendAiTrace("llm_request", new JSONObject().put("turn", session.currentStep).put("model", model).put("request", new JSONObject(currentRequestJson)));
+            appendAiTrace("llm_request", new JSONObject()
+                    .put("turn", session.currentStep)
+                    .put("model", model)
+                    .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
             AiApiResponse apiResponse = callOpenAiResponsesApi(apiKey, model, currentRequestJson);
             usage.add(model, apiResponse.usage);
-            appendAiTrace("llm_response", new JSONObject().put("turn", session.currentStep).put("body", apiResponse.body));
             String aiJson = extractAiJsonResponse(apiResponse.body);
-            appendAiTrace("llm_json", new JSONObject().put("turn", session.currentStep).put("response", new JSONObject(aiJson)));
             JSONObject response = new JSONObject(aiJson);
+            appendAiTrace("llm_response", new JSONObject()
+                    .put("turn", session.currentStep)
+                    .put("summary", summarizeAiResponseForTrace(apiResponse.body, response)));
+            appendAiTrace("llm_json", new JSONObject().put("turn", session.currentStep).put("response", response));
             JSONArray responseValidationErrors = validateAiResponseShape(response);
             if (responseValidationErrors.length() > 0) {
                 postAiProgress(session.currentStep, session.actionCount, "invalid response");
@@ -1115,7 +1124,7 @@ public final class MainActivity extends Activity {
                 followup.put("original_request", new JSONObject(initialRequestJson));
                 followup.put("tool_observations", responseValidationErrors);
                 followup.put("response_contract", aiResponseContract());
-                followup.put("instruction", "Your previous JSON response shape was invalid. Return exactly one JSON object matching original_request.response_contract. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source.");
+                followup.put("instruction", "Your previous JSON response shape was invalid. Return exactly one JSON object matching the stable request response_contract. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source.");
                 currentRequestJson = followup.toString();
                 continue;
             }
@@ -2416,11 +2425,38 @@ public final class MainActivity extends Activity {
         }
         return "function";
     }
+
+    private static JSONArray buildAiOpenAiInput(String requestJson) throws Exception {
+        JSONObject request = new JSONObject(requestJson);
+        JSONObject stableRequest = request.optJSONObject("original_request");
+        JSONObject volatileRequest = new JSONObject();
+        if (stableRequest == null) {
+            stableRequest = request;
+            volatileRequest.put("phase", "initial");
+        } else {
+            Iterator<String> keys = request.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if (!"original_request".equals(key)) {
+                    volatileRequest.put(key, request.get(key));
+                }
+            }
+        }
+        String stableInstruction = "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect the current target with list_symbols, list_owner_symbols, read_symbol, read_imports, list_tests, and read_test_file unless the exact current source was already provided in selected_symbols or tool observations. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior that depends on time since an entity, encounter, projectile, effect, resource, objective, mode, or event was created/entered, prefer local lifecycle state that is reset on creation/entry and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol. All write_symbol/delete_symbol/write_imports calls in one tool-call batch compile together after the batch; if the batch breaks compilation, the app rolls back the whole batch and returns diagnostics. read_imports returns the imports for one file; write_imports replaces that file import block using an imports JSON array and participates in the same batch compile/rollback as write_symbol. list_tests/read_test_file/write_test_file let you create tests under tests/; for behavior-changing requests, add or update a tests/*.ai_test.json scenario before returning done. run_tests executes Android AI scenario tests and reports .test.stasis files awaiting native bridge execution. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes and runs tests after each tool-call batch; use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() for post-hot-swap migration, reinitialization, or compatibility work when a running game needs state adjusted after code changes. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
+        return new JSONArray()
+                .put(new JSONObject().put("role", "system").put("content", stableInstruction))
+                .put(new JSONObject().put("role", "user").put("content", "Stable request context: " + stableRequest.toString()))
+                .put(new JSONObject().put("type", "prompt_cache_breakpoint").put("name", "stasis_android_workspace_context"))
+                .put(new JSONObject().put("role", "user").put("content", "Volatile turn context: " + volatileRequest.toString()));
+    }
+
     private static AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
+        payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
+        payload.put("prompt_cache_retention", "24h");
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect the current target with list_symbols, list_owner_symbols, read_symbol, read_imports, list_tests, and read_test_file unless the exact current source was already provided in selected_symbols or tool observations. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior that depends on time since an entity, encounter, projectile, effect, resource, objective, mode, or event was created/entered, prefer local lifecycle state that is reset on creation/entry and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol. All write_symbol/delete_symbol/write_imports calls in one tool-call batch compile together after the batch; if the batch breaks compilation, the app rolls back the whole batch and returns diagnostics. read_imports returns the imports for one file; write_imports replaces that file import block using an imports JSON array and participates in the same batch compile/rollback as write_symbol. list_tests/read_test_file/write_test_file let you create tests under tests/; for behavior-changing requests, add or update a tests/*.ai_test.json scenario before returning done. run_tests executes Android AI scenario tests and reports .test.stasis files awaiting native bridge execution. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes and runs tests after each tool-call batch; use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() for post-hot-swap migration, reinitialization, or compatibility work when a running game needs state adjusted after code changes. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown. Request: " + requestJson);
+        payload.put("input", buildAiOpenAiInput(requestJson));
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -2571,6 +2607,79 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private static JSONObject summarizeAiRequestForTrace(String requestJson) throws Exception {
+        JSONObject request = new JSONObject(requestJson);
+        JSONObject stable = request.optJSONObject("original_request");
+        JSONObject volatileContext = new JSONObject();
+        boolean followup = stable != null;
+        if (stable == null) {
+            stable = request;
+            volatileContext.put("phase", "initial");
+        } else {
+            Iterator<String> keys = request.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if (!"original_request".equals(key)) {
+                    volatileContext.put(key, request.get(key));
+                }
+            }
+        }
+        JSONArray globals = stable.optJSONArray("project_globals");
+        JSONArray selected = stable.optJSONArray("selected_symbols");
+        JSONArray tools = stable.optJSONArray("available_tools");
+        return new JSONObject()
+                .put("followup", followup)
+                .put("cache_key", AI_PROMPT_CACHE_KEY)
+                .put("cache_breakpoint_after", "stable_request_context")
+                .put("stable_keys", sortedJsonKeys(stable))
+                .put("volatile_keys", sortedJsonKeys(volatileContext))
+                .put("project_global_count", globals == null ? 0 : globals.length())
+                .put("selected_symbol_count", selected == null ? 0 : selected.length())
+                .put("available_tool_count", tools == null ? 0 : tools.length());
+    }
+
+    private static JSONObject summarizeAiResponseForTrace(String responseBody, JSONObject parsedResponse) throws Exception {
+        JSONObject response = new JSONObject(responseBody);
+        return new JSONObject()
+                .put("response_id", response.optString("id", ""))
+                .put("response_model", response.optString("model", ""))
+                .put("status", response.optString("status", ""))
+                .put("usage", aiUsageSummary(extractAiUsage(responseBody)))
+                .put("mode", parsedResponse.optString("mode", ""))
+                .put("summary", parsedResponse.optString("summary", ""))
+                .put("tool_call_count", parsedResponse.optJSONArray("tool_calls") == null ? 0 : parsedResponse.optJSONArray("tool_calls").length())
+                .put("edit_count", parsedResponse.optJSONArray("edits") == null ? 0 : parsedResponse.optJSONArray("edits").length())
+                .put("response_keys", sortedJsonKeys(parsedResponse));
+    }
+
+    private static JSONArray sortedJsonKeys(JSONObject object) {
+        TreeSet<String> keys = new TreeSet<>();
+        if (object != null) {
+            Iterator<String> iterator = object.keys();
+            while (iterator.hasNext()) {
+                keys.add(iterator.next());
+            }
+        }
+        JSONArray result = new JSONArray();
+        for (String key : keys) {
+            result.put(key);
+        }
+        return result;
+    }
+
+    private static JSONObject aiUsageSummary(JSONObject usage) throws Exception {
+        long inputTokens = usageTokenCount(usage, "input_tokens", "prompt_tokens");
+        long cachedInputTokens = cachedInputTokenCount(usage);
+        long cacheWriteTokens = cacheWriteInputTokenCount(usage);
+        long outputTokens = usageTokenCount(usage, "output_tokens", "completion_tokens");
+        return new JSONObject()
+                .put("input_tokens", inputTokens)
+                .put("cached_input_tokens", cachedInputTokens)
+                .put("cache_write_input_tokens", cacheWriteTokens)
+                .put("uncached_input_tokens", Math.max(0L, inputTokens - cachedInputTokens - cacheWriteTokens))
+                .put("output_tokens", outputTokens);
+    }
+
     private void saveLastAiUsage(JSONObject usageJson) {
         getSharedPreferences(AI_PREFS, MODE_PRIVATE)
                 .edit()
@@ -2599,19 +2708,30 @@ public final class MainActivity extends Activity {
         return details == null ? 0L : details.optLong("cached_tokens", 0L);
     }
 
-    private static boolean hasKnownAiPricing(String model) {
-        return "gpt-5.4-mini".equals(model);
+    private static long cacheWriteInputTokenCount(JSONObject usage) {
+        if (usage == null) {
+            return 0L;
+        }
+        JSONObject details = usage.optJSONObject("input_tokens_details");
+        if (details == null) {
+            details = usage.optJSONObject("prompt_tokens_details");
+        }
+        return details == null ? 0L : details.optLong("cache_write_tokens", 0L);
     }
 
-    private static double estimateAiCostUsd(String model, long inputTokens, long cachedInputTokens, long outputTokens) {
+    private static boolean hasKnownAiPricing(String model) {
+        return DEFAULT_AI_MODEL.equals(model);
+    }
+
+    private static double estimateAiCostUsd(String model, long inputTokens, long cachedInputTokens, long cacheWriteInputTokens, long outputTokens) {
         if (!hasKnownAiPricing(model)) {
             return 0.0;
         }
-        long uncachedInputTokens = Math.max(0L, inputTokens - cachedInputTokens);
-        double inputCost = uncachedInputTokens * GPT_5_4_MINI_INPUT_USD_PER_MILLION;
-        double cachedInputCost = cachedInputTokens * GPT_5_4_MINI_CACHED_INPUT_USD_PER_MILLION;
-        double outputCost = outputTokens * GPT_5_4_MINI_OUTPUT_USD_PER_MILLION;
-        return (inputCost + cachedInputCost + outputCost) / 1000000.0;
+        double inputCost = Math.max(0L, inputTokens - cachedInputTokens - cacheWriteInputTokens) * GPT_5_6_LUNA_INPUT_USD_PER_MILLION;
+        double cachedInputCost = cachedInputTokens * GPT_5_6_LUNA_CACHED_INPUT_USD_PER_MILLION;
+        double cacheWriteCost = cacheWriteInputTokens * GPT_5_6_LUNA_CACHE_WRITE_USD_PER_MILLION;
+        double outputCost = outputTokens * GPT_5_6_LUNA_OUTPUT_USD_PER_MILLION;
+        return (inputCost + cachedInputCost + cacheWriteCost + outputCost) / 1000000.0;
     }
 
     private static String formatAiCostUsd(double costUsd) {
@@ -3388,6 +3508,7 @@ public final class MainActivity extends Activity {
         private final JSONArray calls = new JSONArray();
         private long inputTokens;
         private long cachedInputTokens;
+        private long cacheWriteInputTokens;
         private long outputTokens;
         private double estimatedCostUsd;
         private boolean costAvailable = true;
@@ -3395,15 +3516,17 @@ public final class MainActivity extends Activity {
         void add(String model, JSONObject usage) throws Exception {
             long callInputTokens = usageTokenCount(usage, "input_tokens", "prompt_tokens");
             long callCachedInputTokens = cachedInputTokenCount(usage);
+            long callCacheWriteInputTokens = cacheWriteInputTokenCount(usage);
             long callOutputTokens = usageTokenCount(usage, "output_tokens", "completion_tokens");
             boolean callCostAvailable = hasKnownAiPricing(model);
-            double callEstimatedCostUsd = estimateAiCostUsd(model, callInputTokens, callCachedInputTokens, callOutputTokens);
+            double callEstimatedCostUsd = estimateAiCostUsd(model, callInputTokens, callCachedInputTokens, callCacheWriteInputTokens, callOutputTokens);
 
             JSONObject call = new JSONObject();
             call.put("turn", calls.length() + 1);
             call.put("model", model);
             call.put("input_tokens", callInputTokens);
             call.put("cached_input_tokens", callCachedInputTokens);
+            call.put("cache_write_input_tokens", callCacheWriteInputTokens);
             call.put("output_tokens", callOutputTokens);
             call.put("estimated_cost_usd", callEstimatedCostUsd);
             call.put("cost_available", callCostAvailable);
@@ -3411,6 +3534,7 @@ public final class MainActivity extends Activity {
 
             inputTokens += callInputTokens;
             cachedInputTokens += callCachedInputTokens;
+            cacheWriteInputTokens += callCacheWriteInputTokens;
             outputTokens += callOutputTokens;
             estimatedCostUsd += callEstimatedCostUsd;
             costAvailable = costAvailable && callCostAvailable;
@@ -3423,6 +3547,7 @@ public final class MainActivity extends Activity {
             json.put("turns", calls.length());
             json.put("input_tokens", inputTokens);
             json.put("cached_input_tokens", cachedInputTokens);
+            json.put("cache_write_input_tokens", cacheWriteInputTokens);
             json.put("output_tokens", outputTokens);
             json.put("estimated_cost_usd", estimatedCostUsd);
             json.put("cost_available", costAvailable);
