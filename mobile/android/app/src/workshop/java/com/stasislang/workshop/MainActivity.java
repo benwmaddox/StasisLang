@@ -74,6 +74,7 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_MODEL = "openai_model";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
     private static final String AI_PREF_COMMAND_HISTORY_PREFIX = "command_history_";
+    private static final String AI_PREF_OUTCOME_HISTORY_PREFIX = "outcome_history_";
     private static final String AI_PREF_MAX_RUN_USD = "max_run_usd";
     private static final String AI_PREF_MONTHLY_LIMIT_USD = "monthly_limit_usd";
     private static final String AI_PREF_MONTH_KEY = "monthly_spend_month";
@@ -160,6 +161,7 @@ public final class MainActivity extends Activity {
     private volatile boolean aiRunActive;
     private volatile boolean aiCancelRequested;
     private volatile HttpURLConnection activeAiConnection;
+    private String activeAiPrompt = "";
     private TextView reloadStatus;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -967,11 +969,17 @@ public final class MainActivity extends Activity {
         commandHistoryText.setPadding(dp(8), dp(6), dp(8), dp(6));
         commandHistoryBody.addView(commandHistoryText, fullWidth());
         Button clearHistory = new Button(this);
-        clearHistory.setText("Clear Command History");
+        clearHistory.setText("Clear Commands + Outcomes");
         clearHistory.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { clearCommandHistory(); }
         });
         commandHistoryBody.addView(clearHistory, fullWidth());
+        Button retryLastAi = new Button(this);
+        retryLastAi.setText("Retry Last AI");
+        retryLastAi.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { retryLastAiRequest(); }
+        });
+        commandHistoryBody.addView(retryLastAi, fullWidth());
         controls.addView(commandHistoryBody, fullWidth());
         refreshCommandHistory();
 
@@ -1105,6 +1113,11 @@ public final class MainActivity extends Activity {
         return AI_PREF_COMMAND_HISTORY_PREFIX + Integer.toHexString(root.hashCode());
     }
 
+    private String outcomeHistoryPreferenceKey() {
+        String root = projectRootPath == null ? PROJECT_DIR : projectRootPath;
+        return AI_PREF_OUTCOME_HISTORY_PREFIX + Integer.toHexString(root.hashCode());
+    }
+
     private void toggleCommandHistory() {
         if (commandHistoryBody != null) {
             commandHistoryBody.setVisibility(commandHistoryBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
@@ -1142,22 +1155,87 @@ public final class MainActivity extends Activity {
         } catch (Exception ignored) {
             history = new JSONArray();
         }
-        if (history.length() == 0) {
-            commandHistoryText.setText("No commands submitted for this project");
-            return;
-        }
         StringBuilder text = new StringBuilder();
+        if (history.length() == 0) text.append("No commands submitted for this project");
         for (int index = 0; index < history.length(); index += 1) {
-            if (index > 0) text.append('\n');
+            if (text.length() > 0) text.append('\n');
             text.append(index + 1).append(". ").append(history.optString(index, ""));
+        }
+        JSONArray outcomes = aiOutcomeHistory();
+        text.append("\n\nAI outcomes:");
+        if (outcomes.length() == 0) text.append(" none");
+        for (int index = 0; index < outcomes.length(); index += 1) {
+            JSONObject outcome = outcomes.optJSONObject(index);
+            if (outcome == null) continue;
+            text.append('\n').append(index + 1).append(". ")
+                    .append(outcome.optString("status", "unknown"))
+                    .append(" - ").append(outcome.optString("summary", ""));
+            String usage = outcome.optString("usage", "");
+            if (!usage.isEmpty()) text.append(" - ").append(usage);
         }
         commandHistoryText.setText(text.toString());
     }
 
     private void clearCommandHistory() {
-        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit().remove(commandHistoryPreferenceKey()).apply();
+        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                .remove(commandHistoryPreferenceKey())
+                .remove(outcomeHistoryPreferenceKey())
+                .apply();
         refreshCommandHistory();
-        setStatusText("Command history cleared for this project");
+        setStatusText("Command and AI outcome history cleared for this project");
+    }
+
+    private JSONArray aiOutcomeHistory() {
+        try {
+            return new JSONArray(getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                    .getString(outcomeHistoryPreferenceKey(), "[]"));
+        } catch (Exception ignored) {
+            return new JSONArray();
+        }
+    }
+
+    private void recordAiOutcome(String prompt, String status, String summary, String usage) {
+        try {
+            JSONArray existing = aiOutcomeHistory();
+            JSONArray updated = new JSONArray();
+            updated.put(new JSONObject()
+                    .put("timestamp_ms", System.currentTimeMillis())
+                    .put("request", prompt == null ? "" : prompt)
+                    .put("status", status)
+                    .put("summary", summary == null ? "" : summary)
+                    .put("usage", usage == null ? "" : usage)
+                    .put("trace_path", aiTraceLogPath()));
+            int firstPrior = 0;
+            JSONObject prior = existing.optJSONObject(0);
+            if (!"started".equals(status) && prior != null
+                    && "started".equals(prior.optString("status", ""))
+                    && (prompt == null ? "" : prompt).equals(prior.optString("request", ""))) {
+                firstPrior = 1;
+            }
+            for (int index = firstPrior; index < existing.length() && updated.length() < MAX_COMMAND_HISTORY; index += 1) {
+                updated.put(existing.get(index));
+            }
+            getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                    .putString(outcomeHistoryPreferenceKey(), updated.toString()).apply();
+            refreshCommandHistory();
+        } catch (Exception ignored) {
+            // Outcome history must not interfere with AI execution or source recovery.
+        }
+    }
+
+    private void retryLastAiRequest() {
+        JSONArray outcomes = aiOutcomeHistory();
+        for (int index = 0; index < outcomes.length(); index += 1) {
+            JSONObject outcome = outcomes.optJSONObject(index);
+            String request = outcome == null ? "" : outcome.optString("request", "").trim();
+            if (!request.isEmpty()) {
+                aiPromptEditor.setText(request);
+                setStatusText("Retrying last AI request as a new budget-checked run");
+                runAiPatch();
+                return;
+            }
+        }
+        setStatusText("No AI request is available to retry");
     }
 
     private void toggleGitHubSettings() {
@@ -1831,8 +1909,10 @@ public final class MainActivity extends Activity {
         final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject);
         final String requestModel = model;
         final String requestApiKey = apiKey;
+        activeAiPrompt = prompt;
         aiCancelRequested = false;
         aiRunActive = true;
+        recordAiOutcome(activeAiPrompt, "started", "AI run started", "");
         aiStartedAtNanos = System.nanoTime();
         appendAiTraceFields("request", "model", requestModel, "request_json", requestJson, null, null);
         setStatusText("AI run started: preparing workspace and command context");
@@ -1855,6 +1935,7 @@ public final class MainActivity extends Activity {
                             @Override public void run() {
                                 updateAiProgress(aiProgressStep, aiProgressActions, "cancelled");
                                 appendAiTraceFields("cancelled", "elapsed", currentAiElapsedText(), null, null, null, null);
+                                recordAiOutcome(activeAiPrompt, "cancelled", "Cancelled by user", "completed calls retained in budget totals");
                                 setStatusText("AI run cancelled; completed calls remain in usage totals");
                             }
                         });
@@ -1866,6 +1947,7 @@ public final class MainActivity extends Activity {
                             String elapsed = currentAiElapsedText();
                             updateAiProgress(aiProgressStep, aiProgressActions, "failed");
                             appendAiTraceFields("fatal_error", "error", error.getMessage(), "elapsed", elapsed, "trace_path", aiTraceLogPath());
+                            recordAiOutcome(activeAiPrompt, "failed", error.getMessage(), "");
                             setStatusText("AI edit failed: elapsed=" + elapsed + " - " + error.getMessage() + " - trace=" + aiTraceLogPath());
                         }
                     });
@@ -3717,6 +3799,7 @@ public final class MainActivity extends Activity {
                 updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, aiReloadPhase(compileResult));
                 JSONObject testRun = aiToolRunTests(new AiAgentSession());
                 appendAiTrace("apply_done", new JSONObject().put("summary", response.optString("summary", "no actions")).put("compile", compileResult).put("tests", testRun).put("elapsed", elapsed));
+                recordAiOutcome(activeAiPrompt, "complete", response.optString("summary", "no actions"), aiResult.usageSummary);
                 setStatusText("AI edit complete: " + response.optString("summary", "no actions") + " - no actions - " + aiReloadSummary(compileResult) + " - " + testSummaryText(testRun) + " - elapsed=" + elapsed + " - " + compileResult + " - " + aiResult.usageSummary + " - trace=" + aiTraceLogPath());
                 return;
             }
@@ -3758,6 +3841,7 @@ public final class MainActivity extends Activity {
             updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, aiReloadPhase(compileResult));
             JSONObject testRun = aiToolRunTests(new AiAgentSession());
             appendAiTrace("apply_edits", new JSONObject().put("summary", response.optString("summary", "updated workspace")).put("compile", compileResult).put("tests", testRun).put("elapsed", elapsed));
+            recordAiOutcome(activeAiPrompt, "applied", response.optString("summary", "updated workspace"), aiResult.usageSummary);
             setStatusText("AI edit applied: " + response.optString("summary", "updated workspace") + " - " + aiReloadSummary(compileResult) + " - " + testSummaryText(testRun) + " - elapsed=" + elapsed + " - " + compileResult + " - " + aiResult.usageSummary + " - trace=" + aiTraceLogPath());
         } catch (Exception error) {
             if (originalSources != null) {
@@ -3774,6 +3858,7 @@ public final class MainActivity extends Activity {
                     String elapsed = currentAiElapsedText();
                     updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "rollback failed");
                     appendAiTraceFields("rollback_failed", "error", error.getMessage(), "restore_error", restoreError.getMessage(), "elapsed", elapsed);
+                    recordAiOutcome(activeAiPrompt, "rollback_failed", error.getMessage() + " / " + restoreError.getMessage(), aiResult.usageSummary);
                     setStatusText("AI edit apply failed and rollback failed: elapsed=" + elapsed + " - " + error.getMessage() + " / " + restoreError.getMessage() + " - trace=" + aiTraceLogPath());
                     return;
                 }
@@ -3781,6 +3866,7 @@ public final class MainActivity extends Activity {
             String elapsed = currentAiElapsedText();
             updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "rolled back");
             appendAiTraceFields("apply_failed_rolled_back", "error", error.getMessage(), "elapsed", elapsed, null, null);
+            recordAiOutcome(activeAiPrompt, "rolled_back", error.getMessage(), aiResult.usageSummary);
             setStatusText("AI edit apply failed and rolled back: elapsed=" + elapsed + " - " + error.getMessage() + " - trace=" + aiTraceLogPath());
         }
     }
