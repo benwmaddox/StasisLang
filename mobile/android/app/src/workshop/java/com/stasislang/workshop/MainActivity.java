@@ -1,8 +1,11 @@
 package com.stasislang.workshop;
 
 import android.app.Activity;
+import android.Manifest;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
@@ -12,6 +15,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.speech.RecognitionListener;
+import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
 import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -68,6 +74,7 @@ public final class MainActivity extends Activity {
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int MAX_AI_AGENT_TURNS = 15;
+    private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
     private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
     private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
     private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125;
@@ -120,6 +127,12 @@ public final class MainActivity extends Activity {
     private String projectRootPath;
     private ScrollView editorPanel;
     private Button editorToggle;
+    private Button voiceToggle;
+    private LinearLayout voiceActionRow;
+    private TextView voiceStatus;
+    private Button voiceRunButton;
+    private SpeechRecognizer voiceRecognizer;
+    private String voiceTranscript = "";
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
     private Runnable gameLoop;
     private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY];
@@ -169,6 +182,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        stopVoiceRecognition();
         if (gameLoop != null) {
             gameLoopHandler.removeCallbacks(gameLoop);
         }
@@ -184,6 +198,8 @@ public final class MainActivity extends Activity {
         root.addView(gamePreview, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
+
+        installVoiceChangeControls(root);
 
         if (BuildConfig.STASIS_PUBLISHED_BUILD) {
             installGameStatusOverlay(root, false);
@@ -306,6 +322,9 @@ public final class MainActivity extends Activity {
         FrameLayout.LayoutParams toggleParams = new FrameLayout.LayoutParams(dp(52), dp(48), Gravity.TOP | Gravity.END);
         toggleParams.setMargins(0, dp(8), dp(10), 0);
         root.addView(editorToggle, toggleParams);
+        if (voiceToggle != null) {
+            voiceToggle.bringToFront();
+        }
 
         startGameLoop();
         return root;
@@ -326,6 +345,165 @@ public final class MainActivity extends Activity {
                 Gravity.TOP | Gravity.START);
         statusParams.setMargins(dp(8), dp(8), dp(68), 0);
         root.addView(gameStatus, statusParams);
+    }
+
+    private void installVoiceChangeControls(FrameLayout root) {
+        voiceToggle = new Button(this);
+        voiceToggle.setText("Voice");
+        voiceToggle.setTextColor(Color.WHITE);
+        voiceToggle.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
+        voiceToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                startVoiceChange();
+            }
+        });
+        FrameLayout.LayoutParams voiceParams = new FrameLayout.LayoutParams(dp(74), dp(48), Gravity.TOP | Gravity.END);
+        voiceParams.setMargins(0, dp(8), dp(68), 0);
+        root.addView(voiceToggle, voiceParams);
+
+        voiceActionRow = new LinearLayout(this);
+        voiceActionRow.setOrientation(LinearLayout.HORIZONTAL);
+        voiceActionRow.setPadding(dp(8), dp(4), dp(8), dp(4));
+        voiceActionRow.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
+        voiceActionRow.setVisibility(View.GONE);
+
+        voiceStatus = new TextView(this);
+        voiceStatus.setTextColor(Color.WHITE);
+        voiceStatus.setTextSize(12.0f);
+        voiceStatus.setGravity(Gravity.CENTER_VERTICAL);
+        voiceActionRow.addView(voiceStatus, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        Button voiceCancel = new Button(this);
+        voiceCancel.setText("Cancel");
+        voiceCancel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                cancelVoiceChange();
+            }
+        });
+        voiceActionRow.addView(voiceCancel, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        voiceRunButton = new Button(this);
+        voiceRunButton.setText("Run");
+        voiceRunButton.setEnabled(false);
+        voiceRunButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                runVoiceChange();
+            }
+        });
+        voiceActionRow.addView(voiceRunButton, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        FrameLayout.LayoutParams actionParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.START);
+        actionParams.setMargins(dp(8), dp(58), dp(8), 0);
+        root.addView(voiceActionRow, actionParams);
+    }
+
+    private void startVoiceChange() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] { Manifest.permission.RECORD_AUDIO }, VOICE_RECORD_PERMISSION_REQUEST);
+            return;
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            setStatusText("Voice change unavailable: speech recognition is not installed");
+            return;
+        }
+
+        stopVoiceRecognition();
+        voiceTranscript = "";
+        voiceActionRow.setVisibility(View.VISIBLE);
+        voiceActionRow.bringToFront();
+        voiceStatus.setText("Listening for a change request...");
+        voiceRunButton.setEnabled(false);
+        voiceToggle.setEnabled(false);
+        voiceRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+        voiceRecognizer.setRecognitionListener(new RecognitionListener() {
+            @Override public void onReadyForSpeech(android.os.Bundle params) { }
+            @Override public void onBeginningOfSpeech() { voiceStatus.setText("Recording change request..."); }
+            @Override public void onRmsChanged(float rmsdB) { }
+            @Override public void onBufferReceived(byte[] buffer) { }
+            @Override public void onEndOfSpeech() { voiceStatus.setText("Transcribing change request..."); }
+            @Override public void onError(int error) {
+                voiceStatus.setText("Voice recording failed; Cancel or try again");
+                voiceToggle.setEnabled(true);
+            }
+            @Override public void onResults(android.os.Bundle results) { acceptVoiceResults(results); }
+            @Override public void onPartialResults(android.os.Bundle partialResults) { }
+            @Override public void onEvent(int eventType, android.os.Bundle params) { }
+        });
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Describe the Stasis change to make");
+        voiceRecognizer.startListening(intent);
+    }
+
+    private void acceptVoiceResults(android.os.Bundle results) {
+        ArrayList<String> candidates = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+        voiceTranscript = candidates == null || candidates.isEmpty() ? "" : candidates.get(0).trim();
+        if (voiceTranscript.isEmpty()) {
+            voiceStatus.setText("No voice request captured; Cancel or try again");
+            voiceToggle.setEnabled(true);
+            return;
+        }
+        voiceStatus.setText("Ready: " + voiceTranscript);
+        voiceRunButton.setEnabled(true);
+        voiceToggle.setEnabled(true);
+    }
+
+    private void cancelVoiceChange() {
+        stopVoiceRecognition();
+        voiceTranscript = "";
+        if (voiceActionRow != null) {
+            voiceActionRow.setVisibility(View.GONE);
+        }
+        if (voiceToggle != null) {
+            voiceToggle.setEnabled(true);
+        }
+        setStatusText("Voice change cancelled");
+    }
+
+    private void runVoiceChange() {
+        if (voiceTranscript.isEmpty()) {
+            setStatusText("Voice change needs a captured request before Run");
+            return;
+        }
+        stopVoiceRecognition();
+        if (aiPromptEditor != null) {
+            aiPromptEditor.setText(voiceTranscript);
+        }
+        if (voiceActionRow != null) {
+            voiceActionRow.setVisibility(View.GONE);
+        }
+        if (voiceToggle != null) {
+            voiceToggle.setEnabled(true);
+        }
+        setStatusText("Voice change confirmed: starting AI run");
+        runAiPatch();
+    }
+
+    private void stopVoiceRecognition() {
+        if (voiceRecognizer != null) {
+            voiceRecognizer.cancel();
+            voiceRecognizer.destroy();
+            voiceRecognizer = null;
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == VOICE_RECORD_PERMISSION_REQUEST) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startVoiceChange();
+            } else {
+                setStatusText("Voice change needs microphone permission");
+            }
+        }
     }
 
     private void toggleBenchmarkHudFromPreview() {
@@ -374,6 +552,12 @@ public final class MainActivity extends Activity {
         if (editorToggle != null) {
             editorToggle.setText(opening ? "\u00D7" : "\u2630");
             editorToggle.bringToFront();
+        }
+        if (voiceActionRow != null && voiceActionRow.getVisibility() == View.VISIBLE) {
+            voiceActionRow.bringToFront();
+        }
+        if (voiceToggle != null) {
+            voiceToggle.bringToFront();
         }
     }
 

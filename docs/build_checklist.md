@@ -364,10 +364,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 #### AW41 - Android Voice Change Shortcut
 - Language: `Android Java + platform voice integration + docs`.
 - Scope: Add a top-game shortcut for a voice change request with explicit recording, cancel, and run states.
-- Deliverable: Voice capture can be started from the preview, cancelled without edits, or submitted through the same validated change workflow as typed commands.
-- Tests: Structural UI verifier, permission/error paths, and debug APK build; device validation when voice hardware is available.
+- Deliverable: The Workshop flavor now requests microphone permission on demand, captures a platform speech-recognizer transcript from a top-game `Voice` shortcut, previews it with explicit `Cancel` and `Run` controls, and routes a confirmed request through the same AI validation flow as typed commands.
+- Tests: Structural UI verifier covers permission, recognizer, cancel/run, and start state; Java sources compile. Device microphone/transcription validation remains pending while the phone is unavailable.
 - Done gate: A user can start, cancel, or run a voice change request without accidental code application.
-- Status: `planned`
+- Status: `in progress (device validation deferred)`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
