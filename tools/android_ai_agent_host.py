@@ -23,7 +23,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROJECT = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
-DEFAULT_MODEL = "gpt-5.6-luna"
+DEFAULT_MODEL = "gpt-5.6-terra"
 DEFAULT_TRACE_DIR = ROOT / "artifacts/android_ai_runs"
 MAX_TURNS = 15
 PROMPT_CACHE_KEY = "stasis-android-ai-agent-v2"
@@ -194,12 +194,12 @@ def preferred_call(symbol: Symbol) -> str:
 
 
 DEFAULT_MODEL_PRICING_PER_MILLION = {
-    "gpt-5.6-luna": {
-        "input": 1.00,
-        "cached_input": 0.10,
-        "cache_write": 1.25,
-        "output": 6.00,
-        "source": "User-provided OpenAI standard short-context pricing on 2026-07-09: gpt-5.6-luna $1.00 input / $0.10 cached input / $1.25 cache writes / $6.00 output per 1M tokens.",
+    "gpt-5.6-terra": {
+        "input": 2.50,
+        "cached_input": 0.25,
+        "cache_write": 3.125,
+        "output": 15.00,
+        "source": "User-provided pricing on 2026-07-09: gpt-5.6-terra $2.50 input / $0.25 cached input / $15.00 output per 1M tokens; cache writes use the GPT-5.6 1.25x input rate.",
     }
 }
 
