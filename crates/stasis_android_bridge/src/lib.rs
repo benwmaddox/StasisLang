@@ -1063,6 +1063,77 @@ mod tests {
         assert!(result.observed_game_tick_count >= 1);
     }
     #[test]
+    #[ignore = "host AI prompt regression target; run after AI edits the workshop sample"]
+    fn android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mobile/android/app/src/main/assets/workshop_sample")
+            .canonicalize()
+            .expect("bundled sample root");
+        let entry = Path::new("src/main.stasis");
+
+        let first = run_android_workshop_tick(
+            &root,
+            entry,
+            AndroidBridgeTickInput {
+                touch_x: 180,
+                touch_y: 240,
+                touch_active: 1,
+                screen_w: 360,
+                screen_h: 640,
+            },
+        )
+        .expect("initial pong tick");
+        assert!(first.observed_game_tick_count >= 1);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "GameState.enemy_paddle_speed_x100")
+                .expect("initial enemy speed"),
+            1500,
+            "enemy paddle starts at 3x a 5px/tick ball speed"
+        );
+
+        set_android_workshop_i32_global(&root, entry, "GameState.ball_age_ticks", 1800)
+            .expect("set half age");
+        run_android_workshop_tick(&root, entry, default_tick_input()).expect("half-age tick");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "GameState.enemy_paddle_speed_x100")
+                .expect("half-age enemy speed"),
+            875,
+            "after 30 seconds, speed is halfway from 3x to 0.5x"
+        );
+
+        set_android_workshop_i32_global(&root, entry, "GameState.ball_age_ticks", 3600)
+            .expect("set full age");
+        run_android_workshop_tick(&root, entry, default_tick_input()).expect("full-age tick");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "GameState.enemy_paddle_speed_x100")
+                .expect("full-age enemy speed"),
+            250,
+            "after 60 seconds, speed reaches 0.5x a 5px/tick ball speed"
+        );
+
+        set_android_workshop_i32_global(&root, entry, "GameState.ball_age_ticks", 1800)
+            .expect("set stale age before reset");
+        set_android_workshop_i32_global(&root, entry, "GameState.ball_x", 361)
+            .expect("force ball reset");
+        run_android_workshop_tick(&root, entry, default_tick_input()).expect("reset tick");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "GameState.enemy_paddle_speed_x100")
+                .expect("reset enemy speed"),
+            1500,
+            "each ball creation resets enemy paddle speed to 3x"
+        );
+        assert!(
+            get_android_workshop_i32_global(&root, entry, "GameState.ball_age_ticks")
+                .expect("reset ball age")
+                <= 1,
+            "ball age resets when a new ball is created"
+        );
+
+        clear_runtime_session_for_test();
+    }
+    #[test]
     fn c_bridge_run_tick_frame_writes_packed_render_data() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();

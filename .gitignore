@@ -77,6 +77,7 @@ android/out/
 android/build/
 android/**/app/build/
 *.apk
+__pycache__/
 
 # Debug/temp files
 nul
