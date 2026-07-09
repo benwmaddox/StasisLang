@@ -13,6 +13,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -188,6 +190,78 @@ def preferred_call(symbol: Symbol) -> str:
     args = ", ".join(part.split(":", 1)[0].strip() for part in pieces)
     return f"{symbol.name}({args})"
 
+
+DEFAULT_MODEL_PRICING_PER_MILLION = {
+    "gpt-5.4-mini": {
+        "input": 1.00,
+        "cached_input": 0.10,
+        "output": 8.00,
+        "source": "Estimate: searched on 2026-07-09; no official OpenAI gpt-5.4-mini pricing page was found in returned results. A public summary said GPT-5.4 mini/nano are about 4x their GPT-5 equivalents, so this uses a working estimate for review only.",
+    }
+}
+
+
+def response_usage_from_body(body: dict[str, Any]) -> dict[str, int]:
+    usage = body.get("usage") if isinstance(body, dict) else {}
+    if not isinstance(usage, dict):
+        usage = {}
+    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+    total_tokens = int(usage.get("total_tokens") or input_tokens + output_tokens)
+    input_details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
+    if not isinstance(input_details, dict):
+        input_details = {}
+    cached_tokens = int(input_details.get("cached_tokens") or 0)
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_tokens,
+        "uncached_input_tokens": max(input_tokens - cached_tokens, 0),
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def aggregate_trace_usage(trace_events: list[dict[str, Any]], model: str) -> dict[str, Any]:
+    totals = {"input_tokens": 0, "cached_input_tokens": 0, "uncached_input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    calls = 0
+    per_call = []
+    for event in trace_events:
+        if event.get("kind") != "openai_response_raw":
+            continue
+        body = event.get("body", {})
+        usage = response_usage_from_body(body if isinstance(body, dict) else {})
+        calls += 1
+        per_call.append({"turn": event.get("turn"), **usage})
+        for key in totals:
+            totals[key] += usage[key]
+    pricing = DEFAULT_MODEL_PRICING_PER_MILLION.get(model, {})
+    cost = None
+    if pricing:
+        cost = (
+            totals["uncached_input_tokens"] * float(pricing["input"])
+            + totals["cached_input_tokens"] * float(pricing["cached_input"])
+            + totals["output_tokens"] * float(pricing["output"])
+        ) / 1_000_000.0
+    return {
+        "calls": calls,
+        "totals": totals,
+        "per_call": per_call,
+        "estimated_cost_usd": cost,
+        "pricing_per_million_tokens": pricing or None,
+        "pricing_note": pricing.get("source") if pricing else "No pricing estimate configured for this model.",
+    }
+
+
+def write_trace_file(path: Path, meta: dict[str, Any], trace_events: list[dict[str, Any]], exit_code: int, started_at_iso: str, elapsed_seconds: float, total_actions: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    usage_summary = aggregate_trace_usage(trace_events, meta.get("model", ""))
+    payload = {
+        "meta": {**meta, "started_at": started_at_iso, "elapsed_seconds": elapsed_seconds, "total_actions": total_actions},
+        "usage_summary": usage_summary,
+        "events": trace_events,
+        "exit_code": exit_code,
+    }
+    write_text(path, json.dumps(payload, indent=2))
 
 def run_command(args: list[str]) -> dict[str, Any]:
     proc = subprocess.run(args, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -577,7 +651,7 @@ def response_json_schema() -> dict[str, Any]:
         "additionalProperties": False,
     }
 
-def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, Any]:
+def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events: list[dict[str, Any]] | None = None, turn: int = 0) -> dict[str, Any]:
     prompt = (
         "Return only one JSON object matching request.response_contract exactly. "
         "Use mode=tool_calls to inspect/write with the provided fine-grained symbol, import, and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/read_imports/list_tests/read_test_file instead. "
@@ -589,6 +663,8 @@ def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, 
     )
     schema = response_json_schema()
     payload = {"model": model, "text": {"format": {"type": "json_schema", "name": "stasis_host_ai_response", "strict": False, "schema": schema}}, "input": prompt}
+    if trace_events is not None:
+        trace_events.append({"kind": "openai_request", "turn": turn, "payload": payload})
     req = urllib.request.Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(payload).encode("utf-8"),
@@ -598,6 +674,8 @@ def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, 
     try:
         with urllib.request.urlopen(req, timeout=120) as response:
             body = json.loads(response.read().decode("utf-8"))
+            if trace_events is not None:
+                trace_events.append({"kind": "openai_response_raw", "turn": turn, "body": body})
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"OpenAI request failed with HTTP {error.code}: {detail}") from error
@@ -609,7 +687,10 @@ def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, 
                 if "text" in content:
                     chunks.append(content["text"])
         text = "".join(chunks)
-    return parse_json_object(text)
+    parsed = parse_json_object(text)
+    if trace_events is not None:
+        trace_events.append({"kind": "openai_response_parsed", "turn": turn, "response": parsed})
+    return parsed
 
 
 def validate_response_shape(response: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -788,6 +869,7 @@ def main() -> int:
     parser.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--reset-paddle-speed-feature", action="store_true", help="Reset the bundled Pong sample to the baseline before the requested paddle-speed feature.")
+    parser.add_argument("--trace-file", type=Path, help="Write full request/response/tool trace JSON to this file.")
     args = parser.parse_args()
     load_env_file(ROOT / ".env")
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -799,18 +881,31 @@ def main() -> int:
     if args.reset_paddle_speed_feature:
         reset_paddle_speed_feature(project)
     request = build_request(project, args.prompt)
+    trace_events: list[dict[str, Any]] = []
+    trace_meta = {"prompt": args.prompt, "model": args.model, "project_root": str(project), "reset_paddle_speed_feature": bool(args.reset_paddle_speed_feature)}
+    if args.trace_file:
+        trace_events.append({"kind": "trace_meta", "meta": trace_meta})
+        trace_events.append({"kind": "initial_request", "request": request})
     last_diagnostics: dict[str, Any] = {}
     total_actions = 0
+    started_at_iso = datetime.now(timezone.utc).isoformat()
+    started_at_perf = time.perf_counter()
     for turn in range(1, MAX_TURNS + 1):
-        response = call_openai(api_key, args.model, request)
+        response = call_openai(api_key, args.model, request, trace_events if args.trace_file else None, turn)
         mode = response.get("mode")
         tool_calls, response_validation_errors = validate_response_shape(response)
         print(json.dumps({"turn": turn, "mode": mode, "response_keys": sorted(response.keys()), "summary": response.get("summary", ""), "tool_call_count": len(tool_calls), "validation_error_count": len(response_validation_errors), "edit_count": len(response.get("edits") or [])}, indent=2))
         if response_validation_errors:
             print(json.dumps({"response_validation_errors": response_validation_errors}, indent=2))
+            if args.trace_file:
+                trace_events.append({"kind": "response_validation_errors", "turn": turn, "errors": response_validation_errors})
             if turn >= MAX_TURNS:
+                if args.trace_file:
+                    write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
             request = {"original_request": build_request(project, args.prompt), "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching original_request.response_contract. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."}
+            if args.trace_file:
+                trace_events.append({"kind": "next_request", "turn": turn, "request": request})
             continue
         if mode == "edits" or (mode != "tool_calls" and response.get("edits")):
             observations = []
@@ -819,9 +914,15 @@ def main() -> int:
                 observations.append({"tool": "edit", "args": {"file": edit.get("file", ""), "name": edit.get("name", "")}, "result": result})
             final = run_behavior_tests(project)
             print(json.dumps({"edit_observations": summarize_observations(observations), "final_test": final}, indent=2))
+            if args.trace_file:
+                trace_events.append({"kind": "direct_edit_observations", "turn": turn, "observations": observations, "final_test": final})
             if final.get("ok"):
+                if args.trace_file:
+                    write_trace_file(args.trace_file, trace_meta, trace_events, 0, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 0
             if turn >= MAX_TURNS:
+                if args.trace_file:
+                    write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
             request = {
                 "original_request": build_request(project, args.prompt),
@@ -833,9 +934,15 @@ def main() -> int:
         if mode != "tool_calls" or not tool_calls:
             final = run_behavior_tests(project)
             print(json.dumps({"final_test": final}, indent=2))
+            if args.trace_file:
+                trace_events.append({"kind": "final_test_after_done_or_empty", "turn": turn, "final_test": final})
             if final.get("ok"):
+                if args.trace_file:
+                    write_trace_file(args.trace_file, trace_meta, trace_events, 0, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 0
             if turn >= MAX_TURNS:
+                if args.trace_file:
+                    write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
             request = {
                 "original_request": build_request(project, args.prompt),
@@ -847,8 +954,15 @@ def main() -> int:
         observations, last_diagnostics = execute_tool_batch(project, tool_calls, last_diagnostics)
         total_actions += len(tool_calls)
         print(json.dumps({"tool_observations": summarize_observations(observations)}, indent=2))
+        if args.trace_file:
+            trace_events.append({"kind": "tool_observations", "turn": turn, "observations": observations, "summary": summarize_observations(observations)})
         request = {"original_request": build_request(project, args.prompt), "tool_observations": observations, "instruction": "Use observations to continue or return mode=done. If tests fail, inspect behavior_test_expectations and fix the exact required state/checks. Do not repeat identical tool calls."}
+        if args.trace_file:
+            trace_events.append({"kind": "next_request", "turn": turn, "request": request})
     print(json.dumps({"error": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
+    if args.trace_file:
+        trace_events.append({"kind": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics})
+        write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
     return 1
 
 
