@@ -954,6 +954,7 @@ public final class MainActivity extends Activity {
         String currentRequestJson = initialRequestJson;
         AiAgentSession session = new AiAgentSession();
         AiUsageAccumulator usage = new AiUsageAccumulator();
+        String previousToolCallBatch = "";
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             session.currentStep = turn + 1;
             postAiProgress(session.currentStep, session.actionCount, "calling AI");
@@ -970,7 +971,29 @@ public final class MainActivity extends Activity {
                 postAiProgress(session.currentStep, session.actionCount, "finalizing");
                 return new AiAgentResult(aiJson, usage.toJson(model), usage.summary(), session.currentStep, session.actionCount);
             }
-
+            String currentToolCallBatch = toolCalls.toString();
+            if (currentToolCallBatch.equals(previousToolCallBatch)) {
+                postAiProgress(session.currentStep, session.actionCount, "repeated tools");
+                JSONObject repeated = new JSONObject()
+                        .put("mode", "done")
+                        .put("summary", "Stopped after repeated identical tool calls")
+                        .put("tool_calls", new JSONArray())
+                        .put("edits", new JSONArray())
+                        .put("expected_reload", reloadKind(lastCompileResult))
+                        .put("reason", "The model returned the exact same tool-call batch twice in a row.")
+                        .put("warning", "repeated_tool_calls")
+                        .put("repeated_tool_calls", toolCalls)
+                        .put("successful_writes", session.successfulWriteCount)
+                        .put("rolled_back_writes", session.rolledBackWriteCount)
+                        .put("last_tool", session.lastToolSummary)
+                        .put("last_error", session.lastToolError);
+                appendAiTrace("repeated_tool_calls", repeated);
+                if (session.successfulWriteCount > 0 && compileReady) {
+                    return new AiAgentResult(repeated.toString(), usage.toJson(model), usage.summary(), session.currentStep, session.actionCount);
+                }
+                throw new IOException("AI repeated identical tool calls; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
+            }
+            previousToolCallBatch = currentToolCallBatch;
             postAiProgress(session.currentStep, session.actionCount, "tools " + toolCalls.length());
             appendAiTrace("tool_calls", new JSONObject().put("turn", session.currentStep).put("tool_calls", toolCalls));
             JSONArray observations = executeAiToolCalls(toolCalls, session);
