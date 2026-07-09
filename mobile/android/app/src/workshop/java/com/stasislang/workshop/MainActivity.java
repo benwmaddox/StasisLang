@@ -98,6 +98,8 @@ public final class MainActivity extends Activity {
     private static final int MAX_AI_OUTPUT_TOKENS = 8192;
     private static final int MAX_COMMAND_HISTORY = 20;
     private static final int GITHUB_NETWORK_TIMEOUT_MS = 15_000;
+    private static final int AI_CONNECT_TIMEOUT_MS = 15_000;
+    private static final int AI_READ_TIMEOUT_MS = 120_000;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
     private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
     private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
@@ -155,6 +157,9 @@ public final class MainActivity extends Activity {
     private String reviewedGitHubChangeFingerprint = "";
     private String credentialStorageError = "";
     private volatile boolean githubOperationActive;
+    private volatile boolean aiRunActive;
+    private volatile boolean aiCancelRequested;
+    private volatile HttpURLConnection activeAiConnection;
     private TextView reloadStatus;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -221,6 +226,9 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         stopVoiceRecognition();
+        aiCancelRequested = true;
+        HttpURLConnection aiConnection = activeAiConnection;
+        if (aiConnection != null) aiConnection.disconnect();
         githubSyncExecutor.shutdownNow();
         if (gameLoop != null) {
             gameLoopHandler.removeCallbacks(gameLoop);
@@ -905,6 +913,8 @@ public final class MainActivity extends Activity {
         aiPromptEditor.setTextSize(12.0f);
         controls.addView(aiPromptEditor, fullWidth());
 
+        LinearLayout aiActionRow = new LinearLayout(this);
+        aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
         Button aiPatch = new Button(this);
         aiPatch.setText("Run AI Change");
         aiPatch.setOnClickListener(new View.OnClickListener() {
@@ -913,7 +923,14 @@ public final class MainActivity extends Activity {
                 runAiPatch();
             }
         });
-        controls.addView(aiPatch, fullWidth());
+        aiActionRow.addView(aiPatch, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        Button cancelAi = new Button(this);
+        cancelAi.setText("Cancel AI");
+        cancelAi.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { cancelAiRun(); }
+        });
+        aiActionRow.addView(cancelAi, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        controls.addView(aiActionRow, fullWidth());
 
         LinearLayout progressRow = new LinearLayout(this);
         progressRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -1779,6 +1796,10 @@ public final class MainActivity extends Activity {
     }
 
     private void runAiPatch() {
+        if (aiRunActive) {
+            setStatusText("AI run already active; cancel it before starting another");
+            return;
+        }
         String apiKey = aiApiKeyEditor == null ? "" : aiApiKeyEditor.getText().toString().trim();
         String prompt = aiPromptEditor == null ? "" : aiPromptEditor.getText().toString().trim();
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
@@ -1810,6 +1831,8 @@ public final class MainActivity extends Activity {
         final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject);
         final String requestModel = model;
         final String requestApiKey = apiKey;
+        aiCancelRequested = false;
+        aiRunActive = true;
         aiStartedAtNanos = System.nanoTime();
         appendAiTraceFields("request", "model", requestModel, "request_json", requestJson, null, null);
         setStatusText("AI run started: preparing workspace and command context");
@@ -1819,6 +1842,7 @@ public final class MainActivity extends Activity {
             public void run() {
                 try {
                     final AiAgentResult aiResult = runAiAgentLoop(requestApiKey, requestModel, requestJson);
+                    throwIfAiCancelled();
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
@@ -1826,6 +1850,16 @@ public final class MainActivity extends Activity {
                         }
                     });
                 } catch (final Exception error) {
+                    if (aiCancelRequested || error instanceof AiCancelledException) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                updateAiProgress(aiProgressStep, aiProgressActions, "cancelled");
+                                appendAiTraceFields("cancelled", "elapsed", currentAiElapsedText(), null, null, null, null);
+                                setStatusText("AI run cancelled; completed calls remain in usage totals");
+                            }
+                        });
+                        return;
+                    }
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
@@ -1835,9 +1869,27 @@ public final class MainActivity extends Activity {
                             setStatusText("AI edit failed: elapsed=" + elapsed + " - " + error.getMessage() + " - trace=" + aiTraceLogPath());
                         }
                     });
+                } finally {
+                    aiRunActive = false;
                 }
             }
         }).start();
+    }
+
+    private void cancelAiRun() {
+        if (!aiRunActive) {
+            setStatusText("No AI run is active");
+            return;
+        }
+        aiCancelRequested = true;
+        HttpURLConnection connection = activeAiConnection;
+        if (connection != null) connection.disconnect();
+        updateAiProgress(aiProgressStep, aiProgressActions, "cancelling");
+        setStatusText("AI cancellation requested; finishing any active call or atomic write batch");
+    }
+
+    private void throwIfAiCancelled() throws AiCancelledException {
+        if (aiCancelRequested) throw new AiCancelledException();
     }
 
     private boolean saveAiSettings(String apiKey, String model) {
@@ -2071,6 +2123,7 @@ public final class MainActivity extends Activity {
         AiUsageAccumulator usage = new AiUsageAccumulator();
         String previousToolCallBatch = "";
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
+            throwIfAiCancelled();
             double maxRunUsd = configuredAiLimit(AI_PREF_MAX_RUN_USD, "0.25");
             double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
             if (usage.estimatedCostUsd >= maxRunUsd || monthlyAiSpendUsd() >= monthlyLimitUsd) {
@@ -2087,6 +2140,7 @@ public final class MainActivity extends Activity {
             AiApiResponse apiResponse = callOpenAiResponsesApi(apiKey, model, currentRequestJson, maxOutputTokens);
             usage.add(model, apiResponse.usage);
             if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+            throwIfAiCancelled();
             String aiJson = extractAiJsonResponse(apiResponse.body);
             JSONObject response = new JSONObject(aiJson);
             appendAiTrace("llm_response", new JSONObject()
@@ -2140,6 +2194,7 @@ public final class MainActivity extends Activity {
             postAiProgress(session.currentStep, session.actionCount, "tools " + toolCalls.length());
             appendAiTrace("tool_calls", new JSONObject().put("turn", session.currentStep).put("tool_calls", toolCalls));
             JSONArray observations = executeAiToolCalls(toolCalls, session);
+            throwIfAiCancelled();
             appendAiTrace("tool_observations", new JSONObject().put("turn", session.currentStep).put("observations", observations));
             JSONObject testObservation = runAiTestsAfterBatch(session);
             session.latestTestObservation = testObservation;
@@ -2187,9 +2242,11 @@ public final class MainActivity extends Activity {
         }
 
         Map<String, String> batchOriginalSources = batchHasWrites ? snapshotProjectSources(session.project()) : null;
+        throwIfAiCancelled();
         session.deferBatchCompile = batchHasWrites;
         try {
             for (int index = 0; index < toolCalls.length(); index += 1) {
+                if (!batchHasWrites) throwIfAiCancelled();
                 JSONObject call = toolCalls.getJSONObject(index);
                 JSONObject observation = new JSONObject();
                 String tool = call.optString("tool", "");
@@ -3335,7 +3392,7 @@ public final class MainActivity extends Activity {
         return Math.min(MAX_AI_OUTPUT_TOKENS, outputTokens);
     }
 
-    private static AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson, int maxOutputTokens) throws Exception {
+    private AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson, int maxOutputTokens) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("max_output_tokens", maxOutputTokens);
@@ -3346,25 +3403,32 @@ public final class MainActivity extends Activity {
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
-        connection.setRequestMethod("POST");
-        connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-        connection.setRequestProperty("Content-Type", "application/json");
-        connection.setDoOutput(true);
-        OutputStream output = connection.getOutputStream();
+        activeAiConnection = connection;
         try {
-            output.write(body);
-        } finally {
-            output.close();
-        }
+            connection.setConnectTimeout(AI_CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(AI_READ_TIMEOUT_MS);
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setDoOutput(true);
+            OutputStream output = connection.getOutputStream();
+            try {
+                output.write(body);
+            } finally {
+                output.close();
+            }
 
-        int status = connection.getResponseCode();
-        InputStream input = status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream();
-        String response = input == null ? "" : readStreamStatic(input);
-        connection.disconnect();
-        if (status < 200 || status >= 300) {
-            throw new IOException("OpenAI HTTP " + status + ": " + response);
+            int status = connection.getResponseCode();
+            InputStream input = status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream();
+            String response = input == null ? "" : readStreamStatic(input);
+            if (status < 200 || status >= 300) {
+                throw new IOException("OpenAI HTTP " + status + ": " + response);
+            }
+            return new AiApiResponse(response, extractAiUsage(response));
+        } finally {
+            connection.disconnect();
+            if (activeAiConnection == connection) activeAiConnection = null;
         }
-        return new AiApiResponse(response, extractAiUsage(response));
     }
 
     private static JSONObject buildAiResponseTextFormat() throws Exception {
@@ -5422,6 +5486,12 @@ public final class MainActivity extends Activity {
                 throw new IllegalStateException("OpenGL shader compile failed: " + log);
             }
             return shader;
+        }
+    }
+
+    private static final class AiCancelledException extends Exception {
+        AiCancelledException() {
+            super("AI run cancelled");
         }
     }
 

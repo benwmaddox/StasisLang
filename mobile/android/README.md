@@ -100,3 +100,5 @@ GitHub settings remain collapsed below the command workflow. After configuring a
 OpenAI and GitHub secrets are encrypted with AES-GCM using a key held by Android Keystore. Preferences contain ciphertext rather than plaintext; installations upgrading from the earlier format migrate each legacy secret on first read and remove the plaintext only after encrypted storage succeeds.
 
 GitHub uploads and pull-request operations share one serial background queue. The app persists whether an operation was queued, running, completed, failed, or interrupted. `Retry GitHub Operation` reconstructs failed work from current app-private files; pull-request retries also recheck the saved review fingerprint and stop if the files changed after review.
+
+`Run AI Change` permits one active run. `Cancel AI` disconnects an active model request and prevents later model/tool turns. If cancellation arrives during an atomic source-write batch, that batch first reaches its existing compile/test/rollback boundary so source is never left partially applied. Any model call that already returned remains included in budget totals.
