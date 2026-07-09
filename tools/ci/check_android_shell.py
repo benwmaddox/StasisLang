@@ -216,6 +216,10 @@ def main() -> int:
     assert "createManualTest();" in activity
     assert "Created failing test template; edit it, then Run Tests" in activity
     assert "findSymbolByIdentity" in activity
+    assert "revertSaved.setText(\"Revert Saved\")" in activity
+    assert "revertSelectedToBundled();" in activity
+    assert "Reverted saved symbol to bundled baseline" in activity
+    assert "Revert unavailable: selected symbol is not bundled" in activity
     assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
     assert "list_owner_symbols" in activity

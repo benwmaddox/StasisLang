@@ -743,6 +743,16 @@ public final class MainActivity extends Activity {
         editRow.addView(reset, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         controls.addView(editRow, fullWidth());
 
+        Button revertSaved = new Button(this);
+        revertSaved.setText("Revert Saved");
+        revertSaved.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                revertSelectedToBundled();
+            }
+        });
+        controls.addView(revertSaved, fullWidth());
+
         Button refreshChanges = new Button(this);
         refreshChanges.setText("Changes");
         refreshChanges.setOnClickListener(new View.OnClickListener() {
@@ -3247,6 +3257,35 @@ public final class MainActivity extends Activity {
 
         sourceEditor.setText(selectedSymbol.source.trim());
         setStatusText("Reset editor to selected symbol");
+    }
+
+    private void revertSelectedToBundled() {
+        if (selectedSymbol == null) {
+            setStatusText("Revert unavailable: select a bundled symbol first");
+            return;
+        }
+        try {
+            SymbolEntry baseline = findMatchingSymbol(loadBundledAssetSnapshot(), selectedSymbol);
+            if (baseline == null) {
+                setStatusText("Revert unavailable: selected symbol is not bundled");
+                return;
+            }
+            persistSelectedEdit(selectedSymbol, baseline.source);
+            ProjectSnapshot refreshedProject = loadBundledProject();
+            rebuildSymbolList(refreshedProject);
+            SymbolEntry refreshedSymbol = findMatchingSymbol(refreshedProject, baseline);
+            if (refreshedSymbol != null) {
+                showSymbol(refreshedSymbol);
+            }
+            refreshChangeSummary(refreshedProject);
+            String compileResult = nativeCompileProject(projectRootPath());
+            lastCompileResult = compileResult;
+            compileReady = isRunnableCompile(compileResult);
+            compileAttempted = true;
+            setStatusText("Reverted saved symbol to bundled baseline - " + compileResult);
+        } catch (IOException error) {
+            setStatusText("Revert failed: " + error.getMessage());
+        }
     }
 
     private String classifySelectedReload(SymbolEntry symbol, String editedSource) {
