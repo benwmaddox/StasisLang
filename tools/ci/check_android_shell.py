@@ -197,6 +197,20 @@ def main() -> int:
     assert "preferences.getString(key" in secret_store
     assert "preferences.edit().remove(key)" in secret_store
     assert "if (!editor.commit())" in secret_store
+    assert "Executors.newSingleThreadExecutor()" in activity
+    assert "githubSyncExecutor.submit" in activity
+    assert "githubSyncExecutor.shutdownNow()" in activity
+    assert "githubOperationActive" in activity
+    assert "beginGitHubOperation" in activity
+    assert "another operation is already queued or running" in activity
+    assert "GITHUB_PREF_OPERATION_STATE" in activity
+    assert "GITHUB_PREF_OPERATION_DETAIL" in activity
+    assert "GITHUB_PREF_REVIEW_FINGERPRINT" in activity
+    assert "Retry GitHub Operation" in activity
+    assert "persistGitHubOperationState" in activity
+    assert '"interrupted", "app stopped before completion"' in activity
+    assert '"sync".equals(operation)' in activity
+    assert '"pull_request".equals(operation)' in activity
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity

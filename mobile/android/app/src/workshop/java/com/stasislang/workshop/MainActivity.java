@@ -60,6 +60,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -80,6 +82,10 @@ public final class MainActivity extends Activity {
     private static final String GITHUB_PREF_TOKEN = "github_token";
     private static final String GITHUB_PREF_REPOSITORY = "github_repository";
     private static final String GITHUB_PREF_BRANCH = "github_branch";
+    private static final String GITHUB_PREF_OPERATION = "github_pending_operation";
+    private static final String GITHUB_PREF_OPERATION_STATE = "github_operation_state";
+    private static final String GITHUB_PREF_OPERATION_DETAIL = "github_operation_detail";
+    private static final String GITHUB_PREF_REVIEW_FINGERPRINT = "github_review_fingerprint";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
     private static final String DEFAULT_AI_MODEL = "gpt-5.6-terra";
     private static final String AI_PROMPT_CACHE_KEY = "stasis-android-workshop-v2";
@@ -148,6 +154,7 @@ public final class MainActivity extends Activity {
     private TextView githubSyncStatus;
     private String reviewedGitHubChangeFingerprint = "";
     private String credentialStorageError = "";
+    private volatile boolean githubOperationActive;
     private TextView reloadStatus;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -164,6 +171,7 @@ public final class MainActivity extends Activity {
     private SpeechRecognizer voiceRecognizer;
     private String voiceTranscript = "";
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
+    private final ExecutorService githubSyncExecutor = Executors.newSingleThreadExecutor();
     private Runnable gameLoop;
     private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY];
     private final StringBuilder debugTextBuilder = new StringBuilder(64);
@@ -213,6 +221,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         stopVoiceRecognition();
+        githubSyncExecutor.shutdownNow();
         if (gameLoop != null) {
             gameLoopHandler.removeCallbacks(gameLoop);
         }
@@ -1064,6 +1073,12 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { queueGitHubPullRequest(); }
         });
         githubSettingsBody.addView(createPullRequest, fullWidth());
+        Button retryGitHubOperation = new Button(this);
+        retryGitHubOperation.setText("Retry GitHub Operation");
+        retryGitHubOperation.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { retryGitHubOperation(); }
+        });
+        githubSettingsBody.addView(retryGitHubOperation, fullWidth());
         controls.addView(githubSettingsBody, fullWidth());
         return controls;
     }
@@ -1190,6 +1205,18 @@ public final class MainActivity extends Activity {
             githubSyncStatus.setText("GitHub sync: not configured");
             return;
         }
+        String operation = prefs.getString(GITHUB_PREF_OPERATION, "");
+        String state = prefs.getString(GITHUB_PREF_OPERATION_STATE, "");
+        String detail = prefs.getString(GITHUB_PREF_OPERATION_DETAIL, "");
+        if (("queued".equals(state) || "running".equals(state)) && !operation.isEmpty()) {
+            persistGitHubOperationState(operation, "interrupted", "app stopped before completion");
+            githubSyncStatus.setText("GitHub sync: interrupted; retry available");
+            return;
+        }
+        if (("error".equals(state) || "interrupted".equals(state)) && !operation.isEmpty()) {
+            githubSyncStatus.setText("GitHub sync: retry available" + (detail.isEmpty() ? "" : " - " + detail));
+            return;
+        }
         githubSyncStatus.setText("GitHub sync: ready for " + repository);
     }
 
@@ -1213,22 +1240,22 @@ public final class MainActivity extends Activity {
             githubSyncStatus.setText("GitHub sync: no local changes");
             return;
         }
-        githubSyncStatus.setText("GitHub sync: queued (" + files.size() + " files)");
-        new Thread(new Runnable() {
+        if (!beginGitHubOperation("sync", "GitHub sync: queued (" + files.size() + " files)")) return;
+        githubSyncExecutor.submit(new Runnable() {
             @Override public void run() {
                 try {
                     int completed = 0;
                     for (Map.Entry<String, String> entry : files.entrySet()) {
                         completed += 1;
-                        postGitHubSyncStatus("GitHub sync: " + completed + "/" + files.size());
+                        postGitHubOperationState("sync", "running", "GitHub sync: " + completed + "/" + files.size());
                         uploadGitHubFile(token, repository, branch, entry.getKey(), entry.getValue());
                     }
-                    postGitHubSyncStatus("GitHub sync: complete (" + completed + " files)");
+                    postGitHubOperationState("", "complete", "GitHub sync: complete (" + completed + " files)");
                 } catch (final Exception error) {
-                    postGitHubSyncStatus("GitHub sync error: " + error.getMessage());
+                    postGitHubOperationState("sync", "error", "GitHub sync error: " + error.getMessage());
                 }
             }
-        }).start();
+        });
     }
 
     private static Map<String, String> changedProjectSources(ProjectSnapshot baseline, ProjectSnapshot current) {
@@ -1254,6 +1281,8 @@ public final class MainActivity extends Activity {
                 return;
             }
             reviewedGitHubChangeFingerprint = githubChangeFingerprint(changes);
+            getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
+                    .putString(GITHUB_PREF_REVIEW_FINGERPRINT, reviewedGitHubChangeFingerprint).apply();
             changeSummary.setText(formatChangeSummary(baseline, current)
                     + "\n\n" + formatRawFileDiffs(baseline, current));
             githubSyncStatus.setText("GitHub review: ready (" + changes.size() + " files)");
@@ -1283,30 +1312,33 @@ public final class MainActivity extends Activity {
             githubSyncStatus.setText("GitHub pull request: no local changes");
             return;
         }
+        if (reviewedGitHubChangeFingerprint.isEmpty()) {
+            reviewedGitHubChangeFingerprint = prefs.getString(GITHUB_PREF_REVIEW_FINGERPRINT, "");
+        }
         if (!githubChangeFingerprint(changes).equals(reviewedGitHubChangeFingerprint)) {
             githubSyncStatus.setText("GitHub pull request: review current changes first");
             return;
         }
         final String reviewBranch = githubReviewBranchName();
-        githubSyncStatus.setText("GitHub pull request: queued");
-        new Thread(new Runnable() {
+        if (!beginGitHubOperation("pull_request", "GitHub pull request: queued")) return;
+        githubSyncExecutor.submit(new Runnable() {
             @Override public void run() {
                 try {
                     ensureGitHubReviewBranch(token, repository, baseBranch, reviewBranch);
                     int completed = 0;
                     for (Map.Entry<String, String> entry : changes.entrySet()) {
                         completed += 1;
-                        postGitHubSyncStatus("GitHub pull request: uploading " + completed + "/" + changes.size());
+                        postGitHubOperationState("pull_request", "running", "GitHub pull request: uploading " + completed + "/" + changes.size());
                         uploadGitHubFile(token, repository, reviewBranch, entry.getKey(), entry.getValue());
                     }
                     String url = createOrFindGitHubPullRequest(token, repository, baseBranch, reviewBranch,
                             formatGitHubPullRequestBody(changes));
-                    postGitHubSyncStatus("GitHub pull request: ready " + url);
+                    postGitHubOperationState("", "complete", "GitHub pull request: ready " + url);
                 } catch (Exception error) {
-                    postGitHubSyncStatus("GitHub pull request error: " + error.getMessage());
+                    postGitHubOperationState("pull_request", "error", "GitHub pull request error: " + error.getMessage());
                 }
             }
-        }).start();
+        });
     }
 
     private static String githubChangeFingerprint(Map<String, String> changes) {
@@ -1431,7 +1463,39 @@ public final class MainActivity extends Activity {
         return new JSONObject(response);
     }
 
-    private void postGitHubSyncStatus(final String status) {
+    private void retryGitHubOperation() {
+        String operation = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE)
+                .getString(GITHUB_PREF_OPERATION, "");
+        if ("sync".equals(operation)) {
+            queueGitHubSync();
+        } else if ("pull_request".equals(operation)) {
+            queueGitHubPullRequest();
+        } else {
+            githubSyncStatus.setText("GitHub sync: no retryable operation");
+        }
+    }
+
+    private void persistGitHubOperationState(String operation, String state, String detail) {
+        getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
+                .putString(GITHUB_PREF_OPERATION, operation)
+                .putString(GITHUB_PREF_OPERATION_STATE, state)
+                .putString(GITHUB_PREF_OPERATION_DETAIL, detail)
+                .apply();
+    }
+
+    private synchronized boolean beginGitHubOperation(String operation, String status) {
+        if (githubOperationActive) {
+            githubSyncStatus.setText("GitHub sync: another operation is already queued or running");
+            return false;
+        }
+        githubOperationActive = true;
+        postGitHubOperationState(operation, "queued", status);
+        return true;
+    }
+
+    private void postGitHubOperationState(final String operation, final String state, final String status) {
+        if ("complete".equals(state) || "error".equals(state)) githubOperationActive = false;
+        persistGitHubOperationState(operation, state, status);
         runOnUiThread(new Runnable() {
             @Override public void run() { if (githubSyncStatus != null) githubSyncStatus.setText(status); }
         });
