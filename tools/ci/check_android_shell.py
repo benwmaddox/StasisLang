@@ -11,6 +11,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -93,6 +94,7 @@ def main() -> int:
     assert 'android:windowSoftInputMode="adjustResize"' in manifest
 
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
+    secret_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "private static native String nativeStatus()" in activity
@@ -181,6 +183,20 @@ def main() -> int:
     assert 'githubApiUrl(repository, "/git/refs")' in activity
     assert 'githubApiUrl(repository, "/pulls")' in activity
     assert "GitHub pull request: ready " in activity
+    assert "AndroidSecretStore.readAndMigrate" in activity
+    assert "AndroidSecretStore.write" in activity
+    assert "TYPE_TEXT_VARIATION_PASSWORD" in activity
+    assert "getString(GITHUB_PREF_TOKEN" not in activity
+    assert "putString(GITHUB_PREF_TOKEN" not in activity
+    assert "getString(AI_PREF_API_KEY" not in activity
+    assert "putString(AI_PREF_API_KEY" not in activity
+    assert 'KeyStore.getInstance("AndroidKeyStore")' in secret_store
+    assert 'Cipher.getInstance("AES/GCM/NoPadding")' in secret_store
+    assert "KeyGenParameterSpec.Builder" in secret_store
+    assert "editor.putString(ENCRYPTED_PREFIX + key" in secret_store
+    assert "preferences.getString(key" in secret_store
+    assert "preferences.edit().remove(key)" in secret_store
+    assert "if (!editor.commit())" in secret_store
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity
@@ -350,7 +366,7 @@ def main() -> int:
     assert "replace_struct" in activity
     assert "SharedPreferences" in activity
     assert "AI_PREF_API_KEY" in activity
-    assert "aiPrefs.getString(AI_PREF_API_KEY" in activity
+    assert "readSecretPreference(aiPrefs, AI_PREF_API_KEY)" in activity
     assert "aiPrefs.getString(AI_PREF_MODEL" in activity
     assert "gpt-5.6-terra" in activity
     assert 'DEFAULT_MODEL = "gpt-5.6-terra"' in host_agent

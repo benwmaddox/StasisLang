@@ -18,6 +18,7 @@ import android.os.Looper;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
+import android.text.InputType;
 import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -146,6 +147,7 @@ public final class MainActivity extends Activity {
     private EditText githubBranchEditor;
     private TextView githubSyncStatus;
     private String reviewedGitHubChangeFingerprint = "";
+    private String credentialStorageError = "";
     private TextView reloadStatus;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -352,6 +354,10 @@ public final class MainActivity extends Activity {
         root.addView(editorToggle, toggleParams);
         if (voiceToggle != null) {
             voiceToggle.bringToFront();
+        }
+
+        if (!credentialStorageError.isEmpty()) {
+            setStatusText("Credential storage error: " + credentialStorageError);
         }
 
         startGameLoop();
@@ -966,7 +972,8 @@ public final class MainActivity extends Activity {
         aiApiKeyEditor = new EditText(this);
         aiApiKeyEditor.setHint("OpenAI API key");
         aiApiKeyEditor.setSingleLine(true);
-        aiApiKeyEditor.setText(aiPrefs.getString(AI_PREF_API_KEY, ""));
+        aiApiKeyEditor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        aiApiKeyEditor.setText(readSecretPreference(aiPrefs, AI_PREF_API_KEY));
         aiApiKeyEditor.setTextSize(12.0f);
         aiSettingsBody.addView(aiApiKeyEditor, fullWidth());
 
@@ -1017,7 +1024,8 @@ public final class MainActivity extends Activity {
         githubTokenEditor = new EditText(this);
         githubTokenEditor.setHint("GitHub token (Contents: write)");
         githubTokenEditor.setSingleLine(true);
-        githubTokenEditor.setText(githubPrefs.getString(GITHUB_PREF_TOKEN, ""));
+        githubTokenEditor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        githubTokenEditor.setText(readSecretPreference(githubPrefs, GITHUB_PREF_TOKEN));
         githubSettingsBody.addView(githubTokenEditor, fullWidth());
         githubRepositoryEditor = new EditText(this);
         githubRepositoryEditor.setHint("owner/repository");
@@ -1126,6 +1134,29 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private String readSecretPreference(SharedPreferences preferences, String key) {
+        try {
+            String value = AndroidSecretStore.readAndMigrate(preferences, key);
+            credentialStorageError = "";
+            return value;
+        } catch (Exception error) {
+            credentialStorageError = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+            return "";
+        }
+    }
+
+    private boolean writeSecretPreference(SharedPreferences preferences, String key, String value) {
+        try {
+            AndroidSecretStore.write(preferences, key, value);
+            credentialStorageError = "";
+            return true;
+        } catch (Exception error) {
+            credentialStorageError = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+            setStatusText("Credential storage error: " + credentialStorageError);
+            return false;
+        }
+    }
+
     private void saveGitHubSyncSettings() {
         String token = githubTokenEditor == null ? "" : githubTokenEditor.getText().toString().trim();
         String repository = githubRepositoryEditor == null ? "" : githubRepositoryEditor.getText().toString().trim();
@@ -1134,8 +1165,9 @@ public final class MainActivity extends Activity {
             setStatusText("GitHub sync settings need a token and owner/repository");
             return;
         }
-        getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
-                .putString(GITHUB_PREF_TOKEN, token)
+        SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        if (!writeSecretPreference(preferences, GITHUB_PREF_TOKEN, token)) return;
+        preferences.edit()
                 .putString(GITHUB_PREF_REPOSITORY, repository)
                 .putString(GITHUB_PREF_BRANCH, branch.isEmpty() ? "main" : branch)
                 .apply();
@@ -1149,7 +1181,11 @@ public final class MainActivity extends Activity {
         }
         SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
         String repository = prefs.getString(GITHUB_PREF_REPOSITORY, "").trim();
-        String token = prefs.getString(GITHUB_PREF_TOKEN, "").trim();
+        String token = readSecretPreference(prefs, GITHUB_PREF_TOKEN).trim();
+        if (!credentialStorageError.isEmpty()) {
+            githubSyncStatus.setText("GitHub sync: credential storage error");
+            return;
+        }
         if (token.isEmpty() || repository.indexOf('/') <= 0) {
             githubSyncStatus.setText("GitHub sync: not configured");
             return;
@@ -1159,7 +1195,7 @@ public final class MainActivity extends Activity {
 
     private void queueGitHubSync() {
         final SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
-        final String token = prefs.getString(GITHUB_PREF_TOKEN, "").trim();
+        final String token = readSecretPreference(prefs, GITHUB_PREF_TOKEN).trim();
         final String repository = prefs.getString(GITHUB_PREF_REPOSITORY, "").trim();
         final String branch = prefs.getString(GITHUB_PREF_BRANCH, "main").trim();
         if (token.isEmpty() || repository.indexOf('/') <= 0) {
@@ -1229,7 +1265,7 @@ public final class MainActivity extends Activity {
 
     private void queueGitHubPullRequest() {
         final SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
-        final String token = prefs.getString(GITHUB_PREF_TOKEN, "").trim();
+        final String token = readSecretPreference(prefs, GITHUB_PREF_TOKEN).trim();
         final String repository = prefs.getString(GITHUB_PREF_REPOSITORY, "").trim();
         final String baseBranch = prefs.getString(GITHUB_PREF_BRANCH, "main").trim();
         if (token.isEmpty() || repository.indexOf('/') <= 0) {
@@ -1442,7 +1478,7 @@ public final class MainActivity extends Activity {
             setStatusText("AI budget limits must be non-negative USD values");
             return;
         }
-        saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model);
+        if (!saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model)) return;
         getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
                 .putString(AI_PREF_MAX_RUN_USD, maxRunText)
                 .putString(AI_PREF_MONTHLY_LIMIT_USD, monthlyLimitText)
@@ -1703,7 +1739,7 @@ public final class MainActivity extends Activity {
             return;
         }
         recordCommandHistory(prompt);
-        saveAiSettings(apiKey, model);
+        if (!saveAiSettings(apiKey, model)) return;
         final SymbolEntry symbol = selectedSymbol;
         final String selectedSource = symbol == null || sourceEditor == null ? "" : sourceEditor.getText().toString().trim();
         final ProjectSnapshot aiProject = loadBundledProject();
@@ -1740,12 +1776,11 @@ public final class MainActivity extends Activity {
         }).start();
     }
 
-    private void saveAiSettings(String apiKey, String model) {
-        getSharedPreferences(AI_PREFS, MODE_PRIVATE)
-                .edit()
-                .putString(AI_PREF_API_KEY, apiKey)
-                .putString(AI_PREF_MODEL, model)
-                .apply();
+    private boolean saveAiSettings(String apiKey, String model) {
+        SharedPreferences preferences = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+        if (!writeSecretPreference(preferences, AI_PREF_API_KEY, apiKey)) return false;
+        preferences.edit().putString(AI_PREF_MODEL, model).apply();
+        return true;
     }
 
     private static JSONArray aiProjectGlobals(ProjectSnapshot project) throws Exception {
