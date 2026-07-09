@@ -201,21 +201,61 @@ def run_behavior_tests() -> dict[str, Any]:
     return run_command(["cargo", "test", "-p", "stasis_android_bridge", "android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear", "--", "--ignored", "--nocapture"])
 
 
+def validate_single_replacement_source(name: str, new_source: str) -> tuple[bool, str]:
+    stripped = new_source.strip()
+    if stripped.startswith("function "):
+        keyword = "function"
+    elif stripped.startswith("struct "):
+        keyword = "struct"
+    elif stripped.startswith("global "):
+        keyword = "global"
+    else:
+        return False, "replacement source must start with function, struct, or global"
+    declared, _ = read_identifier(stripped, len(keyword) + 1)
+    if declared != name:
+        return False, f"replacement source defines {declared}, expected {name}"
+    body_start = stripped.find("{")
+    body_end = find_matching_brace(stripped, body_start) if body_start >= 0 else -1
+    if body_start < 0 or body_end != len(stripped):
+        return False, "replacement source must contain exactly one top-level declaration"
+    body = stripped[body_start + 1:body_end - 1]
+    if "function " in body or "struct " in body or "global " in body:
+        return False, "replacement body must not contain nested function, struct, or global declarations"
+    return True, "ok"
+
 def replace_symbol(project: Path, name: str, file: str, new_source: str) -> dict[str, Any]:
+    valid, validation_message = validate_single_replacement_source(name, new_source)
+    if not valid:
+        return {"status": "validation_error", "file": file, "name": name, "error": validation_message}
     path = project / file
     source = read_text(path)
     symbols = [s for s in parse_symbols(project) if s.file == file and s.name == name]
     if symbols:
         target = symbols[0]
         updated = source[:target.start] + new_source.rstrip() + source[target.end:]
-        write_text(path, updated)
         status = "written"
     else:
         updated = source.rstrip() + "\n\n" + new_source.rstrip() + "\n"
-        write_text(path, updated)
         status = "created"
+    write_text(path, updated)
     compile_result = run_compile_check()
-    return {"status": status if compile_result["ok"] else "compile_failed", "file": file, "name": name, "compile": compile_result}
+    if not compile_result["ok"]:
+        write_text(path, source)
+        return {"status": "rolled_back", "file": file, "name": name, "compile": compile_result}
+    return {"status": status, "file": file, "name": name, "compile": compile_result}
+
+
+def write_project_file(project: Path, file: str, source: str) -> dict[str, Any]:
+    path = project / file
+    if not path.is_file():
+        return {"status": "not_found", "file": file}
+    original = read_text(path)
+    write_text(path, source.rstrip() + "\n")
+    compile_result = run_compile_check()
+    if not compile_result["ok"]:
+        write_text(path, original)
+        return {"status": "rolled_back", "file": file, "compile": compile_result}
+    return {"status": "written", "file": file, "compile": compile_result}
 
 
 def tool_specs() -> list[dict[str, Any]]:
@@ -226,7 +266,7 @@ def tool_specs() -> list[dict[str, Any]]:
         spec("list_owner_symbols", "List symbols and preferred receiver calls for one owner/type.", ["owner"], [], {"owner": "GameState"}),
         spec("read_symbol", "Read one symbol source.", ["name"], ["kind", "file", "owner"], {"name": "update_enemy_paddle"}),
         spec("read_file", "Read a source file.", ["file"], [], {"file": "src/main.stasis"}),
-        spec("write_symbol", "Create or replace a Stasis function/global/struct, then compile locally.", ["file", "name", "new_source"], ["kind", "owner"], {"file": "src/main.stasis", "name": "tick", "new_source": "function tick(): void {\n}"}),
+        spec("write_symbol", "Create or replace exactly one Stasis function/global/struct, then compile locally and roll back on compile failure. The new_source must not contain additional top-level or nested declarations.", ["file", "name", "new_source"], ["kind", "owner"], {"file": "src/main.stasis", "name": "tick", "new_source": "function tick(): void {\n}"}),
         spec("run_tests", "Run the local host behavior test for the requested edit.", [], [], {}),
         spec("get_diagnostics", "Return last local diagnostics.", [], [], {}),
     ]
@@ -256,11 +296,44 @@ def build_request(project: Path, prompt: str) -> dict[str, Any]:
     }
 
 
+def parse_json_object(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    start = stripped.find("{")
+    if start < 0:
+        raise ValueError(f"No JSON object found in model response: {stripped[:200]}")
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(stripped)):
+        ch = stripped[index]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(stripped[start:index + 1])
+    raise ValueError(f"Unclosed JSON object in model response: {stripped[:200]}")
+
 def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, Any]:
     prompt = (
         "Return only one JSON object. Use mode=tool_calls to inspect/write with the provided tools. "
-        "After write_symbol, compile runs locally. Use run_tests to verify the behavior. "
-        "Return mode=done with empty tool_calls when the requested work is complete. "
+        "After write_symbol, compile runs locally and failed compiles roll back. Use run_tests to verify the behavior. "
+        "Return mode=tool_calls for tools, mode=edits with edits if returning direct edits, or mode=done only when tests pass. "
         "Use Stasis syntax only. Request: " + json.dumps(request, separators=(",", ":"))
     )
     schema = {"type": "object", "additionalProperties": True}
@@ -281,8 +354,23 @@ def call_openai(api_key: str, model: str, request: dict[str, Any]) -> dict[str, 
                 if "text" in content:
                     chunks.append(content["text"])
         text = "".join(chunks)
-    return json.loads(text)
+    return parse_json_object(text)
 
+
+def summarize_observations(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summary = []
+    for observation in observations:
+        result = observation.get("result", {})
+        compile_result = result.get("compile") if isinstance(result, dict) else None
+        summary.append({
+            "tool": observation.get("tool"),
+            "args": observation.get("args"),
+            "status": result.get("status") if isinstance(result, dict) else None,
+            "compile_ok": compile_result.get("ok") if isinstance(compile_result, dict) else None,
+            "test_ok": result.get("ok") if isinstance(result, dict) and observation.get("tool") == "run_tests" else None,
+            "error_tail": (compile_result or result).get("output_tail", "")[-600:] if isinstance((compile_result or result), dict) else "",
+        })
+    return summary
 
 def execute_tool(project: Path, tool: str, args: dict[str, Any], last_diagnostics: dict[str, Any]) -> dict[str, Any]:
     symbols = parse_symbols(project)
@@ -308,6 +396,8 @@ def execute_tool(project: Path, tool: str, args: dict[str, Any], last_diagnostic
         return {"file": file, "source": read_text(project / file)}
     if tool == "write_symbol":
         return replace_symbol(project, args.get("name", ""), args.get("file", ""), args.get("new_source") or args.get("source", ""))
+    if tool == "write_file":
+        return write_project_file(project, args.get("file", ""), args.get("source", ""))
     if tool == "run_tests":
         return run_behavior_tests()
     if tool == "get_diagnostics":
@@ -335,11 +425,39 @@ def main() -> int:
         response = call_openai(api_key, args.model, request)
         mode = response.get("mode")
         tool_calls = response.get("tool_calls") or []
-        print(json.dumps({"turn": turn, "mode": mode, "summary": response.get("summary", ""), "tool_call_count": len(tool_calls)}, indent=2))
+        print(json.dumps({"turn": turn, "mode": mode, "response_keys": sorted(response.keys()), "summary": response.get("summary", ""), "tool_call_count": len(tool_calls), "edit_count": len(response.get("edits") or [])}, indent=2))
+        if mode == "edits" or (mode != "tool_calls" and response.get("edits")):
+            observations = []
+            for edit in response.get("edits") or []:
+                result = replace_symbol(project, edit.get("name", ""), edit.get("file", ""), edit.get("new_source", ""))
+                observations.append({"tool": "edit", "args": {"file": edit.get("file", ""), "name": edit.get("name", "")}, "result": result})
+            final = run_behavior_tests()
+            print(json.dumps({"edit_observations": summarize_observations(observations), "final_test": final}, indent=2))
+            if final.get("ok"):
+                return 0
+            if turn >= MAX_TURNS:
+                return 1
+            request = {
+                "original_request": build_request(project, args.prompt),
+                "tool_observations": observations,
+                "test_observation": final,
+                "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Inspect the current source and fix it using tool calls. Use precise write_symbol calls; write_file is reserved for host recovery and is not part of the normal tool list.",
+            }
+            continue
         if mode != "tool_calls" or not tool_calls:
             final = run_behavior_tests()
             print(json.dumps({"final_test": final}, indent=2))
-            return 0 if final.get("ok") else 1
+            if final.get("ok"):
+                return 0
+            if turn >= MAX_TURNS:
+                return 1
+            request = {
+                "original_request": build_request(project, args.prompt),
+                "tool_observations": [],
+                "test_observation": final,
+                "instruction": "The model returned done or an unsupported shape, but the required local behavior test failed. Inspect the current source and fix it using tool calls. Fix duplicate or misplaced symbols with precise write_symbol calls; write_file is not part of the normal tool list.",
+            }
+            continue
         observations = []
         for call in tool_calls:
             tool = call.get("tool", "")
@@ -349,6 +467,7 @@ def main() -> int:
             if tool in {"write_symbol", "run_tests"}:
                 last_diagnostics = result
             observations.append({"tool": tool, "args": tool_args, "result": result})
+        print(json.dumps({"tool_observations": summarize_observations(observations)}, indent=2))
         request = {"original_request": build_request(project, args.prompt), "tool_observations": observations, "instruction": "Use observations to continue or return mode=done. If tests fail, inspect and fix. Do not repeat identical tool calls."}
     print(json.dumps({"error": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
     return 1

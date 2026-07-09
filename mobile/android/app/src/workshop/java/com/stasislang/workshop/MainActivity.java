@@ -2542,16 +2542,27 @@ public final class MainActivity extends Activity {
             throw new IOException("AI edit must use Stasis syntax, not Rust syntax");
         }
         if ("replace_struct".equals(editKind)) {
-            if (!newSource.trim().startsWith("struct ") || !expectedName.equals(extractDeclarationName(newSource, "struct"))) {
-                throw new IOException("AI replace_struct source does not define expected struct: " + expectedName);
-            }
+            validateSingleReplacementDeclaration(newSource, "struct", expectedName);
             return;
         }
-        if (!newSource.trim().startsWith("function ") || !expectedName.equals(extractDeclarationName(newSource, "function"))) {
-            throw new IOException("AI replace_function source does not define expected function: " + expectedName);
-        }
+        validateSingleReplacementDeclaration(newSource, "function", expectedName);
     }
 
+    private static void validateSingleReplacementDeclaration(String source, String keyword, String expectedName) throws Exception {
+        String trimmed = source.trim();
+        if (!trimmed.startsWith(keyword + " ") || !expectedName.equals(extractDeclarationName(trimmed, keyword))) {
+            throw new IOException("AI replace_" + keyword + " source does not define expected " + keyword + ": " + expectedName);
+        }
+        int bodyStart = trimmed.indexOf('{');
+        int bodyEnd = bodyStart < 0 ? -1 : findMatchingBrace(trimmed, bodyStart);
+        if (bodyStart < 0 || bodyEnd != trimmed.length()) {
+            throw new IOException("AI replace_" + keyword + " source must contain exactly one top-level " + keyword + " declaration");
+        }
+        String body = trimmed.substring(bodyStart + 1, bodyEnd - 1);
+        if (body.contains("function ") || body.contains("struct ") || body.contains("global ")) {
+            throw new IOException("AI replace_" + keyword + " body must not contain nested function, struct, or global declarations");
+        }
+    }
     private static String extractDeclarationName(String source, String keyword) {
         String trimmed = source.trim();
         String prefix = keyword + " ";

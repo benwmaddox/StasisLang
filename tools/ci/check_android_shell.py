@@ -252,6 +252,8 @@ def main() -> int:
     assert "part.optString(\"output_text\", \"\")" in activity
     assert "validateAiReplacementSource(kind, target.name, newSource)" in activity
     assert "AI edit must use Stasis syntax, not Rust syntax" in activity
+    assert "must contain exactly one top-level" in activity
+    assert "body must not contain nested function, struct, or global declarations" in activity
     assert "extractDeclarationName(newSource, \"function\")" in activity
     assert "replace_function" in activity
     assert "replace_struct" in activity
