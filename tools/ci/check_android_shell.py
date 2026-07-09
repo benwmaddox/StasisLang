@@ -84,6 +84,7 @@ def main() -> int:
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
     workshop_manifest = read("mobile/android/app/src/workshop/AndroidManifest.xml")
     assert "android.permission.INTERNET" not in manifest
+    assert "android.permission.RECORD_AUDIO" in workshop_manifest
     assert "android.permission.INTERNET" in workshop_manifest
     assert "${appLabel}" in manifest
     assert "android.intent.action.MAIN" in manifest
@@ -136,6 +137,13 @@ def main() -> int:
     assert "aiSettingsBody.setVisibility(View.GONE)" in activity
     assert "AI run started: preparing workspace and command context" in activity
     assert "AI run needs both a request and an API key" in activity
+    assert "installVoiceChangeControls(root)" in activity
+    assert "SpeechRecognizer.createSpeechRecognizer(this)" in activity
+    assert "VOICE_RECORD_PERMISSION_REQUEST" in activity
+    assert "voiceCancel.setText(\"Cancel\")" in activity
+    assert "voiceRunButton.setText(\"Run\")" in activity
+    assert "Voice change confirmed: starting AI run" in activity
+    assert "Voice change cancelled" in activity
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity
