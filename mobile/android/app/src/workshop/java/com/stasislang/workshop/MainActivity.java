@@ -66,6 +66,7 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_MODEL = "openai_model";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
+    private static final String AI_PREF_COMMAND_HISTORY_PREFIX = "command_history_";
     private static final String GITHUB_PREFS = "github_sync_settings";
     private static final String GITHUB_PREF_TOKEN = "github_token";
     private static final String GITHUB_PREF_REPOSITORY = "github_repository";
@@ -79,6 +80,7 @@ public final class MainActivity extends Activity {
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int MAX_AI_AGENT_TURNS = 15;
+    private static final int MAX_COMMAND_HISTORY = 20;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
     private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
     private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
@@ -123,6 +125,8 @@ public final class MainActivity extends Activity {
     private TextView aiPhasePill;
     private TextView aiElapsedPill;
     private LinearLayout aiSettingsBody;
+    private LinearLayout commandHistoryBody;
+    private TextView commandHistoryText;
     private LinearLayout githubSettingsBody;
     private EditText githubTokenEditor;
     private EditText githubRepositoryEditor;
@@ -895,6 +899,29 @@ public final class MainActivity extends Activity {
         progressRow.addView(aiElapsedPill);
         controls.addView(progressRow, fullWidth());
 
+        Button historyToggle = new Button(this);
+        historyToggle.setText("Recent Commands");
+        historyToggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { toggleCommandHistory(); }
+        });
+        controls.addView(historyToggle, fullWidth());
+        commandHistoryBody = new LinearLayout(this);
+        commandHistoryBody.setOrientation(LinearLayout.VERTICAL);
+        commandHistoryBody.setVisibility(View.GONE);
+        commandHistoryText = new TextView(this);
+        commandHistoryText.setTextSize(12.0f);
+        commandHistoryText.setTextColor(Color.rgb(73, 84, 100));
+        commandHistoryText.setPadding(dp(8), dp(6), dp(8), dp(6));
+        commandHistoryBody.addView(commandHistoryText, fullWidth());
+        Button clearHistory = new Button(this);
+        clearHistory.setText("Clear Command History");
+        clearHistory.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { clearCommandHistory(); }
+        });
+        commandHistoryBody.addView(clearHistory, fullWidth());
+        controls.addView(commandHistoryBody, fullWidth());
+        refreshCommandHistory();
+
         githubSyncStatus = new TextView(this);
         githubSyncStatus.setTextSize(12.0f);
         githubSyncStatus.setTextColor(Color.rgb(73, 84, 100));
@@ -986,6 +1013,66 @@ public final class MainActivity extends Activity {
         githubSettingsBody.addView(syncNow, fullWidth());
         controls.addView(githubSettingsBody, fullWidth());
         return controls;
+    }
+
+    private String commandHistoryPreferenceKey() {
+        String root = projectRootPath == null ? PROJECT_DIR : projectRootPath;
+        return AI_PREF_COMMAND_HISTORY_PREFIX + Integer.toHexString(root.hashCode());
+    }
+
+    private void toggleCommandHistory() {
+        if (commandHistoryBody != null) {
+            commandHistoryBody.setVisibility(commandHistoryBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+        }
+    }
+
+    private void recordCommandHistory(String prompt) {
+        SharedPreferences prefs = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+        JSONArray existing;
+        try {
+            existing = new JSONArray(prefs.getString(commandHistoryPreferenceKey(), "[]"));
+        } catch (Exception ignored) {
+            existing = new JSONArray();
+        }
+        JSONArray updated = new JSONArray();
+        updated.put(prompt);
+        for (int index = 0; index < existing.length() && updated.length() < MAX_COMMAND_HISTORY; index += 1) {
+            String prior = existing.optString(index, "").trim();
+            if (!prior.isEmpty() && !prior.equals(prompt)) {
+                updated.put(prior);
+            }
+        }
+        prefs.edit().putString(commandHistoryPreferenceKey(), updated.toString()).apply();
+        refreshCommandHistory();
+    }
+
+    private void refreshCommandHistory() {
+        if (commandHistoryText == null) {
+            return;
+        }
+        JSONArray history;
+        try {
+            history = new JSONArray(getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                    .getString(commandHistoryPreferenceKey(), "[]"));
+        } catch (Exception ignored) {
+            history = new JSONArray();
+        }
+        if (history.length() == 0) {
+            commandHistoryText.setText("No commands submitted for this project");
+            return;
+        }
+        StringBuilder text = new StringBuilder();
+        for (int index = 0; index < history.length(); index += 1) {
+            if (index > 0) text.append('\n');
+            text.append(index + 1).append(". ").append(history.optString(index, ""));
+        }
+        commandHistoryText.setText(text.toString());
+    }
+
+    private void clearCommandHistory() {
+        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit().remove(commandHistoryPreferenceKey()).apply();
+        refreshCommandHistory();
+        setStatusText("Command history cleared for this project");
     }
 
     private void toggleGitHubSettings() {
@@ -1320,6 +1407,7 @@ public final class MainActivity extends Activity {
         if (model.isEmpty()) {
             model = DEFAULT_AI_MODEL;
         }
+        recordCommandHistory(prompt);
         saveAiSettings(apiKey, model);
         final SymbolEntry symbol = selectedSymbol;
         final String selectedSource = symbol == null || sourceEditor == null ? "" : sourceEditor.getText().toString().trim();

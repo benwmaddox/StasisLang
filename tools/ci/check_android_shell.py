@@ -137,6 +137,11 @@ def main() -> int:
     assert "aiSettingsBody.setVisibility(View.GONE)" in activity
     assert "AI run started: preparing workspace and command context" in activity
     assert "AI run needs both a request and an API key" in activity
+    assert "Recent Commands" in activity
+    assert "Clear Command History" in activity
+    assert "MAX_COMMAND_HISTORY = 20" in activity
+    assert "recordCommandHistory(prompt)" in activity
+    assert "Command history cleared for this project" in activity
     assert "installVoiceChangeControls(root)" in activity
     assert "SpeechRecognizer.createSpeechRecognizer(this)" in activity
     assert "VOICE_RECORD_PERMISSION_REQUEST" in activity
