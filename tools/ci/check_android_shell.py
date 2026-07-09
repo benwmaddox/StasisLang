@@ -144,6 +144,12 @@ def main() -> int:
     assert "voiceRunButton.setText(\"Run\")" in activity
     assert "Voice change confirmed: starting AI run" in activity
     assert "Voice change cancelled" in activity
+    assert "GITHUB_PREF_TOKEN" in activity
+    assert "GitHub Sync Settings" in activity
+    assert "githubSettingsBody.setVisibility(View.GONE)" in activity
+    assert "GitHub sync: not configured" in activity
+    assert "GitHub sync: ready for " in activity
+    assert "Save GitHub Sync Settings" in activity
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity

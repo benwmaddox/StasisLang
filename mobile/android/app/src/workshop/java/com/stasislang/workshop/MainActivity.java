@@ -65,6 +65,10 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_MODEL = "openai_model";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
+    private static final String GITHUB_PREFS = "github_sync_settings";
+    private static final String GITHUB_PREF_TOKEN = "github_token";
+    private static final String GITHUB_PREF_REPOSITORY = "github_repository";
+    private static final String GITHUB_PREF_BRANCH = "github_branch";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
     private static final String DEFAULT_AI_MODEL = "gpt-5.6-terra";
     private static final String AI_PROMPT_CACHE_KEY = "stasis-android-workshop-v2";
@@ -118,6 +122,11 @@ public final class MainActivity extends Activity {
     private TextView aiPhasePill;
     private TextView aiElapsedPill;
     private LinearLayout aiSettingsBody;
+    private LinearLayout githubSettingsBody;
+    private EditText githubTokenEditor;
+    private EditText githubRepositoryEditor;
+    private EditText githubBranchEditor;
+    private TextView githubSyncStatus;
     private TextView reloadStatus;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -885,6 +894,13 @@ public final class MainActivity extends Activity {
         progressRow.addView(aiElapsedPill);
         controls.addView(progressRow, fullWidth());
 
+        githubSyncStatus = new TextView(this);
+        githubSyncStatus.setTextSize(12.0f);
+        githubSyncStatus.setTextColor(Color.rgb(73, 84, 100));
+        githubSyncStatus.setPadding(0, dp(4), 0, dp(2));
+        controls.addView(githubSyncStatus, fullWidth());
+        refreshGitHubSyncStatus();
+
         Button settingsToggle = new Button(this);
         settingsToggle.setText("AI Settings");
         settingsToggle.setOnClickListener(new View.OnClickListener() {
@@ -922,7 +938,84 @@ public final class MainActivity extends Activity {
         });
         aiSettingsBody.addView(saveSettings, fullWidth());
         controls.addView(aiSettingsBody, fullWidth());
+
+        Button githubSettingsToggle = new Button(this);
+        githubSettingsToggle.setText("GitHub Sync Settings");
+        githubSettingsToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                toggleGitHubSettings();
+            }
+        });
+        controls.addView(githubSettingsToggle, fullWidth());
+
+        SharedPreferences githubPrefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        githubSettingsBody = new LinearLayout(this);
+        githubSettingsBody.setOrientation(LinearLayout.VERTICAL);
+        githubSettingsBody.setVisibility(View.GONE);
+        githubTokenEditor = new EditText(this);
+        githubTokenEditor.setHint("GitHub token (Contents: write)");
+        githubTokenEditor.setSingleLine(true);
+        githubTokenEditor.setText(githubPrefs.getString(GITHUB_PREF_TOKEN, ""));
+        githubSettingsBody.addView(githubTokenEditor, fullWidth());
+        githubRepositoryEditor = new EditText(this);
+        githubRepositoryEditor.setHint("owner/repository");
+        githubRepositoryEditor.setSingleLine(true);
+        githubRepositoryEditor.setText(githubPrefs.getString(GITHUB_PREF_REPOSITORY, ""));
+        githubSettingsBody.addView(githubRepositoryEditor, fullWidth());
+        githubBranchEditor = new EditText(this);
+        githubBranchEditor.setHint("Branch");
+        githubBranchEditor.setSingleLine(true);
+        githubBranchEditor.setText(githubPrefs.getString(GITHUB_PREF_BRANCH, "main"));
+        githubSettingsBody.addView(githubBranchEditor, fullWidth());
+        Button saveGitHubSettings = new Button(this);
+        saveGitHubSettings.setText("Save GitHub Sync Settings");
+        saveGitHubSettings.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                saveGitHubSyncSettings();
+            }
+        });
+        githubSettingsBody.addView(saveGitHubSettings, fullWidth());
+        controls.addView(githubSettingsBody, fullWidth());
         return controls;
+    }
+
+    private void toggleGitHubSettings() {
+        if (githubSettingsBody != null) {
+            githubSettingsBody.setVisibility(githubSettingsBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+        }
+    }
+
+    private void saveGitHubSyncSettings() {
+        String token = githubTokenEditor == null ? "" : githubTokenEditor.getText().toString().trim();
+        String repository = githubRepositoryEditor == null ? "" : githubRepositoryEditor.getText().toString().trim();
+        String branch = githubBranchEditor == null ? "" : githubBranchEditor.getText().toString().trim();
+        if (token.isEmpty() || repository.indexOf('/') <= 0 || repository.endsWith("/")) {
+            setStatusText("GitHub sync settings need a token and owner/repository");
+            return;
+        }
+        getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
+                .putString(GITHUB_PREF_TOKEN, token)
+                .putString(GITHUB_PREF_REPOSITORY, repository)
+                .putString(GITHUB_PREF_BRANCH, branch.isEmpty() ? "main" : branch)
+                .apply();
+        refreshGitHubSyncStatus();
+        setStatusText("GitHub sync settings saved; background sync is ready");
+    }
+
+    private void refreshGitHubSyncStatus() {
+        if (githubSyncStatus == null) {
+            return;
+        }
+        SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        String repository = prefs.getString(GITHUB_PREF_REPOSITORY, "").trim();
+        String token = prefs.getString(GITHUB_PREF_TOKEN, "").trim();
+        if (token.isEmpty() || repository.indexOf('/') <= 0) {
+            githubSyncStatus.setText("GitHub sync: not configured");
+            return;
+        }
+        githubSyncStatus.setText("GitHub sync: ready for " + repository);
     }
 
     private void toggleAiSettings() {
