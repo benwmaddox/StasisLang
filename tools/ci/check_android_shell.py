@@ -216,6 +216,10 @@ def main() -> int:
     assert "createManualTest();" in activity
     assert "Created failing test template; edit it, then Run Tests" in activity
     assert "findSymbolByIdentity" in activity
+    assert "deleteTest.setText(\"Delete Test\")" in activity
+    assert "deleteSelectedManualTest();" in activity
+    assert "bundled tests can be reverted, not deleted" in activity
+    assert "Deleted user-created test" in activity
     assert "revertSaved.setText(\"Revert Saved\")" in activity
     assert "revertSelectedToBundled();" in activity
     assert "Reverted saved symbol to bundled baseline" in activity
