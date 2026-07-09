@@ -24,6 +24,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROJECT = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
 DEFAULT_MODEL = "gpt-5.6-luna"
+DEFAULT_TRACE_DIR = ROOT / "artifacts/android_ai_runs"
 MAX_TURNS = 15
 PROMPT_CACHE_KEY = "stasis-android-ai-agent-v2"
 
@@ -268,6 +269,11 @@ def write_trace_file(path: Path, meta: dict[str, Any], trace_events: list[dict[s
         "exit_code": exit_code,
     }
     write_text(path, json.dumps(payload, indent=2))
+
+
+def default_trace_file() -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return DEFAULT_TRACE_DIR / f"android_ai_run_{timestamp}.json"
 
 def run_command(args: list[str]) -> dict[str, Any]:
     proc = subprocess.run(args, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -702,7 +708,7 @@ def summarize_response_for_trace(body: dict[str, Any], parsed: dict[str, Any]) -
     }
 
 
-def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events: list[dict[str, Any]] | None = None, turn: int = 0) -> dict[str, Any]:
+def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
     stable_instruction = (
         "Return only one JSON object matching request.shared_context.protocol.response_contract exactly. "
         "Use mode=tool_calls to inspect/write with the provided fine-grained symbol, import, and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/read_imports/list_tests/read_test_file instead. "
@@ -715,7 +721,7 @@ def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events:
     shared_context = request.get("shared_context", {})
     turn_state = request.get("turn_state", {})
     schema = response_json_schema()
-    payload = {
+    return {
         "model": model,
         "prompt_cache_key": PROMPT_CACHE_KEY,
         "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
@@ -736,6 +742,59 @@ def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events:
             },
         ],
     }
+
+
+def validate_openai_payload(payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if not payload.get("prompt_cache_key"):
+        errors.append("prompt_cache_key is required")
+    if payload.get("prompt_cache_options") != {"mode": "explicit", "ttl": "30m"}:
+        errors.append("prompt_cache_options must use explicit 30m caching")
+    input_items = payload.get("input")
+    if not isinstance(input_items, list) or len(input_items) != 3:
+        errors.append("input must contain stable instruction, stable context, and volatile context messages")
+        return errors
+    stable_content = input_items[1].get("content") if isinstance(input_items[1], dict) else None
+    if not isinstance(stable_content, list) or len(stable_content) != 1:
+        errors.append("stable context must use one input_text content block")
+    elif stable_content[0].get("prompt_cache_breakpoint") != {"mode": "explicit"}:
+        errors.append("stable context must end with an explicit prompt cache breakpoint")
+    if any(item.get("type") == "prompt_cache_breakpoint" for item in input_items if isinstance(item, dict)):
+        errors.append("prompt cache breakpoints must be attached to input_text blocks")
+    return errors
+
+
+def summarize_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    messages = []
+    for item in payload.get("input", []):
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content", [])
+        blocks = []
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    blocks.append({
+                        "type": block.get("type"),
+                        "text_length": len(str(block.get("text", ""))),
+                        "prompt_cache_breakpoint": block.get("prompt_cache_breakpoint"),
+                    })
+        messages.append({"role": item.get("role"), "content": blocks})
+    return {
+        "model": payload.get("model"),
+        "prompt_cache_key": payload.get("prompt_cache_key"),
+        "prompt_cache_options": payload.get("prompt_cache_options"),
+        "messages": messages,
+    }
+
+
+def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events: list[dict[str, Any]] | None = None, turn: int = 0) -> dict[str, Any]:
+    payload = build_openai_payload(model, request)
+    payload_errors = validate_openai_payload(payload)
+    if payload_errors:
+        raise RuntimeError("OpenAI payload preflight failed: " + "; ".join(payload_errors))
+    if trace_events is not None:
+        trace_events.append({"kind": "openai_request", "turn": turn, "payload": summarize_openai_payload(payload)})
     req = urllib.request.Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(payload).encode("utf-8"),
@@ -748,6 +807,8 @@ def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events:
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"OpenAI request failed with HTTP {error.code}: {detail}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"OpenAI request failed: {error.reason}") from error
     text = body.get("output_text", "")
     if not text:
         chunks: list[str] = []
@@ -938,43 +999,55 @@ def main() -> int:
     parser.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--reset-paddle-speed-feature", action="store_true", help="Reset the bundled Pong sample to the baseline before the requested paddle-speed feature.")
-    parser.add_argument("--trace-file", type=Path, help="Write full request/response/tool trace JSON to this file.")
+    parser.add_argument("--trace-file", type=Path, help="Write the run trace JSON to this file; defaults to artifacts/android_ai_runs/.")
+    parser.add_argument("--preflight", action="store_true", help="Validate the outgoing Responses payload locally without calling OpenAI or editing the project.")
     args = parser.parse_args()
     load_env_file(ROOT / ".env")
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        print("OPENAI_API_KEY is required", file=sys.stderr)
-        return 2
-
     project = args.project_root.resolve()
-    if args.reset_paddle_speed_feature:
-        reset_paddle_speed_feature(project)
+    trace_file = args.trace_file or default_trace_file()
     request = build_agent_request(project, args.prompt, {"phase": "initial", "instruction": "Inspect the workspace with fine-grained tools, make the requested behavior change, add or update tests, run tests, then return done only after tests pass."})
     trace_events: list[dict[str, Any]] = []
     trace_meta = {"prompt": args.prompt, "model": args.model, "project_root": str(project), "reset_paddle_speed_feature": bool(args.reset_paddle_speed_feature)}
-    if args.trace_file:
-        trace_events.append({"kind": "trace_meta", "meta": trace_meta})
-        trace_events.append({"kind": "initial_request", "summary": summarize_request_for_trace(request)})
-    last_diagnostics: dict[str, Any] = {}
-    total_actions = 0
+    trace_events.append({"kind": "trace_meta", "meta": trace_meta})
+    trace_events.append({"kind": "initial_request", "summary": summarize_request_for_trace(request)})
+    print(f"Trace file: {trace_file}")
     started_at_iso = datetime.now(timezone.utc).isoformat()
     started_at_perf = time.perf_counter()
+    if args.preflight:
+        errors = validate_openai_payload(build_openai_payload(args.model, request))
+        trace_events.append({"kind": "payload_preflight", "ok": not errors, "errors": errors})
+        write_trace_file(trace_file, trace_meta, trace_events, 0 if not errors else 1, started_at_iso, time.perf_counter() - started_at_perf, 0)
+        print(json.dumps({"preflight_ok": not errors, "errors": errors}, indent=2))
+        return 0 if not errors else 1
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        trace_events.append({"kind": "api_error", "error": "OPENAI_API_KEY is required"})
+        write_trace_file(trace_file, trace_meta, trace_events, 2, started_at_iso, time.perf_counter() - started_at_perf, 0)
+        print("OPENAI_API_KEY is required", file=sys.stderr)
+        return 2
+    if args.reset_paddle_speed_feature:
+        reset_paddle_speed_feature(project)
+    last_diagnostics: dict[str, Any] = {}
+    total_actions = 0
     for turn in range(1, MAX_TURNS + 1):
-        response = call_openai(api_key, args.model, request, trace_events if args.trace_file else None, turn)
+        try:
+            response = call_openai(api_key, args.model, request, trace_events, turn)
+        except Exception as error:
+            trace_events.append({"kind": "api_error", "turn": turn, "error_type": type(error).__name__, "error": str(error)})
+            write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
+            print(json.dumps({"error": str(error), "trace_file": str(trace_file)}, indent=2), file=sys.stderr)
+            return 1
         mode = response.get("mode")
         tool_calls, response_validation_errors = validate_response_shape(response)
         print(json.dumps({"turn": turn, "mode": mode, "response_keys": sorted(response.keys()), "summary": response.get("summary", ""), "tool_call_count": len(tool_calls), "validation_error_count": len(response_validation_errors), "edit_count": len(response.get("edits") or [])}, indent=2))
         if response_validation_errors:
             print(json.dumps({"response_validation_errors": response_validation_errors}, indent=2))
-            if args.trace_file:
-                trace_events.append({"kind": "response_validation_errors", "turn": turn, "errors": response_validation_errors})
+            trace_events.append({"kind": "response_validation_errors", "turn": turn, "errors": response_validation_errors})
             if turn >= MAX_TURNS:
-                if args.trace_file:
-                    write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
+                write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
             request = build_agent_request(project, args.prompt, {"phase": "response_validation_error", "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching shared_context.protocol.response_contract. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."})
-            if args.trace_file:
-                trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
+            trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
             continue
         if mode == "edits" or (mode != "tool_calls" and response.get("edits")):
             observations = []
@@ -983,45 +1056,36 @@ def main() -> int:
                 observations.append({"tool": "edit", "args": {"file": edit.get("file", ""), "name": edit.get("name", "")}, "result": result})
             final = run_behavior_tests(project)
             print(json.dumps({"edit_observations": summarize_observations(observations), "final_test": final}, indent=2))
-            if args.trace_file:
-                trace_events.append({"kind": "direct_edit_observations", "turn": turn, "observations": observations, "final_test": final})
+            trace_events.append({"kind": "direct_edit_observations", "turn": turn, "observations": observations, "final_test": final})
             if final.get("ok"):
-                if args.trace_file:
-                    write_trace_file(args.trace_file, trace_meta, trace_events, 0, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
+                write_trace_file(trace_file, trace_meta, trace_events, 0, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 0
             if turn >= MAX_TURNS:
-                if args.trace_file:
-                    write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
+                write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
             request = build_agent_request(project, args.prompt, {"phase": "direct_edit_test_failure", "tool_observations": observations, "test_observation": final, "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Inspect shared_context.workflow_rules.behavior_test_expectations and current source, then fix it using tool calls. Use precise write_symbol calls; write_file is reserved for host recovery and is not part of the normal tool list."})
             continue
         if mode != "tool_calls" or not tool_calls:
             final = run_behavior_tests(project)
             print(json.dumps({"final_test": final}, indent=2))
-            if args.trace_file:
-                trace_events.append({"kind": "final_test_after_done_or_empty", "turn": turn, "final_test": final})
+            trace_events.append({"kind": "final_test_after_done_or_empty", "turn": turn, "final_test": final})
             if final.get("ok"):
-                if args.trace_file:
-                    write_trace_file(args.trace_file, trace_meta, trace_events, 0, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
+                write_trace_file(trace_file, trace_meta, trace_events, 0, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 0
             if turn >= MAX_TURNS:
-                if args.trace_file:
-                    write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
+                write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
             request = build_agent_request(project, args.prompt, {"phase": "done_or_empty_test_failure", "tool_observations": [], "test_observation": final, "instruction": "The model returned done or an unsupported shape, but the required local behavior test failed. Inspect shared_context.workflow_rules.behavior_test_expectations and current source, then fix it using tool calls. Fix duplicate or misplaced symbols with precise write_symbol calls; write_file is not part of the normal tool list."})
             continue
         observations, last_diagnostics = execute_tool_batch(project, tool_calls, last_diagnostics)
         total_actions += len(tool_calls)
         print(json.dumps({"tool_observations": summarize_observations(observations)}, indent=2))
-        if args.trace_file:
-            trace_events.append({"kind": "tool_observations", "turn": turn, "observations": observations, "summary": summarize_observations(observations)})
+        trace_events.append({"kind": "tool_observations", "turn": turn, "observations": observations, "summary": summarize_observations(observations)})
         request = build_agent_request(project, args.prompt, {"phase": "tool_observations", "tool_observations": observations, "instruction": "Use observations to continue or return mode=done. If tests fail, inspect shared_context.workflow_rules.behavior_test_expectations and fix the exact required state/checks. Do not repeat identical tool calls."})
-        if args.trace_file:
-            trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
+        trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
     print(json.dumps({"error": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
-    if args.trace_file:
-        trace_events.append({"kind": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics})
-        write_trace_file(args.trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
+    trace_events.append({"kind": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics})
+    write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
     return 1
 
 
