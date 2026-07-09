@@ -142,6 +142,15 @@ def main() -> int:
     assert "MAX_COMMAND_HISTORY = 20" in activity
     assert "recordCommandHistory(prompt)" in activity
     assert "Command history cleared for this project" in activity
+    assert "Maximum USD per AI run" in activity
+    assert "Monthly AI limit USD" in activity
+    assert "AI budget:" in activity
+    assert "AI run blocked by configured spending limit" in activity
+    assert "AI spending limit reached before agent turn" in activity
+    assert "recordMonthlyAiSpend" in activity
+    assert "maxOutputTokensForBudget" in activity
+    assert "max_output_tokens" in activity
+    assert "AI spending limit leaves insufficient budget" in activity
     assert "installVoiceChangeControls(root)" in activity
     assert "SpeechRecognizer.createSpeechRecognizer(this)" in activity
     assert "VOICE_RECORD_PERMISSION_REQUEST" in activity

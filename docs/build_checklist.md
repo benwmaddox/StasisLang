@@ -443,7 +443,7 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `planned`
 #### AW58 - Android Command History, Sessions, and AI Budget Controls
 - Scope: Persist chat/command history per project, expose cancel/retry, retain tool/test outcomes, show token/cost estimates, and enforce configurable per-run/monthly spend limits.
-- Progress: The Workshop now persists the 20 most recent unique submitted requests per project, keeps the history collapsed behind `Recent Commands`, and provides a project-scoped clear action. Outcome history, resume/retry, cancellation, and hard budget limits remain.
+- Progress: The Workshop persists the 20 most recent unique submitted requests per project behind `Recent Commands`. AI Settings now provides a default `$0.25` per-run cap and `$5.00` monthly cap, records each returned Terra call immediately, blocks unknown-priced models while limits are active, stops multi-turn agents before another paid call at either limit, and conservatively bounds each response with `max_output_tokens`. Outcome history, resume/retry, and cancellation remain.
 - Done gate: Users can understand, resume, cancel, and audit AI work while preventing accidental budget overruns.
 - Status: `in progress`
 #### AW59 - Android Lifecycle, Autosave, and Background Work
