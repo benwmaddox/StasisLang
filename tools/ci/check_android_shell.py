@@ -24,6 +24,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/workshop_sample/src/assets.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis",
     "mobile/android/README.md",
+    "tools/android_ai_agent_host.py",
 ]
 
 STASIS_SAMPLE_FILES = [
@@ -91,6 +92,7 @@ def main() -> int:
     assert 'android:windowSoftInputMode="adjustResize"' in manifest
 
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
+    host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
@@ -271,6 +273,14 @@ def main() -> int:
     assert "gpt-5.6-luna" in activity
     assert "prompt_cache_key" in activity
     assert "prompt_cache_breakpoint" in activity
+    assert 'content.put("prompt_cache_breakpoint", new JSONObject().put("mode", "explicit"))' in activity
+    assert 'payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"))' in activity
+    assert 'put("type", "prompt_cache_breakpoint")' not in activity
+    assert 'payload.put("prompt_cache_retention"' not in activity
+    assert '"prompt_cache_options": {"mode": "explicit", "ttl": "30m"}' in host_agent
+    assert '"prompt_cache_breakpoint": {"mode": "explicit"}' in host_agent
+    assert '"type": "prompt_cache_breakpoint"' not in host_agent
+    assert '"prompt_cache_retention"' not in host_agent
     assert "saveAiSettings(apiKey, model)" in activity
     assert "private LinearLayout symbolList" in activity
     assert "rebuildSymbolList(refreshedProject)" in activity

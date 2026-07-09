@@ -2444,17 +2444,24 @@ public final class MainActivity extends Activity {
         }
         String stableInstruction = "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect the current target with list_symbols, list_owner_symbols, read_symbol, read_imports, list_tests, and read_test_file unless the exact current source was already provided in selected_symbols or tool observations. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior that depends on time since an entity, encounter, projectile, effect, resource, objective, mode, or event was created/entered, prefer local lifecycle state that is reset on creation/entry and incremented by tick over using overall game tick count; inspect creation and update paths together. Follow architecture_recommendations for Stasis code structure when changing or adding features. write_symbol creates or replaces a symbol. All write_symbol/delete_symbol/write_imports calls in one tool-call batch compile together after the batch; if the batch breaks compilation, the app rolls back the whole batch and returns diagnostics. read_imports returns the imports for one file; write_imports replaces that file import block using an imports JSON array and participates in the same batch compile/rollback as write_symbol. list_tests/read_test_file/write_test_file let you create tests under tests/; for behavior-changing requests, add or update a tests/*.ai_test.json scenario before returning done. run_tests executes Android AI scenario tests and reports .test.stasis files awaiting native bridge execution. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes and runs tests after each tool-call batch; use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() for post-hot-swap migration, reinitialization, or compatibility work when a running game needs state adjusted after code changes. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
         return new JSONArray()
-                .put(new JSONObject().put("role", "system").put("content", stableInstruction))
-                .put(new JSONObject().put("role", "user").put("content", "Stable request context: " + stableRequest.toString()))
-                .put(new JSONObject().put("type", "prompt_cache_breakpoint").put("name", "stasis_android_workspace_context"))
-                .put(new JSONObject().put("role", "user").put("content", "Volatile turn context: " + volatileRequest.toString()));
+                .put(aiInputMessage("system", stableInstruction, false))
+                .put(aiInputMessage("user", "Stable request context: " + stableRequest.toString(), true))
+                .put(aiInputMessage("user", "Volatile turn context: " + volatileRequest.toString(), false));
+    }
+
+    private static JSONObject aiInputMessage(String role, String text, boolean cacheBreakpoint) throws Exception {
+        JSONObject content = new JSONObject().put("type", "input_text").put("text", text);
+        if (cacheBreakpoint) {
+            content.put("prompt_cache_breakpoint", new JSONObject().put("mode", "explicit"));
+        }
+        return new JSONObject().put("role", role).put("content", new JSONArray().put(content));
     }
 
     private static AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
-        payload.put("prompt_cache_retention", "24h");
+        payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
         payload.put("text", buildAiResponseTextFormat());
         payload.put("input", buildAiOpenAiInput(requestJson));
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
