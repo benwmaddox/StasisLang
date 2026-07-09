@@ -136,12 +136,17 @@ def main() -> int:
     assert "compile.setText(\"Compile\")" not in activity
     assert "https://api.openai.com/v1/responses" in activity
     assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
-    assert "private static final int MAX_AI_AGENT_TURNS = 5" in activity
+    assert "private static final int MAX_AI_AGENT_TURNS = 15" in activity
     assert "AI_PREF_LAST_USAGE" in activity
     assert "AI_TRACE_LOG" in activity
     assert "appendAiTrace" in activity
     assert "llm_request" in activity
     assert "tool_observations" in activity
+    assert "response_contract" in activity
+    assert "Return exactly one JSON object matching original_request.response_contract" in activity
+    assert "Use tool_calls instead." in activity
+    assert "requires imports array, or source/import_source as a compatibility alias" not in activity
+    assert "call.optString(\"new_source\", call.optString(\"source\", \"\"))" not in activity
     assert "AI read_symbol target ambiguous: " in activity
     assert "AI read_symbol target not found: " in activity
     assert "AI read_symbol target ambiguous or not found" not in activity
@@ -171,7 +176,7 @@ def main() -> int:
     assert "required_args" in activity
     assert "Tool errors, validation_error observations, and test_observation failures are not final" in activity
     assert "recordAiToolResult" in activity
-    assert "tool_call_limit_after_successful_writes" in activity
+    assert "tool_call_limit_after_successful_tested_writes" in activity
     assert "repeated_tool_calls" in activity
     assert "repeated tools" in activity
     assert "successful_writes" in activity
