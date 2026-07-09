@@ -200,6 +200,8 @@ def main() -> int:
     assert "runAiTestsAfterBatch" in activity
     assert "new_passing_tests" in activity
     assert "nativeRunTests(projectRootPath())" in activity
+    assert "runTests.setText(\"Run Tests\")" in activity
+    assert "runNativeTests();" in activity
     assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
     assert "list_owner_symbols" in activity

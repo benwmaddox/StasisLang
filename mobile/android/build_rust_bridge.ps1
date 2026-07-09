@@ -43,6 +43,7 @@ if ($installedTargets -notcontains "aarch64-linux-android") {
 }
 
 $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = $linker
+$env:CARGO_INCREMENTAL = "0"
 $profileArgs = @()
 $profileDir = "debug"
 if ($Release) {
