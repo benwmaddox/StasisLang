@@ -545,7 +545,7 @@ public final class MainActivity extends Activity {
         SharedPreferences aiPrefs = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
 
         aiPromptEditor = new EditText(this);
-        aiPromptEditor.setHint("Describe a game change for the selected symbol");
+        aiPromptEditor.setHint("Describe a game change. AI can inspect and edit any symbol.");
         aiPromptEditor.setSingleLine(false);
         aiPromptEditor.setMinLines(2);
         aiPromptEditor.setTextSize(12.0f);
@@ -565,7 +565,7 @@ public final class MainActivity extends Activity {
         controls.addView(aiModelEditor, fullWidth());
 
         Button aiPatch = new Button(this);
-        aiPatch.setText("AI Patch Selected Symbol");
+        aiPatch.setText("AI Edit Workspace");
         aiPatch.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -693,10 +693,6 @@ public final class MainActivity extends Activity {
     }
 
     private void runAiPatch() {
-        if (selectedSymbol == null) {
-            setStatusText("AI edit requires a selected symbol");
-            return;
-        }
         String apiKey = aiApiKeyEditor == null ? "" : aiApiKeyEditor.getText().toString().trim();
         String prompt = aiPromptEditor == null ? "" : aiPromptEditor.getText().toString().trim();
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
@@ -709,11 +705,11 @@ public final class MainActivity extends Activity {
         }
         saveAiSettings(apiKey, model);
         final SymbolEntry symbol = selectedSymbol;
-        final String selectedSource = sourceEditor.getText().toString().trim();
+        final String selectedSource = symbol == null || sourceEditor == null ? "" : sourceEditor.getText().toString().trim();
         final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource);
         final String requestModel = model;
         final String requestApiKey = apiKey;
-        setStatusText("AI edit: sending selected symbol context");
+        setStatusText("AI edit: sending workspace context");
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -747,12 +743,16 @@ public final class MainActivity extends Activity {
 
     private static String buildAiCodeRequestJson(String prompt, SymbolEntry symbol, String selectedSource) {
         try {
-            JSONObject selected = new JSONObject();
-            selected.put("kind", symbol.kind);
-            selected.put("name", symbol.name);
-            selected.put("owner", symbol.owner);
-            selected.put("file", symbol.file);
-            selected.put("source", selectedSource);
+            JSONArray selectedSymbols = new JSONArray();
+            if (symbol != null) {
+                JSONObject selected = new JSONObject();
+                selected.put("kind", symbol.kind);
+                selected.put("name", symbol.name);
+                selected.put("owner", symbol.owner);
+                selected.put("file", symbol.file);
+                selected.put("source", selectedSource);
+                selectedSymbols.put(selected);
+            }
 
             JSONObject rules = new JSONObject();
             rules.put("use_function_keyword", true);
@@ -764,7 +764,9 @@ public final class MainActivity extends Activity {
 
             JSONObject request = new JSONObject();
             request.put("user_prompt", prompt);
-            request.put("selected_symbols", new JSONArray().put(selected));
+            request.put("scope", "entire_workspace");
+            request.put("selected_symbols", selectedSymbols);
+            request.put("selected_symbols_are_context_only", true);
             request.put("available_tools", new JSONArray()
                     .put("list_symbols")
                     .put("read_symbol")
@@ -1186,7 +1188,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", "Return only one JSON object. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
+        payload.put("input", "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, read_symbol, read_file, write_symbol, compile_project, get_diagnostics, set_input_state, set_runtime_i32, get_runtime_i32, run_frame, run_for_ticks, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; set_runtime_i32 and get_runtime_i32 mutate or inspect i32 Stasis global paths; run_for_ticks advances the game and returns runtime/render state. write_symbol compiles immediately and returns status=rolled_back if the edit breaks compilation. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits when finished. Do not use markdown. Request: " + requestJson);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -1417,25 +1419,30 @@ public final class MainActivity extends Activity {
                 project = loadBundledProject();
             }
             rebuildSymbolList(project);
-            SymbolEntry refreshed = findMatchingSymbol(project, lastEdited);
-            if (refreshed != null) {
-                showSymbol(refreshed);
+            if (lastEdited != null) {
+                SymbolEntry refreshed = findMatchingSymbol(project, lastEdited);
+                if (refreshed != null) {
+                    showSymbol(refreshed);
+                }
             }
             refreshChangeSummary(project);
             String compileResult = nativeCompileProject(projectRootPath());
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
-            setStatusText("AI edit applied: " + response.optString("summary", "updated selected symbol") + " - " + compileResult + " - " + aiResult.usageSummary);
+            setStatusText("AI edit applied: " + response.optString("summary", "updated workspace") + " - " + compileResult + " - " + aiResult.usageSummary);
         } catch (Exception error) {
             setStatusText("AI edit apply failed: " + error.getMessage());
         }
     }
 
     private static SymbolEntry findSymbolForAiEdit(ProjectSnapshot project, String expectedKind, JSONObject edit, SymbolEntry fallback) throws Exception {
-        String file = edit.optString("file", fallback.file);
-        String name = edit.optString("name", fallback.name);
-        String owner = edit.optString("owner", fallback.owner);
+        String file = edit.optString("file", fallback == null ? "" : fallback.file);
+        String name = edit.optString("name", fallback == null ? "" : fallback.name);
+        String owner = edit.optString("owner", fallback == null ? "" : fallback.owner);
+        if (file.isEmpty() || name.isEmpty()) {
+            throw new IOException("AI edit target requires file and name when no symbol is selected");
+        }
         for (SymbolSection section : project.sections) {
             for (SymbolGroup group : section.groups) {
                 for (SymbolEntry symbol : group.symbols) {
