@@ -397,8 +397,9 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress (authenticated validation deferred)`
 #### AW46 - Android Sync Reliability and Credential Protection
 - Scope: Queue serial sync work, persist retry/error state, and move API keys/tokens from plain preferences to Android credential storage.
+- Progress: GitHub and OpenAI secrets now use an AES-GCM key held by Android Keystore; preferences retain only versioned ciphertext. Existing plaintext preferences migrate on first read and are removed only after the encrypted value commits successfully. Secret editors use password input. Persistent serial retry/error state remains.
 - Done gate: Interrupted/offline sync never loses local source; secrets are not stored in plain text.
-- Status: `planned`
+- Status: `in progress`
 #### AW47 - Android Project Import, Export, and Switching
 - Scope: Support multiple normal Stasis projects, import/export archives, project metadata, and explicit project switching.
 - Done gate: A user can open, back up, restore, and switch projects while retaining symbol editing, tests, and compile behavior.
