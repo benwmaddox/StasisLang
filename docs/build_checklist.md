@@ -305,6 +305,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Done gate: The sideloaded Android app's tick path executes real Stasis code when the Rust bridge is packaged.
 - Mobile input note: Android example games must be playable without a hardware keyboard; sample game input should be touch-friendly before phone testing.
 - Status: `completed`
+#### AW33 - Android Native Stasis Test Runner
+- Language: `Rust + Android Java + C JNI + docs`.
+- Scope: Run real `.test.stasis` tests against the app-private workshop project through the packaged Rust compiler bridge.
+- Deliverable: `nativeRunTests(projectRoot)` invokes `stasis_android_bridge_run_tests`, discovers and executes test declarations through the JIT, and reports passed/failed counts to the Android UI and AI tool contract. The editor provides a manual `Run Tests` control.
+- Tests: `android_bridge_runs_bundled_stasis_tests`, the bounded desktop `stasis test --dir mobile/android/app/src/main/assets/workshop_sample/tests` command, and the Android shell verifier cover the bridge, valid Stasis test syntax, and UI control; debug APK builds and installs on a paired phone.
+- Done gate: A sideloaded workshop can run bundled real Stasis tests without JSON scenario files, and test success requires at least one passing test with no failures.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.
