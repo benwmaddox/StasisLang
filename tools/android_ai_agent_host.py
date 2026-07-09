@@ -193,13 +193,12 @@ def preferred_call(symbol: Symbol) -> str:
 
 DEFAULT_MODEL_PRICING_PER_MILLION = {
     "gpt-5.4-mini": {
-        "input": 1.00,
-        "cached_input": 0.10,
-        "output": 8.00,
-        "source": "Estimate: searched on 2026-07-09; no official OpenAI gpt-5.4-mini pricing page was found in returned results. A public summary said GPT-5.4 mini/nano are about 4x their GPT-5 equivalents, so this uses a working estimate for review only.",
+        "input": 0.75,
+        "cached_input": 0.075,
+        "output": 4.50,
+        "source": "User-provided OpenAI standard short-context pricing on 2026-07-09: gpt-5.4-mini $0.75 input / $0.075 cached input / $4.50 output per 1M tokens.",
     }
 }
-
 
 def response_usage_from_body(body: dict[str, Any]) -> dict[str, int]:
     usage = body.get("usage") if isinstance(body, dict) else {}

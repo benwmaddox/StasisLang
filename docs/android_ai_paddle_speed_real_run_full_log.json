@@ -59,14 +59,14 @@
         "total_tokens": 3102
       }
     ],
-    "estimated_cost_usd": 0.038791599999999996,
+    "estimated_cost_usd": 0.0241152,
     "pricing_per_million_tokens": {
-      "input": 1.0,
-      "cached_input": 0.1,
-      "output": 8.0,
-      "source": "Estimate: searched on 2026-07-09; no official OpenAI gpt-5.4-mini pricing page was found in returned results. A public summary said GPT-5.4 mini/nano are about 4x their GPT-5 equivalents, so this uses a working estimate for review only."
+      "input": 0.75,
+      "cached_input": 0.075,
+      "output": 4.5,
+      "source": "User-provided OpenAI standard short-context pricing on 2026-07-09: gpt-5.4-mini $0.75 input / $0.075 cached input / $4.50 output per 1M tokens."
     },
-    "pricing_note": "Estimate: searched on 2026-07-09; no official OpenAI gpt-5.4-mini pricing page was found in returned results. A public summary said GPT-5.4 mini/nano are about 4x their GPT-5 equivalents, so this uses a working estimate for review only."
+    "pricing_note": "User-provided OpenAI standard short-context pricing on 2026-07-09: gpt-5.4-mini $0.75 input / $0.075 cached input / $4.50 output per 1M tokens."
   },
   "events": [
     {
