@@ -417,6 +417,26 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Scope: Add a repeatable device validation checklist/automation for editor, tests, voice, touch preview, sync, and lifecycle recovery.
 - Done gate: Every user-facing workshop slice has an on-device proof or an explicitly recorded hardware/environment limitation.
 - Status: `planned`
+#### AW52 - Android Image Import and Asset Library
+- Scope: Import images through the Android photo/document picker, copy them into project-relative asset storage, generate bounded previews, and expose an asset library with rename/delete/reference safety.
+- Done gate: A user can import, preview, select, persist, export, and GitHub-sync a project image without exposing arbitrary device paths to Stasis or AI.
+- Status: `planned`
+#### AW53 - Android Mini Paint Editor
+- Scope: Add a touch-first bitmap editor with brush, eraser, palette/color picker, undo/redo, clear, canvas/crop sizing, save-as, cancel, and bounded image dimensions.
+- Done gate: A user can create or modify a simple game image, review it, cancel without mutation, or save it as a normal project asset.
+- Status: `planned`
+#### AW54 - Android Multimodal AI Attachments
+- Scope: Attach imported/painted images to typed or voice AI requests using real image input blocks, with thumbnail review, remove controls, format conversion, size limits, and per-request cost visibility.
+- Done gate: The AI receives the exact selected project image(s), while unselected assets and private device media are never sent.
+- Status: `planned`
+#### AW55 - Android Pixel Screenshot to AI
+- Scope: Capture the actual preview framebuffer as a bounded image, retain the logical render snapshot as structured context, and let the user explicitly attach either or both to an AI request.
+- Done gate: A request can include a visually accurate game screenshot plus runtime/render metadata, with explicit preview/remove/consent before upload.
+- Status: `planned`
+#### AW56 - AI-Generated Image Asset Review
+- Scope: Accept AI-generated or AI-edited image outputs into a temporary review area with before/after preview, accept/reject, undo, project persistence, export, and GitHub sync.
+- Done gate: AI image work cannot overwrite an accepted project asset without review and a recoverable prior version.
+- Status: `planned`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

@@ -418,6 +418,16 @@ Changed files:
 
 Raw file diffs should be available as an advanced/review option.
 
+## Visual Asset and Multimodal AI Workflow
+
+- The Workshop must import images from Android storage/photo picker into the active project as normal binary assets with stable project-relative paths.
+- A small touch-first paint editor must support creating and editing simple game images, including pencil/brush, eraser, color selection, undo/redo, clear, crop/canvas sizing, and explicit save/cancel.
+- Imported or painted images must be previewable and selectable as attachments to chat, voice, and command requests.
+- AI requests must use real multimodal image inputs for selected attachments rather than describing image bytes as text.
+- The Workshop must capture the actual game preview framebuffer as an image and optionally attach it to AI requests. The existing logical render snapshot remains useful structured context, but is not a pixel screenshot.
+- AI responses that create or revise image assets must write normal project assets, preserve originals until accepted, and participate in review, undo, GitHub backup, and project export.
+- Image handling must impose bounded dimensions/file sizes and deterministic conversion rules so mobile memory and API costs remain visible and controlled.
+
 ## Rule Summary
 
 - Use Stasis syntax in all generated source.
@@ -434,5 +444,7 @@ Raw file diffs should be available as an advanced/review option.
 - Compile changed symbols locally.
 - Hot reload changed functions with Cranelift.
 - Use the GitHub API for v1 commit/push.
+- Support project image import, lightweight paint editing, and multimodal AI attachments.
+- Distinguish real pixel screenshots from logical render snapshots.
 - Start sideload-first.
 - Choose preview renderer based on least friction.
