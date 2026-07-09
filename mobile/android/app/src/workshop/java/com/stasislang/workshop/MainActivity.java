@@ -57,6 +57,8 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_MODEL = "openai_model";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
+    private static final String AI_TRACE_LOG = "ai_trace.jsonl";
+    private static final long AI_TRACE_RETENTION_MS = 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
@@ -839,6 +841,7 @@ public final class MainActivity extends Activity {
         final String requestModel = model;
         final String requestApiKey = apiKey;
         aiStartedAtNanos = System.nanoTime();
+        appendAiTraceFields("request", "model", requestModel, "request_json", requestJson, null, null);
         setStatusText("AI edit: sending workspace context");
         updateAiProgress(0, 0, "queued");
         new Thread(new Runnable() {
@@ -858,7 +861,8 @@ public final class MainActivity extends Activity {
                         public void run() {
                             String elapsed = currentAiElapsedText();
                             updateAiProgress(aiProgressStep, aiProgressActions, "failed");
-                            setStatusText("AI edit failed: elapsed=" + elapsed + " - " + error.getMessage());
+                            appendAiTraceFields("fatal_error", "error", error.getMessage(), "elapsed", elapsed, "trace_path", aiTraceLogPath());
+                            setStatusText("AI edit failed: elapsed=" + elapsed + " - " + error.getMessage() + " - trace=" + aiTraceLogPath());
                         }
                     });
                 }
@@ -953,9 +957,12 @@ public final class MainActivity extends Activity {
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             session.currentStep = turn + 1;
             postAiProgress(session.currentStep, session.actionCount, "calling AI");
+            appendAiTrace("llm_request", new JSONObject().put("turn", session.currentStep).put("model", model).put("request", new JSONObject(currentRequestJson)));
             AiApiResponse apiResponse = callOpenAiResponsesApi(apiKey, model, currentRequestJson);
             usage.add(model, apiResponse.usage);
+            appendAiTrace("llm_response", new JSONObject().put("turn", session.currentStep).put("body", apiResponse.body));
             String aiJson = extractAiJsonResponse(apiResponse.body);
+            appendAiTrace("llm_json", new JSONObject().put("turn", session.currentStep).put("response", new JSONObject(aiJson)));
             JSONObject response = new JSONObject(aiJson);
             JSONArray toolCalls = response.optJSONArray("tool_calls");
             String mode = response.optString("mode", "edits");
@@ -965,7 +972,9 @@ public final class MainActivity extends Activity {
             }
 
             postAiProgress(session.currentStep, session.actionCount, "tools " + toolCalls.length());
+            appendAiTrace("tool_calls", new JSONObject().put("turn", session.currentStep).put("tool_calls", toolCalls));
             JSONArray observations = executeAiToolCalls(toolCalls, session);
+            appendAiTrace("tool_observations", new JSONObject().put("turn", session.currentStep).put("observations", observations));
             JSONObject followup = new JSONObject();
             followup.put("original_request", new JSONObject(initialRequestJson));
             followup.put("tool_observations", observations);
@@ -987,6 +996,7 @@ public final class MainActivity extends Activity {
                     .put("rolled_back_writes", session.rolledBackWriteCount)
                     .put("last_tool", session.lastToolSummary)
                     .put("last_error", session.lastToolError);
+            appendAiTrace("limit_after_successful_writes", synthetic);
             return new AiAgentResult(synthetic.toString(), usage.toJson(model), usage.summary(), MAX_AI_AGENT_TURNS, session.actionCount);
         }
         throw new IOException("AI agent reached tool-call limit before returning edits; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
@@ -1102,9 +1112,14 @@ public final class MainActivity extends Activity {
 
     private JSONObject aiToolReadSymbol(AiAgentSession session, JSONObject call) throws Exception {
         ProjectSnapshot project = session.project();
-        String kind = call.optString("kind", "function");
-        String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
-        SymbolEntry target = findSymbolForAiEdit(project, expectedKind, call, selectedSymbol);
+        String kind = call.optString("kind", "");
+        SymbolEntry target;
+        if (kind.isEmpty()) {
+            target = findAnySymbolForAiLookup(project, call, selectedSymbol);
+        } else {
+            String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
+            target = findSymbolForAiEdit(project, expectedKind, call, selectedSymbol);
+        }
         return symbolToJson(target, true);
     }
 
@@ -1664,7 +1679,8 @@ public final class MainActivity extends Activity {
                 compileAttempted = true;
                 String elapsed = currentAiElapsedText();
                 updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, aiReloadPhase(compileResult));
-                setStatusText("AI edit complete: " + response.optString("summary", "no actions") + " - no actions - " + aiReloadSummary(compileResult) + " - elapsed=" + elapsed + " - " + compileResult + " - " + aiResult.usageSummary);
+                appendAiTrace("apply_done", new JSONObject().put("summary", response.optString("summary", "no actions")).put("compile", compileResult).put("elapsed", elapsed));
+                setStatusText("AI edit complete: " + response.optString("summary", "no actions") + " - no actions - " + aiReloadSummary(compileResult) + " - elapsed=" + elapsed + " - " + compileResult + " - " + aiResult.usageSummary + " - trace=" + aiTraceLogPath());
                 return;
             }
             ProjectSnapshot project = loadBundledProject();
@@ -1703,7 +1719,8 @@ public final class MainActivity extends Activity {
             refreshChangeSummary(project);
             String elapsed = currentAiElapsedText();
             updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, aiReloadPhase(compileResult));
-            setStatusText("AI edit applied: " + response.optString("summary", "updated workspace") + " - " + aiReloadSummary(compileResult) + " - elapsed=" + elapsed + " - " + compileResult + " - " + aiResult.usageSummary);
+            appendAiTrace("apply_edits", new JSONObject().put("summary", response.optString("summary", "updated workspace")).put("compile", compileResult).put("elapsed", elapsed));
+            setStatusText("AI edit applied: " + response.optString("summary", "updated workspace") + " - " + aiReloadSummary(compileResult) + " - elapsed=" + elapsed + " - " + compileResult + " - " + aiResult.usageSummary + " - trace=" + aiTraceLogPath());
         } catch (Exception error) {
             if (originalSources != null) {
                 try {
@@ -1718,13 +1735,15 @@ public final class MainActivity extends Activity {
                 } catch (Exception restoreError) {
                     String elapsed = currentAiElapsedText();
                     updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "rollback failed");
-                    setStatusText("AI edit apply failed and rollback failed: elapsed=" + elapsed + " - " + error.getMessage() + " / " + restoreError.getMessage());
+                    appendAiTraceFields("rollback_failed", "error", error.getMessage(), "restore_error", restoreError.getMessage(), "elapsed", elapsed);
+                    setStatusText("AI edit apply failed and rollback failed: elapsed=" + elapsed + " - " + error.getMessage() + " / " + restoreError.getMessage() + " - trace=" + aiTraceLogPath());
                     return;
                 }
             }
             String elapsed = currentAiElapsedText();
             updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "rolled back");
-            setStatusText("AI edit apply failed and rolled back: elapsed=" + elapsed + " - " + error.getMessage());
+            appendAiTraceFields("apply_failed_rolled_back", "error", error.getMessage(), "elapsed", elapsed, null, null);
+            setStatusText("AI edit apply failed and rolled back: elapsed=" + elapsed + " - " + error.getMessage() + " - trace=" + aiTraceLogPath());
         }
     }
 
@@ -1812,7 +1831,64 @@ public final class MainActivity extends Activity {
                 }
             }
         }
-        return fileNameMatches == 1 ? fileNameMatch : null;
+        if (fileNameMatches == 1) {
+            return fileNameMatch;
+        }
+
+        SymbolEntry globalNameMatch = null;
+        int globalNameMatches = 0;
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (symbol.kind.equals(expectedKind) && symbol.name.equals(name)) {
+                        if (owner.isEmpty() || symbol.owner.equals(owner)) {
+                            globalNameMatch = symbol;
+                            globalNameMatches += 1;
+                        }
+                    }
+                }
+            }
+        }
+        return globalNameMatches == 1 ? globalNameMatch : null;
+    }
+
+    private static SymbolEntry findAnySymbolForAiLookup(ProjectSnapshot project, JSONObject edit, SymbolEntry fallback) throws Exception {
+        String file = edit.optString("file", fallback == null ? "" : fallback.file);
+        String name = edit.optString("name", fallback == null ? "" : fallback.name);
+        String owner = edit.optString("owner", fallback == null ? "" : fallback.owner);
+        if (name.isEmpty()) {
+            throw new IOException("AI read_symbol requires a name when kind is omitted");
+        }
+
+        SymbolEntry exactMatch = null;
+        int exactMatches = 0;
+        SymbolEntry nameMatch = null;
+        int nameMatches = 0;
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (!symbol.name.equals(name)) {
+                        continue;
+                    }
+                    if (!owner.isEmpty() && !symbol.owner.equals(owner)) {
+                        continue;
+                    }
+                    if (!file.isEmpty() && symbol.file.equals(file)) {
+                        exactMatch = symbol;
+                        exactMatches += 1;
+                    }
+                    nameMatch = symbol;
+                    nameMatches += 1;
+                }
+            }
+        }
+        if (exactMatches == 1) {
+            return exactMatch;
+        }
+        if (nameMatches == 1) {
+            return nameMatch;
+        }
+        throw new IOException("AI read_symbol target ambiguous or not found: " + file + " " + name);
     }
     private static void validateAiReplacementSource(String editKind, String expectedName, String newSource) throws Exception {
         if (newSource.contains("&mut") || newSource.contains("->") || newSource.contains("fn ")) {
@@ -2093,6 +2169,54 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private File aiTraceLogFile() {
+        return new File(getFilesDir(), AI_TRACE_LOG);
+    }
+
+    private String aiTraceLogPath() {
+        return aiTraceLogFile().getAbsolutePath();
+    }
+
+    private void appendAiTraceFields(String event, String key1, String value1, String key2, String value2, String key3, String value3) {
+        try {
+            JSONObject fields = new JSONObject();
+            if (key1 != null) {
+                fields.put(key1, value1 == null ? "" : value1);
+            }
+            if (key2 != null) {
+                fields.put(key2, value2 == null ? "" : value2);
+            }
+            if (key3 != null) {
+                fields.put(key3, value3 == null ? "" : value3);
+            }
+            appendAiTrace(event, fields);
+        } catch (Exception ignored) {
+            // Trace logging must not break editing or gameplay.
+        }
+    }
+    private void appendAiTrace(String event, JSONObject fields) {
+        try {
+            File file = aiTraceLogFile();
+            long now = System.currentTimeMillis();
+            if (file.isFile() && now - file.lastModified() > AI_TRACE_RETENTION_MS) {
+                writeTextFile(file, "");
+            }
+            JSONObject entry = new JSONObject();
+            entry.put("timestamp_ms", now);
+            entry.put("event", event);
+            if (fields != null) {
+                entry.put("data", fields);
+            }
+            FileOutputStream output = new FileOutputStream(file, true);
+            try {
+                output.write((entry.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+            } finally {
+                output.close();
+            }
+        } catch (Exception ignored) {
+            // Trace logging must not break editing or gameplay.
+        }
+    }
     private void writeTextFile(File file, String source) throws IOException {
         File parent = file.getParentFile();
         if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
