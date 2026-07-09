@@ -1696,7 +1696,6 @@ public final class MainActivity extends Activity {
         compileAttempted = true;
         JSONObject compileJson = compileResultToJson(compileResult);
 
-        JSONArray scenarioResults = new JSONArray();
         JSONArray stasisTests = new JSONArray();
         TreeSet<String> passingKeys = new TreeSet<>();
         int passed = 0;
@@ -1705,16 +1704,7 @@ public final class MainActivity extends Activity {
         JSONObject bridgeTestRun = null;
         for (File file : listProjectTestFiles()) {
             String relative = relativeProjectPath(file);
-            if (relative.endsWith(".ai_test.json")) {
-                JSONObject result = runAiScenarioTest(session, file, relative, compileJson.optBoolean("ok", false));
-                scenarioResults.put(result);
-                if (result.optBoolean("passed", false)) {
-                    passed += 1;
-                    passingKeys.add(relative + ":" + result.optString("name", relative));
-                } else {
-                    failed += 1;
-                }
-            } else if (relative.endsWith(".test.stasis")) {
+            if (relative.endsWith(".test.stasis")) {
                 if (bridgeTestRun == null) {
                     bridgeTestRun = new JSONObject(nativeRunTests(projectRootPath()));
                     stasisTests.put(bridgeTestRun);
@@ -1738,99 +1728,11 @@ public final class MainActivity extends Activity {
                 .put("passed", passed)
                 .put("failed", failed)
                 .put("pending", pending)
-                .put("scenario_results", scenarioResults)
                 .put("stasis_test_files", stasisTests)
                 .put("new_passing_tests", newPassing)
                 .put("all_runnable_tests_passed", passed > 0 && failed == 0 && compileJson.optBoolean("ok", false));
     }
 
-    private JSONObject runAiScenarioTest(AiAgentSession session, File file, String relative, boolean compileOk) throws Exception {
-        JSONObject result = new JSONObject()
-                .put("file", relative)
-                .put("kind", "ai_scenario")
-                .put("passed", false);
-        if (!compileOk) {
-            return result.put("status", "blocked_by_compile_failure");
-        }
-        JSONObject test = new JSONObject(readTextFile(file));
-        String name = test.optString("name", relative);
-        result.put("name", name);
-        JSONArray steps = test.optJSONArray("steps");
-        if (steps == null) {
-            return result.put("status", "failed").put("error", "AI scenario test requires steps array");
-        }
-        JSONArray stepResults = new JSONArray();
-        for (int index = 0; index < steps.length(); index += 1) {
-            JSONObject step = steps.getJSONObject(index);
-            JSONObject stepResult = runAiScenarioStep(session, step);
-            stepResult.put("index", index);
-            stepResults.put(stepResult);
-            if (!stepResult.optBoolean("ok", false)) {
-                return result.put("status", "failed").put("steps", stepResults).put("error", stepResult.optString("error", "step failed"));
-            }
-        }
-        return result.put("status", "passed").put("passed", true).put("steps", stepResults);
-    }
-
-    private JSONObject runAiScenarioStep(AiAgentSession session, JSONObject step) throws Exception {
-        if (step.has("tool")) {
-            String tool = step.getString("tool");
-            if (!"set_input_state".equals(tool)
-                    && !"run_frame".equals(tool) && !"run_for_ticks".equals(tool) && !"inspect_runtime_state".equals(tool)
-                    && !"take_screenshot".equals(tool)) {
-                return new JSONObject().put("ok", false).put("error", "Unsupported test step tool: " + tool);
-            }
-            JSONObject args = step.optJSONObject("args");
-            if (args == null) {
-                args = new JSONObject();
-            }
-            JSONObject value;
-            if ("run_for_ticks".equals(tool)) {
-                value = aiToolRunForTicks(args);
-            } else {
-                value = executeAiToolCall(tool, args, session);
-            }
-            return new JSONObject().put("ok", true).put("tool", tool).put("result", value);
-        }
-        JSONObject stateSet = step.optJSONObject("set_runtime_i32");
-        if (stateSet != null) {
-            JSONObject value = aiToolSetRuntimeI32(stateSet);
-            return new JSONObject()
-                    .put("ok", value.optBoolean("ok", false))
-                    .put("tool", "set_runtime_i32")
-                    .put("result", value);
-        }
-        JSONObject assertion = step.optJSONObject("assert_runtime_i32");
-        if (assertion != null) {
-            String path = assertion.getString("path");
-            JSONObject actual = aiToolGetRuntimeI32(new JSONObject().put("path", path));
-            int value = actual.optInt("value", 0);
-            JSONObject result = new JSONObject()
-                    .put("path", path)
-                    .put("actual", value)
-                    .put("raw", actual.optString("raw", ""));
-            if (assertion.has("equals")) {
-                int expected = assertion.getInt("equals");
-                return result
-                        .put("ok", value == expected)
-                        .put("assertion", "runtime_i32_equals")
-                        .put("expected", expected);
-            }
-            if (assertion.has("max")) {
-                int max = assertion.getInt("max");
-                return result
-                        .put("ok", value <= max)
-                        .put("assertion", "runtime_i32_max")
-                        .put("max", max);
-            }
-            return result.put("ok", false).put("error", "assert_runtime_i32 requires equals or max");
-        }
-        return new JSONObject().put("ok", false).put("error", "Unsupported test step shape").put("accepted_shapes", new JSONArray()
-                .put(new JSONObject().put("tool", "run_for_ticks").put("args", new JSONObject().put("ticks", 1)))
-                .put(new JSONObject().put("set_runtime_i32", new JSONObject().put("path", "GameState.score").put("value", 0)))
-                .put(new JSONObject().put("assert_runtime_i32", new JSONObject().put("path", "GameState.score").put("equals", 0)))
-                .put(new JSONObject().put("assert_runtime_i32", new JSONObject().put("path", "GameState.ball_age_ticks").put("max", 1))));
-    }
     private JSONObject aiToolReadImports(AiAgentSession session, JSONObject call) throws Exception {
         ProjectSnapshot project = session.project();
         SourceFile sourceFile = findProjectFile(project, call.optString("file", ""));
