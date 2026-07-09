@@ -326,6 +326,13 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Tests: Android shell verifier covers bundled test seeding, test-declaration parsing, test reload guidance, and immutable asset reads; Java sources compile.
 - Done gate: A phone-only manual editor user can find, edit, review, and run real Stasis tests from the same app-private project used by the runtime.
 - Status: `completed`
+#### AW36 - Android Manual Stasis Test Creation
+- Language: `Android Java + docs`.
+- Scope: Let a phone-only manual workshop user add a behavior test without an AI request or external tooling.
+- Deliverable: The editor's `New Test` control creates a uniquely named app-private `tests/manual_test_N.test.stasis` template, selects it in the Tests tree, and starts with `return false` so the user must implement and validate real behavior through `Run Tests`.
+- Tests: Android shell verifier covers the control, creation path, selection helper, and intentional failing-template guidance; Java sources compile.
+- Done gate: Users can create, edit, review, and run a real Stasis test entirely through manual Android workshop controls.
+- Status: `completed`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

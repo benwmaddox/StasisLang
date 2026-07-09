@@ -763,6 +763,16 @@ public final class MainActivity extends Activity {
         });
         controls.addView(rawDiffs, fullWidth());
 
+        Button newTest = new Button(this);
+        newTest.setText("New Test");
+        newTest.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                createManualTest();
+            }
+        });
+        controls.addView(newTest, fullWidth());
+
         Button resetProject = new Button(this);
         resetProject.setText("Reset Project");
         resetProject.setOnClickListener(new View.OnClickListener() {
@@ -3197,6 +3207,39 @@ public final class MainActivity extends Activity {
         setStatusText("Reset project from bundled sample");
     }
 
+    private void createManualTest() {
+        try {
+            int number = 1;
+            File file;
+            do {
+                file = testFileForAiPath("tests/manual_test_" + number + ".test.stasis");
+                number += 1;
+            } while (file.exists());
+
+            String name = "manual test " + (number - 1);
+            String source = "import \"../src/main.stasis\";\n\n"
+                    + "test `" + name + "`(): bool {\n"
+                    + "    return false;\n"
+                    + "}\n";
+            File parent = file.getParentFile();
+            if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+                throw new IOException("failed to create " + parent.getAbsolutePath());
+            }
+            writeTextFile(file, source);
+
+            ProjectSnapshot project = loadBundledProject();
+            rebuildSymbolList(project);
+            SymbolEntry created = findSymbolByIdentity(project, "test", relativeProjectPath(file), "Tests", name);
+            if (created != null) {
+                showSymbol(created);
+            }
+            refreshChangeSummary(project);
+            setStatusText("Created failing test template; edit it, then Run Tests");
+        } catch (IOException error) {
+            setStatusText("Create test failed: " + error.getMessage());
+        }
+    }
+
     private void resetSelectedEdit() {
         if (selectedSymbol == null) {
             return;
@@ -3649,6 +3692,20 @@ public final class MainActivity extends Activity {
             for (SymbolGroup group : section.groups) {
                 for (SymbolEntry symbol : group.symbols) {
                     if (sameSymbolIdentity(symbol, previous)) {
+                        return symbol;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static SymbolEntry findSymbolByIdentity(ProjectSnapshot project, String kind, String file, String owner, String name) {
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (symbol.kind.equals(kind) && symbol.file.equals(file)
+                            && symbol.owner.equals(owner) && symbol.name.equals(name)) {
                         return symbol;
                     }
                 }
