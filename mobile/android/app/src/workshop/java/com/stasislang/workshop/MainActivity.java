@@ -1001,7 +1001,7 @@ public final class MainActivity extends Activity {
             JSONObject followup = new JSONObject();
             followup.put("original_request", new JSONObject(initialRequestJson));
             followup.put("tool_observations", observations);
-            followup.put("instruction", "Use the tool observations to either request more tools or return final edits. Inspect current symbols before writing unless the exact current source is already available. Apply code changes with write_symbol before final edits so compile failures return observations you can correct. Tool errors are not final; use the error observation to choose another tool call or corrected write. Return mode=edits only after the intended code has been written and compiled successfully. If no further action is needed, return mode=done with empty tool_calls and empty edits.");
+            followup.put("instruction", "Use the tool observations to either request more tools or return final edits. Inspect current symbols before writing unless the exact current source is already available. Apply code changes with write_symbol before final edits so compile failures return observations you can correct. Tool errors and validation_error observations are not final; use accepted_shape, required_args, and the error observation to choose another tool call or corrected write. Return mode=edits only after the intended code has been written and compiled successfully. If no further action is needed, return mode=done with empty tool_calls and empty edits.");
             currentRequestJson = followup.toString();
         }
         postAiProgress(MAX_AI_AGENT_TURNS, session.actionCount, "limit hit");
@@ -1039,6 +1039,15 @@ public final class MainActivity extends Activity {
             observation.put("args", args);
             session.actionCount += 1;
             postAiProgress(session.currentStep, session.actionCount, tool.isEmpty() ? "tool" : tool);
+            JSONObject validationError = validateAiToolCall(tool, args);
+            if (validationError != null) {
+                session.lastToolSummary = tool.isEmpty() ? "invalid_tool_call" : "invalid_tool_call " + tool;
+                session.lastToolError = validationError.optString("error", "invalid tool call");
+                observation.put("error", session.lastToolError);
+                observation.put("validation", validationError);
+                observations.put(observation);
+                continue;
+            }
             try {
                 JSONObject result = executeAiToolCall(tool, args, session);
                 observation.put("result", result);
@@ -1052,6 +1061,104 @@ public final class MainActivity extends Activity {
         return observations;
     }
 
+    private static JSONObject validateAiToolCall(String tool, JSONObject args) throws Exception {
+        if (tool == null || tool.trim().isEmpty()) {
+            return aiToolValidationError(tool, args, "Tool call is missing required string field: tool", new JSONArray().put("tool").put("args"));
+        }
+        JSONArray required = requiredArgsForAiTool(tool);
+        if (required == null) {
+            return aiToolValidationError(tool, args, "Unsupported AI tool: " + tool, supportedAiTools());
+        }
+        for (int index = 0; index < required.length(); index += 1) {
+            String name = required.getString(index);
+            if ("new_source".equals(name)) {
+                if (!hasTextArg(args, "new_source") && !hasTextArg(args, "source")) {
+                    return aiToolValidationError(tool, args, "Tool " + tool + " requires new_source, or source as a compatibility alias", required);
+                }
+            } else if (!hasTextArg(args, name)) {
+                return aiToolValidationError(tool, args, "Tool " + tool + " requires arg: " + name, required);
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasTextArg(JSONObject args, String name) {
+        return args != null && args.has(name) && !args.optString(name, "").trim().isEmpty();
+    }
+
+    private static JSONArray requiredArgsForAiTool(String tool) {
+        if ("list_symbols".equals(tool)
+                || "compile_project".equals(tool)
+                || "get_diagnostics".equals(tool)
+                || "run_frame".equals(tool)
+                || "inspect_runtime_state".equals(tool)
+                || "take_screenshot".equals(tool)
+                || "set_input_state".equals(tool)
+                || "run_for_ticks".equals(tool)) {
+            return new JSONArray();
+        }
+        if ("read_symbol".equals(tool)) {
+            return new JSONArray().put("name");
+        }
+        if ("read_file".equals(tool)) {
+            return new JSONArray().put("file");
+        }
+        if ("write_symbol".equals(tool)) {
+            return new JSONArray().put("file").put("name").put("new_source");
+        }
+        if ("set_runtime_i32".equals(tool)) {
+            return new JSONArray().put("path");
+        }
+        if ("get_runtime_i32".equals(tool)) {
+            return new JSONArray().put("path");
+        }
+        return null;
+    }
+
+    private static JSONArray supportedAiTools() {
+        return new JSONArray()
+                .put("list_symbols")
+                .put("read_symbol")
+                .put("read_file")
+                .put("write_symbol")
+                .put("compile_project")
+                .put("get_diagnostics")
+                .put("set_input_state")
+                .put("set_runtime_i32")
+                .put("get_runtime_i32")
+                .put("run_frame")
+                .put("run_for_ticks")
+                .put("inspect_runtime_state")
+                .put("take_screenshot");
+    }
+
+    private static JSONObject aiToolValidationError(String tool, JSONObject args, String error, JSONArray requiredArgs) throws Exception {
+        JSONObject acceptedArgs = new JSONObject();
+        String normalizedTool = tool == null ? "" : tool;
+        if ("read_symbol".equals(normalizedTool)) {
+            acceptedArgs.put("name", "symbol_name").put("kind", "function_or_struct_optional").put("file", "src/main.stasis_optional").put("owner", "owner_optional");
+        } else if ("read_file".equals(normalizedTool)) {
+            acceptedArgs.put("file", "src/main.stasis");
+        } else if ("write_symbol".equals(normalizedTool)) {
+            acceptedArgs.put("file", "src/main.stasis").put("name", "function_name").put("kind", "replace_function").put("owner", "Root").put("new_source", "function function_name(): void {\n    // ...\n}");
+        } else if ("set_runtime_i32".equals(normalizedTool)) {
+            acceptedArgs.put("path", "GameState.field").put("value", 0);
+        } else if ("get_runtime_i32".equals(normalizedTool)) {
+            acceptedArgs.put("path", "GameState.field");
+        } else if ("set_input_state".equals(normalizedTool)) {
+            acceptedArgs.put("x", 180).put("y", 320).put("active", 1).put("screen_w", 360).put("screen_h", 640);
+        } else if ("run_for_ticks".equals(normalizedTool)) {
+            acceptedArgs.put("ticks", 1);
+        }
+        return new JSONObject()
+                .put("kind", "validation_error")
+                .put("error", error)
+                .put("tool", normalizedTool)
+                .put("received_args", args == null ? new JSONObject() : args)
+                .put("required_args", requiredArgs)
+                .put("accepted_shape", new JSONObject().put("tool", normalizedTool.isEmpty() ? "tool_name" : normalizedTool).put("args", acceptedArgs))
+                .put("correction_instruction", "Return another mode=tool_calls response with corrected JSON for this tool, or mode=done with no actions if no work remains.");
+    }
 
     private void recordAiToolResult(AiAgentSession session, String tool, JSONObject result) {
         session.lastToolSummary = tool;

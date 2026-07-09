@@ -156,6 +156,11 @@ def main() -> int:
     assert "aiResult.usageSummary" in activity
     assert "runAiAgentLoop" in activity
     assert "executeAiToolCalls" in activity
+    assert "validateAiToolCall" in activity
+    assert "validation_error" in activity
+    assert "accepted_shape" in activity
+    assert "required_args" in activity
+    assert "Tool errors and validation_error observations are not final" in activity
     assert "recordAiToolResult" in activity
     assert "tool_call_limit_after_successful_writes" in activity
     assert "repeated_tool_calls" in activity
@@ -208,7 +213,7 @@ def main() -> int:
     assert "spawn_actor" in activity
     assert "Follow architecture_recommendations" in activity
     assert "Apply code changes with write_symbol before final edits" in activity
-    assert "Tool errors are not final" in activity
+    assert "Tool errors and validation_error observations are not final" in activity
     assert "mode=done" in activity
     assert "AI edit complete" in activity
     assert "status=rolled_back with diagnostics" in activity
