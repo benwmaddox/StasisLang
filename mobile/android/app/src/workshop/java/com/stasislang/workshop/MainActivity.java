@@ -110,6 +110,7 @@ public final class MainActivity extends Activity {
     private TextView aiActionPill;
     private TextView aiPhasePill;
     private TextView aiElapsedPill;
+    private LinearLayout aiSettingsBody;
     private TextView reloadStatus;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -662,7 +663,7 @@ public final class MainActivity extends Activity {
         controls.setPadding(0, dp(8), 0, 0);
 
         TextView aiTitle = new TextView(this);
-        aiTitle.setText("AI Edit");
+        aiTitle.setText("Chat and Commands");
         aiTitle.setTextColor(Color.rgb(35, 45, 60));
         aiTitle.setTextSize(14.0f);
         aiTitle.setTypeface(Typeface.DEFAULT_BOLD);
@@ -671,27 +672,14 @@ public final class MainActivity extends Activity {
         SharedPreferences aiPrefs = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
 
         aiPromptEditor = new EditText(this);
-        aiPromptEditor.setHint("Describe a game change. AI can inspect and edit any symbol.");
+        aiPromptEditor.setHint("Describe a game change or command. The workspace will inspect, edit, compile, and test it.");
         aiPromptEditor.setSingleLine(false);
         aiPromptEditor.setMinLines(2);
         aiPromptEditor.setTextSize(12.0f);
         controls.addView(aiPromptEditor, fullWidth());
 
-        aiApiKeyEditor = new EditText(this);
-        aiApiKeyEditor.setHint("OpenAI API key");
-        aiApiKeyEditor.setSingleLine(true);
-        aiApiKeyEditor.setText(aiPrefs.getString(AI_PREF_API_KEY, ""));
-        aiApiKeyEditor.setTextSize(12.0f);
-        controls.addView(aiApiKeyEditor, fullWidth());
-
-        aiModelEditor = new EditText(this);
-        aiModelEditor.setSingleLine(true);
-        aiModelEditor.setText(aiPrefs.getString(AI_PREF_MODEL, DEFAULT_AI_MODEL));
-        aiModelEditor.setTextSize(12.0f);
-        controls.addView(aiModelEditor, fullWidth());
-
         Button aiPatch = new Button(this);
-        aiPatch.setText("AI Edit Workspace");
+        aiPatch.setText("Run AI Change");
         aiPatch.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -712,7 +700,63 @@ public final class MainActivity extends Activity {
         progressRow.addView(aiPhasePill);
         progressRow.addView(aiElapsedPill);
         controls.addView(progressRow, fullWidth());
+
+        Button settingsToggle = new Button(this);
+        settingsToggle.setText("AI Settings");
+        settingsToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                toggleAiSettings();
+            }
+        });
+        controls.addView(settingsToggle, fullWidth());
+
+        aiSettingsBody = new LinearLayout(this);
+        aiSettingsBody.setOrientation(LinearLayout.VERTICAL);
+        aiSettingsBody.setVisibility(View.GONE);
+        aiApiKeyEditor = new EditText(this);
+        aiApiKeyEditor.setHint("OpenAI API key");
+        aiApiKeyEditor.setSingleLine(true);
+        aiApiKeyEditor.setText(aiPrefs.getString(AI_PREF_API_KEY, ""));
+        aiApiKeyEditor.setTextSize(12.0f);
+        aiSettingsBody.addView(aiApiKeyEditor, fullWidth());
+
+        aiModelEditor = new EditText(this);
+        aiModelEditor.setHint("Model");
+        aiModelEditor.setSingleLine(true);
+        aiModelEditor.setText(aiPrefs.getString(AI_PREF_MODEL, DEFAULT_AI_MODEL));
+        aiModelEditor.setTextSize(12.0f);
+        aiSettingsBody.addView(aiModelEditor, fullWidth());
+
+        Button saveSettings = new Button(this);
+        saveSettings.setText("Save AI Settings");
+        saveSettings.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                saveAiSettingsFromEditors();
+            }
+        });
+        aiSettingsBody.addView(saveSettings, fullWidth());
+        controls.addView(aiSettingsBody, fullWidth());
         return controls;
+    }
+
+    private void toggleAiSettings() {
+        if (aiSettingsBody == null) {
+            return;
+        }
+        aiSettingsBody.setVisibility(aiSettingsBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+    }
+
+    private void saveAiSettingsFromEditors() {
+        String apiKey = aiApiKeyEditor == null ? "" : aiApiKeyEditor.getText().toString().trim();
+        String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
+        if (apiKey.isEmpty()) {
+            setStatusText("AI settings need an API key before a run can start");
+            return;
+        }
+        saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model);
+        setStatusText("AI settings saved");
     }
     private LinearLayout createEditControls() {
         LinearLayout controls = new LinearLayout(this);
@@ -896,7 +940,7 @@ public final class MainActivity extends Activity {
         String prompt = aiPromptEditor == null ? "" : aiPromptEditor.getText().toString().trim();
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
         if (apiKey.isEmpty() || prompt.isEmpty()) {
-            setStatusText("AI edit requires an API key and prompt");
+            setStatusText("AI run needs both a request and an API key; open AI Settings if the key is not saved");
             updateAiProgress(0, 0, "needs input");
             return;
         }
@@ -912,8 +956,8 @@ public final class MainActivity extends Activity {
         final String requestApiKey = apiKey;
         aiStartedAtNanos = System.nanoTime();
         appendAiTraceFields("request", "model", requestModel, "request_json", requestJson, null, null);
-        setStatusText("AI edit: sending workspace context");
-        updateAiProgress(0, 0, "queued");
+        setStatusText("AI run started: preparing workspace and command context");
+        updateAiProgress(0, 0, "preparing");
         new Thread(new Runnable() {
             @Override
             public void run() {

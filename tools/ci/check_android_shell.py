@@ -130,7 +130,12 @@ def main() -> int:
     assert "time 0.0s" in activity
     assert "hot swap=FastReload" in activity
     assert "aiReloadPhase" in activity
-    assert "AI Edit Workspace" in activity
+    assert "Chat and Commands" in activity
+    assert "Run AI Change" in activity
+    assert "AI Settings" in activity
+    assert "aiSettingsBody.setVisibility(View.GONE)" in activity
+    assert "AI run started: preparing workspace and command context" in activity
+    assert "AI run needs both a request and an API key" in activity
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity

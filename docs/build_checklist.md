@@ -357,10 +357,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 #### AW40 - Android Pull-Down Workspace Priorities
 - Language: `Android Java + docs`.
 - Scope: Reorder the game overlay around chat and command entry first, with API configuration collapsed, manual source/browser secondary, and compact background GitHub sync state.
-- Deliverable: The pull-down workspace makes chat/commands the immediate interaction surface while retaining manual editing, settings, diagnostics, and review behind clear secondary controls.
+- Deliverable: The pull-down workspace opens with `Chat and Commands`, a request field, `Run AI Change`, and visible progress pills. API key/model fields move into collapsed `AI Settings`, while manual editing, diagnostics, and review remain secondary controls.
 - Tests: Structural UI verifier plus debug APK build; focused local tests for persisted settings and command state where applicable.
 - Done gate: Opening the workshop makes commands immediately available without hiding source, settings, or sync review.
-- Status: `planned`
+- Status: `completed`
 #### AW41 - Android Voice Change Shortcut
 - Language: `Android Java + platform voice integration + docs`.
 - Scope: Add a top-game shortcut for a voice change request with explicit recording, cancel, and run states.
