@@ -30,7 +30,7 @@ From the API-reported `usage` fields in the full log:
   "uncached_input_tokens": 11702,
   "output_tokens": 3319,
   "total_tokens": 20397,
-  "estimated_cost_usd": 0.0387916
+  "estimated_cost_usd": 0.0241152
 }
 ```
 
@@ -50,13 +50,13 @@ Cost estimate assumption:
 
 ```json
 {
-  "input_per_1m": 1.00,
-  "cached_input_per_1m": 0.10,
-  "output_per_1m": 8.00
+  "input_per_1m": 0.75,
+  "cached_input_per_1m": 0.075,
+  "output_per_1m": 4.50
 }
 ```
 
-I could not find an official OpenAI `gpt-5.4-mini` API pricing page in the current search results. The full log marks this as an estimate and preserves exact API token usage separately, so the estimate can be recalculated if we update pricing.
+Pricing updated from user-provided OpenAI standard short-context rates on 2026-07-09: `gpt-5.4-mini` is `$0.75` input, `$0.075` cached input, and `$4.50` output per 1M tokens. The full log preserves exact API token usage so this can be recalculated if rates change.
 
 ## Flow Review
 
