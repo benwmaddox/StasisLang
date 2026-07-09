@@ -1911,10 +1911,16 @@ public final class MainActivity extends Activity {
         if (exactMatches == 1) {
             return exactMatch;
         }
+        if (exactMatches > 1) {
+            throw new IOException("AI read_symbol target ambiguous: " + file + " " + name);
+        }
         if (nameMatches == 1) {
             return nameMatch;
         }
-        throw new IOException("AI read_symbol target ambiguous or not found: " + file + " " + name);
+        if (nameMatches > 1) {
+            throw new IOException("AI read_symbol target ambiguous: " + file + " " + name);
+        }
+        throw new IOException("AI read_symbol target not found: " + file + " " + name);
     }
     private static void validateAiReplacementSource(String editKind, String expectedName, String newSource) throws Exception {
         if (newSource.contains("&mut") || newSource.contains("->") || newSource.contains("fn ")) {
