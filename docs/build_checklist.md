@@ -451,8 +451,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW55 - Android Pixel Screenshot to AI
 - Scope: Capture the actual preview framebuffer as a bounded image, retain the logical render snapshot as structured context, and let the user explicitly attach either or both to an AI request.
+- Progress: `Capture Preview for AI` schedules a fresh OpenGL render and reads the actual post-draw RGBA framebuffer, flips it to Android coordinates, rejects framebuffers above 8 megapixels before allocation, and proportionally bounds the retained image to a 1024 px maximum axis. The renderer snapshots the exact native frame-value array used for that draw, which is decoded with current runtime/input context as the companion logical snapshot. A review dialog previews the pixels and independently opts pixels and logical context in or out; both default off, can be removed, never enter traces, and are discarded on project switch. Approved pixels share AW54's four-image/12 MiB/cost gates and are encoded as a PNG `input_image`; approved logical state stays text context. On-device visual orientation/color and live response acceptance remain.
+- Tests: The Android shell verifier covers explicit capture/review/consent/removal, post-draw `glReadPixels`, frame matching, vertical/channel conversion path, allocation and retained-size bounds, project-switch cleanup, logical request context, and PNG attachment wiring; workshop Java compilation and APK assembly cover GLES/Android APIs.
 - Done gate: A request can include a visually accurate game screenshot plus runtime/render metadata, with explicit preview/remove/consent before upload.
-- Status: `planned`
+- Status: `in progress`
 #### AW56 - AI-Generated Image Asset Review
 - Scope: Accept AI-generated or AI-edited image outputs into a temporary review area with before/after preview, accept/reject, undo, project persistence, export, and GitHub sync.
 - Done gate: AI image work cannot overwrite an accepted project asset without review and a recoverable prior version.

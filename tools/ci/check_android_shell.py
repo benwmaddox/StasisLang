@@ -235,6 +235,19 @@ def main() -> int:
     assert "buildAiOpenAiInput(requestJson, true)" in activity
     assert "selected_images_are_explicit_project_assets_only" in activity
     assert "activeAiImageAttachments = Collections.emptyList()" in activity
+    assert "Capture Preview for AI" in activity
+    assert "Review Preview Capture" in activity
+    assert "Attach these rendered pixels" in activity
+    assert "Attach logical render/runtime/input snapshot" in activity
+    assert "Nothing is sent until selected here and Run AI is pressed" in activity
+    assert "GLES20.glReadPixels" in activity
+    assert "lastDrawnFrame" in activity
+    assert "MAX_PREVIEW_CAPTURE_PIXELS = 8_000_000L" in activity
+    assert "preview framebuffer exceeds the 8 megapixel capture limit" in activity
+    assert "Bitmap.createScaledBitmap" in activity
+    assert "selected_preview_logical_snapshot" in activity
+    assert '"captured-preview.png"' in activity
+    assert "clearPendingPreviewCapture();" in activity
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
     assert "Cancel AI" in activity
