@@ -421,8 +421,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW50 - Android Published Build and Release Validation
 - Scope: Validate the published/AOT flavor, signing/install workflow, runtime assets, and release performance/error reporting.
+- Progress: The published flavor directly links the generated Android arm64 AOT objects and no longer seeds or packages workshop source, tests, generated stubs, or the Rust JIT bridge. Workshop assets are copied through a filtered generated source set so app-private build output cannot leak back into either APK. `build_published.ps1` validates the built APK as runtime-only, arm64-only, bounded in size, and containing the native runtime before reporting success. Release signing configuration and on-device published runtime/performance acceptance remain.
+- Tests: `check_android_published_apk.py`, the structural Android verifier, the published AOT bundle regression tests, and `assemblePublishedRelease` cover the machine-testable package contract.
 - Done gate: A signed sideloadable published build runs a representative game without developer workshop dependencies.
-- Status: `planned`
+- Status: `in progress`
 #### AW51 - Android Device Acceptance Suite
 - Scope: Add a repeatable device validation checklist/automation for editor, tests, voice, touch preview, sync, and lifecycle recovery.
 - Done gate: Every user-facing workshop slice has an on-device proof or an explicitly recorded hardware/environment limitation.

@@ -23,7 +23,7 @@ It packages the tested Rust/C ABI bridge from `crates/stasis_android_bridge`, ru
 
 ## Published Build Path
 
-The `published` flavor is a parallel runtime-only Android target. It keeps the same native rendering/runtime surface but skips the workshop chrome entirely: no hamburger drawer, no symbol browser, no source editor, no AI controls, and no manual hot-swap UI. It uses a separate application id, `com.stasislang.workshop.published`, so it can be installed next to the developer workshop app.
+The `published` flavor is a parallel runtime-only Android target. It keeps the same native rendering/runtime surface but skips the workshop chrome entirely: no hamburger drawer, no symbol browser, no source editor, no AI controls, and no manual hot-swap UI. It uses a separate application id, `com.stasislang.workshop.published`, so it can be installed next to the developer workshop app. The APK links the generated arm64 AOT objects directly and excludes Stasis source, tests, compiler stubs, and the Rust JIT bridge.
 
 Build the release-style APK with:
 
@@ -37,7 +37,7 @@ Install a debug-signed published variant for device testing with:
 .\build_published.ps1 -Install
 ```
 
-AOT status: `stasis_compiler` already has an AOT engine-bundle path and the published build script can run its AOT bundle contract check with `-ValidateAot`. The Android runtime still executes through the current native bridge/JIT path until the next bridge step links or packages the Android AOT engine image and calls it directly from the host.
+The build script runs an APK-content gate after Gradle succeeds. `-ValidateAot` additionally runs the compiler AOT bundle contract test before building. A release build is unsigned until a release signing configuration is supplied; `-Install` uses the debug-signed published variant for device acceptance.
 ## Build
 
 Prerequisites:
@@ -115,4 +115,4 @@ Sample and imported projects keep separate immutable source baselines. Sample ba
 
 Real-device touch acceptance uses the same packaged Rust/JIT runtime as the preview: an injected Android gesture updates Stasis `Input`, advances game logic, and moves the emitted player-paddle render command. The 2026-07-09 device run advanced 120 ticks during the check and moved the paddle command from Y 811 to Y 1537.
 
-Failed manual Apply operations show the edited file/symbol, compiler result, and reload expectation. `Go to Diagnostic` reopens that symbol. `Undo Failed Apply` uses a bounded per-project recovery journal and restores only when the file still matches the failed version, so a recovery action cannot overwrite newer edits.
+Failed manual Apply operations show the edited file/symbol, compiler result, and reload expectation. `Go to Diagnostic` reopens that symbol. `Recovery History` browses the bounded per-project journal, and `Undo Failed Apply` restores the selected entry only when the file still matches the failed version, so recovery cannot overwrite newer edits. Failed Stasis tests also populate diagnostic file/test/line navigation.

@@ -29,6 +29,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis",
     "mobile/android/README.md",
     "tools/android_ai_agent_host.py",
+    "tools/ci/check_android_published_apk.py",
 ]
 
 STASIS_SAMPLE_FILES = [
@@ -70,6 +71,8 @@ def main() -> int:
     assert ":app:installPublishedDebug" in published_script
     assert "ValidateAot" in published_script
     assert "aot_engine_bundle_writes_manifest_and_required_entrypoints" in published_script
+    assert "check_android_published_apk.py" in published_script
+    assert "build_rust_bridge.ps1" not in published_script
     assert "app/src/*/jniLibs/" in android_gitignore
 
     app_gradle = read("mobile/android/app/build.gradle")
@@ -84,6 +87,9 @@ def main() -> int:
     assert "STASIS_ANDROID_SMOKE_ONLY=ON" in app_gradle
     assert "generatePublishedAotBundle" in app_gradle
     assert "STASIS_ANDROID_PUBLISHED_AOT=ON" in app_gradle
+    assert "prepareWorkshopAssets" in app_gradle
+    assert "workshop_sample/build/**" in app_gradle
+    assert "published.assets.setSrcDirs([])" in app_gradle
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
     workshop_manifest = read("mobile/android/app/src/workshop/AndroidManifest.xml")
@@ -616,7 +622,9 @@ def main() -> int:
     assert "onDrawFrame" in published_activity
     assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in published_activity
     assert "event.getPointerCount() >= 3" in published_activity
-    assert "PROJECT_DIR = \"published_project\"" in published_activity
+    assert "PUBLISHED_RUNTIME_ID = \"published_aot\"" in published_activity
+    assert "ensureBundledProject" not in published_activity
+    assert "AssetManager" not in published_activity
     workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")
     assert "build_android_workshop_compile_plan" in workshop
     assert "AndroidWorkshopCompilePlan" in workshop
