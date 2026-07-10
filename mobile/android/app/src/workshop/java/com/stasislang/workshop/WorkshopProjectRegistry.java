@@ -68,10 +68,16 @@ final class WorkshopProjectRegistry {
     }
 
     static ProjectInfo createFromSample(Context context, String requestedName) throws Exception {
+        return createProject(context, requestedName);
+    }
+
+    static ProjectInfo createForImport(Context context, String requestedName) throws Exception {
+        return createProject(context, requestedName);
+    }
+
+    private static ProjectInfo createProject(Context context, String requestedName) throws Exception {
         String name = requestedName == null ? "" : requestedName.trim();
-        if (name.isEmpty() || name.length() > 80 || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
-            throw new IllegalArgumentException("project name must be 1-80 characters without slashes");
-        }
+        validateRequestedName(name);
         File projectsRoot = new File(context.getFilesDir(), PROJECTS_DIR);
         if (!projectsRoot.isDirectory() && !projectsRoot.mkdirs()) {
             throw new IllegalStateException("unable to create projects directory");
@@ -89,6 +95,22 @@ final class WorkshopProjectRegistry {
             throw error;
         }
         return project;
+    }
+
+    static void validateRequestedName(String requestedName) {
+        String name = requestedName == null ? "" : requestedName.trim();
+        if (name.isEmpty() || name.length() > 80 || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+            throw new IllegalArgumentException("project name must be 1-80 characters without slashes");
+        }
+    }
+
+    static void deleteFailedImport(Context context, ProjectInfo project) throws Exception {
+        validateProjectRoot(context, project.root);
+        if (LEGACY_PROJECT_DIR.equals(project.directoryName)) {
+            throw new IllegalArgumentException("legacy project cannot be deleted as a failed import");
+        }
+        deleteTree(project.root);
+        if (project.root.exists()) throw new IllegalStateException("failed import cleanup did not complete");
     }
 
     static void setActive(Context context, ProjectInfo project) throws Exception {
@@ -184,6 +206,14 @@ final class WorkshopProjectRegistry {
         } finally {
             input.close();
         }
+    }
+
+    private static void deleteTree(File file) {
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) for (File child : children) deleteTree(child);
+        }
+        file.delete();
     }
 
     static final class ProjectInfo {

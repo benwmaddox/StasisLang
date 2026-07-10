@@ -12,6 +12,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 public final class WorkshopProjectArchiveCheck {
     public static void main(String[] args) throws Exception {
@@ -30,6 +31,30 @@ public final class WorkshopProjectArchiveCheck {
             List<String> entries = zipEntries(output.toByteArray());
             require(entries.equals(Arrays.asList(".stasis-workshop.json", "src/main.stasis")),
                     "archive entries were not deterministic: " + entries);
+
+            File imported = new File(root.getParentFile(), root.getName() + "-imported");
+            require(imported.mkdirs(), "import target mkdir failed");
+            try {
+                write(new File(imported, ".stasis-workshop.json"), "{\"format_version\":1,\"id\":\"fresh\"}\n");
+                WorkshopProjectArchive.ImportSummary importedSummary = WorkshopProjectArchive.importProject(
+                        new ByteArrayInputStream(output.toByteArray()), imported);
+                require(importedSummary.fileCount == 2, "unexpected imported file count");
+                require(new File(imported, "src/main.stasis").isFile(), "main source was not restored");
+                String freshMetadata = new String(Files.readAllBytes(
+                        new File(imported, ".stasis-workshop.json").toPath()), StandardCharsets.UTF_8);
+                require(freshMetadata.contains("fresh"), "archive overwrote fresh project identity");
+
+                boolean traversalRejected = false;
+                try {
+                    WorkshopProjectArchive.importProject(new ByteArrayInputStream(traversalArchive()), imported);
+                } catch (Exception expected) {
+                    traversalRejected = expected.getMessage().contains("path is invalid");
+                }
+                require(traversalRejected, "archive traversal was not rejected");
+                require(!new File(imported.getParentFile(), "escaped.stasis").exists(), "archive escaped target root");
+            } finally {
+                deleteTree(imported);
+            }
 
             File oversized = new File(root, "src/oversized.bin");
             RandomAccessFile random = new RandomAccessFile(oversized, "rw");
@@ -61,6 +86,20 @@ public final class WorkshopProjectArchiveCheck {
             input.close();
         }
         return entries;
+    }
+
+    private static byte[] traversalArchive() throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        ZipOutputStream zip = new ZipOutputStream(bytes);
+        try {
+            zip.putNextEntry(new ZipEntry("../escaped.stasis"));
+            zip.write("escape".getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+            zip.finish();
+        } finally {
+            zip.close();
+        }
+        return bytes.toByteArray();
     }
 
     private static void write(File file, String text) throws Exception {
