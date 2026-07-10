@@ -17,6 +17,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTemplateCatalog.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java",
@@ -44,6 +46,7 @@ REQUIRED_FILES = [
     "tools/android_ai_agent_host.py",
     "tools/ci/check_android_published_apk.py",
     "tests/android/AiQueuePolicyTest.java",
+    "tests/android/WorkshopProjectFormatPolicyTest.java",
 ]
 
 STASIS_SAMPLE_FILES = [
@@ -143,6 +146,8 @@ def main() -> int:
     recovery_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java")
     draft_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java")
     project_registry = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java")
+    template_catalog = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTemplateCatalog.java")
+    project_format_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java")
     project_archive = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java")
     image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
     paint_view = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java")
@@ -252,7 +257,9 @@ def main() -> int:
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
     assert "private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues)" in activity
-    assert "workshop_sample/" in activity
+    assert 'assetRoot = "workshop_sample/"' not in template_catalog
+    assert '"workshop_sample/"' in template_catalog
+    assert "activeWorkshopTemplate" in activity
     assert "createWorkshopView" in activity
     assert "BuildConfig.STASIS_PUBLISHED_BUILD" in activity
     assert "installGameStatusOverlay(root, false)" in activity
@@ -569,8 +576,11 @@ def main() -> int:
     assert '"interrupted", "app stopped before completion"' in activity
     assert '"sync".equals(operation)' in activity
     assert '"pull_request".equals(operation)' in activity
-    assert "WorkshopProjectRegistry.initialize(this)" in activity
-    assert "New Project From Sample" in activity
+    assert "WorkshopProjectRegistry.initialize(this," in activity
+    assert "New Project From Selected Template" in activity
+    assert "WorkshopTemplateCatalog.list()" in activity
+    assert "templateSelector.getSelectedItem()" in activity
+    assert "createFromTemplate" in activity
     assert "Switch Project" in activity
     assert "projectSettingsBody.setVisibility(View.GONE)" in activity
     assert "Project switch blocked while AI, GitHub, or project I/O is active" in activity
@@ -583,14 +593,19 @@ def main() -> int:
     assert "Apply or Reset the pending source edit before switching projects" in activity
     assert 'return "stasis-workshop-" + identity' in activity
     assert "WorkshopProjectRegistry.METADATA_FILE.equals(file.getName())" in activity
-    assert "static final int FORMAT_VERSION = 2" in project_registry
-    assert 'V1_BACKUP_FILE = ".stasis-workshop.json.v1.bak"' in project_registry
-    assert "migrateV1Metadata" in project_registry
+    assert "FORMAT_VERSION = WorkshopProjectFormatPolicy.CURRENT_VERSION" in project_registry
+    assert "CURRENT_VERSION = 3" in project_format_policy
+    assert 'return ".stasis-workshop.json.v1.bak"' in project_format_policy
+    assert 'return ".stasis-workshop.json.v2.bak"' in project_format_policy
+    assert "migrateLegacyMetadata" in project_registry
+    assert "WorkshopProjectFormatPolicy.supported(version)" in project_registry
+    assert "WorkshopProjectFormatPolicy.templateId" in project_registry
+    assert "WorkshopProjectFormatPolicy.backupFileName" in project_registry
     assert 'put("schema", "stasis-workshop-project")' in project_registry
     assert 'put("migrated_from_version", migratedFromVersion)' in project_registry
     assert "update the Workshop before opening this project" in project_registry
-    assert "project format 2 metadata schema is invalid" in project_registry
-    assert "the fsynced v1 backup was preserved" in project_registry
+    assert "project metadata schema is invalid" in project_registry
+    assert '" migration failed; the fsynced v"' in project_registry
     assert "migrated metadata verification failed" in project_registry
     assert "StandardCopyOption.ATOMIC_MOVE" in project_registry
     assert "StandardCopyOption.REPLACE_EXISTING" in project_registry
@@ -603,6 +618,11 @@ def main() -> int:
     assert "active project preference commit failed" in project_registry
     assert "unsupported project format version" in project_registry
     assert '.put("origin", project.origin)' in project_registry
+    assert '.put("template_id", project.templateId)' in project_registry
+    assert "WorkshopTemplateCatalog.LEGACY_TEMPLATE_ID" in project_format_policy
+    assert "WorkshopTemplateCatalog.isKnown(templateId)" in project_registry
+    assert 'DEFAULT_TEMPLATE_ID = "pong"' in template_catalog
+    assert 'LEGACY_TEMPLATE_ID = "pong"' in template_catalog
     assert '"sample".equals(origin)' in project_registry
     assert '"import".equals(origin)' in project_registry
     assert "project metadata id is invalid" in project_registry
@@ -644,7 +664,7 @@ def main() -> int:
     assert "validateArchivePath" in project_archive
     assert "project archive contains duplicate path" in project_archive
     assert "project archive metadata format is unsupported" in project_archive
-    assert '?:1|2' in project_archive
+    assert '?:1|2|3' in project_archive
     assert "project archive needs src/main.stasis" in project_archive
     assert "output.getFD().sync()" in project_archive
     assert "legacy project cannot be deleted as a failed import" in project_registry
@@ -751,11 +771,11 @@ def main() -> int:
     assert "formatRawFileDiffs" in activity
     assert "appendUnifiedFileDiff" in activity
     assert "splitSourceLines" in activity
-    assert "SAMPLE_TEST_FILES" in activity
+    assert "template.testFiles" in activity
     assert "parseTest" in activity
     assert "TestUpdated: run tests to validate" in activity
     assert "sections.put(\"Tests\"" in activity
-    assert "readAsset(assets, ASSET_ROOT + file)" in activity
+    assert "readAsset(assets, template.assetRoot + file)" in activity
     assert "newTest.setText(\"New Test\")" in activity
     assert "createManualTest();" in activity
     assert "Created failing test template; edit it, then Run Tests" in activity
