@@ -260,6 +260,22 @@ def main() -> int:
     assert "output.getFD().sync()" in project_registry
     assert "active project preference commit failed" in project_registry
     assert "unsupported project format version" in project_registry
+    assert '.put("origin", project.origin)' in project_registry
+    assert '"sample".equals(origin)' in project_registry
+    assert '"import".equals(origin)' in project_registry
+    assert "project metadata id is invalid" in project_registry
+    assert "originMissing" in project_registry
+    assert "StandardCopyOption.ATOMIC_MOVE" in project_registry
+    assert "StandardCopyOption.REPLACE_EXISTING" in project_registry
+    assert "PROJECT_BASELINES_DIR" in activity
+    assert "ensureActiveProjectBaseline" in activity
+    assert "loadProjectBaselineSnapshot" in activity
+    assert "restoreImportedProjectSourceBaseline" in activity
+    assert '"import".equals(activeProject.origin)' in activity
+    assert '"sample".equals(activeProject.origin)' in activity
+    assert "collectProjectStasisFiles(projectRoot, files, seen)" in activity
+    assert "files = sourcesByFile(loadBundledProject())" in activity
+    assert "Reverted saved symbol to project baseline" in activity
     assert "Export Project Archive" in activity
     assert "Intent.ACTION_CREATE_DOCUMENT" in activity
     assert 'intent.setType("application/zip")' in activity
@@ -375,7 +391,7 @@ def main() -> int:
     assert "findSymbolByIdentity" in activity
     assert "deleteTest.setText(\"Delete Test\")" in activity
     assert "deleteSelectedManualTest();" in activity
-    assert "bundled tests can be reverted, not deleted" in activity
+    assert "baseline tests can be reverted, not deleted" in activity
     assert "Deleted user-created test" in activity
     assert "newHelper.setText(\"New Helper\")" in activity
     assert "createManualHelper();" in activity
@@ -383,12 +399,12 @@ def main() -> int:
     assert "Created root helper" in activity
     assert "deleteHelper.setText(\"Delete Helper\")" in activity
     assert "deleteSelectedManualHelper();" in activity
-    assert "bundled helpers can be reverted, not deleted" in activity
+    assert "baseline helpers can be reverted, not deleted" in activity
     assert "Deleted user-created root helper" in activity
     assert "revertSaved.setText(\"Revert Saved\")" in activity
     assert "revertSelectedToBundled();" in activity
-    assert "Reverted saved symbol to bundled baseline" in activity
-    assert "Revert unavailable: selected symbol is not bundled" in activity
+    assert "Reverted saved symbol to project baseline" in activity
+    assert "Revert unavailable: selected symbol is not in the project baseline" in activity
     assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
     assert "list_owner_symbols" in activity
