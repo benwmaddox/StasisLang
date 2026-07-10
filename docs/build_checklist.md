@@ -528,7 +528,8 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Deliverable: UI dollar amounts round half-up to the nearest cent (including estimates, per-run cap, monthly cap, spent, and remaining), while internal token/image pricing, accumulated spend, comparisons, and persisted records retain full precision. Values below half a cent display `$0.00`, not as free/unmetered.
 - Tests: Boundary cases around `$0.004`, `$0.005`, `$0.014`, `$0.015`, negative-zero avoidance, locale-independent formatting, and proof that rounded display does not change enforcement.
 - Done gate: Every visible budget amount uses consistent cents while enforcement remains conservative and precise.
-- Status: `planned`
+- Progress: All existing AI cost/budget display paths now route through a locale-independent half-up two-decimal formatter; precise doubles remain unchanged for persistence, accumulation, limits, and paid-call decisions.
+- Status: `in progress (host boundary tests implemented; device visual acceptance pending)`
 
 #### AW68 - Data-Oriented Exploration Tutorial and Template Catalog
 - Scope: Replace Pong as the default Workshop project with a more instructive touch exploration game while retaining Pong as a selectable template.
