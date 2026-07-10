@@ -415,8 +415,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `completed`
 #### AW49 - Android Diagnostics and Change Recovery UX
 - Scope: Provide structured compiler/test diagnostics, source locations, safe rollback/recovery history, and clear hot-reload/reset explanations.
+- Progress: Manual Apply now presents a structured diagnostic with the exact edited file/symbol, raw compiler result, and `FastReload`/`ResetRequired` expectation. `Go to Diagnostic` reopens the affected symbol. Failed manual compiles persist a bounded ten-entry per-project whole-file before/failed journal with fsynced app-private records. `Undo Failed Apply` restores the prior file only when the current file still exactly matches the failed version, preventing recovery from overwriting newer work, recompiles, and retains other valid project edits. Cross-file compiler positions, test-location navigation, and a browsable multi-entry recovery list remain.
+- Tests: Android shell verifier covers diagnostic controls, per-project journaling, bounds, path confinement, fsync, compare-before-restore, navigation, and recompile wiring; Java sources compile and the debug APK builds.
 - Done gate: A user can identify, navigate to, and recover from a failed edit without raw log hunting.
-- Status: `planned`
+- Status: `in progress`
 #### AW50 - Android Published Build and Release Validation
 - Scope: Validate the published/AOT flavor, signing/install workflow, runtime assets, and release performance/error reporting.
 - Done gate: A signed sideloadable published build runs a representative game without developer workshop dependencies.

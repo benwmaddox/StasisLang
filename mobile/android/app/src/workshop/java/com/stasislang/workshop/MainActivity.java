@@ -181,6 +181,9 @@ public final class MainActivity extends Activity {
     private volatile HttpURLConnection activeAiConnection;
     private String activeAiPrompt = "";
     private TextView reloadStatus;
+    private TextView diagnosticStatus;
+    private String diagnosticFile = "";
+    private String diagnosticSymbol = "";
     private TextView changeSummary;
     private TextView gameStatus;
     private GamePreviewView gamePreview;
@@ -461,6 +464,28 @@ public final class MainActivity extends Activity {
         reloadStatus.setTextSize(13.0f);
         reloadStatus.setPadding(0, dp(8), 0, dp(6));
         content.addView(reloadStatus, fullWidth());
+
+        diagnosticStatus = new TextView(this);
+        diagnosticStatus.setTextSize(12.0f);
+        diagnosticStatus.setTextColor(Color.rgb(125, 55, 45));
+        diagnosticStatus.setTypeface(Typeface.MONOSPACE);
+        content.addView(diagnosticStatus, fullWidth());
+        LinearLayout diagnosticActions = new LinearLayout(this);
+        diagnosticActions.setOrientation(LinearLayout.HORIZONTAL);
+        Button goToDiagnostic = new Button(this);
+        goToDiagnostic.setText("Go to Diagnostic");
+        goToDiagnostic.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { goToDiagnosticSource(); }
+        });
+        diagnosticActions.addView(goToDiagnostic, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        Button undoFailedApply = new Button(this);
+        undoFailedApply.setText("Undo Failed Apply");
+        undoFailedApply.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { undoLatestFailedApply(); }
+        });
+        diagnosticActions.addView(undoFailedApply, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        content.addView(diagnosticActions, fullWidth());
+        refreshRecoveryStatus();
 
         changeSummary = new TextView(this);
         changeSummary.setTextColor(Color.rgb(73, 84, 100));
@@ -1501,6 +1526,8 @@ public final class MainActivity extends Activity {
             projectRootFile = project.root;
             projectRootPath = project.root.getAbsolutePath();
             selectedSymbol = null;
+            diagnosticFile = "";
+            diagnosticSymbol = "";
             compileAttempted = false;
             compileReady = false;
             lastCompileResult = "CompileNotRun";
@@ -1511,6 +1538,7 @@ public final class MainActivity extends Activity {
             if (snapshot.firstSymbol != null) showSymbol(snapshot.firstSymbol);
             refreshChangeSummary(snapshot);
             refreshCommandHistory();
+            refreshRecoveryStatus();
             refreshGitHubSettingsEditors();
             refreshGitHubSyncStatus();
             refreshProjectControls();
@@ -4457,6 +4485,7 @@ public final class MainActivity extends Activity {
 
         SymbolEntry editedSymbol = selectedSymbol;
         String editedSource = sourceEditor.getText().toString().trim();
+        String beforeFileSource = editedSymbol.sourceFile.source;
         String reload = classifySelectedReload(editedSymbol, editedSource);
         try {
             persistSelectedEdit(editedSymbol, editedSource);
@@ -4472,11 +4501,103 @@ public final class MainActivity extends Activity {
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
-            setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
+            if (compileReady) {
+                diagnosticFile = "";
+                diagnosticSymbol = "";
+                diagnosticStatus.setText("Compile passed - " + reload);
+                setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
+            } else {
+                diagnosticFile = editedSymbol.file;
+                diagnosticSymbol = editedSymbol.name;
+                AndroidEditRecoveryStore.record(this, activeRecoveryProjectId(), editedSymbol.file,
+                        editedSymbol.name, beforeFileSource, editedSymbol.sourceFile.source, compileResult);
+                diagnosticStatus.setText("Compile failed\nfile=" + diagnosticFile
+                        + "\nsymbol=" + diagnosticSymbol + "\nreload=" + reload + "\n" + compileResult);
+                setStatusText("Saved edit failed compile; use Go to Diagnostic or Undo Failed Apply");
+            }
         } catch (IOException error) {
             setStatusText("Save failed: " + error.getMessage());
+        } catch (Exception error) {
+            setStatusText("Recovery journal failed: " + error.getMessage());
         }
     }
+
+    private String activeRecoveryProjectId() {
+        return activeProject == null ? Integer.toHexString(projectRootPath().hashCode()) : activeProject.id;
+    }
+
+    private void refreshRecoveryStatus() {
+        if (diagnosticStatus == null) return;
+        try {
+            AndroidEditRecoveryStore.Entry entry = AndroidEditRecoveryStore.latest(this, activeRecoveryProjectId());
+            if (entry == null) {
+                diagnosticStatus.setText("Diagnostics: no failed manual applies");
+                return;
+            }
+            diagnosticFile = entry.path;
+            diagnosticSymbol = entry.symbol;
+            diagnosticStatus.setText("Recoverable failed apply\nfile=" + entry.path
+                    + "\nsymbol=" + entry.symbol + "\n" + entry.diagnostic);
+        } catch (Exception error) {
+            diagnosticStatus.setText("Recovery history unavailable: " + error.getMessage());
+        }
+    }
+
+    private void goToDiagnosticSource() {
+        if (diagnosticFile.isEmpty()) {
+            setStatusText("No source diagnostic is available");
+            return;
+        }
+        ProjectSnapshot project = loadBundledProject();
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (symbol.file.equals(diagnosticFile)
+                            && (diagnosticSymbol.isEmpty() || symbol.name.equals(diagnosticSymbol))) {
+                        showSymbol(symbol);
+                        manualEditBody.setVisibility(View.VISIBLE);
+                        setStatusText("Opened diagnostic source " + diagnosticFile + " - " + symbol.displayName());
+                        return;
+                    }
+                }
+            }
+        }
+        setStatusText("Diagnostic file is available but its symbol could not be parsed");
+    }
+
+    private void undoLatestFailedApply() {
+        try {
+            AndroidEditRecoveryStore.Entry entry = AndroidEditRecoveryStore.latest(this, activeRecoveryProjectId());
+            if (entry == null) {
+                setStatusText("No failed manual apply is available to undo");
+                return;
+            }
+            File target = new File(projectRoot(), entry.path.replace('/', File.separatorChar));
+            relativeProjectPath(target);
+            String current = readTextFile(target);
+            if (!current.equals(entry.failedSource)) {
+                setStatusText("Undo blocked: source changed after the failed apply");
+                return;
+            }
+            writeTextFile(target, entry.beforeSource);
+            AndroidEditRecoveryStore.consume(entry);
+            ProjectSnapshot restored = loadBundledProject();
+            rebuildSymbolList(restored);
+            diagnosticFile = entry.path;
+            diagnosticSymbol = entry.symbol;
+            goToDiagnosticSource();
+            refreshChangeSummary(restored);
+            String compileResult = nativeCompileProject(projectRootPath());
+            lastCompileResult = compileResult;
+            compileReady = isRunnableCompile(compileResult);
+            compileAttempted = true;
+            diagnosticStatus.setText("Recovered failed apply\nfile=" + entry.path + "\n" + compileResult);
+            setStatusText("Failed manual apply restored safely - " + compileResult);
+        } catch (Exception error) {
+            setStatusText("Undo failed: " + error.getMessage());
+        }
+    }
+
     private void persistSelectedEdit(SymbolEntry symbol, String editedSource) throws IOException {
         SourceFile sourceFile = symbol.sourceFile;
         String before = sourceFile.source.substring(0, symbol.start);
