@@ -340,6 +340,19 @@ def main() -> int:
     assert "preferences.getAll().keySet()" in activity
     assert "aiTraceLogFile()" in activity
     assert "Code and assets remain" in activity
+    assert "Delete Active Non-Bundled Project" in activity
+    assert "Bundled Workshop cannot be deleted" in activity
+    assert "confirmation name did not match exactly" in activity
+    assert "Export a project archive first" in activity
+    assert "WorkshopProjectRegistry.deleteProject" in activity
+    assert "AndroidDraftStore.clear(this, target.id)" in activity
+    assert "AndroidEditRecoveryStore.clearProject(this, target.id)" in activity
+    assert "clearDeletedProjectPreferences" in activity
+    assert "Bundled Workshop is active" in activity
+    assert "bundled project cannot be deleted" in project_registry
+    assert "switch away from a project before deleting it" in project_registry
+    assert "project directory deletion did not complete" in project_registry
+    assert "clearProject" in recovery_store
     assert 'ONBOARDING_PREFS = "onboarding_settings"' in activity
     assert 'ONBOARDING_COMPLETE = "manual_tutorial_seen_v1"' in activity
     assert "Welcome to Stasis Workshop" in activity
