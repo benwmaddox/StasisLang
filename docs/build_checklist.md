@@ -457,8 +457,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW56 - AI-Generated Image Asset Review
 - Scope: Accept AI-generated or AI-edited image outputs into a temporary review area with before/after preview, accept/reject, undo, project persistence, export, and GitHub sync.
+- Progress: A default-off command checkbox explicitly enables at most one Responses API `image_generation` tool opportunity on the first agent turn, fixed to low-quality 1024×1024 PNG with `action=auto` so selected project images can serve as edit references. The current documented ~$0.006 GPT Image 2 output charge is reserved before the call, charged only when a result exists, and recorded separately alongside Terra token usage. Returned Base64 is never traced or persisted automatically: it is limited to one 8 MiB, 4096 px/16 megapixel PNG, decoded into temporary review memory, and shown beside the first selected reference when available. Reject leaves the project untouched. Accept rechecks project identity and atomically creates a collision-safe new project PNG without overwriting its reference; archive and GitHub flows then treat it like every other accepted asset. A live generated/edited result and on-device dialog acceptance remain.
+- Tests: The Android shell verifier covers explicit opt-in/default-off behavior, first-turn-only low/1024 PNG tool configuration, budget reservation/accounting, bounded Base64/PNG parsing, trace exclusion, before/after review, reject-without-mutation, project identity recheck, and atomic accept-as-new publication; workshop Java compilation and APK assembly cover the integration.
 - Done gate: AI image work cannot overwrite an accepted project asset without review and a recoverable prior version.
-- Status: `planned`
+- Status: `in progress`
 #### AW57 - Android Audio Asset Workflow
 - Scope: Import/record, preview, trim, normalize, rename, delete, reference-check, export, and GitHub-sync bounded sound/music assets; expose selected audio to multimodal-capable AI only with explicit consent.
 - Done gate: A user can add and manage game audio without arbitrary device paths, silent transcoding surprises, or orphaned Stasis references.
