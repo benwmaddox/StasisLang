@@ -1,13 +1,22 @@
+// Historical first Stasis recreation. Retained as reference; not authoritative.
 import "../../src/stdlib/stdlib.stasis";
 import "../../src/stdlib/frame_timer.stasis";
 import "../../src/stdlib/sdl_scancodes.stasis";
 import "../../src/stdlib/graphics.stasis";
-import "../../src/runtime/host_frame.stasis";
-import "../../src/runtime/gfx_cmd.stasis";
 import "../../src/stdlib/audio.stasis";
+import "brickout_revenge_v1_core.stasis";
+import "brickout_revenge_v1_levels.stasis";
+import "brickout_revenge_v1_ui_flow.stasis";
 
 // Brickout Revenge - Tower Defense meets Breakout
 // An auto-battler where you set up brick defenses and watch balls try to destroy them
+//
+// Fonts:
+// - `load_font` prerenders a glyph atlas from a TTF.
+// - This default path is Windows-centric; change it if needed.
+//   Forward slashes work on Windows and avoid escape noise.
+const UI_FONT_PATH: string = "C:/Windows/Fonts/consola.ttf";
+const UI_FONT_SIZE_PX: i32 = 24;
 //
 // Live tuning:
 // - Run with: `.\stasis.bat run samples\brickout_revenge\brickout_revenge.stasis --backend cranelift --graphics`
@@ -19,11 +28,10 @@ import "../../src/stdlib/audio.stasis";
 // - get_time_ms() -> i32: millisecond clock
 // - should_quit() -> bool: polls SDL quit events
 // - begin_frame(), end_frame(): bracket GPU work
-// - gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
-// - gfx_cmd_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
+// - clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
+// - draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
 // - gfx_load_sprite(path: string, max_w: i32, max_h: i32) -> i32
-// - gfx_cmd_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): top-left
-// - gfx_poll_reload(handle: i32) -> bool
+// - gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): top-left
 // - gfx_window_width() -> i32
 // - gfx_window_height() -> i32
 // - gfx_window_resized() -> bool
@@ -37,6 +45,7 @@ import "../../src/stdlib/audio.stasis";
 const MAX_BRICKS: i32 = 50;
 const MAX_BALLS: i32 = 90;
 const MAX_TAP_PULSES: i32 = 16;
+const MAX_INPUT_POINTERS: i32 = 8;
 const GRID_COLS: i32 = 6;
 const GRID_ROWS: i32 = 6;
 const UI_MENU_PAD: f32 = 10.0;
@@ -66,11 +75,13 @@ const BENCH_AUTO_EXIT: i32 = 1;
 const BENCH_WARMUP_FRAMES: i32 = 200;
 const BENCH_TOTAL_FRAMES: i32 = 2000;
 const BENCH_SKIP_MAXIMIZE: i32 = 1;
+const SWAP_FLASH_TICKS_MAX: i32 = 180;
 
 global bench_frame: i32;
 global bench_sum_ms: i32;
 global bench_sum_us: i32;
 global bench_count: i32;
+global swap_flash_ticks: i32;
 
 // Virtual resolution + safe gameplay area.
 // The bottom UI region is reserved for a slide-up menu (and should not be used for gameplay placement).
@@ -84,7 +95,6 @@ enum BrickType {
     Armored,
     Reflector
 }
-
 enum Phase {
     Setup,
     Battle,
@@ -197,6 +207,8 @@ struct Ball {
     damage: i32;
     hp: i32;
     max_hp: i32;
+    preset: BrickoutBallPreset;
+    split_ready: i32;
     active: bool;
     bounce_streak: i32;
 }
@@ -269,6 +281,22 @@ struct SoundVoice {
     duration_frames: i32;
 }
 
+struct InputPointerSample {
+    id: i32;
+    is_down: bool;
+    went_down: bool;
+    went_up: bool;
+    x_px: f32;
+    y_px: f32;
+}
+
+struct InputModel {
+    quit_requested: bool;
+    escape_down: bool;
+    pointer_count: i32;
+    pointers: InputPointerSample[8];
+}
+
 struct BrickoutRuntimeScreen {
     w: i32;
     h: i32;
@@ -319,15 +347,28 @@ struct GameState {
     drag_grid_x: i32;
     drag_grid_y: i32;
     drag_valid: i32;
+
+    screen: BrickoutScreen;
+    menu_selected_level: i32;
+    level_index: i32;
+    level_spawns: BrickoutBallPreset[4];
+    economy: BrickoutEconomy;
+    shop_open: i32;
+    shop_anim: f32;
+    ui_font: i32;
+    ui_hud_line: utf8[96];
+    ui_tmp_ascii: ascii[96];
 }
 
 global state: GameState;
+global brickout_ui_font: i32;
 global audio_buf: f32[512];
 global audio_ready: bool;
 global audio_sr: i32;
 global sfx_voices: SoundVoice[12];
 global desktop_size_w: i32[1];
 global desktop_size_h: i32[1];
+global input_model: InputModel;
 
 // RNG functions
 function seed_rng(seed: i32): void {
@@ -397,8 +438,8 @@ function ensure_config_loaded(): void {
         // Data binding is optional, but the runner may bind only a subset of fields if JSON keys don't match.
         // Ensure window size is always valid even if `screen.w/h` were not populated.
         if (state.config.screen.w < 1 || state.config.screen.h < 1) {
-            state.config.screen.w = 540;
-            state.config.screen.h = 1080;
+            state.config.screen.w = 360;
+            state.config.screen.h = 720;
         }
         return;
     }
@@ -407,8 +448,8 @@ function ensure_config_loaded(): void {
     state.config.magic = 1337;
 
     // Window size (pixels). Virtual resolution is fixed (VIRTUAL_W x VIRTUAL_H) and scaled to fit.
-    state.config.screen.w = 540;
-    state.config.screen.h = 1080;
+    state.config.screen.w = 360;
+    state.config.screen.h = 720;
 
     state.config.grid.origin_x = 50.0;
     state.config.grid.margin_bottom = 50.0;
@@ -564,8 +605,12 @@ function audio_update(): void {
 }
 
 function sync_screen_size(): void {
-    let w: i32 = host_window_w_px();
-    let h: i32 = host_window_h_px();
+    if (!gfx_window_resized()) {
+        return;
+    }
+
+    let w: i32 = gfx_window_width();
+    let h: i32 = gfx_window_height();
     if (w < 1 || h < 1) {
         return;
     }
@@ -576,13 +621,13 @@ function sync_screen_size(): void {
 
 function update_layout(): void {
     let vx: f32;
-    vx.from_i32(host_viewport_x_px());
+    vx.from_i32(input_viewport_x_px());
     let vy: f32;
-    vy.from_i32(host_viewport_y_px());
+    vy.from_i32(input_viewport_y_px());
     let vw: f32;
-    vw.from_i32(host_viewport_w_px());
+    vw.from_i32(input_viewport_w_px());
     let vh: f32;
-    vh.from_i32(host_viewport_h_px());
+    vh.from_i32(input_viewport_h_px());
     if (vw < 1.0 || vh < 1.0) {
         return;
     }
@@ -839,6 +884,14 @@ function place_brick_at_grid(gx: i32, gy: i32, brick_type: BrickType): bool {
     let slot: i32 = find_free_brick_slot();
     if (slot < 0) { return false; }
 
+    let cost_scraps: i32 = tower_cost_scraps(brick_type);
+    let cost_power: i32 = tower_cost_power(brick_type);
+    if (!brickout_can_buy(state.economy.scraps, state.economy.power_used, state.economy.power_cap, cost_scraps, cost_power)) {
+        return false;
+    }
+    state.economy.scraps = state.economy.scraps - cost_scraps;
+    state.economy.power_used = state.economy.power_used + cost_power;
+
     state.bricks[slot].active = true;
     state.bricks[slot].grid_x = gx;
     state.bricks[slot].grid_y = gy;
@@ -852,7 +905,10 @@ function place_brick_at_grid(gx: i32, gy: i32, brick_type: BrickType): bool {
     state.bricks[slot].shot_tx = 0.0;
     state.bricks[slot].shot_ty = 0.0;
 
-    let hp: i32 = 10 + (next_rand() % 21);
+    let hp: i32 = 20;
+    if (brick_type == BrickType.Basic) { hp = 20; }
+    if (brick_type == BrickType.Armored) { hp = 40; }
+    if (brick_type == BrickType.Reflector) { hp = 16; }
     state.bricks[slot].hp = hp;
     state.bricks[slot].max_hp = hp;
     return true;
@@ -889,6 +945,8 @@ function init_game(reset_progress: bool): void {
         ball.damage = state.config.ball.damage_base;
         ball.hp = 0;
         ball.max_hp = 0;
+        ball.preset = BrickoutBallPreset.Normal;
+        ball.split_ready = 0;
         ball.bounce_streak = 0;
     }
 
@@ -912,6 +970,9 @@ function init_game(reset_progress: bool): void {
     state.drag_grid_x = -1;
     state.drag_grid_y = -1;
     state.drag_valid = 0;
+    state.shop_open = 0;
+    state.shop_anim = 0.0;
+    state.ui_font = 0;
 
     // Init timers
     state.timers.last_time = get_time_ms();
@@ -923,10 +984,10 @@ function init_game(reset_progress: bool): void {
     state.frame_timer.sample_index = 0;
 
     // Game state
-    // Start immediately in battle; no setup pause.
-    state.phase = Phase.Battle;
+    state.phase = Phase.Setup;
     state.balls_spawned = 0;
     state.running = 1;
+    brickout_level_reset();
 
     // Initialize frame time tracking
     // Note: Frame times will be filled with first actual measurement
@@ -940,6 +1001,24 @@ function init_game(reset_progress: bool): void {
     }
 
     sfx_reset();
+}
+
+function start_level(level_index: i32): void {
+    let idx: i32 = clamp_i32(level_index, 0, BRICKOUT_LEVEL_COUNT - 1);
+    init_game(true);
+    state.ui_font = brickout_ui_font;
+
+    state.screen = BrickoutScreen.Game;
+    state.level_index = idx;
+    state.wave = idx + 1;
+    brickout_level_reset();
+    state.economy.scraps = brickout_level_initial_scraps[idx];
+    state.economy.power_used = 0;
+    state.economy.power_cap = brickout_level_initial_power_cap[idx];
+
+    // Start with the shop visible so the player can buy towers immediately.
+    state.shop_open = 1;
+    state.shop_anim = 1.0;
 }
 
 function setup_default_bricks(): void {
@@ -1064,13 +1143,19 @@ function update_brick_attacks(delta_ms: i32): void {
     }
 }
 
-// Spawn a ball near the paddle, heading downward
-function spawn_ball(): void {
+// Spawn a ball near the paddle, heading downward, with preset stats.
+function spawn_ball_preset(preset: BrickoutBallPreset): void {
     let sw: f32;
     sw.from_i32(state.config.screen.w);
     foreach (let ball in state.balls) {
         if (!ball.active) {
             ball.active = true;
+            ball.preset = preset;
+            ball.split_ready = 0;
+            if (preset == BrickoutBallPreset.Splitter) {
+                ball.split_ready = 1;
+            }
+
             let jitter: f32 = state.config.ball.spawn_jitter_x;
             ball.x = rand_range(state.paddle.x - jitter, state.paddle.x + jitter);
             let margin: f32 = state.config.ball.clamp_margin_x;
@@ -1082,22 +1167,46 @@ function spawn_ball(): void {
             ball.y = state.paddle.y + ph / 2.0 + ball.radius + 2.0;
             let vr: f32 = state.config.ball.vx_rand;
             ball.vx = rand_range(0.0 - vr, vr);
+
+            let level: i32 = state.level_index + 1;
             let wf: f32;
-            wf.from_i32(state.wave);
+            wf.from_i32(level);
             let speed_min: f32 = state.config.ball.speed_min_base + wf * state.config.ball.speed_min_per_wave;
             let speed_max: f32 = state.config.ball.speed_max_base + wf * state.config.ball.speed_max_per_wave;
-            ball.vy = rand_range(speed_min, speed_max);
             let div: i32 = state.config.ball.damage_wave_div;
             if (div < 1) { div = 1; }
-            ball.damage = state.config.ball.damage_base + (state.wave / div);
+            let base_damage: i32 = state.config.ball.damage_base + (level / div);
             let hp_div: i32 = state.config.ball.hp_wave_div;
             if (hp_div < 1) { hp_div = 1; }
-            ball.max_hp = (state.config.ball.hp_base + (state.wave / hp_div)) * state.config.ball.hp_scale;
+            let base_hp: i32 = (state.config.ball.hp_base + (level / hp_div)) * state.config.ball.hp_scale;
+
+            if (preset == BrickoutBallPreset.Heavy) {
+                speed_min = speed_min * 0.75;
+                speed_max = speed_max * 0.80;
+                base_damage = base_damage * 2;
+                base_hp = base_hp * 2;
+            }
+            if (preset == BrickoutBallPreset.Splitter) {
+                speed_min = speed_min * 1.05;
+                speed_max = speed_max * 1.10;
+                if (base_hp > 1) {
+                    base_hp = base_hp / 2;
+                }
+            }
+
+            ball.vy = rand_range(speed_min, speed_max);
+            ball.damage = base_damage;
+            ball.max_hp = base_hp;
             ball.hp = ball.max_hp;
+            ball.bounce_streak = 0;
             state.balls_spawned = state.balls_spawned + 1;
             return;
         }
     }
+}
+
+function spawn_ball(): void {
+    spawn_ball_preset(BrickoutBallPreset.Normal);
 }
 
 // Count active entities
@@ -1364,6 +1473,9 @@ function check_brick_collisions(): void {
                             // Hit! Damage brick
                             brick.hp = brick.hp - ball.damage;
                             if (brick.hp < 1) {
+                                let dead_power: i32 = tower_cost_power(brick.brick_type);
+                                state.economy.power_used = state.economy.power_used - dead_power;
+                                if (state.economy.power_used < 0) { state.economy.power_used = 0; }
                                 brick.active = false;
                                 sfx_play(SFX_BRICK_BREAK);
                                 state.score = state.score + state.config.score.brick_kill;
@@ -1399,6 +1511,32 @@ function check_brick_collisions(): void {
                                 ball.vx = ball.vx + rand_range(-50.0, 50.0);
                                 ball.vy = ball.vy + rand_range(-50.0, 50.0);
                             }
+
+                            // Splitter balls fork once on brick hit.
+                            if (ball.preset == BrickoutBallPreset.Splitter) {
+                                if (ball.split_ready != 0) {
+                                    ball.split_ready = 0;
+                                    let spawned: i32 = 0;
+                                    foreach (let other in state.balls) {
+                                        if (spawned == 0 && !other.active) {
+                                            other.active = true;
+                                            other.preset = BrickoutBallPreset.Splitter;
+                                            other.split_ready = 0;
+                                            other.x = ball.x;
+                                            other.y = ball.y;
+                                            other.radius = ball.radius;
+                                            other.damage = ball.damage;
+                                            other.max_hp = ball.max_hp;
+                                            other.hp = other.max_hp;
+                                            other.vx = ball.vx + rand_range(-120.0, 120.0);
+                                            other.vy = ball.vy;
+                                            other.bounce_streak = 0;
+                                            state.balls_spawned = state.balls_spawned + 1;
+                                            spawned = 1;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1413,14 +1551,33 @@ function handle_setup_input(): void {
     // (simplified - in full version would track key press/release)
 }
 
+function brickout_try_start_battle(): void {
+    if (state.phase != Phase.Setup) {
+        return;
+    }
+
+    if (count_active_bricks() < 1) {
+        sfx_play(SFX_DRAG_INVALID);
+        return;
+    }
+
+    sfx_play(SFX_SELECT);
+    brickout_level_reset();
+    state.balls_spawned = 0;
+    state.phase = Phase.Battle;
+}
+
 // Update game logic
 function update_game(dt: f32, delta_ms: i32): void {
+    if (state.screen != BrickoutScreen.Game) {
+        return;
+    }
+
     if (state.phase == Phase.Battle) {
-        // Spawn balls periodically (stress test: no limit)
-        state.timers.ball_spawn_cd = state.timers.ball_spawn_cd - delta_ms;
-        if (state.timers.ball_spawn_cd < 0) {
-            spawn_ball();
-            state.timers.ball_spawn_cd = compute_ball_spawn_cd_ms();
+        let spawn_count: i32 = brickout_level_consume_spawns(state.level_index, state.level_spawns, BRICKOUT_LEVEL_MAX_SPAWNS_PER_TICK);
+        let i: i32 = 0;
+        for (i = 0; i < spawn_count; i = i + 1) {
+            spawn_ball_preset(state.level_spawns[i]);
         }
 
         // Update physics
@@ -1434,34 +1591,31 @@ function update_game(dt: f32, delta_ms: i32): void {
         let active_bricks: i32 = count_active_bricks();
         let active_balls: i32 = count_active_balls();
 
-        if (active_bricks == 0) {
-            state.phase = Phase.Lose; // All bricks destroyed = player loses
+        // Only lose once the level is actually underway (after the first ball spawns).
+        if (state.balls_spawned > 0 && active_bricks == 0) {
+            state.phase = Phase.Lose;
             state.timers.phase_timer = 0;
         }
 
-        // Check if all balls spawned and none active = survived wave
-        let all_spawned: bool = state.balls_spawned > (state.max_balls_wave - 1);
-        if (all_spawned) {
-            if (active_balls == 0) {
-                // Survived the wave: immediately start the next wave (no pause banner).
-                state.wave = state.wave + 1;
-                state.max_balls_wave = state.max_balls_wave + state.config.wave.max_balls_wave_add;
-                start_wave();
-            }
+        if (brickout_level_done != 0 && active_balls == 0) {
+            state.phase = Phase.Win;
+            state.timers.phase_timer = 0;
         }
     }
 
-    // Handle end phases (WIN or LOSE)
+    // Handle end phases (WIN/LOSE) -> return to menu.
     let in_end_phase: bool = false;
     if (state.phase == Phase.Lose) { in_end_phase = true; }
+    if (state.phase == Phase.Win) { in_end_phase = true; }
 
     if (in_end_phase) {
         state.timers.phase_timer = state.timers.phase_timer + delta_ms;
         if (state.timers.phase_timer > state.config.timing.end_phase_restart_ms) {
-            // Restart
-            init_game(true);
-            setup_default_bricks();
-            start_wave();
+            state.screen = BrickoutScreen.Menu;
+            state.shop_open = 0;
+            state.shop_anim = 0.0;
+            state.drag_active = 0;
+            state.drag_pointer_id = -1;
         }
     }
 }
@@ -1469,17 +1623,17 @@ function update_game(dt: f32, delta_ms: i32): void {
 // Drawing functions
 function @inline draw_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
     // Draw rectangle as 4 lines
-    gfx_cmd_line(x, y, x + w, y, r, g, b, a);
-    gfx_cmd_line(x + w, y, x + w, y + h, r, g, b, a);
-    gfx_cmd_line(x + w, y + h, x, y + h, r, g, b, a);
-    gfx_cmd_line(x, y + h, x, y, r, g, b, a);
+    draw_line(x, y, x + w, y, r, g, b, a);
+    draw_line(x + w, y, x + w, y + h, r, g, b, a);
+    draw_line(x + w, y + h, x, y + h, r, g, b, a);
+    draw_line(x, y + h, x, y, r, g, b, a);
 }
 
 function draw_filled_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
     // Draw filled rectangle with horizontal lines
     let line_y: f32 = y;
     for (line_y = y; line_y < y + h; line_y = line_y + 2.0) {
-        gfx_cmd_line(x, line_y, x + w, line_y, r, g, b, a);
+        draw_line(x, line_y, x + w, line_y, r, g, b, a);
     }
 }
 
@@ -1498,14 +1652,14 @@ function draw_circle(cx: f32, cy: f32, radius: f32, r: f32, g: f32, b: f32, a: f
         let angle: f32 = (fi / seg_f) * 2.0 * PI;
         let px: f32 = cx + cos_fast(angle) * radius;
         let py: f32 = cy + sin_fast(angle) * radius;
-        gfx_cmd_line(prev_x, prev_y, px, py, r, g, b, a);
+        draw_line(prev_x, prev_y, px, py, r, g, b, a);
         prev_x = px;
         prev_y = py;
     }
 }
 
 function @inline play_draw_line(x1: f32, y1: f32, x2: f32, y2: f32, red: f32, green: f32, blue: f32, alpha: f32): void {
-    gfx_cmd_line(
+    draw_line(
         play_snap_x(x1),
         play_snap_y(y1),
         play_snap_x(x2),
@@ -1559,7 +1713,7 @@ function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, 
     screen_y_i.from_f32(screen_y);
     let top_left_x: i32 = screen_x_i - (screen_w / 2);
     let top_left_y: i32 = screen_y_i - (screen_h / 2);
-    gfx_cmd_sprite(handle, top_left_x, top_left_y, screen_w, screen_h, rot_deg, alpha);
+    gfx_draw_sprite(handle, top_left_x, top_left_y, screen_w, screen_h, rot_deg, alpha);
 }
 
 function draw_bricks(): void {
@@ -1681,8 +1835,8 @@ function draw_balls(): void {
                     let bar_w: f32 = half_w * 2.0;
                     let filled_w: f32 = snap_px(bar_w * t);
 
-                    gfx_cmd_line(sx - half_w, bar_y, sx + half_w, bar_y, 0.2, 0.2, 0.2, 0.9);
-                    gfx_cmd_line(sx - half_w, bar_y, sx - half_w + filled_w, bar_y, 0.9, 0.3, 0.9, 0.9);
+                    draw_line(sx - half_w, bar_y, sx + half_w, bar_y, 0.2, 0.2, 0.2, 0.9);
+                    draw_line(sx - half_w, bar_y, sx - half_w + filled_w, bar_y, 0.9, 0.3, 0.9, 0.9);
                 }
             }
         }
@@ -1730,13 +1884,13 @@ function draw_digit(digit: i32, x: f32, y: f32, scale: f32): void {
     let left: f32 = x;
     let right: f32 = x + scale;
 
-    if (seg0) { gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0); }
-    if (seg1) { gfx_cmd_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0); }
-    if (seg2) { gfx_cmd_line(right, mid, right, bot, 1.0, 1.0, 1.0, 1.0); }
-    if (seg3) { gfx_cmd_line(left, bot, right, bot, 1.0, 1.0, 1.0, 1.0); }
-    if (seg4) { gfx_cmd_line(left, mid, left, bot, 1.0, 1.0, 1.0, 1.0); }
-    if (seg5) { gfx_cmd_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0); }
-    if (seg6) { gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0); }
+    if (seg0) { draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0); }
+    if (seg1) { draw_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0); }
+    if (seg2) { draw_line(right, mid, right, bot, 1.0, 1.0, 1.0, 1.0); }
+    if (seg3) { draw_line(left, bot, right, bot, 1.0, 1.0, 1.0, 1.0); }
+    if (seg4) { draw_line(left, mid, left, bot, 1.0, 1.0, 1.0, 1.0); }
+    if (seg5) { draw_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0); }
+    if (seg6) { draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0); }
 }
 
 function draw_number(num: i32, x: f32, y: f32, scale: f32): void {
@@ -1839,10 +1993,10 @@ function hud_glyph_M(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
     let midx: f32 = x + s;
-    gfx_cmd_line(left, bottom, left, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, bottom, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, left, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, bottom, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_S(x: f32, y: f32, s: f32): void {
@@ -1851,11 +2005,11 @@ function hud_glyph_S(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_L(x: f32, y: f32, s: f32): void {
@@ -1863,8 +2017,8 @@ function hud_glyph_L(x: f32, y: f32, s: f32): void {
     let right: f32 = x + 2.0 * s;
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_O(x: f32, y: f32, s: f32): void {
@@ -1872,10 +2026,10 @@ function hud_glyph_O(x: f32, y: f32, s: f32): void {
     let right: f32 = x + 2.0 * s;
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_G(x: f32, y: f32, s: f32): void {
@@ -1885,11 +2039,11 @@ function hud_glyph_G(x: f32, y: f32, s: f32): void {
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
     let midx: f32 = x + s;
-    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(midx, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(midx, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_I(x: f32, y: f32, s: f32): void {
@@ -1898,9 +2052,9 @@ function hud_glyph_I(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
     let midx: f32 = x + s;
-    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_C(x: f32, y: f32, s: f32): void {
@@ -1908,9 +2062,9 @@ function hud_glyph_C(x: f32, y: f32, s: f32): void {
     let right: f32 = x + 2.0 * s;
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_B(x: f32, y: f32, s: f32): void {
@@ -1919,12 +2073,12 @@ function hud_glyph_B(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_A(x: f32, y: f32, s: f32): void {
@@ -1934,9 +2088,9 @@ function hud_glyph_A(x: f32, y: f32, s: f32): void {
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
     let midx: f32 = x + s;
-    gfx_cmd_line(left, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(x + 0.5 * s, mid, x + 1.5 * s, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, bottom, midx, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(x + 0.5 * s, mid, x + 1.5 * s, mid, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_R(x: f32, y: f32, s: f32): void {
@@ -1945,11 +2099,11 @@ function hud_glyph_R(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_K(x: f32, y: f32, s: f32): void {
@@ -1958,9 +2112,9 @@ function hud_glyph_K(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, mid, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_E(x: f32, y: f32, s: f32): void {
@@ -1969,10 +2123,10 @@ function hud_glyph_E(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_N(x: f32, y: f32, s: f32): void {
@@ -1980,9 +2134,9 @@ function hud_glyph_N(x: f32, y: f32, s: f32): void {
     let right: f32 = x + 2.0 * s;
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_U(x: f32, y: f32, s: f32): void {
@@ -1990,9 +2144,9 @@ function hud_glyph_U(x: f32, y: f32, s: f32): void {
     let right: f32 = x + 2.0 * s;
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, bottom, right, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_T(x: f32, y: f32, s: f32): void {
@@ -2001,8 +2155,8 @@ function hud_glyph_T(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let bottom: f32 = y + 2.0 * s;
     let midx: f32 = x + s;
-    gfx_cmd_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, right, top, 1.0, 1.0, 1.0, 1.0);
+    draw_line(midx, top, midx, bottom, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_glyph_H(x: f32, y: f32, s: f32): void {
@@ -2011,9 +2165,9 @@ function hud_glyph_H(x: f32, y: f32, s: f32): void {
     let top: f32 = y;
     let mid: f32 = y + s;
     let bottom: f32 = y + 2.0 * s;
-    gfx_cmd_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
-    gfx_cmd_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, top, left, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(right, top, right, bottom, 1.0, 1.0, 1.0, 1.0);
+    draw_line(left, mid, right, mid, 1.0, 1.0, 1.0, 1.0);
 }
 
 function hud_draw_ms_logic(x: f32, y: f32, s: f32): void {
@@ -2094,7 +2248,7 @@ function ui_pick_menu_slot(px: f32, py: f32, panel_x: f32, panel_y: f32, panel_w
 function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
     draw_filled_rect(x, y, w, h, 0.08, 0.09, 0.12, 0.92);
     draw_rect(x, y, w, h, 0.2, 0.7, 0.9, 0.9);
-    gfx_cmd_line(x, y + UI_MENU_HEADER_H, x + w, y + UI_MENU_HEADER_H, 0.2, 0.7, 0.9, 0.6);
+    draw_line(x, y + UI_MENU_HEADER_H, x + w, y + UI_MENU_HEADER_H, 0.2, 0.7, 0.9, 0.6);
     hud_draw_menu(x + UI_MENU_PAD, y + 6.0, 3.0);
 
     let slot_w: f32 = w - UI_MENU_PAD * 2.0;
@@ -2109,7 +2263,28 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
             if (sy + UI_MENU_SLOT_H > y + h - UI_MENU_PAD) {
                 slots_done = true;
             } else {
-                draw_rect(x + UI_MENU_PAD, sy, slot_w, UI_MENU_SLOT_H, 0.3, 0.6, 0.8, 0.8);
+                let t: BrickType = BrickType.Basic;
+                if (i == 1) { t = BrickType.Armored; }
+                if (i == 2) { t = BrickType.Reflector; }
+                let cost_scraps: i32 = tower_cost_scraps(t);
+                let cost_power: i32 = tower_cost_power(t);
+                let can_buy: bool = brickout_can_buy(state.economy.scraps, state.economy.power_used, state.economy.power_cap, cost_scraps, cost_power);
+                if (can_buy) {
+                    draw_rect(x + UI_MENU_PAD, sy, slot_w, UI_MENU_SLOT_H, 0.3, 0.6, 0.8, 0.8);
+                } else {
+                    draw_rect(x + UI_MENU_PAD, sy, slot_w, UI_MENU_SLOT_H, 0.9, 0.25, 0.25, 0.9);
+                }
+
+                if (i == 0) {
+                    draw_text(state.ui_font, "10s/1p", x + UI_MENU_PAD + 8.0, sy + 6.0, 0.9, 0.9, 0.9, 0.9);
+                }
+                if (i == 1) {
+                    draw_text(state.ui_font, "20s/2p", x + UI_MENU_PAD + 8.0, sy + 6.0, 0.9, 0.9, 0.9, 0.9);
+                }
+                if (i == 2) {
+                    draw_text(state.ui_font, "15s/2p", x + UI_MENU_PAD + 8.0, sy + 6.0, 0.9, 0.9, 0.9, 0.9);
+                }
+
                 let icon_handle: i32 = state.sprites.brick_basic_base;
                 if (i == 1) { icon_handle = state.sprites.brick_armored_base; }
                 if (i == 2) { icon_handle = state.sprites.brick_reflector_base; }
@@ -2128,7 +2303,7 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
                         icon_w_i.from_f32(icon_size);
                         let icon_h_i: i32;
                         icon_h_i.from_f32(icon_size);
-                        gfx_cmd_sprite(icon_handle, icon_x_i, icon_y_i, icon_w_i, icon_h_i, 0, 255);
+                        gfx_draw_sprite(icon_handle, icon_x_i, icon_y_i, icon_w_i, icon_h_i, 0, 255);
                     }
                 }
                 let selected: bool = false;
@@ -2146,7 +2321,7 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
 function draw_tech_panel(x: f32, y: f32, w: f32, h: f32): void {
     draw_filled_rect(x, y, w, h, 0.06, 0.08, 0.12, 0.92);
     draw_rect(x, y, w, h, 0.2, 0.6, 0.9, 0.9);
-    gfx_cmd_line(x, y + UI_MENU_HEADER_H, x + w, y + UI_MENU_HEADER_H, 0.2, 0.6, 0.9, 0.6);
+    draw_line(x, y + UI_MENU_HEADER_H, x + w, y + UI_MENU_HEADER_H, 0.2, 0.6, 0.9, 0.6);
     hud_draw_tech(x + UI_MENU_PAD, y + 6.0, 3.0);
 
     let cx: f32 = x + w * 0.5;
@@ -2156,10 +2331,10 @@ function draw_tech_panel(x: f32, y: f32, w: f32, h: f32): void {
     let spread: f32 = w * 0.25;
     let radius: f32 = 8.0;
 
-    gfx_cmd_line(cx, top, cx - spread, mid, 0.4, 0.8, 0.9, 0.8);
-    gfx_cmd_line(cx, top, cx + spread, mid, 0.4, 0.8, 0.9, 0.8);
-    gfx_cmd_line(cx - spread, mid, cx - spread, bot, 0.4, 0.8, 0.9, 0.8);
-    gfx_cmd_line(cx + spread, mid, cx + spread, bot, 0.4, 0.8, 0.9, 0.8);
+    draw_line(cx, top, cx - spread, mid, 0.4, 0.8, 0.9, 0.8);
+    draw_line(cx, top, cx + spread, mid, 0.4, 0.8, 0.9, 0.8);
+    draw_line(cx - spread, mid, cx - spread, bot, 0.4, 0.8, 0.9, 0.8);
+    draw_line(cx + spread, mid, cx + spread, bot, 0.4, 0.8, 0.9, 0.8);
 
     draw_circle(cx, top, radius, 0.4, 0.9, 0.9, 0.9);
     draw_circle(cx - spread, mid, radius, 0.4, 0.9, 0.9, 0.9);
@@ -2180,20 +2355,39 @@ function draw_ui_panels(): void {
     let ui_w: f32 = state.layout.ui_w;
     let ui_h: f32 = state.layout.ui_h;
 
+    // Slide-up shop handle.
+    let handle_h: f32 = 22.0;
+    let handle_y: f32 = ui_y + ui_h - handle_h;
+    draw_filled_rect(ui_x, handle_y, ui_w, handle_h, 0.05, 0.07, 0.11, 0.92);
+    draw_rect(ui_x, handle_y, ui_w, handle_h, 0.2, 0.6, 0.9, 0.9);
+    if (state.shop_open == 0) {
+        draw_text(state.ui_font, "SHOP", ui_x + 10.0, handle_y + 5.0, 0.9, 0.9, 0.95, 0.9);
+    } else {
+        draw_text(state.ui_font, "CLOSE", ui_x + 10.0, handle_y + 5.0, 0.9, 0.9, 0.95, 0.9);
+    }
+
+    if (state.shop_anim < 0.02) {
+        return;
+    }
+
+    let panel_y: f32 = shop_visible_y(ui_y, ui_h);
+    let vis_h: f32 = ui_y + ui_h - panel_y;
+    let vis_y: f32 = panel_y;
+
     if (state.layout.ui_mode == 1) {
         let panel_w: f32 = ui_w - pad * 2.0;
-        let panel_h: f32 = (ui_h - pad * 2.0 - gap) * 0.5;
+        let panel_h: f32 = (vis_h - pad * 2.0 - gap) * 0.5;
         if (panel_w > 1.0 && panel_h > 1.0) {
-            draw_menu_panel(ui_x + pad, ui_y + pad, panel_w, panel_h);
-            draw_tech_panel(ui_x + pad, ui_y + pad + panel_h + gap, panel_w, panel_h);
+            draw_menu_panel(ui_x + pad, vis_y + pad, panel_w, panel_h);
+            draw_tech_panel(ui_x + pad, vis_y + pad + panel_h + gap, panel_w, panel_h);
         }
     } else {
         if (state.layout.ui_mode == 2) {
             let panel_w: f32 = (ui_w - pad * 2.0 - gap) * 0.5;
-            let panel_h: f32 = ui_h - pad * 2.0;
+            let panel_h: f32 = vis_h - pad * 2.0;
             if (panel_w > 1.0 && panel_h > 1.0) {
-                draw_menu_panel(ui_x + pad, ui_y + pad, panel_w, panel_h);
-                draw_tech_panel(ui_x + pad + panel_w + gap, ui_y + pad, panel_w, panel_h);
+                draw_menu_panel(ui_x + pad, vis_y + pad, panel_w, panel_h);
+                draw_tech_panel(ui_x + pad + panel_w + gap, vis_y + pad, panel_w, panel_h);
             }
         }
     }
@@ -2204,11 +2398,38 @@ function draw_ui(): void {
     let sh: f32 = GAME_H;
     let s: f32 = state.layout.play_scale;
 
+    // Economy HUD (full font).
+    brickout_ascii_write_scraps_power_line(
+        state.ui_hud_line, state.ui_hud_line.length,
+        state.ui_tmp_ascii,
+        state.economy.scraps, state.economy.power_used, state.economy.power_cap);
+    draw_text(state.ui_font, state.ui_hud_line, play_to_screen_x(20.0), play_to_screen_y(34.0), 0.95, 0.95, 0.95, 0.95);
+
     // Score in top-left
     draw_number(state.score, play_to_screen_x(20.0), play_to_screen_y(10.0), 8.0 * s);
 
     // Wave indicator in top-right
     draw_number(state.wave, play_to_screen_x(sw - 60.0), play_to_screen_y(10.0), 8.0 * s);
+
+    if (state.phase == Phase.Setup) {
+        let btn_x: f32 = sw - 112.0;
+        let btn_y: f32 = 62.0;
+        let btn_w: f32 = 96.0;
+        let btn_h: f32 = 28.0;
+        let bx: f32 = play_to_screen_x(btn_x);
+        let by: f32 = play_to_screen_y(btn_y);
+        let bw: f32 = play_to_screen_len(btn_w);
+        let bh: f32 = play_to_screen_len(btn_h);
+        draw_filled_rect(bx, by, bw, bh, 0.08, 0.12, 0.18, 0.95);
+        draw_rect(bx, by, bw, bh, 0.25, 0.75, 0.95, 0.95);
+        draw_text(state.ui_font, "START", bx + 22.0 * s, by + 6.0 * s, 0.95, 0.95, 0.95, 0.95);
+
+        if (count_active_bricks() < 1) {
+            draw_text(state.ui_font, "Place a tower first", play_to_screen_x(20.0), play_to_screen_y(70.0), 0.95, 0.6, 0.3, 0.95);
+        } else {
+            draw_text(state.ui_font, "Setup: place towers", play_to_screen_x(20.0), play_to_screen_y(70.0), 0.8, 0.9, 1.0, 0.9);
+        }
+    }
 
     // Average frame time in bottom-left (in milliseconds with 1 decimal)
     let avg_time_tenths: i32 = frame_timer_avg_tenths(state.frame_timer.samples_ms);
@@ -2224,37 +2445,53 @@ function draw_ui(): void {
     draw_number(active_bricks_count, play_to_screen_x(sw - 80.0), play_to_screen_y(GAME_H - 30.0), 4.0 * s);
 
     if (state.phase == Phase.Lose) {
-        // "LOSE" indicator
-        play_draw_rect(sw / 2.0 - 40.0, sh / 2.0 - 20.0, 80.0, 40.0, 1.0, 0.3, 0.3, 1.0);
+        draw_text(state.ui_font, "LOSE", play_to_screen_x(sw * 0.5 - 22.0), play_to_screen_y(sh * 0.5 - 10.0), 1.0, 0.3, 0.3, 1.0);
+    }
+    if (state.phase == Phase.Win) {
+        draw_text(state.ui_font, "WIN", play_to_screen_x(sw * 0.5 - 18.0), play_to_screen_y(sh * 0.5 - 10.0), 0.3, 1.0, 0.3, 1.0);
     }
 
     draw_ui_panels();
 }
 
-function draw_frame(): void {
-    // Hot reload during development (no flags for now)
-    if (state.sprites.paddle == 0) { } else { gfx_poll_reload(state.sprites.paddle); }
-    if (state.sprites.ball == 0) { } else { gfx_poll_reload(state.sprites.ball); }
-    if (state.sprites.brick_basic_base == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_base); }
-    if (state.sprites.brick_basic_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_turret); }
-    if (state.sprites.brick_basic_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_fx); }
-    if (state.sprites.brick_armored_base == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_base); }
-    if (state.sprites.brick_armored_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_turret); }
-    if (state.sprites.brick_armored_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_fx); }
-    if (state.sprites.brick_reflector_base == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_base); }
-    if (state.sprites.brick_reflector_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_fx); }
+function draw_swap_indicator(): void {
+    if (swap_flash_ticks <= 0) { return; }
 
+    let alpha: f32;
+    alpha.from_i32(swap_flash_ticks);
+    let max_ticks: f32;
+    max_ticks.from_i32(SWAP_FLASH_TICKS_MAX);
+    alpha = alpha / max_ticks;
+    if (alpha < 0.1) { alpha = 0.1; }
+
+    let size: f32 = 12.0 * state.layout.play_scale;
+    let x: f32 = play_to_screen_x(VIRTUAL_W - 22.0);
+    let y: f32 = play_to_screen_y(8.0);
+    draw_filled_rect(x, y, size, size, 0.25, 0.95, 0.35, alpha);
+    draw_rect(x, y, size, size, 0.9, 1.0, 0.9, alpha);
+
+    swap_flash_ticks = swap_flash_ticks - 1;
+}
+
+function draw_frame(): void {
+    if (state.screen == BrickoutScreen.Menu) {
+        draw_main_menu();
+        draw_tap_pulses();
+        draw_swap_indicator();
+        return;
+    }
     draw_bricks();
     draw_balls();
     draw_paddle();
     draw_drag_preview();
     draw_ui();
     draw_tap_pulses();
+    draw_swap_indicator();
 }
 
 // Timing
 function compute_delta_ms(): i32 {
-    let current_time: i32 = host_time_ms();
+    let current_time: i32 = get_time_ms();
     let delta_ms: i32 = current_time - state.timers.last_time;
     if (delta_ms < 1) { delta_ms = 1; }
     if (delta_ms > 100) { delta_ms = 100; }
@@ -2262,114 +2499,43 @@ function compute_delta_ms(): i32 {
     return delta_ms;
 }
 
-function update_drag_from_screen(screen_x: f32, screen_y: f32): void {
-    state.drag_world_x = screen_to_play_x(screen_x);
-    state.drag_world_y = screen_to_play_y(screen_y);
-    state.drag_grid_x = world_to_grid_x(state.drag_world_x);
-    state.drag_grid_y = world_to_grid_y(state.drag_world_y);
+function refresh_input_model(): void {
+    input_model.quit_requested = should_quit();
+    input_model.escape_down = is_key_down(Scancode.Escape);
 
-    let in_virtual: bool = point_in_rect(screen_x, screen_y, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
-    let in_game: bool = in_virtual && state.drag_world_y <= GAME_H;
-    let valid: bool = in_game && grid_cell_fits_in_level(state.drag_grid_x, state.drag_grid_y);
-    if (valid) {
-        if (grid_is_occupied(state.drag_grid_x, state.drag_grid_y)) {
-            valid = false;
-        }
-    }
-    if (valid) {
-        state.drag_valid = 1;
-    } else {
-        state.drag_valid = 0;
-    }
-}
+    let count: i32 = input_pointer_count();
+    if (count < 0) { count = 0; }
+    if (count > MAX_INPUT_POINTERS) { count = MAX_INPUT_POINTERS; }
+    input_model.pointer_count = count;
 
-function handle_pointer_input(): void {
-    let count: i32 = host_pointer_count();
     let i: i32 = 0;
-    for (i = 0; i < count; i = i + 1) {
-        let pid: i32 = host_pointer_id(i);
-        let went_down: bool = host_pointer_went_down(i);
-        let went_up: bool = host_pointer_went_up(i);
-        let is_down: bool = host_pointer_is_down(i);
-        let sx: f32 = host_pointer_x_px(i) + state.layout.viewport_x;
-        let sy: f32 = host_pointer_y_px(i) + state.layout.viewport_y;
-
-        if (state.drag_active != 0) {
-            if (pid == state.drag_pointer_id) {
-                if (is_down) {
-                    update_drag_from_screen(sx, sy);
-                }
-                if (went_up) {
-                    if (state.drag_valid != 0) {
-                        let placed: bool = place_brick_at_grid(state.drag_grid_x, state.drag_grid_y, state.selected_tower);
-                        if (placed) {
-                            sfx_play(SFX_DRAG_PLACE);
-                        } else {
-                            sfx_play(SFX_DRAG_INVALID);
-                        }
-                    } else {
-                        sfx_play(SFX_DRAG_INVALID);
-                    }
-                    state.drag_active = 0;
-                    state.drag_pointer_id = -1;
-                    state.drag_valid = 0;
-                }
-            }
+    for (i = 0; i < MAX_INPUT_POINTERS; i = i + 1) {
+        if (i < count) {
+            input_model.pointers[i].id = input_pointer_id(i);
+            input_model.pointers[i].is_down = input_pointer_is_down(i);
+            input_model.pointers[i].went_down = input_pointer_went_down(i);
+            input_model.pointers[i].went_up = input_pointer_went_up(i);
+            input_model.pointers[i].x_px = input_pointer_x_px(i);
+            input_model.pointers[i].y_px = input_pointer_y_px(i);
         } else {
-            if (went_down) {
-                let pad: f32 = UI_PANEL_PAD;
-                let gap: f32 = UI_PANEL_GAP;
-                let ui_x: f32 = state.layout.ui_x;
-                let ui_y: f32 = state.layout.ui_y;
-                let ui_w: f32 = state.layout.ui_w;
-                let ui_h: f32 = state.layout.ui_h;
-                let menu_x: f32 = ui_x + pad;
-                let menu_y: f32 = ui_y + pad;
-                let menu_w: f32 = 0.0;
-                let menu_h: f32 = 0.0;
-                let have_menu: bool = false;
-                if (state.layout.ui_mode == 1) {
-                    menu_w = ui_w - pad * 2.0;
-                    menu_h = (ui_h - pad * 2.0 - gap) * 0.5;
-                    have_menu = true;
-                } else {
-                    if (state.layout.ui_mode == 2) {
-                        menu_w = (ui_w - pad * 2.0 - gap) * 0.5;
-                        menu_h = ui_h - pad * 2.0;
-                        have_menu = true;
-                    }
-                }
-
-                if (have_menu && point_in_rect(sx, sy, menu_x, menu_y, menu_w, menu_h)) {
-                    let slot: i32 = ui_pick_menu_slot(sx, sy, menu_x, menu_y, menu_w, menu_h);
-                    if (slot == 0) { state.selected_tower = BrickType.Basic; state.cursor.brick_type = BrickType.Basic; sfx_play(SFX_SELECT); }
-                    if (slot == 1) { state.selected_tower = BrickType.Armored; state.cursor.brick_type = BrickType.Armored; sfx_play(SFX_SELECT); }
-                    if (slot == 2) { state.selected_tower = BrickType.Reflector; state.cursor.brick_type = BrickType.Reflector; sfx_play(SFX_SELECT); }
-                } else {
-                    let in_virtual: bool = point_in_rect(sx, sy, state.layout.play_x, state.layout.play_y, state.layout.play_w, state.layout.play_h);
-                    let wx: f32 = screen_to_play_x(sx);
-                    let wy: f32 = screen_to_play_y(sy);
-                    let in_game: bool = in_virtual && wy <= GAME_H && wx >= 0.0 && wx <= VIRTUAL_W;
-                    if (in_game) {
-                        state.drag_active = 1;
-                        state.drag_pointer_id = pid;
-                        update_drag_from_screen(sx, sy);
-                        sfx_play(SFX_DRAG_START);
-                    }
-                }
-            }
+            input_model.pointers[i].id = -1;
+            input_model.pointers[i].is_down = false;
+            input_model.pointers[i].went_down = false;
+            input_model.pointers[i].went_up = false;
+            input_model.pointers[i].x_px = 0.0;
+            input_model.pointers[i].y_px = 0.0;
         }
     }
 }
 
 function record_tap_pulses(): void {
-    let count: i32 = host_pointer_count();
+    let count: i32 = input_model.pointer_count;
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        let went_down: bool = host_pointer_went_down(i);
+        let went_down: bool = input_model.pointers[i].went_down;
         if (went_down) {
-            let x: f32 = host_pointer_x_px(i);
-            let y: f32 = host_pointer_y_px(i);
+            let x: f32 = input_model.pointers[i].x_px;
+            let y: f32 = input_model.pointers[i].y_px;
             let vx: f32 = state.layout.viewport_x;
             let vy: f32 = state.layout.viewport_y;
             let j: i32 = 0;
@@ -2436,6 +2602,10 @@ function draw_drag_preview(): void {
     play_draw_rect(x, y, w, h, r, g, b, a);
 }
 
+function on_code_swap(): void {
+    swap_flash_ticks = SWAP_FLASH_TICKS_MAX;
+}
+
 function main(): i32 {
     ensure_config_loaded();
 
@@ -2451,11 +2621,11 @@ function main(): i32 {
         return 1;
     }
 
-    if (!(BENCH_SKIP_MAXIMIZE == 1)) {
-        maximize_window_for_desktop();
-    }
-    state.runtime_screen.w = state.config.screen.w;
-    state.runtime_screen.h = state.config.screen.h;
+    brickout_ui_font = load_font(UI_FONT_PATH, UI_FONT_SIZE_PX);
+
+    // Keep the window at the configured resolution by default.
+    // (Maximizing is useful for screenshots, but it makes iteration/debugging harder.)
+    sync_screen_size();
     print_string("window_px=");
     print_int(state.runtime_screen.w);
     print_string("x");
@@ -2469,6 +2639,8 @@ function main(): i32 {
         audio_sr = 0;
     }
 
+    state.runtime_screen.w = gfx_window_width();
+    state.runtime_screen.h = gfx_window_height();
     state.layout.viewport_x = 0.0;
     state.layout.viewport_y = 0.0;
     state.layout.viewport_w.from_i32(state.runtime_screen.w);
@@ -2499,8 +2671,13 @@ function main(): i32 {
         // Use get_time_ms() so non-libc hosts (e.g. wasm) don't need C's time().
         seed_rng(get_time_ms());
         init_game(true);
-        setup_default_bricks();
-        start_wave();
+        state.ui_font = brickout_ui_font;
+        if (brickout_levels_magic == 0) {
+            init_level_defs();
+        }
+        state.screen = BrickoutScreen.Menu;
+        state.menu_selected_level = 0;
+        state.level_index = 0;
 
         // Initialize frame time buffer with baseline value
         frame_timer_init(state.frame_timer.samples_ms);
@@ -2513,6 +2690,7 @@ function main(): i32 {
     bench_sum_ms = 0;
     bench_sum_us = 0;
     bench_count = 0;
+    swap_flash_ticks = 0;
 
     state.timers.last_time = get_time_ms();
     state.running = 1;
@@ -2524,9 +2702,11 @@ function tick(): i32 {
         return 1;
     }
 
-    if (host_quit_requested()) {
+    refresh_input_model();
+    if (input_model.quit_requested) {
         state.running = 0;
     }
+
     sync_screen_size();
     update_layout();
     apply_config_live();
@@ -2534,7 +2714,7 @@ function tick(): i32 {
     state.timers.frame_start = get_time_ms();
     let bench_start_us: i32 = get_time_us();
 
-    if (host_key_down(Scancode.Escape)) {
+    if (input_model.escape_down) {
         state.running = 0;
     }
 
@@ -2545,19 +2725,26 @@ function tick(): i32 {
     handle_pointer_input();
     record_tap_pulses();
 
-    gfx_cmd_begin();
-    gfx_cmd_clear(0.05, 0.05, 0.15, 1.0);
+    begin_frame();
+    clear(0.05, 0.05, 0.15, 1.0);
 
     let delta_ms: i32 = compute_delta_ms();
     let delta_f: f32;
     delta_f.from_i32(delta_ms);
     let dt: f32 = delta_f / 1000.0;
 
+    if (state.screen == BrickoutScreen.Game) {
+        state.shop_anim = brickout_shop_anim_step(state.shop_anim, state.shop_open, dt, 6.0);
+    } else {
+        state.shop_open = 0;
+        state.shop_anim = 0.0;
+    }
+
     update_tap_pulses(delta_ms);
     update_game(dt, delta_ms);
     audio_update();
     draw_frame();
-    gfx_cmd_mark_present();
+
     // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
     let frame_end: i32 = get_time_ms();
     state.timers.tick_time_ms = frame_end - state.timers.frame_start;
@@ -2568,6 +2755,8 @@ function tick(): i32 {
     // Store in circular buffer for averaging
     state.frame_timer.sample_index =
         frame_timer_push(state.frame_timer.samples_ms, state.frame_timer.sample_index, state.timers.tick_time_ms);
+
+    end_frame();
 
     if (BENCH_AUTO_EXIT == 1) {
         bench_frame = bench_frame + 1;
@@ -2589,21 +2778,6 @@ function tick(): i32 {
             print_string(" frames=");
             print_int(bench_count);
             print_char(10);
-            print_string("cmd lines=");
-            print_int(gfx_cmd_line_count());
-            print_string(" sprites=");
-            print_int(gfx_cmd_sprite_count());
-            print_string(" text=");
-            print_int(gfx_cmd_text_count());
-            print_string(" dropped_lines=");
-            print_int(gfx_cmd_dropped_lines());
-            print_string(" dropped_sprites=");
-            print_int(gfx_cmd_dropped_sprites());
-            print_string(" dropped_text=");
-            print_int(gfx_cmd_dropped_text());
-            print_string(" text_bytes_used=");
-            print_int(gfx_cmd_text_bytes_used());
-            print_char(10);
             state.running = 0;
             return 1;
         }
@@ -2612,5 +2786,15 @@ function tick(): i32 {
     return 0;
 }
 
+function render(): i32 {
+    if (state.running != 1) {
+        return 1;
+    }
 
+    begin_frame();
+    clear(0.05, 0.05, 0.15, 1.0);
+    draw_frame();
+    end_frame();
+    return 0;
+}
 

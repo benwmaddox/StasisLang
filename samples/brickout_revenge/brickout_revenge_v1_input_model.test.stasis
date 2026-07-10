@@ -1,108 +1,76 @@
 import "../../src/runtime/input_testkit.stasis";
 import "brickout_revenge_v1.stasis";
 
-test `brickout refresh input model maps testkit snapshot`(): bool {
+test `vector labels are initialized without runtime font forwarding`(): bool {
+    original_init_text();
+    if (original_text_lengths[TXT_BRICKOUT_DEFENSE] != 16) { return false; }
+    if (original_text_codes[original_text_offsets[TXT_BRICKOUT_DEFENSE]] != 66) { return false; }
+    return true;
+}
+
+function original_testkit_set_viewport(width: i32, height: i32): void {
+    host_i32[HOST_I_WINDOW_W_PX] = width;
+    host_i32[HOST_I_WINDOW_H_PX] = height;
+    host_i32[HOST_I_VIEWPORT_X_PX] = 0;
+    host_i32[HOST_I_VIEWPORT_Y_PX] = 0;
+    host_i32[HOST_I_VIEWPORT_W_PX] = width;
+    host_i32[HOST_I_VIEWPORT_H_PX] = height;
+}
+
+test `android touch can start the recovered challenge`(): bool {
     input_testkit_reset();
-    input_testkit_set_quit_requested(false);
-    input_testkit_set_key_down(Scancode.Escape, true);
+    original_testkit_set_viewport(660, 550);
+    original_state.screen = OriginalScreen.MainMenu;
     input_testkit_set_pointer_count(1);
-    input_testkit_set_pointer(0, 17, true, true, false, 33.5, 44.5);
-
-    refresh_input_model();
-
-    if (input_model.quit_requested) { return false; }
-    if (!input_model.escape_down) { return false; }
-    if (input_model.pointer_count != 1) { return false; }
-    if (input_model.pointers[0].id != 17) { return false; }
-    if (!input_model.pointers[0].is_down) { return false; }
-    if (!input_model.pointers[0].went_down) { return false; }
-    if (input_model.pointers[0].went_up) { return false; }
-    if (input_model.pointers[0].x_px < 33.4 || input_model.pointers[0].x_px > 33.6) { return false; }
-    if (input_model.pointers[0].y_px < 44.4 || input_model.pointers[0].y_px > 44.6) { return false; }
+    input_testkit_set_pointer(0, 4, true, true, false, 200.0, 240.0);
+    original_update_layout();
+    original_handle_pointer();
+    if (original_state.screen != OriginalScreen.Game) { return false; }
+    if (original_state.level_index != 2) { return false; }
+    if (original_state.gold != 115) { return false; }
+    if (original_spawn_total != 47) { return false; }
     return true;
 }
 
-test `brickout record tap pulse uses refreshed input model`(): bool {
-    input_testkit_reset();
-    input_testkit_set_pointer_count(1);
-    input_testkit_set_pointer(0, 21, true, true, false, 40.0, 50.0);
-
-    state.layout.viewport_x = 10.0;
-    state.layout.viewport_y = 20.0;
-    state.tap_pulses[0].active = 0;
-    state.tap_pulses[1].active = 0;
-
-    refresh_input_model();
-    record_tap_pulses();
-
-    if (state.tap_pulses[0].active != 1) { return false; }
-    if (state.tap_pulses[0].age_ms != 0) { return false; }
-    if (state.tap_pulses[0].x < 49.9 || state.tap_pulses[0].x > 50.1) { return false; }
-    if (state.tap_pulses[0].y < 69.9 || state.tap_pulses[0].y > 70.1) { return false; }
+test `touch placement uses original grid and economy`(): bool {
+    original_start_level(0);
+    original_state.selected_shop = OriginalTowerKind.Standard;
+    let before: i32 = original_state.gold;
+    let placed: bool = original_try_place_tower(120.0, 180.0);
+    if (!placed) { return false; }
+    if (original_state.gold != before - 5) { return false; }
+    if (original_state.selected_tower_index < 0) { return false; }
+    let index: i32 = original_state.selected_tower_index;
+    if (original_state.towers[index].kind != OriginalTowerKind.Standard) { return false; }
+    if (original_state.towers[index].hp != 10) { return false; }
     return true;
 }
 
-test `brickout refresh input model clears inactive pointer slots`(): bool {
+test `desktop shortcuts select upgrade and sell original towers`(): bool {
     input_testkit_reset();
-    input_testkit_set_pointer_count(1);
-    input_testkit_set_pointer(0, 7, true, false, false, 11.0, 12.0);
-
-    input_model.pointers[1].id = 999;
-    input_model.pointers[1].is_down = true;
-    input_model.pointers[1].went_down = true;
-    input_model.pointers[1].went_up = true;
-    input_model.pointers[1].x_px = 123.0;
-    input_model.pointers[1].y_px = 456.0;
-
-    refresh_input_model();
-
-    if (input_model.pointers[1].id != -1) { return false; }
-    if (input_model.pointers[1].is_down) { return false; }
-    if (input_model.pointers[1].went_down) { return false; }
-    if (input_model.pointers[1].went_up) { return false; }
-    if (input_model.pointers[1].x_px != 0.0) { return false; }
-    if (input_model.pointers[1].y_px != 0.0) { return false; }
+    original_start_level(0);
+    original_handle_number_press(2);
+    if (original_state.selected_shop != OriginalTowerKind.Standard) { return false; }
+    if (!original_try_place_tower(120.0, 180.0)) { return false; }
+    let index: i32 = original_state.selected_tower_index;
+    let gold_after_place: i32 = original_state.gold;
+    original_upgrade_selected();
+    if (original_state.towers[index].level != 1) { return false; }
+    if (original_state.gold != gold_after_place - 6) { return false; }
+    original_sell_selected();
+    if (original_state.towers[index].active) { return false; }
+    if (original_state.selected_tower_index != -1) { return false; }
     return true;
 }
 
-test `brickout record tap pulse skips occupied slot`(): bool {
-    input_testkit_reset();
-    input_testkit_set_pointer_count(1);
-    input_testkit_set_pointer(0, 33, true, true, false, 5.0, 6.0);
-
-    state.layout.viewport_x = 0.0;
-    state.layout.viewport_y = 0.0;
-    state.tap_pulses[0].active = 1;
-    state.tap_pulses[0].x = 1000.0;
-    state.tap_pulses[0].y = 1000.0;
-    state.tap_pulses[1].active = 0;
-
-    refresh_input_model();
-    record_tap_pulses();
-
-    if (state.tap_pulses[0].x != 1000.0) { return false; }
-    if (state.tap_pulses[0].y != 1000.0) { return false; }
-    if (state.tap_pulses[1].active != 1) { return false; }
-    if (state.tap_pulses[1].x < 4.9 || state.tap_pulses[1].x > 5.1) { return false; }
-    if (state.tap_pulses[1].y < 5.9 || state.tap_pulses[1].y > 6.1) { return false; }
-    return true;
-}
-
-test `brickout refresh input model clamps negative pointer count`(): bool {
-    input_testkit_reset();
-    input_testkit_set_pointer_count_raw(-5);
-    refresh_input_model();
-    if (input_model.pointer_count != 0) { return false; }
-    return true;
-}
-
-test `brickout refresh input model clamps oversized pointer count`(): bool {
-    input_testkit_reset();
-    input_testkit_set_pointer_count_raw(999);
-    input_testkit_set_pointer(7, 77, true, true, false, 1.0, 2.0);
-    refresh_input_model();
-    if (input_model.pointer_count != MAX_INPUT_POINTERS) { return false; }
-    if (input_model.pointers[7].id != 77) { return false; }
-    if (!input_model.pointers[7].is_down) { return false; }
+test `splitter produces two weakened recovered children`(): bool {
+    original_clear_entities();
+    original_state.rng = 1234;
+    let parent: i32 = original_spawn_ball(OriginalBallKind.Splitter, 1, 200.0, 100.0, 3);
+    if (parent < 0) { return false; }
+    original_state.balls[parent].hp = 40;
+    original_state.balls[parent].split_timer = 1;
+    original_update_ball_behavior(parent);
+    if (original_count_balls() != 3) { return false; }
     return true;
 }

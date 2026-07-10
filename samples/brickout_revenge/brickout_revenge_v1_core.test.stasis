@@ -1,56 +1,54 @@
-import "brickout_revenge_v1_core.stasis";
-import "brickout_revenge_v1_levels.stasis";
+import "brickout_revenge_original_core.stasis";
 
-global test_spawn_buffer: BrickoutBallPreset[4];
-
-test `brickout can buy enforces scraps and power cap`(): bool {
-    if (!brickout_can_buy(20, 0, 5, 10, 2)) { return false; }
-    if (brickout_can_buy(5, 0, 5, 10, 2)) { return false; }
-    if (brickout_can_buy(20, 4, 5, 1, 2)) { return false; }
+test `original standard tower level zero matches recovered values`(): bool {
+    if (original_tower_cost(OriginalTowerKind.Standard, 0) != 5) { return false; }
+    if (original_tower_starting_hp(OriginalTowerKind.Standard, 0) != 10) { return false; }
+    if (original_tower_range(OriginalTowerKind.Standard, 0) != 125) { return false; }
+    if (original_tower_damage(OriginalTowerKind.Standard, 0) != 10) { return false; }
+    if (original_tower_reload_ticks(OriginalTowerKind.Standard, 0) != 180) { return false; }
     return true;
 }
 
-test `brickout shop anim step clamps open close range`(): bool {
-    let opened: f32 = brickout_shop_anim_step(0.95, 1, 0.1, 1.0);
-    if (opened < 0.99 || opened > 1.0) { return false; }
-    let closed: f32 = brickout_shop_anim_step(0.05, 0, 0.2, 1.0);
-    if (closed != 0.0) { return false; }
+test `original tower upgrade formulas match recovered ActionScript`(): bool {
+    if (original_tower_starting_hp(OriginalTowerKind.Wall, 5) != 125) { return false; }
+    if (original_tower_max_hp(OriginalTowerKind.Wall, 5) != 187) { return false; }
+    if (original_tower_damage(OriginalTowerKind.Sniper, 5) != 600) { return false; }
+    if (original_tower_reload_ticks(OriginalTowerKind.Rapid, 5) != 6) { return false; }
+    if (original_tower_cost(OriginalTowerKind.Gold, 3) != 21) { return false; }
     return true;
 }
 
-test `brickout level reset zeros runtime counters`(): bool {
-    brickout_level_tick = 99;
-    brickout_level_next_event_index = 11;
-    brickout_level_done = 1;
-    brickout_level_reset();
-    if (brickout_level_tick != 0) { return false; }
-    if (brickout_level_next_event_index != 0) { return false; }
-    if (brickout_level_done != 0) { return false; }
+test `original ball scaling and identities match recovered values`(): bool {
+    if (original_ball_base_damage(OriginalBallKind.Standard) != 2) { return false; }
+    if (original_ball_base_damage(OriginalBallKind.Slow) != 3) { return false; }
+    if (original_ball_speed_min(OriginalBallKind.Fast) != 80) { return false; }
+    if (original_ball_scaled_hp(OriginalBallKind.Standard, 15) != 160) { return false; }
+    if (original_ball_scaled_damage(OriginalBallKind.Standard, 15) != 4) { return false; }
     return true;
 }
 
-test `brickout consume spawns emits expected event at matching tick`(): bool {
-    init_level_defs();
-    brickout_level_tick = 120;
-    brickout_level_next_event_index = 0;
-    brickout_level_done = 0;
-    let count: i32 = brickout_level_consume_spawns(0, test_spawn_buffer, 4);
-    if (count != 1) { return false; }
-    if (test_spawn_buffer[0] != BrickoutBallPreset.Normal) { return false; }
-    if (brickout_level_tick != 121) { return false; }
-    if (brickout_level_next_event_index != 1) { return false; }
+test `original campaign schedules preserve recovered group counts`(): bool {
+    original_level_init(0);
+    if (original_spawn_total != 144) { return false; }
+    if (original_spawn_kind[0] != OriginalBallKind.Standard) { return false; }
+    if (original_spawn_count[0] != 5) { return false; }
+
+    original_level_init(1);
+    if (original_spawn_total != 22) { return false; }
+    if (original_spawn_kind[0] != OriginalBallKind.Splitter) { return false; }
+    if (original_spawn_count[21] != 30) { return false; }
+    if (original_spawn_kind[21] != OriginalBallKind.Swarm) { return false; }
     return true;
 }
 
-test `brickout consume spawns marks done after last event`(): bool {
-    init_level_defs();
-    brickout_level_tick = 780;
-    brickout_level_next_event_index = 11;
-    brickout_level_done = 0;
-    let count: i32 = brickout_level_consume_spawns(0, test_spawn_buffer, 4);
-    if (count != 1) { return false; }
-    if (test_spawn_buffer[0] != BrickoutBallPreset.Normal) { return false; }
-    if (brickout_level_next_event_index != 12) { return false; }
-    if (brickout_level_done != 1) { return false; }
+test `original challenge and earthquake schedules remain available`(): bool {
+    original_level_init(2);
+    if (original_spawn_total != 47) { return false; }
+    if (original_spawn_kind[15] != OriginalBallKind.Fire) { return false; }
+
+    original_level_init(3);
+    if (original_spawn_total != 21) { return false; }
+    if (original_spawn_kind[20] != OriginalBallKind.Mover) { return false; }
+    if (original_spawn_count[20] != 50) { return false; }
     return true;
 }

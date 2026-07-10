@@ -1,0 +1,2 @@
+// Descriptive alias for the stable v1 tooling entrypoint.
+import "brickout_revenge_v1.stasis";
