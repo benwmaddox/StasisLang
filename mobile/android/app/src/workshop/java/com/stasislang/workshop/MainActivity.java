@@ -285,6 +285,22 @@ public final class MainActivity extends Activity {
             projectRegistryError = "baseline: " + error.getMessage();
         }
         setContentView(createWorkshopView(project));
+        markInterruptedAiOutcomeIfNeeded();
+        restorePendingDraft();
+    }
+
+    @Override
+    protected void onPause() {
+        persistPendingDraft();
+        stopVoiceRecognition();
+        stopAudioPreview();
+        super.onPause();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        persistPendingDraft();
+        super.onSaveInstanceState(outState);
     }
 
     @Override
@@ -1943,6 +1959,77 @@ public final class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    private void markInterruptedAiOutcomeIfNeeded() {
+        JSONArray outcomes = aiOutcomeHistory();
+        JSONObject latest = outcomes.optJSONObject(0);
+        if (latest == null || !"started".equals(latest.optString("status", ""))) return;
+        String request = latest.optString("request", "");
+        recordAiOutcome(request, "interrupted",
+                "App stopped before AI completion; Retry Last AI starts a new budget-checked run",
+                "A paid in-flight call may have completed remotely");
+    }
+
+    private void persistPendingDraft() {
+        if (selectedSymbol == null || sourceEditor == null) return;
+        try {
+            String draft = sourceEditor.getText().toString();
+            if (draft.trim().equals(selectedSymbol.source.trim())) {
+                AndroidDraftStore.clearIfMatches(this, activeRecoveryProjectId(), selectedSymbol.file,
+                        selectedSymbol.kind, selectedSymbol.name, selectedSymbol.owner);
+                return;
+            }
+            AndroidDraftStore.save(this, activeRecoveryProjectId(), selectedSymbol.file, selectedSymbol.kind,
+                    selectedSymbol.name, selectedSymbol.owner, selectedSymbol.source, draft);
+        } catch (Exception error) {
+            setStatusText("Draft autosave failed: " + error.getMessage());
+        }
+    }
+
+    private void restorePendingDraft() {
+        try {
+            AndroidDraftStore.Entry draft = AndroidDraftStore.load(this, activeRecoveryProjectId());
+            if (draft == null) return;
+            SymbolEntry target = null;
+            for (SymbolSection section : loadBundledProject().sections) {
+                for (SymbolGroup group : section.groups) {
+                    for (SymbolEntry symbol : group.symbols) {
+                        if (symbol.file.equals(draft.path) && symbol.kind.equals(draft.kind)
+                                && symbol.name.equals(draft.name) && symbol.owner.equals(draft.owner)) {
+                            target = symbol;
+                            break;
+                        }
+                    }
+                    if (target != null) break;
+                }
+                if (target != null) break;
+            }
+            if (target == null) {
+                setStatusText("Unsaved draft retained but its symbol no longer exists");
+                return;
+            }
+            if (!AndroidDraftStore.matchesBase(draft, target.source)) {
+                setStatusText("Unsaved draft retained but source changed; recovery will not overwrite newer code");
+                return;
+            }
+            showSymbol(target);
+            sourceEditor.setText(draft.draftSource);
+            if (manualEditBody != null) manualEditBody.setVisibility(View.VISIBLE);
+            setStatusText("Recovered unsaved source draft after app interruption");
+        } catch (Exception error) {
+            setStatusText("Draft recovery unavailable: " + error.getMessage());
+        }
+    }
+
+    private void clearPendingDraft() {
+        if (selectedSymbol == null) return;
+        try {
+            AndroidDraftStore.clearIfMatches(this, activeRecoveryProjectId(), selectedSymbol.file,
+                    selectedSymbol.kind, selectedSymbol.name, selectedSymbol.owner);
+        } catch (Exception error) {
+            setStatusText("Draft cleanup failed: " + error.getMessage());
+        }
     }
 
     private Map<String, byte[]> githubBackupFiles() throws IOException {
@@ -4884,6 +4971,7 @@ public final class MainActivity extends Activity {
         String reload = classifySelectedReload(editedSymbol, editedSource);
         try {
             persistSelectedEdit(editedSymbol, editedSource);
+            clearPendingDraft();
             ProjectSnapshot refreshedProject = loadBundledProject();
             rebuildSymbolList(refreshedProject);
             SymbolEntry refreshedSymbol = findMatchingSymbol(refreshedProject, editedSymbol);
@@ -6515,6 +6603,7 @@ public final class MainActivity extends Activity {
         }
 
         sourceEditor.setText(selectedSymbol.source.trim());
+        clearPendingDraft();
         setStatusText("Reset editor to selected symbol");
     }
 
@@ -6530,6 +6619,7 @@ public final class MainActivity extends Activity {
                 return;
             }
             persistSelectedEdit(selectedSymbol, baseline.source);
+            clearPendingDraft();
             ProjectSnapshot refreshedProject = loadBundledProject();
             rebuildSymbolList(refreshedProject);
             SymbolEntry refreshedSymbol = findMatchingSymbol(refreshedProject, baseline);
