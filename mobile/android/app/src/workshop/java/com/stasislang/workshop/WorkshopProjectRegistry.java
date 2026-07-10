@@ -169,6 +169,20 @@ final class WorkshopProjectRegistry {
         writeMetadataTemporary(root, project, target, 0);
     }
 
+    static void deleteProject(Context context, ProjectInfo project) throws Exception {
+        validateProjectRoot(context, project.root);
+        if (LEGACY_PROJECT_DIR.equals(project.directoryName)) {
+            throw new IllegalArgumentException("bundled project cannot be deleted");
+        }
+        String activeDirectory = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(PREF_ACTIVE_PROJECT, LEGACY_PROJECT_DIR);
+        if (project.directoryName.equals(activeDirectory)) {
+            throw new IllegalStateException("switch away from a project before deleting it");
+        }
+        deleteTree(project.root);
+        if (project.root.exists()) throw new IllegalStateException("project directory deletion did not complete");
+    }
+
     private static void migrateV1Metadata(File root, ProjectInfo project) throws Exception {
         File source = new File(root, METADATA_FILE);
         File backup = new File(root, V1_BACKUP_FILE);

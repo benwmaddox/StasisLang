@@ -58,6 +58,17 @@ final class AndroidEditRecoveryStore {
         if (!entry.file.delete() && entry.file.exists()) throw new IllegalStateException("recovery entry delete failed");
     }
 
+    static void clearProject(Context context, String projectId) throws Exception {
+        File directory = projectDirectory(context, projectId);
+        File[] files = directory.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                if (!file.delete() && file.exists()) throw new IllegalStateException("recovery entry delete failed");
+            }
+        }
+        if (!directory.delete() && directory.exists()) throw new IllegalStateException("recovery directory delete failed");
+    }
+
     private static Entry read(File file) throws Exception {
         JSONObject json = new JSONObject(readText(file));
         return new Entry(file, json.getLong("timestamp_ms"), json.getString("path"),

@@ -1696,6 +1696,12 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { requestSupportBundleExport(); }
         });
         privacySettingsBody.addView(exportSupport, fullWidth());
+        Button deleteProject = new Button(this);
+        deleteProject.setText("Delete Active Non-Bundled Project");
+        deleteProject.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { confirmDeleteActiveProject(); }
+        });
+        privacySettingsBody.addView(deleteProject, fullWidth());
         controls.addView(privacySettingsBody, fullWidth());
 
         Button onboardingToggle = new Button(this);
@@ -2325,6 +2331,80 @@ public final class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    private void confirmDeleteActiveProject() {
+        if (activeProject == null || WorkshopProjectRegistry.LEGACY_PROJECT_DIR.equals(activeProject.directoryName)) {
+            setStatusText("Bundled Workshop cannot be deleted");
+            return;
+        }
+        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive) {
+            setStatusText("Project deletion blocked while background work or recording is active");
+            return;
+        }
+        if (hasPendingSourceEdit()) {
+            setStatusText("Apply or Reset the pending source edit before deleting this project");
+            return;
+        }
+        final WorkshopProjectRegistry.ProjectInfo target = activeProject;
+        final EditText confirmation = new EditText(this);
+        confirmation.setHint("Type " + target.name + " to confirm");
+        confirmation.setSingleLine(true);
+        new AlertDialog.Builder(this)
+                .setTitle("Delete Project Permanently?")
+                .setMessage("Export a project archive first if it may be needed. This deletes the project, accepted assets, "
+                        + "trash, baseline, draft/recovery journal, and project-scoped AI/GitHub state. The bundled project and credentials remain.")
+                .setView(confirmation)
+                .setPositiveButton("Delete Project", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        if (!target.name.equals(confirmation.getText().toString())) {
+                            setStatusText("Project deletion cancelled: confirmation name did not match exactly");
+                            return;
+                        }
+                        deleteActiveProject(target);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void deleteActiveProject(WorkshopProjectRegistry.ProjectInfo target) {
+        try {
+            WorkshopProjectRegistry.ProjectInfo bundled = null;
+            for (WorkshopProjectRegistry.ProjectInfo project : WorkshopProjectRegistry.list(this)) {
+                if (WorkshopProjectRegistry.LEGACY_PROJECT_DIR.equals(project.directoryName)) {
+                    bundled = project;
+                    break;
+                }
+            }
+            if (bundled == null) throw new IOException("Bundled Workshop recovery target is unavailable");
+            File baseline = new File(new File(getFilesDir(), PROJECT_BASELINES_DIR), target.id);
+            if (!activateProject(bundled)) throw new IOException("could not switch to Bundled Workshop before deletion");
+            WorkshopProjectRegistry.deleteProject(this, target);
+            deleteBaselineDirectory(baseline);
+            if (baseline.exists()) throw new IOException("project baseline deletion did not complete");
+            AndroidDraftStore.clear(this, target.id);
+            AndroidEditRecoveryStore.clearProject(this, target.id);
+            clearDeletedProjectPreferences(target);
+            refreshProjectControls();
+            setStatusText("Deleted project and scoped private data: " + target.name + "; Bundled Workshop is active");
+        } catch (Exception error) {
+            refreshProjectControls();
+            setStatusText("Project deletion stopped with recovery context preserved where possible: " + error.getMessage());
+        }
+    }
+
+    private void clearDeletedProjectPreferences(WorkshopProjectRegistry.ProjectInfo project) {
+        String historyIdentity = Integer.toHexString(project.root.getAbsolutePath().hashCode());
+        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                .remove(AI_PREF_COMMAND_HISTORY_PREFIX + historyIdentity)
+                .remove(AI_PREF_OUTCOME_HISTORY_PREFIX + historyIdentity)
+                .apply();
+        SharedPreferences github = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        SharedPreferences.Editor editor = github.edit();
+        String suffix = "_" + project.id;
+        for (String key : github.getAll().keySet()) if (key.endsWith(suffix)) editor.remove(key);
+        editor.apply();
     }
 
     private void showOnboardingGuide(boolean firstRun) {
