@@ -296,6 +296,23 @@ def main() -> int:
     assert "WorkshopAudioAssets.readForSync" in activity
     assert "MAX_AUDIO_BYTES = 16 * 1024 * 1024" in audio_assets
     assert "MAX_DURATION_MS = 5L * 60L * 1000L" in audio_assets
+    assert "AUDIO_RECORD_PERMISSION_REQUEST = 42" in activity
+    assert "Recording name (saved as M4A)" in activity
+    assert "Record Audio" in activity
+    assert "Stop & Save" in activity
+    assert "Cancel Recording" in activity
+    assert "MediaRecorder.AudioSource.MIC" in activity
+    assert "MediaRecorder.OutputFormat.MPEG_4" in activity
+    assert "MediaRecorder.AudioEncoder.AAC" in activity
+    assert "setMaxDuration((int)WorkshopAudioAssets.MAX_DURATION_MS)" in activity
+    assert "setMaxFileSize(WorkshopAudioAssets.MAX_AUDIO_BYTES)" in activity
+    assert "WorkshopAudioAssets.publishRecording" in activity
+    assert "cancelAudioRecording(false)" in activity
+    assert "Finish or cancel audio recording before running AI" in activity
+    assert "createRecordingFile" in audio_assets
+    assert "publishRecording" in audio_assets
+    assert "discardRecording" in audio_assets
+    assert "could not publish recorded audio" in audio_assets
     assert "MediaMetadataRetriever" in audio_assets
     assert "audio path escapes the active project" in audio_assets
     assert "output.getFD().sync()" in audio_assets
@@ -321,7 +338,7 @@ def main() -> int:
     assert "Help & Onboarding" in activity
     assert "Start Zero-AI Manual Tutorial" in activity
     assert "no API key is required" in activity
-    assert "Voice asks for microphone permission only when started" in activity
+    assert "Voice or audio recording asks for microphone permission only when started" in activity
     assert "toggleEditorPanel();" in activity
     assert "Interactive Stasis game preview" in activity
     assert "Open Workshop menu" in activity

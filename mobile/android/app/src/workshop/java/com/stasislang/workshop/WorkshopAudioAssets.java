@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.UUID;
 
 final class WorkshopAudioAssets {
     static final int MAX_AUDIO_BYTES = 16 * 1024 * 1024;
@@ -144,6 +145,31 @@ final class WorkshopAudioAssets {
         File target = uniqueTarget(directory, baseWithoutExtension(original), extension);
         if (!latest.renameTo(target)) throw new IOException("could not restore deleted audio");
         return inspect(projectRoot, target, mime);
+    }
+
+    static File createRecordingFile(File projectRoot) throws IOException {
+        File directory = confinedAudioDirectory(projectRoot);
+        if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("could not create project audio directory");
+        File target = new File(directory, ".recording-" + UUID.randomUUID().toString() + ".m4a");
+        requireInside(projectRoot, target);
+        return target;
+    }
+
+    static AssetInfo publishRecording(File temporary, File projectRoot, String requestedName) throws IOException {
+        requireInside(projectRoot, temporary);
+        AssetInfo validated = inspect(projectRoot, temporary, "audio/mp4");
+        String base = normalizeRequestedBase(requestedName, ".m4a");
+        File directory = confinedAudioDirectory(projectRoot);
+        File target = uniqueTarget(directory, base, ".m4a");
+        if (!temporary.renameTo(target)) throw new IOException("could not publish recorded audio");
+        return new AssetInfo(target, relativePath(projectRoot, target), target.length(),
+                validated.durationMs, "audio/mp4");
+    }
+
+    static void discardRecording(File temporary, File projectRoot) throws IOException {
+        if (temporary == null) return;
+        requireInside(projectRoot, temporary);
+        if (!temporary.delete() && temporary.exists()) throw new IOException("could not discard temporary audio recording");
     }
 
     private static AssetInfo inspect(File projectRoot, File file, String fallbackMime) throws IOException {

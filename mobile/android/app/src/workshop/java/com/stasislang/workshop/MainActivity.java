@@ -14,6 +14,7 @@ import android.opengl.GLSurfaceView;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
+import android.media.MediaRecorder;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -121,6 +122,7 @@ public final class MainActivity extends Activity {
     private static final int AI_CONNECT_TIMEOUT_MS = 15_000;
     private static final int AI_READ_TIMEOUT_MS = 120_000;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
+    private static final int AUDIO_RECORD_PERMISSION_REQUEST = 42;
     private static final int EXPORT_PROJECT_REQUEST = 71;
     private static final int IMPORT_PROJECT_REQUEST = 72;
     private static final int IMPORT_IMAGE_REQUEST = 73;
@@ -191,6 +193,7 @@ public final class MainActivity extends Activity {
     private TextView projectStatus;
     private LinearLayout imageAssetList;
     private LinearLayout audioAssetList;
+    private EditText audioRecordingNameEditor;
     private final ArrayList<WorkshopProjectRegistry.ProjectInfo> availableProjects = new ArrayList<>();
     private final HashSet<String> selectedImageAssets = new HashSet<>();
     private String selectedImageAssetProjectId = "";
@@ -209,6 +212,9 @@ public final class MainActivity extends Activity {
     private volatile List<AiImageAttachment> activeAiImageAttachments = Collections.emptyList();
     private Bitmap pendingPreviewScreenshot;
     private MediaPlayer activeAudioPreview;
+    private MediaRecorder activeAudioRecorder;
+    private File activeAudioRecordingFile;
+    private boolean audioRecordingActive;
     private JSONObject pendingPreviewLogicalSnapshot;
     private boolean attachPreviewPixels;
     private boolean attachPreviewLogicalSnapshot;
@@ -305,6 +311,7 @@ public final class MainActivity extends Activity {
         persistPendingDraft();
         stopVoiceRecognition();
         stopAudioPreview();
+        cancelAudioRecording(false);
         super.onPause();
     }
 
@@ -326,6 +333,7 @@ public final class MainActivity extends Activity {
             pendingPreviewScreenshot.recycle();
         }
         stopAudioPreview();
+        cancelAudioRecording(false);
         if (gameLoop != null) {
             gameLoopHandler.removeCallbacks(gameLoop);
         }
@@ -784,6 +792,10 @@ public final class MainActivity extends Activity {
     }
 
     private void startVoiceChange() {
+        if (audioRecordingActive) {
+            setStatusText("Finish or cancel audio recording before starting a voice command");
+            return;
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
                 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[] { Manifest.permission.RECORD_AUDIO }, VOICE_RECORD_PERMISSION_REQUEST);
@@ -882,6 +894,12 @@ public final class MainActivity extends Activity {
                 startVoiceChange();
             } else {
                 setStatusText("Voice change needs microphone permission");
+            }
+        } else if (requestCode == AUDIO_RECORD_PERMISSION_REQUEST) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startAudioRecording();
+            } else {
+                setStatusText("Audio recording needs microphone permission");
             }
         }
     }
@@ -1434,6 +1452,38 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { requestAudioImport(); }
         });
         projectSettingsBody.addView(importAudio, fullWidth());
+        audioRecordingNameEditor = new EditText(this);
+        audioRecordingNameEditor.setHint("Recording name (saved as M4A)");
+        audioRecordingNameEditor.setSingleLine(true);
+        audioRecordingNameEditor.setText("recorded_audio");
+        projectSettingsBody.addView(audioRecordingNameEditor, fullWidth());
+        LinearLayout recordingActions = new LinearLayout(this);
+        recordingActions.setOrientation(getResources().getConfiguration().screenWidthDp < 480
+                ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        Button startRecording = new Button(this);
+        startRecording.setText("Record Audio");
+        startRecording.setContentDescription("Start a bounded microphone recording for the active project");
+        startRecording.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { requestAudioRecording(); }
+        });
+        Button saveRecording = new Button(this);
+        saveRecording.setText("Stop & Save");
+        saveRecording.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { finishAudioRecording(true); }
+        });
+        Button cancelRecording = new Button(this);
+        cancelRecording.setText("Cancel Recording");
+        cancelRecording.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { cancelAudioRecording(true); }
+        });
+        LinearLayout.LayoutParams recordingButtonParams = getResources().getConfiguration().screenWidthDp < 480
+                ? fullWidth() : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f);
+        recordingActions.addView(startRecording, recordingButtonParams);
+        recordingActions.addView(saveRecording, getResources().getConfiguration().screenWidthDp < 480
+                ? fullWidth() : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        recordingActions.addView(cancelRecording, getResources().getConfiguration().screenWidthDp < 480
+                ? fullWidth() : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        projectSettingsBody.addView(recordingActions, fullWidth());
         Button stopAudio = new Button(this);
         stopAudio.setText("Stop Audio Preview");
         stopAudio.setOnClickListener(new View.OnClickListener() {
@@ -1592,7 +1642,7 @@ public final class MainActivity extends Activity {
         TextView privacyDisclosure = new TextView(this);
         privacyDisclosure.setText("On-device by default: project code, assets, drafts, recovery, and traces. "
                 + "Run AI sends the command, workspace context, and only media explicitly selected in review. "
-                + "GitHub receives project files only when Sync or PR is pressed. Microphone access is used only for explicit voice actions.");
+                + "GitHub receives project files only when Sync or PR is pressed. Microphone access is used only for explicit voice or audio-recording actions.");
         privacyDisclosure.setTextSize(12.0f);
         privacyDisclosure.setTextColor(Color.rgb(73, 84, 100));
         privacyDisclosure.setPadding(dp(8), dp(8), dp(8), dp(8));
@@ -1647,7 +1697,7 @@ public final class MainActivity extends Activity {
                 + "3. Edit, Apply, then Run Tests; use Changes before backup.\n"
                 + "4. Projects creates/switches workshops and exports portable archives.\n\n"
                 + "Optional: AI Settings stores an OpenAI key; GitHub Settings stores a token for explicit Sync/PR actions. "
-                + "Image/Audio Assets stay under Projects. Voice asks for microphone permission only when started.");
+                + "Image/Audio Assets stay under Projects. Voice or audio recording asks for microphone permission only when started.");
         onboardingSummary.setTextSize(12.0f);
         onboardingSummary.setTextColor(Color.rgb(73, 84, 100));
         onboardingSummary.setPadding(dp(8), dp(8), dp(8), dp(8));
@@ -1836,7 +1886,7 @@ public final class MainActivity extends Activity {
     }
 
     private void createAndSwitchProject() {
-        if (aiRunActive || githubOperationActive || projectIoActive
+        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project creation blocked while AI, GitHub, or project I/O is active");
             return;
@@ -1856,7 +1906,7 @@ public final class MainActivity extends Activity {
     }
 
     private boolean activateProject(WorkshopProjectRegistry.ProjectInfo project) {
-        if (aiRunActive || githubOperationActive || projectIoActive
+        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project switch blocked while AI, GitHub, or project I/O is active");
             return false;
@@ -1872,6 +1922,7 @@ public final class MainActivity extends Activity {
             projectRootPath = project.root.getAbsolutePath();
             clearPendingPreviewCapture();
             stopAudioPreview();
+            cancelAudioRecording(false);
             selectedSymbol = null;
             diagnosticFile = "";
             diagnosticSymbol = "";
@@ -1913,7 +1964,7 @@ public final class MainActivity extends Activity {
             setStatusText("Project export needs a registered active project");
             return;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive
+        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project export blocked while other background work is active");
             return;
@@ -1937,7 +1988,7 @@ public final class MainActivity extends Activity {
     }
 
     private void requestProjectImport() {
-        if (aiRunActive || githubOperationActive || projectIoActive
+        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project import blocked while other background work is active");
             return;
@@ -2054,6 +2105,10 @@ public final class MainActivity extends Activity {
     }
 
     private void queueGitHubSync() {
+        if (audioRecordingActive) {
+            setStatusText("Finish or cancel audio recording before GitHub sync");
+            return;
+        }
         final SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
         final String token = readSecretPreference(prefs, GITHUB_PREF_TOKEN).trim();
         final String repository = readGitHubProjectPreference(prefs, GITHUB_PREF_REPOSITORY, "").trim();
@@ -2433,6 +2488,10 @@ public final class MainActivity extends Activity {
     }
 
     private void queueGitHubPullRequest() {
+        if (audioRecordingActive) {
+            setStatusText("Finish or cancel audio recording before GitHub pull request work");
+            return;
+        }
         final SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
         final String token = readSecretPreference(prefs, GITHUB_PREF_TOKEN).trim();
         final String repository = readGitHubProjectPreference(prefs, GITHUB_PREF_REPOSITORY, "").trim();
@@ -2940,6 +2999,10 @@ public final class MainActivity extends Activity {
     }
 
     private void runAiPatch() {
+        if (audioRecordingActive) {
+            setStatusText("Finish or cancel audio recording before running AI");
+            return;
+        }
         if (aiRunActive) {
             setStatusText("AI run already active; cancel it before starting another");
             return;
@@ -5484,6 +5547,121 @@ public final class MainActivity extends Activity {
         } catch (Exception error) {
             setStatusText("Audio picker failed: " + error.getMessage());
         }
+    }
+
+    private void requestAudioRecording() {
+        if (!canModifyAudioAssets()) return;
+        if (audioRecordingActive) {
+            setStatusText("Audio recording is already active; use Stop & Save or Cancel Recording");
+            return;
+        }
+        String requestedName = audioRecordingNameEditor == null
+                ? "" : audioRecordingNameEditor.getText().toString().trim();
+        if (!requestedName.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,63}")) {
+            setStatusText("Recording name must use 1-64 letters, numbers, underscores, or hyphens");
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, AUDIO_RECORD_PERMISSION_REQUEST);
+            setStatusText("Audio recording is waiting for microphone permission");
+            return;
+        }
+        startAudioRecording();
+    }
+
+    private void startAudioRecording() {
+        if (activeProject == null || audioRecordingActive) return;
+        stopVoiceRecognition();
+        stopAudioPreview();
+        File temporary = null;
+        MediaRecorder recorder = null;
+        try {
+            temporary = WorkshopAudioAssets.createRecordingFile(activeProject.root);
+            recorder = new MediaRecorder();
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+            recorder.setAudioEncodingBitRate(128_000);
+            recorder.setAudioSamplingRate(44_100);
+            recorder.setMaxDuration((int)WorkshopAudioAssets.MAX_DURATION_MS);
+            recorder.setMaxFileSize(WorkshopAudioAssets.MAX_AUDIO_BYTES);
+            recorder.setOutputFile(temporary.getAbsolutePath());
+            recorder.setOnInfoListener(new MediaRecorder.OnInfoListener() {
+                @Override public void onInfo(MediaRecorder ignored, int what, int extra) {
+                    if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED
+                            || what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED) {
+                        finishAudioRecording(true);
+                    }
+                }
+            });
+            recorder.prepare();
+            recorder.start();
+            activeAudioRecordingFile = temporary;
+            activeAudioRecorder = recorder;
+            audioRecordingActive = true;
+            setStatusText("Audio recording active: bounded to five minutes and 16 MiB; use Stop & Save or Cancel");
+        } catch (Exception error) {
+            if (recorder != null) recorder.release();
+            if (temporary != null) {
+                try {
+                    WorkshopAudioAssets.discardRecording(temporary, activeProject.root);
+                } catch (Exception ignored) {
+                }
+            }
+            setStatusText("Audio recording failed to start: " + error.getMessage());
+        }
+    }
+
+    private void finishAudioRecording(boolean save) {
+        if (!audioRecordingActive || activeAudioRecorder == null || activeAudioRecordingFile == null) {
+            if (save) setStatusText("No audio recording is active");
+            return;
+        }
+        MediaRecorder recorder = activeAudioRecorder;
+        File temporary = activeAudioRecordingFile;
+        File project = activeProject == null ? projectRoot() : activeProject.root;
+        activeAudioRecorder = null;
+        activeAudioRecordingFile = null;
+        audioRecordingActive = false;
+        try {
+            recorder.stop();
+        } catch (RuntimeException stopError) {
+            recorder.release();
+            try {
+                WorkshopAudioAssets.discardRecording(temporary, project);
+            } catch (Exception cleanupError) {
+                stopError.addSuppressed(cleanupError);
+            }
+            setStatusText("Audio recording discarded after stop failure: " + stopError.getMessage());
+            return;
+        }
+        recorder.release();
+        try {
+            if (!save) {
+                WorkshopAudioAssets.discardRecording(temporary, project);
+                setStatusText("Audio recording cancelled; project assets unchanged");
+                return;
+            }
+            String name = audioRecordingNameEditor == null
+                    ? "recorded_audio" : audioRecordingNameEditor.getText().toString().trim();
+            WorkshopAudioAssets.AssetInfo recorded = WorkshopAudioAssets.publishRecording(temporary, project, name);
+            refreshAudioAssetList();
+            setStatusText("Audio recording saved: " + recorded.relativePath + " - "
+                    + formatDuration(recorded.durationMs));
+        } catch (Exception error) {
+            try {
+                WorkshopAudioAssets.discardRecording(temporary, project);
+            } catch (Exception cleanupError) {
+                error.addSuppressed(cleanupError);
+            }
+            setStatusText("Audio recording discarded after stop/validation failure: " + error.getMessage());
+        }
+    }
+
+    private void cancelAudioRecording(boolean report) {
+        if (!audioRecordingActive) return;
+        finishAudioRecording(false);
+        if (!report && reloadStatus != null) reloadStatus.setText("Audio recording cancelled on app pause");
     }
 
     private void refreshAudioAssetList() {
