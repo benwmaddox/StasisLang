@@ -428,6 +428,9 @@ struct StasisGraphicsAssetsApi {
     stasis_measure_text: usize,
     stasis_gfx_cache_text: usize,
     stasis_gfx_measure_text_cached: usize,
+    stasis_audio_load_wav: usize,
+    stasis_audio_play_wav: usize,
+    stasis_audio_stop_wav: usize,
 }
 
 #[cfg(windows)]
@@ -454,6 +457,9 @@ impl StasisGraphicsAssetsApi {
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
             stasis_gfx_cache_text: lib.symbol_address("stasis_gfx_cache_text")?,
             stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
+            stasis_audio_load_wav: lib.symbol_address("stasis_audio_load_wav")?,
+            stasis_audio_play_wav: lib.symbol_address("stasis_audio_play_wav")?,
+            stasis_audio_stop_wav: lib.symbol_address("stasis_audio_stop_wav")?,
             _lib: lib,
         })
     }
@@ -1266,6 +1272,63 @@ pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
     {
         let _ = run_handle;
         0.0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_load_wav(path_id: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let callback: extern "system" fn(*const c_char) -> i32 =
+            unsafe { std::mem::transmute(api.stasis_audio_load_wav) };
+        return callback(path.as_ptr());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path_id;
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_play_wav(sample_handle: i32, volume: f32, looped: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let callback: extern "system" fn(i32, f32, i32) -> i32 =
+            unsafe { std::mem::transmute(api.stasis_audio_play_wav) };
+        return callback(sample_handle, volume, looped);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = sample_handle;
+        let _ = volume;
+        let _ = looped;
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_stop_wav(voice_handle: i32) {
+    #[cfg(windows)]
+    {
+        if let Ok(api) = stasis_graphics_assets_api() {
+            let callback: extern "system" fn(i32) =
+                unsafe { std::mem::transmute(api.stasis_audio_stop_wav) };
+            callback(voice_handle);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = voice_handle;
     }
 }
 

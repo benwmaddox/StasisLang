@@ -11,3 +11,8 @@ extern function audio_get_channels(): i32;
 extern function audio_get_queued_frames(): i32;
 extern function audio_get_underruns(): i32;
 extern function audio_push_f32_interleaved(samples: f32[], frame_count: i32): i32;
+
+// Native WAV assets are decoded once and mixed by the runtime. Handles are 1-based.
+extern function audio_load_wav(path: string): i32;
+extern function audio_play_wav(sample_handle: i32, volume: f32, loop: bool): i32;
+extern function audio_stop_wav(voice_handle: i32): void;

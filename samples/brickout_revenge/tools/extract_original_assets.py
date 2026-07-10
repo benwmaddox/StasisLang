@@ -459,6 +459,38 @@ def export_placement_assets(
         frame.save(placement_root / f"tower_placer_{name}_4x.png", optimize=True)
 
 
+def export_audio_assets(ffdec: Path, source_swf: Path, temp: Path, sample_root: Path) -> None:
+    export_root = temp / "audio"
+    run(
+        [
+            str(ffdec),
+            "-onerror",
+            "abort",
+            "-format",
+            "sound:wav",
+            "-export",
+            "sound",
+            str(export_root),
+            str(source_swf),
+        ]
+    )
+    output_root = sample_root / "assets" / "original" / "audio"
+    output_root.mkdir(parents=True, exist_ok=True)
+    names = {
+        "1_org.flixel.FlxGame_SndFlixel": "flixel.wav",
+        "2_org.flixel.FlxGame_SndBeep": "beep.wav",
+        "3_PlayState_backgroundMusic": "background_music.wav",
+        "4_levels.BaseLevel_lostLife": "lost_life.wav",
+        "5_balls.BallBase_curveBallCollision": "curve_collision.wav",
+        "227_projectiles.ExplosionProjectile_explosionSound": "rocket_explosion.wav",
+    }
+    for source_prefix, target_name in names.items():
+        matches = list(export_root.glob(f"{source_prefix}*.wav"))
+        if len(matches) != 1:
+            raise RuntimeError(f"expected one WAV for {source_prefix}, found {len(matches)}")
+        shutil.copy2(matches[0], output_root / target_name)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ffdec", type=Path, required=True, help="Path to ffdec-cli or ffdec-cli.exe")
@@ -553,6 +585,7 @@ def main() -> int:
             output_root,
             args.scale,
         )
+        export_audio_assets(args.ffdec, source_root / "TowerDefense.swf", temp, sample_root)
         export_used_vectors(args.ffdec, source_root / "TowerDefense.swf", temp, sample_root)
 
         (output_root / "animation_manifest.json").write_text(
