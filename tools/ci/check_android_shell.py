@@ -20,6 +20,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -123,6 +124,7 @@ def main() -> int:
     image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
     paint_view = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java")
     audio_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java")
+    support_bundle = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "protected void onPause()" in activity
@@ -336,6 +338,24 @@ def main() -> int:
     assert "Audio asset " in activity
     assert "Touch paint canvas" in paint_view
     assert "setFocusable(true)" in paint_view
+    assert "Export Redacted Support Bundle" in activity
+    assert "Excludes credentials, source, prompts" in activity
+    assert 'intent.setType("application/json")' in activity
+    assert "AndroidSupportBundle.build" in activity
+    assert "Redacted support bundle exported without credentials, source, prompts, or media" in activity
+    assert '"stasis-android-redacted-support-v1"' in support_bundle
+    assert '"credentials_excluded"' in support_bundle
+    assert '"source_and_prompts_excluded"' in support_bundle
+    assert '"media_bytes_and_names_excluded"' in support_bundle
+    assert '"absolute_paths_excluded"' in support_bundle
+    assert "MAX_TRACE_READ_BYTES = 512 * 1024" in support_bundle
+    assert "MAX_TRACE_EVENTS = 50" in support_bundle
+    assert "redacted support bundle exceeds 1 MiB" in support_bundle
+    assert 'outcome.optString("status"' in support_bundle
+    assert 'entry.optString("event"' in support_bundle
+    assert "draft_source" not in support_bundle
+    assert "before_source" not in support_bundle
+    assert "api_key" not in support_bundle
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
     assert "Cancel AI" in activity

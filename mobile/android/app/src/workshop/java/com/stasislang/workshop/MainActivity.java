@@ -125,6 +125,7 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_PROJECT_REQUEST = 72;
     private static final int IMPORT_IMAGE_REQUEST = 73;
     private static final int IMPORT_AUDIO_REQUEST = 74;
+    private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
     private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
     private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
     private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125;
@@ -342,6 +343,8 @@ public final class MainActivity extends Activity {
             completeImageImport(resultCode, data);
         } else if (requestCode == IMPORT_AUDIO_REQUEST) {
             completeAudioImport(resultCode, data);
+        } else if (requestCode == EXPORT_SUPPORT_BUNDLE_REQUEST) {
+            completeSupportBundleExport(resultCode, data);
         }
     }
 
@@ -1618,6 +1621,12 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { confirmEraseAiActivity(); }
         });
         privacySettingsBody.addView(eraseAiActivity, fullWidth());
+        Button exportSupport = new Button(this);
+        exportSupport.setText("Export Redacted Support Bundle");
+        exportSupport.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { requestSupportBundleExport(); }
+        });
+        privacySettingsBody.addView(exportSupport, fullWidth());
         controls.addView(privacySettingsBody, fullWidth());
 
         Button onboardingToggle = new Button(this);
@@ -2171,6 +2180,77 @@ public final class MainActivity extends Activity {
         refreshCommandHistory();
         refreshAiBudgetStatus();
         setStatusText("AI histories, usage records, monthly spend history, trace, and pending media erased");
+    }
+
+    private void requestSupportBundleExport() {
+        if (aiRunActive || githubOperationActive || projectIoActive) {
+            setStatusText("Support export blocked while background work is active");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Export Redacted Support Bundle?")
+                .setMessage("Includes app/device versions, project file counts, compile/reload state, operation states, "
+                        + "AI outcome statuses, and up to 50 trace event names. Excludes credentials, source, prompts, "
+                        + "file/media names and bytes, repository names, and absolute paths.")
+                .setPositiveButton("Choose Destination", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                        intent.addCategory(Intent.CATEGORY_OPENABLE);
+                        intent.setType("application/json");
+                        intent.putExtra(Intent.EXTRA_TITLE, "stasis-android-support-redacted.json");
+                        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                        try {
+                            startActivityForResult(intent, EXPORT_SUPPORT_BUNDLE_REQUEST);
+                        } catch (Exception error) {
+                            setStatusText("Support export picker failed: " + error.getMessage());
+                        }
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void completeSupportBundleExport(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            setStatusText("Support export cancelled");
+            return;
+        }
+        final Uri destination = data.getData();
+        final WorkshopProjectRegistry.ProjectInfo project = activeProject;
+        final File root = projectRoot();
+        final String compile = lastCompileResult;
+        final JSONArray outcomes = aiOutcomeHistory();
+        SharedPreferences github = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        final String operation = github.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
+        final String state = github.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
+        projectIoActive = true;
+        setStatusText("Building redacted support bundle");
+        projectIoExecutor.submit(new Runnable() {
+            @Override public void run() {
+                try {
+                    String bundle = AndroidSupportBundle.build(MainActivity.this, project, root, compile,
+                            operation, state, outcomes, aiTraceLogFile());
+                    OutputStream output = getContentResolver().openOutputStream(destination, "w");
+                    if (output == null) throw new IOException("document provider did not open the destination");
+                    try {
+                        output.write(bundle.getBytes(StandardCharsets.UTF_8));
+                    } finally {
+                        output.close();
+                    }
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            setStatusText("Redacted support bundle exported without credentials, source, prompts, or media");
+                        }
+                    });
+                } catch (final Exception error) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() { setStatusText("Support export failed: " + error.getMessage()); }
+                    });
+                } finally {
+                    projectIoActive = false;
+                }
+            }
+        });
     }
 
     private void showOnboardingGuide(boolean firstRun) {
