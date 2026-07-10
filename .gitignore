@@ -26,6 +26,7 @@ _ReSharper.Caches/
 artifacts/
 scratch/
 logs/nightshift/
+out/
 
 # Build artifacts
 *.dll
@@ -67,10 +68,17 @@ build/wasm/
 examples/wasm/**/*.wasm
 
 # Android local build outputs
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/**/.cxx/
+mobile/android/local.properties
 android/out/
 android/build/
 android/**/app/build/
 *.apk
+.env
+__pycache__/
 
 # Debug/temp files
 nul

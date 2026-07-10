@@ -1,0 +1,52 @@
+import "../../src/stdlib/flex_layout.stasis";
+
+global parent: f32[4];
+global rects: f32[16];
+global widths: f32[4];
+global heights: f32[4];
+global size: f32[2];
+
+function reset_parent(x: f32, y: f32, w: f32, h: f32): void {
+    flex_rect_set(parent, x, y, w, h);
+}
+
+test `flex row distributes items across parent width`(): bool {
+    reset_parent(10.0, 20.0, 220.0, 40.0);
+    widths[0] = 50.0;
+    widths[1] = 70.0;
+    heights[0] = 20.0;
+    heights[1] = 20.0;
+    flex_row(rects, parent, widths, heights, 2, 10.0, FLEX_JUSTIFY_SPACE_BETWEEN, FLEX_ALIGN_CENTER);
+    if (flex_rect_x(rects, 0) != 10.0) { return false; }
+    if (flex_rect_x(rects, 1) != 160.0) { return false; }
+    if (flex_rect_y(rects, 0) != 30.0) { return false; }
+    if (flex_rect_y(rects, 1) != 30.0) { return false; }
+    return true;
+}
+
+test `flex grid wraps rows without overlap`(): bool {
+    reset_parent(100.0, 200.0, 320.0, 220.0);
+    widths[0] = 96.0;
+    widths[1] = 96.0;
+    widths[2] = 96.0;
+    widths[3] = 96.0;
+    heights[0] = 96.0;
+    heights[1] = 96.0;
+    heights[2] = 96.0;
+    heights[3] = 96.0;
+    flex_grid(rects, parent, widths, heights, 4, 3, 14.0, 12.0);
+    if (flex_rect_x(rects, 0) != 100.0) { return false; }
+    if (flex_rect_x(rects, 1) != 210.0) { return false; }
+    if (flex_rect_x(rects, 2) != 320.0) { return false; }
+    if (flex_rect_x(rects, 3) != 100.0) { return false; }
+    if (flex_rect_y(rects, 0) != 200.0) { return false; }
+    if (flex_rect_y(rects, 3) != 308.0) { return false; }
+    return true;
+}
+
+test `flex measure box adds padding to inner size`(): bool {
+    flex_measure_box(size, 48.0, 12.0, 6.0, 4.0);
+    if (size[0] != 60.0) { return false; }
+    if (size[1] != 20.0) { return false; }
+    return true;
+}

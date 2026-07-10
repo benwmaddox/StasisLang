@@ -1,0 +1,3 @@
+struct PlayerPaddle {
+    y: i32;
+}

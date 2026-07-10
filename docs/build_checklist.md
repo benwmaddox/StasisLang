@@ -3,6 +3,7 @@
 This checklist is the implementation plan and is aligned with:
 - `docs/spec.md`
 - `docs/live-compilation-prd.md`
+- `docs/android_workshop_prd.md`
 
 Status note:
 - This repository's stable compiler is implemented in Rust (`cargo build`, `cargo test`).
@@ -17,6 +18,9 @@ Locked decisions:
 - Backend modes are:
 - Cranelift JIT for development/watch/hot-swap runtime
 - Cranelift AOT for production builds
+- Android workshop v1 is sideload-first and uses symbol-based editing over normal `.stasis` files.
+- Android workshop Git v1 uses GitHub API commit/push/PR flow; full local git can come later.
+- Android workshop preview rendering will be selected by least architectural friction, starting near the existing Stasis runtime unless Android-native preview integration is clearly better.
 
 ## Language Ownership Legend
 
@@ -52,7 +56,465 @@ Release AOT optimization:
 Historical bootstrap/self-host notes below are archival only and do not describe an active compiler track.
 
 ## Slice Plan
+### Android Workshop Track
 
+#### AW0 - Product and Syntax Decisions
+- Language: `docs`.
+- Scope: Lock sideload-first distribution, eventual full Android workshop direction, flexible preview surface decision, GitHub API v1 Git workflow, and Stasis-style syntax examples.
+- Deliverable: `docs/android_workshop_prd.md` is the canonical Android workshop product/editor requirements document.
+- Tests: Documentation-only slice; verify the workspace still compiles before implementation slices land.
+- Done gate: No Android workshop examples use Rust-style `fn`/reference syntax for Stasis source.
+- Status: `completed`
+
+#### AW1 - Symbol Tree and Source Span Index
+- Language: `Rust`.
+- Scope: Expose Android editor-facing symbol metadata for lifecycle functions, receiver-owned struct functions, root utilities, and system files.
+- Deliverable: The compiler frontend can map editable symbols to `.stasis` files and source spans.
+- Tests: Deterministic unit tests over the Android workshop example layout.
+- Done gate: Symbol tree groups match `Main`, `Structs`, `Systems`, and `Root`.
+- Status: `completed`
+
+#### AW2 - AI Patch Contract and Source Replacement
+- Language: `Rust`.
+- Scope: Add serializable AI request/response contract structs and apply validated symbol edits back to `.stasis` source spans.
+- Deliverable: `replace_function` edits can update selected symbols while preserving normal files on disk.
+- Tests: Contract serialization and function-span replacement tests.
+- Done gate: Patch contract prefers receiver-style owner metadata and rejects mismatched symbol/file targets.
+- Status: `completed`
+
+#### AW3 - Reload Classification for Android UX
+- Language: `Rust`.
+- Scope: Add Android-facing reload classifications for changed symbol batches: `FastReload` for function-body-only changes and `ResetRequired` for layout/signature changes.
+- Deliverable: Compiler/editor can explain reload expectations before or after a patch.
+- Tests: Function-body edit and struct-layout edit tests.
+- Done gate: Classification reason strings identify changed layout/signature facts.
+- Status: `completed`
+
+#### AW4 - GitHub API Change Summary Model
+- Language: `Rust`.
+- Scope: Add symbol-first change summary DTOs for Android GitHub API commit/push/PR review.
+- Deliverable: Changed symbols are summarized before changed files, with raw file diffs as advanced review data.
+- Tests: Summary ordering and grouping tests.
+- Done gate: `Player`-owned edits group under `Player`; file list contains affected `.stasis` files.
+- Status: `completed`
+
+
+#### AW5 - Project Source Loader
+- Language: `Rust`.
+- Scope: Load Android workshop projects from a project root plus entry `.stasis` file, recursively following project-local imports into normalized editor paths.
+- Deliverable: Android editor APIs can build symbol trees, AI requests, reload classifications, and Git summaries from a complete entry-file import closure.
+- Tests: Import-closure loading, normalized path ordering, and missing-import diagnostics.
+- Done gate: Unused `.stasis` files outside the import closure are not loaded for symbol editing.
+- Status: `completed`
+
+#### AW6 - Project-Wide Symbol Edit Application
+- Language: `Rust`.
+- Scope: Apply approved AI/editor symbol edits across a loaded Android workshop project, including both `replace_function` and `replace_struct` edits.
+- Deliverable: Android can update normal `.stasis` files by symbol without hand-editing file text, then classify reload expectations from the before/after project sources.
+- Tests: Multi-file project edit application, struct replacement, function replacement, and wrong-target rejection.
+- Done gate: Struct edits can force `ResetRequired` via the existing reload classifier.
+- Status: `completed`
+
+#### AW7 - Symbol Placement Planner
+- Language: `Rust`.
+- Scope: Apply Android workshop placement rules for new/moved symbols: structs, lifecycle functions, receiver-owned functions, struct constructors, root utilities, and system functions.
+- Deliverable: Android can choose the correct `.stasis` file before creating a symbol or requesting an AI edit.
+- Tests: Lifecycle/root placement, struct-owned receiver placement, struct-return constructor placement, system placement, and struct file placement.
+- Done gate: Placement results match the Android Workshop PRD function placement rules.
+- Status: `completed`
+
+#### AW8 - Android Phone Smoke Shell
+- Language: `Android Java + C + Gradle + docs`.
+- Scope: Add the first checked-in Android app shell under `mobile/android` with an arm64-only native JNI smoke library.
+- Deliverable: Developers with Android SDK/NDK/JDK/Gradle can build and install a debug app that loads native code and displays a status string on a phone.
+- Tests: Structural Android shell verifier covering manifest, Gradle config, native CMake, JNI entrypoint, and arm64 ABI selection.
+- Done gate: The shell is installable in principle without linking Stasis runtime or game code yet.
+- Status: `completed`
+
+#### AW9 - Android Bundled Workshop Surface
+- Language: `Android Java + .stasis assets + docs`.
+- Scope: Replace the smoke-only screen with a native Android workshop surface backed by bundled Stasis-style project files.
+- Deliverable: The installed app can show Main, Structs, Systems, and Root symbol groups and display selected symbol source from normal `.stasis` files.
+- Tests: Structural Android shell verifier covers bundled assets, Stasis syntax rules, symbol-browser code path, and smoke JNI retention; debug APK builds and installs on a paired phone.
+- Done gate: A sideloaded app shows a real workshop project surface without hard-coding Rust-style examples.
+- Status: `completed`
+
+#### AW10 - Android In-Memory Symbol Edit Flow
+- Language: `Android Java + docs`.
+- Scope: Add phone-runnable selected-symbol editing controls before durable file persistence and compiler-backed hot reload.
+- Deliverable: The Android app can edit the selected symbol source in an `EditText`, apply it in memory, reset the editor, and show `FastReload` versus `ResetRequired` expectations from symbol kind/signature checks.
+- Tests: Structural Android shell verifier covers the editor controls and reload classification strings; debug APK builds and installs on a paired phone.
+- Done gate: Symbol editing is available from the sideloaded app without exposing raw file editing as the primary workflow.
+- Status: `completed`
+
+#### AW11 - Android Source Editor Keyboard Handling
+- Language: `Android Java + manifest + docs`.
+- Scope: Keep the selected-symbol editor usable when the soft keyboard opens on a phone.
+- Deliverable: The Android activity requests keyboard resize behavior and scrolls the focused source editor into view after IME focus.
+- Tests: Structural Android shell verifier covers `adjustResize`, fill-viewport scrolling, editor focus handling, and smooth scroll targeting; debug APK builds and installs on a paired phone.
+- Done gate: Tapping into the source editor no longer leaves the active text area hidden under the keyboard.
+- Status: `completed`
+
+#### AW12 - Android Source Editor Bottom Spacer
+- Language: `Android Java + docs`.
+- Scope: Add a direct fallback for phones where soft-keyboard resize does not keep the source editor visible.
+- Deliverable: The Android scroll content includes fixed trailing space below the editor controls so users can scroll active source above the keyboard.
+- Tests: Structural Android shell verifier covers the keyboard spacer and spacer height; debug APK builds and installs on a paired phone.
+- Done gate: Tapping into the source editor has enough trailing scroll room to manually position text above the keyboard.
+- Status: `completed`
+
+#### AW13 - Android App-Private Stasis File Persistence
+- Language: `Android Java + docs`.
+- Scope: Move the phone editor from bundled-asset display to app-private `.stasis` files that survive process restarts.
+- Deliverable: On first launch, bundled sample files are seeded into `getFilesDir()/workshop_project`; selected-symbol Apply replaces the symbol span in the matching `.stasis` file and writes it back to disk.
+- Tests: Structural Android shell verifier covers app-private project root, first-launch seeding, text file read/write helpers, and selected-symbol persistence; debug APK builds.
+- Done gate: Android edits are symbol-based while the backing project remains normal `.stasis` files on disk.
+- Status: `completed`
+
+#### AW14 - Android Native Compile Probe
+- Language: `Android Java + C JNI + docs`.
+- Scope: Establish the first native compile bridge from saved app-private `.stasis` files without linking the Rust compiler/runtime yet.
+- Deliverable: After Apply saves a symbol edit, Java calls `nativeCompileProject(projectRoot)`; the native probe recursively scans readable `.stasis` files and returns deterministic `CompileNotLinked` diagnostics with file and byte counts.
+- Tests: Structural Android shell verifier covers the Java native method, post-Apply invocation, JNI entrypoint, recursive `.stasis` scan helper, and `CompileNotLinked` result string; debug APK builds.
+- Done gate: Android has a tested native compile-call surface that can be replaced with the real compiler bridge.
+- Status: `completed`
+#### AW15 - Android Native Stasis Compile Check
+- Language: `Android C JNI + docs`.
+- Scope: Upgrade the native compile bridge from file scanning to a deterministic Android-side source check pass.
+- Deliverable: `nativeCompileProject` reads `.stasis` files, validates comments/strings/braces, counts functions/structs/globals, checks `main` and `tick` lifecycle roots, and returns `CompileChecked` or `CompileError` diagnostics.
+- Tests: Structural Android shell verifier covers the native analysis helpers and success/error result strings; debug APK builds.
+- Done gate: Android can execute a native compile-check step over saved project files without linking the full compiler yet.
+- Status: `completed`
+#### AW16 - Android Native Compile Manifest
+- Language: `Android C JNI + docs`.
+- Scope: Give the Android native compile path a concrete deterministic output artifact before real codegen is linked.
+- Deliverable: Successful native compile checks write `build/native_compile_manifest.txt` under the app-private project root with status, project hash, declaration counts, byte counts, and lifecycle roots, then return `CompilePlanned` diagnostics to Java.
+- Tests: Structural Android shell verifier covers manifest path, manifest writer, project hash output, and `CompilePlanned` result string; debug APK builds.
+- Done gate: Android compile has a persistent native output artifact that later compiler/linker stages can consume or replace.
+- Status: `completed`
+#### AW17 - Android Function Compile Manifest Entries
+- Language: `Android C JNI + docs`.
+- Scope: Add function-level compile artifact metadata for later dirty-function and hot-reload decisions.
+- Deliverable: The native compile manifest includes one `function=` entry per Stasis function with source path, signature text, signature hash, and body hash.
+- Tests: Structural Android shell verifier covers function manifest writer, project recursion, signature hash, and body hash markers; debug APK builds.
+- Done gate: Android compile output can distinguish signature changes from body-only changes at function granularity.
+- Status: `completed`
+#### AW18 - Android Function Compile Stub Artifacts
+- Language: `Android C JNI + docs`.
+- Scope: Give each function-level compile entry a concrete output artifact location before real machine code is emitted.
+- Deliverable: Successful native compile planning writes `build/functions/<body_hash>.stub` files containing source path, signature, signature hash, and body hash, and links each function manifest entry to its stub artifact.
+- Tests: Structural Android shell verifier covers artifact directory, stub writer, `CompiledStub` marker, and manifest artifact references; debug APK builds.
+- Done gate: Android compile output has per-function artifact files keyed by body hash for later replacement with real compiled code.
+- Status: `completed`
+#### AW19 - Android Manual Compile Control
+- Language: `Android Java + docs`.
+- Scope: Make the on-device native compile path runnable without requiring a symbol edit.
+- Deliverable: The Android editor controls include a `Compile` button that calls `nativeCompileProject(projectRoot)` and displays the returned compile diagnostics.
+- Tests: Structural Android shell verifier covers the compile control and Java compile runner; debug APK builds.
+- Done gate: Users can explicitly run the Android compile path against saved app-private `.stasis` files.
+- Status: `completed`
+#### AW20 - Android Native Reload Classification
+- Language: `Android C JNI + docs`.
+- Scope: Make native compile planning compare against the previous app-private manifest and report the expected reload class.
+- Deliverable: Successful native compile planning reads the prior `build/native_compile_manifest.txt` when present, writes `reload=<classification>` into the new manifest, and returns `CompilePlanned: reload=...` diagnostics for `InitialCompile`, `NoChange`, `FastReload`, and `ResetRequired` paths.
+- Tests: Structural Android shell verifier covers previous-manifest parsing, reload classifier strings, manifest reload output, and compile diagnostics; debug APK builds.
+- Done gate: Android compile planning now exposes the stateful reload decision needed before replacing compiled stubs with real runtime code.
+- Status: `completed`
+#### AW21 - Android Runtime State Artifact
+- Language: `Android C JNI + docs`.
+- Scope: Give successful Android compile planning a concrete runtime state file and entrypoint table before the run UI is wired in.
+- Deliverable: The native compile manifest now records `entrypoint=main`, `entrypoint=tick`, optional `entrypoint=on_code_swap`, and `runtime_state=build/runtime_state.txt`; the state artifact initializes on `InitialCompile`/`ResetRequired` and is preserved for `NoChange`/`FastReload`.
+- Tests: Structural Android shell verifier covers the runtime-state path, entrypoint manifest lines, state-ready marker, compile result state path, and runtime-state writer; debug APK builds.
+- Done gate: Android compile planning now produces the state artifact the next on-device run/preview control can consume.
+- Status: `completed`
+#### AW22 - Android Run Tick Control
+- Language: `Android Java + C JNI + docs`.
+- Scope: Add the first on-device run control that consumes Android compile artifacts.
+- Deliverable: The Android UI now has a `Run Tick` button wired to `nativeRunTick(projectRoot)`; native code requires `build/runtime_state.txt`, increments `tick_count`, persists it, and returns `RunTick` or `RunError` diagnostics.
+- Tests: Structural Android shell verifier covers the Java native binding, Run Tick button, native JNI entrypoint, runtime state tick readers/writers, and run diagnostics; debug APK builds.
+- Done gate: A sideloaded Android app can compile the bundled project and then run a visible native tick loop placeholder against app-private state.
+- Status: `completed`
+#### AW23 - Android Preview Tick Surface
+- Language: `Android Java + docs`.
+- Scope: Add a first native Android game preview surface that responds to the Run Tick path.
+- Deliverable: `MainActivity` now includes a custom `GamePreviewView` that draws a simple arcade scene and updates from parsed `RunTick: tick_count=...` diagnostics after the native runtime state advances.
+- Tests: Structural Android shell verifier covers the preview view, Canvas drawing path, tick parser, and Run Tick preview update; debug APK builds.
+- Done gate: A sideloaded Android app now has an editor, compile control, run-tick control, and visible game preview placeholder on one screen.
+- Status: `completed`
+#### AW24 - Compiler-Owned Android Compile Plan
+- Language: `Rust compiler frontend + docs`.
+- Scope: Stop Android compile planning from growing as a parallel C compiler path.
+- Deliverable: `stasis_compiler::frontend::workshop` now exposes `build_android_workshop_compile_plan`, which maps `IncrementalCompilerHost` output back to Android workshop symbols, entrypoints, function hashes, artifact paths, and reload classifications using compiler-owned metadata plus workshop layout fingerprints.
+- Tests: Focused Rust tests compile sample workshop projects through `IncrementalCompilerHost`, build Android compile plans, verify function metadata/artifact paths, and classify `FastReload` versus `ResetRequired`; Android shell verifier and debug APK build continue to pass.
+- Done gate: The next JNI slice has a Rust compiler-owned contract to call instead of expanding the native C scaffold.
+- Status: `completed`
+#### AW25 - Compiler-Owned Android Artifact Rendering
+- Language: `Rust compiler frontend + docs`.
+- Scope: Move Android manifest, runtime-state, and function-stub artifact contents into the compiler-owned workshop contract.
+- Deliverable: `stasis_compiler::frontend::workshop` now exposes `render_android_workshop_artifacts`, producing `build/native_compile_manifest.txt`, optional `build/runtime_state.txt`, and per-function `CompiledStub` artifact text from `AndroidWorkshopCompilePlan`.
+- Tests: Focused Rust tests render artifacts from real `IncrementalCompilerHost` output and verify manifest entrypoints, reload strings, runtime-state reset/preserve behavior, and function stub content; Android shell verifier covers the compiler-owned artifact API; debug APK builds.
+- Done gate: JNI can switch from generating Android compile artifacts in C to writing compiler-rendered artifact text.
+- Status: `completed`
+#### AW26 - Rust Android Compiler Bridge Crate
+- Language: `Rust compiler bridge + docs`.
+- Scope: Start replacing Android C compile planning with a Rust bridge that calls the existing compiler/workshop APIs.
+- Deliverable: Added `crates/stasis_android_bridge` as a workspace crate with `rlib`/`cdylib` outputs, a safe `compile_android_workshop_project` API, and C ABI functions that load a workshop project, run `IncrementalCompilerHost`, build the compiler-owned Android compile plan, and write compiler-rendered manifest/runtime/function artifacts.
+- Tests: `cargo test -p stasis_android_bridge` covers artifact writing, fast-reload runtime-state preservation, and the C ABI compile message; Android shell verifier covers workspace/crate wiring and bridge API references; debug APK builds.
+- Done gate: Android now has a tested Rust bridge crate that reuses compiler structure and can replace the native C scaffold in the JNI layer.
+- Status: `completed`
+#### AW27 - Optional Rust Bridge JNI Loader
+- Language: `Android C JNI + CMake + docs`.
+- Scope: Start routing Android `nativeCompileProject` to the Rust compiler bridge without breaking the current C fallback build.
+- Deliverable: The JNI compile path now attempts to `dlopen("libstasis_android_bridge.so")`, calls `stasis_android_bridge_compile_project(projectRoot, "src/main.stasis")` when available, frees bridge strings through `stasis_android_bridge_free_string`, and falls back to the existing C scaffold when the Rust library is not packaged yet; CMake links `dl` explicitly.
+- Tests: Android shell verifier covers the optional bridge loader and `dl` linkage, `cargo test -p stasis_android_bridge` keeps the bridge API valid, and debug APK builds with the fallback path.
+- Done gate: The Android native layer now has an explicit compiler-bridge handoff point; the remaining step is packaging the Rust Android `.so` into the APK.
+- Status: `completed`
+#### AW28 - Package Rust Bridge in Android Debug APK
+- Language: `PowerShell Android build + Rust + docs`.
+- Scope: Build and package the Rust compiler bridge `.so` into the sideloadable Android debug APK.
+- Deliverable: Added `mobile/android/build_rust_bridge.ps1`, which locates the NDK, builds `stasis_android_bridge` for `aarch64-linux-android` with the NDK clang linker, copies `libstasis_android_bridge.so` into `app/src/main/jniLibs/arm64-v8a`, and is called by `build_debug.ps1` before Gradle assembly; generated `jniLibs` output is ignored by git.
+- Tests: `rustup target add aarch64-linux-android` completed locally; `build_debug.ps1` builds/copies the Rust bridge and assembles the APK; APK zip inspection confirms both `lib/arm64-v8a/libstasis_android_bridge.so` and `lib/arm64-v8a/libstasis_mobile_smoke.so` are packaged; Android shell verifier covers the packaging helper.
+- Done gate: A debug APK built from the repo now contains the Rust compiler bridge library that JNI attempts to load first.
+- Status: `completed`
+#### AW29 - Android Game-First Preview Surface
+- Language: `Android Java + docs`.
+- Scope: Make the Android app run the preview by default and move symbol editing into a top-right hamburger overlay.
+- Deliverable: `MainActivity` now uses a full-screen native preview root, hides the editor panel until the menu button opens it, keeps the keyboard spacer inside the overlay, and starts an automatic compile/tick loop on launch while retaining manual Compile and Run Tick controls for review.
+- Tests: Structural Android shell verifier covers the full-screen `FrameLayout`, hidden editor overlay, hamburger toggle, automatic tick loop, and compile-ready state; debug APK builds.
+- Done gate: A sideloaded app opens into the running preview first, with code editing available as an overlay instead of the default screen.
+- Status: `completed`
+#### AW30 - Android System-Bar Safe Preview Insets
+- Language: `Android Java + docs`.
+- Scope: Keep the game-first preview and overlay controls out of Android system bars and display cutouts.
+- Deliverable: `MainActivity` colors the system bars black and applies root padding from `WindowInsets`, including display-cutout safe insets when available, so the preview, status row, hamburger button, and editor overlay are laid out inside the usable screen area.
+- Tests: Structural Android shell verifier covers system bar color setup, root inset listener installation, system-window inset reads, display-cutout safe inset reads, and root padding application; debug APK builds.
+- Done gate: The sideloaded preview no longer places visible UI under the bottom navigation bar or camera notch.
+- Status: `completed`
+#### AW31 - Android 60 FPS Runtime Tick Cadence
+- Language: `Android Java + docs`.
+- Scope: Make the Android preview/run loop target the product-default 60 fps cadence instead of the earlier slow smoke-test interval.
+- Deliverable: `MainActivity` now uses a named 16 ms default tick interval for the automatic compile/run loop while keeping the existing placeholder preview unchanged until real runtime rendering replaces it.
+- Tests: Structural Android shell verifier covers the 16 ms tick interval constant and loop scheduling call; debug APK builds.
+- Done gate: The sideloaded app drives runtime ticks at the intended default cadence while runtime integration proceeds.
+- Status: `completed`
+#### AW32 - Android Real JIT Tick Bridge
+- Language: `Rust + Android C JNI + docs`.
+- Scope: Move Android `Run Tick` beyond the C runtime-state counter by invoking real compiled Stasis lifecycle functions through the existing JIT compiler structure.
+- Deliverable: `JitProcess` exposes no-arg void lifecycle invocation and global i32 reads; `stasis_android_bridge` keeps a thread-local runtime session, compiles app-private `.stasis` files with `JitProcess`, runs `main()` once, runs `tick()` each frame, writes `mode=JitExecuted` runtime state, and JNI routes `nativeRunTick` through `stasis_android_bridge_run_tick` before the C fallback.
+- Tests: Rust bridge tests prove `main()`/`tick()` mutate Stasis global state through JIT and the C ABI returns `JitExecuted`; Android shell verifier covers the bridge/JNI symbols; debug APK builds.
+- Done gate: The sideloaded Android app's tick path executes real Stasis code when the Rust bridge is packaged.
+- Mobile input note: Android example games must be playable without a hardware keyboard; sample game input should be touch-friendly before phone testing.
+- Status: `completed`
+#### AW33 - Android Native Stasis Test Runner
+- Language: `Rust + Android Java + C JNI + docs`.
+- Scope: Run real `.test.stasis` tests against the app-private workshop project through the packaged Rust compiler bridge.
+- Deliverable: `nativeRunTests(projectRoot)` invokes `stasis_android_bridge_run_tests`, discovers and executes test declarations through the JIT, and reports passed/failed counts to the Android UI and AI tool contract. The editor provides a manual `Run Tests` control.
+- Tests: `android_bridge_runs_bundled_stasis_tests`, the bounded desktop `stasis test --dir mobile/android/app/src/main/assets/workshop_sample/tests` command, and the Android shell verifier cover the bridge, valid Stasis test syntax, and UI control; debug APK builds and installs on a paired phone.
+- Done gate: A sideloaded workshop can run bundled real Stasis tests without JSON scenario files, and test success requires at least one passing test with no failures.
+- Status: `completed`
+#### AW34 - Android Manual Raw-Diff Review
+- Language: `Android Java + docs`.
+- Scope: Complete the PRD's manual Git-review preparation flow by making raw changed-file diffs available alongside the existing symbol-first change summary.
+- Deliverable: The editor's `Raw Diffs` control compares the app-private project to the bundled baseline and presents deterministic unified diff hunks for every changed `.stasis` file.
+- Tests: Android shell verifier covers the review control and unified-diff formatter; debug APK compiles.
+- Done gate: A manual editor user can inspect both changed symbols/files and the corresponding advanced raw file diffs without using an AI call or phone-hosted service.
+- Status: `completed`
+#### AW35 - Android Manual Stasis Test Editing
+- Language: `Android Java + docs`.
+- Scope: Make bundled and user-authored `.test.stasis` files first-class manual workshop sources instead of AI-only files.
+- Deliverable: The app-private project seeds the bundled test fixture, includes project tests in the symbol tree, parses valid `test `name`(): bool` declarations into a `Tests` section, and marks saved test edits as requiring the native `Run Tests` validation. Change and raw-diff baselines read immutable bundled assets rather than current app-private files.
+- Tests: Android shell verifier covers bundled test seeding, test-declaration parsing, test reload guidance, and immutable asset reads; Java sources compile.
+- Done gate: A phone-only manual editor user can find, edit, review, and run real Stasis tests from the same app-private project used by the runtime.
+- Status: `completed`
+#### AW36 - Android Manual Stasis Test Creation
+- Language: `Android Java + docs`.
+- Scope: Let a phone-only manual workshop user add a behavior test without an AI request or external tooling.
+- Deliverable: The editor's `New Test` control creates a uniquely named app-private `tests/manual_test_N.test.stasis` template, selects it in the Tests tree, and starts with `return false` so the user must implement and validate real behavior through `Run Tests`.
+- Tests: Android shell verifier covers the control, creation path, selection helper, and intentional failing-template guidance; Java sources compile.
+- Done gate: Users can create, edit, review, and run a real Stasis test entirely through manual Android workshop controls.
+- Status: `completed`
+#### AW37 - Android Manual Saved-Symbol Revert
+- Language: `Android Java + docs`.
+- Scope: Let manual workshop users safely undo a persisted change without resetting the whole app-private project.
+- Deliverable: `Revert Saved` restores the selected bundled symbol source from immutable assets, refreshes the symbol tree/change review, and recompiles the project. User-created symbols report that a bundled revert is unavailable instead of deleting content implicitly.
+- Tests: Android shell verifier covers the control, immutable-baseline restore path, and user-created-symbol guard; Java sources compile.
+- Done gate: A manual user can distinguish discarding unsaved editor text from reverting a saved bundled symbol on disk.
+- Status: `completed`
+#### AW38 - Android Manual Test Deletion
+- Language: `Android Java + docs`.
+- Scope: Complete the manual test lifecycle without making reset-project the only way to discard a draft test.
+- Deliverable: `Delete Test` removes the selected user-created test file and refreshes the symbol tree/review. Bundled tests are guarded from deletion and can instead be restored with `Revert Saved`.
+- Tests: Android shell verifier covers the deletion control, user-created-test path, bundled-test guard, and completion status; Java sources compile.
+- Done gate: A phone-only manual user can create, edit, run, review, revert, and discard draft Stasis tests safely.
+- Status: `completed`
+#### AW39 - Android Manual Root Helper Creation
+- Language: `Android Java + docs`.
+- Scope: Let manual workshop users add normal Stasis code according to the PRD's no-owner helper placement rule.
+- Deliverable: `New Helper` creates a uniquely named `manual_helper_N` void function in `src/root.stasis`, compiles it transactionally, and selects it for editing. A compile failure restores the original root source.
+- Tests: Android shell verifier covers the control, root-function template, and successful creation status; Java sources compile.
+- Done gate: A manual user can add an ordinary root helper without an AI request while retaining compile safety.
+- Status: `completed`
+#### AW40 - Android Pull-Down Workspace Priorities
+- Language: `Android Java + docs`.
+- Scope: Reorder the game overlay around chat and command entry first, with API configuration collapsed, manual source/browser secondary, and compact background GitHub sync state.
+- Deliverable: The pull-down workspace opens with `Chat and Commands`, a request field, `Run AI Change`, and visible progress pills. API key/model fields move into collapsed `AI Settings`, while manual editing, diagnostics, and review remain secondary controls.
+- Tests: Structural UI verifier plus debug APK build; focused local tests for persisted settings and command state where applicable.
+- Done gate: Opening the workshop makes commands immediately available without hiding source, settings, or sync review.
+- Status: `completed`
+#### AW41 - Android Voice Change Shortcut
+- Language: `Android Java + platform voice integration + docs`.
+- Scope: Add a top-game shortcut for a voice change request with explicit recording, cancel, and run states.
+- Deliverable: The Workshop flavor now requests microphone permission on demand, captures a platform speech-recognizer transcript from a top-game `Voice` shortcut, previews it with explicit `Cancel` and `Run` controls, and routes a confirmed request through the same AI validation flow as typed commands.
+- Tests: Structural UI verifier covers permission, recognizer, cancel/run, and start state; Java sources compile. Device microphone/transcription validation remains pending while the phone is unavailable.
+- Done gate: A user can start, cancel, or run a voice change request without accidental code application.
+- Status: `in progress (device validation deferred)`
+#### AW42 - Android Manual Root Helper Deletion
+- Language: `Android Java + docs`.
+- Scope: Complete the lifecycle for manually created no-owner helpers without exposing destructive deletion for bundled source.
+- Deliverable: `Delete Helper` removes a selected user-created function in `src/root.stasis`, recompiles transactionally, restores the original source on failure, and protects bundled helpers with the existing revert path.
+- Tests: Android shell verifier covers the control, source guard, bundled-helper protection, and success status; Java sources compile.
+- Done gate: Manual users can create, edit, review, and safely discard draft root helpers without resetting the project.
+- Status: `completed`
+#### AW43 - Android GitHub Sync Configuration
+- Language: `Android Java + docs`.
+- Scope: Establish a background-sync configuration contract without claiming that a remote backup has completed before an authenticated API write exists.
+- Deliverable: The command-first pull-down shows compact GitHub sync state and exposes collapsed settings for a GitHub token, `owner/repository`, and branch. Valid saved settings report `ready`; missing settings report `not configured`.
+- Tests: Android shell verifier covers persisted sync settings, collapsed configuration, and truthful status states; Java sources compile.
+- Done gate: A user can configure the repository target once without displacing chat/commands from the primary workflow.
+- Status: `completed`
+#### AW44 - Android Background GitHub Contents Sync
+- Language: `Android Java + GitHub REST API + docs`.
+- Scope: Use saved GitHub settings to sync changed app-private project files serially in the background, with compact progress/error state and no false success claim.
+- Deliverable: A configured Workshop can now manually start serial Contents API uploads for changed app-private files, using the configured branch, Base64 content, and existing remote SHA when replacing a file. Local files are never modified by upload failure; compact status reports queued, progress, complete, or error. Automatic scheduling, deletion sync, and authenticated repository validation remain pending.
+- Tests: Isolated request/response helpers, serial sync scheduling, conflict/error paths, structural verifier, and debug APK build; authenticated repository validation when configured.
+- Done gate: A configured Workshop can back up changed Stasis sources to GitHub without making sync controls the foreground editor workflow.
+- Status: `in progress (authenticated validation deferred)`
+#### AW45 - Android GitHub Review and Pull Request Flow
+- Scope: Create a review branch/PR from the configured project, with symbol-first and raw-diff review before submission.
+- Deliverable: GitHub settings now expose an explicit review step that displays the symbol summary and raw file diffs and fingerprints that exact change set. Submission rejects missing or stale review, creates or reuses a deterministic Workshop branch from the configured base, uploads changed project files serially, and creates or finds the matching open pull request. Remote failures do not modify local project files.
+- Tests: Android shell verifier covers the review controls, fingerprint gate, branch/ref API, serial upload path, and create-or-find PR API; Java sources compile. Authenticated repository/device validation remains deferred.
+- Done gate: A configured workshop can create or update a GitHub PR without losing local edits.
+- Status: `in progress (authenticated validation deferred)`
+#### AW46 - Android Sync Reliability and Credential Protection
+- Scope: Queue serial sync work, persist retry/error state, and move API keys/tokens from plain preferences to Android credential storage.
+- Deliverable: GitHub and OpenAI secrets use an AES-GCM key held by Android Keystore; preferences retain only versioned ciphertext. Existing plaintext preferences migrate on first read and are removed only after encrypted storage commits successfully. A single executor serializes sync and PR work, persists queued/running/complete/error state plus the retryable operation type, recognizes work interrupted by process shutdown, and reconstructs retries from current local files. PR retry retains the reviewed-change fingerprint and still rejects stale local changes.
+- Tests: Android shell verifier covers Keystore/AES-GCM storage, plaintext migration removal, masked editors, serial execution, persisted operation states, interrupted-state recovery, retry routing, and executor shutdown; Java sources compile and the debug APK builds. Device process-death/offline validation remains deferred.
+- Done gate: Interrupted/offline sync never loses local source; secrets are not stored in plain text.
+- Status: `in progress (device interruption validation deferred)`
+#### AW47 - Android Project Import, Export, and Switching
+- Scope: Support multiple normal Stasis projects, import/export archives, project metadata, and explicit project switching.
+- Progress: A versioned app-private registry now adopts the existing `workshop_project` without moving or replacing it, writes fsynced `.stasis-workshop.json` metadata with stable project IDs and sample/import origin, confines roots to registered app-private directories, and persists the active project. Collapsed project controls create a named project from the bundled sample and explicitly switch projects; switching is blocked during AI/GitHub/project-I/O work or a pending source edit, refreshes symbols/history/sync state, and compiles the new root. The editor deterministically discovers every project `.stasis` file. Immutable per-project source baselines use bundled assets for sample projects and imported contents for restored projects, so Changes, Raw Diffs, Revert, and Reset never compare against or restore the wrong project. Reset preserves registry metadata and imported non-source assets. GitHub repository/branch settings, review branches, reviewed fingerprints, and retry state are scoped by project ID while the encrypted token remains shared; direct backup uploads the complete current source set. Export uses Android's document picker to write a deterministic bounded ZIP of project-relative files, preserves metadata, excludes generated `build/` output, and requests no broad storage permission. Import uses the document picker plus the same bounds, rejects traversal/duplicates/unsupported or incomplete archives, assigns a fresh project identity, fsyncs extracted files, discards failed targets, and activates/compiles successful imports.
+- Tests: Android shell verifier covers registry/UI/picker wiring, cleanup, and archive bounds; the executable pure-Java `WorkshopProjectArchiveCheck` verifies deterministic export contents, exclusions, byte accounting, oversized-entry rejection, round-trip restoration, fresh-identity preservation, and traversal denial; Java sources compile and the debug APK builds.
+- Done gate: A user can open, back up, restore, and switch projects while retaining symbol editing, tests, and compile behavior.
+- Status: `in progress`
+#### AW48 - Android Preview and Touch Gameplay Parity
+- Scope: Replace placeholder preview assumptions with a renderer/runtime contract that displays real game output and supports touch-first sample gameplay.
+- Deliverable: The Workshop's full-screen GLES preview consumes the real render-command buffer produced by the packaged Rust/JIT bridge. Android `MotionEvent` coordinates flow through JNI into Stasis `Input` globals, update the touch-first paddle game, and return through the same Stasis render state used by the preview.
+- Tests: Rust bridge/runtime render tests and Android shell checks cover the contract. Real-device acceptance on 2026-07-09 reinstalled the committed APK over existing data, launched an imported registered project in `JitExecuted` mode, verified `game_tick_count` advanced from `8220` to `8340`, injected a vertical Android touch gesture, and verified the Stasis player-paddle command moved from `render1_y=811` to `render1_y=1537`.
+- Done gate: A representative Stasis game renders and is playable on a phone using touch input through the same runtime used by the workshop.
+- Status: `completed`
+#### AW49 - Android Diagnostics and Change Recovery UX
+- Scope: Provide structured compiler/test diagnostics, source locations, safe rollback/recovery history, and clear hot-reload/reset explanations.
+- Progress: Manual Apply now presents a structured diagnostic with the exact edited file/symbol, raw compiler result, and `FastReload`/`ResetRequired` expectation. `Go to Diagnostic` reopens the affected symbol. Failed manual compiles persist a bounded ten-entry per-project whole-file before/failed journal with fsynced app-private records. `Undo Failed Apply` restores the prior file only when the current file still exactly matches the failed version, preventing recovery from overwriting newer work, recompiles, and retains other valid project edits. Cross-file compiler positions, test-location navigation, and a browsable multi-entry recovery list remain.
+- Tests: Android shell verifier covers diagnostic controls, per-project journaling, bounds, path confinement, fsync, compare-before-restore, navigation, and recompile wiring; Java sources compile and the debug APK builds.
+- Done gate: A user can identify, navigate to, and recover from a failed edit without raw log hunting.
+- Status: `in progress`
+#### AW50 - Android Published Build and Release Validation
+- Scope: Validate the published/AOT flavor, signing/install workflow, runtime assets, and release performance/error reporting.
+- Done gate: A signed sideloadable published build runs a representative game without developer workshop dependencies.
+- Status: `planned`
+#### AW51 - Android Device Acceptance Suite
+- Scope: Add a repeatable device validation checklist/automation for editor, tests, voice, touch preview, sync, and lifecycle recovery.
+- Done gate: Every user-facing workshop slice has an on-device proof or an explicitly recorded hardware/environment limitation.
+- Status: `planned`
+#### AW52 - Android Image Import and Asset Library
+- Scope: Import images through the Android photo/document picker, copy them into project-relative asset storage, generate bounded previews, and expose an asset library with rename/delete/reference safety.
+- Done gate: A user can import, preview, select, persist, export, and GitHub-sync a project image without exposing arbitrary device paths to Stasis or AI.
+- Status: `planned`
+#### AW53 - Android Mini Paint Editor
+- Scope: Add a touch-first bitmap editor with brush, eraser, palette/color picker, undo/redo, clear, canvas/crop sizing, save-as, cancel, and bounded image dimensions.
+- Done gate: A user can create or modify a simple game image, review it, cancel without mutation, or save it as a normal project asset.
+- Status: `planned`
+#### AW54 - Android Multimodal AI Attachments
+- Scope: Attach imported/painted images to typed or voice AI requests using real image input blocks, with thumbnail review, remove controls, format conversion, size limits, and per-request cost visibility.
+- Done gate: The AI receives the exact selected project image(s), while unselected assets and private device media are never sent.
+- Status: `planned`
+#### AW55 - Android Pixel Screenshot to AI
+- Scope: Capture the actual preview framebuffer as a bounded image, retain the logical render snapshot as structured context, and let the user explicitly attach either or both to an AI request.
+- Done gate: A request can include a visually accurate game screenshot plus runtime/render metadata, with explicit preview/remove/consent before upload.
+- Status: `planned`
+#### AW56 - AI-Generated Image Asset Review
+- Scope: Accept AI-generated or AI-edited image outputs into a temporary review area with before/after preview, accept/reject, undo, project persistence, export, and GitHub sync.
+- Done gate: AI image work cannot overwrite an accepted project asset without review and a recoverable prior version.
+- Status: `planned`
+#### AW57 - Android Audio Asset Workflow
+- Scope: Import/record, preview, trim, normalize, rename, delete, reference-check, export, and GitHub-sync bounded sound/music assets; expose selected audio to multimodal-capable AI only with explicit consent.
+- Done gate: A user can add and manage game audio without arbitrary device paths, silent transcoding surprises, or orphaned Stasis references.
+- Status: `planned`
+#### AW58 - Android Command History, Sessions, and AI Budget Controls
+- Scope: Persist chat/command history per project, expose cancel/retry, retain tool/test outcomes, show token/cost estimates, and enforce configurable per-run/monthly spend limits.
+- Progress: The Workshop persists the 20 most recent unique submitted requests per project behind `Recent Commands`. AI Settings provides a default `$0.25` per-run cap and `$5.00` monthly cap, records each returned Terra call immediately, blocks unknown-priced models while limits are active, stops multi-turn agents before another paid call at either limit, and conservatively bounds each response with `max_output_tokens`. `Cancel AI` disconnects the active HTTP request, stops before further paid calls or read-only tools, and lets an already-started write batch finish its compile/test/rollback boundary. Concurrent AI runs are rejected and completed calls remain in usage totals. Bounded per-project outcome history records start, success, cancellation, failure, rollback, usage summaries, and trace paths; `Retry Last AI` restores the request as a fresh budget-checked run. True mid-agent resume remains.
+- Done gate: Users can understand, resume, cancel, and audit AI work while preventing accidental budget overruns.
+- Status: `in progress`
+#### AW59 - Android Lifecycle, Autosave, and Background Work
+- Scope: Define autosave points, process-death recovery, pause/resume behavior, foreground-service/notification rules for long work, battery/network constraints, and safe cancellation.
+- Done gate: Rotation, backgrounding, process death, offline transitions, and app upgrades do not lose accepted project edits or falsely report work complete.
+- Status: `planned`
+#### AW60 - Android Onboarding, Templates, and First-Run Setup
+- Scope: Provide a first-run path, sample/template selection, API/GitHub setup guidance, permission explanations, and a zero-AI manual tutorial.
+- Done gate: A new user can create/open a project, run it, make a tested change, and understand optional AI/sync configuration without external documentation.
+- Status: `planned`
+#### AW61 - Android Accessibility and Adaptive Layout
+- Scope: Add content descriptions, scalable text/touch targets, contrast/focus support, screen-reader/keyboard navigation, orientation handling, and phone/tablet/foldable layouts.
+- Done gate: Core preview, command, editor, test, asset, and review workflows pass accessibility checks and remain usable across supported display sizes.
+- Status: `planned`
+#### AW62 - Android Privacy, Permissions, and Data Management
+- Scope: Minimize permissions, disclose exactly what code/media is sent externally, provide attachment consent and credential revocation, and support project/cache/history/trace deletion.
+- Done gate: Users can inspect and erase stored data and secrets, and no project/media leaves the device without an explicit configured action.
+- Status: `planned`
+#### AW63 - Android Project Format Versioning and Migration
+- Scope: Version project/workshop metadata and migrate app-private projects, settings, manifests, assets, tests, and sync state across app/compiler upgrades with rollback-safe backups.
+- Done gate: Upgrading the Workshop preserves existing projects or stops with a recoverable, actionable migration diagnostic.
+- Status: `planned`
+#### AW64 - Android Crash Recovery and Support Bundle
+- Scope: Capture bounded local crash/compile/sync diagnostics, detect interrupted operations, offer recovery, and export a redacted support bundle without secrets or unapproved source/media.
+- Done gate: A failure can be diagnosed and recovered from without exposing credentials or requiring raw Android log access.
+- Status: `planned`
+
+### Cross-Platform Sprite and Audio Track
+
+#### AS0 - Versioned Asset Manifest and Stable Handles
+- Scope: Define project-relative sprite/audio entries, content hashes, stable runtime handles, format metadata, dependency tracking, and missing/invalid diagnostics.
+- Done gate: JIT/AOT/desktop/Android resolve the same manifest to the same asset identities without arbitrary filesystem access.
+- Status: `planned`
+#### AS1 - Sprite Decode, Texture Upload, and Lifetime
+- Scope: Implement bounded PNG/SVG sprite decoding, GPU upload, handle ownership, release, fallback texture, and deterministic load errors across supported render backends.
+- Done gate: A packaged sprite loads and renders identically on desktop and Android, and malformed/missing assets fail safely.
+- Status: `planned`
+#### AS2 - Sprite Batching and Hot Reload
+- Scope: Complete command batching, ordering, transforms, alpha, clipping/atlas policy, resource-generation swaps, and failed-reload preservation.
+- Done gate: A changed sprite becomes visible without restarting while the prior texture remains active if decode/upload fails.
+- Status: `planned`
+#### AS3 - Audio Decode, Mixer, and Playback API
+- Scope: Add bounded sound/music decode, voices/streams, play/stop/pause, loop, volume/pan, mixing, asset handles, and deterministic audio-event submission.
+- Done gate: Stasis code can play overlapping effects and streaming music through a real mixer rather than the current unavailable stub.
+- Status: `planned`
+#### AS4 - Desktop and Android Audio Backends
+- Scope: Implement device initialization, callback/queue integration, focus/interruption handling, pause/resume, route changes, latency, underrun recovery, and clean shutdown.
+- Done gate: The same audio sample plays on desktop and Android and recovers correctly from Android lifecycle/audio-focus events.
+- Status: `planned`
+#### AS5 - Asset Packaging and JIT/AOT Parity
+- Scope: Package referenced assets for dev/JIT, production/AOT, Android Workshop, published APK, import/export, and GitHub sync with reachability and size diagnostics.
+- Done gate: A representative game uses the same source/manifest in every execution mode with no missing runtime-only asset path.
+- Status: `planned`
+#### AS6 - Headless Asset and Event Tests
+- Scope: Add deterministic manifest/decode/event/mixer tests, golden sprite output, audio buffer checks, corruption/limit cases, and host-set denial tests without requiring hardware.
+- Done gate: CI proves asset semantics, hot-reload safety, and audio mixing deterministically; hardware checks are a separate acceptance layer.
+- Status: `planned`
+#### AS7 - Sprite and Audio End-to-End Sample Acceptance
+- Scope: Upgrade a representative game (Brickout Revenge) to load real sprites and audio, hot reload assets, run in JIT/AOT, and pass desktop plus Android acceptance checks.
+- Done gate: The sample is visibly rendered with sprites and audibly produces music/effects on supported devices in dev and published builds.
+- Status: `planned`
 ### Current Snapshot (2026-03-02)
 - Completed slices (baseline): `S0`, `S1`, `S2`, `S3`, `S4`, `S5`, `S6`, `S7`, `S8`, `S9`, `S11`.
 - Partially complete/in progress: `S8b`, `S10`.

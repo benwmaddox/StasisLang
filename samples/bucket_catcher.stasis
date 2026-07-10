@@ -24,7 +24,7 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // - Example (explicit override):
 //   stasis.exe play samples/bucket_catcher.stasis --watch-dir samples --data-bind samples/bucket_catcher/data/config.json samples/bucket_catcher/data/config.struct-meta.json
 
-const MAX_BALLS: i32 = 24;
+const MAX_BALLS: i32 = 500;
 
 struct Ball {
     x: i32;
@@ -72,7 +72,7 @@ struct GameState {
     misses: i32;
 
     // Keep this in sync with MAX_BALLS.
-    balls: Ball[24];
+    balls: Ball[500];
     spawn_timer_ticks: i32;
 
     ui_font: i32;
@@ -368,5 +368,6 @@ function render(): i32 {
 
 // Hot-reload hook. This sample does not need any special swap behavior.
 function on_code_swap(): void {
+    state.config.ball_spawn_ticks = 1;
     return;
 }
