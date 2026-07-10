@@ -72,11 +72,16 @@ final class WorkshopImageAssets {
             if (!temporary.renameTo(target)) {
                 throw new IOException("could not publish imported image");
             }
-            published = true;
-            return new AssetInfo(target, relativePath(projectRoot, target), bounds.outWidth,
+            AssetInfo result = new AssetInfo(target, relativePath(projectRoot, target), bounds.outWidth,
                     bounds.outHeight, target.length());
+            WorkshopAssetManifest.putSprite(projectRoot, result, null);
+            published = true;
+            return result;
         } finally {
-            if (!published && temporary.exists()) temporary.delete();
+            if (!published) {
+                if (temporary.exists()) temporary.delete();
+                if (target.exists()) target.delete();
+            }
         }
     }
 
@@ -160,7 +165,14 @@ final class WorkshopImageAssets {
         if (target.equals(asset.file)) return asset;
         if (target.exists()) throw new IOException("an image already uses that name");
         if (!asset.file.renameTo(target)) throw new IOException("could not rename image");
-        return inspect(projectRoot, target);
+        try {
+            AssetInfo renamed = inspect(projectRoot, target);
+            WorkshopAssetManifest.putSprite(projectRoot, renamed, asset.relativePath);
+            return renamed;
+        } catch (IOException error) {
+            target.renameTo(asset.file);
+            throw error;
+        }
     }
 
     static void moveToTrash(AssetInfo asset, File projectRoot) throws IOException {
@@ -171,6 +183,12 @@ final class WorkshopImageAssets {
         File target = uniqueTarget(trash, Long.toString(System.currentTimeMillis()) + "-"
                 + baseWithoutExtension(asset.file.getName()), fileExtension(asset.file.getName()));
         if (!asset.file.renameTo(target)) throw new IOException("could not move image to recovery");
+        try {
+            WorkshopAssetManifest.remove(projectRoot, asset.relativePath);
+        } catch (IOException error) {
+            target.renameTo(asset.file);
+            throw error;
+        }
         pruneTrash(trash);
     }
 
@@ -186,7 +204,14 @@ final class WorkshopImageAssets {
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("could not create project image directory");
         File target = uniqueTarget(directory, baseWithoutExtension(original), extension);
         if (!latest.renameTo(target)) throw new IOException("could not restore deleted image");
-        return inspect(projectRoot, target);
+        try {
+            AssetInfo restored = inspect(projectRoot, target);
+            WorkshopAssetManifest.putSprite(projectRoot, restored, null);
+            return restored;
+        } catch (IOException error) {
+            target.renameTo(latest);
+            throw error;
+        }
     }
 
     static AssetInfo savePainted(Bitmap bitmap, File projectRoot, String requestedName) throws IOException {
@@ -218,10 +243,15 @@ final class WorkshopImageAssets {
             }
             if (temporary.length() > MAX_IMPORT_BYTES) throw new IOException("painted image exceeds the 8 MiB asset limit");
             if (!temporary.renameTo(target)) throw new IOException("could not publish painted image");
+            AssetInfo result = inspect(projectRoot, target);
+            WorkshopAssetManifest.putSprite(projectRoot, result, null);
             published = true;
-            return inspect(projectRoot, target);
+            return result;
         } finally {
-            if (!published && temporary.exists()) temporary.delete();
+            if (!published) {
+                if (temporary.exists()) temporary.delete();
+                if (target.exists()) target.delete();
+            }
         }
     }
 
@@ -265,10 +295,15 @@ final class WorkshopImageAssets {
                 output.close();
             }
             if (!temporary.renameTo(target)) throw new IOException("could not publish accepted AI image");
+            AssetInfo result = inspect(projectRoot, target);
+            WorkshopAssetManifest.putSprite(projectRoot, result, null);
             published = true;
-            return inspect(projectRoot, target);
+            return result;
         } finally {
-            if (!published && temporary.exists()) temporary.delete();
+            if (!published) {
+                if (temporary.exists()) temporary.delete();
+                if (target.exists()) target.delete();
+            }
         }
     }
 

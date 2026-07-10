@@ -20,6 +20,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
@@ -130,12 +132,34 @@ def main() -> int:
     image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
     paint_view = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java")
     audio_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java")
+    asset_manifest = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java")
+    asset_identity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java")
     assert "MediaExtractor" in audio_assets
     assert "MediaFormat.KEY_SAMPLE_RATE" in audio_assets
     assert "MediaFormat.KEY_CHANNEL_COUNT" in audio_assets
     assert "audio stream metadata exceeds supported bounds" in audio_assets
     assert "asset.sampleRate" in activity
     assert "asset.channels" in activity
+    assert 'RELATIVE_PATH = "assets/manifest.json"' in asset_manifest
+    assert 'put("schema", "stasis-assets")' in asset_manifest
+    assert 'put("version", 1)' in asset_manifest
+    assert 'MessageDigest.getInstance("SHA-256")' in asset_manifest
+    assert "StandardCopyOption.ATOMIC_MOVE" in asset_manifest
+    assert "validateStableHandles" in asset_manifest
+    assert "seedMissing" in asset_manifest
+    assert "WorkshopAssetIdentity.stableHandle" in asset_manifest
+    assert "0x811c9dc5" in asset_identity
+    assert "0x01000193" in asset_identity
+    assert "WorkshopAssetManifest.putSprite" in image_assets
+    assert "WorkshopAssetManifest.putAudio" in audio_assets
+    assert "WorkshopAssetManifest.readForSync" in activity
+    assert "files.put(WorkshopAssetManifest.RELATIVE_PATH" in activity
+    assert "WorkshopAssetManifest.remove" in image_assets
+    assert "WorkshopAssetManifest.remove" in audio_assets
+    assert "target.renameTo(asset.file)" in image_assets
+    assert "target.renameTo(asset.file)" in audio_assets
+    assert "target.renameTo(latest)" in image_assets
+    assert "target.renameTo(latest)" in audio_assets
     support_bundle = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java")
     crash_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java")
     host_agent = read("tools/android_ai_agent_host.py")
