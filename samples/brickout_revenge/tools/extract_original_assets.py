@@ -479,7 +479,6 @@ def export_audio_assets(ffdec: Path, source_swf: Path, temp: Path, sample_root: 
     names = {
         "1_org.flixel.FlxGame_SndFlixel": "flixel.wav",
         "2_org.flixel.FlxGame_SndBeep": "beep.wav",
-        "3_PlayState_backgroundMusic": "background_music.wav",
         "4_levels.BaseLevel_lostLife": "lost_life.wav",
         "5_balls.BallBase_curveBallCollision": "curve_collision.wav",
         "227_projectiles.ExplosionProjectile_explosionSound": "rocket_explosion.wav",
@@ -489,6 +488,25 @@ def export_audio_assets(ffdec: Path, source_swf: Path, temp: Path, sample_root: 
         if len(matches) != 1:
             raise RuntimeError(f"expected one WAV for {source_prefix}, found {len(matches)}")
         shutil.copy2(matches[0], output_root / target_name)
+    music_export_root = temp / "audio_mp3"
+    run(
+        [
+            str(ffdec),
+            "-onerror",
+            "abort",
+            "-format",
+            "sound:mp3",
+            "-export",
+            "sound",
+            str(music_export_root),
+            str(source_swf),
+        ]
+    )
+    music_matches = list(music_export_root.glob("3_PlayState_backgroundMusic*.mp3"))
+    if len(music_matches) != 1:
+        raise RuntimeError(f"expected one MP3 background track, found {len(music_matches)}")
+    shutil.copy2(music_matches[0], output_root / "background_music.mp3")
+    (output_root / "background_music.wav").unlink(missing_ok=True)
 
 
 def main() -> int:

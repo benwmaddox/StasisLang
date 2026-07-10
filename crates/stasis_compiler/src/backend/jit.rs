@@ -720,6 +720,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "audio_load_wav" | "stasis_audio_load_wav" => {
             function_address(stasis_dynload::stasis_jit_audio_load_wav as *const ())
         }
+        "audio_load_mp3" | "stasis_audio_load_mp3" => {
+            function_address(stasis_dynload::stasis_jit_audio_load_mp3 as *const ())
+        }
         "audio_play_wav" | "stasis_audio_play_wav" => {
             function_address(stasis_dynload::stasis_jit_audio_play_wav as *const ())
         }

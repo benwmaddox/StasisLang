@@ -795,7 +795,7 @@ function original_play_effect(sample: i32, volume: f32): void {
 }
 
 function original_load_audio(): void {
-    original_audio_music = audio_load_wav("assets/original/audio/background_music.wav");
+    original_audio_music = audio_load_mp3("assets/original/audio/background_music.mp3");
     original_audio_lost_life = audio_load_wav("assets/original/audio/lost_life.wav");
     original_audio_curve_collision = audio_load_wav("assets/original/audio/curve_collision.wav");
     original_audio_rocket_explosion = audio_load_wav("assets/original/audio/rocket_explosion.wav");

@@ -43,6 +43,10 @@
 #define NANOSVGRAST_IMPLEMENTATION
 #include "nanosvgrast.h"
 
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_ONLY_MP3
+#include "third_party/minimp3/minimp3_ex.h"
+
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void flush_sprites(void);
 static void render_postfx(void);
@@ -4469,6 +4473,67 @@ STASIS_EXPORT int stasis_audio_load_wav(const char* path) {
     SDL_UnlockAudioDevice(g_audio_device);
     if (slot < 0) {
         free(pcm_copy);
+        return 0;
+    }
+    return slot + 1;
+}
+
+STASIS_EXPORT int stasis_audio_load_mp3(const char* path) {
+    if (!path || !*path || !stasis_audio_ensure_init()) return 0;
+
+    FILE* file = fopen(path, "rb");
+    if (!file) return 0;
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return 0;
+    }
+    long length = ftell(file);
+    if (length <= 0 || length > INT_MAX) {
+        fclose(file);
+        return 0;
+    }
+    rewind(file);
+    unsigned char* bytes = (unsigned char*)malloc((size_t)length);
+    if (!bytes || fread(bytes, 1, (size_t)length, file) != (size_t)length) {
+        free(bytes);
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+
+    mp3dec_t decoder;
+    mp3dec_file_info_t info;
+    SDL_zero(info);
+    int decode_result = mp3dec_load_buf(&decoder, bytes, (size_t)length, &info, NULL, NULL);
+    free(bytes);
+    if (decode_result != 0 || !info.buffer || info.channels < 1 || info.channels > 2 || info.hz < 8000 || info.samples == 0) {
+        free(info.buffer);
+        return 0;
+    }
+    int frame_count = (int)(info.samples / (size_t)info.channels);
+    if (frame_count <= 0 || info.samples > (size_t)INT_MAX) {
+        free(info.buffer);
+        return 0;
+    }
+
+    int slot = -1;
+    SDL_LockAudioDevice(g_audio_device);
+    for (int i = 0; i < STASIS_MAX_WAV_SAMPLES; i++) {
+        if (!g_wav_samples[i].active) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot >= 0) {
+        g_wav_samples[slot].active = 1;
+        g_wav_samples[slot].sample_rate = info.hz;
+        g_wav_samples[slot].channels = info.channels;
+        g_wav_samples[slot].frame_count = frame_count;
+        g_wav_samples[slot].pcm = info.buffer;
+    }
+    SDL_UnlockAudioDevice(g_audio_device);
+    if (slot < 0) {
+        free(info.buffer);
         return 0;
     }
     return slot + 1;

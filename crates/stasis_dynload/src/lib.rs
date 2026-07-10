@@ -429,6 +429,7 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_cache_text: usize,
     stasis_gfx_measure_text_cached: usize,
     stasis_audio_load_wav: usize,
+    stasis_audio_load_mp3: usize,
     stasis_audio_play_wav: usize,
     stasis_audio_stop_wav: usize,
 }
@@ -458,6 +459,7 @@ impl StasisGraphicsAssetsApi {
             stasis_gfx_cache_text: lib.symbol_address("stasis_gfx_cache_text")?,
             stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
             stasis_audio_load_wav: lib.symbol_address("stasis_audio_load_wav")?,
+            stasis_audio_load_mp3: lib.symbol_address("stasis_audio_load_mp3")?,
             stasis_audio_play_wav: lib.symbol_address("stasis_audio_play_wav")?,
             stasis_audio_stop_wav: lib.symbol_address("stasis_audio_stop_wav")?,
             _lib: lib,
@@ -1287,6 +1289,27 @@ pub extern "C" fn stasis_jit_audio_load_wav(path_id: i32) -> i32 {
         };
         let callback: extern "system" fn(*const c_char) -> i32 =
             unsafe { std::mem::transmute(api.stasis_audio_load_wav) };
+        return callback(path.as_ptr());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path_id;
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_audio_load_mp3(path_id: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let callback: extern "system" fn(*const c_char) -> i32 =
+            unsafe { std::mem::transmute(api.stasis_audio_load_mp3) };
         return callback(path.as_ptr());
     }
     #[cfg(not(windows))]
