@@ -71,6 +71,10 @@ impl AotTarget {
             Self::AndroidArm64 { min_sdk } => Some(format!("aarch64-linux-android{min_sdk}")),
         }
     }
+
+    pub fn requires_position_independent_code(&self) -> bool {
+        !matches!(self, Self::Native)
+    }
 }
 
 impl Default for AotTarget {
@@ -796,6 +800,12 @@ echo "fake-shared" > "$OUT"
         };
 
         assert_eq!(resolve_linker_path(&config), PathBuf::from("clang"));
+    }
+
+    #[test]
+    fn aot_target_reports_position_independent_code_requirement() {
+        assert!(!AotTarget::Native.requires_position_independent_code());
+        assert!(AotTarget::android_arm64_default().requires_position_independent_code());
     }
 
     #[test]

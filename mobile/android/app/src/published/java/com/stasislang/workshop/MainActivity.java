@@ -1,7 +1,6 @@
 package com.stasislang.workshop;
 
 import android.app.Activity;
-import android.content.res.AssetManager;
 import android.graphics.Color;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
@@ -18,27 +17,12 @@ import android.view.WindowInsets;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 
 public final class MainActivity extends Activity {
-    private static final String ASSET_ROOT = "workshop_sample/";
-    private static final String PROJECT_DIR = "published_project";
-    private static final String[] SAMPLE_FILES = new String[] {
-            "src/main.stasis",
-            "src/root.stasis",
-            "src/game_state.stasis",
-            "src/player.stasis",
-            "src/enemy.stasis",
-            "src/input.stasis",
-            "src/assets.stasis",
-            "src/systems/collision.stasis"
-    };
+    private static final String PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID;
 
     private static final long FRAME_DELAY_MS = 16L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
@@ -60,8 +44,6 @@ public final class MainActivity extends Activity {
     private final RollingMetric tickMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
     private final StringBuilder hudText = new StringBuilder(80);
-    private File projectRootFile;
-    private String projectRootPath;
     private GameSurfaceView gameSurface;
     private TextView hud;
     private Runnable frameLoop;
@@ -78,15 +60,6 @@ public final class MainActivity extends Activity {
         Window window = getWindow();
         window.setStatusBarColor(Color.BLACK);
         window.setNavigationBarColor(Color.BLACK);
-
-        projectRootFile = new File(getFilesDir(), PROJECT_DIR);
-        projectRootPath = projectRootFile.getAbsolutePath();
-        try {
-            ensureBundledProject();
-        } catch (IOException error) {
-            compileAttempted = true;
-            compileReady = false;
-        }
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -143,7 +116,7 @@ public final class MainActivity extends Activity {
             @Override
             public void run() {
                 if (!compileAttempted) {
-                    String result = nativeCompileProject(projectRootPath);
+                    String result = nativeCompileProject(PUBLISHED_RUNTIME_ID);
                     compileReady = result != null && result.startsWith("CompilePlanned") && result.contains("status=0");
                     compileAttempted = true;
                 }
@@ -161,7 +134,7 @@ public final class MainActivity extends Activity {
         int height = gameSurface == null ? 0 : gameSurface.getHeight();
         long start = System.nanoTime();
         int status = nativeRunFrameInto(
-                projectRootPath,
+                PUBLISHED_RUNTIME_ID,
                 gameSurface == null ? 0 : gameSurface.touchX(),
                 gameSurface == null ? 0 : gameSurface.touchY(),
                 gameSurface == null ? 0 : gameSurface.touchActive(),
@@ -218,33 +191,6 @@ public final class MainActivity extends Activity {
             builder.append('0');
         }
         builder.append(fraction);
-    }
-
-    private void ensureBundledProject() throws IOException {
-        AssetManager assets = getAssets();
-        for (String file : SAMPLE_FILES) {
-            copyAssetIfMissing(assets, ASSET_ROOT + file, new File(projectRootFile, file));
-        }
-    }
-
-    private static void copyAssetIfMissing(AssetManager assets, String assetPath, File outFile) throws IOException {
-        if (outFile.isFile()) {
-            return;
-        }
-        File parent = outFile.getParentFile();
-        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
-            throw new IOException("Unable to create " + parent.getAbsolutePath());
-        }
-        try (InputStream input = assets.open(assetPath); FileOutputStream output = new FileOutputStream(outFile)) {
-            byte[] buffer = new byte[8192];
-            while (true) {
-                int count = input.read(buffer);
-                if (count < 0) {
-                    break;
-                }
-                output.write(buffer, 0, count);
-            }
-        }
     }
 
     private void installSystemInsetGuard(final View root) {

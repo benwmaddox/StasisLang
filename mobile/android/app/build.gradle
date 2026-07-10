@@ -4,6 +4,24 @@ plugins {
 
 def repoRootDir = rootProject.projectDir.parentFile.parentFile
 def publishedAotDir = layout.buildDirectory.dir('generated/stasisAot/publishedArm64')
+def workshopAssetsDir = layout.buildDirectory.dir('generated/stasisAssets/workshop')
+def publishedGameName = (project.findProperty('stasis.publishedGame') ?: 'pong').toString()
+def publishedGameDescriptorFile = rootProject.file("games/${publishedGameName}.gradle")
+if (!publishedGameDescriptorFile.isFile()) {
+    throw new GradleException("Unknown Stasis published game descriptor: ${publishedGameName}")
+}
+apply from: publishedGameDescriptorFile
+def publishedGame = ext.stasisGameDescriptor
+def requiredGameFields = ['id', 'runtimeId', 'applicationId', 'label', 'projectDirectory', 'entrySource', 'testPattern']
+requiredGameFields.each { field ->
+    if (!publishedGame.containsKey(field) || publishedGame[field] == null || publishedGame[field].toString().isBlank()) {
+        throw new GradleException("Stasis published game descriptor is missing ${field}")
+    }
+}
+if (publishedGame.schemaVersion != 1 || !publishedGame.projectDirectory.isDirectory()
+        || !new File(publishedGame.projectDirectory, publishedGame.entrySource).isFile()) {
+    throw new GradleException("Stasis published game descriptor is invalid: ${publishedGameName}")
+}
 
 android {
     namespace 'com.stasislang.workshop'
@@ -38,6 +56,8 @@ android {
             applicationId 'com.stasislang.workshop'
             manifestPlaceholders = [appLabel: 'Stasis Workshop']
             buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'false'
+            buildConfigField 'String', 'STASIS_GAME_ID', '""'
+            buildConfigField 'String', 'STASIS_RUNTIME_ID', '""'
             externalNativeBuild {
                 cmake {
                     arguments '-DSTASIS_ANDROID_PUBLISHED_AOT=OFF'
@@ -46,9 +66,11 @@ android {
         }
         published {
             dimension 'mode'
-            applicationId 'com.stasislang.workshop.published'
-            manifestPlaceholders = [appLabel: 'Stasis Game']
+            applicationId publishedGame.applicationId
+            manifestPlaceholders = [appLabel: publishedGame.label]
             buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'true'
+            buildConfigField 'String', 'STASIS_GAME_ID', "\"${publishedGame.id}\""
+            buildConfigField 'String', 'STASIS_RUNTIME_ID', "\"${publishedGame.runtimeId}\""
             externalNativeBuild {
                 cmake {
                     arguments '-DSTASIS_ANDROID_PUBLISHED_AOT=ON', "-DSTASIS_PUBLISHED_AOT_DIR=${projectDir}/build/generated/stasisAot/publishedArm64"
@@ -62,19 +84,37 @@ android {
             path file('src/main/cpp/CMakeLists.txt')
         }
     }
+
+    sourceSets {
+        main.assets.setSrcDirs([])
+        workshop.assets.setSrcDirs([workshopAssetsDir.get().asFile])
+        published.assets.setSrcDirs([])
+    }
+}
+
+tasks.register('prepareWorkshopAssets', Sync) {
+    from(file('src/main/assets')) {
+        exclude 'workshop_sample/build/**'
+        exclude 'exploration_sample/build/**'
+    }
+    into(workshopAssetsDir)
 }
 
 tasks.register('generatePublishedAotBundle', Exec) {
     def outputDir = publishedAotDir.get().asFile
-    inputs.dir(file('src/main/assets/workshop_sample'))
+    inputs.file(publishedGameDescriptorFile)
+    inputs.dir(publishedGame.projectDirectory)
     outputs.dir(outputDir)
     workingDir repoRootDir
     commandLine 'cargo', 'run', '-p', 'stasis', '--', 'android-aot-bundle',
-            '--project-dir', file('src/main/assets/workshop_sample').absolutePath,
+            '--project-dir', publishedGame.projectDirectory.absolutePath,
             '--out-dir', outputDir.absolutePath
 }
 
 tasks.configureEach { task ->
+    if (task.name.startsWith('preWorkshop')) {
+        task.dependsOn(tasks.named('prepareWorkshopAssets'))
+    }
     if (task.name.startsWith('prePublished') || (task.name.startsWith('configureCMake') && task.name.contains('Published'))) {
         task.dependsOn(tasks.named('generatePublishedAotBundle'))
     }

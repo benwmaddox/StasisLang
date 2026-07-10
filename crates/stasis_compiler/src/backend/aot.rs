@@ -547,10 +547,10 @@ fn compile_function_to_object_bytes(
     flag_builder
         .set("opt_level", optimization_profile.as_cranelift_opt_level())
         .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
-    if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
-        flag_builder.set("is_pic", "true").map_err(|error| {
-            format!("failed to configure position-independent Android AOT: {error}")
-        })?;
+    if target.requires_position_independent_code() {
+        flag_builder
+            .set("is_pic", "true")
+            .map_err(|error| format!("failed to configure position-independent AOT: {error}"))?;
     }
     let flags = settings::Flags::new(flag_builder);
     let isa_builder = match target.object_triple() {

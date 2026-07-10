@@ -7,14 +7,29 @@ REQUIRED_FILES = [
     "mobile/android/build.gradle",
     "mobile/android/build_rust_bridge.ps1",
     "mobile/android/build_published.ps1",
+    "mobile/android/validate_device.ps1",
     "mobile/android/app/build.gradle",
+    "mobile/android/games/pong.gradle",
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTemplateCatalog.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopMoney.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -27,8 +42,23 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/workshop_sample/src/input.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/assets.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/main.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/config.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/components.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/world_data.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/input.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/assets.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/movement.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/collection.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/tutorial.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/render_extract.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/tests/exploration_gameplay.test.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/assets/manifest.json",
     "mobile/android/README.md",
     "tools/android_ai_agent_host.py",
+    "tools/ci/check_android_published_apk.py",
+    "tests/android/AiQueuePolicyTest.java",
+    "tests/android/WorkshopProjectFormatPolicyTest.java",
 ]
 
 STASIS_SAMPLE_FILES = [
@@ -53,12 +83,18 @@ def main() -> int:
     assert "crate-type = [\"rlib\", \"cdylib\"]" in bridge_toml
     assert "compile_android_workshop_project" in bridge
     assert "stasis_android_bridge_compile_project" in bridge
-    assert "build_android_workshop_compile_plan" in bridge
-    assert "render_android_workshop_artifacts" in bridge
+    assert "load_android_workshop_asset_manifest" in bridge
+    assert "stasis_assets::load_project_asset_manifest" in bridge
+    assert "build_workshop_compile_plan" in bridge
+    assert "render_workshop_artifacts" in bridge
 
     rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
     debug_script = read("mobile/android/build_debug.ps1")
+    assert "Workshop Android Gradle build failed with exit code" in debug_script
+    assert "Rust Android bridge build failed with exit code" in rust_bridge_script
+    assert "rustup target discovery failed with exit code" in rust_bridge_script
     published_script = read("mobile/android/build_published.ps1")
+    device_script = read("mobile/android/validate_device.ps1")
     android_gitignore = read("mobile/android/.gitignore")
     assert "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER" in rust_bridge_script
     assert "aarch64-linux-android" in rust_bridge_script
@@ -70,20 +106,42 @@ def main() -> int:
     assert ":app:installPublishedDebug" in published_script
     assert "ValidateAot" in published_script
     assert "aot_engine_bundle_writes_manifest_and_required_entrypoints" in published_script
+    assert "check_android_published_apk.py" in published_script
+    assert "build_rust_bridge.ps1" not in published_script
     assert "app/src/*/jniLibs/" in android_gitignore
+    assert "RequireDevice" in device_script
+    assert "android_device_acceptance" in device_script
+    assert "ro.product.cpu.abilist" in device_script
+    assert "arm64-v8a" in device_script
+    assert "am\", \"start\", \"-W" in device_script
+    assert "pidof" in device_script
 
     app_gradle = read("mobile/android/app/build.gradle")
+    pong_descriptor = read("mobile/android/games/pong.gradle")
     assert "flavorDimensions 'mode'" in app_gradle
     assert "workshop {" in app_gradle
     assert "published {" in app_gradle
     assert "applicationId 'com.stasislang.workshop'" in app_gradle
-    assert "applicationId 'com.stasislang.workshop.published'" in app_gradle
+    assert "applicationId publishedGame.applicationId" in app_gradle
+    assert "manifestPlaceholders = [appLabel: publishedGame.label]" in app_gradle
+    assert "publishedGameDescriptorFile" in app_gradle
+    assert "STASIS_RUNTIME_ID" in app_gradle
+    assert "inputs.file(publishedGameDescriptorFile)" in app_gradle
+    assert "publishedGame.projectDirectory.absolutePath" in app_gradle
+    assert "applicationId: 'com.stasislang.pong'" in pong_descriptor
+    assert "label: 'Stasis Pong'" in pong_descriptor
+    assert "runtimeId: 'pong_aot'" in pong_descriptor
+    assert "entrySource: 'src/main.stasis'" in pong_descriptor
     assert "STASIS_PUBLISHED_BUILD" in app_gradle
     assert "abiFilters 'arm64-v8a'" in app_gradle
     assert "externalNativeBuild" in app_gradle
     assert "STASIS_ANDROID_SMOKE_ONLY=ON" in app_gradle
     assert "generatePublishedAotBundle" in app_gradle
     assert "STASIS_ANDROID_PUBLISHED_AOT=ON" in app_gradle
+    assert "prepareWorkshopAssets" in app_gradle
+    assert "workshop_sample/build/**" in app_gradle
+    assert "exploration_sample/build/**" in app_gradle
+    assert "published.assets.setSrcDirs([])" in app_gradle
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
     workshop_manifest = read("mobile/android/app/src/workshop/AndroidManifest.xml")
@@ -99,15 +157,122 @@ def main() -> int:
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
     secret_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java")
     recovery_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java")
+    draft_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java")
     project_registry = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java")
+    template_catalog = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTemplateCatalog.java")
+    project_format_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java")
     project_archive = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java")
+    image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
+    paint_view = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java")
+    audio_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java")
+    asset_manifest = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java")
+    asset_identity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java")
+    money = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopMoney.java")
+    assert "MediaExtractor" in audio_assets
+    assert "MediaFormat.KEY_SAMPLE_RATE" in audio_assets
+    assert "MediaFormat.KEY_CHANNEL_COUNT" in audio_assets
+    assert "audio stream metadata exceeds supported bounds" in audio_assets
+    assert "asset.sampleRate" in activity
+    assert "asset.channels" in activity
+    assert 'RELATIVE_PATH = "assets/manifest.json"' in asset_manifest
+    assert 'put("schema", "stasis-assets")' in asset_manifest
+    assert 'put("version", 1)' in asset_manifest
+    assert 'MessageDigest.getInstance("SHA-256")' in asset_manifest
+    assert "StandardCopyOption.ATOMIC_MOVE" in asset_manifest
+    assert "validateStableHandles" in asset_manifest
+    assert "seedMissing" in asset_manifest
+    assert "WorkshopAssetIdentity.stableHandle" in asset_manifest
+    assert "0x811c9dc5" in asset_identity
+    assert "0x01000193" in asset_identity
+    assert "WorkshopMoney.formatUsd(costUsd)" in activity
+    assert "setScale(2, RoundingMode.HALF_UP)" in money
+    assert "Math.max(0.0, value)" in money
+    assert "WorkshopAssetManifest.putSprite" in image_assets
+    assert "WorkshopAssetManifest.putAudio" in audio_assets
+    assert "WorkshopAssetManifest.readForSync" in activity
+    assert "files.put(WorkshopAssetManifest.RELATIVE_PATH" in activity
+    assert "WorkshopAssetManifest.remove" in image_assets
+    assert "WorkshopAssetManifest.remove" in audio_assets
+    assert "target.renameTo(asset.file)" in image_assets
+    assert "target.renameTo(asset.file)" in audio_assets
+    assert "target.renameTo(latest)" in image_assets
+    assert "target.renameTo(latest)" in audio_assets
+    support_bundle = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java")
+    crash_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java")
+    ai_queue = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java")
+    ai_queue_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
+    assert "protected void onPause()" in activity
+    assert "protected void onSaveInstanceState(Bundle outState)" in activity
+    assert 'outState.putString("ai_prompt"' in activity
+    assert 'outState.putString("selected_file"' in activity
+    assert 'outState.putStringArrayList("selected_image_paths"' in activity
+    assert 'outState.putInt("editor_scroll_y"' in activity
+    assert "restoreWorkshopUiState(savedInstanceState)" in activity
+    assert 'state.getBoolean("editor_open"' in activity
+    assert 'state.getBoolean("privacy_open"' in activity
+    assert 'state.getStringArrayList("selected_image_paths")' in activity
+    assert "clearPendingPreviewCapture();" in activity
+    assert "allowAiImageGeneration.setChecked(false)" in activity
+    assert "persistPendingDraft();" in activity
+    assert "restorePendingDraft();" in activity
+    assert "Recovered unsaved source draft after app interruption" in activity
+    assert "source changed; recovery will not overwrite newer code" in activity
+    assert "App stopped before AI completion" in activity
+    assert '"interrupted"' in activity
+    assert 'ROOT = "workshop_drafts"' in draft_store
+    assert "MAX_DRAFT_BYTES = 2 * 1024 * 1024" in draft_store
+    assert 'put("base_sha256", sha256(baseSource))' in draft_store
+    assert "StandardCopyOption.ATOMIC_MOVE" in draft_store
+    assert "StandardCopyOption.REPLACE_EXISTING" in draft_store
+    assert "clearIfMatches" in draft_store
+    assert "draft path escaped root" in draft_store
+    assert "Intent.ACTION_OPEN_DOCUMENT" in activity
+    assert 'intent.setType("image/*")' in activity
+    assert "WorkshopImageAssets.importImage" in activity
+    assert "WorkshopImageAssets.decodePreview" in activity
+    assert "WorkshopImageAssets.readForSync" in activity
+    assert "WorkshopImageAssets.rename" in activity
+    assert "WorkshopImageAssets.moveToTrash" in activity
+    assert "WorkshopImageAssets.restoreLatest" in activity
+    assert "Rename blocked: image is referenced by" in activity
+    assert "Delete blocked: image is referenced by" in activity
+    assert "selectedImageAssetProjectId" in activity
+    assert "Map<String, byte[]> githubBackupFiles()" in activity
+    assert "MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024" in activity
+    assert "project exceeds the 32 MiB direct backup limit" in activity
+    assert "Image Assets" in activity
+    assert "MAX_IMPORT_BYTES = 8 * 1024 * 1024" in image_assets
+    assert "MAX_DIMENSION = 4096" in image_assets
+    assert "MAX_PIXELS = 16_000_000L" in image_assets
+    assert "exceeds the image sync limit" in image_assets
+    assert "MAX_TRASH_FILES = 20" in image_assets
+    assert 'TRASH_DIRECTORY = ".stasis-trash/images"' in image_assets
+    assert "output.getFD().sync()" in image_assets
+    assert "image path escapes the active project" in image_assets
+    assert '"image/png"' in image_assets
+    assert '"image/jpeg"' in image_assets
+    assert '"image/webp"' in image_assets
+    assert "New Painted Image" in activity
+    assert "Paint as Copy" in activity
+    assert "Paint cancelled; project assets unchanged" in activity
+    assert "Resize / Crop Canvas" in activity
+    assert "WorkshopImageAssets.savePainted" in activity
+    assert "MAX_CANVAS_DIMENSION = 1024" in paint_view
+    assert "MAX_HISTORY = 8" in paint_view
+    assert "PorterDuff.Mode.CLEAR" in paint_view
+    assert "void undo()" in paint_view
+    assert "void redo()" in paint_view
+    assert "void resizeCanvas" in paint_view
+    assert "Bitmap snapshot()" in paint_view
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
     assert "private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues)" in activity
-    assert "workshop_sample/" in activity
+    assert 'assetRoot = "workshop_sample/"' not in template_catalog
+    assert '"workshop_sample/"' in template_catalog
+    assert "activeWorkshopTemplate" in activity
     assert "createWorkshopView" in activity
     assert "BuildConfig.STASIS_PUBLISHED_BUILD" in activity
     assert "installGameStatusOverlay(root, false)" in activity
@@ -124,6 +289,10 @@ def main() -> int:
     assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in activity
     assert "budget=--%" in activity
     assert "debugColorForBudget" in activity
+    assert "appendExplorationProgress(debugTextBuilder)" in activity
+    assert '"GameState.collected_count"' in activity
+    assert '"keepsakes="' in activity
+    assert '"garden complete"' in activity
     assert "private String projectRootPath" in activity
     assert "nativeCompileProject(projectRootPath())" in activity
     assert "String.format" not in activity
@@ -140,7 +309,31 @@ def main() -> int:
     assert "hot swap=FastReload" in activity
     assert "aiReloadPhase" in activity
     assert "Chat and Commands" in activity
-    assert "Run AI Change" in activity
+    assert "Queue AI Change" in activity
+    assert "AI Work Queue" in activity
+    assert 'runAiPatch("voice", null)' in activity
+    assert "cancelPendingAiItem" in activity
+    assert "startNextQueuedAiIfIdle" in activity
+    assert 'ROOT = "workshop_ai_queue"' in ai_queue
+    assert 'static final String PENDING = "pending"' in ai_queue
+    assert 'static final String IN_PROGRESS = "in_progress"' in ai_queue
+    assert "writeSyncedAtomic" not in ai_queue or "getFD().sync()" in ai_queue
+    assert "StandardCopyOption.ATOMIC_MOVE" in ai_queue
+    assert "recoverInterrupted" in ai_queue
+    assert "cancelPending" in ai_queue
+    assert "AiQueuePolicy.canTransition" in ai_queue
+    assert "loadPreview" in ai_queue
+    assert 'MAX_PREVIEW_BYTES = 12 * 1024 * 1024' in ai_queue
+    assert 'MessageDigest.getInstance("SHA-256")' in ai_queue
+    assert "writeSyncedAtomic(savedPreview, previewPng)" in ai_queue
+    assert "deletePreview(context, entry)" in ai_queue
+    assert "pruneOrphanPreviews" in ai_queue
+    assert "removeOldestTerminal" in ai_queue
+    assert "AiQueuePolicy.terminal(state)" in ai_queue
+    assert "index < first && !AndroidAiQueue.PENDING.equals(item.state)" in activity
+    assert "encodeBitmapPng" in activity
+    assert "queuedEntry.previewFile" in activity
+    assert "nextPendingIndex" in ai_queue_policy
     assert "AI Settings" in activity
     assert "aiSettingsBody.setVisibility(View.GONE)" in activity
     assert "AI run started: preparing workspace and command context" in activity
@@ -168,12 +361,169 @@ def main() -> int:
     assert "AI spending limit reached before agent turn" in activity
     assert "recordMonthlyAiSpend" in activity
     assert "maxOutputTokensForBudget" in activity
+    assert "MAX_AI_IMAGE_ATTACHMENTS = 4" in activity
+    assert "MAX_AI_IMAGE_ATTACHMENT_BYTES = 12 * 1024 * 1024" in activity
+    assert "Review AI Image Attachments" in activity
+    assert "Only these app-private project images" in activity
+    assert 'put("type", "input_image")' in activity
+    assert 'put("detail", "original")' in activity
+    assert '"data:" + attachment.mimeType + ";base64,"' in activity
+    assert "buildAiOpenAiInput(requestJson, false)" in activity
+    assert "buildAiOpenAiInput(requestJson, true)" in activity
+    assert "selected_images_are_explicit_project_assets_only" in activity
+    assert "activeAiImageAttachments = Collections.emptyList()" in activity
+    assert "Capture Preview for AI" in activity
+    assert "Review Preview Capture" in activity
+    assert "Attach these rendered pixels" in activity
+    assert "Attach logical render/runtime/input snapshot" in activity
+    assert "Nothing is sent until selected here and Queue AI Change is pressed" in activity
+    assert "GLES20.glReadPixels" in activity
+    assert "lastDrawnFrame" in activity
+    assert "MAX_PREVIEW_CAPTURE_PIXELS = 8_000_000L" in activity
+    assert "preview framebuffer exceeds the 8 megapixel capture limit" in activity
+    assert "Bitmap.createScaledBitmap" in activity
+    assert "selected_preview_logical_snapshot" in activity
+    assert '"captured-preview.png"' in activity
+    assert "clearPendingPreviewCapture();" in activity
+    assert "GPT_IMAGE_2_LOW_1024_USD = 0.006" in activity
+    assert "Allow one low-quality 1024x1024 AI image" in activity
+    assert 'put("type", "image_generation")' in activity
+    assert 'put("quality", "low")' in activity
+    assert 'put("size", "1024x1024")' in activity
+    assert 'put("output_format", "png")' in activity
+    assert "allowImageGeneration && turn == 0" in activity
+    assert "extractAiGeneratedImages" in activity
+    assert "AI generated image is not a bounded PNG" in activity
+    assert "Review AI Image" in activity
+    assert "Accept as New Asset" in activity
+    assert "AI image rejected; project assets unchanged" in activity
+    assert "WorkshopImageAssets.saveGeneratedPng" in activity
+    assert "image_generation_cost_usd" in activity
+    assert "active project changed before image acceptance" in activity
+    assert 'File.createTempFile(".ai-review-"' in image_assets
+    assert "could not publish accepted AI image" in image_assets
+    assert 'intent.setType("audio/*")' in activity
+    assert "WorkshopAudioAssets.importAudio" in activity
+    assert "Audio Assets" in activity
+    assert "Stop Audio Preview" in activity
+    assert "MediaPlayer player = new MediaPlayer()" in activity
+    assert "Audio rename blocked: referenced by" in activity
+    assert "Audio delete blocked: referenced by" in activity
+    assert "WorkshopAudioAssets.readForSync" in activity
+    assert "MAX_AUDIO_BYTES = 16 * 1024 * 1024" in audio_assets
+    assert "MAX_DURATION_MS = 5L * 60L * 1000L" in audio_assets
+    assert "AUDIO_RECORD_PERMISSION_REQUEST = 42" in activity
+    assert "Recording name (saved as M4A)" in activity
+    assert "Record Audio" in activity
+    assert "Stop & Save" in activity
+    assert "Cancel Recording" in activity
+    assert "MediaRecorder.AudioSource.MIC" in activity
+    assert "MediaRecorder.OutputFormat.MPEG_4" in activity
+    assert "MediaRecorder.AudioEncoder.AAC" in activity
+    assert "setMaxDuration((int)WorkshopAudioAssets.MAX_DURATION_MS)" in activity
+    assert "setMaxFileSize(WorkshopAudioAssets.MAX_AUDIO_BYTES)" in activity
+    assert "WorkshopAudioAssets.publishRecording" in activity
+    assert "cancelAudioRecording(false)" in activity
+    assert "Finish or cancel audio recording before running AI" in activity
+    assert "createRecordingFile" in audio_assets
+    assert "publishRecording" in audio_assets
+    assert "discardRecording" in audio_assets
+    assert "could not publish recorded audio" in audio_assets
+    assert "MediaMetadataRetriever" in audio_assets
+    assert "audio path escapes the active project" in audio_assets
+    assert "output.getFD().sync()" in audio_assets
+    assert 'TRASH_DIRECTORY = ".stasis-trash/audio"' in audio_assets
+    assert "Privacy & Data" in activity
+    assert "On-device by default: project code, assets, drafts, recovery, and traces" in activity
+    assert "only media explicitly selected in review" in activity
+    assert "Revoke OpenAI API Key" in activity
+    assert "Revoke GitHub Token" in activity
+    assert "writeSecretPreference(preferences, AI_PREF_API_KEY, \"\")" in activity
+    assert "writeSecretPreference(preferences, GITHUB_PREF_TOKEN, \"\")" in activity
+    assert "Clear Pending Media Consent" in activity
+    assert "selectedImageAssets.clear()" in activity
+    assert "Erase AI Histories + Trace" in activity
+    assert "preferences.getAll().keySet()" in activity
+    assert "aiTraceLogFile()" in activity
+    assert "Code and assets remain" in activity
+    assert "Delete Active Non-Bundled Project" in activity
+    assert "Bundled Workshop cannot be deleted" in activity
+    assert "confirmation name did not match exactly" in activity
+    assert "Export a project archive first" in activity
+    assert "WorkshopProjectRegistry.deleteProject" in activity
+    assert "AndroidDraftStore.clear(this, target.id)" in activity
+    assert "AndroidEditRecoveryStore.clearProject(this, target.id)" in activity
+    assert "clearDeletedProjectPreferences" in activity
+    assert "Bundled Workshop is active" in activity
+    assert "bundled project cannot be deleted" in project_registry
+    assert "switch away from a project before deleting it" in project_registry
+    assert "project directory deletion did not complete" in project_registry
+    assert "clearProject" in recovery_store
+    assert 'ONBOARDING_PREFS = "onboarding_settings"' in activity
+    assert 'ONBOARDING_COMPLETE = "manual_tutorial_seen_v1"' in activity
+    assert "Welcome to Stasis Workshop" in activity
+    assert "You can build and test a game entirely on-device without AI" in activity
+    assert "Remind Me Later" in activity
+    assert "Help & Onboarding" in activity
+    assert "Start Zero-AI Manual Tutorial" in activity
+    assert "no API key is required" in activity
+    assert "Voice or audio recording asks for microphone permission only when started" in activity
+    assert "toggleEditorPanel();" in activity
+    assert "Interactive Stasis game preview" in activity
+    assert "Open Workshop menu" in activity
+    assert "Close Workshop menu" in activity
+    assert "Start voice command recording" in activity
+    assert "Stasis source editor for the selected symbol" in activity
+    assert "Queue the requested AI change with current reviewed attachments" in activity
+    assert "Cancel the active AI run after its current atomic operation" in activity
+    assert "ACCESSIBILITY_LIVE_REGION_POLITE" in activity
+    assert "ACCESSIBILITY_LIVE_REGION_ASSERTIVE" in activity
+    assert "setAccessibilityHeading(true)" in activity
+    assert "screenWidthDp < 480" in activity
+    assert "Selected image asset" in activity
+    assert "Audio asset " in activity
+    assert "Touch paint canvas" in paint_view
+    assert "setFocusable(true)" in paint_view
+    assert "Export Redacted Support Bundle" in activity
+    assert "Excludes credentials, source, prompts" in activity
+    assert 'intent.setType("application/json")' in activity
+    assert "AndroidSupportBundle.build" in activity
+    assert "Redacted support bundle exported without credentials, source, prompts, or media" in activity
+    assert '"stasis-android-redacted-support-v1"' in support_bundle
+    assert '"credentials_excluded"' in support_bundle
+    assert '"source_and_prompts_excluded"' in support_bundle
+    assert '"media_bytes_and_names_excluded"' in support_bundle
+    assert '"absolute_paths_excluded"' in support_bundle
+    assert "MAX_TRACE_READ_BYTES = 512 * 1024" in support_bundle
+    assert "MAX_TRACE_EVENTS = 50" in support_bundle
+    assert "redacted support bundle exceeds 1 MiB" in support_bundle
+    assert 'outcome.optString("status"' in support_bundle
+    assert 'entry.optString("event"' in support_bundle
+    assert "draft_source" not in support_bundle
+    assert "before_source" not in support_bundle
+    assert "api_key" not in support_bundle
+    assert "AndroidCrashStore.install(this)" in activity
+    assert "Previous crash detected" in activity
+    assert "Clear Local Crash Record" in activity
+    assert "AndroidCrashStore.clear" in activity
+    assert 'FILE_NAME = "android_crash_redacted.json"' in crash_store
+    assert "MAX_FRAMES = 30" in crash_store
+    assert "MAX_RECORD_BYTES = 64 * 1024" in crash_store
+    assert "Thread.setDefaultUncaughtExceptionHandler" in crash_store
+    assert "prior.uncaughtException(thread, error)" in crash_store
+    assert '"message_excluded"' in crash_store
+    assert '"paths_and_source_excluded"' in crash_store
+    assert "getClassName()" in crash_store
+    assert "getMethodName()" in crash_store
+    assert "getMessage()" not in crash_store
+    assert "output.getFD().sync()" in crash_store
+    assert '"previous_crash"' in support_bundle
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
     assert "Cancel AI" in activity
     assert "aiRunActive" in activity
     assert "aiCancelRequested" in activity
-    assert "AI run already active; cancel it before starting another" in activity
+    assert "AI request queued behind the active item" in activity
     assert "throwIfAiCancelled()" in activity
     assert "if (!batchHasWrites) throwIfAiCancelled()" in activity
     assert "finishing any active call or atomic write batch" in activity
@@ -182,11 +532,15 @@ def main() -> int:
     assert "AI_READ_TIMEOUT_MS" in activity
     assert "completed calls remain in usage totals" in activity
     assert "installVoiceChangeControls(root)" in activity
+    assert "VOICE_TOP_MARGIN_DP = 64" in activity
+    assert "VOICE_ACTION_TOP_MARGIN_DP = 120" in activity
+    assert "voiceParams.setMargins(0, dp(VOICE_TOP_MARGIN_DP), dp(TOP_CONTROL_END_MARGIN_DP), 0)" in activity
+    assert "toggleParams.setMargins(0, dp(8), dp(TOP_CONTROL_END_MARGIN_DP), 0)" in activity
     assert "SpeechRecognizer.createSpeechRecognizer(this)" in activity
     assert "VOICE_RECORD_PERMISSION_REQUEST" in activity
     assert "voiceCancel.setText(\"Cancel\")" in activity
     assert "voiceRunButton.setText(\"Run\")" in activity
-    assert "Voice change confirmed: starting AI run" in activity
+    assert "Voice change confirmed: adding it to the AI queue" in activity
     assert "Voice change cancelled" in activity
     assert "GITHUB_PREF_TOKEN" in activity
     assert "GitHub Sync Settings" in activity
@@ -239,8 +593,11 @@ def main() -> int:
     assert '"interrupted", "app stopped before completion"' in activity
     assert '"sync".equals(operation)' in activity
     assert '"pull_request".equals(operation)' in activity
-    assert "WorkshopProjectRegistry.initialize(this)" in activity
-    assert "New Project From Sample" in activity
+    assert "WorkshopProjectRegistry.initialize(this," in activity
+    assert "New Project From Selected Template" in activity
+    assert "WorkshopTemplateCatalog.list()" in activity
+    assert "templateSelector.getSelectedItem()" in activity
+    assert "createFromTemplate" in activity
     assert "Switch Project" in activity
     assert "projectSettingsBody.setVisibility(View.GONE)" in activity
     assert "Project switch blocked while AI, GitHub, or project I/O is active" in activity
@@ -253,7 +610,22 @@ def main() -> int:
     assert "Apply or Reset the pending source edit before switching projects" in activity
     assert 'return "stasis-workshop-" + identity' in activity
     assert "WorkshopProjectRegistry.METADATA_FILE.equals(file.getName())" in activity
-    assert "static final int FORMAT_VERSION = 1" in project_registry
+    assert "FORMAT_VERSION = WorkshopProjectFormatPolicy.CURRENT_VERSION" in project_registry
+    assert "CURRENT_VERSION = 3" in project_format_policy
+    assert 'return ".stasis-workshop.json.v1.bak"' in project_format_policy
+    assert 'return ".stasis-workshop.json.v2.bak"' in project_format_policy
+    assert "migrateLegacyMetadata" in project_registry
+    assert "WorkshopProjectFormatPolicy.supported(version)" in project_registry
+    assert "WorkshopProjectFormatPolicy.templateId" in project_registry
+    assert "WorkshopProjectFormatPolicy.backupFileName" in project_registry
+    assert 'put("schema", "stasis-workshop-project")' in project_registry
+    assert 'put("migrated_from_version", migratedFromVersion)' in project_registry
+    assert "update the Workshop before opening this project" in project_registry
+    assert "project metadata schema is invalid" in project_registry
+    assert '" migration failed; the fsynced v"' in project_registry
+    assert "migrated metadata verification failed" in project_registry
+    assert "StandardCopyOption.ATOMIC_MOVE" in project_registry
+    assert "StandardCopyOption.REPLACE_EXISTING" in project_registry
     assert 'LEGACY_PROJECT_DIR = "workshop_project"' in project_registry
     assert 'METADATA_FILE = ".stasis-workshop.json"' in project_registry
     assert "UUID.randomUUID().toString()" in project_registry
@@ -263,6 +635,30 @@ def main() -> int:
     assert "active project preference commit failed" in project_registry
     assert "unsupported project format version" in project_registry
     assert '.put("origin", project.origin)' in project_registry
+    assert '.put("template_id", project.templateId)' in project_registry
+    assert "WorkshopTemplateCatalog.LEGACY_TEMPLATE_ID" in project_format_policy
+    assert "WorkshopTemplateCatalog.isKnown(templateId)" in project_registry
+    assert 'DEFAULT_TEMPLATE_ID = "exploration"' in template_catalog
+    assert 'LEGACY_TEMPLATE_ID = "pong"' in template_catalog
+    assert '"exploration_sample/"' in template_catalog
+    assert '"Exploration Garden"' in template_catalog
+    exploration_main = read("mobile/android/app/src/main/assets/exploration_sample/src/main.stasis")
+    exploration_components = read("mobile/android/app/src/main/assets/exploration_sample/src/components.stasis")
+    exploration_tests = read("mobile/android/app/src/main/assets/exploration_sample/tests/exploration_gameplay.test.stasis")
+    assert "exploration_input_target_system();" in exploration_main
+    assert "exploration_movement_system();" in exploration_main
+    assert "exploration_collection_system();" in exploration_main
+    assert "exploration_camera_follow_system();" in exploration_main
+    assert "Input.touch_x + GameState.camera_x" in exploration_main
+    assert "WORLD_WIDTH: i32 = 720" in exploration_main
+    assert "test `camera follow is deterministic and bounded`(): bool" in exploration_tests
+    assert "test `spawn capacity rejects player occupied and out of range slots`(): bool" in exploration_tests
+    assert "test `overlapping collectibles resolve in ascending entity order`(): bool" in exploration_tests
+    assert "last_collected_entity_id" in exploration_main
+    assert "entity_alive: i32[8]" in exploration_main
+    assert "Lesson map:" in exploration_components
+    assert "test `new touch edge sets one clamped destination`(): bool" in exploration_tests
+    assert "assert_runtime" not in exploration_tests
     assert '"sample".equals(origin)' in project_registry
     assert '"import".equals(origin)' in project_registry
     assert "project metadata id is invalid" in project_registry
@@ -276,7 +672,8 @@ def main() -> int:
     assert '"import".equals(activeProject.origin)' in activity
     assert '"sample".equals(activeProject.origin)' in activity
     assert "collectProjectStasisFiles(projectRoot, files, seen)" in activity
-    assert "files = sourcesByFile(loadBundledProject())" in activity
+    assert "files = githubBackupFiles()" in activity
+    assert "sourcesByFile(loadBundledProject()).entrySet()" in activity
     assert "Reverted saved symbol to project baseline" in activity
     assert "Export Project Archive" in activity
     assert "Intent.ACTION_CREATE_DOCUMENT" in activity
@@ -303,18 +700,30 @@ def main() -> int:
     assert "validateArchivePath" in project_archive
     assert "project archive contains duplicate path" in project_archive
     assert "project archive metadata format is unsupported" in project_archive
+    assert '?:1|2|3' in project_archive
     assert "project archive needs src/main.stasis" in project_archive
     assert "output.getFD().sync()" in project_archive
     assert "legacy project cannot be deleted as a failed import" in project_registry
     assert "Manual Symbols and Source" in activity
     assert "Go to Diagnostic" in activity
+    assert "captureFirstTestFailureDiagnostic" in activity
+    assert "sourceOffsetForLine" in activity
+    assert 'diagnosticStatus.setText("Test failure' in activity
+    assert 'result.optInt("line", 0)' in activity
+    assert "sourceEditor.setSelection(symbolOffset)" in activity
     assert "Undo Failed Apply" in activity
+    assert "Recovery History" in activity
+    assert "Failed Apply History" in activity
+    assert "Recovery history selection" in activity
     assert "AndroidEditRecoveryStore.record" in activity
     assert "AndroidEditRecoveryStore.latest" in activity
+    assert "AndroidEditRecoveryStore.list" in activity
+    assert "selectedRecoveryEntry" in activity
     assert "Undo blocked: source changed after the failed apply" in activity
     assert "Failed manual apply restored safely" in activity
     assert "Recoverable failed apply" in activity
     assert "MAX_ENTRIES = 10" in recovery_store
+    assert "static Entry[] list" in recovery_store
     assert "MAX_SOURCE_BYTES = 2 * 1024 * 1024" in recovery_store
     assert "writeSyncedAtomic" in recovery_store
     assert "recovery entry publish failed" in recovery_store
@@ -341,8 +750,10 @@ def main() -> int:
     assert "AI read_symbol target ambiguous: " in activity
     assert "AI read_symbol target not found: " in activity
     assert "AI read_symbol target ambiguous or not found" not in activity
-    assert "private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50" in activity
-    assert "private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125" in activity
+    assert "private static final double GPT_5_6_SOL_INPUT_USD_PER_MILLION = 5.00" in activity
+    assert "private static final double GPT_5_6_SOL_CACHED_INPUT_USD_PER_MILLION = 0.50" in activity
+    assert "private static final double GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION = 6.25" in activity
+    assert "private static final double GPT_5_6_SOL_OUTPUT_USD_PER_MILLION = 30.00" in activity
     assert "private AiApiResponse callOpenAiResponsesApi" in activity
     assert "extractAiUsage(response)" in activity
     assert "saveLastAiUsage(aiResult.usageJson)" in activity
@@ -396,11 +807,11 @@ def main() -> int:
     assert "formatRawFileDiffs" in activity
     assert "appendUnifiedFileDiff" in activity
     assert "splitSourceLines" in activity
-    assert "SAMPLE_TEST_FILES" in activity
+    assert "template.testFiles" in activity
     assert "parseTest" in activity
     assert "TestUpdated: run tests to validate" in activity
     assert "sections.put(\"Tests\"" in activity
-    assert "readAsset(assets, ASSET_ROOT + file)" in activity
+    assert "readAsset(assets, template.assetRoot + file)" in activity
     assert "newTest.setText(\"New Test\")" in activity
     assert "createManualTest();" in activity
     assert "Created failing test template; edit it, then Run Tests" in activity
@@ -491,16 +902,25 @@ def main() -> int:
     assert "AI_PREF_API_KEY" in activity
     assert "readSecretPreference(aiPrefs, AI_PREF_API_KEY)" in activity
     assert "aiPrefs.getString(AI_PREF_MODEL" in activity
-    assert "gpt-5.6-terra" in activity
-    assert 'DEFAULT_MODEL = "gpt-5.6-terra"' in host_agent
-    assert '"cache_write": 3.125' in host_agent
+    assert 'DEFAULT_AI_MODEL = "gpt-5.6-sol"' in activity
+    assert 'DEFAULT_AI_REASONING_EFFORT = "medium"' in activity
+    assert 'reasoningSummary.setText("Reasoning: medium")' in activity
+    assert 'GPT-5.6 Sol defaults to medium reasoning' in activity
+    assert '"gpt-5.6-terra".equals(configuredModel)' in activity
+    assert "AI_PREF_MODEL_DEFAULT_VERSION" in activity
+    assert 'DEFAULT_MODEL = "gpt-5.6-sol"' in host_agent
+    assert 'DEFAULT_REASONING_EFFORT = "medium"' in host_agent
+    assert '"cache_write": 6.25' in host_agent
     assert "prompt_cache_key" in activity
     assert "prompt_cache_breakpoint" in activity
     assert 'content.put("prompt_cache_breakpoint", new JSONObject().put("mode", "explicit"))' in activity
     assert 'payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"))' in activity
+    assert 'payload.put("reasoning", new JSONObject().put("effort", DEFAULT_AI_REASONING_EFFORT))' in activity
     assert 'put("type", "prompt_cache_breakpoint")' not in activity
     assert 'payload.put("prompt_cache_retention"' not in activity
     assert '"prompt_cache_options": {"mode": "explicit", "ttl": "30m"}' in host_agent
+    assert '"reasoning": {"effort": DEFAULT_REASONING_EFFORT}' in host_agent
+    assert 'payload.get("reasoning") != {"effort": "medium"}' in host_agent
     assert '"prompt_cache_breakpoint": {"mode": "explicit"}' in host_agent
     assert '"type": "prompt_cache_breakpoint"' not in host_agent
     assert '"prompt_cache_retention"' not in host_agent
@@ -605,15 +1025,18 @@ def main() -> int:
     assert "onDrawFrame" in published_activity
     assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in published_activity
     assert "event.getPointerCount() >= 3" in published_activity
-    assert "PROJECT_DIR = \"published_project\"" in published_activity
+    assert "PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID" in published_activity
+    assert '"com.stasislang.pong"' in device_script
+    assert "ensureBundledProject" not in published_activity
+    assert "AssetManager" not in published_activity
     workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")
-    assert "build_android_workshop_compile_plan" in workshop
-    assert "AndroidWorkshopCompilePlan" in workshop
+    assert "build_workshop_compile_plan" in workshop
+    assert "WorkshopCompilePlan" in workshop
     assert "IncrementalCompileOutput" in workshop
-    assert "AndroidWorkshopReload" in workshop
-    assert "android_compile_plan_tests" in workshop
-    assert "render_android_workshop_artifacts" in workshop
-    assert "AndroidWorkshopArtifactSet" in workshop
+    assert "WorkshopReload" in workshop
+    assert "workshop_compile_plan_tests" in workshop
+    assert "render_workshop_artifacts" in workshop
+    assert "WorkshopArtifactSet" in workshop
     assert "status=RuntimeStateReady" in workshop
     assert "status=CompiledStub" in workshop
 

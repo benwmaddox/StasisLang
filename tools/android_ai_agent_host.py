@@ -23,7 +23,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROJECT = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
-DEFAULT_MODEL = "gpt-5.6-terra"
+DEFAULT_MODEL = "gpt-5.6-sol"
+DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_TRACE_DIR = ROOT / "artifacts/android_ai_runs"
 MAX_TURNS = 15
 PROMPT_CACHE_KEY = "stasis-android-ai-agent-v2"
@@ -194,12 +195,12 @@ def preferred_call(symbol: Symbol) -> str:
 
 
 DEFAULT_MODEL_PRICING_PER_MILLION = {
-    "gpt-5.6-terra": {
-        "input": 2.50,
-        "cached_input": 0.25,
-        "cache_write": 3.125,
-        "output": 15.00,
-        "source": "User-provided pricing on 2026-07-09: gpt-5.6-terra $2.50 input / $0.25 cached input / $15.00 output per 1M tokens; cache writes use the GPT-5.6 1.25x input rate.",
+    "gpt-5.6-sol": {
+        "input": 5.00,
+        "cached_input": 0.50,
+        "cache_write": 6.25,
+        "output": 30.00,
+        "source": "User-provided pricing on 2026-07-10: gpt-5.6-sol $5.00 input / $0.50 cached input / $30.00 output per 1M tokens; cache writes use the documented GPT-5.6 1.25x input rate.",
     }
 }
 
@@ -673,6 +674,7 @@ def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
     schema = response_json_schema()
     return {
         "model": model,
+        "reasoning": {"effort": DEFAULT_REASONING_EFFORT},
         "prompt_cache_key": PROMPT_CACHE_KEY,
         "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
         "text": {"format": {"type": "json_schema", "name": "stasis_host_ai_response", "strict": False, "schema": schema}},
@@ -700,6 +702,8 @@ def validate_openai_payload(payload: dict[str, Any]) -> list[str]:
         errors.append("prompt_cache_key is required")
     if payload.get("prompt_cache_options") != {"mode": "explicit", "ttl": "30m"}:
         errors.append("prompt_cache_options must use explicit 30m caching")
+    if payload.get("reasoning") != {"effort": "medium"}:
+        errors.append("reasoning effort must be medium")
     input_items = payload.get("input")
     if not isinstance(input_items, list) or len(input_items) != 3:
         errors.append("input must contain stable instruction, stable context, and volatile context messages")
@@ -732,6 +736,7 @@ def summarize_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
         messages.append({"role": item.get("role"), "content": blocks})
     return {
         "model": payload.get("model"),
+        "reasoning": payload.get("reasoning"),
         "prompt_cache_key": payload.get("prompt_cache_key"),
         "prompt_cache_options": payload.get("prompt_cache_options"),
         "messages": messages,
@@ -964,8 +969,10 @@ def main() -> int:
     started_at_iso = datetime.now(timezone.utc).isoformat()
     started_at_perf = time.perf_counter()
     if args.preflight:
-        errors = validate_openai_payload(build_openai_payload(args.model, request))
-        trace_events.append({"kind": "payload_preflight", "ok": not errors, "errors": errors})
+        payload = build_openai_payload(args.model, request)
+        errors = validate_openai_payload(payload)
+        trace_events.append({"kind": "payload_preflight", "ok": not errors, "errors": errors,
+                             "payload": summarize_openai_payload(payload)})
         write_trace_file(trace_file, trace_meta, trace_events, 0 if not errors else 1, started_at_iso, time.perf_counter() - started_at_perf, 0)
         print(json.dumps({"preflight_ok": not errors, "errors": errors}, indent=2))
         return 0 if not errors else 1

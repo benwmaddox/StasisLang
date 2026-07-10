@@ -681,7 +681,17 @@ name = "stasis_android_bridge"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "stasis_assets",
  "stasis_compiler",
+]
+
+[[package]]
+name = "stasis_assets"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -719,6 +729,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "serde",
+ "stasis_assets",
 ]
 
 [[package]]
