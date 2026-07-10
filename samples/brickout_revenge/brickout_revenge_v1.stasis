@@ -120,6 +120,7 @@ struct OriginalAssets {
     projectile_rocket: i32;
     font_small: i32;
     font_title: i32;
+    font_tower: i32;
 }
 
 struct OriginalLayout {
@@ -225,6 +226,10 @@ global original_text_lengths: i32[42];
 global original_text_cursor: i32;
 global original_label_handles: i32[42];
 global original_label_runs: i32[42];
+global original_digit_runs: i32[10];
+global original_tower_digit_runs: i32[10];
+global original_minus_run: i32;
+global original_tower_minus_run: i32;
 global original_digit_handles: i32[10];
 global original_minus_handle: i32;
 
@@ -579,54 +584,8 @@ function original_glyph_row(code: i32, row: i32): i32 {
     return 0;
 }
 
-function original_draw_cached_label(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
-    let run: i32 = gfx_cache_text(font, text);
-    draw_text_cached(font, run, original_screen_x(x), original_screen_y(y), r, g, b, a);
-}
-
 function original_draw_label(font: i32, label: i32, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
-    if (label == TXT_WALL) { original_draw_cached_label(font, "WALL", x, y, r, g, b, a); }
-    if (label == TXT_STANDARD) { original_draw_cached_label(font, "STANDARD", x, y, r, g, b, a); }
-    if (label == TXT_RAPID) { original_draw_cached_label(font, "RAPID", x, y, r, g, b, a); }
-    if (label == TXT_HEALER) { original_draw_cached_label(font, "HEALER", x, y, r, g, b, a); }
-    if (label == TXT_SNIPER) { original_draw_cached_label(font, "SNIPER", x, y, r, g, b, a); }
-    if (label == TXT_ROCKET) { original_draw_cached_label(font, "ROCKET", x, y, r, g, b, a); }
-    if (label == TXT_GOLD_MINER) { original_draw_cached_label(font, "GOLD MINER", x, y, r, g, b, a); }
-    if (label == TXT_BASIC_BALL) { original_draw_cached_label(font, "BASIC BALL", x, y, r, g, b, a); }
-    if (label == TXT_FAST_BALL) { original_draw_cached_label(font, "FAST BALL", x, y, r, g, b, a); }
-    if (label == TXT_SLOW_BALL) { original_draw_cached_label(font, "SLOW BALL", x, y, r, g, b, a); }
-    if (label == TXT_CURVE_BALL) { original_draw_cached_label(font, "CURVE BALL", x, y, r, g, b, a); }
-    if (label == TXT_SWARM_BALL) { original_draw_cached_label(font, "SWARM BALL", x, y, r, g, b, a); }
-    if (label == TXT_SPLITTER) { original_draw_cached_label(font, "SPLITTER", x, y, r, g, b, a); }
-    if (label == TXT_FIRE_BALL) { original_draw_cached_label(font, "FIRE BALL", x, y, r, g, b, a); }
-    if (label == TXT_MOVER_BALL) { original_draw_cached_label(font, "MOVER BALL", x, y, r, g, b, a); }
-    if (label == TXT_COST) { original_draw_cached_label(font, "COST", x, y, r, g, b, a); }
-    if (label == TXT_DAMAGE) { original_draw_cached_label(font, "DAMAGE", x, y, r, g, b, a); }
-    if (label == TXT_HEALTH) { original_draw_cached_label(font, "HEALTH", x, y, r, g, b, a); }
-    if (label == TXT_RANGE) { original_draw_cached_label(font, "RANGE", x, y, r, g, b, a); }
-    if (label == TXT_RELOAD) { original_draw_cached_label(font, "RELOAD", x, y, r, g, b, a); }
-    if (label == TXT_LIVES) { original_draw_cached_label(font, "LIVES", x, y, r, g, b, a); }
-    if (label == TXT_GOLD) { original_draw_cached_label(font, "GOLD", x, y, r, g, b, a); }
-    if (label == TXT_NEXT_ENEMY) { original_draw_cached_label(font, "NEXT ENEMY", x, y, r, g, b, a); }
-    if (label == TXT_LEVELS_LEFT) { original_draw_cached_label(font, "LEVELS LEFT", x, y, r, g, b, a); }
-    if (label == TXT_SCORE) { original_draw_cached_label(font, "SCORE", x, y, r, g, b, a); }
-    if (label == TXT_PAUSED) { original_draw_cached_label(font, "PAUSED", x, y, r, g, b, a); }
-    if (label == TXT_BRICKOUT_DEFENSE) { original_draw_cached_label(font, "BRICKOUT DEFENSE", x, y, r, g, b, a); }
-    if (label == TXT_SELECT_OPTION) { original_draw_cached_label(font, "SELECT AN OPTION", x, y, r, g, b, a); }
-    if (label == TXT_CAMPAIGN_TUTORIAL) { original_draw_cached_label(font, "CAMPAIGN / TUTORIAL", x, y, r, g, b, a); }
-    if (label == TXT_CHALLENGE_LEVEL) { original_draw_cached_label(font, "CHALLENGE LEVEL", x, y, r, g, b, a); }
-    if (label == TXT_FORMER_CHALLENGES) { original_draw_cached_label(font, "FORMER CHALLENGES", x, y, r, g, b, a); }
-    if (label == TXT_UPGRADES) { original_draw_cached_label(font, "UPGRADES", x, y, r, g, b, a); }
-    if (label == TXT_SELECT_CAMPAIGN) { original_draw_cached_label(font, "SELECT CAMPAIGN", x, y, r, g, b, a); }
-    if (label == TXT_MARATHON) { original_draw_cached_label(font, "MARATHON", x, y, r, g, b, a); }
-    if (label == TXT_SPLIT_SWARM) { original_draw_cached_label(font, "SPLIT & SWARM", x, y, r, g, b, a); }
-    if (label == TXT_FORMER_RECOVERED) { original_draw_cached_label(font, "FORMER CHALLENGES", x, y, r, g, b, a); }
-    if (label == TXT_EARTHQUAKE) { original_draw_cached_label(font, "EARTHQUAKE", x, y, r, g, b, a); }
-    if (label == TXT_UPGRADE_PLACEHOLDER) { original_draw_cached_label(font, "UPGRADE PLACEHOLDER", x, y, r, g, b, a); }
-    if (label == TXT_TAP_ESC) { original_draw_cached_label(font, "TAP ESC", x, y, r, g, b, a); }
-    if (label == TXT_LEVEL_WON) { original_draw_cached_label(font, "LEVEL WON", x, y, r, g, b, a); }
-    if (label == TXT_LEVEL_LOST) { original_draw_cached_label(font, "LEVEL LOST", x, y, r, g, b, a); }
-    if (label == TXT_TAP_MENU) { original_draw_cached_label(font, "TAP TO MENU", x, y, r, g, b, a); }
+    draw_text_cached(font, original_label_runs[label], original_screen_x(x), original_screen_y(y), r, g, b, a);
 }
 
 function original_tower_asset(kind: OriginalTowerKind): i32 {
@@ -669,22 +628,91 @@ function original_load_label(path: string, source_width: i32): i32 {
     return gfx_load_sprite(path, source_width * 4, 20);
 }
 
+function original_cache_text_runs(): void {
+    let small: i32 = original_state.assets.font_small;
+    let title: i32 = original_state.assets.font_title;
+    original_label_runs[TXT_WALL] = gfx_cache_text(small, "WALL");
+    original_label_runs[TXT_STANDARD] = gfx_cache_text(small, "STANDARD");
+    original_label_runs[TXT_RAPID] = gfx_cache_text(small, "RAPID");
+    original_label_runs[TXT_HEALER] = gfx_cache_text(small, "HEALER");
+    original_label_runs[TXT_SNIPER] = gfx_cache_text(small, "SNIPER");
+    original_label_runs[TXT_ROCKET] = gfx_cache_text(small, "ROCKET");
+    original_label_runs[TXT_GOLD_MINER] = gfx_cache_text(small, "GOLD MINER");
+    original_label_runs[TXT_BASIC_BALL] = gfx_cache_text(small, "BASIC BALL");
+    original_label_runs[TXT_FAST_BALL] = gfx_cache_text(small, "FAST BALL");
+    original_label_runs[TXT_SLOW_BALL] = gfx_cache_text(small, "SLOW BALL");
+    original_label_runs[TXT_CURVE_BALL] = gfx_cache_text(small, "CURVE BALL");
+    original_label_runs[TXT_SWARM_BALL] = gfx_cache_text(small, "SWARM BALL");
+    original_label_runs[TXT_SPLITTER] = gfx_cache_text(small, "SPLITTER");
+    original_label_runs[TXT_FIRE_BALL] = gfx_cache_text(small, "FIRE BALL");
+    original_label_runs[TXT_MOVER_BALL] = gfx_cache_text(small, "MOVER BALL");
+    original_label_runs[TXT_COST] = gfx_cache_text(small, "COST");
+    original_label_runs[TXT_DAMAGE] = gfx_cache_text(small, "DAMAGE");
+    original_label_runs[TXT_HEALTH] = gfx_cache_text(small, "HEALTH");
+    original_label_runs[TXT_RANGE] = gfx_cache_text(small, "RANGE");
+    original_label_runs[TXT_RELOAD] = gfx_cache_text(small, "RELOAD");
+    original_label_runs[TXT_LIVES] = gfx_cache_text(small, "LIVES");
+    original_label_runs[TXT_GOLD] = gfx_cache_text(small, "GOLD");
+    original_label_runs[TXT_NEXT_ENEMY] = gfx_cache_text(small, "NEXT ENEMY");
+    original_label_runs[TXT_LEVELS_LEFT] = gfx_cache_text(small, "LEVELS LEFT");
+    original_label_runs[TXT_SCORE] = gfx_cache_text(small, "SCORE");
+    original_label_runs[TXT_PAUSED] = gfx_cache_text(title, "PAUSED");
+    original_label_runs[TXT_BRICKOUT_DEFENSE] = gfx_cache_text(title, "BRICKOUT DEFENSE");
+    original_label_runs[TXT_SELECT_OPTION] = gfx_cache_text(small, "SELECT AN OPTION");
+    original_label_runs[TXT_CAMPAIGN_TUTORIAL] = gfx_cache_text(small, "CAMPAIGN / TUTORIAL");
+    original_label_runs[TXT_CHALLENGE_LEVEL] = gfx_cache_text(small, "CHALLENGE LEVEL");
+    original_label_runs[TXT_FORMER_CHALLENGES] = gfx_cache_text(small, "FORMER CHALLENGES");
+    original_label_runs[TXT_UPGRADES] = gfx_cache_text(small, "UPGRADES");
+    original_label_runs[TXT_SELECT_CAMPAIGN] = gfx_cache_text(small, "SELECT CAMPAIGN");
+    original_label_runs[TXT_MARATHON] = gfx_cache_text(small, "MARATHON");
+    original_label_runs[TXT_SPLIT_SWARM] = gfx_cache_text(small, "SPLIT & SWARM");
+    original_label_runs[TXT_FORMER_RECOVERED] = gfx_cache_text(small, "FORMER CHALLENGES");
+    original_label_runs[TXT_EARTHQUAKE] = gfx_cache_text(small, "EARTHQUAKE");
+    original_label_runs[TXT_UPGRADE_PLACEHOLDER] = gfx_cache_text(small, "UPGRADE PLACEHOLDER");
+    original_label_runs[TXT_TAP_ESC] = gfx_cache_text(small, "TAP ESC");
+    original_label_runs[TXT_LEVEL_WON] = gfx_cache_text(title, "LEVEL WON");
+    original_label_runs[TXT_LEVEL_LOST] = gfx_cache_text(title, "LEVEL LOST");
+    original_label_runs[TXT_TAP_MENU] = gfx_cache_text(small, "TAP TO MENU");
+    original_digit_runs[0] = gfx_cache_text(small, "0");
+    original_digit_runs[1] = gfx_cache_text(small, "1");
+    original_digit_runs[2] = gfx_cache_text(small, "2");
+    original_digit_runs[3] = gfx_cache_text(small, "3");
+    original_digit_runs[4] = gfx_cache_text(small, "4");
+    original_digit_runs[5] = gfx_cache_text(small, "5");
+    original_digit_runs[6] = gfx_cache_text(small, "6");
+    original_digit_runs[7] = gfx_cache_text(small, "7");
+    original_digit_runs[8] = gfx_cache_text(small, "8");
+    original_digit_runs[9] = gfx_cache_text(small, "9");
+    original_minus_run = gfx_cache_text(small, "-");
+    original_tower_digit_runs[0] = gfx_cache_text(original_state.assets.font_tower, "0");
+    original_tower_digit_runs[1] = gfx_cache_text(original_state.assets.font_tower, "1");
+    original_tower_digit_runs[2] = gfx_cache_text(original_state.assets.font_tower, "2");
+    original_tower_digit_runs[3] = gfx_cache_text(original_state.assets.font_tower, "3");
+    original_tower_digit_runs[4] = gfx_cache_text(original_state.assets.font_tower, "4");
+    original_tower_digit_runs[5] = gfx_cache_text(original_state.assets.font_tower, "5");
+    original_tower_digit_runs[6] = gfx_cache_text(original_state.assets.font_tower, "6");
+    original_tower_digit_runs[7] = gfx_cache_text(original_state.assets.font_tower, "7");
+    original_tower_digit_runs[8] = gfx_cache_text(original_state.assets.font_tower, "8");
+    original_tower_digit_runs[9] = gfx_cache_text(original_state.assets.font_tower, "9");
+    original_tower_minus_run = gfx_cache_text(original_state.assets.font_tower, "-");
+}
+
 function original_load_assets(): void {
     original_state.assets.background = gfx_load_sprite("assets/original/generated_4x/background_4x.png", 1320, 1100);
     original_state.assets.paddle = gfx_load_sprite("assets/original/paddle.png", 133, 19);
-    original_state.assets.store_wall = gfx_load_sprite("assets/original/store_wall.png", 65, 65);
-    original_state.assets.store_standard = gfx_load_sprite("assets/original/store_standard.png", 65, 65);
-    original_state.assets.store_rapid = gfx_load_sprite("assets/original/store_rapid.png", 65, 65);
-    original_state.assets.store_healer = gfx_load_sprite("assets/original/store_healer.png", 65, 65);
-    original_state.assets.store_sniper = gfx_load_sprite("assets/original/store_sniper.png", 65, 65);
-    original_state.assets.store_rocket = gfx_load_sprite("assets/original/store_rocket.png", 65, 65);
+    original_state.assets.store_wall = gfx_load_sprite("assets/original/generated_4x/buttons/store_wall_4x.png", 260, 260);
+    original_state.assets.store_standard = gfx_load_sprite("assets/original/generated_4x/buttons/store_standard_4x.png", 260, 260);
+    original_state.assets.store_rapid = gfx_load_sprite("assets/original/generated_4x/buttons/store_rapid_4x.png", 260, 260);
+    original_state.assets.store_healer = gfx_load_sprite("assets/original/generated_4x/buttons/store_healer_4x.png", 260, 260);
+    original_state.assets.store_sniper = gfx_load_sprite("assets/original/generated_4x/buttons/store_sniper_4x.png", 260, 260);
+    original_state.assets.store_rocket = gfx_load_sprite("assets/original/generated_4x/buttons/store_rocket_4x.png", 260, 260);
     original_state.assets.store_gold = gfx_load_sprite("assets/original/store_gold.png", 65, 65);
     original_state.assets.store_info = gfx_load_sprite("assets/original/store_info.png", 201, 197);
     original_state.assets.button_upgrade = gfx_load_sprite("assets/original/button_upgrade.png", 80, 25);
     original_state.assets.button_sell = gfx_load_sprite("assets/original/button_sell.png", 44, 26);
     original_state.assets.button_cancel = gfx_load_sprite("assets/original/button_cancel.png", 71, 26);
-    original_state.assets.button_next = gfx_load_sprite("assets/original/button_next.png", 131, 64);
-    original_state.assets.button_pause = gfx_load_sprite("assets/original/button_pause.png", 65, 65);
+    original_state.assets.button_next = gfx_load_sprite("assets/original/generated_4x/buttons/button_next_4x.png", 524, 260);
+    original_state.assets.button_pause = gfx_load_sprite("assets/original/generated_4x/buttons/button_pause_4x.png", 260, 260);
     original_state.assets.tower_selector = gfx_load_sprite("assets/original/tower_selector.png", 34, 34);
     original_state.assets.range_ring = gfx_load_sprite("assets/original/range_ring.svg", 256, 256);
     original_state.assets.outline = gfx_load_sprite("assets/original/outline.svg", 128, 128);
@@ -748,6 +776,8 @@ function original_load_assets(): void {
     original_state.assets.projectile_rocket = gfx_load_sprite("assets/original/projectile_rocket.svg", 8, 8);
     original_state.assets.font_small = load_font("assets/original/estudio.ttf", 14);
     original_state.assets.font_title = load_font("assets/original/estudio.ttf", 28);
+    original_state.assets.font_tower = load_font("assets/original/estudio.ttf", 8);
+    original_cache_text_runs();
     original_load_animation_assets();
 }
 
@@ -1452,23 +1482,26 @@ function original_handle_keyboard(): void {
 
 function original_draw_digit(digit: i32, x: f32, y: f32, scale: f32, r: f32, g: f32, b: f32): void {
     if (digit < 0 || digit > 9) { return; }
-    if (digit == 0) { original_draw_cached_label(original_state.assets.font_small, "0", x, y, r, g, b, 1.0); }
-    if (digit == 1) { original_draw_cached_label(original_state.assets.font_small, "1", x, y, r, g, b, 1.0); }
-    if (digit == 2) { original_draw_cached_label(original_state.assets.font_small, "2", x, y, r, g, b, 1.0); }
-    if (digit == 3) { original_draw_cached_label(original_state.assets.font_small, "3", x, y, r, g, b, 1.0); }
-    if (digit == 4) { original_draw_cached_label(original_state.assets.font_small, "4", x, y, r, g, b, 1.0); }
-    if (digit == 5) { original_draw_cached_label(original_state.assets.font_small, "5", x, y, r, g, b, 1.0); }
-    if (digit == 6) { original_draw_cached_label(original_state.assets.font_small, "6", x, y, r, g, b, 1.0); }
-    if (digit == 7) { original_draw_cached_label(original_state.assets.font_small, "7", x, y, r, g, b, 1.0); }
-    if (digit == 8) { original_draw_cached_label(original_state.assets.font_small, "8", x, y, r, g, b, 1.0); }
-    if (digit == 9) { original_draw_cached_label(original_state.assets.font_small, "9", x, y, r, g, b, 1.0); }
+    let font: i32 = original_state.assets.font_small;
+    let run: i32 = original_digit_runs[digit];
+    if (scale < 0.75) {
+        font = original_state.assets.font_tower;
+        run = original_tower_digit_runs[digit];
+    }
+    draw_text_cached(font, run, original_screen_x(x), original_screen_y(y), r, g, b, 1.0);
 }
 
 function original_draw_number(value: i32, x: f32, y: f32, scale: f32, r: f32, g: f32, b: f32): void {
     let n: i32 = value;
     let cursor: f32 = x;
     if (n < 0) {
-        original_draw_cached_label(original_state.assets.font_small, "-", cursor, y, r, g, b, 1.0);
+        let font: i32 = original_state.assets.font_small;
+        let run: i32 = original_minus_run;
+        if (scale < 0.75) {
+            font = original_state.assets.font_tower;
+            run = original_tower_minus_run;
+        }
+        draw_text_cached(font, run, original_screen_x(cursor), original_screen_y(y), r, g, b, 1.0);
         cursor += 6.0 * scale;
         n = 0 - n;
     }
@@ -1542,7 +1575,7 @@ function original_draw_towers(): void {
             let frame: i32 = 0;
             if (original_state.towers[i].animation_active) { frame = original_state.towers[i].animation_tick / 2; }
             original_draw_sprite(original_tower_animation_asset(original_state.towers[i].kind, frame), original_state.towers[i].x, original_state.towers[i].y, 32.0, 32.0, 255);
-            original_draw_number(original_state.towers[i].hp, original_state.towers[i].x + 1.0, original_state.towers[i].y + 1.0, 1.0, 0.95, 0.95, 0.95);
+            original_draw_number(original_state.towers[i].hp, original_state.towers[i].x + 1.0, original_state.towers[i].y + 1.0, 0.55, 0.95, 0.95, 0.95);
             if (i == original_state.selected_tower_index) {
                 original_draw_sprite(original_state.assets.tower_selector, original_state.towers[i].x - 1.0, original_state.towers[i].y - 1.0, 34.0, 34.0, 255);
             }

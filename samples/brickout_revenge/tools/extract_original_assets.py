@@ -17,7 +17,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 BALLS = {
@@ -187,6 +187,103 @@ def render_ai_masters(source_root: Path, output_root: Path, pdftoppm: Path, scal
                 str(output_root / f"{stem}_4x"),
             ]
         )
+
+
+def recolor_button(image: Image.Image, hue: float, saturation: float) -> Image.Image:
+    hsv = image.convert("RGB").convert("HSV")
+    pixels = hsv.load()
+    for y in range(hsv.height):
+        for x in range(hsv.width):
+            h, s, v = pixels[x, y]
+            if s > 70 and 8 <= h <= 45:
+                pixels[x, y] = (int(hue * 255.0), int(saturation * 255.0), v)
+    recolored = hsv.convert("RGB").convert("RGBA")
+    recolored.putalpha(image.getchannel("A"))
+    return recolored
+
+
+def erase_button_label(image: Image.Image) -> Image.Image:
+    clean = image.copy()
+    pixels = clean.load()
+    base = pixels[130, 176]
+    for y in range(86, 174):
+        for x in range(18, 242):
+            r, g, b, a = pixels[x, y]
+            if a > 0 and min(r, g, b) > 205 and max(r, g, b) - min(r, g, b) < 35:
+                pixels[x, y] = base
+    return clean
+
+
+def centered_text(
+    image: Image.Image,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int, int],
+    center_y: int,
+) -> None:
+    draw = ImageDraw.Draw(image)
+    bounds = draw.multiline_textbbox((0, 0), text, font=font, align="center", spacing=0)
+    width = bounds[2] - bounds[0]
+    height = bounds[3] - bounds[1]
+    draw.multiline_text(
+        ((image.width - width) // 2, center_y - height // 2 - bounds[1]),
+        text,
+        font=font,
+        fill=fill,
+        align="center",
+        spacing=0,
+    )
+
+
+def write_button_assets(sample_root: Path, output_root: Path, scale: int) -> None:
+    composition = Image.open(output_root / "PTDsource_4x.png").convert("RGBA")
+    button_root = output_root / "buttons"
+    button_root.mkdir(parents=True, exist_ok=True)
+
+    crops = {
+        "store_standard": (451, 43, 65, 65),
+        "store_rocket": (520, 43, 65, 65),
+        "store_wall": (589, 43, 65, 65),
+        "store_healer": (451, 113, 65, 65),
+        "button_pause": (451, 412, 65, 65),
+        "button_next": (520, 412, 131, 65),
+    }
+    for name, (x, y, width, height) in crops.items():
+        crop = composition.crop((x * scale, y * scale, (x + width) * scale, (y + height) * scale))
+        crop.save(button_root / f"{name}_4x.png", optimize=True)
+
+    template = erase_button_label(
+        Image.open(button_root / "store_standard_4x.png").convert("RGBA")
+    )
+    font_path = sample_root / "assets" / "original" / "estudio.ttf"
+
+    rapid = recolor_button(template, 0.72, 0.35)
+    centered_text(
+        rapid,
+        "RAPID\nFIRE",
+        ImageFont.truetype(str(font_path), 30 * scale // 4),
+        (245, 245, 255, 255),
+        128,
+    )
+    rapid.save(button_root / "store_rapid_4x.png", optimize=True)
+
+    sniper = recolor_button(template, 0.10, 0.18)
+    sniper_draw = ImageDraw.Draw(sniper)
+    for bounds, color in (
+        ((18, 18, 96, 84), (191, 163, 137, 150)),
+        ((128, 4, 226, 82), (236, 220, 198, 180)),
+        ((6, 146, 92, 238), (237, 219, 194, 180)),
+        ((150, 146, 254, 246), (190, 160, 132, 130)),
+    ):
+        sniper_draw.ellipse(bounds, fill=color)
+    centered_text(
+        sniper,
+        "SNIPER",
+        ImageFont.truetype(str(font_path), 30 * scale // 4),
+        (74, 62, 57, 255),
+        128,
+    )
+    sniper.save(button_root / "store_sniper_4x.png", optimize=True)
 
 
 def write_stasis_loader(sample_root: Path, published_scale: int = 4) -> None:
@@ -414,6 +511,7 @@ def main() -> int:
 
         if args.pdftoppm:
             render_ai_masters(source_root, output_root, args.pdftoppm, args.scale)
+            write_button_assets(sample_root, output_root, args.scale)
 
         export_used_vectors(args.ffdec, source_root / "TowerDefense.swf", temp, sample_root)
 
