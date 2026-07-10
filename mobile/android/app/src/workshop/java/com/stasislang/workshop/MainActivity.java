@@ -30,6 +30,7 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.util.Base64;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -49,6 +50,7 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
@@ -108,6 +110,7 @@ public final class MainActivity extends Activity {
     private static final int MAX_AI_OUTPUT_TOKENS = 8192;
     private static final int MAX_AI_IMAGE_ATTACHMENTS = 4;
     private static final int MAX_AI_IMAGE_ATTACHMENT_BYTES = 12 * 1024 * 1024;
+    private static final long MAX_PREVIEW_CAPTURE_PIXELS = 8_000_000L;
     private static final int MAX_COMMAND_HISTORY = 20;
     private static final int GITHUB_NETWORK_TIMEOUT_MS = 15_000;
     private static final int MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024;
@@ -159,6 +162,7 @@ public final class MainActivity extends Activity {
     private EditText aiMonthlyLimitUsdEditor;
     private TextView aiBudgetStatus;
     private TextView aiAttachmentStatus;
+    private TextView screenshotAttachmentStatus;
     private TextView aiStepPill;
     private TextView aiActionPill;
     private TextView aiPhasePill;
@@ -192,6 +196,10 @@ public final class MainActivity extends Activity {
     private volatile HttpURLConnection activeAiConnection;
     private String activeAiPrompt = "";
     private volatile List<AiImageAttachment> activeAiImageAttachments = Collections.emptyList();
+    private Bitmap pendingPreviewScreenshot;
+    private JSONObject pendingPreviewLogicalSnapshot;
+    private boolean attachPreviewPixels;
+    private boolean attachPreviewLogicalSnapshot;
     private TextView reloadStatus;
     private TextView diagnosticStatus;
     private String diagnosticFile = "";
@@ -280,6 +288,9 @@ public final class MainActivity extends Activity {
         if (aiConnection != null) aiConnection.disconnect();
         githubSyncExecutor.shutdownNow();
         projectIoExecutor.shutdownNow();
+        if (pendingPreviewScreenshot != null && !pendingPreviewScreenshot.isRecycled()) {
+            pendingPreviewScreenshot.recycle();
+        }
         if (gameLoop != null) {
             gameLoopHandler.removeCallbacks(gameLoop);
         }
@@ -1156,6 +1167,21 @@ public final class MainActivity extends Activity {
         });
         controls.addView(reviewAttachments, fullWidth());
         refreshAiAttachmentStatus();
+        screenshotAttachmentStatus = new TextView(this);
+        screenshotAttachmentStatus.setTextSize(12.0f);
+        screenshotAttachmentStatus.setTextColor(Color.rgb(73, 84, 100));
+        screenshotAttachmentStatus.setPadding(0, dp(3), 0, dp(2));
+        screenshotAttachmentStatus.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { reviewPreviewCaptureForAi(); }
+        });
+        controls.addView(screenshotAttachmentStatus, fullWidth());
+        Button capturePreview = new Button(this);
+        capturePreview.setText("Capture Preview for AI");
+        capturePreview.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { capturePreviewForAi(); }
+        });
+        controls.addView(capturePreview, fullWidth());
+        refreshScreenshotAttachmentStatus();
 
         LinearLayout aiActionRow = new LinearLayout(this);
         aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -1626,6 +1652,7 @@ public final class MainActivity extends Activity {
             activeProject = project;
             projectRootFile = project.root;
             projectRootPath = project.root.getAbsolutePath();
+            clearPendingPreviewCapture();
             selectedSymbol = null;
             diagnosticFile = "";
             diagnosticSymbol = "";
@@ -2439,16 +2466,38 @@ public final class MainActivity extends Activity {
         final ProjectSnapshot aiProject = loadBundledProject();
         final List<WorkshopImageAssets.AssetInfo> requestImageInfos;
         final JSONArray requestImageMetadata;
+        final Bitmap requestPreviewPixels;
+        final JSONObject requestLogicalSnapshot;
         try {
             requestImageInfos = selectedAiImageInfos();
             requestImageMetadata = aiImageMetadata(requestImageInfos);
+            if (attachPreviewPixels) {
+                if (pendingPreviewScreenshot == null || pendingPreviewScreenshot.isRecycled()) {
+                    throw new IOException("selected preview pixels are no longer available");
+                }
+                if (requestImageInfos.size() >= MAX_AI_IMAGE_ATTACHMENTS) {
+                    throw new IOException("preview plus project images exceed the four-image request limit");
+                }
+                requestPreviewPixels = pendingPreviewScreenshot.copy(Bitmap.Config.ARGB_8888, false);
+                requestImageMetadata.put(new JSONObject()
+                        .put("kind", "captured_preview_pixels")
+                        .put("width", requestPreviewPixels.getWidth())
+                        .put("height", requestPreviewPixels.getHeight())
+                        .put("detail", "original")
+                        .put("estimated_patch_tokens", ((requestPreviewPixels.getWidth() + 31L) / 32L)
+                                * ((requestPreviewPixels.getHeight() + 31L) / 32L)));
+            } else {
+                requestPreviewPixels = null;
+            }
+            requestLogicalSnapshot = attachPreviewLogicalSnapshot && pendingPreviewLogicalSnapshot != null
+                    ? new JSONObject(pendingPreviewLogicalSnapshot.toString()) : null;
         } catch (Exception error) {
             setStatusText("AI run blocked by image attachments: " + error.getMessage());
             updateAiProgress(0, 0, "attachment blocked");
             return;
         }
         final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
-                requestImageMetadata);
+                requestImageMetadata, requestLogicalSnapshot);
         final String requestModel = model;
         final String requestApiKey = apiKey;
         activeAiPrompt = prompt;
@@ -2463,7 +2512,7 @@ public final class MainActivity extends Activity {
             @Override
             public void run() {
                 try {
-                    activeAiImageAttachments = loadAiImageAttachments(requestImageInfos);
+                    activeAiImageAttachments = loadAiImageAttachments(requestImageInfos, requestPreviewPixels);
                     final AiAgentResult aiResult = runAiAgentLoop(requestApiKey, requestModel, requestJson);
                     throwIfAiCancelled();
                     runOnUiThread(new Runnable() {
@@ -2495,6 +2544,7 @@ public final class MainActivity extends Activity {
                         }
                     });
                 } finally {
+                    if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
                     activeAiImageAttachments = Collections.emptyList();
                     aiRunActive = false;
                 }
@@ -2559,7 +2609,7 @@ public final class MainActivity extends Activity {
     }
 
     private static String buildAiCodeRequestJson(String prompt, SymbolEntry symbol, String selectedSource,
-            ProjectSnapshot project, JSONArray imageAttachments) {
+            ProjectSnapshot project, JSONArray imageAttachments, JSONObject logicalSnapshot) {
         try {
             JSONArray selectedSymbols = new JSONArray();
             if (symbol != null) {
@@ -2618,6 +2668,7 @@ public final class MainActivity extends Activity {
             request.put("selected_symbols_are_context_only", true);
             request.put("selected_image_attachments", imageAttachments);
             request.put("selected_images_are_explicit_project_assets_only", true);
+            if (logicalSnapshot != null) request.put("selected_preview_logical_snapshot", logicalSnapshot);
             return request.toString();
         } catch (Exception error) {
             return "{}";
@@ -3873,11 +3924,15 @@ public final class MainActivity extends Activity {
                 .put("raw_values", values);
     }
     private JSONObject aiToolTakeScreenshot() throws Exception {
+        return logicalRenderSnapshot(nativeFrameValues);
+    }
+
+    private JSONObject logicalRenderSnapshot(int[] capturedFrame) throws Exception {
         int width = gamePreview == null ? 0 : gamePreview.getWidth();
         int height = gamePreview == null ? 0 : gamePreview.getHeight();
         JSONArray frame = new JSONArray();
-        for (int index = 0; index < nativeFrameValues.length; index += 1) {
-            frame.put(nativeFrameValues[index]);
+        for (int index = 0; index < capturedFrame.length; index += 1) {
+            frame.put(capturedFrame[index]);
         }
         return new JSONObject()
                 .put("kind", "logical_render_snapshot")
@@ -3888,7 +3943,7 @@ public final class MainActivity extends Activity {
                 .put("touch_active", gamePreview != null && gamePreview.touchActive() == 1)
                 .put("input", currentInputStateJson())
                 .put("runtime_state", runtimeStateJson())
-                .put("frame", frameValuesToJson(nativeFrameValues))
+                .put("frame", frameValuesToJson(capturedFrame))
                 .put("frame_values", frame);
     }
 
@@ -4775,11 +4830,26 @@ public final class MainActivity extends Activity {
     }
 
     private static List<AiImageAttachment> loadAiImageAttachments(
-            List<WorkshopImageAssets.AssetInfo> images) throws IOException {
+            List<WorkshopImageAssets.AssetInfo> images, Bitmap previewPixels) throws IOException {
         ArrayList<AiImageAttachment> attachments = new ArrayList<>();
+        int totalBytes = 0;
         for (WorkshopImageAssets.AssetInfo image : images) {
+            byte[] bytes = WorkshopImageAssets.readForSync(image);
+            totalBytes += bytes.length;
             attachments.add(new AiImageAttachment(image.relativePath, imageMimeType(image.file.getName()),
-                    WorkshopImageAssets.readForSync(image), image.width, image.height));
+                    bytes, image.width, image.height));
+        }
+        if (previewPixels != null) {
+            ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+            if (!previewPixels.compress(Bitmap.CompressFormat.PNG, 100, encoded)) {
+                throw new IOException("could not encode captured preview pixels");
+            }
+            byte[] bytes = encoded.toByteArray();
+            if (bytes.length > MAX_AI_IMAGE_ATTACHMENT_BYTES - totalBytes) {
+                throw new IOException("project images plus preview exceed the 12 MiB request limit");
+            }
+            attachments.add(new AiImageAttachment("captured-preview.png", "image/png", bytes,
+                    previewPixels.getWidth(), previewPixels.getHeight()));
         }
         return Collections.unmodifiableList(attachments);
     }
@@ -5186,6 +5256,126 @@ public final class MainActivity extends Activity {
             }
         });
         dialog.show();
+    }
+
+    private void capturePreviewForAi() {
+        if (aiRunActive) {
+            setStatusText("Preview capture blocked while an AI run is active");
+            return;
+        }
+        if (gamePreview == null || gamePreview.getWidth() <= 0 || gamePreview.getHeight() <= 0) {
+            setStatusText("Preview capture needs a visible rendered game frame");
+            return;
+        }
+        screenshotAttachmentStatus.setText("AI preview: capturing rendered pixels");
+        gamePreview.captureFrame(new GamePreviewView.CaptureCallback() {
+            @Override public void onCaptured(final Bitmap bitmap, final String error, final int[] capturedFrame) {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        if (bitmap == null) {
+                            setStatusText("Preview capture failed: " + error);
+                            refreshScreenshotAttachmentStatus();
+                            return;
+                        }
+                        if (pendingPreviewScreenshot != null && !pendingPreviewScreenshot.isRecycled()) {
+                            pendingPreviewScreenshot.recycle();
+                        }
+                        pendingPreviewScreenshot = bitmap;
+                        try {
+                            pendingPreviewLogicalSnapshot = logicalRenderSnapshot(capturedFrame);
+                        } catch (Exception snapshotError) {
+                            pendingPreviewLogicalSnapshot = null;
+                            setStatusText("Pixels captured; logical snapshot failed: " + snapshotError.getMessage());
+                        }
+                        attachPreviewPixels = false;
+                        attachPreviewLogicalSnapshot = false;
+                        refreshScreenshotAttachmentStatus();
+                        reviewPreviewCaptureForAi();
+                    }
+                });
+            }
+        });
+    }
+
+    private void clearPendingPreviewCapture() {
+        if (pendingPreviewScreenshot != null && !pendingPreviewScreenshot.isRecycled()) {
+            pendingPreviewScreenshot.recycle();
+        }
+        pendingPreviewScreenshot = null;
+        pendingPreviewLogicalSnapshot = null;
+        attachPreviewPixels = false;
+        attachPreviewLogicalSnapshot = false;
+        refreshScreenshotAttachmentStatus();
+    }
+
+    private void refreshScreenshotAttachmentStatus() {
+        if (screenshotAttachmentStatus == null) return;
+        if (pendingPreviewScreenshot == null || pendingPreviewScreenshot.isRecycled()) {
+            screenshotAttachmentStatus.setText("AI preview: no pixel capture or logical snapshot selected");
+            return;
+        }
+        String selections;
+        if (attachPreviewPixels && attachPreviewLogicalSnapshot) selections = "pixels + logical snapshot";
+        else if (attachPreviewPixels) selections = "pixels";
+        else if (attachPreviewLogicalSnapshot) selections = "logical snapshot";
+        else selections = "captured, nothing approved to send";
+        long patches = ((pendingPreviewScreenshot.getWidth() + 31L) / 32L)
+                * ((pendingPreviewScreenshot.getHeight() + 31L) / 32L);
+        screenshotAttachmentStatus.setText("AI preview: " + selections + " - "
+                + pendingPreviewScreenshot.getWidth() + "x" + pendingPreviewScreenshot.getHeight()
+                + (attachPreviewPixels ? ", about " + patches + " image tokens / "
+                        + formatAiCostUsd(patches * GPT_5_6_TERRA_INPUT_USD_PER_MILLION / 1000000.0)
+                        + " Terra input" : "") + " (tap to review)");
+    }
+
+    private void reviewPreviewCaptureForAi() {
+        if (pendingPreviewScreenshot == null || pendingPreviewScreenshot.isRecycled()) {
+            setStatusText("Capture the preview before reviewing it");
+            return;
+        }
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(8), dp(8), dp(8), dp(8));
+        ImageView preview = new ImageView(this);
+        preview.setImageBitmap(pendingPreviewScreenshot);
+        preview.setAdjustViewBounds(true);
+        preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        content.addView(preview, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(320)));
+        final CheckBox pixels = new CheckBox(this);
+        pixels.setText("Attach these rendered pixels to the next AI request");
+        pixels.setChecked(attachPreviewPixels);
+        content.addView(pixels, fullWidth());
+        final CheckBox logical = new CheckBox(this);
+        logical.setText("Attach logical render/runtime/input snapshot as text context");
+        logical.setChecked(attachPreviewLogicalSnapshot);
+        logical.setEnabled(pendingPreviewLogicalSnapshot != null);
+        content.addView(logical, fullWidth());
+        new AlertDialog.Builder(this)
+                .setTitle("Review Preview Capture")
+                .setMessage("Nothing is sent until selected here and Run AI is pressed.")
+                .setView(content)
+                .setPositiveButton("Apply Selection", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        attachPreviewPixels = pixels.isChecked();
+                        attachPreviewLogicalSnapshot = logical.isChecked();
+                        refreshScreenshotAttachmentStatus();
+                        setStatusText("AI preview attachment selection updated");
+                    }
+                })
+                .setNeutralButton("Remove Capture", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        pendingPreviewScreenshot.recycle();
+                        pendingPreviewScreenshot = null;
+                        pendingPreviewLogicalSnapshot = null;
+                        attachPreviewPixels = false;
+                        attachPreviewLogicalSnapshot = false;
+                        refreshScreenshotAttachmentStatus();
+                        setStatusText("AI preview capture removed");
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void requestImageRename(final WorkshopImageAssets.AssetInfo asset) {
@@ -6730,6 +6920,10 @@ public final class MainActivity extends Activity {
 
 
     private static final class GamePreviewView extends GLSurfaceView {
+        interface CaptureCallback {
+            void onCaptured(Bitmap bitmap, String error, int[] capturedFrame);
+        }
+
         private final MainActivity activity;
         private final PreviewRenderer renderer;
         private int touchX;
@@ -6760,6 +6954,11 @@ public final class MainActivity extends Activity {
 
         void setRenderFrameValues(int[] frameValues) {
             renderer.setFrameValues(frameValues);
+            requestRender();
+        }
+
+        void captureFrame(CaptureCallback callback) {
+            renderer.requestCapture(callback);
             requestRender();
         }
 
@@ -6827,6 +7026,7 @@ public final class MainActivity extends Activity {
                 .order(ByteOrder.nativeOrder())
                 .asFloatBuffer();
         private final int[] frameValues = new int[RENDER_FRAME_I32_CAPACITY];
+        private final int[] lastDrawnFrame = new int[RENDER_FRAME_I32_CAPACITY];
         private int program;
         private int positionHandle;
         private int resolutionHandle;
@@ -6840,6 +7040,7 @@ public final class MainActivity extends Activity {
         private int ballTexture;
         private int surfaceWidth = 1;
         private int surfaceHeight = 1;
+        private GamePreviewView.CaptureCallback pendingCapture;
 
         PreviewRenderer(MainActivity activity) {
             this.activity = activity;
@@ -6847,6 +7048,13 @@ public final class MainActivity extends Activity {
 
         synchronized void setFrameValues(int[] values) {
             System.arraycopy(values, 0, frameValues, 0, RENDER_FRAME_I32_CAPACITY);
+        }
+
+        synchronized void requestCapture(GamePreviewView.CaptureCallback callback) {
+            if (pendingCapture != null) {
+                pendingCapture.onCaptured(null, "a newer preview capture replaced this request", new int[0]);
+            }
+            pendingCapture = callback;
         }
 
         @Override
@@ -6886,6 +7094,7 @@ public final class MainActivity extends Activity {
             int vertexCount = 0;
             int spriteVertexCount = 0;
             synchronized (this) {
+                System.arraycopy(frameValues, 0, lastDrawnFrame, 0, lastDrawnFrame.length);
                 int commandCount = Math.max(0, Math.min(MAX_RENDER_COMMANDS, frameValues[5]));
                 for (int index = 0; index < commandCount; index += 1) {
                     int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
@@ -6907,7 +7116,58 @@ public final class MainActivity extends Activity {
             if (spriteVertexCount > 0) {
                 drawSpriteBatch(spriteVertexCount);
             }
+            captureRenderedPixelsIfRequested();
             activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
+        }
+
+        private void captureRenderedPixelsIfRequested() {
+            GamePreviewView.CaptureCallback callback;
+            synchronized (this) {
+                callback = pendingCapture;
+                pendingCapture = null;
+            }
+            if (callback == null) return;
+            int[] capturedFrame = new int[RENDER_FRAME_I32_CAPACITY];
+            synchronized (this) {
+                System.arraycopy(lastDrawnFrame, 0, capturedFrame, 0, capturedFrame.length);
+            }
+            try {
+                long pixelCount = (long)surfaceWidth * (long)surfaceHeight;
+                if (pixelCount > MAX_PREVIEW_CAPTURE_PIXELS) {
+                    callback.onCaptured(null, "preview framebuffer exceeds the 8 megapixel capture limit", capturedFrame);
+                    return;
+                }
+                IntBuffer pixels = ByteBuffer.allocateDirect(surfaceWidth * surfaceHeight * 4)
+                        .order(ByteOrder.nativeOrder()).asIntBuffer();
+                GLES20.glReadPixels(0, 0, surfaceWidth, surfaceHeight, GLES20.GL_RGBA,
+                        GLES20.GL_UNSIGNED_BYTE, pixels);
+                int[] flipped = new int[surfaceWidth * surfaceHeight];
+                for (int y = 0; y < surfaceHeight; y++) {
+                    int sourceRow = y * surfaceWidth;
+                    int targetRow = (surfaceHeight - y - 1) * surfaceWidth;
+                    for (int x = 0; x < surfaceWidth; x++) {
+                        int rgba = pixels.get(sourceRow + x);
+                        int redBlueSwapped = (rgba & 0xff00ff00)
+                                | ((rgba << 16) & 0x00ff0000) | ((rgba >> 16) & 0x000000ff);
+                        flipped[targetRow + x] = redBlueSwapped;
+                    }
+                }
+                Bitmap full = Bitmap.createBitmap(flipped, surfaceWidth, surfaceHeight, Bitmap.Config.ARGB_8888);
+                int largest = Math.max(surfaceWidth, surfaceHeight);
+                if (largest <= 1024) {
+                    callback.onCaptured(full, "", capturedFrame);
+                    return;
+                }
+                float scale = 1024.0f / largest;
+                Bitmap bounded = Bitmap.createScaledBitmap(full, Math.max(1, Math.round(surfaceWidth * scale)),
+                        Math.max(1, Math.round(surfaceHeight * scale)), true);
+                full.recycle();
+                callback.onCaptured(bounded, "", capturedFrame);
+            } catch (OutOfMemoryError error) {
+                callback.onCaptured(null, "not enough memory for bounded pixel capture", capturedFrame);
+            } catch (RuntimeException error) {
+                callback.onCaptured(null, error.getMessage(), capturedFrame);
+            }
         }
 
         private void appendRect(int base) {
