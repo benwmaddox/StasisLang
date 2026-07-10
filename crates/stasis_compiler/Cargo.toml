@@ -20,4 +20,5 @@ stasis_dynload = { path = "../stasis_dynload" }
 serde.workspace = true
 
 [dev-dependencies]
+object = "0.36"
 serde_json.workspace = true

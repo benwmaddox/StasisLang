@@ -134,13 +134,15 @@ impl JitProcess {
         self.load_import_graph_sources()
             .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
-        let mut type_table = self.compiler.types().clone();
-        type_table
+        self.compiler
+            .types_mut()
             .ensure_utf8_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
-        type_table
+        self.compiler
+            .types_mut()
             .ensure_ascii_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
+        let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
         let cache_miss = self
             .compile_analysis_cache
@@ -148,16 +150,18 @@ impl JitProcess {
             .is_none_or(|cache| cache.files_fingerprint != files_fingerprint);
         let mut force_reemit_reachable = false;
         if cache_miss {
-            let extern_signatures =
-                collect_supported_extern_call_signatures(self.compiler.files(), &mut type_table)
-                    .map_err(crate::compiler::CompileError::Backend)?;
+            let extern_signatures = collect_supported_extern_call_signatures(
+                self.compiler.files(),
+                &mut analysis_type_table,
+            )
+            .map_err(crate::compiler::CompileError::Backend)?;
             let (resolved_extern_signatures, extern_symbol_addresses) = self
                 .resolve_extern_call_signatures(&extern_signatures)
                 .map_err(crate::compiler::CompileError::Backend)?;
             let next_cache = build_compile_analysis_cache_from_resolved_externs(
                 self.compiler.files(),
                 self.compiler.functions(),
-                &mut type_table,
+                &mut analysis_type_table,
                 files_fingerprint,
                 resolved_extern_signatures,
                 extern_symbol_addresses,
@@ -169,12 +173,13 @@ impl JitProcess {
             }
             self.compile_analysis_cache = Some(next_cache);
         }
+        *self.compiler.types_mut() = analysis_type_table.clone();
         let analysis = self.compile_analysis_cache.as_ref().ok_or_else(|| {
             crate::compiler::CompileError::Invariant(
                 "jit compile analysis cache missing after refresh".to_string(),
             )
         })?;
-        seed_fixed_collection_max_length_headers(&analysis.global_path_types, &type_table)
+        seed_fixed_collection_max_length_headers(&analysis.global_path_types, &analysis_type_table)
             .map_err(crate::compiler::CompileError::Backend)?;
         let emit_function_ids = select_emit_function_ids(
             self.compiler.functions(),
@@ -186,11 +191,14 @@ impl JitProcess {
         let mut next_symbol_seq = self.next_symbol_seq;
         let mut staged_artifacts = self.artifacts.clone();
         let mut staged_modules: Vec<JITModule> = Vec::new();
-        let emit = self
-            .compiler
-            .emit_pass_for_ids_with(&emit_function_ids, &mut |meta, hir| {
+        let emit = self.compiler.emit_pass_for_ids_with(
+            &emit_function_ids,
+            &mut |meta, hir, lowered_types| {
                 let symbol = format!("jit_fn_{}_{}", meta.id, next_symbol_seq);
                 next_symbol_seq = next_symbol_seq.saturating_add(1);
+                let mut type_table = lowered_types.clone();
+                type_table.ensure_utf8_view_id()?;
+                type_table.ensure_ascii_view_id()?;
                 let (module, code_ptr) = compile_function_to_jit_module(
                     meta,
                     hir,
@@ -214,7 +222,8 @@ impl JitProcess {
                     code_ptr,
                 });
                 Ok(())
-            })?;
+            },
+        )?;
         self.next_slot = next_slot;
         self.next_symbol_seq = next_symbol_seq;
         self.artifacts = staged_artifacts;
@@ -1280,6 +1289,18 @@ mod tests {
             .artifacts()
             .iter()
             .all(|artifact| artifact.code_ptr != 0));
+    }
+
+    #[test]
+    fn jit_process_supports_local_annotation_only_type_during_emit() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let token: local_only = 7; return token; }\n",
+        );
+        let report = process.compile().expect("jit compile");
+        assert_eq!(report.emit.emitted_functions, 1);
+        assert_eq!(process.artifacts().len(), 1);
     }
 
     #[test]

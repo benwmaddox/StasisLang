@@ -59,6 +59,16 @@ If you prefer to build manually or vcpkg is unavailable:
    cmake --build . --config Release
    ```
 
+## Sprite Atlas Runtime Settings
+
+The OpenGL sprite path now uses a multi-page atlas instead of one fixed texture.
+
+- `STASIS_GFX_ATLAS_W` and `STASIS_GFX_ATLAS_H` set the per-page atlas size.
+- The default page size is `2048x2048`, clamped to the runtime `GL_MAX_TEXTURE_SIZE`.
+- `STASIS_GFX_MAX_SPRITES` optionally caps sprite-handle growth; unset or `0` leaves the table heap-backed and effectively unbounded.
+- Size-stable reloads update in place. Size-changing reloads allocate a new region, switch the sprite handle, and free the old region.
+- Atlas allocation failures now log page count, page size, free-region summary, and current sprite-table usage.
+
 ## API
 
 The library exports these functions for Stasis programs:
@@ -71,7 +81,7 @@ The library exports these functions for Stasis programs:
 | `stasis_clear(r, g, b, a)` | Clear screen with color |
 | `stasis_draw_line(x1, y1, x2, y2, r, g, b, a)` | Queue a line for rendering |
 | `stasis_draw_lines_f32(lines, count)` | Batch: queue `count` lines from an `f32` array (8 floats per line) |
-| `stasis_gfx_load_sprite(path)` | Load and bake an SVG sprite into an atlas; returns handle |
+| `stasis_gfx_load_sprite(path, max_w, max_h)` | Load and bake an image into the sprite atlas system; returns handle |
 | `stasis_gfx_draw_sprite(handle, x, y, sx, sy, rot, r, g, b, a)` | Draw baked sprite (centered) with scale/rotation/tint |
 | `stasis_gfx_draw_sprites_i32(cmds, count)` | Batch: draw `count` sprites from an `i32` array (7 ints per sprite) |
 | `stasis_gfx_debug_bake_hash(path)` | Debug: bake SVG on CPU and return a pixel hash |
@@ -96,6 +106,21 @@ The library exports these functions for Stasis programs:
 Guest code should read keyboard/pointer/quit state through `src/runtime/host_frame.stasis`
 directly or via the HostFrame-backed stdlib wrappers in `src/stdlib/graphics.stasis` and
 `src/stdlib/game_input.stasis`.
+
+## Sprite Atlas Configuration
+
+The OpenGL sprite path now uses paged atlases with region reuse instead of one fixed compile-time atlas.
+The runtime creates new atlas pages on demand, reuses freed regions on reload/resize, and keeps sprite
+handles in a growable table.
+
+Environment variables:
+
+- `STASIS_GFX_ATLAS_W=<n>` sets the atlas page width. Default: `2048`.
+- `STASIS_GFX_ATLAS_H=<n>` sets the atlas page height. Default: `2048`.
+- `STASIS_GFX_MAX_SPRITES=<n>` caps how many sprite handles may be allocated.
+
+The runtime clamps atlas page width and height to the current GL `GL_MAX_TEXTURE_SIZE` limit when an
+OpenGL context is active.
 
 ## SDL Scancodes
 

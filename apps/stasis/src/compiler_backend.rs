@@ -1046,6 +1046,7 @@ impl IncrementalCompilerBackend {
         let mut process = AotProcess::with_optimization_profile(
             Self::aot_optimization_profile_from_compile_config(&self.aot_compile_config),
         );
+        process.set_target(self.aot_compile_config.target.clone());
         for (path, source) in &self.source_by_path {
             process.upsert_file(path.clone(), source.clone());
         }
@@ -1083,6 +1084,8 @@ impl IncrementalCompilerBackend {
             .values()
             .map(|(symbol, _)| symbol.clone())
             .collect();
+        let mut link_config = self.aot_link_config.clone();
+        link_config.target = self.aot_compile_config.target.clone();
 
         let (linked_image_path, linked_image_size_bytes, linked_image_sha256) =
             if self.enable_aot_link_step && !artifact_paths.is_empty() {
@@ -1101,7 +1104,7 @@ impl IncrementalCompilerBackend {
                     &object_paths,
                     &linked_output,
                     &export_symbols,
-                    &self.aot_link_config,
+                    &link_config,
                 )?;
                 let size = std::fs::metadata(&linked_output)
                     .map_err(|error| {
@@ -2138,11 +2141,25 @@ fn packaged_runtime_library_extension() -> &'static str {
     }
 }
 
-fn runtime_bridge_object_extension() -> &'static str {
-    if cfg!(windows) {
+fn runtime_bridge_object_extension(target: &stasis_jit::AotTarget) -> &'static str {
+    if matches!(target, stasis_jit::AotTarget::Native) && cfg!(windows) {
         "obj"
     } else {
         "o"
+    }
+}
+
+fn should_link_stasis_dynload_staticlib(target: &stasis_jit::AotTarget) -> bool {
+    matches!(target, stasis_jit::AotTarget::Native)
+}
+
+fn default_runtime_bridge_compiler(target: &stasis_jit::AotTarget) -> PathBuf {
+    if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
+        PathBuf::from("clang")
+    } else if cfg!(windows) {
+        PathBuf::from("clang-cl.exe")
+    } else {
+        PathBuf::from("cc")
     }
 }
 
@@ -2796,6 +2813,7 @@ fn escape_c_string_literal(text: &str) -> String {
 }
 
 fn build_engine_bundle_runtime_bridge_source(
+    target: &stasis_jit::AotTarget,
     runtime_fields: &[PackagedRuntimeField],
     function_symbols: &[String],
     function_aliases: &[PackagedFunctionAlias],
@@ -2921,6 +2939,35 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
             ));
         }
     }
+    // Keep the Android ABI surface fixed while the host shell/input event mapping lands separately.
+    if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
+        source.push_str(
+            "STASIS_EXPORT void stasis_init(int width, int height) {\n\
+    host_i32[1] = width;\n\
+    host_i32[2] = height;\n\
+    host_i32[5] = width;\n\
+    host_i32[6] = height;\n\
+    host_i32[12] = width;\n\
+    host_i32[13] = height;\n\
+    host_req_window_w_px = width;\n\
+    host_req_window_h_px = height;\n\
+    main();\n\
+}\n\
+STASIS_EXPORT void stasis_tick(float dt) {\n\
+    (void)dt;\n\
+    host_i32[10] = host_i32[10] + 1;\n\
+    tick();\n\
+}\n\
+STASIS_EXPORT void stasis_render(void) {\n\
+    render();\n\
+}\n\
+STASIS_EXPORT void stasis_on_input(int type, int a, int b) {\n\
+    (void)type;\n\
+    (void)a;\n\
+    (void)b;\n\
+}\n",
+        );
+    }
     source.push_str("STASIS_EXPORT void stasis_aot_bind_runtime_globals(void) {\n");
     for line in register_lines {
         source.push_str("    ");
@@ -2943,9 +2990,10 @@ fn emit_engine_bundle_runtime_bridge_object(
         .join("engine_bundle_runtime_bridge.c");
     let object_path = backend.aot_artifact_root.join(format!(
         "engine_bundle_runtime_bridge.{}",
-        runtime_bridge_object_extension()
+        runtime_bridge_object_extension(&backend.aot_compile_config.target)
     ));
     let source = build_engine_bundle_runtime_bridge_source(
+        &backend.aot_compile_config.target,
         runtime_fields,
         function_symbols,
         function_aliases,
@@ -2958,19 +3006,18 @@ fn emit_engine_bundle_runtime_bridge_object(
         )
     })?;
 
-    let compiler = std::env::var_os("CC").unwrap_or_else(|| {
-        if cfg!(windows) {
-            "clang-cl.exe".into()
-        } else {
-            "cc".into()
-        }
-    });
-    let compiler_name = Path::new(&compiler)
+    let compiler = std::env::var_os("CC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_runtime_bridge_compiler(&backend.aot_compile_config.target));
+    let compiler_name = compiler
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let is_msvc_style = cfg!(windows)
+    let is_msvc_style = matches!(
+        backend.aot_compile_config.target,
+        stasis_jit::AotTarget::Native
+    ) && cfg!(windows)
         && (compiler_name == "clang-cl"
             || compiler_name == "clang-cl.exe"
             || compiler_name == "cl"
@@ -2992,8 +3039,16 @@ fn emit_engine_bundle_runtime_bridge_object(
             .arg("c")
             .arg("-o")
             .arg(&object_path);
-        if !cfg!(windows) {
+        if !cfg!(windows)
+            || matches!(
+                backend.aot_compile_config.target,
+                stasis_jit::AotTarget::AndroidArm64 { .. }
+            )
+        {
             command.arg("-fPIC");
+        }
+        if let Some(target) = backend.aot_compile_config.target.clang_target() {
+            command.arg(format!("--target={target}"));
         }
         command.arg(&source_path);
     }
@@ -3135,13 +3190,16 @@ fn package_engine_bundle_release(
     }
 
     let mut link_config = backend.aot_link_config.clone();
-    let dynload_lib = ensure_stasis_dynload_staticlib()?;
-    if !link_config
-        .runtime_lib_paths
-        .iter()
-        .any(|path| path == &dynload_lib)
-    {
-        link_config.runtime_lib_paths.push(dynload_lib);
+    link_config.target = backend.aot_compile_config.target.clone();
+    if should_link_stasis_dynload_staticlib(&link_config.target) {
+        let dynload_lib = ensure_stasis_dynload_staticlib()?;
+        if !link_config
+            .runtime_lib_paths
+            .iter()
+            .any(|path| path == &dynload_lib)
+        {
+            link_config.runtime_lib_paths.push(dynload_lib);
+        }
     }
     if cfg!(windows) {
         if let Some(wrapper) = ensure_rust_lld_link_wrapper(&backend.aot_artifact_root) {
@@ -3293,7 +3351,9 @@ fn aot_call_conv() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
     use object::Object;
+    #[cfg(windows)]
     use stasis_compiler::IncrementalCompilerHost;
     #[cfg(windows)]
     use stasis_dynload::{invoke_noarg_u64, Library as DynamicLibrary};
@@ -3314,6 +3374,60 @@ mod tests {
     #[test]
     fn identifier_hash_matches_incremental_function() {
         assert_eq!(hash_identifier("on_code_swap"), -663_287_521);
+    }
+
+    #[test]
+    fn engine_bundle_runtime_bridge_source_includes_android_entry_exports() {
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::android_arm64_default(),
+            &[],
+            &[
+                "aot_fn_1".to_string(),
+                "aot_fn_2".to_string(),
+                "aot_fn_3".to_string(),
+            ],
+            &[
+                PackagedFunctionAlias {
+                    alias: "main",
+                    target_symbol: "aot_fn_1".to_string(),
+                    returns_i32: true,
+                },
+                PackagedFunctionAlias {
+                    alias: "tick",
+                    target_symbol: "aot_fn_2".to_string(),
+                    returns_i32: true,
+                },
+                PackagedFunctionAlias {
+                    alias: "render",
+                    target_symbol: "aot_fn_3".to_string(),
+                    returns_i32: true,
+                },
+            ],
+            &[],
+        )
+        .expect("build android bridge source");
+
+        assert!(source.contains("STASIS_EXPORT void stasis_init(int width, int height)"));
+        assert!(source.contains("host_i32[1] = width;"));
+        assert!(source.contains("STASIS_EXPORT void stasis_tick(float dt)"));
+        assert!(source.contains("host_i32[10] = host_i32[10] + 1;"));
+        assert!(source.contains("STASIS_EXPORT void stasis_render(void)"));
+        assert!(source.contains("STASIS_EXPORT void stasis_on_input(int type, int a, int b)"));
+    }
+
+    #[test]
+    fn android_engine_bundle_skips_host_dynload_staticlib() {
+        assert!(!should_link_stasis_dynload_staticlib(
+            &stasis_jit::AotTarget::android_arm64_default()
+        ));
+    }
+
+    #[test]
+    fn android_runtime_bridge_compiler_defaults_to_clang() {
+        assert_eq!(
+            default_runtime_bridge_compiler(&stasis_jit::AotTarget::android_arm64_default()),
+            PathBuf::from("clang")
+        );
     }
 
     #[test]
@@ -4909,6 +5023,7 @@ mod tests {
         let link_config = stasis_jit::AotLinkConfig {
             linker_path: Some(linker_path),
             runtime_lib_paths: vec![stasis_dynload_lib],
+            target: stasis_jit::AotTarget::default(),
         };
 
         stasis_jit::link_objects_to_dynamic_library(
@@ -5344,6 +5459,7 @@ mod tests {
         let link_config = stasis_jit::AotLinkConfig {
             linker_path: Some(linker_path),
             runtime_lib_paths: vec![stasis_dynload_lib],
+            target: stasis_jit::AotTarget::default(),
         };
 
         stasis_jit::link_objects_to_dynamic_library(
@@ -5695,6 +5811,7 @@ mod tests {
         let link_config = stasis_jit::AotLinkConfig {
             linker_path: Some(linker_path),
             runtime_lib_paths: vec![stasis_dynload_lib],
+            target: stasis_jit::AotTarget::default(),
         };
 
         stasis_jit::link_objects_to_dynamic_library(
@@ -6076,6 +6193,7 @@ mod tests {
         let link_config = stasis_jit::AotLinkConfig {
             linker_path: Some(linker_path),
             runtime_lib_paths: vec![stasis_dynload_lib],
+            target: stasis_jit::AotTarget::default(),
         };
         stasis_jit::link_objects_to_dynamic_library(
             &object_paths,
@@ -6331,6 +6449,7 @@ mod tests {
         let link_config = stasis_jit::AotLinkConfig {
             linker_path: Some(linker_path),
             runtime_lib_paths: vec![stasis_dynload_lib],
+            target: stasis_jit::AotTarget::default(),
         };
         stasis_jit::link_objects_to_dynamic_library(
             &object_paths,
@@ -6979,6 +7098,7 @@ mod tests {
             AotLinkConfig {
                 linker_path: Some(linker_path),
                 runtime_lib_paths: vec![],
+                target: stasis_jit::AotTarget::default(),
             },
             temp_root.join("aot_artifacts"),
             true,
@@ -7058,6 +7178,7 @@ mod tests {
             AotLinkConfig {
                 linker_path: Some(linker_path),
                 runtime_lib_paths: vec![],
+                target: stasis_jit::AotTarget::default(),
             },
             temp_root.join("aot_artifacts"),
             true,
@@ -7185,6 +7306,7 @@ echo "signed" > "$1.signed"
             AotLinkConfig {
                 linker_path: Some(linker_path),
                 runtime_lib_paths: vec![],
+                target: stasis_jit::AotTarget::default(),
             },
             artifact_root,
             false,
@@ -7697,9 +7819,7 @@ pub fn run_self_host_aot_cli_with_options(
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("aot_output");
-    let artifact_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+    let artifact_root = project_dir
         .join(".stasis_cache")
         .join("aot_cli")
         .join(output_key);

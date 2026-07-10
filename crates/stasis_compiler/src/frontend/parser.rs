@@ -39,6 +39,12 @@ pub struct ParsedStructDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedStructDefinitionRange {
+    pub name: String,
+    pub definition_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedEnumDefinition {
     pub name: String,
     pub variants: Vec<ParsedEnumVariant>,
@@ -298,6 +304,39 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
     Ok(out)
 }
 
+pub fn parse_top_level_struct_definitions(
+    source: &str,
+) -> Result<Vec<ParsedStructDefinitionRange>, String> {
+    let tokens = lex(source)?;
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    let mut depth = 0usize;
+    while cursor < tokens.len() {
+        let token = tokens[cursor];
+        match token.kind {
+            TokenKind::LBrace => {
+                depth = depth.saturating_add(1);
+                cursor += 1;
+                continue;
+            }
+            TokenKind::RBrace => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+                continue;
+            }
+            TokenKind::Identifier if depth == 0 && token_text(source, token) == "struct" => {
+                let (parsed, next_cursor) = parse_struct_definition_range(source, &tokens, cursor)?;
+                out.push(parsed);
+                cursor = next_cursor;
+                continue;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    Ok(out)
+}
+
 pub fn parse_top_level_extern_functions(
     source: &str,
 ) -> Result<Vec<ParsedExternFunctionDeclaration>, String> {
@@ -485,6 +524,33 @@ fn parse_struct_definition(
         ParsedStructDefinition {
             name: token_text(source, name_token).to_string(),
             fields,
+        },
+        next_cursor,
+    ))
+}
+
+fn parse_struct_definition_range(
+    source: &str,
+    tokens: &[Token],
+    cursor: usize,
+) -> Result<(ParsedStructDefinitionRange, usize), String> {
+    let name_token = expect(tokens, cursor + 1, TokenKind::Identifier)?;
+    let body_open = expect(tokens, cursor + 2, TokenKind::LBrace)?;
+    let (_, mut next_cursor) = parse_braced_fields(source, tokens, body_open, cursor + 2)?;
+    if tokens
+        .get(next_cursor)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        next_cursor += 1;
+    }
+    let definition_end = tokens
+        .get(next_cursor.saturating_sub(1))
+        .map_or(source.len(), |token| token.end)
+        .min(source.len());
+    Ok((
+        ParsedStructDefinitionRange {
+            name: token_text(source, name_token).to_string(),
+            definition_range: tokens[cursor].start..definition_end,
         },
         next_cursor,
     ))
@@ -1120,6 +1186,19 @@ mod tests {
         assert_eq!(parsed.global_blocks[0].fields.len(), 2);
         assert_eq!(parsed.global_blocks[0].fields[1].name, "first_enemy");
         assert_eq!(parsed.global_blocks[0].fields[1].type_name, "Enemy");
+    }
+
+    #[test]
+    fn parses_top_level_struct_definition_ranges() {
+        let source =
+            "struct Enemy {\n    hp: i32;\n    speed: f32;\n}\nfunction main(): i32 { return 0; }\n";
+        let parsed = parse_top_level_struct_definitions(source).expect("parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "Enemy");
+        assert_eq!(
+            &source[parsed[0].definition_range.clone()],
+            "struct Enemy {\n    hp: i32;\n    speed: f32;\n}"
+        );
     }
 
     #[test]
