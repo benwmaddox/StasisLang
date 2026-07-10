@@ -274,6 +274,20 @@ def main() -> int:
     assert '"build".equals(current.getName())' in project_archive
     assert "entry.setTime(0L)" in project_archive
     assert "project file escaped project root" in project_archive
+    assert "Import Project Archive" in activity
+    assert "Intent.ACTION_OPEN_DOCUMENT" in activity
+    assert "FLAG_GRANT_READ_URI_PERMISSION" in activity
+    assert "WorkshopProjectArchive.importProject" in activity
+    assert "WorkshopProjectRegistry.createForImport" in activity
+    assert "WorkshopProjectRegistry.deleteFailedImport" in activity
+    assert "Project import failed and was discarded" in activity
+    assert "Apply or Reset the pending source edit before import" in activity
+    assert "validateArchivePath" in project_archive
+    assert "project archive contains duplicate path" in project_archive
+    assert "project archive metadata format is unsupported" in project_archive
+    assert "project archive needs src/main.stasis" in project_archive
+    assert "output.getFD().sync()" in project_archive
+    assert "legacy project cannot be deleted as a failed import" in project_registry
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity

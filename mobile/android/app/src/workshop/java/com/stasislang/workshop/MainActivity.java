@@ -106,6 +106,7 @@ public final class MainActivity extends Activity {
     private static final int AI_READ_TIMEOUT_MS = 120_000;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
     private static final int EXPORT_PROJECT_REQUEST = 71;
+    private static final int IMPORT_PROJECT_REQUEST = 72;
     private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
     private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
     private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125;
@@ -166,6 +167,7 @@ public final class MainActivity extends Activity {
     private final ArrayList<WorkshopProjectRegistry.ProjectInfo> availableProjects = new ArrayList<>();
     private WorkshopProjectRegistry.ProjectInfo activeProject;
     private WorkshopProjectRegistry.ProjectInfo pendingExportProject;
+    private String pendingImportProjectName = "";
     private String projectRegistryError = "";
     private String reviewedGitHubChangeFingerprint = "";
     private String credentialStorageError = "";
@@ -262,7 +264,14 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != EXPORT_PROJECT_REQUEST) return;
+        if (requestCode == EXPORT_PROJECT_REQUEST) {
+            completeProjectExport(resultCode, data);
+        } else if (requestCode == IMPORT_PROJECT_REQUEST) {
+            completeProjectImport(resultCode, data);
+        }
+    }
+
+    private void completeProjectExport(int resultCode, Intent data) {
         final WorkshopProjectRegistry.ProjectInfo exportProject = pendingExportProject == null
                 ? activeProject : pendingExportProject;
         pendingExportProject = null;
@@ -302,6 +311,62 @@ public final class MainActivity extends Activity {
                     });
                 } finally {
                     projectIoActive = false;
+                }
+            }
+        });
+    }
+
+    private void completeProjectImport(int resultCode, Intent data) {
+        final String projectName = pendingImportProjectName;
+        pendingImportProjectName = "";
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            setStatusText("Project import cancelled");
+            return;
+        }
+        final Uri source = data.getData();
+        projectIoActive = true;
+        setStatusText("Project import started");
+        projectIoExecutor.submit(new Runnable() {
+            @Override public void run() {
+                WorkshopProjectRegistry.ProjectInfo imported = null;
+                try {
+                    imported = WorkshopProjectRegistry.createForImport(MainActivity.this, projectName);
+                    InputStream input = getContentResolver().openInputStream(source);
+                    if (input == null) throw new IOException("document provider did not open the archive");
+                    final WorkshopProjectArchive.ImportSummary summary;
+                    try {
+                        summary = WorkshopProjectArchive.importProject(input, imported.root);
+                    } finally {
+                        input.close();
+                    }
+                    final WorkshopProjectRegistry.ProjectInfo completedProject = imported;
+                    projectIoActive = false;
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (activateProject(completedProject)) {
+                                setStatusText("Project import complete: " + summary.fileCount
+                                        + " files, " + summary.totalBytes + " bytes - " + lastCompileResult);
+                            } else {
+                                setStatusText("Project imported but could not be activated; select it from Projects");
+                                refreshProjectControls();
+                            }
+                        }
+                    });
+                } catch (final Exception error) {
+                    if (imported != null) {
+                        try {
+                            WorkshopProjectRegistry.deleteFailedImport(MainActivity.this, imported);
+                        } catch (Exception cleanupError) {
+                            error.addSuppressed(cleanupError);
+                        }
+                    }
+                    projectIoActive = false;
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            setStatusText("Project import failed and was discarded: " + error.getMessage());
+                            refreshProjectControls();
+                        }
+                    });
                 }
             }
         });
@@ -1091,6 +1156,12 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { requestProjectExport(); }
         });
         projectSettingsBody.addView(exportProject, fullWidth());
+        Button importProject = new Button(this);
+        importProject.setText("Import Project Archive");
+        importProject.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { requestProjectImport(); }
+        });
+        projectSettingsBody.addView(importProject, fullWidth());
         controls.addView(projectSettingsBody, fullWidth());
         refreshProjectControls();
 
@@ -1387,7 +1458,8 @@ public final class MainActivity extends Activity {
     }
 
     private void createAndSwitchProject() {
-        if (aiRunActive || githubOperationActive || projectIoActive || pendingExportProject != null) {
+        if (aiRunActive || githubOperationActive || projectIoActive
+                || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project creation blocked while AI, GitHub, or project I/O is active");
             return;
         }
@@ -1405,14 +1477,15 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void activateProject(WorkshopProjectRegistry.ProjectInfo project) {
-        if (aiRunActive || githubOperationActive || projectIoActive || pendingExportProject != null) {
+    private boolean activateProject(WorkshopProjectRegistry.ProjectInfo project) {
+        if (aiRunActive || githubOperationActive || projectIoActive
+                || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project switch blocked while AI, GitHub, or project I/O is active");
-            return;
+            return false;
         }
         if (hasPendingSourceEdit()) {
             setStatusText("Apply or Reset the pending source edit before switching projects");
-            return;
+            return false;
         }
         try {
             WorkshopProjectRegistry.setActive(this, project);
@@ -1437,8 +1510,10 @@ public final class MainActivity extends Activity {
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
             setStatusText("Switched to " + project.name + " - " + compileResult);
+            return true;
         } catch (Exception error) {
             setStatusText("Project switch failed: " + error.getMessage());
+            return false;
         }
     }
 
@@ -1452,7 +1527,8 @@ public final class MainActivity extends Activity {
             setStatusText("Project export needs a registered active project");
             return;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || pendingExportProject != null) {
+        if (aiRunActive || githubOperationActive || projectIoActive
+                || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project export blocked while other background work is active");
             return;
         }
@@ -1471,6 +1547,36 @@ public final class MainActivity extends Activity {
         } catch (Exception error) {
             pendingExportProject = null;
             setStatusText("Project export picker failed: " + error.getMessage());
+        }
+    }
+
+    private void requestProjectImport() {
+        if (aiRunActive || githubOperationActive || projectIoActive
+                || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
+            setStatusText("Project import blocked while other background work is active");
+            return;
+        }
+        if (hasPendingSourceEdit()) {
+            setStatusText("Apply or Reset the pending source edit before import");
+            return;
+        }
+        String name = newProjectNameEditor == null ? "" : newProjectNameEditor.getText().toString().trim();
+        try {
+            WorkshopProjectRegistry.validateRequestedName(name);
+        } catch (Exception error) {
+            setStatusText("Project import needs a valid new project name");
+            return;
+        }
+        pendingImportProjectName = name;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/zip");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, IMPORT_PROJECT_REQUEST);
+        } catch (Exception error) {
+            pendingImportProjectName = "";
+            setStatusText("Project import picker failed: " + error.getMessage());
         }
     }
 
