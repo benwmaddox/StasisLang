@@ -3,6 +3,8 @@ package com.stasislang.workshop;
 import android.content.ContentResolver;
 import android.database.Cursor;
 import android.media.MediaMetadataRetriever;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
 import android.net.Uri;
 import android.provider.OpenableColumns;
 
@@ -31,13 +33,18 @@ final class WorkshopAudioAssets {
         final long bytes;
         final long durationMs;
         final String mimeType;
+        final int sampleRate;
+        final int channels;
 
-        AssetInfo(File file, String relativePath, long bytes, long durationMs, String mimeType) {
+        AssetInfo(File file, String relativePath, long bytes, long durationMs, String mimeType,
+                int sampleRate, int channels) {
             this.file = file;
             this.relativePath = relativePath;
             this.bytes = bytes;
             this.durationMs = durationMs;
             this.mimeType = mimeType;
+            this.sampleRate = sampleRate;
+            this.channels = channels;
         }
     }
 
@@ -157,13 +164,12 @@ final class WorkshopAudioAssets {
 
     static AssetInfo publishRecording(File temporary, File projectRoot, String requestedName) throws IOException {
         requireInside(projectRoot, temporary);
-        AssetInfo validated = inspect(projectRoot, temporary, "audio/mp4");
+        inspect(projectRoot, temporary, "audio/mp4");
         String base = normalizeRequestedBase(requestedName, ".m4a");
         File directory = confinedAudioDirectory(projectRoot);
         File target = uniqueTarget(directory, base, ".m4a");
         if (!temporary.renameTo(target)) throw new IOException("could not publish recorded audio");
-        return new AssetInfo(target, relativePath(projectRoot, target), target.length(),
-                validated.durationMs, "audio/mp4");
+        return inspect(projectRoot, target, "audio/mp4");
     }
 
     static void discardRecording(File temporary, File projectRoot) throws IOException {
@@ -187,13 +193,42 @@ final class WorkshopAudioAssets {
                     metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE));
             if (detected.isEmpty()) detected = fallbackMime;
             extensionFor(detected);
-            return new AssetInfo(file, relativePath(projectRoot, file), file.length(), duration, detected);
+            int[] stream = inspectAudioStream(file);
+            return new AssetInfo(file, relativePath(projectRoot, file), file.length(), duration,
+                    detected, stream[0], stream[1]);
         } catch (NumberFormatException error) {
             throw new IOException("audio duration metadata is invalid");
         } catch (RuntimeException error) {
             throw new IOException("audio could not be decoded: " + error.getMessage());
         } finally {
             metadata.release();
+        }
+    }
+
+    private static int[] inspectAudioStream(File file) throws IOException {
+        MediaExtractor extractor = new MediaExtractor();
+        try {
+            extractor.setDataSource(file.getAbsolutePath());
+            for (int index = 0; index < extractor.getTrackCount(); index++) {
+                MediaFormat format = extractor.getTrackFormat(index);
+                String mime = format.getString(MediaFormat.KEY_MIME);
+                if (mime == null || !mime.startsWith("audio/")) continue;
+                if (!format.containsKey(MediaFormat.KEY_SAMPLE_RATE)
+                        || !format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                    throw new IOException("audio stream metadata is incomplete");
+                }
+                int sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+                int channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+                if (sampleRate < 8000 || sampleRate > 384000 || channels < 1 || channels > 8) {
+                    throw new IOException("audio stream metadata exceeds supported bounds");
+                }
+                return new int[] {sampleRate, channels};
+            }
+            throw new IOException("audio file has no decodable audio track");
+        } catch (RuntimeException error) {
+            throw new IOException("audio stream metadata could not be read: " + error.getMessage());
+        } finally {
+            extractor.release();
         }
     }
 

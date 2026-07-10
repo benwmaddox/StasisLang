@@ -130,6 +130,12 @@ def main() -> int:
     image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
     paint_view = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java")
     audio_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java")
+    assert "MediaExtractor" in audio_assets
+    assert "MediaFormat.KEY_SAMPLE_RATE" in audio_assets
+    assert "MediaFormat.KEY_CHANNEL_COUNT" in audio_assets
+    assert "audio stream metadata exceeds supported bounds" in audio_assets
+    assert "asset.sampleRate" in activity
+    assert "asset.channels" in activity
     support_bundle = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java")
     crash_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java")
     host_agent = read("tools/android_ai_agent_host.py")
