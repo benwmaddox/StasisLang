@@ -5144,28 +5144,17 @@ mod tests {
             .copied()
             .expect("expected main pointer in JIT engine package");
         let tick_ptr = package.tick_code_ptr;
-        let start_level_ptr = package
-            .symbol_code_ptrs
-            .get("start_level")
-            .copied()
-            .expect("expected start_level pointer in JIT engine package");
-        let place_brick_at_grid_ptr = package
-            .symbol_code_ptrs
-            .get("place_brick_at_grid")
-            .copied()
-            .expect("expected place_brick_at_grid pointer in JIT engine package");
-        let try_start_battle_ptr = package
-            .symbol_code_ptrs
-            .get("brickout_try_start_battle")
-            .copied()
-            .expect("expected brickout_try_start_battle pointer in JIT engine package");
         assert_ne!(main_ptr, 0);
         assert_ne!(tick_ptr, 0);
 
         let host_i32 = hash_global_path("host_i32");
+        let host_f32 = hash_global_path("host_f32");
         let field = 0;
         let store = |index: i32, value: i32| {
             stasis_dynload::stasis_jit_global_i32_array_store(host_i32, field, index, value);
+        };
+        let store_f32 = |index: i32, value: f32| {
+            stasis_dynload::stasis_jit_global_f32_array_store(host_f32, field, index, value);
         };
 
         // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
@@ -5193,20 +5182,28 @@ mod tests {
         // Clear resize flag for subsequent ticks.
         store(11, 0);
 
-        // Force in-level gameplay (not title screen): enter level 1, place a brick, then start battle.
-        stasis_dynload::invoke_i32_to_void(start_level_ptr as usize, 0)
-            .expect("invoke start_level");
-        let place_rc =
-            stasis_dynload::invoke_i32_i32_i32_to_i32(place_brick_at_grid_ptr as usize, 0, 0, 0)
-                .expect("invoke place_brick_at_grid");
-        assert_ne!(place_rc, 0, "expected place_brick_at_grid to succeed");
-        stasis_dynload::invoke_noarg_void(try_start_battle_ptr as usize)
-            .expect("invoke brickout_try_start_battle");
+        // Select Challenge Level through the current pointer-driven menu flow.
+        // At this 360x720 host viewport, the original 660x550 canvas is centered
+        // vertically at y=210 and scaled by 360/660.
+        store(7, 1); // HOST_I_POINTER_COUNT
+        store(544, 1); // pointer id
+        store(545, 1); // pointer down
+        store(546, 1); // pointer went down
+        store_f32(0, 180.0); // pointer x
+        store_f32(1, 341.0); // pointer y: Challenge Level
+        store(0, t0_ms + 16);
+        store(10, 0);
+        store(19, (t0_ms + 16) * 1000);
+        let rc = stasis_dynload::invoke_noarg_i32(tick_ptr as usize).expect("invoke menu tick");
+        assert_eq!(rc, 0, "expected menu tick() to return 0");
+        store(7, 0); // HOST_I_POINTER_COUNT
+        store(545, 0);
+        store(546, 0);
 
         let ticks: i32 = 1000;
         let start = std::time::Instant::now();
         for tick_index in 0..ticks {
-            let time_ms = t0_ms + (tick_index + 1) * 16;
+            let time_ms = t0_ms + (tick_index + 2) * 16;
             store(0, time_ms);
             store(10, tick_index);
             store(19, time_ms * 1000);
