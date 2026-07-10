@@ -4,6 +4,7 @@ members = [
   "apps/stasis",
   "crates/stasis_compiler",
   "crates/stasis_dynload",
+  "crates/stasis_android_bridge",
   "crates/stasis_jit",
   "crates/stasis_runner",
 ]
@@ -31,6 +32,7 @@ cranelift-jit = "0.117"
 cranelift-module = "0.117"
 cranelift-native = "0.117"
 cranelift-object = "0.117"
+target-lexicon = "0.13"
 
 winit = "0.29"
 glutin = "0.31"

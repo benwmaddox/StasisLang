@@ -1325,6 +1325,12 @@ pub(crate) enum SharedCompileBackendMode {
     AotDirect,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RuntimeHelperLinkage<'a> {
+    Imported,
+    LocalTrampolines(&'a BTreeMap<String, usize>),
+}
+
 fn aot_symbol_name(function_id: FunctionId) -> String {
     format!("aot_fn_{function_id}")
 }
@@ -1423,6 +1429,7 @@ pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuil
     meta: &FunctionMeta,
     hir: &FunctionHIR,
     symbol: &str,
+    runtime_helper_linkage: RuntimeHelperLinkage<'_>,
     backend_mode: SharedCompileBackendMode,
     call_signatures: &CallSignatureMap,
     type_table: &mut TypeTable,
@@ -1470,6 +1477,7 @@ where
         .map_err(|error| format!("failed to declare function {symbol}: {error}"))?;
     let runtime_call_imports = build_runtime_call_import_ids(
         &mut module,
+        runtime_helper_linkage,
         call_signatures,
         type_table,
         named_struct_field_types,
@@ -1675,9 +1683,69 @@ pub(crate) fn collection_meta_kind_from_suffix(suffix: &str) -> Option<Collectio
     }
 }
 
+pub(crate) fn declare_runtime_helper(
+    module: &mut impl Module,
+    symbol: &str,
+    signature: cranelift_codegen::ir::Signature,
+    linkage: RuntimeHelperLinkage<'_>,
+) -> Result<FuncId, String> {
+    match linkage {
+        RuntimeHelperLinkage::Imported => module
+            .declare_function(symbol, Linkage::Import, &signature)
+            .map_err(|error| format!("failed to declare JIT import {symbol}: {error}")),
+        RuntimeHelperLinkage::LocalTrampolines(addresses) => {
+            let address = addresses
+                .get(symbol)
+                .copied()
+                .ok_or_else(|| format!("missing runtime helper address for {symbol}"))?;
+            let local_symbol = format!("__stasis_runtime_helper_{symbol}");
+            let func_id = module
+                .declare_function(&local_symbol, Linkage::Local, &signature)
+                .map_err(|error| {
+                    format!("failed to declare runtime helper trampoline {symbol}: {error}")
+                })?;
+            let pointer_type = module.target_config().pointer_type();
+            let pointer_bits = pointer_type.bits();
+            if pointer_bits < usize::BITS && address > u32::MAX as usize {
+                return Err(format!(
+                    "runtime helper address for {symbol} does not fit target pointer type"
+                ));
+            }
+            let mut context = module.make_context();
+            context.func.signature = signature.clone();
+            let mut builder_context = FunctionBuilderContext::new();
+            {
+                let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+                let entry = builder.create_block();
+                for param in &signature.params {
+                    builder.append_block_param(entry, param.value_type);
+                }
+                builder.switch_to_block(entry);
+                builder.seal_block(entry);
+                let args = builder.block_params(entry).to_vec();
+                let address_value = builder.ins().iconst(pointer_type, address as i64);
+                let signature_ref = builder.func.import_signature(signature);
+                let call = builder
+                    .ins()
+                    .call_indirect(signature_ref, address_value, &args);
+                let results = builder.inst_results(call).to_vec();
+                builder.ins().return_(&results);
+                builder.finalize();
+            }
+            module
+                .define_function(func_id, &mut context)
+                .map_err(|error| {
+                    format!("failed to define runtime helper trampoline {symbol}: {error}")
+                })?;
+            module.clear_context(&mut context);
+            Ok(func_id)
+        }
+    }
+}
 pub(crate) fn declare_i32_call_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
     param_count: usize,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
@@ -1685,14 +1753,13 @@ pub(crate) fn declare_i32_call_import(
         signature.params.push(AbiParam::new(types::I32));
     }
     signature.returns.push(AbiParam::new(types::I32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_i32_f32_call_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
     f32_arg_count: usize,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
@@ -1701,38 +1768,35 @@ pub(crate) fn declare_i32_f32_call_import(
         signature.params.push(AbiParam::new(types::F32));
     }
     signature.returns.push(AbiParam::new(types::I32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_lookup_code_ptr_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::I64));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_direct_f32_unary_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::F32));
     signature.returns.push(AbiParam::new(types::F32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f32_call_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
     param_count: usize,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
@@ -1741,14 +1805,13 @@ pub(crate) fn declare_f32_call_import(
         signature.params.push(AbiParam::new(types::F32));
     }
     signature.returns.push(AbiParam::new(types::F32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f32_i32_call_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
     param_count: usize,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
@@ -1760,197 +1823,181 @@ pub(crate) fn declare_f32_i32_call_import(
         signature.params.push(AbiParam::new(types::I32));
     }
     signature.returns.push(AbiParam::new(types::F32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_void_call_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
     param_count: usize,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     for _ in 0..param_count {
         signature.params.push(AbiParam::new(types::I32));
     }
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f32_global_load_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::F32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f32_global_store_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::F32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f64_global_load_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::F64));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f64_global_store_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::F64));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_i32_array_load_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::I32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_i32_array_store_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_i32_array_ptr_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::I64));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f32_array_load_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::F32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f32_array_store_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::F32));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f32_array_ptr_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::I64));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f64_array_load_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::F64));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f64_array_store_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::F64));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_f64_array_ptr_import(
     module: &mut impl Module,
     symbol: &str,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::I64));
-    module
-        .declare_function(symbol, Linkage::Import, &signature)
-        .map_err(|error| format!("failed to declare JIT import {symbol}: {error}"))
+    declare_runtime_helper(module, symbol, signature, linkage)
 }
 
 pub(crate) fn declare_extern_call_imports(
@@ -9420,89 +9467,175 @@ pub(crate) fn emit_bool_constant(builder: &mut FunctionBuilder<'_>, value: bool)
 
 pub(crate) fn build_runtime_call_import_ids(
     module: &mut impl Module,
+    linkage: RuntimeHelperLinkage<'_>,
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
     named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<RuntimeCallImportIds, String> {
     Ok(RuntimeCallImportIds {
-        call_i32_0: declare_i32_call_import(module, "stasis_jit_call_i32_0", 1)?,
-        call_i32_1: declare_i32_call_import(module, "stasis_jit_call_i32_1", 2)?,
-        call_i32_2: declare_i32_call_import(module, "stasis_jit_call_i32_2", 3)?,
-        call_i32_3: declare_i32_call_import(module, "stasis_jit_call_i32_3", 4)?,
-        call_i32_4: declare_i32_call_import(module, "stasis_jit_call_i32_4", 5)?,
-        call_i32_5: declare_i32_call_import(module, "stasis_jit_call_i32_5", 6)?,
-        call_i32_6: declare_i32_call_import(module, "stasis_jit_call_i32_6", 7)?,
-        call_i32_7: declare_i32_call_import(module, "stasis_jit_call_i32_7", 8)?,
-        call_i32_8: declare_i32_call_import(module, "stasis_jit_call_i32_8", 9)?,
-        call_i32_f32_1: declare_i32_f32_call_import(module, "stasis_jit_call_i32_f32_1", 1)?,
-        call_i32_f32_2: declare_i32_f32_call_import(module, "stasis_jit_call_i32_f32_2", 2)?,
-        call_i32_f32_3: declare_i32_f32_call_import(module, "stasis_jit_call_i32_f32_3", 3)?,
-        call_i32_f32_4: declare_i32_f32_call_import(module, "stasis_jit_call_i32_f32_4", 4)?,
-        call_i32_f32_5: declare_i32_f32_call_import(module, "stasis_jit_call_i32_f32_5", 5)?,
-        call_i32_f32_6: declare_i32_f32_call_import(module, "stasis_jit_call_i32_f32_6", 6)?,
-        call_i32_f32_7: declare_i32_f32_call_import(module, "stasis_jit_call_i32_f32_7", 7)?,
-        call_i32_f32_8: declare_i32_f32_call_import(module, "stasis_jit_call_i32_f32_8", 8)?,
-        call_f32_0: declare_f32_call_import(module, "stasis_jit_call_f32_0", 1)?,
-        call_f32_1: declare_f32_call_import(module, "stasis_jit_call_f32_1", 2)?,
-        call_f32_2: declare_f32_call_import(module, "stasis_jit_call_f32_2", 3)?,
-        call_f32_3: declare_f32_call_import(module, "stasis_jit_call_f32_3", 4)?,
-        call_f32_4: declare_f32_call_import(module, "stasis_jit_call_f32_4", 5)?,
-        call_f32_5: declare_f32_call_import(module, "stasis_jit_call_f32_5", 6)?,
-        call_f32_6: declare_f32_call_import(module, "stasis_jit_call_f32_6", 7)?,
-        call_f32_7: declare_f32_call_import(module, "stasis_jit_call_f32_7", 8)?,
-        call_f32_8: declare_f32_call_import(module, "stasis_jit_call_f32_8", 9)?,
-        call_f32_i32_1: declare_f32_i32_call_import(module, "stasis_jit_call_f32_i32_1", 2)?,
-        print_i32: declare_void_call_import(module, "stasis_jit_print_i32", 1)?,
-        print_string: declare_void_call_import(module, "stasis_jit_print_string", 1)?,
-        lookup_code_ptr: declare_lookup_code_ptr_import(module, "stasis_jit_lookup_code_ptr")?,
-        sin_fast: declare_direct_f32_unary_import(module, "stasis_jit_sin_fast")?,
-        cos_fast: declare_direct_f32_unary_import(module, "stasis_jit_cos_fast")?,
-        global_i32_load: declare_i32_call_import(module, "stasis_jit_global_i32_load", 1)?,
-        global_i32_store: declare_void_call_import(module, "stasis_jit_global_i32_store", 2)?,
-        global_f32_load: declare_f32_global_load_import(module, "stasis_jit_global_f32_load")?,
-        global_f32_store: declare_f32_global_store_import(module, "stasis_jit_global_f32_store")?,
-        global_f64_load: declare_f64_global_load_import(module, "stasis_jit_global_f64_load")?,
-        global_f64_store: declare_f64_global_store_import(module, "stasis_jit_global_f64_store")?,
+        call_i32_0: declare_i32_call_import(module, "stasis_jit_call_i32_0", linkage, 1)?,
+        call_i32_1: declare_i32_call_import(module, "stasis_jit_call_i32_1", linkage, 2)?,
+        call_i32_2: declare_i32_call_import(module, "stasis_jit_call_i32_2", linkage, 3)?,
+        call_i32_3: declare_i32_call_import(module, "stasis_jit_call_i32_3", linkage, 4)?,
+        call_i32_4: declare_i32_call_import(module, "stasis_jit_call_i32_4", linkage, 5)?,
+        call_i32_5: declare_i32_call_import(module, "stasis_jit_call_i32_5", linkage, 6)?,
+        call_i32_6: declare_i32_call_import(module, "stasis_jit_call_i32_6", linkage, 7)?,
+        call_i32_7: declare_i32_call_import(module, "stasis_jit_call_i32_7", linkage, 8)?,
+        call_i32_8: declare_i32_call_import(module, "stasis_jit_call_i32_8", linkage, 9)?,
+        call_i32_f32_1: declare_i32_f32_call_import(
+            module,
+            "stasis_jit_call_i32_f32_1",
+            linkage,
+            1,
+        )?,
+        call_i32_f32_2: declare_i32_f32_call_import(
+            module,
+            "stasis_jit_call_i32_f32_2",
+            linkage,
+            2,
+        )?,
+        call_i32_f32_3: declare_i32_f32_call_import(
+            module,
+            "stasis_jit_call_i32_f32_3",
+            linkage,
+            3,
+        )?,
+        call_i32_f32_4: declare_i32_f32_call_import(
+            module,
+            "stasis_jit_call_i32_f32_4",
+            linkage,
+            4,
+        )?,
+        call_i32_f32_5: declare_i32_f32_call_import(
+            module,
+            "stasis_jit_call_i32_f32_5",
+            linkage,
+            5,
+        )?,
+        call_i32_f32_6: declare_i32_f32_call_import(
+            module,
+            "stasis_jit_call_i32_f32_6",
+            linkage,
+            6,
+        )?,
+        call_i32_f32_7: declare_i32_f32_call_import(
+            module,
+            "stasis_jit_call_i32_f32_7",
+            linkage,
+            7,
+        )?,
+        call_i32_f32_8: declare_i32_f32_call_import(
+            module,
+            "stasis_jit_call_i32_f32_8",
+            linkage,
+            8,
+        )?,
+        call_f32_0: declare_f32_call_import(module, "stasis_jit_call_f32_0", linkage, 1)?,
+        call_f32_1: declare_f32_call_import(module, "stasis_jit_call_f32_1", linkage, 2)?,
+        call_f32_2: declare_f32_call_import(module, "stasis_jit_call_f32_2", linkage, 3)?,
+        call_f32_3: declare_f32_call_import(module, "stasis_jit_call_f32_3", linkage, 4)?,
+        call_f32_4: declare_f32_call_import(module, "stasis_jit_call_f32_4", linkage, 5)?,
+        call_f32_5: declare_f32_call_import(module, "stasis_jit_call_f32_5", linkage, 6)?,
+        call_f32_6: declare_f32_call_import(module, "stasis_jit_call_f32_6", linkage, 7)?,
+        call_f32_7: declare_f32_call_import(module, "stasis_jit_call_f32_7", linkage, 8)?,
+        call_f32_8: declare_f32_call_import(module, "stasis_jit_call_f32_8", linkage, 9)?,
+        call_f32_i32_1: declare_f32_i32_call_import(
+            module,
+            "stasis_jit_call_f32_i32_1",
+            linkage,
+            2,
+        )?,
+        print_i32: declare_void_call_import(module, "stasis_jit_print_i32", linkage, 1)?,
+        print_string: declare_void_call_import(module, "stasis_jit_print_string", linkage, 1)?,
+        lookup_code_ptr: declare_lookup_code_ptr_import(
+            module,
+            "stasis_jit_lookup_code_ptr",
+            linkage,
+        )?,
+        sin_fast: declare_direct_f32_unary_import(module, "stasis_jit_sin_fast", linkage)?,
+        cos_fast: declare_direct_f32_unary_import(module, "stasis_jit_cos_fast", linkage)?,
+        global_i32_load: declare_i32_call_import(module, "stasis_jit_global_i32_load", linkage, 1)?,
+        global_i32_store: declare_void_call_import(
+            module,
+            "stasis_jit_global_i32_store",
+            linkage,
+            2,
+        )?,
+        global_f32_load: declare_f32_global_load_import(
+            module,
+            "stasis_jit_global_f32_load",
+            linkage,
+        )?,
+        global_f32_store: declare_f32_global_store_import(
+            module,
+            "stasis_jit_global_f32_store",
+            linkage,
+        )?,
+        global_f64_load: declare_f64_global_load_import(
+            module,
+            "stasis_jit_global_f64_load",
+            linkage,
+        )?,
+        global_f64_store: declare_f64_global_store_import(
+            module,
+            "stasis_jit_global_f64_store",
+            linkage,
+        )?,
         global_i32_array_load: declare_i32_array_load_import(
             module,
             "stasis_jit_global_i32_array_load",
+            linkage,
         )?,
         global_i32_array_store: declare_i32_array_store_import(
             module,
             "stasis_jit_global_i32_array_store",
+            linkage,
         )?,
         global_i32_array_ptr: declare_i32_array_ptr_import(
             module,
             "stasis_jit_global_i32_array_ptr",
+            linkage,
         )?,
         global_f32_array_load: declare_f32_array_load_import(
             module,
             "stasis_jit_global_f32_array_load",
+            linkage,
         )?,
         global_f32_array_store: declare_f32_array_store_import(
             module,
             "stasis_jit_global_f32_array_store",
+            linkage,
         )?,
         global_f32_array_ptr: declare_f32_array_ptr_import(
             module,
             "stasis_jit_global_f32_array_ptr",
+            linkage,
         )?,
         global_f64_array_load: declare_f64_array_load_import(
             module,
             "stasis_jit_global_f64_array_load",
+            linkage,
         )?,
         global_f64_array_store: declare_f64_array_store_import(
             module,
             "stasis_jit_global_f64_array_store",
+            linkage,
         )?,
         global_f64_array_ptr: declare_f64_array_ptr_import(
             module,
             "stasis_jit_global_f64_array_ptr",
+            linkage,
         )?,
-        collection_i32_load: declare_i32_call_import(module, "stasis_jit_collection_i32_load", 2)?,
+        collection_i32_load: declare_i32_call_import(
+            module,
+            "stasis_jit_collection_i32_load",
+            linkage,
+            2,
+        )?,
         collection_i32_store: declare_void_call_import(
             module,
             "stasis_jit_collection_i32_store",
+            linkage,
             3,
         )?,
         extern_calls: declare_extern_call_imports(

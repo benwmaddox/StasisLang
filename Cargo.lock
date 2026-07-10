@@ -677,6 +677,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "stasis_android_bridge"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "stasis_compiler",
+]
+
+[[package]]
 name = "stasis_compiler"
 version = "0.1.0"
 dependencies = [
@@ -687,6 +695,8 @@ dependencies = [
  "cranelift-native",
  "cranelift-object",
  "object",
+ "serde",
+ "serde_json",
  "stasis_dynload",
  "stasis_jit",
  "target-lexicon",

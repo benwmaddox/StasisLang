@@ -25,6 +25,8 @@ The system must:
 - provide clear visual confirmation of successful swaps
 - operate deterministically using tick-based semantics
 
+Android workshop requirements are tracked in `docs/android_workshop_prd.md`. That document locks the sideload-first Android app direction, symbol-first editor model, Stasis-syntax AI patch contracts, GitHub API v1 Git workflow, and preview-renderer selection criteria.
+
 ### 1.2 Non-Goals
 
 This system does not aim to:
@@ -200,6 +202,18 @@ Examples:
 - entity/system helpers
 - rendering commands
 - audio events
+
+### First-Class Sprite and Audio Assets
+
+Sprite and audio support is a cross-platform runtime contract, not an editor-only feature.
+
+- Project-relative asset paths resolve through a versioned asset manifest with deterministic IDs/hashes.
+- JIT, AOT, desktop, Android Workshop, and published Android builds use the same asset identity and packaging rules.
+- Sprite loading supports bounded decode, texture lifetime management, batching, hot reload, missing-asset diagnostics, and safe fallback rendering.
+- Audio supports decoded sound/music assets, bounded voices/streams, volume/pan/loop controls, deterministic event submission, device lifecycle handling, underrun diagnostics, and graceful unavailable-device behavior.
+- Asset hot reload swaps only complete decoded resources and preserves the previous accepted resource on failure.
+- Headless tests validate asset manifests/events without requiring graphics or audio hardware; representative device tests validate actual pixels and sound.
+- Host-set permissions remain deny-by-default for file/device access; Stasis code addresses packaged project assets rather than arbitrary host paths.
 
 The runtime API:
 
@@ -481,3 +495,4 @@ This system is intentionally:
 - developer-trust-focused
 
 It provides a robust, file-level hot reload pipeline with per-function efficiency, an explicit swap hook, and a deterministic tick-based UI confirmation mechanism.
+

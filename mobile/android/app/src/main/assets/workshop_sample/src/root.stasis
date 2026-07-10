@@ -1,0 +1,19 @@
+function clamp_i32(value: i32, minimum: i32, maximum: i32): i32 {
+    if (value < minimum) {
+        return minimum;
+    }
+
+    if (value > maximum) {
+        return maximum;
+    }
+
+    return value;
+}
+
+function abs_i32(value: i32): i32 {
+    if (value < 0) {
+        return 0 - value;
+    }
+
+    return value;
+}

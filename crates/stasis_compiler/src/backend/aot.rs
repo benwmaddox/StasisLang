@@ -547,6 +547,11 @@ fn compile_function_to_object_bytes(
     flag_builder
         .set("opt_level", optimization_profile.as_cranelift_opt_level())
         .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
+    if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
+        flag_builder.set("is_pic", "true").map_err(|error| {
+            format!("failed to configure position-independent Android AOT: {error}")
+        })?;
+    }
     let flags = settings::Flags::new(flag_builder);
     let isa_builder = match target.object_triple() {
         Some(triple_text) => {
@@ -576,6 +581,7 @@ fn compile_function_to_object_bytes(
         meta,
         hir,
         symbol,
+        RuntimeHelperLinkage::Imported,
         SharedCompileBackendMode::AotDirect,
         call_signatures,
         type_table,
@@ -907,7 +913,7 @@ mod tests {
     use super::*;
     use crate::backend::jit::JitProcess;
     use crate::backend::EngineEntrypoints;
-    use object::{Architecture, BinaryFormat, File, Object};
+    use object::{Architecture, BinaryFormat, File, Object, ObjectSection, RelocationKind};
     #[cfg(windows)]
     use std::process::Command;
     use std::sync::Arc;
@@ -1397,16 +1403,32 @@ mod tests {
     fn aot_process_emits_android_arm64_elf_objects_when_target_is_configured() {
         let mut process = AotProcess::new();
         process.set_target(stasis_jit::AotTarget::android_arm64_default());
-        process.upsert_file("sample.stasis", "function main(): i32 { return 7; }\n");
+        process.upsert_file(
+            "sample.stasis",
+            "global State { value: i32; }\nfunction helper(): i32 { return State.value; }\nfunction main(): i32 { State.value = 7; return helper(); }\n",
+        );
         process.compile().expect("android aot compile");
 
-        let bytes = process
-            .object_bytes
-            .first()
-            .expect("expected first object bytes");
-        let object = File::parse(bytes.as_slice()).expect("parse emitted object");
-        assert_eq!(object.format(), BinaryFormat::Elf);
-        assert_eq!(object.architecture(), Architecture::Aarch64);
+        let mut relocation_count = 0;
+        for bytes in &process.object_bytes {
+            let object = File::parse(bytes.as_slice()).expect("parse emitted object");
+            assert_eq!(object.format(), BinaryFormat::Elf);
+            assert_eq!(object.architecture(), Architecture::Aarch64);
+            for section in object.sections() {
+                for (_, relocation) in section.relocations() {
+                    relocation_count += 1;
+                    assert_ne!(
+                        relocation.kind(),
+                        RelocationKind::Absolute,
+                        "Android AOT objects must be position independent"
+                    );
+                }
+            }
+        }
+        assert!(
+            relocation_count > 0,
+            "fixture should exercise AOT relocations"
+        );
     }
 
     #[test]

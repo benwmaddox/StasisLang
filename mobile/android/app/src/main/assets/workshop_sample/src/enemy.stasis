@@ -1,0 +1,3 @@
+struct EnemyPaddle {
+    y: i32;
+}

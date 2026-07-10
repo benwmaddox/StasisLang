@@ -16,9 +16,12 @@ use stasis::{
     run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
     RunnerConfig, StasisTestRunSession,
 };
+use stasis_compiler::backend::aot::AotProcess;
+use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
 use stasis_compiler::frontend::parser::{
     parse_top_level_functions, parse_top_level_struct_definitions,
 };
+use stasis_jit::AotTarget;
 use stasis_runner::swap::contracts::TargetMode;
 
 struct CliOptions {
@@ -41,6 +44,12 @@ struct AotCliContractArgs {
     summary_file: Option<PathBuf>,
     entry_file: Option<PathBuf>,
     quality_gate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AndroidAotBundleArgs {
+    project_dir: PathBuf,
+    output_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1127,6 +1136,247 @@ fn parse_aot_cli_contract_args(args: &[String]) -> Result<AotCliContractArgs, St
     })
 }
 
+fn parse_android_aot_bundle_args(args: &[String]) -> Result<AndroidAotBundleArgs, String> {
+    let mut project_dir: Option<PathBuf> = None;
+    let mut output_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--project-dir" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --project-dir".to_string());
+                }
+                project_dir = Some(PathBuf::from(args[i + 1].clone()));
+                i += 2;
+            }
+            "--out-dir" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --out-dir".to_string());
+                }
+                output_dir = Some(PathBuf::from(args[i + 1].clone()));
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let Some(project_dir) = project_dir else {
+        return Err("missing required --project-dir <path>".to_string());
+    };
+    let Some(output_dir) = output_dir else {
+        return Err("missing required --out-dir <path>".to_string());
+    };
+    Ok(AndroidAotBundleArgs {
+        project_dir,
+        output_dir,
+    })
+}
+
+fn try_run_android_aot_bundle_subcommand() -> Option<i32> {
+    let mut args = env::args().skip(1);
+    let first = args.next()?;
+    if first != "android-aot-bundle" {
+        return None;
+    }
+    let arg_list: Vec<String> = args.collect();
+    let parsed = match parse_android_aot_bundle_args(&arg_list) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(2);
+        }
+    };
+
+    match write_android_aot_engine_bundle(&parsed.project_dir, &parsed.output_dir) {
+        Ok(summary) => {
+            println!("android_aot_bundle_dir={}", summary.bundle_dir.display());
+            println!("android_aot_object_count={}", summary.object_count);
+            println!(
+                "android_aot_symbols_header={}",
+                summary.symbols_header.display()
+            );
+            println!("android_aot_cmake_file={}", summary.cmake_file.display());
+            Some(0)
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            Some(1)
+        }
+    }
+}
+
+struct AndroidAotBundleSummary {
+    bundle_dir: PathBuf,
+    object_count: usize,
+    symbols_header: PathBuf,
+    cmake_file: PathBuf,
+}
+
+fn write_android_aot_engine_bundle(
+    project_dir: &Path,
+    output_dir: &Path,
+) -> Result<AndroidAotBundleSummary, String> {
+    let mut process = AotProcess::with_optimization_profile(AotOptimizationProfile::SpeedAndSize);
+    process.set_target(AotTarget::android_arm64_default());
+    for (path, source) in collect_android_aot_sources(project_dir)? {
+        process.upsert_file(path, source);
+    }
+    process
+        .compile()
+        .map_err(|error| format!("failed to compile Android AOT bundle: {error:?}"))?;
+    let bundle = process.write_engine_bundle(&EngineEntrypoints::runtime_default(), output_dir)?;
+    let manifest = fs::read_to_string(&bundle.manifest_path).map_err(|error| {
+        format!(
+            "failed to read Android AOT manifest {}: {error}",
+            bundle.manifest_path.display()
+        )
+    })?;
+    let manifest_json: serde_json::Value = serde_json::from_str(&manifest)
+        .map_err(|error| format!("failed to parse Android AOT manifest: {error}"))?;
+    let symbols_header = output_dir.join("published_aot_symbols.h");
+    let cmake_file = output_dir.join("published_aot_objects.cmake");
+    write_android_aot_symbols_header(&manifest_json, &symbols_header)?;
+    write_android_aot_cmake_file(&bundle.object_paths_by_function, &cmake_file)?;
+    Ok(AndroidAotBundleSummary {
+        bundle_dir: bundle.output_dir,
+        object_count: bundle.object_paths_by_function.len(),
+        symbols_header,
+        cmake_file,
+    })
+}
+
+fn collect_android_aot_sources(project_dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    collect_android_aot_sources_inner(project_dir, project_dir, &mut out)?;
+    out.sort_by(|left, right| left.0.cmp(&right.0));
+    if out.is_empty() {
+        return Err(format!(
+            "no .stasis files found under {}",
+            project_dir.display()
+        ));
+    }
+    Ok(out)
+}
+
+fn collect_android_aot_sources_inner(
+    root: &Path,
+    current: &Path,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(current)
+        .map_err(|error| format!("failed to read directory {}: {error}", current.display()))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read directory entry: {error}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            if path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name == "tests" || name == "build")
+            {
+                continue;
+            }
+            collect_android_aot_sources_inner(root, &path, out)?;
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) != Some("stasis") {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(".test.stasis"))
+        {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| format!("failed to relativize {}: {error}", path.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        out.push((relative, source));
+    }
+    Ok(())
+}
+
+fn write_android_aot_symbols_header(
+    manifest: &serde_json::Value,
+    output_path: &Path,
+) -> Result<(), String> {
+    let main = android_aot_symbol_for(manifest, "main")?;
+    let tick = android_aot_symbol_for(manifest, "tick")?;
+    let render = android_aot_symbol_for(manifest, "render")?;
+    let on_code_swap = android_aot_symbol_for(manifest, "on_code_swap").ok();
+    let mut out = String::new();
+    out.push_str("#pragma once\n\n");
+    for symbol in [&main, &tick, &render] {
+        out.push_str(&format!("extern void {symbol}(void);\n"));
+    }
+    if let Some(symbol) = on_code_swap.as_ref() {
+        out.push_str(&format!("extern void {symbol}(void);\n"));
+    }
+    out.push_str("\n");
+    out.push_str(&format!("#define STASIS_AOT_MAIN {main}\n"));
+    out.push_str(&format!("#define STASIS_AOT_TICK {tick}\n"));
+    out.push_str(&format!("#define STASIS_AOT_RENDER {render}\n"));
+    if let Some(symbol) = on_code_swap.as_ref() {
+        out.push_str(&format!("#define STASIS_AOT_ON_CODE_SWAP {symbol}\n"));
+    }
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create symbol header directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(output_path, out).map_err(|error| {
+        format!(
+            "failed to write Android AOT symbol header {}: {error}",
+            output_path.display()
+        )
+    })
+}
+
+fn android_aot_symbol_for(
+    manifest: &serde_json::Value,
+    function_name: &str,
+) -> Result<String, String> {
+    let functions = manifest
+        .get("functions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Android AOT manifest missing functions array".to_string())?;
+    functions
+        .iter()
+        .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(function_name))
+        .and_then(|entry| entry.get("symbol").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!("Android AOT manifest missing symbol for function '{function_name}'")
+        })
+}
+
+fn write_android_aot_cmake_file(
+    object_paths_by_function: &std::collections::BTreeMap<String, PathBuf>,
+    output_path: &Path,
+) -> Result<(), String> {
+    let mut out = String::new();
+    out.push_str("set(STASIS_PUBLISHED_AOT_OBJECTS\n");
+    for path in object_paths_by_function.values() {
+        out.push_str(&format!(
+            "  \"{}\"\n",
+            path.to_string_lossy().replace('\\', "/")
+        ));
+    }
+    out.push_str(")\n");
+    fs::write(output_path, out).map_err(|error| {
+        format!(
+            "failed to write Android AOT CMake file {}: {error}",
+            output_path.display()
+        )
+    })
+}
 fn try_run_aot_cli_subcommand() -> Option<i32> {
     let mut args = env::args().skip(1);
     let first = args.next()?;
@@ -1517,6 +1767,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_android_aot_bundle_args_accepts_required_flags() {
+        let args = vec![
+            "--project-dir".to_string(),
+            "mobile/android/app/src/main/assets/workshop_sample".to_string(),
+            "--out-dir".to_string(),
+            "target/android-aot".to_string(),
+        ];
+        let parsed = parse_android_aot_bundle_args(&args).expect("parse should succeed");
+        assert_eq!(
+            parsed.project_dir,
+            PathBuf::from("mobile/android/app/src/main/assets/workshop_sample")
+        );
+        assert_eq!(parsed.output_dir, PathBuf::from("target/android-aot"));
+    }
+
+    #[test]
+    fn android_aot_bundle_writes_pong_symbols_header() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let project_dir = repo_root.join("mobile/android/app/src/main/assets/workshop_sample");
+        let output_dir = std::env::temp_dir().join(format!("stasis_android_aot_bundle_{stamp}"));
+
+        let summary = write_android_aot_engine_bundle(&project_dir, &output_dir)
+            .expect("write Android AOT bundle");
+
+        assert!(summary.object_count >= 3, "expected lifecycle objects");
+        let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
+        assert!(header.contains("#define STASIS_AOT_MAIN aot_fn_"));
+        assert!(header.contains("#define STASIS_AOT_TICK aot_fn_"));
+        assert!(header.contains("#define STASIS_AOT_RENDER aot_fn_"));
+        let cmake = fs::read_to_string(&summary.cmake_file).expect("read cmake file");
+        assert!(cmake.contains("set(STASIS_PUBLISHED_AOT_OBJECTS"));
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+    #[test]
     fn parse_aot_cli_contract_args_accepts_required_flags() {
         let args = vec![
             "--project-dir".to_string(),
@@ -1611,6 +1900,9 @@ fn main() {
         std::process::exit(exit);
     }
     if let Some(exit) = try_run_test_subcommand() {
+        std::process::exit(exit);
+    }
+    if let Some(exit) = try_run_android_aot_bundle_subcommand() {
         std::process::exit(exit);
     }
     if let Some(exit) = try_run_aot_cli_subcommand() {
