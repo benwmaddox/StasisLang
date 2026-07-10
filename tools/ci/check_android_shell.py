@@ -644,6 +644,10 @@ def main() -> int:
     assert "exploration_input_target_system();" in exploration_main
     assert "exploration_movement_system();" in exploration_main
     assert "exploration_collection_system();" in exploration_main
+    assert "exploration_camera_follow_system();" in exploration_main
+    assert "Input.touch_x + GameState.camera_x" in exploration_main
+    assert "WORLD_WIDTH: i32 = 720" in exploration_main
+    assert "test `camera follow is deterministic and bounded`(): bool" in exploration_tests
     assert "entity_alive: i32[8]" in exploration_main
     assert "Lesson map:" in exploration_components
     assert "test `new touch edge sets one clamped destination`(): bool" in exploration_tests

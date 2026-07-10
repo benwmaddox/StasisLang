@@ -1215,11 +1215,11 @@ mod tests {
         assert_eq!(result.render_commands[0].kind, 1);
         assert_eq!(result.render_commands[0].w, 360);
         assert_eq!(result.render_commands[4].kind, 2);
-        assert_eq!(result.render_commands[4].x, 167);
-        assert_eq!(result.render_commands[4].y, 482);
+        assert_eq!(result.render_commands[4].x, 168);
+        assert_eq!(result.render_commands[4].y, 306);
         assert_eq!(result.render_commands[5].kind, 2);
-        assert_eq!(result.render_commands[5].x, 85);
-        assert_eq!(result.render_commands[5].y, 175);
+        assert_eq!(result.render_commands[5].x, 88);
+        assert_eq!(result.render_commands[5].y, 179);
         assert!(result.observed_game_tick_count >= 1);
         clear_runtime_session_for_test();
     }
@@ -1328,7 +1328,7 @@ mod tests {
             .canonicalize()
             .expect("exploration template root");
         let result = run_android_workshop_stasis_tests(&root).expect("run exploration Stasis tests");
-        assert_eq!(result["passed"], 4);
+        assert_eq!(result["passed"], 5);
         assert_eq!(result["failed"], 0);
         assert_eq!(result["all_passed"], true);
         assert_eq!(result["results"][0]["file"], "tests/exploration_gameplay.test.stasis");

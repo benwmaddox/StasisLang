@@ -3,6 +3,9 @@ const PLAYER_SLOT: i32 = 0;
 const MOVE_SPEED: i32 = 6;
 const PICKUP_RADIUS: i32 = 24;
 const HUD_HEIGHT: i32 = 56;
+const WORLD_WIDTH: i32 = 720;
+const WORLD_HEIGHT: i32 = 960;
+const CAMERA_FOLLOW_STEP: i32 = 4;
 
 global Input {
     touch_x: i32; touch_y: i32; touch_active: i32; screen_w: i32; screen_h: i32;
@@ -20,6 +23,7 @@ global World {
 global GameState {
     tick_count: i32; screen_w: i32; screen_h: i32; previous_touch_active: i32;
     player_entity_id: i32; collected_count: i32; total_collectibles: i32; tutorial_stage: i32;
+    camera_x: i32; camera_y: i32;
 }
 
 global Render {
@@ -60,7 +64,7 @@ function exploration_init_world(): void {
     GameState.tick_count = 0; GameState.screen_w = 360; GameState.screen_h = 640;
     GameState.previous_touch_active = 0; GameState.player_entity_id = 1;
     GameState.collected_count = 0; GameState.total_collectibles = 3;
-    GameState.tutorial_stage = 0;
+    GameState.tutorial_stage = 0; GameState.camera_x = 180; GameState.camera_y = 280;
     let slot: i32 = 0;
     for (slot = 0; slot < MAX_ENTITIES; slot = slot + 1) {
         World.entity_alive[slot] = 0; World.entity_kind[slot] = 0;
@@ -70,18 +74,20 @@ function exploration_init_world(): void {
     }
     World.inventory_count[0] = 0; World.inventory_count[1] = 0; World.inventory_count[2] = 0;
     World.entity_alive[0] = 1; World.entity_kind[0] = 1;
-    World.position_x[0] = 180; World.position_y[0] = 500; World.move_speed[0] = MOVE_SPEED;
-    exploration_spawn_collectible(1, 90, 180, 1);
-    exploration_spawn_collectible(2, 270, 300, 2);
-    exploration_spawn_collectible(3, 100, 420, 1);
+    World.position_x[0] = 360; World.position_y[0] = 600; World.move_speed[0] = MOVE_SPEED;
+    exploration_spawn_collectible(1, 180, 220, 1);
+    exploration_spawn_collectible(2, 540, 400, 2);
+    exploration_spawn_collectible(3, 220, 720, 1);
 }
 
 function exploration_input_target_system(): void {
     if (Input.screen_w > 0) { GameState.screen_w = Input.screen_w; }
     if (Input.screen_h > 0) { GameState.screen_h = Input.screen_h; }
     if (Input.touch_active != 0 && GameState.previous_touch_active == 0) {
-        World.destination_x[0] = exploration_clamp(Input.touch_x, 12, GameState.screen_w - 12);
-        World.destination_y[0] = exploration_clamp(Input.touch_y, HUD_HEIGHT + 12, GameState.screen_h - 12);
+        let world_x: i32 = Input.touch_x + GameState.camera_x;
+        let world_y: i32 = Input.touch_y + GameState.camera_y;
+        World.destination_x[0] = exploration_clamp(world_x, 12, WORLD_WIDTH - 12);
+        World.destination_y[0] = exploration_clamp(world_y, HUD_HEIGHT + 12, WORLD_HEIGHT - 12);
         World.destination_active[0] = 1;
     }
     GameState.previous_touch_active = Input.touch_active;
@@ -142,19 +148,42 @@ function exploration_tutorial_progress_system(): void {
     if (GameState.collected_count == GameState.total_collectibles) { GameState.tutorial_stage = 2; }
 }
 
+function exploration_approach(current: i32, target: i32, step: i32): i32 {
+    if (current < target) {
+        if (target - current <= step) { return target; }
+        return current + step;
+    }
+    if (current > target) {
+        if (current - target <= step) { return target; }
+        return current - step;
+    }
+    return current;
+}
+
+function exploration_camera_follow_system(): void {
+    let max_x: i32 = WORLD_WIDTH - GameState.screen_w;
+    let max_y: i32 = WORLD_HEIGHT - GameState.screen_h;
+    if (max_x < 0) { max_x = 0; }
+    if (max_y < 0) { max_y = 0; }
+    let target_x: i32 = exploration_clamp(World.position_x[0] - (GameState.screen_w / 2), 0, max_x);
+    let target_y: i32 = exploration_clamp(World.position_y[0] - (GameState.screen_h / 2), 0, max_y);
+    GameState.camera_x = exploration_approach(GameState.camera_x, target_x, CAMERA_FOLLOW_STEP);
+    GameState.camera_y = exploration_approach(GameState.camera_y, target_y, CAMERA_FOLLOW_STEP);
+}
+
 function exploration_render_extract_system(): void {
     Render.command_count = 8;
     Render.command0_kind = 1; Render.command0_x = 0; Render.command0_y = 0;
     Render.command0_w = GameState.screen_w; Render.command0_h = GameState.screen_h; Render.command0_color = 1007922; Render.command0_asset = 0;
-    Render.command1_kind = World.collectible_active[1] * 2; Render.command1_x = World.position_x[1] - 9; Render.command1_y = World.position_y[1] - 9;
+    Render.command1_kind = World.collectible_active[1] * 2; Render.command1_x = World.position_x[1] - GameState.camera_x - 9; Render.command1_y = World.position_y[1] - GameState.camera_y - 9;
     Render.command1_w = 18; Render.command1_h = 18; Render.command1_color = 16763904; Render.command1_asset = 0;
-    Render.command2_kind = World.collectible_active[2] * 2; Render.command2_x = World.position_x[2] - 9; Render.command2_y = World.position_y[2] - 9;
+    Render.command2_kind = World.collectible_active[2] * 2; Render.command2_x = World.position_x[2] - GameState.camera_x - 9; Render.command2_y = World.position_y[2] - GameState.camera_y - 9;
     Render.command2_w = 18; Render.command2_h = 18; Render.command2_color = 6737151; Render.command2_asset = 0;
-    Render.command3_kind = World.collectible_active[3] * 2; Render.command3_x = World.position_x[3] - 9; Render.command3_y = World.position_y[3] - 9;
+    Render.command3_kind = World.collectible_active[3] * 2; Render.command3_x = World.position_x[3] - GameState.camera_x - 9; Render.command3_y = World.position_y[3] - GameState.camera_y - 9;
     Render.command3_w = 18; Render.command3_h = 18; Render.command3_color = 16763904; Render.command3_asset = 0;
-    Render.command4_kind = 2; Render.command4_x = World.position_x[0] - 12; Render.command4_y = World.position_y[0] - 12;
+    Render.command4_kind = 2; Render.command4_x = World.position_x[0] - GameState.camera_x - 12; Render.command4_y = World.position_y[0] - GameState.camera_y - 12;
     Render.command4_w = 24; Render.command4_h = 24; Render.command4_color = 5636095; Render.command4_asset = 0;
-    Render.command5_kind = World.destination_active[0] * 2; Render.command5_x = World.destination_x[0] - 5; Render.command5_y = World.destination_y[0] - 5;
+    Render.command5_kind = World.destination_active[0] * 2; Render.command5_x = World.destination_x[0] - GameState.camera_x - 5; Render.command5_y = World.destination_y[0] - GameState.camera_y - 5;
     Render.command5_w = 10; Render.command5_h = 10; Render.command5_color = 16777215; Render.command5_asset = 0;
     Render.command6_kind = 1; Render.command6_x = 12; Render.command6_y = 14; Render.command6_w = World.inventory_count[1] * 22;
     Render.command6_h = 12; Render.command6_color = 16763904; Render.command6_asset = 0;
@@ -169,6 +198,7 @@ function tick(): void {
     exploration_input_target_system();
     exploration_movement_system();
     exploration_collection_system();
+    exploration_camera_follow_system();
     exploration_tutorial_progress_system();
 }
 
