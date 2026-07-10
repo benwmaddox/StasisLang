@@ -23,7 +23,7 @@ global World {
 global GameState {
     tick_count: i32; screen_w: i32; screen_h: i32; previous_touch_active: i32;
     player_entity_id: i32; collected_count: i32; total_collectibles: i32; tutorial_stage: i32;
-    camera_x: i32; camera_y: i32;
+    camera_x: i32; camera_y: i32; last_collected_entity_id: i32;
 }
 
 global Render {
@@ -54,10 +54,15 @@ function exploration_clamp(value: i32, minimum: i32, maximum: i32): i32 {
     return value;
 }
 
-function exploration_spawn_collectible(slot: i32, x: i32, y: i32, kind: i32): void {
+function exploration_spawn_collectible(slot: i32, x: i32, y: i32, kind: i32): bool {
+    if (slot <= PLAYER_SLOT) { return false; }
+    if (slot >= MAX_ENTITIES) { return false; }
+    if (kind < 1 || kind > 2) { return false; }
+    if (World.entity_alive[slot] != 0) { return false; }
     World.entity_alive[slot] = 1; World.entity_kind[slot] = 2;
     World.position_x[slot] = x; World.position_y[slot] = y;
     World.collectible_kind[slot] = kind; World.collectible_active[slot] = 1;
+    return true;
 }
 
 function exploration_init_world(): void {
@@ -65,6 +70,7 @@ function exploration_init_world(): void {
     GameState.previous_touch_active = 0; GameState.player_entity_id = 1;
     GameState.collected_count = 0; GameState.total_collectibles = 3;
     GameState.tutorial_stage = 0; GameState.camera_x = 180; GameState.camera_y = 280;
+    GameState.last_collected_entity_id = 0;
     let slot: i32 = 0;
     for (slot = 0; slot < MAX_ENTITIES; slot = slot + 1) {
         World.entity_alive[slot] = 0; World.entity_kind[slot] = 0;
@@ -124,6 +130,7 @@ function exploration_movement_system(): void {
 
 function exploration_collect_slot(slot: i32): void {
     World.collectible_active[slot] = 0; GameState.collected_count += 1;
+    GameState.last_collected_entity_id = slot + 1;
     let kind: i32 = World.collectible_kind[slot];
     if (kind == 1) { World.inventory_count[1] += 1; }
     if (kind == 2) { World.inventory_count[2] += 1; }
@@ -175,6 +182,8 @@ function exploration_render_extract_system(): void {
     Render.command_count = 8;
     Render.command0_kind = 1; Render.command0_x = 0; Render.command0_y = 0;
     Render.command0_w = GameState.screen_w; Render.command0_h = GameState.screen_h; Render.command0_color = 1007922; Render.command0_asset = 0;
+    if (GameState.tutorial_stage == 1) { Render.command0_color = 1017139; }
+    if (GameState.tutorial_stage == 2) { Render.command0_color = 1585208; }
     Render.command1_kind = World.collectible_active[1] * 2; Render.command1_x = World.position_x[1] - GameState.camera_x - 9; Render.command1_y = World.position_y[1] - GameState.camera_y - 9;
     Render.command1_w = 18; Render.command1_h = 18; Render.command1_color = 16763904; Render.command1_asset = 0;
     Render.command2_kind = World.collectible_active[2] * 2; Render.command2_x = World.position_x[2] - GameState.camera_x - 9; Render.command2_y = World.position_y[2] - GameState.camera_y - 9;

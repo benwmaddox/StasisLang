@@ -76,3 +76,28 @@ test `camera follow is deterministic and bounded`(): bool {
     return GameState.camera_x == WORLD_WIDTH - GameState.screen_w
         && GameState.camera_y == WORLD_HEIGHT - GameState.screen_h;
 }
+
+test `spawn capacity rejects player occupied and out of range slots`(): bool {
+    exploration_init_world();
+    let player_x: i32 = World.position_x[0];
+    if (exploration_spawn_collectible(0, 20, 20, 1)) { return false; }
+    if (exploration_spawn_collectible(MAX_ENTITIES, 20, 20, 1)) { return false; }
+    if (exploration_spawn_collectible(1, 20, 20, 1)) { return false; }
+    if (exploration_spawn_collectible(4, 20, 20, 3)) { return false; }
+    return World.position_x[0] == player_x && World.entity_alive[4] == 0
+        && GameState.collected_count == 0;
+}
+
+test `overlapping collectibles resolve in ascending entity order`(): bool {
+    exploration_init_world();
+    World.position_x[1] = World.position_x[0]; World.position_y[1] = World.position_y[0];
+    World.position_x[2] = World.position_x[0]; World.position_y[2] = World.position_y[0];
+    exploration_collection_system();
+    if (GameState.collected_count != 2) { return false; }
+    if (GameState.last_collected_entity_id != 3) { return false; }
+    if (World.inventory_count[1] != 1 || World.inventory_count[2] != 1) { return false; }
+    World.entity_alive[3] = 0;
+    World.position_x[3] = World.position_x[0]; World.position_y[3] = World.position_y[0];
+    exploration_collection_system();
+    return GameState.collected_count == 2;
+}
