@@ -502,8 +502,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `planned`
 #### AW64 - Android Crash Recovery and Support Bundle
 - Scope: Capture bounded local crash/compile/sync diagnostics, detect interrupted operations, offer recovery, and export a redacted support bundle without secrets or unapproved source/media.
+- Progress: `Privacy & Data` now offers a reviewed Android document export of a versioned JSON support bundle capped at 1 MiB. It contains package/version, coarse device model/SDK/ABIs, project origin/format and category counts, runnable/reload state, enum-limited GitHub operation state, AI outcome timestamps/status/usage-presence, and at most 50 events read from the last 512 KiB of the local trace. Redaction is structural: the builder never imports credential preferences, project/source/prompt content, project/repository/file/media names or bytes, absolute paths, raw diagnostics, tool arguments/observations, or raw trace fields. The pre-export dialog lists included/excluded categories and requires a chosen document destination. Failed compile drafts, edit recovery, interrupted GitHub state, and unmatched AI starts already have recovery/status paths. Uncaught crash capture, restart-loop detection, and on-device exported-bundle inspection remain.
+- Tests: The Android shell verifier covers version/size/event/read bounds, allowlisted summaries, forbidden source/recovery/credential fields, disclosure/confirmation, document picker scoping, serial background export, and success wording. Workshop Java compilation and APK assembly cover the flow.
 - Done gate: A failure can be diagnosed and recovered from without exposing credentials or requiring raw Android log access.
-- Status: `planned`
+- Status: `in progress`
 
 ### Cross-Platform Sprite and Audio Track
 
