@@ -14,6 +14,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
@@ -116,6 +117,7 @@ def main() -> int:
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
     secret_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java")
     recovery_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java")
+    draft_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java")
     project_registry = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java")
     project_archive = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java")
     image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
@@ -123,6 +125,21 @@ def main() -> int:
     audio_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
+    assert "protected void onPause()" in activity
+    assert "protected void onSaveInstanceState(Bundle outState)" in activity
+    assert "persistPendingDraft();" in activity
+    assert "restorePendingDraft();" in activity
+    assert "Recovered unsaved source draft after app interruption" in activity
+    assert "source changed; recovery will not overwrite newer code" in activity
+    assert "App stopped before AI completion" in activity
+    assert '"interrupted"' in activity
+    assert 'ROOT = "workshop_drafts"' in draft_store
+    assert "MAX_DRAFT_BYTES = 2 * 1024 * 1024" in draft_store
+    assert 'put("base_sha256", sha256(baseSource))' in draft_store
+    assert "StandardCopyOption.ATOMIC_MOVE" in draft_store
+    assert "StandardCopyOption.REPLACE_EXISTING" in draft_store
+    assert "clearIfMatches" in draft_store
+    assert "draft path escaped root" in draft_store
     assert "Intent.ACTION_OPEN_DOCUMENT" in activity
     assert 'intent.setType("image/*")' in activity
     assert "WorkshopImageAssets.importImage" in activity
