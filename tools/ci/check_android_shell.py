@@ -16,6 +16,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -115,8 +116,27 @@ def main() -> int:
     recovery_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java")
     project_registry = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java")
     project_archive = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java")
+    image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
+    assert "Intent.ACTION_OPEN_DOCUMENT" in activity
+    assert 'intent.setType("image/*")' in activity
+    assert "WorkshopImageAssets.importImage" in activity
+    assert "WorkshopImageAssets.decodePreview" in activity
+    assert "WorkshopImageAssets.readForSync" in activity
+    assert "Map<String, byte[]> githubBackupFiles()" in activity
+    assert "MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024" in activity
+    assert "project exceeds the 32 MiB direct backup limit" in activity
+    assert "Image Assets" in activity
+    assert "MAX_IMPORT_BYTES = 8 * 1024 * 1024" in image_assets
+    assert "MAX_DIMENSION = 4096" in image_assets
+    assert "MAX_PIXELS = 16_000_000L" in image_assets
+    assert "exceeds the image sync limit" in image_assets
+    assert "output.getFD().sync()" in image_assets
+    assert "image path escapes the active project" in image_assets
+    assert '"image/png"' in image_assets
+    assert '"image/jpeg"' in image_assets
+    assert '"image/webp"' in image_assets
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
@@ -290,7 +310,8 @@ def main() -> int:
     assert '"import".equals(activeProject.origin)' in activity
     assert '"sample".equals(activeProject.origin)' in activity
     assert "collectProjectStasisFiles(projectRoot, files, seen)" in activity
-    assert "files = sourcesByFile(loadBundledProject())" in activity
+    assert "files = githubBackupFiles()" in activity
+    assert "sourcesByFile(loadBundledProject()).entrySet()" in activity
     assert "Reverted saved symbol to project baseline" in activity
     assert "Export Project Archive" in activity
     assert "Intent.ACTION_CREATE_DOCUMENT" in activity
