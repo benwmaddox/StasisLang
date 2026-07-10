@@ -224,6 +224,17 @@ def main() -> int:
     assert "AI spending limit reached before agent turn" in activity
     assert "recordMonthlyAiSpend" in activity
     assert "maxOutputTokensForBudget" in activity
+    assert "MAX_AI_IMAGE_ATTACHMENTS = 4" in activity
+    assert "MAX_AI_IMAGE_ATTACHMENT_BYTES = 12 * 1024 * 1024" in activity
+    assert "Review AI Image Attachments" in activity
+    assert "Only these app-private project images" in activity
+    assert 'put("type", "input_image")' in activity
+    assert 'put("detail", "original")' in activity
+    assert '"data:" + attachment.mimeType + ";base64,"' in activity
+    assert "buildAiOpenAiInput(requestJson, false)" in activity
+    assert "buildAiOpenAiInput(requestJson, true)" in activity
+    assert "selected_images_are_explicit_project_assets_only" in activity
+    assert "activeAiImageAttachments = Collections.emptyList()" in activity
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
     assert "Cancel AI" in activity
