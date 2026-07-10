@@ -89,6 +89,8 @@ static int32_t published_game_ball_x;
 static int32_t published_game_ball_y;
 static int32_t published_game_ball_vx;
 static int32_t published_game_ball_vy;
+static int32_t published_game_ball_age_ticks;
+static int32_t published_game_enemy_paddle_speed_x100;
 static int32_t published_game_player_score;
 static int32_t published_game_ai_score;
 static int32_t published_render_command_count;
@@ -121,6 +123,8 @@ static PublishedI32Global published_i32_globals[] = {
     {"GameState.ball_y", &published_game_ball_y, 0},
     {"GameState.ball_vx", &published_game_ball_vx, 0},
     {"GameState.ball_vy", &published_game_ball_vy, 0},
+    {"GameState.ball_age_ticks", &published_game_ball_age_ticks, 0},
+    {"GameState.enemy_paddle_speed_x100", &published_game_enemy_paddle_speed_x100, 0},
     {"GameState.player_score", &published_game_player_score, 0},
     {"GameState.ai_score", &published_game_ai_score, 0},
     {"Render.command_count", &published_render_command_count, 0},
