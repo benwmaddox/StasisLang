@@ -2588,6 +2588,11 @@ public final class MainActivity extends Activity {
             files.put(source.getKey(), content);
         }
         if (activeProject != null) {
+            byte[] assetManifest = WorkshopAssetManifest.readForSync(activeProject.root);
+            if (assetManifest != null) {
+                totalBytes = checkedGitHubBackupSize(totalBytes, assetManifest.length);
+                files.put(WorkshopAssetManifest.RELATIVE_PATH, assetManifest);
+            }
             for (WorkshopImageAssets.AssetInfo asset : WorkshopImageAssets.list(activeProject.root)) {
                 byte[] content = WorkshopImageAssets.readForSync(asset);
                 totalBytes = checkedGitHubBackupSize(totalBytes, content.length);

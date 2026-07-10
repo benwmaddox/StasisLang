@@ -64,10 +64,15 @@ final class WorkshopAudioAssets {
             writeSynced(temporary, encoded);
             inspect(projectRoot, temporary, mimeType);
             if (!temporary.renameTo(target)) throw new IOException("could not publish imported audio");
+            AssetInfo result = inspect(projectRoot, target, mimeType);
+            WorkshopAssetManifest.putAudio(projectRoot, result, null);
             published = true;
-            return inspect(projectRoot, target, mimeType);
+            return result;
         } finally {
-            if (!published && temporary.exists()) temporary.delete();
+            if (!published) {
+                if (temporary.exists()) temporary.delete();
+                if (target.exists()) target.delete();
+            }
         }
     }
 
@@ -122,7 +127,14 @@ final class WorkshopAudioAssets {
         if (target.equals(asset.file)) return asset;
         if (target.exists()) throw new IOException("an audio asset already uses that name");
         if (!asset.file.renameTo(target)) throw new IOException("could not rename audio asset");
-        return inspect(projectRoot, target, asset.mimeType);
+        try {
+            AssetInfo renamed = inspect(projectRoot, target, asset.mimeType);
+            WorkshopAssetManifest.putAudio(projectRoot, renamed, asset.relativePath);
+            return renamed;
+        } catch (IOException error) {
+            target.renameTo(asset.file);
+            throw error;
+        }
     }
 
     static void moveToTrash(AssetInfo asset, File projectRoot) throws IOException {
@@ -134,6 +146,12 @@ final class WorkshopAudioAssets {
         File target = uniqueTarget(trash, Long.toString(System.currentTimeMillis()) + "-"
                 + baseWithoutExtension(asset.file.getName()), extension);
         if (!asset.file.renameTo(target)) throw new IOException("could not move audio to recovery");
+        try {
+            WorkshopAssetManifest.remove(projectRoot, asset.relativePath);
+        } catch (IOException error) {
+            target.renameTo(asset.file);
+            throw error;
+        }
         pruneTrash(trash);
     }
 
@@ -151,7 +169,14 @@ final class WorkshopAudioAssets {
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("could not create project audio directory");
         File target = uniqueTarget(directory, baseWithoutExtension(original), extension);
         if (!latest.renameTo(target)) throw new IOException("could not restore deleted audio");
-        return inspect(projectRoot, target, mime);
+        try {
+            AssetInfo restored = inspect(projectRoot, target, mime);
+            WorkshopAssetManifest.putAudio(projectRoot, restored, null);
+            return restored;
+        } catch (IOException error) {
+            target.renameTo(latest);
+            throw error;
+        }
     }
 
     static File createRecordingFile(File projectRoot) throws IOException {
@@ -169,7 +194,14 @@ final class WorkshopAudioAssets {
         File directory = confinedAudioDirectory(projectRoot);
         File target = uniqueTarget(directory, base, ".m4a");
         if (!temporary.renameTo(target)) throw new IOException("could not publish recorded audio");
-        return inspect(projectRoot, target, "audio/mp4");
+        try {
+            AssetInfo result = inspect(projectRoot, target, "audio/mp4");
+            WorkshopAssetManifest.putAudio(projectRoot, result, null);
+            return result;
+        } catch (IOException error) {
+            target.renameTo(temporary);
+            throw error;
+        }
     }
 
     static void discardRecording(File temporary, File projectRoot) throws IOException {
