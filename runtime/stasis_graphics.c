@@ -43,10 +43,6 @@
 #define NANOSVGRAST_IMPLEMENTATION
 #include "nanosvgrast.h"
 
-#define MINIMP3_IMPLEMENTATION
-#define MINIMP3_ONLY_MP3
-#include "third_party/minimp3/minimp3_ex.h"
-
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void flush_sprites(void);
 static void render_postfx(void);
@@ -771,85 +767,8 @@ static int g_audio_write_sample = 0;
 static int g_audio_queued_samples = 0;
 static int64_t g_audio_running_frame_index = 0;
 
-#define STASIS_MAX_WAV_SAMPLES 32
-#define STASIS_MAX_WAV_VOICES 16
-typedef struct {
-    int active;
-    int sample_rate;
-    int channels;
-    int frame_count;
-    int16_t* pcm;
-} StasisWavSample;
-typedef struct {
-    int active;
-    int sample_index;
-    double frame_position;
-    double frame_step;
-    float volume;
-    int loop;
-} StasisWavVoice;
-static StasisWavSample g_wav_samples[STASIS_MAX_WAV_SAMPLES];
-static StasisWavVoice g_wav_voices[STASIS_MAX_WAV_VOICES];
-
 static int stasis_audio_maxi(int a, int b) { return a > b ? a : b; }
 static int stasis_audio_mini(int a, int b) { return a < b ? a : b; }
-
-static uint16_t stasis_read_u16_le(const unsigned char* data) {
-    return (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
-}
-
-static uint32_t stasis_read_u32_le(const unsigned char* data) {
-    return (uint32_t)data[0] |
-        ((uint32_t)data[1] << 8) |
-        ((uint32_t)data[2] << 16) |
-        ((uint32_t)data[3] << 24);
-}
-
-static float stasis_wav_sample_channel(const StasisWavSample* sample, int frame, int channel) {
-    if (!sample || frame < 0 || frame >= sample->frame_count) return 0.0f;
-    int source_channel = sample->channels == 1 ? 0 : channel;
-    if (source_channel >= sample->channels) source_channel = sample->channels - 1;
-    return (float)sample->pcm[frame * sample->channels + source_channel] / 32768.0f;
-}
-
-static void stasis_mix_wav_voices(float* out, int frame_count) {
-    if (!out || frame_count <= 0 || g_audio_channels <= 0) return;
-    for (int voice_index = 0; voice_index < STASIS_MAX_WAV_VOICES; voice_index++) {
-        StasisWavVoice* voice = &g_wav_voices[voice_index];
-        if (!voice->active || voice->sample_index < 0 || voice->sample_index >= STASIS_MAX_WAV_SAMPLES) continue;
-        StasisWavSample* sample = &g_wav_samples[voice->sample_index];
-        if (!sample->active || !sample->pcm || sample->frame_count <= 0) {
-            voice->active = 0;
-            continue;
-        }
-        for (int frame = 0; frame < frame_count && voice->active; frame++) {
-            int base_frame = (int)voice->frame_position;
-            if (base_frame >= sample->frame_count) {
-                if (!voice->loop) {
-                    voice->active = 0;
-                    break;
-                }
-                voice->frame_position -= (double)sample->frame_count;
-                if (voice->frame_position < 0.0) voice->frame_position = 0.0;
-                base_frame = (int)voice->frame_position;
-            }
-            int next_frame = base_frame + 1;
-            if (next_frame >= sample->frame_count) next_frame = voice->loop ? 0 : base_frame;
-            float fraction = (float)(voice->frame_position - (double)base_frame);
-            for (int channel = 0; channel < g_audio_channels; channel++) {
-                float a = stasis_wav_sample_channel(sample, base_frame, channel);
-                float b = stasis_wav_sample_channel(sample, next_frame, channel);
-                out[frame * g_audio_channels + channel] += (a + (b - a) * fraction) * voice->volume;
-            }
-            voice->frame_position += voice->frame_step;
-        }
-    }
-    int total_samples = frame_count * g_audio_channels;
-    for (int i = 0; i < total_samples; i++) {
-        if (out[i] > 1.0f) out[i] = 1.0f;
-        if (out[i] < -1.0f) out[i] = -1.0f;
-    }
-}
 
 static void stasis_audio_callback(void* userdata, Uint8* stream, int len) {
     (void)userdata;
@@ -890,8 +809,6 @@ static void stasis_audio_callback(void* userdata, Uint8* stream, int len) {
         SDL_memset(out, 0, (size_t)remaining * sizeof(float));
     }
 
-    stasis_mix_wav_voices((float*)stream, requested_samples / g_audio_channels);
-
     g_audio_running_frame_index += requested_samples / g_audio_channels;
 }
 
@@ -905,11 +822,6 @@ static void stasis_audio_shutdown_internal(void) {
         free(g_audio_ring);
         g_audio_ring = NULL;
     }
-    for (int i = 0; i < STASIS_MAX_WAV_SAMPLES; i++) {
-        free(g_wav_samples[i].pcm);
-        SDL_zero(g_wav_samples[i]);
-    }
-    SDL_zero(g_wav_voices);
 
     g_audio_initialized = 0;
     g_audio_ring_capacity_frames = 0;
@@ -4382,195 +4294,6 @@ STASIS_EXPORT int stasis_audio_push_f32_interleaved(const float* interleaved_lr,
 
     if (g_audio_channels <= 0) return 0;
     return accepted_samples / g_audio_channels;
-}
-
-STASIS_EXPORT int stasis_audio_load_wav(const char* path) {
-    if (!path || !*path || !stasis_audio_ensure_init()) return 0;
-
-    FILE* file = fopen(path, "rb");
-    if (!file) return 0;
-    if (fseek(file, 0, SEEK_END) != 0) {
-        fclose(file);
-        return 0;
-    }
-    long length = ftell(file);
-    if (length < 44 || length > INT_MAX) {
-        fclose(file);
-        return 0;
-    }
-    rewind(file);
-    unsigned char* bytes = (unsigned char*)malloc((size_t)length);
-    if (!bytes || fread(bytes, 1, (size_t)length, file) != (size_t)length) {
-        free(bytes);
-        fclose(file);
-        return 0;
-    }
-    fclose(file);
-
-    if (memcmp(bytes, "RIFF", 4) != 0 || memcmp(bytes + 8, "WAVE", 4) != 0) {
-        free(bytes);
-        return 0;
-    }
-
-    const unsigned char* fmt = NULL;
-    const unsigned char* pcm = NULL;
-    uint32_t fmt_size = 0;
-    uint32_t pcm_size = 0;
-    size_t offset = 12;
-    while (offset + 8 <= (size_t)length) {
-        const unsigned char* chunk = bytes + offset;
-        uint32_t chunk_size = stasis_read_u32_le(chunk + 4);
-        size_t data_offset = offset + 8;
-        if (data_offset + (size_t)chunk_size > (size_t)length) break;
-        if (memcmp(chunk, "fmt ", 4) == 0) {
-            fmt = bytes + data_offset;
-            fmt_size = chunk_size;
-        } else if (memcmp(chunk, "data", 4) == 0) {
-            pcm = bytes + data_offset;
-            pcm_size = chunk_size;
-        }
-        offset = data_offset + (size_t)chunk_size + ((size_t)chunk_size & 1u);
-    }
-
-    if (!fmt || !pcm || fmt_size < 16 || stasis_read_u16_le(fmt) != 1 ||
-        stasis_read_u16_le(fmt + 2) < 1 || stasis_read_u16_le(fmt + 2) > 2 ||
-        stasis_read_u32_le(fmt + 4) < 8000 || stasis_read_u16_le(fmt + 14) != 16 ||
-        pcm_size < 2) {
-        free(bytes);
-        return 0;
-    }
-
-    int channels = (int)stasis_read_u16_le(fmt + 2);
-    int sample_rate = (int)stasis_read_u32_le(fmt + 4);
-    int frame_count = (int)(pcm_size / (uint32_t)(channels * (int)sizeof(int16_t)));
-    if (frame_count <= 0) {
-        free(bytes);
-        return 0;
-    }
-    int16_t* pcm_copy = (int16_t*)malloc((size_t)frame_count * (size_t)channels * sizeof(int16_t));
-    if (!pcm_copy) {
-        free(bytes);
-        return 0;
-    }
-    SDL_memcpy(pcm_copy, pcm, (size_t)frame_count * (size_t)channels * sizeof(int16_t));
-    free(bytes);
-
-    int slot = -1;
-    SDL_LockAudioDevice(g_audio_device);
-    for (int i = 0; i < STASIS_MAX_WAV_SAMPLES; i++) {
-        if (!g_wav_samples[i].active) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot >= 0) {
-        g_wav_samples[slot].active = 1;
-        g_wav_samples[slot].sample_rate = sample_rate;
-        g_wav_samples[slot].channels = channels;
-        g_wav_samples[slot].frame_count = frame_count;
-        g_wav_samples[slot].pcm = pcm_copy;
-    }
-    SDL_UnlockAudioDevice(g_audio_device);
-    if (slot < 0) {
-        free(pcm_copy);
-        return 0;
-    }
-    return slot + 1;
-}
-
-STASIS_EXPORT int stasis_audio_load_mp3(const char* path) {
-    if (!path || !*path || !stasis_audio_ensure_init()) return 0;
-
-    FILE* file = fopen(path, "rb");
-    if (!file) return 0;
-    if (fseek(file, 0, SEEK_END) != 0) {
-        fclose(file);
-        return 0;
-    }
-    long length = ftell(file);
-    if (length <= 0 || length > INT_MAX) {
-        fclose(file);
-        return 0;
-    }
-    rewind(file);
-    unsigned char* bytes = (unsigned char*)malloc((size_t)length);
-    if (!bytes || fread(bytes, 1, (size_t)length, file) != (size_t)length) {
-        free(bytes);
-        fclose(file);
-        return 0;
-    }
-    fclose(file);
-
-    mp3dec_t decoder;
-    mp3dec_file_info_t info;
-    SDL_zero(info);
-    int decode_result = mp3dec_load_buf(&decoder, bytes, (size_t)length, &info, NULL, NULL);
-    free(bytes);
-    if (decode_result != 0 || !info.buffer || info.channels < 1 || info.channels > 2 || info.hz < 8000 || info.samples == 0) {
-        free(info.buffer);
-        return 0;
-    }
-    int frame_count = (int)(info.samples / (size_t)info.channels);
-    if (frame_count <= 0 || info.samples > (size_t)INT_MAX) {
-        free(info.buffer);
-        return 0;
-    }
-
-    int slot = -1;
-    SDL_LockAudioDevice(g_audio_device);
-    for (int i = 0; i < STASIS_MAX_WAV_SAMPLES; i++) {
-        if (!g_wav_samples[i].active) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot >= 0) {
-        g_wav_samples[slot].active = 1;
-        g_wav_samples[slot].sample_rate = info.hz;
-        g_wav_samples[slot].channels = info.channels;
-        g_wav_samples[slot].frame_count = frame_count;
-        g_wav_samples[slot].pcm = info.buffer;
-    }
-    SDL_UnlockAudioDevice(g_audio_device);
-    if (slot < 0) {
-        free(info.buffer);
-        return 0;
-    }
-    return slot + 1;
-}
-
-STASIS_EXPORT int stasis_audio_play_wav(int sample_handle, float volume, int loop) {
-    if (!stasis_audio_ensure_init() || sample_handle <= 0 || sample_handle > STASIS_MAX_WAV_SAMPLES) return 0;
-    int sample_index = sample_handle - 1;
-    int voice_slot = -1;
-    SDL_LockAudioDevice(g_audio_device);
-    StasisWavSample* sample = &g_wav_samples[sample_index];
-    if (sample->active && sample->pcm && sample->frame_count > 0) {
-        for (int i = 0; i < STASIS_MAX_WAV_VOICES; i++) {
-            if (!g_wav_voices[i].active) {
-                voice_slot = i;
-                break;
-            }
-        }
-        if (voice_slot >= 0) {
-            StasisWavVoice* voice = &g_wav_voices[voice_slot];
-            voice->active = 1;
-            voice->sample_index = sample_index;
-            voice->frame_position = 0.0;
-            voice->frame_step = (double)sample->sample_rate / (double)g_audio_sample_rate;
-            voice->volume = volume < 0.0f ? 0.0f : (volume > 1.0f ? 1.0f : volume);
-            voice->loop = loop != 0;
-        }
-    }
-    SDL_UnlockAudioDevice(g_audio_device);
-    return voice_slot + 1;
-}
-
-STASIS_EXPORT void stasis_audio_stop_wav(int voice_handle) {
-    if (g_audio_device == 0 || voice_handle <= 0 || voice_handle > STASIS_MAX_WAV_VOICES) return;
-    SDL_LockAudioDevice(g_audio_device);
-    g_wav_voices[voice_handle - 1].active = 0;
-    SDL_UnlockAudioDevice(g_audio_device);
 }
 
 /*

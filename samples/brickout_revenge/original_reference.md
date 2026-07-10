@@ -12,14 +12,6 @@ not a gameplay specification.
 - Decompiled game code: 183 ActionScript classes, including all game-specific
   levels, balls, towers, projectiles, UI states, embedded fonts, and sounds
 
-## Original audio
-
-The published SWF contains the original background music plus Flixel/menu, life-loss,
-curve-ball collision, and rocket explosion effects. The checked-in recovery tool preserves
-the original compact MP3 music and exports the short effects as PCM WAV files under
-`assets/original/audio/`; the port loops the original music and plays the effects at their
-corresponding gameplay events.
-
 Recovery output is intentionally kept outside this repository. Only the ported
 Stasis implementation and redistributable game assets are committed here.
 

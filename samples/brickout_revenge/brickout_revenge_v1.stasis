@@ -1,7 +1,6 @@
 import "../../src/stdlib/stdlib.stasis";
 import "../../src/stdlib/sdl_scancodes.stasis";
 import "../../src/stdlib/graphics.stasis";
-import "../../src/stdlib/audio.stasis";
 import "brickout_revenge_original_core.stasis";
 import "brickout_revenge_original_animations.stasis";
 
@@ -179,10 +178,6 @@ struct OriginalGameState {
 }
 
 global original_state: OriginalGameState;
-global original_audio_music: i32;
-global original_audio_lost_life: i32;
-global original_audio_curve_collision: i32;
-global original_audio_rocket_explosion: i32;
 const TXT_WALL: i32 = 0;
 const TXT_STANDARD: i32 = 1;
 const TXT_RAPID: i32 = 2;
@@ -790,18 +785,6 @@ function original_load_assets(): void {
     original_load_animation_assets();
 }
 
-function original_play_effect(sample: i32, volume: f32): void {
-    if (sample > 0) { audio_play_wav(sample, volume, false); }
-}
-
-function original_load_audio(): void {
-    original_audio_music = audio_load_mp3("assets/original/audio/background_music.mp3");
-    original_audio_lost_life = audio_load_wav("assets/original/audio/lost_life.wav");
-    original_audio_curve_collision = audio_load_wav("assets/original/audio/curve_collision.wav");
-    original_audio_rocket_explosion = audio_load_wav("assets/original/audio/rocket_explosion.wav");
-    if (original_audio_music > 0) { audio_play_wav(original_audio_music, 0.40, true); }
-}
-
 function original_clear_entities(): void {
     let i: i32 = 0;
     for (i = 0; i < MAX_ORIGINAL_TOWERS; i += 1) { original_state.towers[i].active = false; }
@@ -994,7 +977,6 @@ function original_spawn_projectile(tower_index: i32, target_index: i32): void {
 }
 
 function original_explode(x: f32, y: f32, damage: i32, serial: i32): void {
-    original_play_effect(original_audio_rocket_explosion, 1.0);
     let i: i32 = 0;
     for (i = 0; i < MAX_ORIGINAL_BALLS; i += 1) {
         if (original_state.balls[i].active && original_state.balls[i].last_explosion_serial != serial) {
@@ -1134,7 +1116,6 @@ function original_ball_tower_collision(ball_index: i32, tower_index: i32, old_x:
     else if (old_x + BALL_SIZE <= original_state.towers[tower_index].x) { side = 1; }
     else if (old_x >= original_state.towers[tower_index].x + TOWER_SIZE) { side = 2; }
     if (original_state.balls[ball_index].kind == OriginalBallKind.Mover) { original_move_tower_for_ball(tower_index, side); }
-    if (original_state.balls[ball_index].kind == OriginalBallKind.Curve) { original_play_effect(original_audio_curve_collision, 1.0); }
     original_damage_tower(tower_index, original_state.balls[ball_index].damage);
     if (side == 0 || side == 3) {
         original_state.balls[ball_index].y = old_y;
@@ -1235,10 +1216,7 @@ function original_update_balls(): void {
                 original_kill_ball(i, false);
             }
             if (original_state.balls[i].active && original_state.balls[i].y + BALL_SIZE > WORLD_BOTTOM) {
-                if (original_state.balls[i].kind != OriginalBallKind.Fire) {
-                    original_state.lives -= 1;
-                    original_play_effect(original_audio_lost_life, 1.0);
-                }
+                if (original_state.balls[i].kind != OriginalBallKind.Fire) { original_state.lives -= 1; }
                 original_kill_ball(i, false);
             }
         }
@@ -1813,7 +1791,6 @@ function main(): i32 {
     if (!original_state.initialized) {
         original_init_text();
         original_load_assets();
-        original_load_audio();
         original_state.rng = 13371337;
         original_state.screen = OriginalScreen.MainMenu;
         original_state.selected_shop = OriginalTowerKind.Standard;
