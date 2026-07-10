@@ -689,17 +689,17 @@ function original_load_assets(): void {
     original_label_handles[39] = original_load_label("assets/original/text/level_won.svg", 35);
     original_label_handles[40] = original_load_label("assets/original/text/level_lost.svg", 39);
     original_label_handles[41] = original_load_label("assets/original/text/tap_menu.svg", 99);
-    original_digit_handles[0] = gfx_load_sprite("assets/original/text/digit_0.svg", 8, 8);
-    original_digit_handles[1] = gfx_load_sprite("assets/original/text/digit_1.svg", 8, 8);
-    original_digit_handles[2] = gfx_load_sprite("assets/original/text/digit_2.svg", 8, 8);
-    original_digit_handles[3] = gfx_load_sprite("assets/original/text/digit_3.svg", 8, 8);
-    original_digit_handles[4] = gfx_load_sprite("assets/original/text/digit_4.svg", 8, 8);
-    original_digit_handles[5] = gfx_load_sprite("assets/original/text/digit_5.svg", 8, 8);
-    original_digit_handles[6] = gfx_load_sprite("assets/original/text/digit_6.svg", 8, 8);
-    original_digit_handles[7] = gfx_load_sprite("assets/original/text/digit_7.svg", 8, 8);
-    original_digit_handles[8] = gfx_load_sprite("assets/original/text/digit_8.svg", 8, 8);
-    original_digit_handles[9] = gfx_load_sprite("assets/original/text/digit_9.svg", 8, 8);
-    original_minus_handle = gfx_load_sprite("assets/original/text/minus.svg", 8, 8);
+    original_digit_handles[0] = gfx_load_sprite("assets/original/text/digit_0.svg", 12, 20);
+    original_digit_handles[1] = gfx_load_sprite("assets/original/text/digit_1.svg", 12, 20);
+    original_digit_handles[2] = gfx_load_sprite("assets/original/text/digit_2.svg", 12, 20);
+    original_digit_handles[3] = gfx_load_sprite("assets/original/text/digit_3.svg", 12, 20);
+    original_digit_handles[4] = gfx_load_sprite("assets/original/text/digit_4.svg", 12, 20);
+    original_digit_handles[5] = gfx_load_sprite("assets/original/text/digit_5.svg", 12, 20);
+    original_digit_handles[6] = gfx_load_sprite("assets/original/text/digit_6.svg", 12, 20);
+    original_digit_handles[7] = gfx_load_sprite("assets/original/text/digit_7.svg", 12, 20);
+    original_digit_handles[8] = gfx_load_sprite("assets/original/text/digit_8.svg", 12, 20);
+    original_digit_handles[9] = gfx_load_sprite("assets/original/text/digit_9.svg", 12, 20);
+    original_minus_handle = gfx_load_sprite("assets/original/text/minus.svg", 12, 20);
     original_state.assets.projectile_standard = gfx_load_sprite("assets/original/projectile_standard.svg", 8, 8);
     original_state.assets.projectile_rapid = gfx_load_sprite("assets/original/projectile_rapid.svg", 8, 8);
     original_state.assets.projectile_sniper = gfx_load_sprite("assets/original/projectile_sniper.svg", 8, 8);
@@ -1491,7 +1491,7 @@ function original_draw_towers(): void {
             let frame: i32 = 0;
             if (original_state.towers[i].animation_active) { frame = original_state.towers[i].animation_tick / 2; }
             original_draw_sprite(original_tower_animation_asset(original_state.towers[i].kind, frame), original_state.towers[i].x, original_state.towers[i].y, 32.0, 32.0, 255);
-            original_draw_number(original_state.towers[i].hp, original_state.towers[i].x + 1.0, original_state.towers[i].y - 2.0, 0.55, 0.95, 0.95, 0.95);
+            original_draw_number(original_state.towers[i].hp, original_state.towers[i].x + 1.0, original_state.towers[i].y + 1.0, 1.0, 0.95, 0.95, 0.95);
             if (i == original_state.selected_tower_index) {
                 original_draw_sprite(original_state.assets.tower_selector, original_state.towers[i].x - 1.0, original_state.towers[i].y - 1.0, 34.0, 34.0, 255);
             }
@@ -1549,15 +1549,15 @@ function original_draw_store_information(): void {
     original_draw_sprite(original_tower_asset(kind), 459.0, 190.0, 32.0, 32.0, 255);
     original_draw_tower_name(kind, 503.0, 190.0);
     original_draw_label(original_state.assets.font_small, TXT_COST, 503.0, 214.0, 0.85, 0.95, 1.0, 1.0);
-    original_draw_number(original_tower_cost(kind, level), 548.0, 217.0, 0.8, 0.85, 0.95, 1.0);
+    original_draw_number(original_tower_cost(kind, level), 548.0, 217.0, 1.0, 0.85, 0.95, 1.0);
     original_draw_label(original_state.assets.font_small, TXT_DAMAGE, 456.0, 291.0, 0.35, 1.0, 1.0, 1.0);
-    original_draw_number(original_tower_damage(kind, level), 568.0, 296.0, 0.75, 0.90, 0.95, 1.0);
+    original_draw_number(original_tower_damage(kind, level), 568.0, 296.0, 0.9, 0.90, 0.95, 1.0);
     original_draw_label(original_state.assets.font_small, TXT_HEALTH, 456.0, 314.0, 0.35, 1.0, 1.0, 1.0);
-    original_draw_number(original_tower_starting_hp(kind, level), 568.0, 319.0, 0.75, 0.90, 0.95, 1.0);
+    original_draw_number(original_tower_starting_hp(kind, level), 568.0, 319.0, 0.9, 0.90, 0.95, 1.0);
     original_draw_label(original_state.assets.font_small, TXT_RANGE, 456.0, 337.0, 0.35, 1.0, 1.0, 1.0);
-    original_draw_number(original_tower_range(kind, level), 568.0, 342.0, 0.75, 0.90, 0.95, 1.0);
+    original_draw_number(original_tower_range(kind, level), 568.0, 342.0, 0.9, 0.90, 0.95, 1.0);
     original_draw_label(original_state.assets.font_small, TXT_RELOAD, 456.0, 360.0, 0.35, 1.0, 1.0, 1.0);
-    original_draw_number(original_tower_reload_ticks(kind, level) / 60, 568.0, 365.0, 0.75, 0.90, 0.95, 1.0);
+    original_draw_number(original_tower_reload_ticks(kind, level) / 60, 568.0, 365.0, 0.9, 0.90, 0.95, 1.0);
     original_draw_sprite(original_state.assets.button_upgrade, 451.0, 383.0, 80.0, 25.0, 255);
     original_draw_sprite(original_state.assets.button_sell, 534.0, 383.0, 44.0, 26.0, 255);
     original_draw_sprite(original_state.assets.button_cancel, 581.0, 383.0, 71.0, 26.0, 255);
@@ -1594,9 +1594,9 @@ function original_draw_game(): void {
     original_draw_label(original_state.assets.font_small, TXT_NEXT_ENEMY, 16.0, 500.0, 0.70, 0.95, 1.0, 1.0);
     if (original_state.spawn_index < original_spawn_total) { original_draw_ball_name(original_spawn_kind[original_state.spawn_index], 116.0, 500.0); }
     original_draw_label(original_state.assets.font_small, TXT_LEVELS_LEFT, 456.0, 500.0, 0.70, 0.95, 1.0, 1.0);
-    original_draw_number(original_spawn_total - original_state.spawn_index, 580.0, 506.0, 0.85, 0.85, 1.0, 1.0);
+    original_draw_number(original_spawn_total - original_state.spawn_index, 580.0, 506.0, 1.0, 0.85, 1.0, 1.0);
     original_draw_label(original_state.assets.font_small, TXT_SCORE, 456.0, 523.0, 0.70, 0.95, 1.0, 1.0);
-    original_draw_number(original_state.score, 530.0, 529.0, 0.85, 0.85, 1.0, 1.0);
+    original_draw_number(original_state.score, 530.0, 529.0, 1.0, 0.85, 1.0, 1.0);
 
     let selected: i32 = original_state.selected_tower_index;
     if (selected >= 0 && selected < MAX_ORIGINAL_TOWERS && original_state.towers[selected].active) {
