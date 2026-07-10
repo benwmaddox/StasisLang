@@ -5838,7 +5838,8 @@ public final class MainActivity extends Activity {
                 Button actions = new Button(this);
                 actions.setAllCaps(false);
                 actions.setText(asset.relativePath + "\n" + formatDuration(asset.durationMs)
-                        + " - " + asset.bytes + " bytes");
+                        + " - " + asset.sampleRate + " Hz / " + asset.channels + " ch - "
+                        + asset.bytes + " bytes");
                 actions.setContentDescription("Audio asset " + asset.relativePath + ", duration "
                         + formatDuration(asset.durationMs) + ". Tap for preview and actions.");
                 actions.setOnClickListener(new View.OnClickListener() {
