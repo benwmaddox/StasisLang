@@ -1,0 +1,169 @@
+{
+  "render_scale": 4,
+  "source_canvas": [
+    660,
+    550
+  ],
+  "balls": {
+    "standard": {
+      "sheet": "standard_4x.png",
+      "frame_directory": "standard",
+      "frame_count": 18,
+      "frame_width": 72,
+      "frame_height": 72,
+      "columns": 8,
+      "fps": 50,
+      "rotations": 16,
+      "rotation_offset_degrees": 135
+    },
+    "curve": {
+      "sheet": "curve_4x.png",
+      "frame_directory": "curve",
+      "frame_count": 34,
+      "frame_width": 72,
+      "frame_height": 72,
+      "columns": 8,
+      "fps": 50,
+      "rotations": 16,
+      "rotation_offset_degrees": 135
+    },
+    "fast": {
+      "sheet": "fast_4x.png",
+      "frame_directory": "fast",
+      "frame_count": 18,
+      "frame_width": 72,
+      "frame_height": 72,
+      "columns": 8,
+      "fps": 50,
+      "rotations": 16,
+      "rotation_offset_degrees": 135
+    },
+    "fire": {
+      "sheet": "fire_4x.png",
+      "frame_directory": "fire",
+      "frame_count": 40,
+      "frame_width": 72,
+      "frame_height": 72,
+      "columns": 8,
+      "fps": 50,
+      "rotations": 1,
+      "rotation_offset_degrees": 0
+    },
+    "slow": {
+      "sheet": "slow_4x.png",
+      "frame_directory": "slow",
+      "frame_count": 18,
+      "frame_width": 72,
+      "frame_height": 72,
+      "columns": 8,
+      "fps": 50,
+      "rotations": 16,
+      "rotation_offset_degrees": 135
+    },
+    "splitter": {
+      "sheet": "splitter_4x.png",
+      "frame_directory": "splitter",
+      "frame_count": 18,
+      "frame_width": 72,
+      "frame_height": 72,
+      "columns": 8,
+      "fps": 50,
+      "rotations": 16,
+      "rotation_offset_degrees": 135
+    },
+    "swarm": {
+      "sheet": "swarm_4x.png",
+      "frame_directory": "swarm",
+      "frame_count": 18,
+      "frame_width": 72,
+      "frame_height": 72,
+      "columns": 8,
+      "fps": 50,
+      "rotations": 16,
+      "rotation_offset_degrees": 135
+    },
+    "mover": {
+      "sheet": "mover_4x.png",
+      "frame_directory": "mover",
+      "frame_count": 18,
+      "frame_width": 72,
+      "frame_height": 72,
+      "columns": 8,
+      "fps": 50,
+      "rotations": 16,
+      "rotation_offset_degrees": 135
+    }
+  },
+  "towers": {
+    "standard": {
+      "sheet": "standard_4x.png",
+      "frame_directory": "standard",
+      "frame_count": 61,
+      "frame_width": 128,
+      "frame_height": 128,
+      "columns": 8,
+      "source": "assets/original/sheets/tower_standard.png",
+      "fps": 30
+    },
+    "gold": {
+      "sheet": "gold_4x.png",
+      "frame_directory": "gold",
+      "frame_count": 60,
+      "frame_width": 128,
+      "frame_height": 128,
+      "columns": 8,
+      "source": "assets/original/sheets/tower_gold.png",
+      "fps": 30
+    },
+    "wall": {
+      "sheet": "wall_4x.png",
+      "frame_directory": "wall",
+      "frame_count": 61,
+      "frame_width": 128,
+      "frame_height": 128,
+      "columns": 8,
+      "source": "assets/original/sheets/tower_wall.png",
+      "fps": 30
+    },
+    "healer": {
+      "sheet": "healer_4x.png",
+      "frame_directory": "healer",
+      "frame_count": 53,
+      "frame_width": 128,
+      "frame_height": 128,
+      "columns": 8,
+      "source": "assets/original/sheets/tower_healer.png",
+      "fps": 30
+    },
+    "rocket": {
+      "sheet": "rocket_4x.png",
+      "frame_directory": "rocket",
+      "frame_count": 60,
+      "frame_width": 128,
+      "frame_height": 128,
+      "columns": 8,
+      "source": "assets/original/sheets/tower_rocket.png",
+      "fps": 30
+    },
+    "rapid": {
+      "sheet": "rapid_4x.png",
+      "frame_directory": "rapid",
+      "frame_count": 60,
+      "frame_width": 128,
+      "frame_height": 128,
+      "columns": 8,
+      "source": "assets/original/sheets/tower_rapid.png",
+      "fps": 30
+    },
+    "sniper": {
+      "sheet": "sniper_4x.png",
+      "frame_directory": "sniper",
+      "frame_count": 60,
+      "frame_width": 128,
+      "frame_height": 128,
+      "columns": 8,
+      "source": "assets/original/sheets/tower_sniper.png",
+      "fps": 30
+    }
+  }
+}
