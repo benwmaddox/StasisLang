@@ -61,11 +61,16 @@ def main() -> int:
     assert "crate-type = [\"rlib\", \"cdylib\"]" in bridge_toml
     assert "compile_android_workshop_project" in bridge
     assert "stasis_android_bridge_compile_project" in bridge
+    assert "load_android_workshop_asset_manifest" in bridge
+    assert "stasis_assets::load_project_asset_manifest" in bridge
     assert "build_workshop_compile_plan" in bridge
     assert "render_workshop_artifacts" in bridge
 
     rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
     debug_script = read("mobile/android/build_debug.ps1")
+    assert "Workshop Android Gradle build failed with exit code" in debug_script
+    assert "Rust Android bridge build failed with exit code" in rust_bridge_script
+    assert "rustup target discovery failed with exit code" in rust_bridge_script
     published_script = read("mobile/android/build_published.ps1")
     device_script = read("mobile/android/validate_device.ps1")
     android_gitignore = read("mobile/android/.gitignore")

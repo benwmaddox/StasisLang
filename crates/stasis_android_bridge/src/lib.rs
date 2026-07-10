@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
+use stasis_assets::{AssetLimits, ResolvedAssetManifest};
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_compiler::frontend::workshop::{
@@ -70,6 +71,13 @@ pub struct AndroidBridgeCompileResult {
     pub manifest_path: PathBuf,
     pub runtime_state_path: PathBuf,
     pub function_artifact_count: usize,
+}
+
+pub fn load_android_workshop_asset_manifest(
+    project_root: impl AsRef<Path>,
+) -> Result<ResolvedAssetManifest, String> {
+    stasis_assets::load_project_asset_manifest(project_root, AssetLimits::default())
+        .map_err(|error| error.to_string())
 }
 
 pub fn run_android_workshop_stasis_tests(
@@ -903,6 +911,21 @@ mod tests {
             screen_w: 360,
             screen_h: 640,
         }
+    }
+
+    #[test]
+    fn android_bridge_uses_shared_asset_manifest_resolver() {
+        let root = temp_project("shared_assets");
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        fs::write(
+            root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
+            r#"{"schema":"stasis-assets","version":1,"assets":[]}"#,
+        )
+        .expect("write manifest");
+
+        let resolved = load_android_workshop_asset_manifest(&root).expect("resolve assets");
+        assert!(resolved.assets.is_empty());
+        fs::remove_dir_all(root).ok();
     }
     fn temp_project(name: &str) -> PathBuf {
         let stamp = SystemTime::now()

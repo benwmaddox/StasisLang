@@ -421,7 +421,7 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW50 - Android Published Build and Release Validation
 - Scope: Validate the published/AOT flavor, signing/install workflow, runtime assets, and release performance/error reporting.
-- Progress: The published flavor directly links the generated Android arm64 AOT objects and no longer seeds or packages workshop source, tests, generated stubs, or the Rust JIT bridge. Workshop assets are copied through a filtered generated source set so app-private build output cannot leak back into either APK. `build_published.ps1` validates the built APK as runtime-only, arm64-only, bounded in size, and containing the native runtime before reporting success. Release signing configuration and on-device published runtime/performance acceptance remain.
+- Progress: The published flavor directly links the generated Android arm64 AOT objects and no longer seeds or packages workshop source, tests, generated stubs, or the Rust JIT bridge. Workshop assets are copied through a filtered generated source set so app-private build output cannot leak back into either APK. Android build wrappers explicitly propagate failed Rust, Gradle, AOT-validation, and APK-validation native commands instead of allowing PowerShell to report false success. `build_published.ps1` validates the built APK as runtime-only, arm64-only, bounded in size, and containing the native runtime before reporting success. Release signing configuration and on-device published runtime/performance acceptance remain.
 - Tests: `check_android_published_apk.py`, the structural Android verifier, the published AOT bundle regression tests, and `assemblePublishedRelease` cover the machine-testable package contract.
 - Done gate: A signed sideloadable published build runs a representative game without developer workshop dependencies.
 - Status: `in progress`
@@ -513,8 +513,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 
 #### AS0 - Versioned Asset Manifest and Stable Handles
 - Scope: Define project-relative sprite/audio entries, content hashes, stable runtime handles, format metadata, dependency tracking, and missing/invalid diagnostics.
+- Progress: `stasis_assets` now owns the versioned `assets/manifest.json` schema, bounded JSON/file loading, canonical project confinement, SHA-256 verification, sprite/audio metadata validation, deterministic nonzero handles with collision rejection, dependency validation, and stable diagnostic codes. `stasis_runner` exposes the shared contract and the Android Rust bridge consumes the same resolver. Runtime load/decode and published-package consumers remain.
+- Tests: Headless Rust tests cover deterministic resolution/handles, sorting, content integrity, path traversal denial, missing/cyclic dependencies, future-version rejection, and file-size limits. The Android bridge test proves it calls the shared resolver without a platform copy.
 - Done gate: JIT/AOT/desktop/Android resolve the same manifest to the same asset identities without arbitrary filesystem access.
-- Status: `planned`
+- Status: `in progress`
 #### AS1 - Sprite Decode, Texture Upload, and Lifetime
 - Scope: Implement bounded PNG/SVG sprite decoding, GPU upload, handle ownership, release, fallback texture, and deterministic load errors across supported render backends.
 - Done gate: A packaged sprite loads and renders identically on desktop and Android, and malformed/missing assets fail safely.

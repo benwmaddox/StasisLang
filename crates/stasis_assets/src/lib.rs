@@ -1,0 +1,737 @@
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+
+pub const ASSET_MANIFEST_SCHEMA: &str = "stasis-assets";
+pub const ASSET_MANIFEST_VERSION: u32 = 1;
+pub const DEFAULT_ASSET_MANIFEST_PATH: &str = "assets/manifest.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetLimits {
+    pub max_manifest_bytes: u64,
+    pub max_assets: usize,
+    pub max_asset_bytes: u64,
+}
+
+impl Default for AssetLimits {
+    fn default() -> Self {
+        Self {
+            max_manifest_bytes: 1024 * 1024,
+            max_assets: 4096,
+            max_asset_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetManifest {
+    pub schema: String,
+    pub version: u32,
+    pub assets: Vec<AssetEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetEntry {
+    pub id: String,
+    pub path: String,
+    pub content_sha256: String,
+    pub format: AssetFormat,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AssetFormat {
+    Sprite {
+        encoding: SpriteEncoding,
+        width: u32,
+        height: u32,
+    },
+    Audio {
+        encoding: AudioEncoding,
+        sample_rate: u32,
+        channels: u16,
+        duration_frames: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpriteEncoding {
+    Png,
+    Svg,
+    Jpeg,
+    Webp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioEncoding {
+    Wav,
+    Ogg,
+    Mp3,
+    M4a,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AssetHandle(u32);
+
+impl AssetHandle {
+    pub fn from_u32(value: u32) -> Option<Self> {
+        (value != 0).then_some(Self(value))
+    }
+
+    pub fn from_i32(value: i32) -> Option<Self> {
+        Self::from_u32(value as u32)
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    pub fn as_i32(self) -> i32 {
+        self.0 as i32
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAsset {
+    pub handle: AssetHandle,
+    pub entry: AssetEntry,
+    pub absolute_path: PathBuf,
+    pub byte_length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAssetManifest {
+    pub manifest_path: PathBuf,
+    pub assets: Vec<ResolvedAsset>,
+}
+
+impl ResolvedAssetManifest {
+    pub fn by_id(&self, id: &str) -> Option<&ResolvedAsset> {
+        self.assets.iter().find(|asset| asset.entry.id == id)
+    }
+
+    pub fn by_handle(&self, handle: AssetHandle) -> Option<&ResolvedAsset> {
+        self.assets.iter().find(|asset| asset.handle == handle)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetManifestError {
+    pub code: &'static str,
+    pub entry_id: Option<String>,
+    pub path: Option<String>,
+    pub detail: String,
+}
+
+impl fmt::Display for AssetManifestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.code)?;
+        if let Some(id) = &self.entry_id {
+            write!(formatter, " [{id}]")?;
+        }
+        if let Some(path) = &self.path {
+            write!(formatter, " ({path})")?;
+        }
+        write!(formatter, ": {}", self.detail)
+    }
+}
+
+impl std::error::Error for AssetManifestError {}
+
+pub fn stable_asset_handle(entry: &AssetEntry) -> AssetHandle {
+    let kind = match entry.format {
+        AssetFormat::Sprite { .. } => "sprite",
+        AssetFormat::Audio { .. } => "audio",
+    };
+    let mut hash = 2_166_136_261u32;
+    for byte in kind.bytes().chain([b':']).chain(entry.id.bytes()) {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    if hash == 0 {
+        hash = 1;
+    }
+    AssetHandle(hash)
+}
+
+pub fn load_project_asset_manifest(
+    project_root: impl AsRef<Path>,
+    limits: AssetLimits,
+) -> Result<ResolvedAssetManifest, AssetManifestError> {
+    let root = project_root.as_ref().canonicalize().map_err(|error| {
+        manifest_error(
+            "asset_root_unavailable",
+            None,
+            Some(project_root.as_ref()),
+            error.to_string(),
+        )
+    })?;
+    let manifest_path = root
+        .join(DEFAULT_ASSET_MANIFEST_PATH)
+        .canonicalize()
+        .map_err(|error| {
+            manifest_error(
+                "asset_manifest_missing",
+                None,
+                Some(Path::new(DEFAULT_ASSET_MANIFEST_PATH)),
+                error.to_string(),
+            )
+        })?;
+    if !manifest_path.starts_with(&root) || !manifest_path.is_file() {
+        return Err(manifest_error(
+            "asset_manifest_outside_project",
+            None,
+            Some(Path::new(DEFAULT_ASSET_MANIFEST_PATH)),
+            "manifest must resolve to a file inside the project root",
+        ));
+    }
+    let manifest_bytes = read_bounded(
+        &manifest_path,
+        limits.max_manifest_bytes,
+        "asset_manifest_too_large",
+    )?;
+    let manifest: AssetManifest = serde_json::from_slice(&manifest_bytes).map_err(|error| {
+        manifest_error(
+            "asset_manifest_invalid_json",
+            None,
+            Some(&manifest_path),
+            error.to_string(),
+        )
+    })?;
+    validate_manifest_header(&manifest)?;
+    if manifest.assets.len() > limits.max_assets {
+        return Err(manifest_error(
+            "asset_manifest_too_many_entries",
+            None,
+            Some(&manifest_path),
+            format!(
+                "{} entries exceeds limit {}",
+                manifest.assets.len(),
+                limits.max_assets
+            ),
+        ));
+    }
+
+    let mut ids = BTreeSet::new();
+    let mut handles = BTreeMap::new();
+    for entry in &manifest.assets {
+        validate_entry(entry)?;
+        if !ids.insert(entry.id.clone()) {
+            return Err(entry_error(
+                "asset_id_duplicate",
+                entry,
+                "asset IDs must be unique",
+            ));
+        }
+        let handle = stable_asset_handle(entry);
+        if let Some(other_id) = handles.insert(handle, entry.id.clone()) {
+            return Err(entry_error(
+                "asset_handle_collision",
+                entry,
+                format!("stable handle collides with asset {other_id}"),
+            ));
+        }
+    }
+    validate_dependencies(&manifest.assets, &ids)?;
+
+    let mut resolved = Vec::with_capacity(manifest.assets.len());
+    for entry in manifest.assets {
+        let relative = validate_relative_asset_path(&entry.path)
+            .map_err(|detail| entry_error("asset_path_invalid", &entry, detail))?;
+        let candidate = root.join(relative);
+        let absolute_path = candidate
+            .canonicalize()
+            .map_err(|error| entry_error("asset_file_missing", &entry, error.to_string()))?;
+        if !absolute_path.starts_with(&root) || !absolute_path.is_file() {
+            return Err(entry_error(
+                "asset_path_outside_project",
+                &entry,
+                "asset must resolve to a file inside the project root",
+            ));
+        }
+        let (content_sha256, byte_length) = sha256_file(&absolute_path, limits.max_asset_bytes)
+            .map_err(|error| entry_error(error.0, &entry, error.1))?;
+        if content_sha256 != entry.content_sha256 {
+            return Err(entry_error(
+                "asset_content_hash_mismatch",
+                &entry,
+                format!("expected {}, found {content_sha256}", entry.content_sha256),
+            ));
+        }
+        resolved.push(ResolvedAsset {
+            handle: stable_asset_handle(&entry),
+            entry,
+            absolute_path,
+            byte_length,
+        });
+    }
+    resolved.sort_by(|left, right| left.entry.id.cmp(&right.entry.id));
+    Ok(ResolvedAssetManifest {
+        manifest_path,
+        assets: resolved,
+    })
+}
+
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn validate_manifest_header(manifest: &AssetManifest) -> Result<(), AssetManifestError> {
+    if manifest.schema != ASSET_MANIFEST_SCHEMA {
+        return Err(manifest_error(
+            "asset_manifest_schema_unsupported",
+            None,
+            None,
+            format!(
+                "expected {ASSET_MANIFEST_SCHEMA}, found {}",
+                manifest.schema
+            ),
+        ));
+    }
+    if manifest.version != ASSET_MANIFEST_VERSION {
+        return Err(manifest_error(
+            "asset_manifest_version_unsupported",
+            None,
+            None,
+            format!(
+                "expected version {ASSET_MANIFEST_VERSION}, found {}",
+                manifest.version
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_entry(entry: &AssetEntry) -> Result<(), AssetManifestError> {
+    if entry.id.is_empty()
+        || entry.id.len() > 128
+        || !entry
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(entry_error(
+            "asset_id_invalid",
+            entry,
+            "ID must be 1-128 ASCII letters, digits, '.', '_' or '-'",
+        ));
+    }
+    if entry.content_sha256.len() != 64
+        || !entry
+            .content_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(entry_error(
+            "asset_content_hash_invalid",
+            entry,
+            "content_sha256 must be 64 lowercase hexadecimal characters",
+        ));
+    }
+    match entry.format {
+        AssetFormat::Sprite {
+            encoding,
+            width,
+            height,
+        } => {
+            if width == 0 || height == 0 || width > 16_384 || height > 16_384 {
+                return Err(entry_error(
+                    "asset_sprite_dimensions_invalid",
+                    entry,
+                    "sprite dimensions must be within 1..=16384",
+                ));
+            }
+            validate_extension(entry, sprite_extension(encoding))?;
+        }
+        AssetFormat::Audio {
+            encoding,
+            sample_rate,
+            channels,
+            duration_frames,
+        } => {
+            if !(8_000..=384_000).contains(&sample_rate)
+                || !(1..=8).contains(&channels)
+                || duration_frames == 0
+            {
+                return Err(entry_error("asset_audio_metadata_invalid", entry, "audio requires sample rate 8000..=384000, channels 1..=8, and nonzero duration"));
+            }
+            validate_extension(entry, audio_extension(encoding))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_extension(entry: &AssetEntry, expected: &str) -> Result<(), AssetManifestError> {
+    let actual = Path::new(&entry.path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if !(actual.eq_ignore_ascii_case(expected)
+        || expected == "jpeg" && actual.eq_ignore_ascii_case("jpg"))
+    {
+        return Err(entry_error(
+            "asset_format_extension_mismatch",
+            entry,
+            format!("declared format requires .{expected}"),
+        ));
+    }
+    Ok(())
+}
+
+fn sprite_extension(encoding: SpriteEncoding) -> &'static str {
+    match encoding {
+        SpriteEncoding::Png => "png",
+        SpriteEncoding::Svg => "svg",
+        SpriteEncoding::Jpeg => "jpeg",
+        SpriteEncoding::Webp => "webp",
+    }
+}
+
+fn audio_extension(encoding: AudioEncoding) -> &'static str {
+    match encoding {
+        AudioEncoding::Wav => "wav",
+        AudioEncoding::Ogg => "ogg",
+        AudioEncoding::Mp3 => "mp3",
+        AudioEncoding::M4a => "m4a",
+    }
+}
+
+fn validate_relative_asset_path(path: &str) -> Result<PathBuf, &'static str> {
+    if path.is_empty() || path.contains('\\') {
+        return Err("asset path must use nonempty forward-slash project-relative syntax");
+    }
+    let parsed = Path::new(path);
+    if parsed.is_absolute() || !path.starts_with("assets/") {
+        return Err("asset path must be relative and remain under assets/");
+    }
+    if parsed
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("asset path cannot contain root, parent, or current-directory components");
+    }
+    Ok(parsed.to_path_buf())
+}
+
+fn validate_dependencies(
+    entries: &[AssetEntry],
+    ids: &BTreeSet<String>,
+) -> Result<(), AssetManifestError> {
+    let by_id = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    for entry in entries {
+        let mut unique = BTreeSet::new();
+        for dependency in &entry.dependencies {
+            if dependency == &entry.id || !unique.insert(dependency) {
+                return Err(entry_error(
+                    "asset_dependency_invalid",
+                    entry,
+                    format!("invalid dependency {dependency}"),
+                ));
+            }
+            if !ids.contains(dependency) {
+                return Err(entry_error(
+                    "asset_dependency_missing",
+                    entry,
+                    format!("missing dependency {dependency}"),
+                ));
+            }
+        }
+    }
+    let mut complete = BTreeSet::new();
+    let mut active = BTreeSet::new();
+    for id in &by_id {
+        visit_dependencies(id.0, &by_id, &mut active, &mut complete)?;
+    }
+    Ok(())
+}
+
+fn visit_dependencies<'a>(
+    id: &'a str,
+    entries: &BTreeMap<&'a str, &'a AssetEntry>,
+    active: &mut BTreeSet<&'a str>,
+    complete: &mut BTreeSet<&'a str>,
+) -> Result<(), AssetManifestError> {
+    if complete.contains(id) {
+        return Ok(());
+    }
+    if !active.insert(id) {
+        return Err(entry_error(
+            "asset_dependency_cycle",
+            entries[id],
+            "asset dependencies must be acyclic",
+        ));
+    }
+    for dependency in &entries[id].dependencies {
+        visit_dependencies(dependency, entries, active, complete)?;
+    }
+    active.remove(id);
+    complete.insert(id);
+    Ok(())
+}
+
+fn read_bounded(
+    path: &Path,
+    limit: u64,
+    code: &'static str,
+) -> Result<Vec<u8>, AssetManifestError> {
+    let file = File::open(path).map_err(|error| {
+        manifest_error(
+            "asset_manifest_read_failed",
+            None,
+            Some(path),
+            error.to_string(),
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            manifest_error(
+                "asset_manifest_read_failed",
+                None,
+                Some(path),
+                error.to_string(),
+            )
+        })?;
+    if bytes.len() as u64 > limit {
+        return Err(manifest_error(
+            code,
+            None,
+            Some(path),
+            format!("manifest exceeds limit {limit} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn sha256_file(path: &Path, limit: u64) -> Result<(String, u64), (&'static str, String)> {
+    let mut file =
+        File::open(path).map_err(|error| ("asset_file_read_failed", error.to_string()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 32 * 1024];
+    let mut length = 0u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| ("asset_file_read_failed", error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        length = length
+            .checked_add(read as u64)
+            .ok_or(("asset_file_too_large", "asset length overflow".to_string()))?;
+        if length > limit {
+            return Err((
+                "asset_file_too_large",
+                format!("asset exceeds {limit} bytes"),
+            ));
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok((format!("{:x}", digest.finalize()), length))
+}
+
+fn entry_error(
+    code: &'static str,
+    entry: &AssetEntry,
+    detail: impl Into<String>,
+) -> AssetManifestError {
+    manifest_error(code, Some(&entry.id), Some(Path::new(&entry.path)), detail)
+}
+
+fn manifest_error(
+    code: &'static str,
+    entry_id: Option<&str>,
+    path: Option<&Path>,
+    detail: impl Into<String>,
+) -> AssetManifestError {
+    AssetManifestError {
+        code,
+        entry_id: entry_id.map(str::to_string),
+        path: path.map(|value| value.to_string_lossy().replace('\\', "/")),
+        detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn project(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_assets_{name}_{stamp}"));
+        fs::create_dir_all(root.join("assets/images")).unwrap();
+        fs::create_dir_all(root.join("assets/audio")).unwrap();
+        root
+    }
+
+    fn sprite(id: &str, path: &str, bytes: &[u8]) -> AssetEntry {
+        AssetEntry {
+            id: id.to_string(),
+            path: path.to_string(),
+            content_sha256: sha256_bytes(bytes),
+            format: AssetFormat::Sprite {
+                encoding: SpriteEncoding::Png,
+                width: 2,
+                height: 3,
+            },
+            dependencies: vec![],
+        }
+    }
+
+    fn write_manifest(root: &Path, entries: Vec<AssetEntry>) {
+        let manifest = AssetManifest {
+            schema: ASSET_MANIFEST_SCHEMA.to_string(),
+            version: ASSET_MANIFEST_VERSION,
+            assets: entries,
+        };
+        fs::write(
+            root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolves_sorted_assets_with_stable_handles_and_hashes() {
+        let root = project("resolve");
+        let ball = b"ball png";
+        let paddle = b"paddle png";
+        fs::write(root.join("assets/images/ball.png"), ball).unwrap();
+        fs::write(root.join("assets/images/paddle.png"), paddle).unwrap();
+        let mut paddle_entry = sprite("paddle", "assets/images/paddle.png", paddle);
+        paddle_entry.dependencies.push("ball".to_string());
+        let ball_entry = sprite("ball", "assets/images/ball.png", ball);
+        let expected_handle = stable_asset_handle(&ball_entry);
+        assert_eq!(expected_handle.get(), 0xa55f_97e3);
+        assert_eq!(
+            AssetHandle::from_i32(expected_handle.as_i32()),
+            Some(expected_handle)
+        );
+        assert_eq!(AssetHandle::from_u32(0), None);
+        write_manifest(&root, vec![paddle_entry, ball_entry]);
+
+        let resolved = load_project_asset_manifest(&root, AssetLimits::default()).unwrap();
+        assert_eq!(
+            resolved
+                .assets
+                .iter()
+                .map(|asset| asset.entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ball", "paddle"]
+        );
+        assert_eq!(resolved.by_id("ball").unwrap().handle, expected_handle);
+        assert_eq!(
+            resolved.by_handle(expected_handle).unwrap().byte_length,
+            ball.len() as u64
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejects_paths_outside_project_and_hash_mismatches() {
+        let root = project("deny");
+        let bytes = b"image";
+        fs::write(root.join("assets/images/ball.png"), bytes).unwrap();
+        let mut entry = sprite("ball", "../ball.png", bytes);
+        write_manifest(&root, vec![entry.clone()]);
+        assert_eq!(
+            load_project_asset_manifest(&root, AssetLimits::default())
+                .unwrap_err()
+                .code,
+            "asset_path_invalid"
+        );
+
+        entry.path = "assets/images/ball.png".to_string();
+        entry.content_sha256 = "0".repeat(64);
+        write_manifest(&root, vec![entry]);
+        assert_eq!(
+            load_project_asset_manifest(&root, AssetLimits::default())
+                .unwrap_err()
+                .code,
+            "asset_content_hash_mismatch"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejects_missing_and_cyclic_dependencies() {
+        let root = project("deps");
+        let bytes = b"image";
+        fs::write(root.join("assets/images/a.png"), bytes).unwrap();
+        fs::write(root.join("assets/images/b.png"), bytes).unwrap();
+        let mut a = sprite("a", "assets/images/a.png", bytes);
+        a.dependencies.push("missing".to_string());
+        write_manifest(&root, vec![a.clone()]);
+        assert_eq!(
+            load_project_asset_manifest(&root, AssetLimits::default())
+                .unwrap_err()
+                .code,
+            "asset_dependency_missing"
+        );
+
+        let mut b = sprite("b", "assets/images/b.png", bytes);
+        a.dependencies = vec!["b".to_string()];
+        b.dependencies = vec!["a".to_string()];
+        write_manifest(&root, vec![a, b]);
+        assert_eq!(
+            load_project_asset_manifest(&root, AssetLimits::default())
+                .unwrap_err()
+                .code,
+            "asset_dependency_cycle"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejects_future_versions_and_oversized_assets() {
+        let root = project("limits");
+        let bytes = b"image";
+        fs::write(root.join("assets/images/ball.png"), bytes).unwrap();
+        let entry = sprite("ball", "assets/images/ball.png", bytes);
+        write_manifest(&root, vec![entry]);
+        let limits = AssetLimits {
+            max_asset_bytes: 2,
+            ..AssetLimits::default()
+        };
+        assert_eq!(
+            load_project_asset_manifest(&root, limits).unwrap_err().code,
+            "asset_file_too_large"
+        );
+
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join(DEFAULT_ASSET_MANIFEST_PATH)).unwrap())
+                .unwrap();
+        json["version"] = serde_json::json!(2);
+        fs::write(
+            root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_project_asset_manifest(&root, AssetLimits::default())
+                .unwrap_err()
+                .code,
+            "asset_manifest_version_unsupported"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+}

@@ -10,4 +10,5 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 stasis_compiler = { path = "../stasis_compiler" }
+stasis_assets = { path = "../stasis_assets" }
 serde_json.workspace = true

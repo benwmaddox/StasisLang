@@ -26,6 +26,7 @@ try {
     if ($TargetSdk) { $args += "-Pstasis.targetSdk=$TargetSdk" }
 
     & $gradleCmd @args
+    if ($LASTEXITCODE -ne 0) { throw "Workshop Android Gradle build failed with exit code $LASTEXITCODE" }
 }
 finally {
     Pop-Location
