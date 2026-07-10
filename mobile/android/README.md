@@ -7,7 +7,7 @@ Current scope:
 - Builds one Android app module with `workshop` and `published` product flavors.
 - Targets `arm64-v8a` only.
 - Loads a tiny native C library through JNI.
-- Bundles a small Stasis-style workshop project under Android assets.
+- Bundles the default Exploration Garden tutorial plus Pong as independently identified Workshop templates.
 - Opens the native Android symbol browser and source editor from a top-right hamburger overlay grouped by Main, Structs, Systems, and Root.
 - Opens into a full-screen native Android preview surface by default and starts an automatic 60 fps compile/tick loop so the preview advances without pressing `Compile` and `Run Tick`.
 - Keeps the preview, status text, and menu button inside Android system-bar and display-cutout safe insets, so they do not sit under the bottom navigation bar or camera notch.
@@ -123,7 +123,7 @@ GitHub uploads and pull-request operations share one serial background queue. Th
 
 `Recent Commands` also shows bounded per-project AI outcomes, including cancellation/failure/rollback status, usage summaries when available, and the local trace path. `Retry Last AI` restores the latest recorded request and starts it again through the normal key, pricing, per-run, and monthly budget checks.
 
-`Projects` is collapsed below the command workflow. The existing app-private `workshop_project` is adopted as `Bundled Workshop` without moving its files. `New Project From Selected Template` creates a separately identified, versioned app-private project and records the chosen catalog template; Pong is currently available and Exploration will join it. `Switch Project` changes the root used by symbols, compile, tests, AI history, and GitHub state and immediately recompiles it. Reset and Changes use the recorded template baseline rather than whichever template is currently the default. Project creation/switching is blocked while AI or GitHub work is active or the source editor contains an unapplied edit. GitHub repository/branch targets and review/retry state are project-specific; the encrypted token is shared.
+`Projects` is collapsed below the command workflow. Fresh installs start with Exploration Garden; existing v1/v2 sample projects retain Pong identity. `New Project From Selected Template` offers Exploration Garden and Pong, creates a separately identified app-private project, and records the choice. `Switch Project` changes the root used by symbols, compile, tests, AI history, and GitHub state and immediately recompiles it. Reset and Changes use the recorded template baseline rather than whichever template is currently the default. Project creation/switching is blocked while AI or GitHub work is active or the source editor contains an unapplied edit. GitHub repository/branch targets and review/retry state are project-specific; the encrypted token is shared.
 
 `Export Project Archive` opens Android's document-creation picker and writes a deterministic ZIP of the active project's normal files and versioned metadata. Generated `build/` output and temporary files are excluded. Export is limited to 512 files, 32 MiB per file, and 128 MiB total and does not require broad storage access.
 
@@ -147,7 +147,7 @@ Unsaved manual source is autosaved on activity pause and instance-state save in 
 
 Accepted images and audio are registered in the shared `assets/manifest.json` contract used by the Rust runtime. Import, paint/AI save, recording, rename, delete, and restore update the manifest atomically; existing accepted assets are reconciled on the next asset mutation after an upgrade.
 
-First run offers a deferrable zero-AI manual guide and requests no permission. `Start Manual Tutorial` opens the workshop menu and source editor on a real bundled symbol, then directs the user to edit, Apply, and Run Tests. The same checklist stays available under collapsed `Help & Onboarding`, together with Projects/archive backup and explanations that OpenAI, GitHub, media, and voice are optional; microphone permission is requested only when voice or audio recording is explicitly started.
+First run offers a deferrable zero-AI manual guide and requests no permission. It begins by tapping a destination in Exploration Garden and collecting a keepsake, then `Start Manual Tutorial` opens the workshop menu/source editor and points to movement speed, Apply, and Run Tests. The same checklist stays available under collapsed `Help & Onboarding`, together with Projects/archive backup and explanations that OpenAI, GitHub, media, and voice are optional; microphone permission is requested only when voice or audio recording is explicitly started.
 
 Priority controls and media reviews include screen-reader descriptions, Workshop/section titles expose heading roles, status is a polite live region, and compile/test diagnostics are assertive. Menu, voice, source, AI Run/Cancel, symbols, asset rows, screenshots, generated comparisons, and paint all have explicit semantics. On screens narrower than 480 dp, AI progress and diagnostic/recovery actions stack vertically. Android lint passes; TalkBack, large-font, keyboard, orientation, tablet, and foldable acceptance still require device testing.
 

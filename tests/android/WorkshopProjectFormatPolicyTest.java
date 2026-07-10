@@ -2,6 +2,13 @@ package com.stasislang.workshop;
 
 public final class WorkshopProjectFormatPolicyTest {
     public static void main(String[] args) {
+        require("exploration".equals(WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID),
+                "new installs default to exploration");
+        require("pong".equals(WorkshopTemplateCatalog.LEGACY_TEMPLATE_ID),
+                "legacy sample identity remains Pong");
+        require(WorkshopTemplateCatalog.list().size() == 2
+                && "exploration".equals(WorkshopTemplateCatalog.list().get(0).id)
+                && WorkshopTemplateCatalog.isKnown("pong"), "catalog exposes exploration and Pong");
         require(WorkshopProjectFormatPolicy.supported(1), "v1 supported");
         require(WorkshopProjectFormatPolicy.supported(2), "v2 supported");
         require(WorkshopProjectFormatPolicy.supported(3), "v3 supported");

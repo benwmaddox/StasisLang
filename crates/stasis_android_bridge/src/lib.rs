@@ -1188,6 +1188,41 @@ mod tests {
         assert_eq!(result.render_commands[3].asset, 1);
         assert!(result.observed_game_tick_count >= 1);
     }
+
+    #[test]
+    fn android_exploration_template_accepts_touch_and_exports_render_commands() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mobile/android/app/src/main/assets/exploration_sample")
+            .canonicalize()
+            .expect("exploration template root");
+
+        let result = run_android_workshop_tick(
+            &root,
+            Path::new("src/main.stasis"),
+            AndroidBridgeTickInput {
+                touch_x: 90,
+                touch_y: 180,
+                touch_active: 1,
+                screen_w: 360,
+                screen_h: 640,
+            },
+        )
+        .expect("exploration touch tick");
+
+        assert_eq!(result.render_command_count, 8);
+        assert_eq!(result.render_commands[0].kind, 1);
+        assert_eq!(result.render_commands[0].w, 360);
+        assert_eq!(result.render_commands[4].kind, 2);
+        assert_eq!(result.render_commands[4].x, 167);
+        assert_eq!(result.render_commands[4].y, 482);
+        assert_eq!(result.render_commands[5].kind, 2);
+        assert_eq!(result.render_commands[5].x, 85);
+        assert_eq!(result.render_commands[5].y, 175);
+        assert!(result.observed_game_tick_count >= 1);
+        clear_runtime_session_for_test();
+    }
     #[test]
     #[ignore = "host AI prompt regression target; run after AI edits the workshop sample"]
     fn android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear() {
@@ -1284,6 +1319,19 @@ mod tests {
             "tests/enemy_paddle_speed_schedule.test.stasis"
         );
         assert_eq!(result["results"][0]["line"], 3);
+    }
+
+    #[test]
+    fn android_bridge_runs_exploration_template_tests() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mobile/android/app/src/main/assets/exploration_sample")
+            .canonicalize()
+            .expect("exploration template root");
+        let result = run_android_workshop_stasis_tests(&root).expect("run exploration Stasis tests");
+        assert_eq!(result["passed"], 4);
+        assert_eq!(result["failed"], 0);
+        assert_eq!(result["all_passed"], true);
+        assert_eq!(result["results"][0]["file"], "tests/exploration_gameplay.test.stasis");
     }
 
     #[test]
