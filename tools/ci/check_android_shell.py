@@ -321,6 +321,21 @@ def main() -> int:
     assert "no API key is required" in activity
     assert "Voice asks for microphone permission only when started" in activity
     assert "toggleEditorPanel();" in activity
+    assert "Interactive Stasis game preview" in activity
+    assert "Open Workshop menu" in activity
+    assert "Close Workshop menu" in activity
+    assert "Start voice command recording" in activity
+    assert "Stasis source editor for the selected symbol" in activity
+    assert "Run the requested AI change with current reviewed attachments" in activity
+    assert "Cancel the active AI run after its current atomic operation" in activity
+    assert "ACCESSIBILITY_LIVE_REGION_POLITE" in activity
+    assert "ACCESSIBILITY_LIVE_REGION_ASSERTIVE" in activity
+    assert "setAccessibilityHeading(true)" in activity
+    assert "screenWidthDp < 480" in activity
+    assert "Selected image asset" in activity
+    assert "Audio asset " in activity
+    assert "Touch paint canvas" in paint_view
+    assert "setFocusable(true)" in paint_view
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
     assert "Cancel AI" in activity

@@ -526,6 +526,7 @@ public final class MainActivity extends Activity {
         installSystemInsetGuard(root);
 
         gamePreview = new GamePreviewView(this);
+        gamePreview.setContentDescription("Interactive Stasis game preview. Touch the game to control it.");
         root.addView(gamePreview, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -549,6 +550,7 @@ public final class MainActivity extends Activity {
         title.setTextColor(Color.rgb(22, 27, 34));
         title.setTextSize(20.0f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
+        if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
         title.setPadding(0, 0, 0, dp(8));
         content.addView(title, fullWidth());
 
@@ -589,6 +591,8 @@ public final class MainActivity extends Activity {
         sourceEditor.setPadding(dp(12), dp(10), dp(12), dp(10));
         sourceEditor.setSingleLine(false);
         sourceEditor.setBackground(createPanelBackground(Color.WHITE, Color.rgb(207, 214, 224)));
+        sourceEditor.setHint("Selected Stasis source code");
+        sourceEditor.setContentDescription("Stasis source editor for the selected symbol");
         selectedSourcePanel.addView(sourceEditor, fullWidth());
         selectedSourcePanel.addView(createEditControls(), fullWidth());
 
@@ -600,33 +604,39 @@ public final class MainActivity extends Activity {
         reloadStatus.setTextColor(Color.rgb(73, 84, 100));
         reloadStatus.setTextSize(13.0f);
         reloadStatus.setPadding(0, dp(8), 0, dp(6));
+        reloadStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         content.addView(reloadStatus, fullWidth());
 
         diagnosticStatus = new TextView(this);
         diagnosticStatus.setTextSize(12.0f);
         diagnosticStatus.setTextColor(Color.rgb(125, 55, 45));
         diagnosticStatus.setTypeface(Typeface.MONOSPACE);
+        diagnosticStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE);
         content.addView(diagnosticStatus, fullWidth());
         LinearLayout diagnosticActions = new LinearLayout(this);
-        diagnosticActions.setOrientation(LinearLayout.HORIZONTAL);
+        boolean narrowLayout = getResources().getConfiguration().screenWidthDp < 480;
+        diagnosticActions.setOrientation(narrowLayout ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
         Button goToDiagnostic = new Button(this);
         goToDiagnostic.setText("Go to Diagnostic");
         goToDiagnostic.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { goToDiagnosticSource(); }
         });
-        diagnosticActions.addView(goToDiagnostic, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        diagnosticActions.addView(goToDiagnostic, narrowLayout ? fullWidth()
+                : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         Button recoveryHistory = new Button(this);
         recoveryHistory.setText("Recovery History");
         recoveryHistory.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { showRecoveryHistory(); }
         });
-        diagnosticActions.addView(recoveryHistory, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        diagnosticActions.addView(recoveryHistory, narrowLayout ? fullWidth()
+                : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         Button undoFailedApply = new Button(this);
         undoFailedApply.setText("Undo Failed Apply");
         undoFailedApply.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { undoSelectedFailedApply(); }
         });
-        diagnosticActions.addView(undoFailedApply, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        diagnosticActions.addView(undoFailedApply, narrowLayout ? fullWidth()
+                : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         content.addView(diagnosticActions, fullWidth());
         refreshRecoveryStatus();
 
@@ -671,6 +681,7 @@ public final class MainActivity extends Activity {
         editorToggle.setText("\u2630");
         editorToggle.setTextSize(20.0f);
         editorToggle.setTextColor(Color.WHITE);
+        editorToggle.setContentDescription("Open Workshop menu");
         editorToggle.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
         editorToggle.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -715,6 +726,7 @@ public final class MainActivity extends Activity {
     private void installVoiceChangeControls(FrameLayout root) {
         voiceToggle = new Button(this);
         voiceToggle.setText("Voice");
+        voiceToggle.setContentDescription("Start voice command recording");
         voiceToggle.setTextColor(Color.WHITE);
         voiceToggle.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
         voiceToggle.setOnClickListener(new View.OnClickListener() {
@@ -916,6 +928,7 @@ public final class MainActivity extends Activity {
         }
         if (editorToggle != null) {
             editorToggle.setText(opening ? "\u00D7" : "\u2630");
+            editorToggle.setContentDescription(opening ? "Close Workshop menu" : "Open Workshop menu");
             editorToggle.bringToFront();
         }
         if (voiceActionRow != null && voiceActionRow.getVisibility() == View.VISIBLE) {
@@ -1135,6 +1148,7 @@ public final class MainActivity extends Activity {
         sectionTitle.setTextColor(Color.rgb(35, 45, 60));
         sectionTitle.setTextSize(18.0f);
         sectionTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        if (Build.VERSION.SDK_INT >= 28) sectionTitle.setAccessibilityHeading(true);
         sectionTitle.setPadding(0, dp(10), 0, dp(4));
         content.addView(sectionTitle, fullWidth());
 
@@ -1161,6 +1175,7 @@ public final class MainActivity extends Activity {
     private TextView createSymbolRow(final SymbolEntry symbol) {
         TextView row = new TextView(this);
         row.setText(symbol.displayName());
+        row.setContentDescription(symbol.kind + " " + symbol.displayName() + ". Tap to edit source.");
         row.setTextColor(Color.rgb(23, 43, 77));
         row.setTextSize(14.0f);
         row.setPadding(dp(12), dp(9), dp(12), dp(9));
@@ -1216,6 +1231,7 @@ public final class MainActivity extends Activity {
         aiTitle.setTextColor(Color.rgb(35, 45, 60));
         aiTitle.setTextSize(14.0f);
         aiTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        if (Build.VERSION.SDK_INT >= 28) aiTitle.setAccessibilityHeading(true);
         controls.addView(aiTitle, fullWidth());
 
         SharedPreferences aiPrefs = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
@@ -1225,6 +1241,7 @@ public final class MainActivity extends Activity {
         aiPromptEditor.setSingleLine(false);
         aiPromptEditor.setMinLines(2);
         aiPromptEditor.setTextSize(12.0f);
+        aiPromptEditor.setContentDescription("Game change or command for the AI workshop agent");
         controls.addView(aiPromptEditor, fullWidth());
 
         aiAttachmentStatus = new TextView(this);
@@ -1234,6 +1251,7 @@ public final class MainActivity extends Activity {
         controls.addView(aiAttachmentStatus, fullWidth());
         Button reviewAttachments = new Button(this);
         reviewAttachments.setText("Review AI Image Attachments");
+        reviewAttachments.setContentDescription("Review or remove project images selected for the next AI request");
         reviewAttachments.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { reviewAiImageAttachments(); }
         });
@@ -1249,6 +1267,7 @@ public final class MainActivity extends Activity {
         controls.addView(screenshotAttachmentStatus, fullWidth());
         Button capturePreview = new Button(this);
         capturePreview.setText("Capture Preview for AI");
+        capturePreview.setContentDescription("Capture and review the rendered game preview for the next AI request");
         capturePreview.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { capturePreviewForAi(); }
         });
@@ -1263,6 +1282,7 @@ public final class MainActivity extends Activity {
         aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
         Button aiPatch = new Button(this);
         aiPatch.setText("Run AI Change");
+        aiPatch.setContentDescription("Run the requested AI change with current reviewed attachments and budget limits");
         aiPatch.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -1272,6 +1292,7 @@ public final class MainActivity extends Activity {
         aiActionRow.addView(aiPatch, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         Button cancelAi = new Button(this);
         cancelAi.setText("Cancel AI");
+        cancelAi.setContentDescription("Cancel the active AI run after its current atomic operation");
         cancelAi.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { cancelAiRun(); }
         });
@@ -1279,7 +1300,8 @@ public final class MainActivity extends Activity {
         controls.addView(aiActionRow, fullWidth());
 
         LinearLayout progressRow = new LinearLayout(this);
-        progressRow.setOrientation(LinearLayout.HORIZONTAL);
+        progressRow.setOrientation(getResources().getConfiguration().screenWidthDp < 480
+                ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
         progressRow.setGravity(Gravity.LEFT);
         aiStepPill = createAiProgressPill("step 0/" + MAX_AI_AGENT_TURNS);
         aiActionPill = createAiProgressPill("actions 0");
@@ -5403,6 +5425,8 @@ public final class MainActivity extends Activity {
                 actions.setAllCaps(false);
                 actions.setText(asset.relativePath + "\n" + formatDuration(asset.durationMs)
                         + " - " + asset.bytes + " bytes");
+                actions.setContentDescription("Audio asset " + asset.relativePath + ", duration "
+                        + formatDuration(asset.durationMs) + ". Tap for preview and actions.");
                 actions.setOnClickListener(new View.OnClickListener() {
                     @Override public void onClick(View view) { showAudioAssetActions(asset); }
                 });
@@ -5585,6 +5609,7 @@ public final class MainActivity extends Activity {
                 Bitmap prior = WorkshopImageAssets.decodePreview(selected.get(0));
                 reviewBitmaps.add(prior);
                 before.setImageBitmap(prior);
+                before.setContentDescription("Selected project image before AI generation or edit");
             } else {
                 before.setBackgroundColor(Color.rgb(225, 228, 234));
                 before.setContentDescription("No reference image selected");
@@ -5595,6 +5620,7 @@ public final class MainActivity extends Activity {
         ImageView after = new ImageView(this);
         after.setImageBitmap(generated);
         after.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        after.setContentDescription("Temporary AI-generated image after result");
         comparison.addView(before, new LinearLayout.LayoutParams(0, dp(300), 1.0f));
         comparison.addView(after, new LinearLayout.LayoutParams(0, dp(300), 1.0f));
         content.addView(comparison, fullWidth());
@@ -5675,6 +5701,9 @@ public final class MainActivity extends Activity {
                 preview.setText((selectedImageAssets.contains(asset.relativePath) ? "[Selected] " : "")
                         + asset.relativePath + "\n" + asset.width + "x" + asset.height
                         + " - " + asset.bytes + " bytes");
+                preview.setContentDescription((selectedImageAssets.contains(asset.relativePath)
+                        ? "Selected image asset " : "Image asset ") + asset.relativePath + ", "
+                        + asset.width + " by " + asset.height + " pixels. Tap for actions.");
                 preview.setOnClickListener(new View.OnClickListener() {
                     @Override public void onClick(View view) { showImageAssetActions(asset); }
                 });
@@ -5982,6 +6011,7 @@ public final class MainActivity extends Activity {
                 ImageView thumbnail = new ImageView(this);
                 thumbnail.setImageBitmap(bitmap);
                 thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                thumbnail.setContentDescription("Preview of selected AI attachment " + asset.relativePath);
                 row.addView(thumbnail, new LinearLayout.LayoutParams(dp(72), dp(72)));
                 TextView label = new TextView(this);
                 label.setText(asset.relativePath + "\n" + asset.width + "x" + asset.height
@@ -6104,6 +6134,7 @@ public final class MainActivity extends Activity {
         preview.setImageBitmap(pendingPreviewScreenshot);
         preview.setAdjustViewBounds(true);
         preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        preview.setContentDescription("Captured rendered game preview awaiting AI attachment consent");
         content.addView(preview, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(320)));
         final CheckBox pixels = new CheckBox(this);
