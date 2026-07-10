@@ -12,6 +12,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -95,6 +96,7 @@ def main() -> int:
 
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
     secret_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java")
+    project_registry = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "private static native String nativeStatus()" in activity
@@ -233,6 +235,29 @@ def main() -> int:
     assert '"interrupted", "app stopped before completion"' in activity
     assert '"sync".equals(operation)' in activity
     assert '"pull_request".equals(operation)' in activity
+    assert "WorkshopProjectRegistry.initialize(this)" in activity
+    assert "New Project From Sample" in activity
+    assert "Switch Project" in activity
+    assert "projectSettingsBody.setVisibility(View.GONE)" in activity
+    assert "Project switch blocked while AI or GitHub work is active" in activity
+    assert "Project creation blocked while AI or GitHub work is active" in activity
+    assert "WorkshopProjectRegistry.setActive(this, project)" in activity
+    assert "nativeCompileProject(projectRootPath())" in activity
+    assert "githubProjectPreferenceKey" in activity
+    assert "readGitHubProjectPreference" in activity
+    assert "hasPendingSourceEdit()" in activity
+    assert "Apply or Reset the pending source edit before switching projects" in activity
+    assert 'return "stasis-workshop-" + identity' in activity
+    assert "WorkshopProjectRegistry.METADATA_FILE.equals(file.getName())" in activity
+    assert "static final int FORMAT_VERSION = 1" in project_registry
+    assert 'LEGACY_PROJECT_DIR = "workshop_project"' in project_registry
+    assert 'METADATA_FILE = ".stasis-workshop.json"' in project_registry
+    assert "UUID.randomUUID().toString()" in project_registry
+    assert "project root must stay in app-private storage" in project_registry
+    assert "project root is outside the registry" in project_registry
+    assert "output.getFD().sync()" in project_registry
+    assert "active project preference commit failed" in project_registry
+    assert "unsupported project format version" in project_registry
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity
@@ -458,7 +483,7 @@ def main() -> int:
     assert "applySelectedEdit" in activity
     assert "persistSelectedEdit" in activity
     assert "getFilesDir()" in activity
-    assert 'PROJECT_DIR = "workshop_project"' in activity
+    assert "PROJECT_DIR = WorkshopProjectRegistry.LEGACY_PROJECT_DIR" in activity
     assert "ensureProjectFile" in activity
     assert "writeTextFile" in activity
     assert "resetProject.setText(\"Reset Project\")" in activity

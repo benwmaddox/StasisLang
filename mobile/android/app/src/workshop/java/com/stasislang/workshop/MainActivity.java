@@ -27,10 +27,12 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.util.Base64;
 import android.widget.Button;
+import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 import java.io.ByteArrayOutputStream;
@@ -68,7 +70,7 @@ import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
     private static final String ASSET_ROOT = "workshop_sample/";
-    private static final String PROJECT_DIR = "workshop_project";
+    private static final String PROJECT_DIR = WorkshopProjectRegistry.LEGACY_PROJECT_DIR;
     private static final String AI_PREFS = "ai_settings";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_MODEL = "openai_model";
@@ -155,6 +157,13 @@ public final class MainActivity extends Activity {
     private EditText githubRepositoryEditor;
     private EditText githubBranchEditor;
     private TextView githubSyncStatus;
+    private LinearLayout projectSettingsBody;
+    private EditText newProjectNameEditor;
+    private Spinner projectSelector;
+    private TextView projectStatus;
+    private final ArrayList<WorkshopProjectRegistry.ProjectInfo> availableProjects = new ArrayList<>();
+    private WorkshopProjectRegistry.ProjectInfo activeProject;
+    private String projectRegistryError = "";
     private String reviewedGitHubChangeFingerprint = "";
     private String credentialStorageError = "";
     private volatile boolean githubOperationActive;
@@ -214,7 +223,13 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        projectRootFile = new File(getFilesDir(), PROJECT_DIR);
+        try {
+            activeProject = WorkshopProjectRegistry.initialize(this);
+            projectRootFile = activeProject.root;
+        } catch (Exception error) {
+            projectRegistryError = error.getMessage();
+            projectRootFile = new File(getFilesDir(), PROJECT_DIR);
+        }
         projectRootPath = projectRootFile.getAbsolutePath();
 
         Window window = getWindow();
@@ -377,6 +392,8 @@ public final class MainActivity extends Activity {
 
         if (!credentialStorageError.isEmpty()) {
             setStatusText("Credential storage error: " + credentialStorageError);
+        } else if (!projectRegistryError.isEmpty()) {
+            setStatusText("Project registry error: " + projectRegistryError);
         }
 
         startGameLoop();
@@ -983,6 +1000,40 @@ public final class MainActivity extends Activity {
         controls.addView(commandHistoryBody, fullWidth());
         refreshCommandHistory();
 
+        Button projectSettingsToggle = new Button(this);
+        projectSettingsToggle.setText("Projects");
+        projectSettingsToggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { toggleProjectSettings(); }
+        });
+        controls.addView(projectSettingsToggle, fullWidth());
+        projectSettingsBody = new LinearLayout(this);
+        projectSettingsBody.setOrientation(LinearLayout.VERTICAL);
+        projectSettingsBody.setVisibility(View.GONE);
+        projectStatus = new TextView(this);
+        projectStatus.setTextSize(12.0f);
+        projectStatus.setTextColor(Color.rgb(73, 84, 100));
+        projectSettingsBody.addView(projectStatus, fullWidth());
+        projectSelector = new Spinner(this);
+        projectSettingsBody.addView(projectSelector, fullWidth());
+        Button switchProject = new Button(this);
+        switchProject.setText("Switch Project");
+        switchProject.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { switchSelectedProject(); }
+        });
+        projectSettingsBody.addView(switchProject, fullWidth());
+        newProjectNameEditor = new EditText(this);
+        newProjectNameEditor.setHint("New project name");
+        newProjectNameEditor.setSingleLine(true);
+        projectSettingsBody.addView(newProjectNameEditor, fullWidth());
+        Button newSampleProject = new Button(this);
+        newSampleProject.setText("New Project From Sample");
+        newSampleProject.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { createAndSwitchProject(); }
+        });
+        projectSettingsBody.addView(newSampleProject, fullWidth());
+        controls.addView(projectSettingsBody, fullWidth());
+        refreshProjectControls();
+
         githubSyncStatus = new TextView(this);
         githubSyncStatus.setTextSize(12.0f);
         githubSyncStatus.setTextColor(Color.rgb(73, 84, 100));
@@ -1064,12 +1115,12 @@ public final class MainActivity extends Activity {
         githubRepositoryEditor = new EditText(this);
         githubRepositoryEditor.setHint("owner/repository");
         githubRepositoryEditor.setSingleLine(true);
-        githubRepositoryEditor.setText(githubPrefs.getString(GITHUB_PREF_REPOSITORY, ""));
+        githubRepositoryEditor.setText(readGitHubProjectPreference(githubPrefs, GITHUB_PREF_REPOSITORY, ""));
         githubSettingsBody.addView(githubRepositoryEditor, fullWidth());
         githubBranchEditor = new EditText(this);
         githubBranchEditor.setHint("Branch");
         githubBranchEditor.setSingleLine(true);
-        githubBranchEditor.setText(githubPrefs.getString(GITHUB_PREF_BRANCH, "main"));
+        githubBranchEditor.setText(readGitHubProjectPreference(githubPrefs, GITHUB_PREF_BRANCH, "main"));
         githubSettingsBody.addView(githubBranchEditor, fullWidth());
         Button saveGitHubSettings = new Button(this);
         saveGitHubSettings.setText("Save GitHub Sync Settings");
@@ -1238,6 +1289,114 @@ public final class MainActivity extends Activity {
         setStatusText("No AI request is available to retry");
     }
 
+    private void toggleProjectSettings() {
+        if (projectSettingsBody != null) {
+            projectSettingsBody.setVisibility(projectSettingsBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+        }
+    }
+
+    private void refreshProjectControls() {
+        if (projectSelector == null || projectStatus == null) return;
+        try {
+            availableProjects.clear();
+            availableProjects.addAll(WorkshopProjectRegistry.list(this));
+            ArrayAdapter<WorkshopProjectRegistry.ProjectInfo> adapter = new ArrayAdapter<>(
+                    this, android.R.layout.simple_spinner_item, availableProjects);
+            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+            projectSelector.setAdapter(adapter);
+            int selected = 0;
+            for (int index = 0; index < availableProjects.size(); index += 1) {
+                if (activeProject != null && availableProjects.get(index).id.equals(activeProject.id)) selected = index;
+            }
+            if (!availableProjects.isEmpty()) projectSelector.setSelection(selected);
+            projectStatus.setText(activeProject == null
+                    ? "Active project: legacy workspace"
+                    : "Active project: " + activeProject.name + " (format " + WorkshopProjectRegistry.FORMAT_VERSION + ")");
+        } catch (Exception error) {
+            projectStatus.setText("Project registry error: " + error.getMessage());
+        }
+    }
+
+    private void switchSelectedProject() {
+        Object selected = projectSelector == null ? null : projectSelector.getSelectedItem();
+        if (!(selected instanceof WorkshopProjectRegistry.ProjectInfo)) {
+            setStatusText("Select a registered project first");
+            return;
+        }
+        activateProject((WorkshopProjectRegistry.ProjectInfo)selected);
+    }
+
+    private void createAndSwitchProject() {
+        if (aiRunActive || githubOperationActive) {
+            setStatusText("Project creation blocked while AI or GitHub work is active");
+            return;
+        }
+        if (hasPendingSourceEdit()) {
+            setStatusText("Apply or Reset the pending source edit before creating a project");
+            return;
+        }
+        String name = newProjectNameEditor == null ? "" : newProjectNameEditor.getText().toString();
+        try {
+            WorkshopProjectRegistry.ProjectInfo project = WorkshopProjectRegistry.createFromSample(this, name);
+            activateProject(project);
+            newProjectNameEditor.setText("");
+        } catch (Exception error) {
+            setStatusText("Project creation failed: " + error.getMessage());
+        }
+    }
+
+    private void activateProject(WorkshopProjectRegistry.ProjectInfo project) {
+        if (aiRunActive || githubOperationActive) {
+            setStatusText("Project switch blocked while AI or GitHub work is active");
+            return;
+        }
+        if (hasPendingSourceEdit()) {
+            setStatusText("Apply or Reset the pending source edit before switching projects");
+            return;
+        }
+        try {
+            WorkshopProjectRegistry.setActive(this, project);
+            activeProject = project;
+            projectRootFile = project.root;
+            projectRootPath = project.root.getAbsolutePath();
+            selectedSymbol = null;
+            compileAttempted = false;
+            compileReady = false;
+            lastCompileResult = "CompileNotRun";
+            reviewedGitHubChangeFingerprint = "";
+            ProjectSnapshot snapshot = loadBundledProject();
+            rebuildSymbolList(snapshot);
+            if (snapshot.firstSymbol != null) showSymbol(snapshot.firstSymbol);
+            refreshChangeSummary(snapshot);
+            refreshCommandHistory();
+            refreshGitHubSettingsEditors();
+            refreshGitHubSyncStatus();
+            refreshProjectControls();
+            String compileResult = nativeCompileProject(projectRootPath());
+            lastCompileResult = compileResult;
+            compileReady = isRunnableCompile(compileResult);
+            compileAttempted = true;
+            setStatusText("Switched to " + project.name + " - " + compileResult);
+        } catch (Exception error) {
+            setStatusText("Project switch failed: " + error.getMessage());
+        }
+    }
+
+    private boolean hasPendingSourceEdit() {
+        return selectedSymbol != null && sourceEditor != null
+                && !sourceEditor.getText().toString().trim().equals(selectedSymbol.source.trim());
+    }
+
+    private void refreshGitHubSettingsEditors() {
+        SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        if (githubRepositoryEditor != null) {
+            githubRepositoryEditor.setText(readGitHubProjectPreference(preferences, GITHUB_PREF_REPOSITORY, ""));
+        }
+        if (githubBranchEditor != null) {
+            githubBranchEditor.setText(readGitHubProjectPreference(preferences, GITHUB_PREF_BRANCH, "main"));
+        }
+    }
+
     private void toggleGitHubSettings() {
         if (githubSettingsBody != null) {
             githubSettingsBody.setVisibility(githubSettingsBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
@@ -1278,8 +1437,8 @@ public final class MainActivity extends Activity {
         SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
         if (!writeSecretPreference(preferences, GITHUB_PREF_TOKEN, token)) return;
         preferences.edit()
-                .putString(GITHUB_PREF_REPOSITORY, repository)
-                .putString(GITHUB_PREF_BRANCH, branch.isEmpty() ? "main" : branch)
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_REPOSITORY), repository)
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_BRANCH), branch.isEmpty() ? "main" : branch)
                 .apply();
         refreshGitHubSyncStatus();
         setStatusText("GitHub sync settings saved; background sync is ready");
@@ -1290,7 +1449,7 @@ public final class MainActivity extends Activity {
             return;
         }
         SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
-        String repository = prefs.getString(GITHUB_PREF_REPOSITORY, "").trim();
+        String repository = readGitHubProjectPreference(prefs, GITHUB_PREF_REPOSITORY, "").trim();
         String token = readSecretPreference(prefs, GITHUB_PREF_TOKEN).trim();
         if (!credentialStorageError.isEmpty()) {
             githubSyncStatus.setText("GitHub sync: credential storage error");
@@ -1300,9 +1459,9 @@ public final class MainActivity extends Activity {
             githubSyncStatus.setText("GitHub sync: not configured");
             return;
         }
-        String operation = prefs.getString(GITHUB_PREF_OPERATION, "");
-        String state = prefs.getString(GITHUB_PREF_OPERATION_STATE, "");
-        String detail = prefs.getString(GITHUB_PREF_OPERATION_DETAIL, "");
+        String operation = prefs.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
+        String state = prefs.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
+        String detail = prefs.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_DETAIL), "");
         if (("queued".equals(state) || "running".equals(state)) && !operation.isEmpty()) {
             persistGitHubOperationState(operation, "interrupted", "app stopped before completion");
             githubSyncStatus.setText("GitHub sync: interrupted; retry available");
@@ -1318,8 +1477,8 @@ public final class MainActivity extends Activity {
     private void queueGitHubSync() {
         final SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
         final String token = readSecretPreference(prefs, GITHUB_PREF_TOKEN).trim();
-        final String repository = prefs.getString(GITHUB_PREF_REPOSITORY, "").trim();
-        final String branch = prefs.getString(GITHUB_PREF_BRANCH, "main").trim();
+        final String repository = readGitHubProjectPreference(prefs, GITHUB_PREF_REPOSITORY, "").trim();
+        final String branch = readGitHubProjectPreference(prefs, GITHUB_PREF_BRANCH, "main").trim();
         if (token.isEmpty() || repository.indexOf('/') <= 0) {
             setStatusText("GitHub sync needs configured settings");
             return;
@@ -1377,7 +1536,7 @@ public final class MainActivity extends Activity {
             }
             reviewedGitHubChangeFingerprint = githubChangeFingerprint(changes);
             getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
-                    .putString(GITHUB_PREF_REVIEW_FINGERPRINT, reviewedGitHubChangeFingerprint).apply();
+                    .putString(githubProjectPreferenceKey(GITHUB_PREF_REVIEW_FINGERPRINT), reviewedGitHubChangeFingerprint).apply();
             changeSummary.setText(formatChangeSummary(baseline, current)
                     + "\n\n" + formatRawFileDiffs(baseline, current));
             githubSyncStatus.setText("GitHub review: ready (" + changes.size() + " files)");
@@ -1390,8 +1549,8 @@ public final class MainActivity extends Activity {
     private void queueGitHubPullRequest() {
         final SharedPreferences prefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
         final String token = readSecretPreference(prefs, GITHUB_PREF_TOKEN).trim();
-        final String repository = prefs.getString(GITHUB_PREF_REPOSITORY, "").trim();
-        final String baseBranch = prefs.getString(GITHUB_PREF_BRANCH, "main").trim();
+        final String repository = readGitHubProjectPreference(prefs, GITHUB_PREF_REPOSITORY, "").trim();
+        final String baseBranch = readGitHubProjectPreference(prefs, GITHUB_PREF_BRANCH, "main").trim();
         if (token.isEmpty() || repository.indexOf('/') <= 0) {
             setStatusText("GitHub pull request needs configured settings");
             return;
@@ -1408,7 +1567,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (reviewedGitHubChangeFingerprint.isEmpty()) {
-            reviewedGitHubChangeFingerprint = prefs.getString(GITHUB_PREF_REVIEW_FINGERPRINT, "");
+            reviewedGitHubChangeFingerprint = prefs.getString(githubProjectPreferenceKey(GITHUB_PREF_REVIEW_FINGERPRINT), "");
         }
         if (!githubChangeFingerprint(changes).equals(reviewedGitHubChangeFingerprint)) {
             githubSyncStatus.setText("GitHub pull request: review current changes first");
@@ -1457,8 +1616,10 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static String githubReviewBranchName() {
-        return "stasis-workshop-" + PROJECT_DIR.replace('_', '-');
+    private String githubReviewBranchName() {
+        String identity = activeProject == null
+                ? Integer.toHexString(projectRootPath().hashCode()) : activeProject.id;
+        return "stasis-workshop-" + identity;
     }
 
     private static String formatGitHubPullRequestBody(Map<String, String> changes) {
@@ -1560,7 +1721,7 @@ public final class MainActivity extends Activity {
 
     private void retryGitHubOperation() {
         String operation = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE)
-                .getString(GITHUB_PREF_OPERATION, "");
+                .getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
         if ("sync".equals(operation)) {
             queueGitHubSync();
         } else if ("pull_request".equals(operation)) {
@@ -1572,10 +1733,25 @@ public final class MainActivity extends Activity {
 
     private void persistGitHubOperationState(String operation, String state, String detail) {
         getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
-                .putString(GITHUB_PREF_OPERATION, operation)
-                .putString(GITHUB_PREF_OPERATION_STATE, state)
-                .putString(GITHUB_PREF_OPERATION_DETAIL, detail)
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), operation)
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), state)
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_DETAIL), detail)
                 .apply();
+    }
+
+    private String githubProjectPreferenceKey(String base) {
+        String identity = activeProject == null
+                ? Integer.toHexString(projectRootPath().hashCode()) : activeProject.id;
+        return base + "_" + identity;
+    }
+
+    private String readGitHubProjectPreference(SharedPreferences preferences, String base, String fallback) {
+        String scopedKey = githubProjectPreferenceKey(base);
+        if (preferences.contains(scopedKey)) return preferences.getString(scopedKey, fallback);
+        if (!preferences.contains(base)) return fallback;
+        String legacy = preferences.getString(base, fallback);
+        preferences.edit().putString(scopedKey, legacy).remove(base).apply();
+        return legacy;
     }
 
     private synchronized boolean beginGitHubOperation(String operation, String status) {
@@ -1589,8 +1765,8 @@ public final class MainActivity extends Activity {
     }
 
     private void postGitHubOperationState(final String operation, final String state, final String status) {
-        if ("complete".equals(state) || "error".equals(state)) githubOperationActive = false;
         persistGitHubOperationState(operation, state, status);
+        if ("complete".equals(state) || "error".equals(state)) githubOperationActive = false;
         runOnUiThread(new Runnable() {
             @Override public void run() { if (githubSyncStatus != null) githubSyncStatus.setText(status); }
         });
@@ -4648,6 +4824,9 @@ public final class MainActivity extends Activity {
         if (!file.exists()) {
             return;
         }
+        if (WorkshopProjectRegistry.METADATA_FILE.equals(file.getName())) {
+            return;
+        }
         if (file.isDirectory()) {
             File[] children = file.listFiles();
             if (children != null) {
@@ -4655,6 +4834,9 @@ public final class MainActivity extends Activity {
                     deleteProjectDirectory(child);
                 }
             }
+        }
+        if (file.equals(projectRoot())) {
+            return;
         }
         if (!file.delete() && file.exists()) {
             setStatusText("Unable to refresh bundled project file: " + file.getAbsolutePath());
