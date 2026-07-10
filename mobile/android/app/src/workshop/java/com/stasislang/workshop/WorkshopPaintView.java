@@ -38,6 +38,8 @@ final class WorkshopPaintView extends View {
         stroke.setStrokeCap(Paint.Cap.ROUND);
         stroke.setStrokeJoin(Paint.Join.ROUND);
         setBackgroundColor(Color.rgb(50, 55, 64));
+        setContentDescription("Touch paint canvas. Use the labeled brush, eraser, color, undo, redo, and resize controls below.");
+        setFocusable(true);
     }
 
     int canvasWidth() { return bitmap.getWidth(); }
