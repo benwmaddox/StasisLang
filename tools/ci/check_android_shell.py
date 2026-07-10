@@ -296,6 +296,9 @@ def main() -> int:
     assert "writeSyncedAtomic(savedPreview, previewPng)" in ai_queue
     assert "deletePreview(context, entry)" in ai_queue
     assert "pruneOrphanPreviews" in ai_queue
+    assert "removeOldestTerminal" in ai_queue
+    assert "AiQueuePolicy.terminal(state)" in ai_queue
+    assert "index < first && !AndroidAiQueue.PENDING.equals(item.state)" in activity
     assert "encodeBitmapPng" in activity
     assert "queuedEntry.previewFile" in activity
     assert "nextPendingIndex" in ai_queue_policy

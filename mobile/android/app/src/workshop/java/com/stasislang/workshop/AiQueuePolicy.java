@@ -26,6 +26,10 @@ final class AiQueuePolicy {
         return false;
     }
 
+    static boolean terminal(String state) {
+        return "completed".equals(state) || "failed".equals(state) || "cancelled".equals(state);
+    }
+
     static int nextPendingIndex(String projectId, String[] projectIds, String[] states) {
         if (projectIds.length != states.length) throw new IllegalArgumentException("queue vectors differ in length");
         for (int index = 0; index < states.length; index += 1) {
