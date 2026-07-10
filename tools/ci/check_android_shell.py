@@ -665,6 +665,8 @@ def main() -> int:
     assert "PreviousManifest" in native
     assert "read_previous_compile_manifest" in native
     assert "classify_reload" in native
+    assert '"GameState.ball_age_ticks", &published_game_ball_age_ticks' in native
+    assert '"GameState.enemy_paddle_speed_x100", &published_game_enemy_paddle_speed_x100' in native
     assert "reload=%s" in native
     assert "InitialCompile" in native
     assert "NoChange" in native
