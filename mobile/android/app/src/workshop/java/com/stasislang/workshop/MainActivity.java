@@ -1762,7 +1762,7 @@ public final class MainActivity extends Activity {
         onboardingBody.setVisibility(View.GONE);
         TextView onboardingSummary = new TextView(this);
         onboardingSummary.setText("Manual path (no API key):\n"
-                + "1. Play the preview and open the top-right menu.\n"
+                + "1. Tap the Exploration Garden, walk to a keepsake, then open the top-right menu.\n"
                 + "2. Open Manual Symbols & Source and choose a symbol.\n"
                 + "3. Edit, Apply, then Run Tests; use Changes before backup.\n"
                 + "4. Projects creates/switches workshops and exports portable archives.\n\n"
@@ -2640,7 +2640,8 @@ public final class MainActivity extends Activity {
     private void showOnboardingGuide(boolean firstRun) {
         new AlertDialog.Builder(this)
                 .setTitle("Welcome to Stasis Workshop")
-                .setMessage("You can build and test a game entirely on-device without AI. Play the preview, open the menu, "
+                .setMessage("You can build and test a game entirely on-device without AI. In the Exploration Garden, tap a destination "
+                        + "and collect a keepsake, then open the menu, "
                         + "expand Manual Symbols & Source, make a small edit, Apply it, and Run Tests. Projects and archive backup "
                         + "work without accounts. OpenAI, GitHub, media, and voice are optional and activate only when you choose them.")
                 .setPositiveButton("Start Manual Tutorial", new android.content.DialogInterface.OnClickListener() {
@@ -2673,7 +2674,7 @@ public final class MainActivity extends Activity {
             ProjectSnapshot project = loadBundledProject();
             if (project.firstSymbol != null) showSymbol(project.firstSymbol);
         }
-        setStatusText("Manual tutorial: edit the selected symbol, tap Apply, then Run Tests; no API key is required");
+        setStatusText("Manual tutorial: try MOVE_SPEED in src/config.stasis, tap Apply, then Run Tests; no API key is required");
         if (editorPanel != null && sourceEditor != null) {
             editorPanel.post(new Runnable() {
                 @Override public void run() { editorPanel.smoothScrollTo(0, sourceEditor.getTop()); }
@@ -7783,6 +7784,13 @@ public final class MainActivity extends Activity {
                         ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
                     } catch (IOException ignored) {
                         // The recursive load below includes files that were seeded successfully.
+                    }
+                }
+                for (String file : template.auxiliaryFiles) {
+                    try {
+                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
+                    } catch (IOException ignored) {
+                        // Optional template support files do not prevent source discovery.
                     }
                 }
             } catch (IOException ignored) {

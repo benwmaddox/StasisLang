@@ -5,7 +5,7 @@ import java.util.Collections;
 import java.util.List;
 
 final class WorkshopTemplateCatalog {
-    static final String DEFAULT_TEMPLATE_ID = "pong";
+    static final String DEFAULT_TEMPLATE_ID = "exploration";
     static final String LEGACY_TEMPLATE_ID = "pong";
 
     private static final Template PONG = new Template(
@@ -22,21 +22,42 @@ final class WorkshopTemplateCatalog {
                     "src/assets.stasis",
                     "src/systems/collision.stasis"
             },
-            new String[] { "tests/enemy_paddle_speed_schedule.test.stasis" });
+            new String[] { "tests/enemy_paddle_speed_schedule.test.stasis" },
+            new String[0]);
+
+    private static final Template EXPLORATION = new Template(
+            "exploration",
+            "Exploration Garden",
+            "exploration_sample/",
+            new String[] {
+                    "src/main.stasis",
+                    "src/config.stasis",
+                    "src/components.stasis",
+                    "src/world_data.stasis",
+                    "src/input.stasis",
+                    "src/assets.stasis",
+                    "src/systems/movement.stasis",
+                    "src/systems/collection.stasis",
+                    "src/systems/tutorial.stasis",
+                    "src/systems/render_extract.stasis"
+            },
+            new String[] { "tests/exploration_gameplay.test.stasis" },
+            new String[] { "assets/manifest.json" });
 
     private WorkshopTemplateCatalog() {}
 
     static Template require(String id) {
         if (PONG.id.equals(id)) return PONG;
+        if (EXPLORATION.id.equals(id)) return EXPLORATION;
         throw new IllegalArgumentException("unknown Workshop template: " + id);
     }
 
     static boolean isKnown(String id) {
-        return PONG.id.equals(id);
+        return PONG.id.equals(id) || EXPLORATION.id.equals(id);
     }
 
     static List<Template> list() {
-        return Collections.unmodifiableList(Arrays.asList(PONG));
+        return Collections.unmodifiableList(Arrays.asList(EXPLORATION, PONG));
     }
 
     static final class Template {
@@ -45,13 +66,16 @@ final class WorkshopTemplateCatalog {
         final String assetRoot;
         final String[] sourceFiles;
         final String[] testFiles;
+        final String[] auxiliaryFiles;
 
-        Template(String id, String name, String assetRoot, String[] sourceFiles, String[] testFiles) {
+        Template(String id, String name, String assetRoot, String[] sourceFiles, String[] testFiles,
+                String[] auxiliaryFiles) {
             this.id = id;
             this.name = name;
             this.assetRoot = assetRoot;
             this.sourceFiles = sourceFiles.clone();
             this.testFiles = testFiles.clone();
+            this.auxiliaryFiles = auxiliaryFiles.clone();
         }
 
         @Override public String toString() {

@@ -125,6 +125,8 @@ Onboarding reveals the project in layers:
 
 Pong remains available in the template selector as the smaller example for collision, difficulty curves, tests, and release packaging.
 
+Current implementation note: the first playable keeps executable declarations in `src/main.stasis` because the Workshop JIT and Android AOT paths do not yet agree on project-relative import bases. The planned files above are present as lesson maps, but splitting declarations into them would currently make one host pass while another fails. This is a shared project-import limitation, not a reason to add an Android-only compiler route; the files should become executable modules only after project-relative imports are fixed and tested across host JIT, AOT, and Android.
+
 ## Required Stasis Tests
 
 - A new press edge sets the player destination; a held touch does not resubmit it every tick.

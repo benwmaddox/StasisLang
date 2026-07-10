@@ -95,6 +95,7 @@ android {
 tasks.register('prepareWorkshopAssets', Sync) {
     from(file('src/main/assets')) {
         exclude 'workshop_sample/build/**'
+        exclude 'exploration_sample/build/**'
     }
     into(workshopAssetsDir)
 }

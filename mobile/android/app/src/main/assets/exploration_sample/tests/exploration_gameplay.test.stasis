@@ -1,0 +1,61 @@
+import "../src/config.stasis";
+import "../src/components.stasis";
+import "../src/world_data.stasis";
+import "../src/input.stasis";
+import "../src/assets.stasis";
+import "../src/systems/movement.stasis";
+import "../src/systems/collection.stasis";
+import "../src/systems/tutorial.stasis";
+import "../src/systems/render_extract.stasis";
+import "../src/main.stasis";
+
+test `new touch edge sets one clamped destination`(): bool {
+    exploration_init_world();
+    Input.touch_x = -20; Input.touch_y = 900; Input.touch_active = 1;
+    exploration_input_target_system();
+    if (World.destination_x[0] != 12) { return false; }
+    if (World.destination_y[0] != 628) { return false; }
+    Input.touch_x = 200; Input.touch_y = 200;
+    exploration_input_target_system();
+    if (World.destination_x[0] != 12) { return false; }
+    Input.touch_active = 0; exploration_input_target_system();
+    Input.touch_active = 1; exploration_input_target_system();
+    return World.destination_x[0] == 200 && World.destination_y[0] == 200;
+}
+
+test `movement is proportional deterministic and never overshoots`(): bool {
+    exploration_init_world();
+    World.destination_active[0] = 1;
+    World.destination_x[0] = 240;
+    World.destination_y[0] = 530;
+    exploration_movement_system();
+    if (World.position_x[0] != 186 || World.position_y[0] != 503) { return false; }
+    World.destination_x[0] = 189;
+    World.destination_y[0] = 505;
+    exploration_movement_system();
+    return World.position_x[0] == 189 && World.position_y[0] == 505
+        && World.destination_active[0] == 0;
+}
+
+test `collection at boundary happens once`(): bool {
+    exploration_init_world();
+    World.position_x[1] = World.position_x[0] + PICKUP_RADIUS;
+    World.position_y[1] = World.position_y[0];
+    exploration_collection_system();
+    if (GameState.collected_count != 1 || World.inventory_count[1] != 1) { return false; }
+    exploration_collection_system();
+    return GameState.collected_count == 1 && World.inventory_count[1] == 1
+        && World.collectible_active[1] == 0;
+}
+
+test `tick schedule moves then collects deterministically`(): bool {
+    exploration_init_world();
+    World.position_x[0] = 90;
+    World.position_y[0] = 210;
+    Input.touch_x = 90; Input.touch_y = 180; Input.touch_active = 1;
+    let step: i32 = 0;
+    for (step = 0; step < 2; step = step + 1) { tick(); }
+    if (GameState.collected_count != 1) { return false; }
+    render();
+    return Render.command_count == 8 && Render.command1_kind == 0 && Render.command4_kind == 2;
+}

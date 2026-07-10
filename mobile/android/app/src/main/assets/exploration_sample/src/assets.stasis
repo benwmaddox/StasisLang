@@ -1,0 +1,2 @@
+// The first lesson uses colored primitives. Later sprite/audio lessons keep the same stable manifest IDs.
+const EXPLORATION_PLAYER_ASSET: i32 = 0;

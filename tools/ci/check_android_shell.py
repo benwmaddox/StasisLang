@@ -42,6 +42,18 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/workshop_sample/src/input.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/assets.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/main.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/config.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/components.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/world_data.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/input.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/assets.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/movement.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/collection.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/tutorial.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/render_extract.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/tests/exploration_gameplay.test.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/assets/manifest.json",
     "mobile/android/README.md",
     "tools/android_ai_agent_host.py",
     "tools/ci/check_android_published_apk.py",
@@ -128,6 +140,7 @@ def main() -> int:
     assert "STASIS_ANDROID_PUBLISHED_AOT=ON" in app_gradle
     assert "prepareWorkshopAssets" in app_gradle
     assert "workshop_sample/build/**" in app_gradle
+    assert "exploration_sample/build/**" in app_gradle
     assert "published.assets.setSrcDirs([])" in app_gradle
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
@@ -621,8 +634,20 @@ def main() -> int:
     assert '.put("template_id", project.templateId)' in project_registry
     assert "WorkshopTemplateCatalog.LEGACY_TEMPLATE_ID" in project_format_policy
     assert "WorkshopTemplateCatalog.isKnown(templateId)" in project_registry
-    assert 'DEFAULT_TEMPLATE_ID = "pong"' in template_catalog
+    assert 'DEFAULT_TEMPLATE_ID = "exploration"' in template_catalog
     assert 'LEGACY_TEMPLATE_ID = "pong"' in template_catalog
+    assert '"exploration_sample/"' in template_catalog
+    assert '"Exploration Garden"' in template_catalog
+    exploration_main = read("mobile/android/app/src/main/assets/exploration_sample/src/main.stasis")
+    exploration_components = read("mobile/android/app/src/main/assets/exploration_sample/src/components.stasis")
+    exploration_tests = read("mobile/android/app/src/main/assets/exploration_sample/tests/exploration_gameplay.test.stasis")
+    assert "exploration_input_target_system();" in exploration_main
+    assert "exploration_movement_system();" in exploration_main
+    assert "exploration_collection_system();" in exploration_main
+    assert "entity_alive: i32[8]" in exploration_main
+    assert "Lesson map:" in exploration_components
+    assert "test `new touch edge sets one clamped destination`(): bool" in exploration_tests
+    assert "assert_runtime" not in exploration_tests
     assert '"sample".equals(origin)' in project_registry
     assert '"import".equals(origin)' in project_registry
     assert "project metadata id is invalid" in project_registry
