@@ -409,8 +409,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW48 - Android Preview and Touch Gameplay Parity
 - Scope: Replace placeholder preview assumptions with a renderer/runtime contract that displays real game output and supports touch-first sample gameplay.
+- Deliverable: The Workshop's full-screen GLES preview consumes the real render-command buffer produced by the packaged Rust/JIT bridge. Android `MotionEvent` coordinates flow through JNI into Stasis `Input` globals, update the touch-first paddle game, and return through the same Stasis render state used by the preview.
+- Tests: Rust bridge/runtime render tests and Android shell checks cover the contract. Real-device acceptance on 2026-07-09 reinstalled the committed APK over existing data, launched an imported registered project in `JitExecuted` mode, verified `game_tick_count` advanced from `8220` to `8340`, injected a vertical Android touch gesture, and verified the Stasis player-paddle command moved from `render1_y=811` to `render1_y=1537`.
 - Done gate: A representative Stasis game renders and is playable on a phone using touch input through the same runtime used by the workshop.
-- Status: `planned`
+- Status: `completed`
 #### AW49 - Android Diagnostics and Change Recovery UX
 - Scope: Provide structured compiler/test diagnostics, source locations, safe rollback/recovery history, and clear hot-reload/reset explanations.
 - Done gate: A user can identify, navigate to, and recover from a failed edit without raw log hunting.
