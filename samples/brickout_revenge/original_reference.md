@@ -15,6 +15,12 @@ not a gameplay specification.
 Recovery output is intentionally kept outside this repository. Only the ported
 Stasis implementation and redistributable game assets are committed here.
 
+## Original audio archive
+
+The recovery tool preserves the six embedded MP3 files under `assets/original/audio/`,
+including the original compact background music. Playback remains out of this remake
+slice until Stasis has a shared compressed-audio asset API.
+
 ## Playfield and flow
 
 - Playfield bounds are x=9..441 and y=15..463.
