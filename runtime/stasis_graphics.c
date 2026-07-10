@@ -47,6 +47,7 @@
 static void flush_sprites(void);
 static void render_postfx(void);
 #endif
+static int gfx_use_nearest_filtering(void);
 
 static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority priority, const char* message) {
     (void)userdata;
@@ -1673,9 +1674,9 @@ static int atlas_add_page(void) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, page->w, page->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, initial_pixels);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glGenerateMipmap(GL_TEXTURE_2D);
+    const GLint filter = gfx_use_nearest_filtering() ? GL_NEAREST : GL_LINEAR;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
     glBindTexture(GL_TEXTURE_2D, 0);
     free(initial_pixels);
 
@@ -3773,6 +3774,11 @@ static int gfx_should_log_sprite_loads(void) {
     return cached;
 }
 
+static int gfx_use_nearest_filtering(void) {
+    const char* value = getenv("STASIS_GFX_NEAREST");
+    return value && value[0] == '1';
+}
+
 static void sprite_set_gl_region(SpriteEntry* e, int page_index, int sprite_x, int sprite_y,
                                  int alloc_x, int alloc_y, int alloc_w, int alloc_h,
                                  int sprite_w, int sprite_h) {
@@ -4990,8 +4996,9 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
         glBindTexture(GL_TEXTURE_2D, font->atlas_texture);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
                      0, GL_ALPHA, GL_UNSIGNED_BYTE, atlas_bitmap);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        const GLint filter = gfx_use_nearest_filtering() ? GL_NEAREST : GL_LINEAR;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 #endif
