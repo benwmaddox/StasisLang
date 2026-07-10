@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
 $variant = if ($Published) { "published" } else { "workshop" }
-$package = if ($Published) { "com.stasislang.workshop.published" } else { "com.stasislang.workshop" }
+$package = if ($Published) { "com.stasislang.pong" } else { "com.stasislang.workshop" }
 $apk = if ($Published) {
     Join-Path $scriptRoot "app\build\outputs\apk\published\debug\app-published-debug.apk"
 } else {

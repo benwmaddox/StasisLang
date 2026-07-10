@@ -101,7 +101,10 @@ def main() -> int:
     assert "workshop {" in app_gradle
     assert "published {" in app_gradle
     assert "applicationId 'com.stasislang.workshop'" in app_gradle
-    assert "applicationId 'com.stasislang.workshop.published'" in app_gradle
+    assert "applicationId 'com.stasislang.pong'" in app_gradle
+    assert "manifestPlaceholders = [appLabel: 'Stasis Pong']" in app_gradle
+    assert "buildConfigField 'String', 'STASIS_GAME_ID', '\"pong\"'" in app_gradle
+    assert "pongReleaseProjectDir" in app_gradle
     assert "STASIS_PUBLISHED_BUILD" in app_gradle
     assert "abiFilters 'arm64-v8a'" in app_gradle
     assert "externalNativeBuild" in app_gradle
@@ -463,6 +466,10 @@ def main() -> int:
     assert "AI_READ_TIMEOUT_MS" in activity
     assert "completed calls remain in usage totals" in activity
     assert "installVoiceChangeControls(root)" in activity
+    assert "VOICE_TOP_MARGIN_DP = 64" in activity
+    assert "VOICE_ACTION_TOP_MARGIN_DP = 120" in activity
+    assert "voiceParams.setMargins(0, dp(VOICE_TOP_MARGIN_DP), dp(TOP_CONTROL_END_MARGIN_DP), 0)" in activity
+    assert "toggleParams.setMargins(0, dp(8), dp(TOP_CONTROL_END_MARGIN_DP), 0)" in activity
     assert "SpeechRecognizer.createSpeechRecognizer(this)" in activity
     assert "VOICE_RECORD_PERMISSION_REQUEST" in activity
     assert "voiceCancel.setText(\"Cancel\")" in activity
@@ -909,7 +916,8 @@ def main() -> int:
     assert "onDrawFrame" in published_activity
     assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in published_activity
     assert "event.getPointerCount() >= 3" in published_activity
-    assert "PUBLISHED_RUNTIME_ID = \"published_aot\"" in published_activity
+    assert 'PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_GAME_ID + "_aot"' in published_activity
+    assert '"com.stasislang.pong"' in device_script
     assert "ensureBundledProject" not in published_activity
     assert "AssetManager" not in published_activity
     workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")

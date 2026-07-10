@@ -509,6 +509,42 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Done gate: A failure can be diagnosed and recovered from without exposing credentials or requiring raw Android log access.
 - Status: `in progress`
 
+#### AW65 - Unobstructed Voice Shortcut Placement
+- Scope: Keep game debug details visible while retaining one-tap voice access.
+- Deliverable: In the collapsed game overlay, the pull-down Workshop control is first and the voice shortcut is directly below it; neither overlaps the persistent debug text across system insets, font scaling, or narrow phones. Recording `Cancel`/`Run` controls expand below the shortcut rather than over debug details.
+- Tests: Structural order/constraint checks, narrow-layout screenshot or hierarchy assertion, accessibility traversal order, APK build, and device visual acceptance.
+- Done gate: The user can read debug details before, during, and after voice capture without opening the Workshop.
+- Status: `in progress (layout implemented; device visual acceptance pending)`
+
+#### AW66 - Unified Typed and Voice AI Work Queue
+- Scope: Treat every submitted typed or voice command as durable work instead of rejecting submissions while one AI run is active.
+- Deliverable: Both entry paths append a versioned per-project queue item with stable ID, source (`text` or `voice`), submitted prompt snapshot, attachment/consent snapshot, creation time, and state (`pending`, `in_progress`, `completed`, `failed`, or `cancelled`). A single worker claims items FIFO, visibly shows pending and active work, persists transitions atomically, recovers an interrupted active item explicitly, and starts the next eligible item only after the prior compile/test/rollback boundary. Users can cancel any not-yet-started item without an API call; active cancellation retains the existing safe boundary. Project switching never executes another project's item accidentally.
+- Tests: Pure queue transition/recovery tests, FIFO and project isolation, typed/voice parity, pending cancellation with zero network calls, active safe cancellation, attachment snapshot immutability, process-death recovery, structural UI checks, APK build, and device acceptance.
+- Done gate: Multiple text/voice requests can be submitted, inspected, and safely cancelled without losing ordering or hiding paid work.
+- Status: `planned`
+
+#### AW67 - Cent-Rounded AI Budget Presentation
+- Scope: Make budget displays readable without weakening precise enforcement.
+- Deliverable: UI dollar amounts round half-up to the nearest cent (including estimates, per-run cap, monthly cap, spent, and remaining), while internal token/image pricing, accumulated spend, comparisons, and persisted records retain full precision. Values below half a cent display `$0.00`, not as free/unmetered.
+- Tests: Boundary cases around `$0.004`, `$0.005`, `$0.014`, `$0.015`, negative-zero avoidance, locale-independent formatting, and proof that rounded display does not change enforcement.
+- Done gate: Every visible budget amount uses consistent cents while enforcement remains conservative and precise.
+- Status: `planned`
+
+#### AW68 - Data-Oriented Exploration Tutorial and Template Catalog
+- Scope: Replace Pong as the default Workshop project with a more instructive touch exploration game while retaining Pong as a selectable template.
+- Deliverable: Tapping sets a world destination; a character moves toward it with deterministic fixed-tick motion, collects nearby items, and exposes a small inventory/status display. The project teaches data-oriented design using bounded structure-of-arrays components keyed by stable entity IDs, explicit system passes, deterministic spawn/collection order, render-command extraction, and separated configuration/data/behavior files. Onboarding introduces the architecture incrementally. Pong remains unchanged as a selectable bundled template and regression sample.
+- Tests: `.test.stasis` coverage for target selection, movement convergence/no overshoot, deterministic collection, capacity limits, inventory state, and render extraction; JIT/AOT parity; Android touch integration; template switching; Workshop and published package checks.
+- Done gate: First launch teaches a useful exploration loop, and Pong remains available without conflating either sample with the Workshop product itself.
+- Status: `planned`
+
+#### AW69 - General Workshop vs Game-Specific Release Build Matrix
+- Scope: Make build identity explicit and prevent Workshop/editor content from leaking into releases.
+- Deliverable: The general Workshop APK has its own package/display name and supports arbitrary projects plus bundled templates. Each release variant declares one game descriptor that selects package/application ID suffix, display name, entry source, AOT roots, assets/manifest, icon, and acceptance suite. The first concrete release variant is Pong; its APK contains Pong AOT/runtime assets only and no compiler, JIT bridge, editor source, tests, API settings, or unrelated templates.
+- Tests: Build both Workshop and Pong release in one bounded matrix; inspect package IDs/names/native libraries/assets; co-install them; launch both exact activities; prove Workshop can switch templates and Pong release cannot expose Workshop controls.
+- Done gate: A general Workshop build and a game-specific Pong release build can coexist and are independently reproducible and verifiable.
+- Progress: The general Workshop remains `com.stasislang.workshop`/`Stasis Workshop`. The current runtime-only published variant is now explicitly declared as game ID `pong`, application ID `com.stasislang.pong`, and label `Stasis Pong`; its AOT project input is named as the Pong release project rather than an implicit generic Workshop asset directory. Additional descriptor extraction and co-install device acceptance remain.
+- Status: `in progress`
+
 ### Cross-Platform Sprite and Audio Track
 
 #### AS0 - Versioned Asset Manifest and Stable Handles

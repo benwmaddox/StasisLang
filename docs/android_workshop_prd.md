@@ -44,7 +44,7 @@ Priority order:
 2. AI API key/model configuration is a collapsed secondary settings area. It is normally set once and should not compete with chat/command controls.
 3. Manual source and symbol browsing remains available in the pull-down workspace, but is secondary to chat/commands because real code is inspected less frequently.
 4. GitHub backup/code-sync activity is frequent but mostly background work. The UI should show compact sync state and errors without making commit/push controls the foreground workflow; detailed review remains available when needed.
-5. A top-of-game voice shortcut will start a voice-change request. Its active state must expose explicit `Cancel` and `Run` actions before any edit is applied. Voice capture/transcription implementation may follow the initial layout slice.
+5. A top-of-game voice shortcut will start a voice-change request. It sits directly below the pull-down Workshop button so the persistent debug details remain visible rather than being covered by the voice control. Its active state must expose explicit `Cancel` and `Run` actions before any edit is applied.
 6. Starting an AI run must provide a clear, persistent status message that identifies the active phase (for example, preparing, running commands, validating tests, applying, completed, or failed) and shows the latest actionable result.
 
 The detailed editor, settings, GitHub review, and voice surfaces should preserve the current app-private `.stasis` project as the source of truth and must not bypass local compile/test validation.
@@ -52,6 +52,8 @@ The detailed editor, settings, GitHub review, and voice surfaces should preserve
 Workshop completion also requires:
 
 - Durable per-project command history, cancellation/retry, and explicit AI token/cost budgets.
+- A durable per-project AI work queue shared by typed and voice requests. Every submission becomes a visible item with `pending`, `in progress`, and terminal state; pending items can be cancelled before execution, while the active item uses the existing safe cancellation boundary.
+- Budget accounting retains full precision, while user-facing dollar totals and limits round to the nearest cent.
 - Audio import/recording and lightweight editing alongside image assets.
 - Autosave, process-death recovery, offline/background behavior, and battery/network-aware long-running work.
 - First-run onboarding, templates, and a complete manual workflow that does not require AI.
@@ -59,6 +61,14 @@ Workshop completion also requires:
 - Permission minimization, explicit external-upload consent, credential revocation, and user-controlled deletion of projects, traces, caches, and history.
 - Versioned project metadata with rollback-safe migrations across Workshop/compiler upgrades.
 - Redacted crash recovery/support bundles that exclude secrets and unapproved source or media.
+
+## Bundled Games and Build Identity
+
+- The Workshop build is a general game workshop, never a game-specific product. It may preload an exploration tutorial, Pong, and additional templates, and users can create/import/switch arbitrary projects.
+- The default bundled project will become a touch-first exploration tutorial: tapping chooses a destination, a character walks toward it deterministically, and nearby collectible items enter an inventory.
+- The exploration tutorial uses a data-oriented learning architecture: stable entity IDs; bounded structure-of-arrays component storage; explicit input, movement, collection, inventory, and render-extraction systems; deterministic tick progression; no hidden object graph; and small files introduced in a teachable order.
+- Pong remains bundled as a compact mechanics/hot-reload example and must remain selectable after the exploration tutorial becomes the default.
+- Every release build is game-specific. Its package, AOT roots, assets, display name, and acceptance tests identify exactly one game and contain no Workshop editor/JIT surface. The current reference release build is Pong.
 
 ## Source Organization
 
