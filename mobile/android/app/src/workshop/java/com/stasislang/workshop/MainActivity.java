@@ -185,6 +185,7 @@ public final class MainActivity extends Activity {
     private TextView diagnosticStatus;
     private String diagnosticFile = "";
     private String diagnosticSymbol = "";
+    private int diagnosticLine;
     private AndroidEditRecoveryStore.Entry selectedRecoveryEntry;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -2415,6 +2416,7 @@ public final class MainActivity extends Activity {
     private void runNativeTests() {
         try {
             JSONObject result = aiToolRunTests(new AiAgentSession());
+            captureFirstTestFailureDiagnostic(result);
             setStatusText(testSummaryText(result));
         } catch (Exception error) {
             setStatusText("Tests failed: " + error.getMessage());
@@ -4512,11 +4514,13 @@ public final class MainActivity extends Activity {
             if (compileReady) {
                 diagnosticFile = "";
                 diagnosticSymbol = "";
+                diagnosticLine = 0;
                 diagnosticStatus.setText("Compile passed - " + reload);
                 setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
             } else {
                 diagnosticFile = editedSymbol.file;
                 diagnosticSymbol = editedSymbol.name;
+                diagnosticLine = 0;
                 selectedRecoveryEntry = AndroidEditRecoveryStore.record(this, activeRecoveryProjectId(), editedSymbol.file,
                         editedSymbol.name, beforeFileSource, editedSymbol.sourceFile.source, compileResult);
                 diagnosticStatus.setText("Compile failed\nfile=" + diagnosticFile
@@ -4555,6 +4559,7 @@ public final class MainActivity extends Activity {
             selectedRecoveryEntry = entry;
             diagnosticFile = entry.path;
             diagnosticSymbol = entry.symbol;
+            diagnosticLine = 0;
             diagnosticStatus.setText("Recoverable failed apply history: " + entries.length + " entries\nselected="
                     + (selectedIndex + 1) + "/" + entries.length + "\nfile=" + entry.path
                     + "\nsymbol=" + entry.symbol + "\n" + entry.diagnostic);
@@ -4587,6 +4592,7 @@ public final class MainActivity extends Activity {
                             selectedRecoveryEntry = entries[which];
                             diagnosticFile = selectedRecoveryEntry.path;
                             diagnosticSymbol = selectedRecoveryEntry.symbol;
+                            diagnosticLine = 0;
                             diagnosticStatus.setText("Recovery history selection " + (which + 1) + "/"
                                     + entries.length + "\nfile=" + diagnosticFile + "\nsymbol="
                                     + diagnosticSymbol + "\n" + selectedRecoveryEntry.diagnostic);
@@ -4597,6 +4603,29 @@ public final class MainActivity extends Activity {
                     .show();
         } catch (Exception error) {
             setStatusText("Recovery history unavailable: " + error.getMessage());
+        }
+    }
+
+    private void captureFirstTestFailureDiagnostic(JSONObject testRun) {
+        JSONArray runs = testRun.optJSONArray("stasis_test_files");
+        if (runs == null) return;
+        for (int runIndex = 0; runIndex < runs.length(); runIndex += 1) {
+            JSONObject run = runs.optJSONObject(runIndex);
+            JSONArray results = run == null ? null : run.optJSONArray("results");
+            if (results == null) continue;
+            for (int resultIndex = 0; resultIndex < results.length(); resultIndex += 1) {
+                JSONObject result = results.optJSONObject(resultIndex);
+                if (result == null || result.optBoolean("passed", false)) continue;
+                diagnosticFile = result.optString("file", "");
+                diagnosticSymbol = result.optString("name", "");
+                diagnosticLine = result.optInt("line", 0);
+                String error = result.optString("error", "");
+                diagnosticStatus.setText("Test failure\nfile=" + diagnosticFile
+                        + (diagnosticLine > 0 ? "\nline=" + diagnosticLine : "")
+                        + (diagnosticSymbol.isEmpty() ? "" : "\ntest=" + diagnosticSymbol)
+                        + (error.isEmpty() ? "" : "\n" + error));
+                return;
+            }
         }
     }
 
@@ -4612,14 +4641,34 @@ public final class MainActivity extends Activity {
                     if (symbol.file.equals(diagnosticFile)
                             && (diagnosticSymbol.isEmpty() || symbol.name.equals(diagnosticSymbol))) {
                         showSymbol(symbol);
+                        if (diagnosticLine > 0) {
+                            int absoluteOffset = sourceOffsetForLine(symbol.sourceFile.source, diagnosticLine);
+                            int symbolOffset = Math.max(0,
+                                    Math.min(symbol.source.length(), absoluteOffset - symbol.start));
+                            sourceEditor.setSelection(symbolOffset);
+                        }
                         manualEditBody.setVisibility(View.VISIBLE);
-                        setStatusText("Opened diagnostic source " + diagnosticFile + " - " + symbol.displayName());
+                        setStatusText("Opened diagnostic source " + diagnosticFile
+                                + (diagnosticLine > 0 ? ":" + diagnosticLine : "")
+                                + " - " + symbol.displayName());
                         return;
                     }
                 }
             }
         }
         setStatusText("Diagnostic file is available but its symbol could not be parsed");
+    }
+
+    private static int sourceOffsetForLine(String source, int oneBasedLine) {
+        if (oneBasedLine <= 1) return 0;
+        int line = 1;
+        for (int index = 0; index < source.length(); index += 1) {
+            if (source.charAt(index) == '\n') {
+                line += 1;
+                if (line == oneBasedLine) return index + 1;
+            }
+        }
+        return source.length();
     }
 
     private void undoSelectedFailedApply() {
@@ -4646,6 +4695,7 @@ public final class MainActivity extends Activity {
             rebuildSymbolList(restored);
             diagnosticFile = entry.path;
             diagnosticSymbol = entry.symbol;
+            diagnosticLine = 0;
             goToDiagnosticSource();
             refreshChangeSummary(restored);
             String compileResult = nativeCompileProject(projectRootPath());

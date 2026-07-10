@@ -308,6 +308,11 @@ def main() -> int:
     assert "legacy project cannot be deleted as a failed import" in project_registry
     assert "Manual Symbols and Source" in activity
     assert "Go to Diagnostic" in activity
+    assert "captureFirstTestFailureDiagnostic" in activity
+    assert "sourceOffsetForLine" in activity
+    assert 'diagnosticStatus.setText("Test failure' in activity
+    assert 'result.optInt("line", 0)' in activity
+    assert "sourceEditor.setSelection(symbolOffset)" in activity
     assert "Undo Failed Apply" in activity
     assert "Recovery History" in activity
     assert "Failed Apply History" in activity

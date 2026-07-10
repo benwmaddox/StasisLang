@@ -73,7 +73,8 @@ pub struct AndroidBridgeCompileResult {
 }
 
 pub fn run_android_workshop_stasis_tests(project_root: impl AsRef<Path>) -> Result<serde_json::Value, String> {
-    let test_root = project_root.as_ref().join("tests");
+    let project_root = project_root.as_ref();
+    let test_root = project_root.join("tests");
     let mut test_files = Vec::new();
     collect_stasis_test_files(&test_root, &mut test_files)?;
     test_files.sort();
@@ -81,6 +82,8 @@ pub fn run_android_workshop_stasis_tests(project_root: impl AsRef<Path>) -> Resu
     let mut failed = 0usize;
     let mut results = Vec::new();
     for path in test_files {
+        let relative_path = path.strip_prefix(project_root).unwrap_or(&path)
+                .to_string_lossy().replace('\\', "/");
         let source = fs::read_to_string(&path)
             .map_err(|error| format!("failed reading Stasis test {}: {error}", path.display()))?;
         let (rewritten, tests) = rewrite_top_level_test_declarations(&source)
@@ -94,14 +97,15 @@ pub fn run_android_workshop_stasis_tests(project_root: impl AsRef<Path>) -> Resu
         jit.set_required_emit_roots(&tests.iter().map(|test| test.generated_function_name.clone()).collect::<Vec<_>>());
         if let Err(error) = jit.compile() {
             failed += tests.len();
-            results.push(serde_json::json!({"file": path, "status": "compile_failed", "error": format!("{error:?}")}));
+            results.push(serde_json::json!({"file": relative_path, "status": "compile_failed", "error": format!("{error:?}")}));
             continue;
         }
         for test in tests {
+            let line = 1 + source[..test.declaration_range.start].bytes().filter(|byte| *byte == b'\n').count();
             match jit.execute_bool_noarg_by_name(&test.generated_function_name) {
-                Ok(true) => { passed += 1; results.push(serde_json::json!({"file": path, "name": test.display_name, "passed": true})); }
-                Ok(false) => { failed += 1; results.push(serde_json::json!({"file": path, "name": test.display_name, "passed": false})); }
-                Err(error) => { failed += 1; results.push(serde_json::json!({"file": path, "name": test.display_name, "passed": false, "error": error})); }
+                Ok(true) => { passed += 1; results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": true})); }
+                Ok(false) => { failed += 1; results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": false})); }
+                Err(error) => { failed += 1; results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": false, "error": error})); }
             }
         }
     }
@@ -1216,6 +1220,25 @@ mod tests {
         assert_eq!(result["passed"], 1);
         assert_eq!(result["failed"], 0);
         assert_eq!(result["all_passed"], true);
+        assert_eq!(result["results"][0]["file"], "tests/enemy_paddle_speed_schedule.test.stasis");
+        assert_eq!(result["results"][0]["line"], 3);
+    }
+
+    #[test]
+    fn android_test_failure_reports_navigable_file_and_line() {
+        let root = temp_project("test_failure_location");
+        fs::create_dir_all(root.join("tests")).expect("create tests");
+        fs::write(
+            root.join("tests/failing.test.stasis"),
+            "\n\ntest `intentional failure`(): bool {\n    return false;\n}\n",
+        )
+        .expect("write failing test");
+        let result = run_android_workshop_stasis_tests(&root).expect("run Stasis tests");
+        assert_eq!(result["failed"], 1);
+        assert_eq!(result["results"][0]["file"], "tests/failing.test.stasis");
+        assert_eq!(result["results"][0]["line"], 3);
+        assert_eq!(result["results"][0]["name"], "intentional failure");
+        fs::remove_dir_all(root).ok();
     }
     #[test]
     fn c_bridge_run_tick_frame_writes_packed_render_data() {
