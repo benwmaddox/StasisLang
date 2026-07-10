@@ -61,8 +61,8 @@ def main() -> int:
     assert "crate-type = [\"rlib\", \"cdylib\"]" in bridge_toml
     assert "compile_android_workshop_project" in bridge
     assert "stasis_android_bridge_compile_project" in bridge
-    assert "build_android_workshop_compile_plan" in bridge
-    assert "render_android_workshop_artifacts" in bridge
+    assert "build_workshop_compile_plan" in bridge
+    assert "render_workshop_artifacts" in bridge
 
     rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
     debug_script = read("mobile/android/build_debug.ps1")
@@ -878,13 +878,13 @@ def main() -> int:
     assert "ensureBundledProject" not in published_activity
     assert "AssetManager" not in published_activity
     workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")
-    assert "build_android_workshop_compile_plan" in workshop
-    assert "AndroidWorkshopCompilePlan" in workshop
+    assert "build_workshop_compile_plan" in workshop
+    assert "WorkshopCompilePlan" in workshop
     assert "IncrementalCompileOutput" in workshop
-    assert "AndroidWorkshopReload" in workshop
-    assert "android_compile_plan_tests" in workshop
-    assert "render_android_workshop_artifacts" in workshop
-    assert "AndroidWorkshopArtifactSet" in workshop
+    assert "WorkshopReload" in workshop
+    assert "workshop_compile_plan_tests" in workshop
+    assert "render_workshop_artifacts" in workshop
+    assert "WorkshopArtifactSet" in workshop
     assert "status=RuntimeStateReady" in workshop
     assert "status=CompiledStub" in workshop
 
