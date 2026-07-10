@@ -426,6 +426,39 @@ def export_used_vectors(ffdec: Path, source_swf: Path, temp: Path, sample_root: 
                 )
 
 
+def export_placement_assets(
+    ffdec: Path,
+    source_swf: Path,
+    temp: Path,
+    output_root: Path,
+    scale: int,
+) -> None:
+    export_root = temp / "placement"
+    run(
+        [
+            str(ffdec),
+            "-onerror",
+            "abort",
+            "-selectid",
+            "16",
+            "-export",
+            "image",
+            str(export_root),
+            str(source_swf),
+        ]
+    )
+    source = Image.open(export_root / "16.png").convert("RGBA")
+    if source.size != (64, 32):
+        raise RuntimeError(f"expected 64x32 tower placer sheet, found {source.size}")
+    placement_root = output_root / "placement"
+    placement_root.mkdir(parents=True, exist_ok=True)
+    for name, left in (("valid", 0), ("invalid", 32)):
+        frame = source.crop((left, 0, left + 32, 32)).resize(
+            (32 * scale, 32 * scale), Image.Resampling.NEAREST
+        )
+        frame.save(placement_root / f"tower_placer_{name}_4x.png", optimize=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ffdec", type=Path, required=True, help="Path to ffdec-cli or ffdec-cli.exe")
@@ -513,6 +546,13 @@ def main() -> int:
             render_ai_masters(source_root, output_root, args.pdftoppm, args.scale)
             write_button_assets(sample_root, output_root, args.scale)
 
+        export_placement_assets(
+            args.ffdec,
+            source_root / "TowerDefense.swf",
+            temp,
+            output_root,
+            args.scale,
+        )
         export_used_vectors(args.ffdec, source_root / "TowerDefense.swf", temp, sample_root)
 
         (output_root / "animation_manifest.json").write_text(

@@ -89,6 +89,7 @@ static bool g_postfx_applied_this_frame = false;
 static bool g_screenshot_taken = false;
 static char g_screenshot_path[1024] = {0};
 static int g_screenshot_exit_after = 0;
+static int g_screenshot_delay_frames = 0;
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static GLuint g_postfx_program = 0;
 static GLint g_postfx_time_loc = -1;
@@ -1435,6 +1436,15 @@ static int parse_env_i32(const char* name, int fallback, int min_value, int max_
         return max_value;
     }
     return (int)parsed;
+}
+
+static bool screenshot_capture_ready(void) {
+    if (g_screenshot_taken || g_screenshot_path[0] == 0) return false;
+    if (g_screenshot_delay_frames > 0) {
+        g_screenshot_delay_frames -= 1;
+        return false;
+    }
+    return true;
 }
 
 static int ensure_sprite_table_capacity(int min_capacity) {
@@ -3083,6 +3093,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     /* Optional screenshot automation via environment variables. */
     g_screenshot_taken = false;
     g_screenshot_exit_after = 0;
+    g_screenshot_delay_frames = 0;
     g_screenshot_path[0] = 0;
     const char* screenshot = SDL_getenv("STASIS_SCREENSHOT_ONCE");
     if (screenshot && *screenshot) {
@@ -3092,6 +3103,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         if (exit_after && exit_after[0] == '1') {
             g_screenshot_exit_after = 1;
         }
+        g_screenshot_delay_frames = parse_env_i32("STASIS_SCREENSHOT_AFTER_FRAMES", 0, 0, 60000);
     }
 
     const char* force_sdl = SDL_getenv("STASIS_USE_SDL");
@@ -3449,7 +3461,7 @@ STASIS_EXPORT void stasis_end_frame(void) {
             SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
         }
 
-        if (!g_screenshot_taken && g_screenshot_path[0] != 0) {
+        if (screenshot_capture_ready()) {
             /* Capture before present so we read the current render target. */
             stasis_gfx_dump_bmp(g_screenshot_path);
             g_screenshot_taken = true;
@@ -3467,7 +3479,7 @@ STASIS_EXPORT void stasis_end_frame(void) {
             render_postfx();
             g_postfx_applied_this_frame = true;
         }
-        if (!g_screenshot_taken && g_screenshot_path[0] != 0) {
+        if (screenshot_capture_ready()) {
             /* Capture after all draws (including postfx) but before swap. */
             stasis_gfx_dump_bmp(g_screenshot_path);
             g_screenshot_taken = true;
@@ -3646,50 +3658,12 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
         }
     }
 
-    /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
-    /* byte_off < 0 encodes cached text run handle (no cmd_u8 access). */
-    if (text_count > 0) {
-        const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
-        const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
-        const int32_t* text_meta = cmd_i32 + text_i32_base;
-
-        for (int i = 0; i < text_count; i++) {
-            const int base_i = i * 3;
-            const int font = text_meta[base_i + 0];
-            const int byte_off = text_meta[base_i + 1];
-            const int byte_len = text_meta[base_i + 2];
-
-            if (font <= 0) continue;
-            if (byte_off < 0) {
-                const int run = -byte_off;
-                const int base_f = text_f32_base + i * 6;
-                const float x = cmd_f32[base_f + 0];
-                const float y = cmd_f32[base_f + 1];
-                const float r = cmd_f32[base_f + 2];
-                const float g = cmd_f32[base_f + 3];
-                const float b = cmd_f32[base_f + 4];
-                const float a = cmd_f32[base_f + 5];
-                stasis_gfx_draw_text_cached(run, x, y, r, g, b, a);
-                continue;
-            }
-            if (!cmd_u8 || text_bytes_used <= 0) continue;
-            if (byte_off >= text_bytes_used) continue;
-            if (byte_len < 0) continue;
-            if (byte_off + byte_len >= text_bytes_used) continue;
-
-            const char* text = (const char*)(cmd_u8 + byte_off);
-
-            const int base_f = text_f32_base + i * 6;
-            const float x = cmd_f32[base_f + 0];
-            const float y = cmd_f32[base_f + 1];
-            const float r = cmd_f32[base_f + 2];
-            const float g = cmd_f32[base_f + 3];
-            const float b = cmd_f32[base_f + 4];
-            const float a = cmd_f32[base_f + 5];
-
-            stasis_draw_text(font, text, x, y, r, g, b, a);
-        }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    /* Text is drawn immediately; submit the queued sprite batch first to preserve command order. */
+    if (!g_use_sdl_renderer) {
+        flush_sprites();
     }
+#endif
 
     /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
     /* byte_off < 0 encodes cached text run handle (no cmd_u8 access). */

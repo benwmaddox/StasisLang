@@ -103,6 +103,8 @@ struct OriginalAssets {
     tower_rocket: i32;
     tower_gold: i32;
     tower_selector: i32;
+    tower_placer_valid: i32;
+    tower_placer_invalid: i32;
     range_ring: i32;
     outline: i32;
     tower_ready: i32;
@@ -714,6 +716,8 @@ function original_load_assets(): void {
     original_state.assets.button_next = gfx_load_sprite("assets/original/generated_4x/buttons/button_next_4x.png", 524, 260);
     original_state.assets.button_pause = gfx_load_sprite("assets/original/generated_4x/buttons/button_pause_4x.png", 260, 260);
     original_state.assets.tower_selector = gfx_load_sprite("assets/original/tower_selector.png", 34, 34);
+    original_state.assets.tower_placer_valid = gfx_load_sprite("assets/original/generated_4x/placement/tower_placer_valid_4x.png", 128, 128);
+    original_state.assets.tower_placer_invalid = gfx_load_sprite("assets/original/generated_4x/placement/tower_placer_invalid_4x.png", 128, 128);
     original_state.assets.range_ring = gfx_load_sprite("assets/original/range_ring.svg", 256, 256);
     original_state.assets.outline = gfx_load_sprite("assets/original/outline.svg", 128, 128);
     original_state.assets.tower_ready = gfx_load_sprite("assets/original/tower_ready.png", 4, 4);
@@ -1324,6 +1328,35 @@ function original_try_place_tower(pointer_x: f32, pointer_y: f32): bool {
     return true;
 }
 
+function original_draw_placement_preview(): void {
+    if (original_state.selected_tower_index >= 0 || input_pointer_count() <= 0) { return; }
+    let sx: f32 = input_pointer_x_px(0) + original_state.layout.viewport_x;
+    let sy: f32 = input_pointer_y_px(0) + original_state.layout.viewport_y;
+    let pointer_x: f32 = original_world_x(sx);
+    let pointer_y: f32 = original_world_y(sy);
+    if (!original_point_in_rect(pointer_x, pointer_y, WORLD_LEFT, WORLD_TOP, WORLD_RIGHT - WORLD_LEFT, WORLD_BOTTOM - WORLD_TOP)) { return; }
+
+    let gx: i32; gx.from_f32((pointer_x - WORLD_LEFT - 16.0) / PLACEMENT_STEP);
+    let gy: i32; gy.from_f32((pointer_y - WORLD_TOP - 16.0) / PLACEMENT_STEP);
+    let gx_f: f32; gx_f.from_i32(gx);
+    let gy_f: f32; gy_f.from_i32(gy);
+    let x: f32 = WORLD_LEFT + gx_f * PLACEMENT_STEP;
+    let y: f32 = WORLD_TOP + gy_f * PLACEMENT_STEP;
+    let cost: i32 = original_tower_cost(original_state.selected_shop, 0);
+    let valid: bool = x >= WORLD_LEFT && x + TOWER_SIZE <= WORLD_RIGHT && y >= 51.0 && y + TOWER_SIZE <= WORLD_BOTTOM && !original_placement_overlaps(x, y) && original_state.gold >= cost;
+
+    let range_f: f32; range_f.from_i32(original_tower_range(original_state.selected_shop, 0));
+    if (range_f > 0.0) {
+        original_draw_sprite(original_state.assets.range_ring, x + 16.0 - range_f, y + 16.0 - range_f, range_f * 2.0, range_f * 2.0, 120);
+    }
+    original_draw_sprite(original_tower_animation_asset(original_state.selected_shop, original_state.tick_index / 2), x, y, 32.0, 32.0, 165);
+    if (valid) {
+        original_draw_sprite(original_state.assets.tower_placer_valid, x, y, 32.0, 32.0, 255);
+    } else {
+        original_draw_sprite(original_state.assets.tower_placer_invalid, x, y, 32.0, 32.0, 255);
+    }
+}
+
 function original_upgrade_selected(): void {
     let index: i32 = original_state.selected_tower_index;
     if (index < 0 || index >= MAX_ORIGINAL_TOWERS || !original_state.towers[index].active) { return; }
@@ -1651,6 +1684,7 @@ function original_draw_game(): void {
     original_draw_sprite(original_state.assets.background, 0.0, 0.0, ORIGINAL_W, ORIGINAL_H, 255);
     original_draw_sprite(original_state.assets.paddle, original_state.paddle_x, original_state.paddle_y, 133.0, 19.0, 255);
     original_draw_towers();
+    original_draw_placement_preview();
     let i: i32 = 0;
     for (i = 0; i < MAX_ORIGINAL_BALLS; i += 1) { if (original_state.balls[i].active) { original_draw_ball(i); } }
     original_draw_projectiles();
