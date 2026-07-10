@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_compiler::frontend::workshop::{
-    build_android_workshop_compile_plan, load_workshop_project, render_android_workshop_artifacts,
-    AndroidWorkshopCompilePlan, AndroidWorkshopReload, WorkshopSourceFile,
+    build_workshop_compile_plan, load_workshop_project, render_workshop_artifacts,
+    WorkshopCompilePlan, WorkshopReload, WorkshopSourceFile,
 };
 use stasis_compiler::IncrementalCompilerHost;
 
@@ -66,13 +66,15 @@ thread_local! {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AndroidBridgeCompileResult {
     pub status: i32,
-    pub reload: AndroidWorkshopReload,
+    pub reload: WorkshopReload,
     pub manifest_path: PathBuf,
     pub runtime_state_path: PathBuf,
     pub function_artifact_count: usize,
 }
 
-pub fn run_android_workshop_stasis_tests(project_root: impl AsRef<Path>) -> Result<serde_json::Value, String> {
+pub fn run_android_workshop_stasis_tests(
+    project_root: impl AsRef<Path>,
+) -> Result<serde_json::Value, String> {
     let project_root = project_root.as_ref();
     let test_root = project_root.join("tests");
     let mut test_files = Vec::new();
@@ -82,8 +84,11 @@ pub fn run_android_workshop_stasis_tests(project_root: impl AsRef<Path>) -> Resu
     let mut failed = 0usize;
     let mut results = Vec::new();
     for path in test_files {
-        let relative_path = path.strip_prefix(project_root).unwrap_or(&path)
-                .to_string_lossy().replace('\\', "/");
+        let relative_path = path
+            .strip_prefix(project_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
         let source = fs::read_to_string(&path)
             .map_err(|error| format!("failed reading Stasis test {}: {error}", path.display()))?;
         let (rewritten, tests) = rewrite_top_level_test_declarations(&source)
@@ -94,30 +99,59 @@ pub fn run_android_workshop_stasis_tests(project_root: impl AsRef<Path>) -> Resu
         let mut jit = JitProcess::new();
         jit.set_local_runtime_helper_trampolines(true);
         jit.upsert_file(path.to_string_lossy().replace('\\', "/"), rewritten);
-        jit.set_required_emit_roots(&tests.iter().map(|test| test.generated_function_name.clone()).collect::<Vec<_>>());
+        jit.set_required_emit_roots(
+            &tests
+                .iter()
+                .map(|test| test.generated_function_name.clone())
+                .collect::<Vec<_>>(),
+        );
         if let Err(error) = jit.compile() {
             failed += tests.len();
             results.push(serde_json::json!({"file": relative_path, "status": "compile_failed", "error": format!("{error:?}")}));
             continue;
         }
         for test in tests {
-            let line = 1 + source[..test.declaration_range.start].bytes().filter(|byte| *byte == b'\n').count();
+            let line = 1 + source[..test.declaration_range.start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count();
             match jit.execute_bool_noarg_by_name(&test.generated_function_name) {
-                Ok(true) => { passed += 1; results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": true})); }
-                Ok(false) => { failed += 1; results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": false})); }
-                Err(error) => { failed += 1; results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": false, "error": error})); }
+                Ok(true) => {
+                    passed += 1;
+                    results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": true}));
+                }
+                Ok(false) => {
+                    failed += 1;
+                    results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": false}));
+                }
+                Err(error) => {
+                    failed += 1;
+                    results.push(serde_json::json!({"file": relative_path, "line": line, "name": test.display_name, "passed": false, "error": error}));
+                }
             }
         }
     }
-    Ok(serde_json::json!({"kind": "stasis_test_run", "passed": passed, "failed": failed, "all_passed": failed == 0 && passed > 0, "results": results}))
+    Ok(
+        serde_json::json!({"kind": "stasis_test_run", "passed": passed, "failed": failed, "all_passed": failed == 0 && passed > 0, "results": results}),
+    )
 }
 
 fn collect_stasis_test_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    if !root.exists() { return Ok(()); }
-    for entry in fs::read_dir(root).map_err(|error| format!("failed reading test directory {}: {error}", root.display()))? {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)
+        .map_err(|error| format!("failed reading test directory {}: {error}", root.display()))?
+    {
         let path = entry.map_err(|error| error.to_string())?.path();
-        if path.is_dir() { collect_stasis_test_files(&path, out)?; }
-        else if path.file_name().is_some_and(|name| name.to_string_lossy().ends_with(".test.stasis")) { out.push(path); }
+        if path.is_dir() {
+            collect_stasis_test_files(&path, out)?;
+        } else if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".test.stasis"))
+        {
+            out.push(path);
+        }
     }
     Ok(())
 }
@@ -138,8 +172,8 @@ pub fn compile_android_workshop_project(
     host.set_required_reachability_roots(&["tick", "render", "on_code_swap"]);
     let compile = host.compile_changed_files(&changed_files)?;
     let previous = read_previous_android_plan(project_root)?;
-    let plan = build_android_workshop_compile_plan(&files, &compile, previous.as_ref())?;
-    let artifacts = render_android_workshop_artifacts(&plan);
+    let plan = build_workshop_compile_plan(&files, &compile, previous.as_ref())?;
+    let artifacts = render_workshop_artifacts(&plan);
 
     let manifest_path = project_root.join(&artifacts.manifest_path);
     if let Some(parent) = manifest_path.parent() {
@@ -563,9 +597,7 @@ fn write_jit_runtime_state(
         )
     })
 }
-fn read_previous_android_plan(
-    project_root: &Path,
-) -> Result<Option<AndroidWorkshopCompilePlan>, String> {
+fn read_previous_android_plan(project_root: &Path) -> Result<Option<WorkshopCompilePlan>, String> {
     let manifest_path = project_root.join("build/native_compile_manifest.txt");
     let manifest = match fs::read_to_string(&manifest_path) {
         Ok(value) => value,
@@ -583,9 +615,9 @@ fn read_previous_android_plan(
     let Some(layout_hash) = parse_manifest_hex_i32(&manifest, "layout_hash=") else {
         return Ok(None);
     };
-    Ok(Some(AndroidWorkshopCompilePlan {
+    Ok(Some(WorkshopCompilePlan {
         status: 0,
-        reload: AndroidWorkshopReload::NoChange,
+        reload: WorkshopReload::NoChange,
         reason: "Loaded from previous Android manifest.".to_string(),
         project_hash,
         layout_hash,
@@ -627,8 +659,12 @@ pub extern "C" fn stasis_android_bridge_compile_project(
 #[no_mangle]
 pub extern "C" fn stasis_android_bridge_run_tests(project_root: *const c_char) -> *mut c_char {
     let message = catch_unwind(AssertUnwindSafe(|| unsafe {
-        if project_root.is_null() { return Err("null project root".to_string()); }
-        let root = CStr::from_ptr(project_root).to_str().map_err(|error| format!("project root was not UTF-8: {error}"))?;
+        if project_root.is_null() {
+            return Err("null project root".to_string());
+        }
+        let root = CStr::from_ptr(project_root)
+            .to_str()
+            .map_err(|error| format!("project root was not UTF-8: {error}"))?;
         run_android_workshop_stasis_tests(root).map(|result| result.to_string())
     }));
     let message = match message {
@@ -890,7 +926,7 @@ mod tests {
         let result = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
             .expect("compile bridge");
         assert_eq!(result.status, 0);
-        assert_eq!(result.reload, AndroidWorkshopReload::InitialCompile);
+        assert_eq!(result.reload, WorkshopReload::InitialCompile);
         assert!(result.function_artifact_count >= 2);
 
         let manifest = fs::read_to_string(root.join("build/native_compile_manifest.txt"))
@@ -931,7 +967,7 @@ mod tests {
         .expect("write body change");
         let result = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
             .expect("second compile");
-        assert_eq!(result.reload, AndroidWorkshopReload::FastReload);
+        assert_eq!(result.reload, WorkshopReload::FastReload);
         let state = fs::read_to_string(root.join("build/runtime_state.txt"))
             .expect("read preserved runtime state");
         assert!(state.contains("tick_count=41"));
@@ -1220,7 +1256,10 @@ mod tests {
         assert_eq!(result["passed"], 1);
         assert_eq!(result["failed"], 0);
         assert_eq!(result["all_passed"], true);
-        assert_eq!(result["results"][0]["file"], "tests/enemy_paddle_speed_schedule.test.stasis");
+        assert_eq!(
+            result["results"][0]["file"],
+            "tests/enemy_paddle_speed_schedule.test.stasis"
+        );
         assert_eq!(result["results"][0]["line"], 3);
     }
 

@@ -15,6 +15,8 @@ The first version is a personal/dev workflow. The long-term direction is a full 
 - Full local git/libgit2 support can come later.
 - Normal `.stasis` files remain the persisted source of truth.
 - The user edits symbols, and the app maps those symbols back to `.stasis` file spans.
+- Android uses the shared Stasis parser, semantic analysis, lowering, JIT, and AOT pipelines. Platform differences must be expressed as target capabilities or bridge configuration, not as Android-specific compiler forks.
+- Android-only implementation stays at platform boundaries such as ABI/JNI, filesystem and lifecycle integration, target toolchain selection, and APK packaging.
 
 ## Android Preview
 

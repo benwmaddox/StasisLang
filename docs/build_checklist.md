@@ -244,14 +244,14 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 #### AW24 - Compiler-Owned Android Compile Plan
 - Language: `Rust compiler frontend + docs`.
 - Scope: Stop Android compile planning from growing as a parallel C compiler path.
-- Deliverable: `stasis_compiler::frontend::workshop` now exposes `build_android_workshop_compile_plan`, which maps `IncrementalCompilerHost` output back to Android workshop symbols, entrypoints, function hashes, artifact paths, and reload classifications using compiler-owned metadata plus workshop layout fingerprints.
+- Deliverable: `stasis_compiler::frontend::workshop` now exposes the platform-neutral `build_workshop_compile_plan`, which maps `IncrementalCompilerHost` output back to workshop symbols, entrypoints, function hashes, artifact paths, and reload classifications using compiler-owned metadata plus workshop layout fingerprints. Android consumes this shared plan through its bridge.
 - Tests: Focused Rust tests compile sample workshop projects through `IncrementalCompilerHost`, build Android compile plans, verify function metadata/artifact paths, and classify `FastReload` versus `ResetRequired`; Android shell verifier and debug APK build continue to pass.
 - Done gate: The next JNI slice has a Rust compiler-owned contract to call instead of expanding the native C scaffold.
 - Status: `completed`
 #### AW25 - Compiler-Owned Android Artifact Rendering
 - Language: `Rust compiler frontend + docs`.
 - Scope: Move Android manifest, runtime-state, and function-stub artifact contents into the compiler-owned workshop contract.
-- Deliverable: `stasis_compiler::frontend::workshop` now exposes `render_android_workshop_artifacts`, producing `build/native_compile_manifest.txt`, optional `build/runtime_state.txt`, and per-function `CompiledStub` artifact text from `AndroidWorkshopCompilePlan`.
+- Deliverable: `stasis_compiler::frontend::workshop` now exposes the platform-neutral `render_workshop_artifacts`, producing `build/native_compile_manifest.txt`, optional `build/runtime_state.txt`, and per-function `CompiledStub` artifact text from `WorkshopCompilePlan`. Android-specific persistence stays in the bridge.
 - Tests: Focused Rust tests render artifacts from real `IncrementalCompilerHost` output and verify manifest entrypoints, reload strings, runtime-state reset/preserve behavior, and function stub content; Android shell verifier covers the compiler-owned artifact API; debug APK builds.
 - Done gate: JNI can switch from generating Android compile artifacts in C to writing compiler-rendered artifact text.
 - Status: `completed`
