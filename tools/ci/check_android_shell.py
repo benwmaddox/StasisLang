@@ -129,6 +129,16 @@ def main() -> int:
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "protected void onPause()" in activity
     assert "protected void onSaveInstanceState(Bundle outState)" in activity
+    assert 'outState.putString("ai_prompt"' in activity
+    assert 'outState.putString("selected_file"' in activity
+    assert 'outState.putStringArrayList("selected_image_paths"' in activity
+    assert 'outState.putInt("editor_scroll_y"' in activity
+    assert "restoreWorkshopUiState(savedInstanceState)" in activity
+    assert 'state.getBoolean("editor_open"' in activity
+    assert 'state.getBoolean("privacy_open"' in activity
+    assert 'state.getStringArrayList("selected_image_paths")' in activity
+    assert "clearPendingPreviewCapture();" in activity
+    assert "allowAiImageGeneration.setChecked(false)" in activity
     assert "persistPendingDraft();" in activity
     assert "restorePendingDraft();" in activity
     assert "Recovered unsaved source draft after app interruption" in activity

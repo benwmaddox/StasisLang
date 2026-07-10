@@ -297,6 +297,7 @@ public final class MainActivity extends Activity {
         }
         setContentView(createWorkshopView(project));
         markInterruptedAiOutcomeIfNeeded();
+        restoreWorkshopUiState(savedInstanceState);
         restorePendingDraft();
         if (!getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE)
                 .getBoolean(ONBOARDING_COMPLETE, false)) {
@@ -318,6 +319,24 @@ public final class MainActivity extends Activity {
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         persistPendingDraft();
+        outState.putString("ai_prompt", aiPromptEditor == null ? "" : aiPromptEditor.getText().toString());
+        outState.putString("voice_transcript", voiceTranscript);
+        outState.putBoolean("editor_open", editorPanel != null && editorPanel.getVisibility() == View.VISIBLE);
+        outState.putBoolean("manual_open", manualEditBody != null && manualEditBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("projects_open", projectSettingsBody != null && projectSettingsBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("history_open", commandHistoryBody != null && commandHistoryBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("ai_settings_open", aiSettingsBody != null && aiSettingsBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("github_settings_open", githubSettingsBody != null && githubSettingsBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("privacy_open", privacySettingsBody != null && privacySettingsBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("onboarding_open", onboardingBody != null && onboardingBody.getVisibility() == View.VISIBLE);
+        outState.putInt("editor_scroll_y", editorPanel == null ? 0 : editorPanel.getScrollY());
+        outState.putStringArrayList("selected_image_paths", new ArrayList<String>(selectedImageAssets));
+        if (selectedSymbol != null) {
+            outState.putString("selected_file", selectedSymbol.file);
+            outState.putString("selected_kind", selectedSymbol.kind);
+            outState.putString("selected_name", selectedSymbol.name);
+            outState.putString("selected_owner", selectedSymbol.owner);
+        }
         super.onSaveInstanceState(outState);
     }
 
@@ -2412,6 +2431,46 @@ public final class MainActivity extends Activity {
             setStatusText("Draft recovery unavailable: " + error.getMessage());
         }
     }
+
+    private void restoreWorkshopUiState(Bundle state) {
+        if (state == null) return;
+        if (aiPromptEditor != null) aiPromptEditor.setText(state.getString("ai_prompt", ""));
+        voiceTranscript = state.getString("voice_transcript", "");
+        SymbolEntry restoredSymbol = findSymbolByIdentity(loadBundledProject(),
+                state.getString("selected_kind", ""), state.getString("selected_file", ""),
+                state.getString("selected_owner", ""), state.getString("selected_name", ""));
+        if (restoredSymbol != null) showSymbol(restoredSymbol);
+        restoreVisibility(manualEditBody, state.getBoolean("manual_open", false));
+        restoreVisibility(projectSettingsBody, state.getBoolean("projects_open", false));
+        restoreVisibility(commandHistoryBody, state.getBoolean("history_open", false));
+        restoreVisibility(aiSettingsBody, state.getBoolean("ai_settings_open", false));
+        restoreVisibility(githubSettingsBody, state.getBoolean("github_settings_open", false));
+        restoreVisibility(privacySettingsBody, state.getBoolean("privacy_open", false));
+        restoreVisibility(onboardingBody, state.getBoolean("onboarding_open", false));
+        ArrayList<String> selectedPaths = state.getStringArrayList("selected_image_paths");
+        selectedImageAssets.clear();
+        if (selectedPaths != null) selectedImageAssets.addAll(selectedPaths);
+        selectedImageAssetProjectId = activeProject == null ? "" : activeProject.id;
+        refreshImageAssetList();
+        refreshAiAttachmentStatus();
+        if (state.getBoolean("editor_open", false) && editorPanel != null
+                && editorPanel.getVisibility() != View.VISIBLE) {
+            toggleEditorPanel();
+        }
+        final int scrollY = Math.max(0, state.getInt("editor_scroll_y", 0));
+        if (editorPanel != null) {
+            editorPanel.post(new Runnable() {
+                @Override public void run() { editorPanel.scrollTo(0, scrollY); }
+            });
+        }
+        clearPendingPreviewCapture();
+        if (allowAiImageGeneration != null) allowAiImageGeneration.setChecked(false);
+    }
+
+    private static void restoreVisibility(View view, boolean visible) {
+        if (view != null) view.setVisibility(visible ? View.VISIBLE : View.GONE);
+    }
+
 
     private void clearPendingDraft() {
         if (selectedSymbol == null) return;
