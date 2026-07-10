@@ -5211,15 +5211,7 @@ public final class MainActivity extends Activity {
     }
 
     private static String formatAiCostUsd(double costUsd) {
-        long millionths = Math.round(costUsd * 1000000.0);
-        String fraction = Long.toString(millionths % 1000000L);
-        StringBuilder builder = new StringBuilder();
-        builder.append('$').append(millionths / 1000000L).append('.');
-        for (int index = fraction.length(); index < 6; index += 1) {
-            builder.append('0');
-        }
-        builder.append(fraction);
-        return builder.toString();
+        return WorkshopMoney.formatUsd(costUsd);
     }
     private void applyAiCodeResponse(AiAgentResult aiResult, SymbolEntry fallbackSymbol) {
         Map<String, String> originalSources = null;

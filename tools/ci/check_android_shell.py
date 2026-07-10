@@ -22,6 +22,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopMoney.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
@@ -137,6 +138,7 @@ def main() -> int:
     audio_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java")
     asset_manifest = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java")
     asset_identity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java")
+    money = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopMoney.java")
     assert "MediaExtractor" in audio_assets
     assert "MediaFormat.KEY_SAMPLE_RATE" in audio_assets
     assert "MediaFormat.KEY_CHANNEL_COUNT" in audio_assets
@@ -153,6 +155,9 @@ def main() -> int:
     assert "WorkshopAssetIdentity.stableHandle" in asset_manifest
     assert "0x811c9dc5" in asset_identity
     assert "0x01000193" in asset_identity
+    assert "WorkshopMoney.formatUsd(costUsd)" in activity
+    assert "setScale(2, RoundingMode.HALF_UP)" in money
+    assert "Math.max(0.0, value)" in money
     assert "WorkshopAssetManifest.putSprite" in image_assets
     assert "WorkshopAssetManifest.putAudio" in audio_assets
     assert "WorkshopAssetManifest.readForSync" in activity
