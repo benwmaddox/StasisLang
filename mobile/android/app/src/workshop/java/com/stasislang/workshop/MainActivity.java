@@ -82,6 +82,8 @@ public final class MainActivity extends Activity {
     private static final String PROJECT_BASELINES_DIR = "workshop_project_baselines";
     private static final String PROJECT_BASELINE_READY = ".ready";
     private static final String AI_PREFS = "ai_settings";
+    private static final String ONBOARDING_PREFS = "onboarding_settings";
+    private static final String ONBOARDING_COMPLETE = "manual_tutorial_seen_v1";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_MODEL = "openai_model";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
@@ -177,6 +179,7 @@ public final class MainActivity extends Activity {
     private TextView commandHistoryText;
     private LinearLayout githubSettingsBody;
     private LinearLayout privacySettingsBody;
+    private LinearLayout onboardingBody;
     private EditText githubTokenEditor;
     private EditText githubRepositoryEditor;
     private EditText githubBranchEditor;
@@ -288,6 +291,12 @@ public final class MainActivity extends Activity {
         setContentView(createWorkshopView(project));
         markInterruptedAiOutcomeIfNeeded();
         restorePendingDraft();
+        if (!getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE)
+                .getBoolean(ONBOARDING_COMPLETE, false)) {
+            gameLoopHandler.post(new Runnable() {
+                @Override public void run() { showOnboardingGuide(true); }
+            });
+        }
     }
 
     @Override
@@ -1588,6 +1597,43 @@ public final class MainActivity extends Activity {
         });
         privacySettingsBody.addView(eraseAiActivity, fullWidth());
         controls.addView(privacySettingsBody, fullWidth());
+
+        Button onboardingToggle = new Button(this);
+        onboardingToggle.setText("Help & Onboarding");
+        onboardingToggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                onboardingBody.setVisibility(onboardingBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+            }
+        });
+        controls.addView(onboardingToggle, fullWidth());
+        onboardingBody = new LinearLayout(this);
+        onboardingBody.setOrientation(LinearLayout.VERTICAL);
+        onboardingBody.setVisibility(View.GONE);
+        TextView onboardingSummary = new TextView(this);
+        onboardingSummary.setText("Manual path (no API key):\n"
+                + "1. Play the preview and open the top-right menu.\n"
+                + "2. Open Manual Symbols & Source and choose a symbol.\n"
+                + "3. Edit, Apply, then Run Tests; use Changes before backup.\n"
+                + "4. Projects creates/switches workshops and exports portable archives.\n\n"
+                + "Optional: AI Settings stores an OpenAI key; GitHub Settings stores a token for explicit Sync/PR actions. "
+                + "Image/Audio Assets stay under Projects. Voice asks for microphone permission only when started.");
+        onboardingSummary.setTextSize(12.0f);
+        onboardingSummary.setTextColor(Color.rgb(73, 84, 100));
+        onboardingSummary.setPadding(dp(8), dp(8), dp(8), dp(8));
+        onboardingBody.addView(onboardingSummary, fullWidth());
+        Button showWelcome = new Button(this);
+        showWelcome.setText("Show Welcome Guide");
+        showWelcome.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { showOnboardingGuide(false); }
+        });
+        onboardingBody.addView(showWelcome, fullWidth());
+        Button startManual = new Button(this);
+        startManual.setText("Start Zero-AI Manual Tutorial");
+        startManual.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { startManualTutorial(); }
+        });
+        onboardingBody.addView(startManual, fullWidth());
+        controls.addView(onboardingBody, fullWidth());
         return controls;
     }
 
@@ -2103,6 +2149,50 @@ public final class MainActivity extends Activity {
         refreshCommandHistory();
         refreshAiBudgetStatus();
         setStatusText("AI histories, usage records, monthly spend history, trace, and pending media erased");
+    }
+
+    private void showOnboardingGuide(boolean firstRun) {
+        new AlertDialog.Builder(this)
+                .setTitle("Welcome to Stasis Workshop")
+                .setMessage("You can build and test a game entirely on-device without AI. Play the preview, open the menu, "
+                        + "expand Manual Symbols & Source, make a small edit, Apply it, and Run Tests. Projects and archive backup "
+                        + "work without accounts. OpenAI, GitHub, media, and voice are optional and activate only when you choose them.")
+                .setPositiveButton("Start Manual Tutorial", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        markOnboardingSeen();
+                        startManualTutorial();
+                    }
+                })
+                .setNegativeButton("Got It", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        markOnboardingSeen();
+                        setStatusText("Welcome guide completed; Help & Onboarding remains available");
+                    }
+                })
+                .setNeutralButton(firstRun ? "Remind Me Later" : "Close", null)
+                .show();
+    }
+
+    private void markOnboardingSeen() {
+        getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE).edit()
+                .putBoolean(ONBOARDING_COMPLETE, true).apply();
+    }
+
+    private void startManualTutorial() {
+        markOnboardingSeen();
+        if (editorPanel != null && editorPanel.getVisibility() != View.VISIBLE) toggleEditorPanel();
+        if (manualEditBody != null) manualEditBody.setVisibility(View.VISIBLE);
+        if (onboardingBody != null) onboardingBody.setVisibility(View.VISIBLE);
+        if (selectedSymbol == null) {
+            ProjectSnapshot project = loadBundledProject();
+            if (project.firstSymbol != null) showSymbol(project.firstSymbol);
+        }
+        setStatusText("Manual tutorial: edit the selected symbol, tap Apply, then Run Tests; no API key is required");
+        if (editorPanel != null && sourceEditor != null) {
+            editorPanel.post(new Runnable() {
+                @Override public void run() { editorPanel.smoothScrollTo(0, sourceEditor.getTop()); }
+            });
+        }
     }
 
     private void markInterruptedAiOutcomeIfNeeded() {
