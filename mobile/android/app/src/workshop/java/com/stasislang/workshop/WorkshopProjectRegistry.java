@@ -10,6 +10,9 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -35,7 +38,7 @@ final class WorkshopProjectRegistry {
         File legacyMetadata = new File(legacyRoot, METADATA_FILE);
         if (!legacyMetadata.isFile()) {
             writeMetadata(legacyRoot, new ProjectInfo(
-                    "bundled-workshop", "Bundled Workshop", LEGACY_PROJECT_DIR, legacyRoot));
+                    "bundled-workshop", "Bundled Workshop", "sample", LEGACY_PROJECT_DIR, legacyRoot));
         }
         String activeDirectory = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(PREF_ACTIVE_PROJECT, LEGACY_PROJECT_DIR);
@@ -68,14 +71,14 @@ final class WorkshopProjectRegistry {
     }
 
     static ProjectInfo createFromSample(Context context, String requestedName) throws Exception {
-        return createProject(context, requestedName);
+        return createProject(context, requestedName, "sample");
     }
 
     static ProjectInfo createForImport(Context context, String requestedName) throws Exception {
-        return createProject(context, requestedName);
+        return createProject(context, requestedName, "import");
     }
 
-    private static ProjectInfo createProject(Context context, String requestedName) throws Exception {
+    private static ProjectInfo createProject(Context context, String requestedName, String origin) throws Exception {
         String name = requestedName == null ? "" : requestedName.trim();
         validateRequestedName(name);
         File projectsRoot = new File(context.getFilesDir(), PROJECTS_DIR);
@@ -87,7 +90,7 @@ final class WorkshopProjectRegistry {
         for (int suffix = 2; root.exists(); suffix += 1) root = new File(projectsRoot, base + "-" + suffix);
         if (!root.mkdirs()) throw new IllegalStateException("unable to create project directory");
         String relativeDirectory = PROJECTS_DIR + "/" + root.getName();
-        ProjectInfo project = new ProjectInfo(UUID.randomUUID().toString(), name, relativeDirectory, root);
+        ProjectInfo project = new ProjectInfo(UUID.randomUUID().toString(), name, origin, relativeDirectory, root);
         try {
             writeMetadata(root, project);
         } catch (Exception error) {
@@ -138,16 +141,38 @@ final class WorkshopProjectRegistry {
         if (version != FORMAT_VERSION) throw new IllegalStateException("unsupported project format version " + version);
         String id = json.optString("id", "").trim();
         String name = json.optString("name", "").trim();
+        boolean originMissing = !json.has("origin");
+        String origin = json.optString("origin", "sample").trim();
         if (id.isEmpty() || name.isEmpty()) throw new IllegalStateException("project metadata needs id and name");
-        return new ProjectInfo(id, name, directoryName, root);
+        if (!id.matches("[A-Za-z0-9][A-Za-z0-9-]{0,79}")) throw new IllegalStateException("project metadata id is invalid");
+        if (!"sample".equals(origin) && !"import".equals(origin)) throw new IllegalStateException("project metadata origin is invalid");
+        ProjectInfo project = new ProjectInfo(id, name, origin, directoryName, root);
+        if (originMissing) replaceMetadata(root, project);
+        return project;
     }
 
     private static void writeMetadata(File root, ProjectInfo project) throws Exception {
+        File target = new File(root, METADATA_FILE);
+        if (target.exists()) throw new IllegalStateException("project metadata already exists");
+        writeMetadataTemporary(root, project, target);
+    }
+
+    private static void replaceMetadata(File root, ProjectInfo project) throws Exception {
+        File target = new File(root, METADATA_FILE);
+        File temporary = writeMetadataTemporary(root, project, null);
+        try {
+            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException unsupported) {
+            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private static File writeMetadataTemporary(File root, ProjectInfo project, File publishTarget) throws Exception {
         JSONObject json = new JSONObject()
                 .put("format_version", FORMAT_VERSION)
                 .put("id", project.id)
-                .put("name", project.name);
-        File target = new File(root, METADATA_FILE);
+                .put("name", project.name)
+                .put("origin", project.origin);
         File temporary = new File(root, METADATA_FILE + ".tmp");
         FileOutputStream output = new FileOutputStream(temporary);
         try {
@@ -156,11 +181,12 @@ final class WorkshopProjectRegistry {
         } finally {
             output.close();
         }
-        if (target.exists()) throw new IllegalStateException("project metadata already exists");
-        if (!temporary.renameTo(target)) {
+        if (publishTarget == null) return temporary;
+        if (!temporary.renameTo(publishTarget)) {
             temporary.delete();
             throw new IllegalStateException("unable to publish project metadata");
         }
+        return publishTarget;
     }
 
     private static void validateProjectRoot(Context context, File root) throws Exception {
@@ -219,12 +245,14 @@ final class WorkshopProjectRegistry {
     static final class ProjectInfo {
         final String id;
         final String name;
+        final String origin;
         final String directoryName;
         final File root;
 
-        ProjectInfo(String id, String name, String directoryName, File root) {
+        ProjectInfo(String id, String name, String origin, String directoryName, File root) {
             this.id = id;
             this.name = name;
+            this.origin = origin;
             this.directoryName = directoryName;
             this.root = root;
         }

@@ -53,6 +53,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
@@ -72,6 +73,8 @@ import org.json.JSONObject;
 public final class MainActivity extends Activity {
     private static final String ASSET_ROOT = "workshop_sample/";
     private static final String PROJECT_DIR = WorkshopProjectRegistry.LEGACY_PROJECT_DIR;
+    private static final String PROJECT_BASELINES_DIR = "workshop_project_baselines";
+    private static final String PROJECT_BASELINE_READY = ".ready";
     private static final String AI_PREFS = "ai_settings";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_MODEL = "openai_model";
@@ -244,6 +247,11 @@ public final class MainActivity extends Activity {
         window.setNavigationBarColor(Color.BLACK);
 
         ProjectSnapshot project = loadBundledProject();
+        try {
+            ensureActiveProjectBaseline(project);
+        } catch (IOException error) {
+            projectRegistryError = "baseline: " + error.getMessage();
+        }
         setContentView(createWorkshopView(project));
     }
 
@@ -1498,6 +1506,7 @@ public final class MainActivity extends Activity {
             lastCompileResult = "CompileNotRun";
             reviewedGitHubChangeFingerprint = "";
             ProjectSnapshot snapshot = loadBundledProject();
+            ensureActiveProjectBaseline(snapshot);
             rebuildSymbolList(snapshot);
             if (snapshot.firstSymbol != null) showSymbol(snapshot.firstSymbol);
             refreshChangeSummary(snapshot);
@@ -1676,15 +1685,9 @@ public final class MainActivity extends Activity {
             setStatusText("GitHub sync needs configured settings");
             return;
         }
-        final Map<String, String> files;
-        try {
-            files = changedProjectSources(loadBundledAssetSnapshot(), loadBundledProject());
-        } catch (IOException error) {
-            githubSyncStatus.setText("GitHub sync error: unable to read local baseline");
-            return;
-        }
+        final Map<String, String> files = sourcesByFile(loadBundledProject());
         if (files.isEmpty()) {
-            githubSyncStatus.setText("GitHub sync: no local changes");
+            githubSyncStatus.setText("GitHub sync: no project sources");
             return;
         }
         if (!beginGitHubOperation("sync", "GitHub sync: queued (" + files.size() + " files)")) return;
@@ -1719,7 +1722,7 @@ public final class MainActivity extends Activity {
 
     private void reviewGitHubPullRequestChanges() {
         try {
-            ProjectSnapshot baseline = loadBundledAssetSnapshot();
+            ProjectSnapshot baseline = loadProjectBaselineSnapshot();
             ProjectSnapshot current = loadBundledProject();
             Map<String, String> changes = changedProjectSources(baseline, current);
             if (changes.isEmpty()) {
@@ -1750,7 +1753,7 @@ public final class MainActivity extends Activity {
         }
         final Map<String, String> changes;
         try {
-            changes = changedProjectSources(loadBundledAssetSnapshot(), loadBundledProject());
+            changes = changedProjectSources(loadProjectBaselineSnapshot(), loadBundledProject());
         } catch (IOException error) {
             githubSyncStatus.setText("GitHub pull request error: unable to read local changes");
             return;
@@ -4489,10 +4492,10 @@ public final class MainActivity extends Activity {
             return;
         }
         try {
-            ProjectSnapshot baseline = loadBundledAssetSnapshot();
+            ProjectSnapshot baseline = loadProjectBaselineSnapshot();
             changeSummary.setText(formatChangeSummary(baseline, currentProject));
         } catch (IOException error) {
-            changeSummary.setText("Changed symbols:\n  Unable to read bundled baseline: " + error.getMessage());
+            changeSummary.setText("Changed symbols:\n  Unable to read project baseline: " + error.getMessage());
         }
     }
 
@@ -4501,9 +4504,9 @@ public final class MainActivity extends Activity {
             return;
         }
         try {
-            changeSummary.setText(formatRawFileDiffs(loadBundledAssetSnapshot(), loadBundledProject()));
+            changeSummary.setText(formatRawFileDiffs(loadProjectBaselineSnapshot(), loadBundledProject()));
         } catch (IOException error) {
-            changeSummary.setText("Raw file diffs:\n  Unable to read bundled baseline: " + error.getMessage());
+            changeSummary.setText("Raw file diffs:\n  Unable to read project baseline: " + error.getMessage());
         }
     }
 
@@ -4529,6 +4532,68 @@ public final class MainActivity extends Activity {
         }
 
         return ProjectSnapshot.from(files);
+    }
+
+    private File activeProjectBaselineRoot() {
+        String identity = activeProject == null
+                ? Integer.toHexString(projectRootPath().hashCode()) : activeProject.id;
+        return new File(new File(getFilesDir(), PROJECT_BASELINES_DIR), identity);
+    }
+
+    private void ensureActiveProjectBaseline(ProjectSnapshot current) throws IOException {
+        File baselineRoot = activeProjectBaselineRoot();
+        if (new File(baselineRoot, PROJECT_BASELINE_READY).isFile()) return;
+        ProjectSnapshot baseline = activeProject != null && "import".equals(activeProject.origin)
+                ? current : loadBundledAssetSnapshot();
+        deleteBaselineDirectory(baselineRoot);
+        if (!baselineRoot.isDirectory() && !baselineRoot.mkdirs()) {
+            throw new IOException("unable to create project baseline directory");
+        }
+        String canonicalRoot = baselineRoot.getCanonicalPath();
+        for (SourceFile source : baseline.files) {
+            File target = new File(baselineRoot, source.path.replace('/', File.separatorChar));
+            String canonicalTarget = target.getCanonicalPath();
+            if (!canonicalTarget.startsWith(canonicalRoot + File.separator)) {
+                throw new IOException("baseline path escaped baseline root");
+            }
+            File parent = target.getParentFile();
+            if (!parent.isDirectory() && !parent.mkdirs()) throw new IOException("unable to create baseline source directory");
+            writeTextFile(target, source.source);
+        }
+        writeTextFile(new File(baselineRoot, PROJECT_BASELINE_READY), "format=1\n");
+    }
+
+    private ProjectSnapshot loadProjectBaselineSnapshot() throws IOException {
+        ensureActiveProjectBaseline(loadBundledProject());
+        File baselineRoot = activeProjectBaselineRoot();
+        List<SourceFile> files = new ArrayList<>();
+        collectBaselineStasisFiles(baselineRoot, baselineRoot, files);
+        return ProjectSnapshot.from(files);
+    }
+
+    private void collectBaselineStasisFiles(File baselineRoot, File file, List<SourceFile> files) throws IOException {
+        if (!file.exists()) return;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children == null) throw new IOException("unable to list project baseline");
+            for (File child : children) collectBaselineStasisFiles(baselineRoot, child, files);
+            return;
+        }
+        if (!file.getName().endsWith(".stasis")) return;
+        String rootPath = baselineRoot.getCanonicalPath();
+        String filePath = file.getCanonicalPath();
+        if (!filePath.startsWith(rootPath + File.separator)) throw new IOException("baseline source escaped baseline root");
+        String relative = filePath.substring(rootPath.length() + 1).replace(File.separatorChar, '/');
+        files.add(new SourceFile(relative, new File(projectRoot(), relative.replace('/', File.separatorChar)), readTextFile(file)));
+    }
+
+    private void deleteBaselineDirectory(File file) {
+        if (!file.exists()) return;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) for (File child : children) deleteBaselineDirectory(child);
+        }
+        file.delete();
     }
 
     private static String formatChangeSummary(ProjectSnapshot baseline, ProjectSnapshot current) {
@@ -4665,15 +4730,42 @@ public final class MainActivity extends Activity {
         return symbols;
     }
     private void resetProjectFiles() {
-        ProjectSnapshot project = loadBundledProject(true);
-        rebuildSymbolList(project);
-        if (project.firstSymbol != null) {
-            showSymbol(project.firstSymbol);
+        try {
+            boolean imported = activeProject != null && "import".equals(activeProject.origin);
+            ProjectSnapshot project;
+            if (imported) {
+                restoreImportedProjectSourceBaseline();
+                project = loadBundledProject();
+            } else {
+                project = loadBundledProject(true);
+            }
+            rebuildSymbolList(project);
+            if (project.firstSymbol != null) showSymbol(project.firstSymbol);
+            refreshChangeSummary(project);
+            compileReady = false;
+            compileAttempted = false;
+            setStatusText(imported ? "Reset imported project source baseline" : "Reset project from bundled sample");
+        } catch (IOException error) {
+            setStatusText("Reset project failed: " + error.getMessage());
         }
-        refreshChangeSummary(project);
-        compileReady = false;
-        compileAttempted = false;
-        setStatusText("Reset project from bundled sample");
+    }
+
+    private void restoreImportedProjectSourceBaseline() throws IOException {
+        ProjectSnapshot baseline = loadProjectBaselineSnapshot();
+        ProjectSnapshot current = loadBundledProject();
+        for (SourceFile source : current.files) {
+            if (source.diskFile.isFile() && !source.diskFile.delete()) {
+                throw new IOException("unable to remove current source " + source.path);
+            }
+        }
+        deleteProjectDirectory(new File(projectRoot(), "build"));
+        for (SourceFile source : baseline.files) {
+            File target = new File(projectRoot(), source.path.replace('/', File.separatorChar));
+            relativeProjectPath(target);
+            File parent = target.getParentFile();
+            if (!parent.isDirectory() && !parent.mkdirs()) throw new IOException("unable to restore source directory");
+            writeTextFile(target, source.source);
+        }
     }
 
     private void createManualTest() {
@@ -4715,8 +4807,8 @@ public final class MainActivity extends Activity {
             return;
         }
         try {
-            if (findMatchingSymbol(loadBundledAssetSnapshot(), selectedSymbol) != null) {
-                setStatusText("Delete Test unavailable: bundled tests can be reverted, not deleted");
+            if (findMatchingSymbol(loadProjectBaselineSnapshot(), selectedSymbol) != null) {
+                setStatusText("Delete Test unavailable: baseline tests can be reverted, not deleted");
                 return;
             }
             File file = selectedSymbol.sourceFile.diskFile;
@@ -4779,8 +4871,8 @@ public final class MainActivity extends Activity {
             return;
         }
         try {
-            if (findMatchingSymbol(loadBundledAssetSnapshot(), selectedSymbol) != null) {
-                setStatusText("Delete Helper unavailable: bundled helpers can be reverted, not deleted");
+            if (findMatchingSymbol(loadProjectBaselineSnapshot(), selectedSymbol) != null) {
+                setStatusText("Delete Helper unavailable: baseline helpers can be reverted, not deleted");
                 return;
             }
             SourceFile sourceFile = selectedSymbol.sourceFile;
@@ -4821,13 +4913,13 @@ public final class MainActivity extends Activity {
 
     private void revertSelectedToBundled() {
         if (selectedSymbol == null) {
-            setStatusText("Revert unavailable: select a bundled symbol first");
+            setStatusText("Revert unavailable: select a baseline symbol first");
             return;
         }
         try {
-            SymbolEntry baseline = findMatchingSymbol(loadBundledAssetSnapshot(), selectedSymbol);
+            SymbolEntry baseline = findMatchingSymbol(loadProjectBaselineSnapshot(), selectedSymbol);
             if (baseline == null) {
-                setStatusText("Revert unavailable: selected symbol is not bundled");
+                setStatusText("Revert unavailable: selected symbol is not in the project baseline");
                 return;
             }
             persistSelectedEdit(selectedSymbol, baseline.source);
@@ -4842,7 +4934,7 @@ public final class MainActivity extends Activity {
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
-            setStatusText("Reverted saved symbol to bundled baseline - " + compileResult);
+            setStatusText("Reverted saved symbol to project baseline - " + compileResult);
         } catch (IOException error) {
             setStatusText("Revert failed: " + error.getMessage());
         }
@@ -4922,8 +5014,14 @@ public final class MainActivity extends Activity {
             return;
         }
         if (file.isDirectory()) {
+            if (!file.equals(projectRoot()) && "build".equals(file.getName())) return;
             File[] children = file.listFiles();
             if (children != null) {
+                Arrays.sort(children, new Comparator<File>() {
+                    @Override public int compare(File left, File right) {
+                        return left.getName().compareTo(right.getName());
+                    }
+                });
                 for (File child : children) {
                     collectTestFiles(child, out);
                 }
@@ -4941,8 +5039,14 @@ public final class MainActivity extends Activity {
             return;
         }
         if (file.isDirectory()) {
+            if (!file.equals(projectRoot()) && "build".equals(file.getName())) return;
             File[] children = file.listFiles();
             if (children != null) {
+                Arrays.sort(children, new Comparator<File>() {
+                    @Override public int compare(File left, File right) {
+                        return left.getName().compareTo(right.getName());
+                    }
+                });
                 for (File child : children) {
                     collectProjectStasisFiles(child, out, seen);
                 }
@@ -4970,32 +5074,28 @@ public final class MainActivity extends Activity {
             deleteProjectDirectory(projectRoot);
         }
 
-        for (String file : SAMPLE_FILES) {
-            File diskFile = new File(projectRoot, file);
-            try {
-                ensureProjectFile(assets, ASSET_ROOT + file, diskFile);
-                files.add(new SourceFile(file, diskFile, readTextFile(diskFile)));
-            } catch (IOException error) {
-                files.add(new SourceFile(file, diskFile, "// Unable to load " + file + ": " + error.getMessage()));
+        boolean sampleProject = activeProject == null || "sample".equals(activeProject.origin);
+        if (sampleProject) {
+            for (String file : SAMPLE_FILES) {
+                try {
+                    ensureProjectFile(assets, ASSET_ROOT + file, new File(projectRoot, file));
+                } catch (IOException ignored) {
+                    // The recursive load below includes files that were seeded successfully.
+                }
             }
-        }
-        for (String file : SAMPLE_TEST_FILES) {
-            File diskFile = new File(projectRoot, file);
-            try {
-                ensureProjectFile(assets, ASSET_ROOT + file, diskFile);
-                files.add(new SourceFile(file, diskFile, readTextFile(diskFile)));
-            } catch (IOException error) {
-                files.add(new SourceFile(file, diskFile, "// Unable to load " + file + ": " + error.getMessage()));
+            for (String file : SAMPLE_TEST_FILES) {
+                try {
+                    ensureProjectFile(assets, ASSET_ROOT + file, new File(projectRoot, file));
+                } catch (IOException ignored) {
+                    // The recursive load below includes files that were seeded successfully.
+                }
             }
         }
         try {
             TreeSet<String> seen = new TreeSet<>();
-            for (SourceFile file : files) {
-                seen.add(file.path);
-            }
-            collectProjectStasisFiles(new File(projectRoot, "tests"), files, seen);
+            collectProjectStasisFiles(projectRoot, files, seen);
         } catch (IOException ignored) {
-            // Extra user-authored test files should not prevent the source tree from loading.
+            // One unreadable project file should not crash the workshop surface.
         }
 
         return ProjectSnapshot.from(files);
