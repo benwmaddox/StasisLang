@@ -488,8 +488,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `planned`
 #### AW62 - Android Privacy, Permissions, and Data Management
 - Scope: Minimize permissions, disclose exactly what code/media is sent externally, provide attachment consent and credential revocation, and support project/cache/history/trace deletion.
+- Progress: A collapsed `Privacy & Data` panel inventories local project code/assets/drafts/recovery/traces and states the exact explicit actions that send workspace/media to OpenAI or project files to GitHub; microphone disclosure is limited to explicit voice actions. Separate confirmed controls revoke the encrypted OpenAI key or GitHub token without deleting repository/model settings or projects and are blocked during their active operation. `Clear Pending Media Consent` removes selected project images, captured pixels/logical context, and one-run image-generation opt-in. Confirmed `Erase AI Histories + Trace` removes command/outcome history across every project, last usage, monthly spend records, local trace bytes, and pending media while preserving accepted code/assets and credentials. Active project/cache/recovery deletion, full install-data export/erase, and device permission acceptance remain.
+- Tests: The Android shell verifier covers collapsed disclosure text, explicit-send boundaries, encrypted credential removal, active-operation guards, pending media revocation, cross-project history/usage/spend removal, trace deletion, and code/asset preservation messaging; workshop Java compilation and APK assembly cover the controls.
 - Done gate: Users can inspect and erase stored data and secrets, and no project/media leaves the device without an explicit configured action.
-- Status: `planned`
+- Status: `in progress`
 #### AW63 - Android Project Format Versioning and Migration
 - Scope: Version project/workshop metadata and migrate app-private projects, settings, manifests, assets, tests, and sync state across app/compiler upgrades with rollback-safe backups.
 - Done gate: Upgrading the Workshop preserves existing projects or stops with a recoverable, actionable migration diagnostic.
