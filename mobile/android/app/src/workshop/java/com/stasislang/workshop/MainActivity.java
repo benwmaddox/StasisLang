@@ -174,6 +174,8 @@ public final class MainActivity extends Activity {
     private TextView projectStatus;
     private LinearLayout imageAssetList;
     private final ArrayList<WorkshopProjectRegistry.ProjectInfo> availableProjects = new ArrayList<>();
+    private final HashSet<String> selectedImageAssets = new HashSet<>();
+    private String selectedImageAssetProjectId = "";
     private WorkshopProjectRegistry.ProjectInfo activeProject;
     private WorkshopProjectRegistry.ProjectInfo pendingExportProject;
     private String pendingImportProjectName = "";
@@ -1261,6 +1263,12 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { requestImageImport(); }
         });
         projectSettingsBody.addView(importImage, fullWidth());
+        Button restoreImage = new Button(this);
+        restoreImage.setText("Restore Last Deleted Image");
+        restoreImage.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { restoreLastDeletedImage(); }
+        });
+        projectSettingsBody.addView(restoreImage, fullWidth());
         imageAssetList = new LinearLayout(this);
         imageAssetList.setOrientation(LinearLayout.VERTICAL);
         projectSettingsBody.addView(imageAssetList, fullWidth());
@@ -4685,6 +4693,14 @@ public final class MainActivity extends Activity {
         if (activeProject == null) return;
         try {
             List<WorkshopImageAssets.AssetInfo> assets = WorkshopImageAssets.list(activeProject.root);
+            String activeId = activeProject.id;
+            if (!activeId.equals(selectedImageAssetProjectId)) {
+                selectedImageAssets.clear();
+                selectedImageAssetProjectId = activeId;
+            }
+            HashSet<String> available = new HashSet<>();
+            for (WorkshopImageAssets.AssetInfo asset : assets) available.add(asset.relativePath);
+            selectedImageAssets.retainAll(available);
             if (assets.isEmpty()) {
                 TextView empty = new TextView(this);
                 empty.setText("No imported images");
@@ -4696,10 +4712,11 @@ public final class MainActivity extends Activity {
             for (final WorkshopImageAssets.AssetInfo asset : assets) {
                 Button preview = new Button(this);
                 preview.setAllCaps(false);
-                preview.setText(asset.relativePath + "\n" + asset.width + "x" + asset.height
+                preview.setText((selectedImageAssets.contains(asset.relativePath) ? "[Selected] " : "")
+                        + asset.relativePath + "\n" + asset.width + "x" + asset.height
                         + " - " + asset.bytes + " bytes");
                 preview.setOnClickListener(new View.OnClickListener() {
-                    @Override public void onClick(View view) { showImagePreview(asset); }
+                    @Override public void onClick(View view) { showImageAssetActions(asset); }
                 });
                 imageAssetList.addView(preview, fullWidth());
             }
@@ -4709,6 +4726,135 @@ public final class MainActivity extends Activity {
             failure.setTextColor(Color.rgb(164, 45, 45));
             imageAssetList.addView(failure, fullWidth());
         }
+    }
+
+    private void showImageAssetActions(final WorkshopImageAssets.AssetInfo asset) {
+        final boolean selected = selectedImageAssets.contains(asset.relativePath);
+        String[] actions = new String[] {"Preview", selected ? "Unselect" : "Select", "Rename", "Delete"};
+        new AlertDialog.Builder(this)
+                .setTitle(asset.relativePath)
+                .setItems(actions, new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        if (which == 0) showImagePreview(asset);
+                        else if (which == 1) toggleImageSelection(asset);
+                        else if (which == 2) requestImageRename(asset);
+                        else if (which == 3) requestImageDelete(asset);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void toggleImageSelection(WorkshopImageAssets.AssetInfo asset) {
+        selectedImageAssetProjectId = activeProject == null ? "" : activeProject.id;
+        if (!selectedImageAssets.remove(asset.relativePath)) selectedImageAssets.add(asset.relativePath);
+        refreshImageAssetList();
+        setStatusText((selectedImageAssets.contains(asset.relativePath) ? "Selected " : "Unselected ")
+                + asset.relativePath + " for an explicit future attachment");
+    }
+
+    private void requestImageRename(final WorkshopImageAssets.AssetInfo asset) {
+        if (!canModifyImageAssets()) return;
+        List<String> references = imageReferences(asset);
+        if (!references.isEmpty()) {
+            setStatusText("Rename blocked: image is referenced by " + joinPaths(references));
+            return;
+        }
+        final EditText name = new EditText(this);
+        String current = asset.file.getName();
+        int dot = current.lastIndexOf('.');
+        name.setText(dot > 0 ? current.substring(0, dot) : current);
+        name.setSingleLine(true);
+        new AlertDialog.Builder(this)
+                .setTitle("Rename Image")
+                .setMessage("References are checked before the file is renamed.")
+                .setView(name)
+                .setPositiveButton("Rename", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        try {
+                            WorkshopImageAssets.AssetInfo renamed = WorkshopImageAssets.rename(
+                                    asset, activeProject.root, name.getText().toString());
+                            if (selectedImageAssets.remove(asset.relativePath)) {
+                                selectedImageAssets.add(renamed.relativePath);
+                            }
+                            refreshImageAssetList();
+                            setStatusText("Image renamed: " + renamed.relativePath);
+                        } catch (Exception error) {
+                            setStatusText("Image rename failed: " + error.getMessage());
+                        }
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void requestImageDelete(final WorkshopImageAssets.AssetInfo asset) {
+        if (!canModifyImageAssets()) return;
+        List<String> references = imageReferences(asset);
+        if (!references.isEmpty()) {
+            setStatusText("Delete blocked: image is referenced by " + joinPaths(references));
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Delete Image?")
+                .setMessage(asset.relativePath + " will move to bounded project recovery.")
+                .setPositiveButton("Delete", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        try {
+                            WorkshopImageAssets.moveToTrash(asset, activeProject.root);
+                            selectedImageAssets.remove(asset.relativePath);
+                            refreshImageAssetList();
+                            setStatusText("Image moved to recovery: " + asset.relativePath);
+                        } catch (Exception error) {
+                            setStatusText("Image delete failed: " + error.getMessage());
+                        }
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void restoreLastDeletedImage() {
+        if (!canModifyImageAssets()) return;
+        try {
+            WorkshopImageAssets.AssetInfo restored = WorkshopImageAssets.restoreLatest(activeProject.root);
+            refreshImageAssetList();
+            setStatusText("Image restored: " + restored.relativePath);
+        } catch (Exception error) {
+            setStatusText("Image restore failed: " + error.getMessage());
+        }
+    }
+
+    private boolean canModifyImageAssets() {
+        if (activeProject == null) {
+            setStatusText("Image changes need a registered active project");
+            return false;
+        }
+        if (aiRunActive || githubOperationActive || projectIoActive || hasPendingSourceEdit()) {
+            setStatusText("Image change blocked by active work or a pending source edit");
+            return false;
+        }
+        return true;
+    }
+
+    private List<String> imageReferences(WorkshopImageAssets.AssetInfo asset) {
+        ArrayList<String> references = new ArrayList<>();
+        ProjectSnapshot project = loadBundledProject();
+        for (SourceFile source : project.files) {
+            if (source.source.contains(asset.relativePath) || source.source.contains(asset.file.getName())) {
+                references.add(source.path);
+            }
+        }
+        return references;
+    }
+
+    private static String joinPaths(List<String> paths) {
+        StringBuilder joined = new StringBuilder();
+        for (String path : paths) {
+            if (joined.length() > 0) joined.append(", ");
+            joined.append(path);
+        }
+        return joined.toString();
     }
 
     private void showImagePreview(WorkshopImageAssets.AssetInfo asset) {
