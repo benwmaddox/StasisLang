@@ -5,6 +5,7 @@ plugins {
 def repoRootDir = rootProject.projectDir.parentFile.parentFile
 def publishedAotDir = layout.buildDirectory.dir('generated/stasisAot/publishedArm64')
 def workshopAssetsDir = layout.buildDirectory.dir('generated/stasisAssets/workshop')
+def pongReleaseProjectDir = file('src/main/assets/workshop_sample')
 
 android {
     namespace 'com.stasislang.workshop'
@@ -39,6 +40,7 @@ android {
             applicationId 'com.stasislang.workshop'
             manifestPlaceholders = [appLabel: 'Stasis Workshop']
             buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'false'
+            buildConfigField 'String', 'STASIS_GAME_ID', '""'
             externalNativeBuild {
                 cmake {
                     arguments '-DSTASIS_ANDROID_PUBLISHED_AOT=OFF'
@@ -47,9 +49,10 @@ android {
         }
         published {
             dimension 'mode'
-            applicationId 'com.stasislang.workshop.published'
-            manifestPlaceholders = [appLabel: 'Stasis Game']
+            applicationId 'com.stasislang.pong'
+            manifestPlaceholders = [appLabel: 'Stasis Pong']
             buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'true'
+            buildConfigField 'String', 'STASIS_GAME_ID', '"pong"'
             externalNativeBuild {
                 cmake {
                     arguments '-DSTASIS_ANDROID_PUBLISHED_AOT=ON', "-DSTASIS_PUBLISHED_AOT_DIR=${projectDir}/build/generated/stasisAot/publishedArm64"
@@ -80,11 +83,11 @@ tasks.register('prepareWorkshopAssets', Sync) {
 
 tasks.register('generatePublishedAotBundle', Exec) {
     def outputDir = publishedAotDir.get().asFile
-    inputs.dir(file('src/main/assets/workshop_sample'))
+    inputs.dir(pongReleaseProjectDir)
     outputs.dir(outputDir)
     workingDir repoRootDir
     commandLine 'cargo', 'run', '-p', 'stasis', '--', 'android-aot-bundle',
-            '--project-dir', file('src/main/assets/workshop_sample').absolutePath,
+            '--project-dir', pongReleaseProjectDir.absolutePath,
             '--out-dir', outputDir.absolutePath
 }
 

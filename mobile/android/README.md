@@ -23,7 +23,9 @@ It packages the tested Rust/C ABI bridge from `crates/stasis_android_bridge`, ru
 
 ## Published Build Path
 
-The `published` flavor is a parallel runtime-only Android target. It keeps the same native rendering/runtime surface but skips the workshop chrome entirely: no hamburger drawer, no symbol browser, no source editor, no AI controls, and no manual hot-swap UI. It uses a separate application id, `com.stasislang.workshop.published`, so it can be installed next to the developer workshop app. The APK links the generated arm64 AOT objects directly and excludes Stasis source, tests, compiler stubs, and the Rust JIT bridge.
+The `workshop` flavor is the general-purpose `com.stasislang.workshop` product. It can open arbitrary projects and may preload several templates; it is never branded as one game.
+
+The current `published` flavor is the game-specific Pong release, labeled `Stasis Pong` with application id `com.stasislang.pong`. It keeps the same native rendering/runtime surface but skips the workshop chrome entirely: no hamburger drawer, symbol browser, source editor, AI controls, or manual hot-swap UI. It can be installed next to the general Workshop. The APK links the Pong arm64 AOT objects directly and excludes Stasis source, tests, compiler stubs, unrelated templates, and the Rust JIT bridge. Future releases must declare their own game ID/project/package rather than turning this flavor back into a generic game container.
 
 Build the release-style APK with:
 

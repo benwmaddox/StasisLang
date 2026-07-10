@@ -119,6 +119,9 @@ public final class MainActivity extends Activity {
     private static final int MAX_COMMAND_HISTORY = 20;
     private static final int GITHUB_NETWORK_TIMEOUT_MS = 15_000;
     private static final int MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024;
+    private static final int TOP_CONTROL_END_MARGIN_DP = 10;
+    private static final int VOICE_TOP_MARGIN_DP = 64;
+    private static final int VOICE_ACTION_TOP_MARGIN_DP = 120;
     private static final int AI_CONNECT_TIMEOUT_MS = 15_000;
     private static final int AI_READ_TIMEOUT_MS = 120_000;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
@@ -724,7 +727,7 @@ public final class MainActivity extends Activity {
             }
         });
         FrameLayout.LayoutParams toggleParams = new FrameLayout.LayoutParams(dp(52), dp(48), Gravity.TOP | Gravity.END);
-        toggleParams.setMargins(0, dp(8), dp(10), 0);
+        toggleParams.setMargins(0, dp(8), dp(TOP_CONTROL_END_MARGIN_DP), 0);
         root.addView(editorToggle, toggleParams);
         if (voiceToggle != null) {
             voiceToggle.bringToFront();
@@ -770,7 +773,7 @@ public final class MainActivity extends Activity {
             }
         });
         FrameLayout.LayoutParams voiceParams = new FrameLayout.LayoutParams(dp(74), dp(48), Gravity.TOP | Gravity.END);
-        voiceParams.setMargins(0, dp(8), dp(68), 0);
+        voiceParams.setMargins(0, dp(VOICE_TOP_MARGIN_DP), dp(TOP_CONTROL_END_MARGIN_DP), 0);
         root.addView(voiceToggle, voiceParams);
 
         voiceActionRow = new LinearLayout(this);
@@ -810,7 +813,7 @@ public final class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.START);
-        actionParams.setMargins(dp(8), dp(58), dp(8), 0);
+        actionParams.setMargins(dp(8), dp(VOICE_ACTION_TOP_MARGIN_DP), dp(8), 0);
         root.addView(voiceActionRow, actionParams);
     }
 
