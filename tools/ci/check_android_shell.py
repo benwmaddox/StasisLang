@@ -309,12 +309,18 @@ def main() -> int:
     assert "Manual Symbols and Source" in activity
     assert "Go to Diagnostic" in activity
     assert "Undo Failed Apply" in activity
+    assert "Recovery History" in activity
+    assert "Failed Apply History" in activity
+    assert "Recovery history selection" in activity
     assert "AndroidEditRecoveryStore.record" in activity
     assert "AndroidEditRecoveryStore.latest" in activity
+    assert "AndroidEditRecoveryStore.list" in activity
+    assert "selectedRecoveryEntry" in activity
     assert "Undo blocked: source changed after the failed apply" in activity
     assert "Failed manual apply restored safely" in activity
     assert "Recoverable failed apply" in activity
     assert "MAX_ENTRIES = 10" in recovery_store
+    assert "static Entry[] list" in recovery_store
     assert "MAX_SOURCE_BYTES = 2 * 1024 * 1024" in recovery_store
     assert "writeSyncedAtomic" in recovery_store
     assert "recovery entry publish failed" in recovery_store

@@ -1,6 +1,7 @@
 package com.stasislang.workshop;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.Manifest;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -184,6 +185,7 @@ public final class MainActivity extends Activity {
     private TextView diagnosticStatus;
     private String diagnosticFile = "";
     private String diagnosticSymbol = "";
+    private AndroidEditRecoveryStore.Entry selectedRecoveryEntry;
     private TextView changeSummary;
     private TextView gameStatus;
     private GamePreviewView gamePreview;
@@ -478,10 +480,16 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { goToDiagnosticSource(); }
         });
         diagnosticActions.addView(goToDiagnostic, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        Button recoveryHistory = new Button(this);
+        recoveryHistory.setText("Recovery History");
+        recoveryHistory.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { showRecoveryHistory(); }
+        });
+        diagnosticActions.addView(recoveryHistory, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         Button undoFailedApply = new Button(this);
         undoFailedApply.setText("Undo Failed Apply");
         undoFailedApply.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { undoLatestFailedApply(); }
+            @Override public void onClick(View view) { undoSelectedFailedApply(); }
         });
         diagnosticActions.addView(undoFailedApply, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         content.addView(diagnosticActions, fullWidth());
@@ -4509,7 +4517,7 @@ public final class MainActivity extends Activity {
             } else {
                 diagnosticFile = editedSymbol.file;
                 diagnosticSymbol = editedSymbol.name;
-                AndroidEditRecoveryStore.record(this, activeRecoveryProjectId(), editedSymbol.file,
+                selectedRecoveryEntry = AndroidEditRecoveryStore.record(this, activeRecoveryProjectId(), editedSymbol.file,
                         editedSymbol.name, beforeFileSource, editedSymbol.sourceFile.source, compileResult);
                 diagnosticStatus.setText("Compile failed\nfile=" + diagnosticFile
                         + "\nsymbol=" + diagnosticSymbol + "\nreload=" + reload + "\n" + compileResult);
@@ -4529,17 +4537,66 @@ public final class MainActivity extends Activity {
     private void refreshRecoveryStatus() {
         if (diagnosticStatus == null) return;
         try {
-            AndroidEditRecoveryStore.Entry entry = AndroidEditRecoveryStore.latest(this, activeRecoveryProjectId());
-            if (entry == null) {
+            AndroidEditRecoveryStore.Entry[] entries = AndroidEditRecoveryStore.list(this, activeRecoveryProjectId());
+            if (entries.length == 0) {
+                selectedRecoveryEntry = null;
                 diagnosticStatus.setText("Diagnostics: no failed manual applies");
                 return;
             }
+            AndroidEditRecoveryStore.Entry entry = selectedRecoveryEntry;
+            int selectedIndex = -1;
+            for (int index = 0; index < entries.length; index += 1) {
+                if (entry != null && entries[index].file.equals(entry.file)) selectedIndex = index;
+            }
+            if (selectedIndex < 0) {
+                selectedIndex = 0;
+                entry = entries[0];
+            }
+            selectedRecoveryEntry = entry;
             diagnosticFile = entry.path;
             diagnosticSymbol = entry.symbol;
-            diagnosticStatus.setText("Recoverable failed apply\nfile=" + entry.path
+            diagnosticStatus.setText("Recoverable failed apply history: " + entries.length + " entries\nselected="
+                    + (selectedIndex + 1) + "/" + entries.length + "\nfile=" + entry.path
                     + "\nsymbol=" + entry.symbol + "\n" + entry.diagnostic);
         } catch (Exception error) {
             diagnosticStatus.setText("Recovery history unavailable: " + error.getMessage());
+        }
+    }
+
+    private void showRecoveryHistory() {
+        try {
+            final AndroidEditRecoveryStore.Entry[] entries =
+                    AndroidEditRecoveryStore.list(this, activeRecoveryProjectId());
+            if (entries.length == 0) {
+                setStatusText("No failed manual apply history is available");
+                return;
+            }
+            String[] labels = new String[entries.length];
+            for (int index = 0; index < entries.length; index += 1) {
+                AndroidEditRecoveryStore.Entry entry = entries[index];
+                String when = java.text.DateFormat.getDateTimeInstance(
+                        java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
+                        .format(new java.util.Date(entry.timestampMs));
+                labels[index] = when + " - " + entry.path
+                        + (entry.symbol.isEmpty() ? "" : " - " + entry.symbol);
+            }
+            new AlertDialog.Builder(this)
+                    .setTitle("Failed Apply History")
+                    .setItems(labels, new android.content.DialogInterface.OnClickListener() {
+                        @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                            selectedRecoveryEntry = entries[which];
+                            diagnosticFile = selectedRecoveryEntry.path;
+                            diagnosticSymbol = selectedRecoveryEntry.symbol;
+                            diagnosticStatus.setText("Recovery history selection " + (which + 1) + "/"
+                                    + entries.length + "\nfile=" + diagnosticFile + "\nsymbol="
+                                    + diagnosticSymbol + "\n" + selectedRecoveryEntry.diagnostic);
+                            setStatusText("Selected failed apply " + (which + 1) + " of " + entries.length);
+                        }
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        } catch (Exception error) {
+            setStatusText("Recovery history unavailable: " + error.getMessage());
         }
     }
 
@@ -4565,9 +4622,12 @@ public final class MainActivity extends Activity {
         setStatusText("Diagnostic file is available but its symbol could not be parsed");
     }
 
-    private void undoLatestFailedApply() {
+    private void undoSelectedFailedApply() {
         try {
-            AndroidEditRecoveryStore.Entry entry = AndroidEditRecoveryStore.latest(this, activeRecoveryProjectId());
+            AndroidEditRecoveryStore.Entry entry = selectedRecoveryEntry;
+            if (entry == null || !entry.file.isFile()) {
+                entry = AndroidEditRecoveryStore.latest(this, activeRecoveryProjectId());
+            }
             if (entry == null) {
                 setStatusText("No failed manual apply is available to undo");
                 return;
@@ -4581,6 +4641,7 @@ public final class MainActivity extends Activity {
             }
             writeTextFile(target, entry.beforeSource);
             AndroidEditRecoveryStore.consume(entry);
+            selectedRecoveryEntry = null;
             ProjectSnapshot restored = loadBundledProject();
             rebuildSymbolList(restored);
             diagnosticFile = entry.path;
