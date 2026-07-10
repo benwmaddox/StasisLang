@@ -106,6 +106,8 @@ public final class MainActivity extends Activity {
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int MAX_AI_AGENT_TURNS = 15;
     private static final int MAX_AI_OUTPUT_TOKENS = 8192;
+    private static final int MAX_AI_IMAGE_ATTACHMENTS = 4;
+    private static final int MAX_AI_IMAGE_ATTACHMENT_BYTES = 12 * 1024 * 1024;
     private static final int MAX_COMMAND_HISTORY = 20;
     private static final int GITHUB_NETWORK_TIMEOUT_MS = 15_000;
     private static final int MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024;
@@ -156,6 +158,7 @@ public final class MainActivity extends Activity {
     private EditText aiMaxRunUsdEditor;
     private EditText aiMonthlyLimitUsdEditor;
     private TextView aiBudgetStatus;
+    private TextView aiAttachmentStatus;
     private TextView aiStepPill;
     private TextView aiActionPill;
     private TextView aiPhasePill;
@@ -188,6 +191,7 @@ public final class MainActivity extends Activity {
     private volatile boolean aiCancelRequested;
     private volatile HttpURLConnection activeAiConnection;
     private String activeAiPrompt = "";
+    private volatile List<AiImageAttachment> activeAiImageAttachments = Collections.emptyList();
     private TextView reloadStatus;
     private TextView diagnosticStatus;
     private String diagnosticFile = "";
@@ -1139,6 +1143,19 @@ public final class MainActivity extends Activity {
         aiPromptEditor.setMinLines(2);
         aiPromptEditor.setTextSize(12.0f);
         controls.addView(aiPromptEditor, fullWidth());
+
+        aiAttachmentStatus = new TextView(this);
+        aiAttachmentStatus.setTextSize(12.0f);
+        aiAttachmentStatus.setTextColor(Color.rgb(73, 84, 100));
+        aiAttachmentStatus.setPadding(0, dp(3), 0, dp(2));
+        controls.addView(aiAttachmentStatus, fullWidth());
+        Button reviewAttachments = new Button(this);
+        reviewAttachments.setText("Review AI Image Attachments");
+        reviewAttachments.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { reviewAiImageAttachments(); }
+        });
+        controls.addView(reviewAttachments, fullWidth());
+        refreshAiAttachmentStatus();
 
         LinearLayout aiActionRow = new LinearLayout(this);
         aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -2420,7 +2437,18 @@ public final class MainActivity extends Activity {
         final SymbolEntry symbol = selectedSymbol;
         final String selectedSource = symbol == null || sourceEditor == null ? "" : sourceEditor.getText().toString().trim();
         final ProjectSnapshot aiProject = loadBundledProject();
-        final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject);
+        final List<WorkshopImageAssets.AssetInfo> requestImageInfos;
+        final JSONArray requestImageMetadata;
+        try {
+            requestImageInfos = selectedAiImageInfos();
+            requestImageMetadata = aiImageMetadata(requestImageInfos);
+        } catch (Exception error) {
+            setStatusText("AI run blocked by image attachments: " + error.getMessage());
+            updateAiProgress(0, 0, "attachment blocked");
+            return;
+        }
+        final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
+                requestImageMetadata);
         final String requestModel = model;
         final String requestApiKey = apiKey;
         activeAiPrompt = prompt;
@@ -2435,6 +2463,7 @@ public final class MainActivity extends Activity {
             @Override
             public void run() {
                 try {
+                    activeAiImageAttachments = loadAiImageAttachments(requestImageInfos);
                     final AiAgentResult aiResult = runAiAgentLoop(requestApiKey, requestModel, requestJson);
                     throwIfAiCancelled();
                     runOnUiThread(new Runnable() {
@@ -2466,6 +2495,7 @@ public final class MainActivity extends Activity {
                         }
                     });
                 } finally {
+                    activeAiImageAttachments = Collections.emptyList();
                     aiRunActive = false;
                 }
             }
@@ -2528,7 +2558,8 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static String buildAiCodeRequestJson(String prompt, SymbolEntry symbol, String selectedSource, ProjectSnapshot project) {
+    private static String buildAiCodeRequestJson(String prompt, SymbolEntry symbol, String selectedSource,
+            ProjectSnapshot project, JSONArray imageAttachments) {
         try {
             JSONArray selectedSymbols = new JSONArray();
             if (symbol != null) {
@@ -2585,6 +2616,8 @@ public final class MainActivity extends Activity {
             request.put("user_prompt", prompt);
             request.put("selected_symbols", selectedSymbols);
             request.put("selected_symbols_are_context_only", true);
+            request.put("selected_image_attachments", imageAttachments);
+            request.put("selected_images_are_explicit_project_assets_only", true);
             return request.toString();
         } catch (Exception error) {
             return "{}";
@@ -3945,7 +3978,7 @@ public final class MainActivity extends Activity {
         return "function";
     }
 
-    private static JSONArray buildAiOpenAiInput(String requestJson) throws Exception {
+    private JSONArray buildAiOpenAiInput(String requestJson, boolean includeImages) throws Exception {
         JSONObject request = new JSONObject(requestJson);
         JSONObject stableRequest = request.optJSONObject("original_request");
         JSONObject volatileRequest = new JSONObject();
@@ -3963,10 +3996,14 @@ public final class MainActivity extends Activity {
         }
         String stableInstruction = "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect the current target with list_symbols, list_owner_symbols, read_symbol, read_imports, list_tests, and read_test_file unless the exact current source was already provided in selected_symbols or tool observations. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes and runs tests after each tool-call batch; use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() for post-hot-swap migration, reinitialization, or compatibility work when a running game needs state adjusted after code changes. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
         stableInstruction += " write_symbol creates or replaces a symbol. Before writing, inspect the current target. Follow game_design_rules, prefer_lifecycle_local_state, avoid_global_tick_for_per_entity_progression, and architecture_recommendations. Follow architecture_recommendations. Use command/event-style functions for durable gameplay concepts. Tool errors, validation_error observations, and test_observation failures are not final; correct them before returning mode=done. A failed write batch rolls back the whole batch and returns diagnostics.";
-        return new JSONArray()
+        JSONArray input = new JSONArray()
                 .put(aiInputMessage("system", stableInstruction, false))
-                .put(aiInputMessage("user", "Stable request context: " + stableRequest.toString(), true))
-                .put(aiInputMessage("user", "Volatile turn context: " + volatileRequest.toString(), false));
+                .put(aiInputMessage("user", "Stable request context: " + stableRequest.toString(), true));
+        if (includeImages && !activeAiImageAttachments.isEmpty()) {
+            input.put(aiImageInputMessage(activeAiImageAttachments));
+        }
+        input.put(aiInputMessage("user", "Volatile turn context: " + volatileRequest.toString(), false));
+        return input;
     }
 
     private static JSONObject aiInputMessage(String role, String text, boolean cacheBreakpoint) throws Exception {
@@ -3977,10 +4014,31 @@ public final class MainActivity extends Activity {
         return new JSONObject().put("role", role).put("content", new JSONArray().put(content));
     }
 
-    private static int maxOutputTokensForBudget(String requestJson, double remainingUsd) throws Exception {
-        byte[] inputBytes = buildAiOpenAiInput(requestJson).toString().getBytes(StandardCharsets.UTF_8);
+    private static JSONObject aiImageInputMessage(List<AiImageAttachment> attachments) throws Exception {
+        JSONArray content = new JSONArray();
+        StringBuilder paths = new StringBuilder("Explicitly selected app-private project images: ");
+        for (AiImageAttachment attachment : attachments) {
+            if (paths.charAt(paths.length() - 1) != ' ') paths.append(", ");
+            paths.append(attachment.projectPath);
+        }
+        content.put(new JSONObject().put("type", "input_text").put("text", paths.toString()));
+        for (AiImageAttachment attachment : attachments) {
+            String dataUrl = "data:" + attachment.mimeType + ";base64,"
+                    + Base64.encodeToString(attachment.bytes, Base64.NO_WRAP);
+            content.put(new JSONObject()
+                    .put("type", "input_image")
+                    .put("image_url", dataUrl)
+                    .put("detail", "original"));
+        }
+        return new JSONObject().put("role", "user").put("content", content);
+    }
+
+    private int maxOutputTokensForBudget(String requestJson, double remainingUsd) throws Exception {
+        byte[] inputBytes = buildAiOpenAiInput(requestJson, false).toString().getBytes(StandardCharsets.UTF_8);
         double inputRate = Math.max(GPT_5_6_TERRA_INPUT_USD_PER_MILLION, GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION);
-        double conservativeInputCost = inputBytes.length * inputRate / 1000000.0;
+        long imageTokens = 0L;
+        for (AiImageAttachment attachment : activeAiImageAttachments) imageTokens += attachment.estimatedPatchTokens();
+        double conservativeInputCost = (inputBytes.length + imageTokens) * inputRate / 1000000.0;
         double outputBudget = remainingUsd - conservativeInputCost;
         int outputTokens = (int)Math.floor(outputBudget * 1000000.0 / GPT_5_6_TERRA_OUTPUT_USD_PER_MILLION);
         if (outputTokens < 64) {
@@ -3996,7 +4054,7 @@ public final class MainActivity extends Activity {
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
         payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
         payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", buildAiOpenAiInput(requestJson));
+        payload.put("input", buildAiOpenAiInput(requestJson, true));
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -4673,6 +4731,67 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private List<WorkshopImageAssets.AssetInfo> selectedAiImageInfos() throws IOException {
+        if (activeProject == null || selectedImageAssets.isEmpty()) return Collections.emptyList();
+        ArrayList<WorkshopImageAssets.AssetInfo> selected = new ArrayList<>();
+        int totalBytes = 0;
+        for (WorkshopImageAssets.AssetInfo asset : WorkshopImageAssets.list(activeProject.root)) {
+            if (!selectedImageAssets.contains(asset.relativePath)) continue;
+            if (selected.size() >= MAX_AI_IMAGE_ATTACHMENTS) {
+                throw new IOException("select no more than " + MAX_AI_IMAGE_ATTACHMENTS + " images");
+            }
+            if (asset.bytes > MAX_AI_IMAGE_ATTACHMENT_BYTES - totalBytes) {
+                throw new IOException("selected images exceed the 12 MiB request limit");
+            }
+            selected.add(asset);
+            totalBytes += (int)asset.bytes;
+        }
+        if (selected.size() != selectedImageAssets.size()) {
+            throw new IOException("one or more selected images no longer exist in this project");
+        }
+        return selected;
+    }
+
+    private static long estimatedImagePatchTokens(List<WorkshopImageAssets.AssetInfo> images) {
+        long patches = 0L;
+        for (WorkshopImageAssets.AssetInfo image : images) {
+            patches += ((image.width + 31L) / 32L) * ((image.height + 31L) / 32L);
+        }
+        return patches;
+    }
+
+    private static JSONArray aiImageMetadata(List<WorkshopImageAssets.AssetInfo> images) throws Exception {
+        JSONArray metadata = new JSONArray();
+        for (WorkshopImageAssets.AssetInfo image : images) {
+            metadata.put(new JSONObject()
+                    .put("project_path", image.relativePath)
+                    .put("width", image.width)
+                    .put("height", image.height)
+                    .put("bytes", image.bytes)
+                    .put("detail", "original")
+                    .put("estimated_patch_tokens", ((image.width + 31L) / 32L) * ((image.height + 31L) / 32L)));
+        }
+        return metadata;
+    }
+
+    private static List<AiImageAttachment> loadAiImageAttachments(
+            List<WorkshopImageAssets.AssetInfo> images) throws IOException {
+        ArrayList<AiImageAttachment> attachments = new ArrayList<>();
+        for (WorkshopImageAssets.AssetInfo image : images) {
+            attachments.add(new AiImageAttachment(image.relativePath, imageMimeType(image.file.getName()),
+                    WorkshopImageAssets.readForSync(image), image.width, image.height));
+        }
+        return Collections.unmodifiableList(attachments);
+    }
+
+    private static String imageMimeType(String name) throws IOException {
+        String lower = name.toLowerCase(Locale.US);
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if (lower.endsWith(".webp")) return "image/webp";
+        throw new IOException("selected image has an unsupported format");
+    }
+
     private void requestImageImport() {
         if (activeProject == null) {
             setStatusText("Image import needs a registered active project");
@@ -4707,6 +4826,7 @@ public final class MainActivity extends Activity {
             HashSet<String> available = new HashSet<>();
             for (WorkshopImageAssets.AssetInfo asset : assets) available.add(asset.relativePath);
             selectedImageAssets.retainAll(available);
+            refreshAiAttachmentStatus();
             if (assets.isEmpty()) {
                 TextView empty = new TextView(this);
                 empty.setText("No imported images");
@@ -4984,8 +5104,88 @@ public final class MainActivity extends Activity {
         selectedImageAssetProjectId = activeProject == null ? "" : activeProject.id;
         if (!selectedImageAssets.remove(asset.relativePath)) selectedImageAssets.add(asset.relativePath);
         refreshImageAssetList();
+        refreshAiAttachmentStatus();
         setStatusText((selectedImageAssets.contains(asset.relativePath) ? "Selected " : "Unselected ")
                 + asset.relativePath + " for an explicit future attachment");
+    }
+
+    private void refreshAiAttachmentStatus() {
+        if (aiAttachmentStatus == null) return;
+        if (selectedImageAssets.isEmpty()) {
+            aiAttachmentStatus.setText("AI images: none selected; no device media will be sent");
+            return;
+        }
+        try {
+            List<WorkshopImageAssets.AssetInfo> selected = selectedAiImageInfos();
+            long patches = estimatedImagePatchTokens(selected);
+            aiAttachmentStatus.setText("AI images: " + selected.size() + " selected, about " + patches
+                    + " original-detail image tokens / "
+                    + formatAiCostUsd(patches * GPT_5_6_TERRA_INPUT_USD_PER_MILLION / 1000000.0)
+                    + " Terra input (review before Run AI)");
+        } catch (Exception error) {
+            aiAttachmentStatus.setText("AI images: selection needs review - " + error.getMessage());
+        }
+    }
+
+    private void reviewAiImageAttachments() {
+        final ArrayList<Bitmap> previews = new ArrayList<>();
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        try {
+            List<WorkshopImageAssets.AssetInfo> selected = selectedAiImageInfos();
+            if (selected.isEmpty()) {
+                TextView empty = new TextView(this);
+                empty.setText("No project images are selected. Select them from Projects > Image Assets.");
+                empty.setPadding(dp(12), dp(12), dp(12), dp(12));
+                content.addView(empty, fullWidth());
+            }
+            for (final WorkshopImageAssets.AssetInfo asset : selected) {
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                Bitmap bitmap = WorkshopImageAssets.decodePreview(asset);
+                previews.add(bitmap);
+                ImageView thumbnail = new ImageView(this);
+                thumbnail.setImageBitmap(bitmap);
+                thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                row.addView(thumbnail, new LinearLayout.LayoutParams(dp(72), dp(72)));
+                TextView label = new TextView(this);
+                label.setText(asset.relativePath + "\n" + asset.width + "x" + asset.height
+                        + " - original detail");
+                label.setPadding(dp(8), 0, dp(8), 0);
+                row.addView(label, weightedWidth());
+                Button remove = compactButton("Remove");
+                remove.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View view) {
+                        selectedImageAssets.remove(asset.relativePath);
+                        refreshImageAssetList();
+                        refreshAiAttachmentStatus();
+                        setStatusText("Removed AI attachment: " + asset.relativePath);
+                        row.setVisibility(View.GONE);
+                    }
+                });
+                row.addView(remove, new LinearLayout.LayoutParams(dp(88), LinearLayout.LayoutParams.WRAP_CONTENT));
+                content.addView(row, fullWidth());
+            }
+        } catch (Exception error) {
+            TextView failure = new TextView(this);
+            failure.setText("Attachment review failed: " + error.getMessage());
+            content.addView(failure, fullWidth());
+        }
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content, fullWidth());
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("AI Image Attachments")
+                .setMessage("Only these app-private project images will be included in the next AI request.")
+                .setView(scroll)
+                .setPositiveButton("Done", null)
+                .create();
+        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface ignored) {
+                for (Bitmap bitmap : previews) if (!bitmap.isRecycled()) bitmap.recycle();
+            }
+        });
+        dialog.show();
     }
 
     private void requestImageRename(final WorkshopImageAssets.AssetInfo asset) {
@@ -6046,6 +6246,26 @@ public final class MainActivity extends Activity {
             this.usageSummary = usageSummary;
             this.finalStep = finalStep;
             this.finalActionCount = finalActionCount;
+        }
+    }
+
+    private static final class AiImageAttachment {
+        final String projectPath;
+        final String mimeType;
+        final byte[] bytes;
+        final int width;
+        final int height;
+
+        AiImageAttachment(String projectPath, String mimeType, byte[] bytes, int width, int height) {
+            this.projectPath = projectPath;
+            this.mimeType = mimeType;
+            this.bytes = bytes;
+            this.width = width;
+            this.height = height;
+        }
+
+        long estimatedPatchTokens() {
+            return ((width + 31L) / 32L) * ((height + 31L) / 32L);
         }
     }
 

@@ -445,8 +445,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW54 - Android Multimodal AI Attachments
 - Scope: Attach imported/painted images to typed or voice AI requests using real image input blocks, with thumbnail review, remove controls, format conversion, size limits, and per-request cost visibility.
+- Progress: Project-scoped asset selection now feeds a top-priority `Review AI Image Attachments` surface with sampled thumbnails, dimensions, `original` detail disclosure, and remove controls. At Run AI, the app snapshots at most four selected registered project images and 12 MiB on the background worker, maps PNG/JPEG/WebP to exact Base64 data URLs, and adds official Responses API `input_image` content blocks after the stable text context. Unselected assets, recovery files, picker URIs, and arbitrary device paths are never read for the call. Traces contain only project-path/dimension/token metadata, not Base64. A GPT-5.6 original-detail patch estimate is displayed before consent and included in the per-turn spending guard. On-device request acceptance and a live multimodal response remain.
+- Tests: The Android shell verifier covers explicit selection, thumbnail/remove review, project-only collection, count/byte bounds, MIME mapping, data URL and `input_image` shape, original detail, trace-safe metadata, cost estimation, and cleanup after a run; workshop Java compilation and APK assembly cover the integration.
 - Done gate: The AI receives the exact selected project image(s), while unselected assets and private device media are never sent.
-- Status: `planned`
+- Status: `in progress`
 #### AW55 - Android Pixel Screenshot to AI
 - Scope: Capture the actual preview framebuffer as a bounded image, retain the logical render snapshot as structured context, and let the user explicitly attach either or both to an AI request.
 - Done gate: A request can include a visually accurate game screenshot plus runtime/render metadata, with explicit preview/remove/consent before upload.
