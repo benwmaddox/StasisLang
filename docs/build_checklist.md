@@ -427,8 +427,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW51 - Android Device Acceptance Suite
 - Scope: Add a repeatable device validation checklist/automation for editor, tests, voice, touch preview, sync, and lifecycle recovery.
+- Progress: `validate_device.ps1` discovers an authorized device/emulator, records model/SDK/ABI, optionally installs the workshop or published debug APK, launches the exact package/activity, verifies the process remains alive, and writes a timestamped JSON record under ignored artifacts. A missing device is recorded as an explicit skip; `-RequireDevice` converts it into a failing acceptance gate. Deeper automated editor, voice, sync, and lifecycle interactions remain.
+- Tests: The structural verifier covers discovery, arm64 gating, bounded launch/process checks, and result recording. A no-device host run records the current hardware limitation without claiming acceptance.
 - Done gate: Every user-facing workshop slice has an on-device proof or an explicitly recorded hardware/environment limitation.
-- Status: `planned`
+- Status: `in progress`
 #### AW52 - Android Image Import and Asset Library
 - Scope: Import images through the Android photo/document picker, copy them into project-relative asset storage, generate bounded previews, and expose an asset library with rename/delete/reference safety.
 - Done gate: A user can import, preview, select, persist, export, and GitHub-sync a project image without exposing arbitrary device paths to Stasis or AI.

@@ -7,6 +7,7 @@ REQUIRED_FILES = [
     "mobile/android/build.gradle",
     "mobile/android/build_rust_bridge.ps1",
     "mobile/android/build_published.ps1",
+    "mobile/android/validate_device.ps1",
     "mobile/android/app/build.gradle",
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/workshop/AndroidManifest.xml",
@@ -60,6 +61,7 @@ def main() -> int:
     rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
     debug_script = read("mobile/android/build_debug.ps1")
     published_script = read("mobile/android/build_published.ps1")
+    device_script = read("mobile/android/validate_device.ps1")
     android_gitignore = read("mobile/android/.gitignore")
     assert "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER" in rust_bridge_script
     assert "aarch64-linux-android" in rust_bridge_script
@@ -74,6 +76,12 @@ def main() -> int:
     assert "check_android_published_apk.py" in published_script
     assert "build_rust_bridge.ps1" not in published_script
     assert "app/src/*/jniLibs/" in android_gitignore
+    assert "RequireDevice" in device_script
+    assert "android_device_acceptance" in device_script
+    assert "ro.product.cpu.abilist" in device_script
+    assert "arm64-v8a" in device_script
+    assert "am\", \"start\", \"-W" in device_script
+    assert "pidof" in device_script
 
     app_gradle = read("mobile/android/app/build.gradle")
     assert "flavorDimensions 'mode'" in app_gradle
