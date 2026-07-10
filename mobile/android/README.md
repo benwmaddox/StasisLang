@@ -71,6 +71,14 @@ Install to a connected device:
 .\build_debug.ps1 -Install
 ```
 
+Record a bounded device acceptance launch for the workshop APK:
+
+```powershell
+.\validate_device.ps1 -Install -RequireDevice
+```
+
+Use `-Published` for the published debug package. Without `-RequireDevice`, an unavailable phone/emulator writes an explicit skipped JSON record under `artifacts/android_device_acceptance/` and exits successfully; CI or a release gate should use `-RequireDevice`.
+
 ## Host AI Run Review
 
 Validate the Android AI Responses payload locally before a live run. This does not call OpenAI or modify the bundled sample, and writes a timestamped trace under the ignored `artifacts/android_ai_runs/` directory:
