@@ -87,6 +87,7 @@ public final class MainActivity extends Activity {
     private static final String ONBOARDING_COMPLETE = "manual_tutorial_seen_v1";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_MODEL = "openai_model";
+    private static final String AI_PREF_MODEL_DEFAULT_VERSION = "openai_model_default_version";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
     private static final String AI_PREF_COMMAND_HISTORY_PREFIX = "command_history_";
     private static final String AI_PREF_OUTCOME_HISTORY_PREFIX = "outcome_history_";
@@ -103,7 +104,9 @@ public final class MainActivity extends Activity {
     private static final String GITHUB_PREF_OPERATION_DETAIL = "github_operation_detail";
     private static final String GITHUB_PREF_REVIEW_FINGERPRINT = "github_review_fingerprint";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
-    private static final String DEFAULT_AI_MODEL = "gpt-5.6-terra";
+    private static final String DEFAULT_AI_MODEL = "gpt-5.6-sol";
+    private static final String DEFAULT_AI_REASONING_EFFORT = "medium";
+    private static final int DEFAULT_AI_MODEL_VERSION = 2;
     private static final String AI_PROMPT_CACHE_KEY = "stasis-android-workshop-v2";
     private static final long AI_TRACE_RETENTION_MS = 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
@@ -131,10 +134,10 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_IMAGE_REQUEST = 73;
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
-    private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
-    private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
-    private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125;
-    private static final double GPT_5_6_TERRA_OUTPUT_USD_PER_MILLION = 15.00;
+    private static final double GPT_5_6_SOL_INPUT_USD_PER_MILLION = 5.00;
+    private static final double GPT_5_6_SOL_CACHED_INPUT_USD_PER_MILLION = 0.50;
+    private static final double GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION = 6.25;
+    private static final double GPT_5_6_SOL_OUTPUT_USD_PER_MILLION = 30.00;
     private static final double GPT_IMAGE_2_LOW_1024_USD = 0.006;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
@@ -1559,11 +1562,23 @@ public final class MainActivity extends Activity {
         aiSettingsBody.addView(aiApiKeyEditor, fullWidth());
 
         aiModelEditor = new EditText(this);
-        aiModelEditor.setHint("Model");
+        aiModelEditor.setHint("Model (GPT-5.6 Sol default)");
+        aiModelEditor.setContentDescription("OpenAI model; GPT-5.6 Sol defaults to medium reasoning");
         aiModelEditor.setSingleLine(true);
-        aiModelEditor.setText(aiPrefs.getString(AI_PREF_MODEL, DEFAULT_AI_MODEL));
+        String configuredModel = aiPrefs.getString(AI_PREF_MODEL, DEFAULT_AI_MODEL);
+        if (aiPrefs.getInt(AI_PREF_MODEL_DEFAULT_VERSION, 0) < DEFAULT_AI_MODEL_VERSION) {
+            if ("gpt-5.6-terra".equals(configuredModel)) configuredModel = DEFAULT_AI_MODEL;
+            aiPrefs.edit().putString(AI_PREF_MODEL, configuredModel)
+                    .putInt(AI_PREF_MODEL_DEFAULT_VERSION, DEFAULT_AI_MODEL_VERSION).apply();
+        }
+        aiModelEditor.setText(configuredModel);
         aiModelEditor.setTextSize(12.0f);
         aiSettingsBody.addView(aiModelEditor, fullWidth());
+
+        TextView reasoningSummary = new TextView(this);
+        reasoningSummary.setText("Reasoning: medium");
+        reasoningSummary.setTextSize(12.0f);
+        aiSettingsBody.addView(reasoningSummary, fullWidth());
 
         aiMaxRunUsdEditor = new EditText(this);
         aiMaxRunUsdEditor.setHint("Maximum USD per AI run");
@@ -3319,7 +3334,8 @@ public final class MainActivity extends Activity {
     private boolean saveAiSettings(String apiKey, String model) {
         SharedPreferences preferences = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
         if (!writeSecretPreference(preferences, AI_PREF_API_KEY, apiKey)) return false;
-        preferences.edit().putString(AI_PREF_MODEL, model).apply();
+        preferences.edit().putString(AI_PREF_MODEL, model)
+                .putInt(AI_PREF_MODEL_DEFAULT_VERSION, DEFAULT_AI_MODEL_VERSION).apply();
         return true;
     }
 
@@ -4853,13 +4869,13 @@ public final class MainActivity extends Activity {
     private int maxOutputTokensForBudget(String requestJson, double remainingUsd,
             boolean reserveImageGeneration) throws Exception {
         byte[] inputBytes = buildAiOpenAiInput(requestJson, false).toString().getBytes(StandardCharsets.UTF_8);
-        double inputRate = Math.max(GPT_5_6_TERRA_INPUT_USD_PER_MILLION, GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION);
+        double inputRate = Math.max(GPT_5_6_SOL_INPUT_USD_PER_MILLION, GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION);
         long imageTokens = 0L;
         for (AiImageAttachment attachment : activeAiImageAttachments) imageTokens += attachment.estimatedPatchTokens();
         double conservativeInputCost = (inputBytes.length + imageTokens) * inputRate / 1000000.0;
         double outputBudget = remainingUsd - conservativeInputCost
                 - (reserveImageGeneration ? GPT_IMAGE_2_LOW_1024_USD : 0.0);
-        int outputTokens = (int)Math.floor(outputBudget * 1000000.0 / GPT_5_6_TERRA_OUTPUT_USD_PER_MILLION);
+        int outputTokens = (int)Math.floor(outputBudget * 1000000.0 / GPT_5_6_SOL_OUTPUT_USD_PER_MILLION);
         if (outputTokens < 64) {
             throw new IOException("AI spending limit leaves insufficient budget for another response");
         }
@@ -4870,6 +4886,7 @@ public final class MainActivity extends Activity {
             int maxOutputTokens, boolean allowImageGeneration) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
+        payload.put("reasoning", new JSONObject().put("effort", DEFAULT_AI_REASONING_EFFORT));
         payload.put("max_output_tokens", maxOutputTokens);
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
         payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
@@ -5203,10 +5220,10 @@ public final class MainActivity extends Activity {
         if (!hasKnownAiPricing(model)) {
             return 0.0;
         }
-        double inputCost = Math.max(0L, inputTokens - cachedInputTokens - cacheWriteInputTokens) * GPT_5_6_TERRA_INPUT_USD_PER_MILLION;
-        double cachedInputCost = cachedInputTokens * GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION;
-        double cacheWriteCost = cacheWriteInputTokens * GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION;
-        double outputCost = outputTokens * GPT_5_6_TERRA_OUTPUT_USD_PER_MILLION;
+        double inputCost = Math.max(0L, inputTokens - cachedInputTokens - cacheWriteInputTokens) * GPT_5_6_SOL_INPUT_USD_PER_MILLION;
+        double cachedInputCost = cachedInputTokens * GPT_5_6_SOL_CACHED_INPUT_USD_PER_MILLION;
+        double cacheWriteCost = cacheWriteInputTokens * GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION;
+        double outputCost = outputTokens * GPT_5_6_SOL_OUTPUT_USD_PER_MILLION;
         return (inputCost + cachedInputCost + cacheWriteCost + outputCost) / 1000000.0;
     }
 
@@ -6398,7 +6415,7 @@ public final class MainActivity extends Activity {
             long patches = estimatedImagePatchTokens(selected);
             aiAttachmentStatus.setText("AI images: " + selected.size() + " selected, about " + patches
                     + " original-detail image tokens / "
-                    + formatAiCostUsd(patches * GPT_5_6_TERRA_INPUT_USD_PER_MILLION / 1000000.0)
+                    + formatAiCostUsd(patches * GPT_5_6_SOL_INPUT_USD_PER_MILLION / 1000000.0)
                     + " Terra input (review before Run AI)");
         } catch (Exception error) {
             aiAttachmentStatus.setText("AI images: selection needs review - " + error.getMessage());
@@ -6533,7 +6550,7 @@ public final class MainActivity extends Activity {
         screenshotAttachmentStatus.setText("AI preview: " + selections + " - "
                 + pendingPreviewScreenshot.getWidth() + "x" + pendingPreviewScreenshot.getHeight()
                 + (attachPreviewPixels ? ", about " + patches + " image tokens / "
-                        + formatAiCostUsd(patches * GPT_5_6_TERRA_INPUT_USD_PER_MILLION / 1000000.0)
+                        + formatAiCostUsd(patches * GPT_5_6_SOL_INPUT_USD_PER_MILLION / 1000000.0)
                         + " Terra input" : "") + " (tap to review)");
     }
 
