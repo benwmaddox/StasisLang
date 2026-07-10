@@ -433,8 +433,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW52 - Android Image Import and Asset Library
 - Scope: Import images through the Android photo/document picker, copy them into project-relative asset storage, generate bounded previews, and expose an asset library with rename/delete/reference safety.
+- Progress: The collapsed Projects panel now opens Android's document picker for PNG, JPEG, or WebP input, reads only the selected document, enforces 8 MiB, 4096 px, and 16 megapixel bounds, and publishes it with a collision-safe sanitized name under `assets/images/` using an fsynced temporary file. The per-project library lists dimensions and sizes and opens a memory-bounded sampled preview. Project archives preserve these normal asset files, and direct GitHub backup uploads their exact bounded bytes alongside source. Selection state and rename/delete/reference safety remain.
+- Tests: The Android shell verifier covers picker scoping, supported formats, resource bounds, canonical project confinement, atomic publication, listing, and bounded preview wiring; workshop Java compilation and APK assembly cover the Android APIs.
 - Done gate: A user can import, preview, select, persist, export, and GitHub-sync a project image without exposing arbitrary device paths to Stasis or AI.
-- Status: `planned`
+- Status: `in progress`
 #### AW53 - Android Mini Paint Editor
 - Scope: Add a touch-first bitmap editor with brush, eraser, palette/color picker, undo/redo, clear, canvas/crop sizing, save-as, cancel, and bounded image dimensions.
 - Done gate: A user can create or modify a simple game image, review it, cancel without mutation, or save it as a normal project asset.

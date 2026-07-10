@@ -8,6 +8,7 @@ import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Bitmap;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.graphics.Typeface;
@@ -32,6 +33,7 @@ import android.widget.Button;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
@@ -106,11 +108,13 @@ public final class MainActivity extends Activity {
     private static final int MAX_AI_OUTPUT_TOKENS = 8192;
     private static final int MAX_COMMAND_HISTORY = 20;
     private static final int GITHUB_NETWORK_TIMEOUT_MS = 15_000;
+    private static final int MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024;
     private static final int AI_CONNECT_TIMEOUT_MS = 15_000;
     private static final int AI_READ_TIMEOUT_MS = 120_000;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
     private static final int EXPORT_PROJECT_REQUEST = 71;
     private static final int IMPORT_PROJECT_REQUEST = 72;
+    private static final int IMPORT_IMAGE_REQUEST = 73;
     private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
     private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
     private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125;
@@ -168,6 +172,7 @@ public final class MainActivity extends Activity {
     private EditText newProjectNameEditor;
     private Spinner projectSelector;
     private TextView projectStatus;
+    private LinearLayout imageAssetList;
     private final ArrayList<WorkshopProjectRegistry.ProjectInfo> availableProjects = new ArrayList<>();
     private WorkshopProjectRegistry.ProjectInfo activeProject;
     private WorkshopProjectRegistry.ProjectInfo pendingExportProject;
@@ -282,7 +287,47 @@ public final class MainActivity extends Activity {
             completeProjectExport(resultCode, data);
         } else if (requestCode == IMPORT_PROJECT_REQUEST) {
             completeProjectImport(resultCode, data);
+        } else if (requestCode == IMPORT_IMAGE_REQUEST) {
+            completeImageImport(resultCode, data);
         }
+    }
+
+    private void completeImageImport(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            setStatusText("Image import cancelled");
+            return;
+        }
+        if (activeProject == null) {
+            setStatusText("Image import needs a registered active project");
+            return;
+        }
+        final Uri source = data.getData();
+        final File targetProject = activeProject.root;
+        projectIoActive = true;
+        setStatusText("Image import started");
+        projectIoExecutor.submit(new Runnable() {
+            @Override public void run() {
+                try {
+                    final WorkshopImageAssets.AssetInfo asset = WorkshopImageAssets.importImage(
+                            getContentResolver(), source, targetProject);
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            refreshImageAssetList();
+                            setStatusText("Image imported: " + asset.relativePath + " ("
+                                    + asset.width + "x" + asset.height + ", " + asset.bytes + " bytes)");
+                        }
+                    });
+                } catch (final Exception error) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            setStatusText("Image import failed: " + error.getMessage());
+                        }
+                    });
+                } finally {
+                    projectIoActive = false;
+                }
+            }
+        });
     }
 
     private void completeProjectExport(int resultCode, Intent data) {
@@ -1204,8 +1249,24 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { requestProjectImport(); }
         });
         projectSettingsBody.addView(importProject, fullWidth());
+        TextView imageAssetsTitle = new TextView(this);
+        imageAssetsTitle.setText("Image Assets");
+        imageAssetsTitle.setTextSize(14.0f);
+        imageAssetsTitle.setTextColor(Color.rgb(34, 43, 55));
+        imageAssetsTitle.setPadding(0, dp(10), 0, dp(2));
+        projectSettingsBody.addView(imageAssetsTitle, fullWidth());
+        Button importImage = new Button(this);
+        importImage.setText("Import PNG, JPEG, or WebP");
+        importImage.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { requestImageImport(); }
+        });
+        projectSettingsBody.addView(importImage, fullWidth());
+        imageAssetList = new LinearLayout(this);
+        imageAssetList.setOrientation(LinearLayout.VERTICAL);
+        projectSettingsBody.addView(imageAssetList, fullWidth());
         controls.addView(projectSettingsBody, fullWidth());
         refreshProjectControls();
+        refreshImageAssetList();
 
         githubSyncStatus = new TextView(this);
         githubSyncStatus.setTextSize(12.0f);
@@ -1551,6 +1612,7 @@ public final class MainActivity extends Activity {
             refreshGitHubSettingsEditors();
             refreshGitHubSyncStatus();
             refreshProjectControls();
+            refreshImageAssetList();
             String compileResult = nativeCompileProject(projectRootPath());
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
@@ -1722,17 +1784,17 @@ public final class MainActivity extends Activity {
             setStatusText("GitHub sync needs configured settings");
             return;
         }
-        final Map<String, String> files = sourcesByFile(loadBundledProject());
-        if (files.isEmpty()) {
-            githubSyncStatus.setText("GitHub sync: no project sources");
-            return;
-        }
-        if (!beginGitHubOperation("sync", "GitHub sync: queued (" + files.size() + " files)")) return;
+        if (!beginGitHubOperation("sync", "GitHub sync: queued")) return;
         githubSyncExecutor.submit(new Runnable() {
             @Override public void run() {
                 try {
+                    Map<String, byte[]> files = githubBackupFiles();
+                    if (files.isEmpty()) {
+                        postGitHubOperationState("", "complete", "GitHub sync: no project files");
+                        return;
+                    }
                     int completed = 0;
-                    for (Map.Entry<String, String> entry : files.entrySet()) {
+                    for (Map.Entry<String, byte[]> entry : files.entrySet()) {
                         completed += 1;
                         postGitHubOperationState("sync", "running", "GitHub sync: " + completed + "/" + files.size());
                         uploadGitHubFile(token, repository, branch, entry.getKey(), entry.getValue());
@@ -1743,6 +1805,31 @@ public final class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    private Map<String, byte[]> githubBackupFiles() throws IOException {
+        Map<String, byte[]> files = new LinkedHashMap<>();
+        int totalBytes = 0;
+        for (Map.Entry<String, String> source : sourcesByFile(loadBundledProject()).entrySet()) {
+            byte[] content = source.getValue().getBytes(StandardCharsets.UTF_8);
+            totalBytes = checkedGitHubBackupSize(totalBytes, content.length);
+            files.put(source.getKey(), content);
+        }
+        if (activeProject != null) {
+            for (WorkshopImageAssets.AssetInfo asset : WorkshopImageAssets.list(activeProject.root)) {
+                byte[] content = WorkshopImageAssets.readForSync(asset);
+                totalBytes = checkedGitHubBackupSize(totalBytes, content.length);
+                files.put(asset.relativePath, content);
+            }
+        }
+        return files;
+    }
+
+    private static int checkedGitHubBackupSize(int current, int additional) throws IOException {
+        if (additional > MAX_GITHUB_BACKUP_BYTES - current) {
+            throw new IOException("project exceeds the 32 MiB direct backup limit");
+        }
+        return current + additional;
     }
 
     private static Map<String, String> changedProjectSources(ProjectSnapshot baseline, ProjectSnapshot current) {
@@ -2006,6 +2093,10 @@ public final class MainActivity extends Activity {
     }
 
     private static void uploadGitHubFile(String token, String repository, String branch, String path, String source) throws Exception {
+        uploadGitHubFile(token, repository, branch, path, source.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void uploadGitHubFile(String token, String repository, String branch, String path, byte[] content) throws Exception {
         String base = githubApiUrl(repository, "/contents/" + encodeGitHubPath(path));
         HttpURLConnection get = (HttpURLConnection)new URL(base + "?ref=" + encodeGitHubQuery(branch)).openConnection();
         configureGitHubConnection(get, token);
@@ -2014,7 +2105,7 @@ public final class MainActivity extends Activity {
         if (getCode == 200) sha = new JSONObject(readStreamStatic(get.getInputStream())).optString("sha", "");
         else if (getCode != 404) throw new IOException("read " + path + " HTTP " + getCode);
         JSONObject body = new JSONObject().put("message", "stasis workshop sync: " + path)
-                .put("content", Base64.encodeToString(source.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP))
+                .put("content", Base64.encodeToString(content, Base64.NO_WRAP))
                 .put("branch", branch);
         if (!sha.isEmpty()) body.put("sha", sha);
         HttpURLConnection put = (HttpURLConnection)new URL(base).openConnection();
@@ -4565,6 +4656,77 @@ public final class MainActivity extends Activity {
                     + "\nsymbol=" + entry.symbol + "\n" + entry.diagnostic);
         } catch (Exception error) {
             diagnosticStatus.setText("Recovery history unavailable: " + error.getMessage());
+        }
+    }
+
+    private void requestImageImport() {
+        if (activeProject == null) {
+            setStatusText("Image import needs a registered active project");
+            return;
+        }
+        if (aiRunActive || githubOperationActive || projectIoActive || hasPendingSourceEdit()) {
+            setStatusText("Image import blocked by active work or a pending source edit");
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("image/*");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, IMPORT_IMAGE_REQUEST);
+        } catch (Exception error) {
+            setStatusText("Image picker failed: " + error.getMessage());
+        }
+    }
+
+    private void refreshImageAssetList() {
+        if (imageAssetList == null) return;
+        imageAssetList.removeAllViews();
+        if (activeProject == null) return;
+        try {
+            List<WorkshopImageAssets.AssetInfo> assets = WorkshopImageAssets.list(activeProject.root);
+            if (assets.isEmpty()) {
+                TextView empty = new TextView(this);
+                empty.setText("No imported images");
+                empty.setTextSize(12.0f);
+                empty.setTextColor(Color.rgb(73, 84, 100));
+                imageAssetList.addView(empty, fullWidth());
+                return;
+            }
+            for (final WorkshopImageAssets.AssetInfo asset : assets) {
+                Button preview = new Button(this);
+                preview.setAllCaps(false);
+                preview.setText(asset.relativePath + "\n" + asset.width + "x" + asset.height
+                        + " - " + asset.bytes + " bytes");
+                preview.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View view) { showImagePreview(asset); }
+                });
+                imageAssetList.addView(preview, fullWidth());
+            }
+        } catch (Exception error) {
+            TextView failure = new TextView(this);
+            failure.setText("Image library unavailable: " + error.getMessage());
+            failure.setTextColor(Color.rgb(164, 45, 45));
+            imageAssetList.addView(failure, fullWidth());
+        }
+    }
+
+    private void showImagePreview(WorkshopImageAssets.AssetInfo asset) {
+        try {
+            Bitmap bitmap = WorkshopImageAssets.decodePreview(asset);
+            ImageView preview = new ImageView(this);
+            preview.setAdjustViewBounds(true);
+            preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            preview.setPadding(dp(12), dp(12), dp(12), dp(12));
+            preview.setImageBitmap(bitmap);
+            new AlertDialog.Builder(this)
+                    .setTitle(asset.relativePath)
+                    .setView(preview)
+                    .setMessage(asset.width + "x" + asset.height + " - " + asset.bytes + " bytes")
+                    .setPositiveButton("Close", null)
+                    .show();
+        } catch (Exception error) {
+            setStatusText("Image preview failed: " + error.getMessage());
         }
     }
 
