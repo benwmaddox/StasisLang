@@ -110,6 +110,7 @@ public final class MainActivity extends Activity {
     private static final int MAX_AI_OUTPUT_TOKENS = 8192;
     private static final int MAX_AI_IMAGE_ATTACHMENTS = 4;
     private static final int MAX_AI_IMAGE_ATTACHMENT_BYTES = 12 * 1024 * 1024;
+    private static final int MAX_AI_GENERATED_BASE64_CHARS = ((8 * 1024 * 1024 + 2) / 3) * 4 + 16;
     private static final long MAX_PREVIEW_CAPTURE_PIXELS = 8_000_000L;
     private static final int MAX_COMMAND_HISTORY = 20;
     private static final int GITHUB_NETWORK_TIMEOUT_MS = 15_000;
@@ -124,6 +125,7 @@ public final class MainActivity extends Activity {
     private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
     private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125;
     private static final double GPT_5_6_TERRA_OUTPUT_USD_PER_MILLION = 15.00;
+    private static final double GPT_IMAGE_2_LOW_1024_USD = 0.006;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
     private static final int RENDER_FRAME_I32_CAPACITY =
@@ -163,6 +165,7 @@ public final class MainActivity extends Activity {
     private TextView aiBudgetStatus;
     private TextView aiAttachmentStatus;
     private TextView screenshotAttachmentStatus;
+    private CheckBox allowAiImageGeneration;
     private TextView aiStepPill;
     private TextView aiActionPill;
     private TextView aiPhasePill;
@@ -1182,6 +1185,10 @@ public final class MainActivity extends Activity {
         });
         controls.addView(capturePreview, fullWidth());
         refreshScreenshotAttachmentStatus();
+        allowAiImageGeneration = new CheckBox(this);
+        allowAiImageGeneration.setText("Allow one low-quality 1024x1024 AI image (~$0.006 plus Terra usage)");
+        allowAiImageGeneration.setChecked(false);
+        controls.addView(allowAiImageGeneration, fullWidth());
 
         LinearLayout aiActionRow = new LinearLayout(this);
         aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -2449,6 +2456,7 @@ public final class MainActivity extends Activity {
         }
         double maxRunUsd = configuredAiLimit(AI_PREF_MAX_RUN_USD, "0.25");
         double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
+        final boolean requestImageGeneration = allowAiImageGeneration != null && allowAiImageGeneration.isChecked();
         if (!hasKnownAiPricing(model)) {
             setStatusText("AI run blocked: pricing is unavailable for " + model);
             updateAiProgress(0, 0, "budget blocked");
@@ -2496,6 +2504,12 @@ public final class MainActivity extends Activity {
             updateAiProgress(0, 0, "attachment blocked");
             return;
         }
+        if (requestImageGeneration && (maxRunUsd < GPT_IMAGE_2_LOW_1024_USD
+                || monthlyLimitUsd - monthlyAiSpendUsd() < GPT_IMAGE_2_LOW_1024_USD)) {
+            setStatusText("AI image generation blocked: spending limits do not cover the reserved image output");
+            updateAiProgress(0, 0, "image budget blocked");
+            return;
+        }
         final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
                 requestImageMetadata, requestLogicalSnapshot);
         final String requestModel = model;
@@ -2513,7 +2527,8 @@ public final class MainActivity extends Activity {
             public void run() {
                 try {
                     activeAiImageAttachments = loadAiImageAttachments(requestImageInfos, requestPreviewPixels);
-                    final AiAgentResult aiResult = runAiAgentLoop(requestApiKey, requestModel, requestJson);
+                    final AiAgentResult aiResult = runAiAgentLoop(
+                            requestApiKey, requestModel, requestJson, requestImageGeneration);
                     throwIfAiCancelled();
                     runOnUiThread(new Runnable() {
                         @Override
@@ -2547,6 +2562,11 @@ public final class MainActivity extends Activity {
                     if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
                     activeAiImageAttachments = Collections.emptyList();
                     aiRunActive = false;
+                    if (requestImageGeneration) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() { allowAiImageGeneration.setChecked(false); }
+                        });
+                    }
                 }
             }
         }).start();
@@ -2798,10 +2818,12 @@ public final class MainActivity extends Activity {
         }
         return errors;
     }
-    private AiAgentResult runAiAgentLoop(String apiKey, String model, String initialRequestJson) throws Exception {
+    private AiAgentResult runAiAgentLoop(String apiKey, String model, String initialRequestJson,
+            boolean allowImageGeneration) throws Exception {
         String currentRequestJson = initialRequestJson;
         AiAgentSession session = new AiAgentSession();
         AiUsageAccumulator usage = new AiUsageAccumulator();
+        ArrayList<AiGeneratedImageCandidate> generatedImages = new ArrayList<>();
         String previousToolCallBatch = "";
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             throwIfAiCancelled();
@@ -2817,10 +2839,19 @@ public final class MainActivity extends Activity {
                     .put("model", model)
                     .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
             double remainingUsd = Math.min(maxRunUsd - usage.estimatedCostUsd, monthlyLimitUsd - monthlyAiSpendUsd());
-            int maxOutputTokens = maxOutputTokensForBudget(currentRequestJson, remainingUsd);
-            AiApiResponse apiResponse = callOpenAiResponsesApi(apiKey, model, currentRequestJson, maxOutputTokens);
+            boolean allowImageOnThisTurn = allowImageGeneration && turn == 0;
+            int maxOutputTokens = maxOutputTokensForBudget(currentRequestJson, remainingUsd, allowImageOnThisTurn);
+            AiApiResponse apiResponse = callOpenAiResponsesApi(
+                    apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
             usage.add(model, apiResponse.usage);
             if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+            List<AiGeneratedImageCandidate> callImages = extractAiGeneratedImages(apiResponse.body);
+            if (!callImages.isEmpty()) {
+                generatedImages.addAll(callImages);
+                double imageCost = callImages.size() * GPT_IMAGE_2_LOW_1024_USD;
+                usage.addImageGenerationCost(imageCost, callImages.size());
+                recordMonthlyAiSpend(imageCost);
+            }
             throwIfAiCancelled();
             String aiJson = extractAiJsonResponse(apiResponse.body);
             JSONObject response = new JSONObject(aiJson);
@@ -2847,7 +2878,8 @@ public final class MainActivity extends Activity {
             JSONArray toolCalls = response.optJSONArray("tool_calls");
             if (!"tool_calls".equals(mode) || toolCalls == null || toolCalls.length() == 0) {
                 postAiProgress(session.currentStep, session.actionCount, "finalizing");
-                return new AiAgentResult(aiJson, usage.toJson(model), usage.summary(), session.currentStep, session.actionCount);
+                return new AiAgentResult(aiJson, usage.toJson(model), usage.summary(), session.currentStep,
+                        session.actionCount, generatedImages);
             }
             String currentToolCallBatch = toolCalls.toString();
             if (currentToolCallBatch.equals(previousToolCallBatch)) {
@@ -2867,7 +2899,8 @@ public final class MainActivity extends Activity {
                         .put("last_error", session.lastToolError);
                 appendAiTrace("repeated_tool_calls", repeated);
                 if (session.successfulWriteCount > 0 && compileReady && session.latestRunnableTestsPassed()) {
-                    return new AiAgentResult(repeated.toString(), usage.toJson(model), usage.summary(), session.currentStep, session.actionCount);
+                    return new AiAgentResult(repeated.toString(), usage.toJson(model), usage.summary(), session.currentStep,
+                            session.actionCount, generatedImages);
                 }
                 throw new IOException("AI repeated identical tool calls; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
             }
@@ -2904,7 +2937,8 @@ public final class MainActivity extends Activity {
                     .put("last_tool", session.lastToolSummary)
                     .put("last_error", session.lastToolError);
             appendAiTrace("limit_after_successful_tested_writes", synthetic);
-            return new AiAgentResult(synthetic.toString(), usage.toJson(model), usage.summary(), MAX_AI_AGENT_TURNS, session.actionCount);
+            return new AiAgentResult(synthetic.toString(), usage.toJson(model), usage.summary(), MAX_AI_AGENT_TURNS,
+                    session.actionCount, generatedImages);
         }
         throw new IOException("AI agent reached tool-call limit before returning edits; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
     }
@@ -4088,13 +4122,15 @@ public final class MainActivity extends Activity {
         return new JSONObject().put("role", "user").put("content", content);
     }
 
-    private int maxOutputTokensForBudget(String requestJson, double remainingUsd) throws Exception {
+    private int maxOutputTokensForBudget(String requestJson, double remainingUsd,
+            boolean reserveImageGeneration) throws Exception {
         byte[] inputBytes = buildAiOpenAiInput(requestJson, false).toString().getBytes(StandardCharsets.UTF_8);
         double inputRate = Math.max(GPT_5_6_TERRA_INPUT_USD_PER_MILLION, GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION);
         long imageTokens = 0L;
         for (AiImageAttachment attachment : activeAiImageAttachments) imageTokens += attachment.estimatedPatchTokens();
         double conservativeInputCost = (inputBytes.length + imageTokens) * inputRate / 1000000.0;
-        double outputBudget = remainingUsd - conservativeInputCost;
+        double outputBudget = remainingUsd - conservativeInputCost
+                - (reserveImageGeneration ? GPT_IMAGE_2_LOW_1024_USD : 0.0);
         int outputTokens = (int)Math.floor(outputBudget * 1000000.0 / GPT_5_6_TERRA_OUTPUT_USD_PER_MILLION);
         if (outputTokens < 64) {
             throw new IOException("AI spending limit leaves insufficient budget for another response");
@@ -4102,7 +4138,8 @@ public final class MainActivity extends Activity {
         return Math.min(MAX_AI_OUTPUT_TOKENS, outputTokens);
     }
 
-    private AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson, int maxOutputTokens) throws Exception {
+    private AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson,
+            int maxOutputTokens, boolean allowImageGeneration) throws Exception {
         JSONObject payload = new JSONObject();
         payload.put("model", model);
         payload.put("max_output_tokens", maxOutputTokens);
@@ -4110,6 +4147,15 @@ public final class MainActivity extends Activity {
         payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
         payload.put("text", buildAiResponseTextFormat());
         payload.put("input", buildAiOpenAiInput(requestJson, true));
+        if (allowImageGeneration) {
+            payload.put("tools", new JSONArray().put(new JSONObject()
+                    .put("type", "image_generation")
+                    .put("action", "auto")
+                    .put("quality", "low")
+                    .put("size", "1024x1024")
+                    .put("output_format", "png")));
+            payload.put("tool_choice", "auto");
+        }
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
 
         HttpURLConnection connection = (HttpURLConnection)new URL("https://api.openai.com/v1/responses").openConnection();
@@ -4252,10 +4298,52 @@ public final class MainActivity extends Activity {
         int start = text.indexOf('{');
         int end = text.lastIndexOf('}');
         if (start < 0 || end < start) {
+            if (!extractAiGeneratedImages(responseBody).isEmpty()) {
+                return new JSONObject().put("mode", "done")
+                        .put("summary", "Generated image ready for review").toString();
+            }
             throw new IOException("AI response did not include JSON edits");
         }
         return text.substring(start, end + 1);
     }
+
+    private static List<AiGeneratedImageCandidate> extractAiGeneratedImages(String responseBody) throws Exception {
+        ArrayList<AiGeneratedImageCandidate> images = new ArrayList<>();
+        JSONArray output = new JSONObject(responseBody).optJSONArray("output");
+        if (output == null) return images;
+        int totalBytes = 0;
+        for (int index = 0; index < output.length(); index++) {
+            JSONObject item = output.optJSONObject(index);
+            if (item == null || !"image_generation_call".equals(item.optString("type", ""))) continue;
+            if (images.size() >= 1) throw new IOException("AI returned more generated images than requested");
+            String result = item.optString("result", "");
+            if (result.isEmpty() || result.length() > MAX_AI_GENERATED_BASE64_CHARS) {
+                throw new IOException("AI generated image result is empty or exceeds the review limit");
+            }
+            byte[] encoded;
+            try {
+                encoded = Base64.decode(result, Base64.DEFAULT);
+            } catch (IllegalArgumentException error) {
+                throw new IOException("AI generated image result is not valid Base64");
+            }
+            totalBytes += encoded.length;
+            if (totalBytes > WorkshopImageAssets.MAX_IMPORT_BYTES) {
+                throw new IOException("AI generated image exceeds the 8 MiB review limit");
+            }
+            android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeByteArray(encoded, 0, encoded.length, bounds);
+            long pixels = (long)bounds.outWidth * (long)bounds.outHeight;
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0 || bounds.outWidth > 4096
+                    || bounds.outHeight > 4096 || pixels > 16_000_000L
+                    || !"image/png".equals(bounds.outMimeType)) {
+                throw new IOException("AI generated image is not a bounded PNG");
+            }
+            images.add(new AiGeneratedImageCandidate(encoded, bounds.outWidth, bounds.outHeight));
+        }
+        return images;
+    }
+
 
     private static JSONObject extractAiUsage(String responseBody) {
         try {
@@ -4409,6 +4497,7 @@ public final class MainActivity extends Activity {
         Map<String, String> originalSources = null;
         try {
             saveLastAiUsage(aiResult.usageJson);
+            if (!aiResult.generatedImages.isEmpty()) reviewAiGeneratedImage(aiResult.generatedImages.get(0));
             JSONObject response = new JSONObject(aiResult.aiJson);
             String mode = response.optString("mode", "edits");
             JSONArray edits = response.optJSONArray("edits");
@@ -4880,6 +4969,90 @@ public final class MainActivity extends Activity {
         } catch (Exception error) {
             setStatusText("Image picker failed: " + error.getMessage());
         }
+    }
+
+    private void reviewAiGeneratedImage(final AiGeneratedImageCandidate candidate) {
+        final File reviewProjectRoot = activeProject == null ? null : activeProject.root;
+        final Bitmap generated = android.graphics.BitmapFactory.decodeByteArray(
+                candidate.pngBytes, 0, candidate.pngBytes.length);
+        if (generated == null) {
+            setStatusText("AI generated image could not be decoded for review");
+            return;
+        }
+        final ArrayList<Bitmap> reviewBitmaps = new ArrayList<>();
+        reviewBitmaps.add(generated);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(8), dp(8), dp(8), dp(8));
+        LinearLayout comparison = new LinearLayout(this);
+        comparison.setOrientation(LinearLayout.HORIZONTAL);
+        ImageView before = new ImageView(this);
+        before.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        try {
+            List<WorkshopImageAssets.AssetInfo> selected = selectedAiImageInfos();
+            if (!selected.isEmpty()) {
+                Bitmap prior = WorkshopImageAssets.decodePreview(selected.get(0));
+                reviewBitmaps.add(prior);
+                before.setImageBitmap(prior);
+            } else {
+                before.setBackgroundColor(Color.rgb(225, 228, 234));
+                before.setContentDescription("No reference image selected");
+            }
+        } catch (Exception ignored) {
+            before.setBackgroundColor(Color.rgb(225, 228, 234));
+        }
+        ImageView after = new ImageView(this);
+        after.setImageBitmap(generated);
+        after.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        comparison.addView(before, new LinearLayout.LayoutParams(0, dp(300), 1.0f));
+        comparison.addView(after, new LinearLayout.LayoutParams(0, dp(300), 1.0f));
+        content.addView(comparison, fullWidth());
+        TextView labels = new TextView(this);
+        labels.setText("Before / selected reference                         AI result");
+        labels.setTextSize(11.0f);
+        content.addView(labels, fullWidth());
+        final EditText name = new EditText(this);
+        name.setHint("Accepted asset name");
+        name.setSingleLine(true);
+        name.setText("ai_generated_image");
+        content.addView(name, fullWidth());
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Review AI Image - " + candidate.width + "x" + candidate.height)
+                .setMessage("The result is temporary. Accept creates a new asset and never overwrites the reference.")
+                .setView(content)
+                .setPositiveButton("Accept as New Asset", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        try {
+                            if (reviewProjectRoot == null || activeProject == null
+                                    || !reviewProjectRoot.equals(activeProject.root)) {
+                                throw new IOException("active project changed before image acceptance");
+                            }
+                            WorkshopImageAssets.AssetInfo saved = WorkshopImageAssets.saveGeneratedPng(
+                                    candidate.pngBytes, reviewProjectRoot, name.getText().toString());
+                            refreshImageAssetList();
+                            appendAiTrace("generated_image_review", new JSONObject()
+                                    .put("action", "accepted").put("path", saved.relativePath)
+                                    .put("width", saved.width).put("height", saved.height));
+                            setStatusText("AI image accepted as new asset: " + saved.relativePath);
+                        } catch (Exception error) {
+                            setStatusText("AI image accept failed without project mutation: " + error.getMessage());
+                        }
+                    }
+                })
+                .setNegativeButton("Reject", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        appendAiTraceFields("generated_image_review", "action", "rejected", "dimensions",
+                                candidate.width + "x" + candidate.height, null, null);
+                        setStatusText("AI image rejected; project assets unchanged");
+                    }
+                })
+                .create();
+        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface ignored) {
+                for (Bitmap bitmap : reviewBitmaps) if (!bitmap.isRecycled()) bitmap.recycle();
+            }
+        });
+        dialog.show();
     }
 
     private void refreshImageAssetList() {
@@ -6429,13 +6602,29 @@ public final class MainActivity extends Activity {
         final String usageSummary;
         final int finalStep;
         final int finalActionCount;
+        final List<AiGeneratedImageCandidate> generatedImages;
 
-        AiAgentResult(String aiJson, JSONObject usageJson, String usageSummary, int finalStep, int finalActionCount) {
+        AiAgentResult(String aiJson, JSONObject usageJson, String usageSummary, int finalStep,
+                int finalActionCount, List<AiGeneratedImageCandidate> generatedImages) {
             this.aiJson = aiJson;
             this.usageJson = usageJson;
             this.usageSummary = usageSummary;
             this.finalStep = finalStep;
             this.finalActionCount = finalActionCount;
+            this.generatedImages = Collections.unmodifiableList(
+                    new ArrayList<AiGeneratedImageCandidate>(generatedImages));
+        }
+    }
+
+    private static final class AiGeneratedImageCandidate {
+        final byte[] pngBytes;
+        final int width;
+        final int height;
+
+        AiGeneratedImageCandidate(byte[] pngBytes, int width, int height) {
+            this.pngBytes = pngBytes;
+            this.width = width;
+            this.height = height;
         }
     }
 
@@ -6466,6 +6655,8 @@ public final class MainActivity extends Activity {
         private long cacheWriteInputTokens;
         private long outputTokens;
         private double estimatedCostUsd;
+        private double imageGenerationCostUsd;
+        private int generatedImageCount;
         private boolean costAvailable = true;
         private double lastCallEstimatedCostUsd;
         private boolean lastCallCostAvailable;
@@ -6499,6 +6690,12 @@ public final class MainActivity extends Activity {
             costAvailable = costAvailable && callCostAvailable;
         }
 
+        void addImageGenerationCost(double costUsd, int count) {
+            imageGenerationCostUsd += costUsd;
+            generatedImageCount += count;
+            estimatedCostUsd += costUsd;
+        }
+
         JSONObject toJson(String model) throws Exception {
             JSONObject json = new JSONObject();
             json.put("model", model);
@@ -6509,6 +6706,8 @@ public final class MainActivity extends Activity {
             json.put("cache_write_input_tokens", cacheWriteInputTokens);
             json.put("output_tokens", outputTokens);
             json.put("estimated_cost_usd", estimatedCostUsd);
+            json.put("image_generation_cost_usd", imageGenerationCostUsd);
+            json.put("generated_image_count", generatedImageCount);
             json.put("cost_available", costAvailable);
             return json;
         }

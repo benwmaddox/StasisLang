@@ -248,6 +248,23 @@ def main() -> int:
     assert "selected_preview_logical_snapshot" in activity
     assert '"captured-preview.png"' in activity
     assert "clearPendingPreviewCapture();" in activity
+    assert "GPT_IMAGE_2_LOW_1024_USD = 0.006" in activity
+    assert "Allow one low-quality 1024x1024 AI image" in activity
+    assert 'put("type", "image_generation")' in activity
+    assert 'put("quality", "low")' in activity
+    assert 'put("size", "1024x1024")' in activity
+    assert 'put("output_format", "png")' in activity
+    assert "allowImageGeneration && turn == 0" in activity
+    assert "extractAiGeneratedImages" in activity
+    assert "AI generated image is not a bounded PNG" in activity
+    assert "Review AI Image" in activity
+    assert "Accept as New Asset" in activity
+    assert "AI image rejected; project assets unchanged" in activity
+    assert "WorkshopImageAssets.saveGeneratedPng" in activity
+    assert "image_generation_cost_usd" in activity
+    assert "active project changed before image acceptance" in activity
+    assert 'File.createTempFile(".ai-review-"' in image_assets
+    assert "could not publish accepted AI image" in image_assets
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
     assert "Cancel AI" in activity
