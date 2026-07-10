@@ -657,8 +657,10 @@ def main() -> int:
     assert "AI read_symbol target ambiguous: " in activity
     assert "AI read_symbol target not found: " in activity
     assert "AI read_symbol target ambiguous or not found" not in activity
-    assert "private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50" in activity
-    assert "private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125" in activity
+    assert "private static final double GPT_5_6_SOL_INPUT_USD_PER_MILLION = 5.00" in activity
+    assert "private static final double GPT_5_6_SOL_CACHED_INPUT_USD_PER_MILLION = 0.50" in activity
+    assert "private static final double GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION = 6.25" in activity
+    assert "private static final double GPT_5_6_SOL_OUTPUT_USD_PER_MILLION = 30.00" in activity
     assert "private AiApiResponse callOpenAiResponsesApi" in activity
     assert "extractAiUsage(response)" in activity
     assert "saveLastAiUsage(aiResult.usageJson)" in activity
@@ -807,16 +809,25 @@ def main() -> int:
     assert "AI_PREF_API_KEY" in activity
     assert "readSecretPreference(aiPrefs, AI_PREF_API_KEY)" in activity
     assert "aiPrefs.getString(AI_PREF_MODEL" in activity
-    assert "gpt-5.6-terra" in activity
-    assert 'DEFAULT_MODEL = "gpt-5.6-terra"' in host_agent
-    assert '"cache_write": 3.125' in host_agent
+    assert 'DEFAULT_AI_MODEL = "gpt-5.6-sol"' in activity
+    assert 'DEFAULT_AI_REASONING_EFFORT = "medium"' in activity
+    assert 'reasoningSummary.setText("Reasoning: medium")' in activity
+    assert 'GPT-5.6 Sol defaults to medium reasoning' in activity
+    assert '"gpt-5.6-terra".equals(configuredModel)' in activity
+    assert "AI_PREF_MODEL_DEFAULT_VERSION" in activity
+    assert 'DEFAULT_MODEL = "gpt-5.6-sol"' in host_agent
+    assert 'DEFAULT_REASONING_EFFORT = "medium"' in host_agent
+    assert '"cache_write": 6.25' in host_agent
     assert "prompt_cache_key" in activity
     assert "prompt_cache_breakpoint" in activity
     assert 'content.put("prompt_cache_breakpoint", new JSONObject().put("mode", "explicit"))' in activity
     assert 'payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"))' in activity
+    assert 'payload.put("reasoning", new JSONObject().put("effort", DEFAULT_AI_REASONING_EFFORT))' in activity
     assert 'put("type", "prompt_cache_breakpoint")' not in activity
     assert 'payload.put("prompt_cache_retention"' not in activity
     assert '"prompt_cache_options": {"mode": "explicit", "ttl": "30m"}' in host_agent
+    assert '"reasoning": {"effort": DEFAULT_REASONING_EFFORT}' in host_agent
+    assert 'payload.get("reasoning") != {"effort": "medium"}' in host_agent
     assert '"prompt_cache_breakpoint": {"mode": "explicit"}' in host_agent
     assert '"type": "prompt_cache_breakpoint"' not in host_agent
     assert '"prompt_cache_retention"' not in host_agent
