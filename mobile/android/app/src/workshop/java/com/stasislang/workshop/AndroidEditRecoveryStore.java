@@ -43,8 +43,15 @@ final class AndroidEditRecoveryStore {
     }
 
     static Entry latest(Context context, String projectId) throws Exception {
-        File[] entries = recoveryFiles(projectDirectory(context, projectId));
-        return entries.length == 0 ? null : read(entries[0]);
+        Entry[] entries = list(context, projectId);
+        return entries.length == 0 ? null : entries[0];
+    }
+
+    static Entry[] list(Context context, String projectId) throws Exception {
+        File[] files = recoveryFiles(projectDirectory(context, projectId));
+        Entry[] entries = new Entry[files.length];
+        for (int index = 0; index < files.length; index += 1) entries[index] = read(files[index]);
+        return entries;
     }
 
     static void consume(Entry entry) throws Exception {
@@ -76,7 +83,8 @@ final class AndroidEditRecoveryStore {
         if (files == null) return new File[0];
         Arrays.sort(files, new Comparator<File>() {
             @Override public int compare(File left, File right) {
-                return Long.compare(right.lastModified(), left.lastModified());
+                int modified = Long.compare(right.lastModified(), left.lastModified());
+                return modified != 0 ? modified : right.getName().compareTo(left.getName());
             }
         });
         return files;
