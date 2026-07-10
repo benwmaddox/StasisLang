@@ -21,10 +21,11 @@ import java.util.Locale;
 import java.util.UUID;
 
 final class WorkshopProjectRegistry {
-    static final int FORMAT_VERSION = 1;
+    static final int FORMAT_VERSION = 2;
     static final String LEGACY_PROJECT_DIR = "workshop_project";
     private static final String PROJECTS_DIR = "workshop_projects";
     static final String METADATA_FILE = ".stasis-workshop.json";
+    private static final String V1_BACKUP_FILE = ".stasis-workshop.json.v1.bak";
     private static final String PREFS = "workshop_project_registry";
     private static final String PREF_ACTIVE_PROJECT = "active_project_directory";
 
@@ -138,7 +139,10 @@ final class WorkshopProjectRegistry {
         validateProjectRoot(context, root);
         JSONObject json = new JSONObject(readFile(new File(root, METADATA_FILE)));
         int version = json.optInt("format_version", 0);
-        if (version != FORMAT_VERSION) throw new IllegalStateException("unsupported project format version " + version);
+        if (version != 1 && version != FORMAT_VERSION) {
+            throw new IllegalStateException("unsupported project format version " + version
+                    + "; update the Workshop before opening this project");
+        }
         String id = json.optString("id", "").trim();
         String name = json.optString("name", "").trim();
         boolean originMissing = !json.has("origin");
@@ -146,20 +150,44 @@ final class WorkshopProjectRegistry {
         if (id.isEmpty() || name.isEmpty()) throw new IllegalStateException("project metadata needs id and name");
         if (!id.matches("[A-Za-z0-9][A-Za-z0-9-]{0,79}")) throw new IllegalStateException("project metadata id is invalid");
         if (!"sample".equals(origin) && !"import".equals(origin)) throw new IllegalStateException("project metadata origin is invalid");
+        if (version == FORMAT_VERSION
+                && !"stasis-workshop-project".equals(json.optString("schema", ""))) {
+            throw new IllegalStateException("project format 2 metadata schema is invalid");
+        }
         ProjectInfo project = new ProjectInfo(id, name, origin, directoryName, root);
-        if (originMissing) replaceMetadata(root, project);
+        if (version == 1) {
+            migrateV1Metadata(root, project);
+        } else if (originMissing) {
+            throw new IllegalStateException("project format 2 metadata origin is missing");
+        }
         return project;
     }
 
     private static void writeMetadata(File root, ProjectInfo project) throws Exception {
         File target = new File(root, METADATA_FILE);
         if (target.exists()) throw new IllegalStateException("project metadata already exists");
-        writeMetadataTemporary(root, project, target);
+        writeMetadataTemporary(root, project, target, 0);
     }
 
-    private static void replaceMetadata(File root, ProjectInfo project) throws Exception {
+    private static void migrateV1Metadata(File root, ProjectInfo project) throws Exception {
+        File source = new File(root, METADATA_FILE);
+        File backup = new File(root, V1_BACKUP_FILE);
+        try {
+            if (!backup.isFile()) writeSyncedFile(backup, readFile(source));
+            replaceMetadata(root, project, 1);
+            JSONObject migrated = new JSONObject(readFile(source));
+            if (migrated.optInt("format_version", 0) != FORMAT_VERSION
+                    || !project.id.equals(migrated.optString("id", ""))) {
+                throw new IllegalStateException("migrated metadata verification failed");
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException("project v1 migration failed; the fsynced v1 backup was preserved", error);
+        }
+    }
+
+    private static void replaceMetadata(File root, ProjectInfo project, int migratedFromVersion) throws Exception {
         File target = new File(root, METADATA_FILE);
-        File temporary = writeMetadataTemporary(root, project, null);
+        File temporary = writeMetadataTemporary(root, project, null, migratedFromVersion);
         try {
             Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (AtomicMoveNotSupportedException unsupported) {
@@ -167,12 +195,15 @@ final class WorkshopProjectRegistry {
         }
     }
 
-    private static File writeMetadataTemporary(File root, ProjectInfo project, File publishTarget) throws Exception {
+    private static File writeMetadataTemporary(File root, ProjectInfo project, File publishTarget,
+            int migratedFromVersion) throws Exception {
         JSONObject json = new JSONObject()
                 .put("format_version", FORMAT_VERSION)
+                .put("schema", "stasis-workshop-project")
                 .put("id", project.id)
                 .put("name", project.name)
-                .put("origin", project.origin);
+                .put("origin", project.origin)
+                .put("migrated_from_version", migratedFromVersion);
         File temporary = new File(root, METADATA_FILE + ".tmp");
         FileOutputStream output = new FileOutputStream(temporary);
         try {
@@ -187,6 +218,22 @@ final class WorkshopProjectRegistry {
             throw new IllegalStateException("unable to publish project metadata");
         }
         return publishTarget;
+    }
+
+    private static void writeSyncedFile(File file, String source) throws Exception {
+        File temporary = new File(file.getParentFile(), file.getName() + ".tmp");
+        FileOutputStream output = new FileOutputStream(temporary);
+        try {
+            output.write(source.getBytes(StandardCharsets.UTF_8));
+            output.getFD().sync();
+        } finally {
+            output.close();
+        }
+        try {
+            Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException unsupported) {
+            Files.move(temporary.toPath(), file.toPath());
+        }
     }
 
     private static void validateProjectRoot(Context context, File root) throws Exception {

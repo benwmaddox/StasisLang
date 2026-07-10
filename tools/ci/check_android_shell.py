@@ -441,7 +441,17 @@ def main() -> int:
     assert "Apply or Reset the pending source edit before switching projects" in activity
     assert 'return "stasis-workshop-" + identity' in activity
     assert "WorkshopProjectRegistry.METADATA_FILE.equals(file.getName())" in activity
-    assert "static final int FORMAT_VERSION = 1" in project_registry
+    assert "static final int FORMAT_VERSION = 2" in project_registry
+    assert 'V1_BACKUP_FILE = ".stasis-workshop.json.v1.bak"' in project_registry
+    assert "migrateV1Metadata" in project_registry
+    assert 'put("schema", "stasis-workshop-project")' in project_registry
+    assert 'put("migrated_from_version", migratedFromVersion)' in project_registry
+    assert "update the Workshop before opening this project" in project_registry
+    assert "project format 2 metadata schema is invalid" in project_registry
+    assert "the fsynced v1 backup was preserved" in project_registry
+    assert "migrated metadata verification failed" in project_registry
+    assert "StandardCopyOption.ATOMIC_MOVE" in project_registry
+    assert "StandardCopyOption.REPLACE_EXISTING" in project_registry
     assert 'LEGACY_PROJECT_DIR = "workshop_project"' in project_registry
     assert 'METADATA_FILE = ".stasis-workshop.json"' in project_registry
     assert "UUID.randomUUID().toString()" in project_registry
@@ -492,6 +502,7 @@ def main() -> int:
     assert "validateArchivePath" in project_archive
     assert "project archive contains duplicate path" in project_archive
     assert "project archive metadata format is unsupported" in project_archive
+    assert '?:1|2' in project_archive
     assert "project archive needs src/main.stasis" in project_archive
     assert "output.getFD().sync()" in project_archive
     assert "legacy project cannot be deleted as a failed import" in project_registry
