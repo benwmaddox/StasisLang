@@ -12,6 +12,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
@@ -97,6 +98,7 @@ def main() -> int:
 
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
     secret_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java")
+    recovery_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java")
     project_registry = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java")
     project_archive = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java")
     host_agent = read("tools/android_ai_agent_host.py")
@@ -305,6 +307,20 @@ def main() -> int:
     assert "output.getFD().sync()" in project_archive
     assert "legacy project cannot be deleted as a failed import" in project_registry
     assert "Manual Symbols and Source" in activity
+    assert "Go to Diagnostic" in activity
+    assert "Undo Failed Apply" in activity
+    assert "AndroidEditRecoveryStore.record" in activity
+    assert "AndroidEditRecoveryStore.latest" in activity
+    assert "Undo blocked: source changed after the failed apply" in activity
+    assert "Failed manual apply restored safely" in activity
+    assert "Recoverable failed apply" in activity
+    assert "MAX_ENTRIES = 10" in recovery_store
+    assert "MAX_SOURCE_BYTES = 2 * 1024 * 1024" in recovery_store
+    assert "writeSyncedAtomic" in recovery_store
+    assert "recovery entry publish failed" in recovery_store
+    assert "output.getFD().sync()" in recovery_store
+    assert "recovery project id is invalid" in recovery_store
+    assert "recovery path escaped root" in recovery_store
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity
     assert "sameSymbolIdentity(symbol, selectedSymbol)" in activity
