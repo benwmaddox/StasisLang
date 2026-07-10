@@ -311,6 +311,16 @@ def main() -> int:
     assert "preferences.getAll().keySet()" in activity
     assert "aiTraceLogFile()" in activity
     assert "Code and assets remain" in activity
+    assert 'ONBOARDING_PREFS = "onboarding_settings"' in activity
+    assert 'ONBOARDING_COMPLETE = "manual_tutorial_seen_v1"' in activity
+    assert "Welcome to Stasis Workshop" in activity
+    assert "You can build and test a game entirely on-device without AI" in activity
+    assert "Remind Me Later" in activity
+    assert "Help & Onboarding" in activity
+    assert "Start Zero-AI Manual Tutorial" in activity
+    assert "no API key is required" in activity
+    assert "Voice asks for microphone permission only when started" in activity
+    assert "toggleEditorPanel();" in activity
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
     assert "Cancel AI" in activity

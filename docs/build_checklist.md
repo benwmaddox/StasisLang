@@ -480,8 +480,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW60 - Android Onboarding, Templates, and First-Run Setup
 - Scope: Provide a first-run path, sample/template selection, API/GitHub setup guidance, permission explanations, and a zero-AI manual tutorial.
+- Progress: First run now shows a deferrable Welcome guide that explicitly starts with an entirely on-device, zero-account path: play the bundled preview, open Manual Symbols & Source, edit, Apply, Run Tests, inspect Changes, and use Projects/archive backup. `Start Manual Tutorial` opens the existing top-priority workshop panel, expands the source editor, selects a real bundled symbol, and gives the next Apply/Test instruction without requiring an API key. Completion is versioned in preferences and never requests a permission. A permanent collapsed `Help & Onboarding` panel repeats the manual checklist and explains that OpenAI/GitHub credentials, image/audio work, and voice microphone permission are optional and user-triggered. Additional project templates, interactive step completion, and on-device first-run acceptance remain.
+- Tests: The Android shell verifier covers versioned first-run state, defer/complete actions, zero-AI language, editor/menu expansion, real-symbol selection, Apply/Test guidance, persistent Help access, optional account/media disclosure, and permission timing; workshop Java compilation and APK assembly cover the dialog/panel flow.
 - Done gate: A new user can create/open a project, run it, make a tested change, and understand optional AI/sync configuration without external documentation.
-- Status: `planned`
+- Status: `in progress`
 #### AW61 - Android Accessibility and Adaptive Layout
 - Scope: Add content descriptions, scalable text/touch targets, contrast/focus support, screen-reader/keyboard navigation, orientation handling, and phone/tablet/foldable layouts.
 - Done gate: Core preview, command, editor, test, asset, and review workflows pass accessibility checks and remain usable across supported display sizes.
