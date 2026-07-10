@@ -27,6 +27,8 @@ The `workshop` flavor is the general-purpose `com.stasislang.workshop` product. 
 
 The current `published` flavor is the game-specific Pong release, labeled `Stasis Pong` with application id `com.stasislang.pong`. It keeps the same native rendering/runtime surface but skips the workshop chrome entirely: no hamburger drawer, symbol browser, source editor, AI controls, or manual hot-swap UI. It can be installed next to the general Workshop. The APK links the Pong arm64 AOT objects directly and excludes Stasis source, tests, compiler stubs, unrelated templates, and the Rust JIT bridge. Future releases must declare their own game ID/project/package rather than turning this flavor back into a generic game container.
 
+`games/pong.gradle` is the versioned release descriptor for that game. It owns the game/runtime IDs, package, label, project directory, entry source, and acceptance-test pattern; `app/build.gradle` validates those fields and feeds the existing shared `android-aot-bundle` command. Gradle defaults to Pong and accepts `-Pstasis.publishedGame=pong`; an unknown descriptor name fails configuration instead of falling back to generic Workshop content.
+
 Build the release-style APK with:
 
 ```powershell
@@ -59,6 +61,12 @@ Or call Gradle directly:
 
 ```powershell
 gradle :app:assembleWorkshopDebug
+```
+
+Build the descriptor-selected Pong package directly with:
+
+```powershell
+gradle :app:assemblePublishedDebug '-Pstasis.publishedGame=pong'
 ```
 
 If your installed SDK is not 35, override it:

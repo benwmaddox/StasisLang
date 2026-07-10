@@ -22,7 +22,7 @@ import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 
 public final class MainActivity extends Activity {
-    private static final String PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_GAME_ID + "_aot";
+    private static final String PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID;
 
     private static final long FRAME_DELAY_MS = 16L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
