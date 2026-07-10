@@ -23,7 +23,9 @@ final class WorkshopImageAssets {
     static final int MAX_DIMENSION = 4096;
     static final long MAX_PIXELS = 16_000_000L;
     private static final int MAX_PREVIEW_DIMENSION = 640;
+    private static final int MAX_TRASH_FILES = 20;
     private static final String IMAGE_DIRECTORY = "assets/images";
+    private static final String TRASH_DIRECTORY = ".stasis-trash/images";
 
     static final class AssetInfo {
         final File file;
@@ -143,6 +145,50 @@ final class WorkshopImageAssets {
         }
     }
 
+    static AssetInfo rename(AssetInfo asset, File projectRoot, String requestedName) throws IOException {
+        requireInside(projectRoot, asset.file);
+        String extension = fileExtension(asset.file.getName());
+        String base = requestedName == null ? "" : requestedName.trim();
+        if (!extension.isEmpty() && base.toLowerCase().endsWith(extension)) {
+            base = base.substring(0, base.length() - extension.length());
+        }
+        if (!base.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,63}")) {
+            throw new IOException("image name must use 1-64 letters, numbers, underscores, or hyphens");
+        }
+        File target = new File(asset.file.getParentFile(), base + extension);
+        requireInside(projectRoot, target);
+        if (target.equals(asset.file)) return asset;
+        if (target.exists()) throw new IOException("an image already uses that name");
+        if (!asset.file.renameTo(target)) throw new IOException("could not rename image");
+        return inspect(projectRoot, target);
+    }
+
+    static void moveToTrash(AssetInfo asset, File projectRoot) throws IOException {
+        requireInside(projectRoot, asset.file);
+        File trash = new File(projectRoot, TRASH_DIRECTORY);
+        requireInside(projectRoot, trash);
+        if (!trash.isDirectory() && !trash.mkdirs()) throw new IOException("could not create image recovery directory");
+        File target = uniqueTarget(trash, Long.toString(System.currentTimeMillis()) + "-"
+                + baseWithoutExtension(asset.file.getName()), fileExtension(asset.file.getName()));
+        if (!asset.file.renameTo(target)) throw new IOException("could not move image to recovery");
+        pruneTrash(trash);
+    }
+
+    static AssetInfo restoreLatest(File projectRoot) throws IOException {
+        File trash = new File(projectRoot, TRASH_DIRECTORY);
+        requireInside(projectRoot, trash);
+        File[] files = trash.listFiles();
+        if (files == null || files.length == 0) throw new IOException("no deleted image is available to restore");
+        File latest = newestFile(files);
+        String original = latest.getName().replaceFirst("^[0-9]+-", "");
+        String extension = fileExtension(original);
+        File directory = confinedImageDirectory(projectRoot);
+        if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("could not create project image directory");
+        File target = uniqueTarget(directory, baseWithoutExtension(original), extension);
+        if (!latest.renameTo(target)) throw new IOException("could not restore deleted image");
+        return inspect(projectRoot, target);
+    }
+
     private static byte[] readBounded(ContentResolver resolver, Uri source) throws IOException {
         InputStream input = resolver.openInputStream(source);
         if (input == null) throw new IOException("document provider did not open the image");
@@ -221,6 +267,47 @@ final class WorkshopImageAssets {
             if (!candidate.exists()) return candidate;
         }
         throw new IOException("too many images share this name");
+    }
+
+    private static AssetInfo inspect(File projectRoot, File file) throws IOException {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw new IOException("image could not be decoded");
+        return new AssetInfo(file, relativePath(projectRoot, file), bounds.outWidth, bounds.outHeight, file.length());
+    }
+
+    private static String fileExtension(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot < 0 ? "" : name.substring(dot).toLowerCase();
+    }
+
+    private static String baseWithoutExtension(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot <= 0 ? name : name.substring(0, dot);
+    }
+
+    private static File newestFile(File[] files) throws IOException {
+        File newest = null;
+        for (File file : files) {
+            if (!file.isFile()) continue;
+            if (newest == null || file.getName().compareTo(newest.getName()) > 0) newest = file;
+        }
+        if (newest == null) throw new IOException("no deleted image is available to restore");
+        return newest;
+    }
+
+    private static void pruneTrash(File trash) {
+        File[] files = trash.listFiles();
+        if (files == null || files.length <= MAX_TRASH_FILES) return;
+        ArrayList<File> ordered = new ArrayList<>();
+        for (File file : files) if (file.isFile()) ordered.add(file);
+        Collections.sort(ordered, new Comparator<File>() {
+            @Override public int compare(File left, File right) {
+                return left.getName().compareTo(right.getName());
+            }
+        });
+        for (int index = 0; index < ordered.size() - MAX_TRASH_FILES; index++) ordered.get(index).delete();
     }
 
     private static File confinedImageDirectory(File projectRoot) throws IOException {

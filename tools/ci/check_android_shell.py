@@ -124,6 +124,12 @@ def main() -> int:
     assert "WorkshopImageAssets.importImage" in activity
     assert "WorkshopImageAssets.decodePreview" in activity
     assert "WorkshopImageAssets.readForSync" in activity
+    assert "WorkshopImageAssets.rename" in activity
+    assert "WorkshopImageAssets.moveToTrash" in activity
+    assert "WorkshopImageAssets.restoreLatest" in activity
+    assert "Rename blocked: image is referenced by" in activity
+    assert "Delete blocked: image is referenced by" in activity
+    assert "selectedImageAssetProjectId" in activity
     assert "Map<String, byte[]> githubBackupFiles()" in activity
     assert "MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024" in activity
     assert "project exceeds the 32 MiB direct backup limit" in activity
@@ -132,6 +138,8 @@ def main() -> int:
     assert "MAX_DIMENSION = 4096" in image_assets
     assert "MAX_PIXELS = 16_000_000L" in image_assets
     assert "exceeds the image sync limit" in image_assets
+    assert "MAX_TRASH_FILES = 20" in image_assets
+    assert 'TRASH_DIRECTORY = ".stasis-trash/images"' in image_assets
     assert "output.getFD().sync()" in image_assets
     assert "image path escapes the active project" in image_assets
     assert '"image/png"' in image_assets
