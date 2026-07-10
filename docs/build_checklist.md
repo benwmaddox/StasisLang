@@ -439,8 +439,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AW53 - Android Mini Paint Editor
 - Scope: Add a touch-first bitmap editor with brush, eraser, palette/color picker, undo/redo, clear, canvas/crop sizing, save-as, cancel, and bounded image dimensions.
+- Progress: `New Painted Image` creates a 16-1024 px transparent canvas, while an existing library asset can open as an isolated `Paint as Copy` session when it fits that bound. The scrollable touch editor provides round brush sizes, transparent erasing, five-color palette, hex ARGB/RGB input, eight-step bounded undo/redo, clear, and resize/crop with transparent expansion. Save always atomically publishes a new PNG through the project asset store; cancellation discards the in-memory canvas without mutating project files. On-device drawing and layout acceptance remain.
+- Tests: The Android shell verifier covers the complete control surface, bounds, bounded history, transparent eraser, resize/crop, snapshot, and save-as wiring; workshop Java compilation and APK assembly cover the custom Android view.
 - Done gate: A user can create or modify a simple game image, review it, cancel without mutation, or save it as a normal project asset.
-- Status: `planned`
+- Status: `in progress`
 #### AW54 - Android Multimodal AI Attachments
 - Scope: Attach imported/painted images to typed or voice AI requests using real image input blocks, with thumbnail review, remove controls, format conversion, size limits, and per-request cost visibility.
 - Done gate: The AI receives the exact selected project image(s), while unselected assets and private device media are never sent.

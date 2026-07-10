@@ -189,6 +189,54 @@ final class WorkshopImageAssets {
         return inspect(projectRoot, target);
     }
 
+    static AssetInfo savePainted(Bitmap bitmap, File projectRoot, String requestedName) throws IOException {
+        if (bitmap == null || bitmap.getWidth() > WorkshopPaintView.MAX_CANVAS_DIMENSION
+                || bitmap.getHeight() > WorkshopPaintView.MAX_CANVAS_DIMENSION) {
+            throw new IOException("painted image exceeds the canvas limit");
+        }
+        String base = requestedName == null ? "" : requestedName.trim();
+        if (base.toLowerCase().endsWith(".png")) base = base.substring(0, base.length() - 4);
+        if (!base.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,63}")) {
+            throw new IOException("image name must use 1-64 letters, numbers, underscores, or hyphens");
+        }
+        File directory = confinedImageDirectory(projectRoot);
+        if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("could not create project image directory");
+        File target = uniqueTarget(directory, base, ".png");
+        requireInside(projectRoot, target);
+        File temporary = File.createTempFile(".paint-", ".tmp", directory);
+        boolean published = false;
+        try {
+            FileOutputStream output = new FileOutputStream(temporary);
+            try {
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    throw new IOException("could not encode painted image");
+                }
+                output.flush();
+                output.getFD().sync();
+            } finally {
+                output.close();
+            }
+            if (temporary.length() > MAX_IMPORT_BYTES) throw new IOException("painted image exceeds the 8 MiB asset limit");
+            if (!temporary.renameTo(target)) throw new IOException("could not publish painted image");
+            published = true;
+            return inspect(projectRoot, target);
+        } finally {
+            if (!published && temporary.exists()) temporary.delete();
+        }
+    }
+
+    static Bitmap decodeForPaint(AssetInfo asset) throws IOException {
+        if (asset.width > WorkshopPaintView.MAX_CANVAS_DIMENSION
+                || asset.height > WorkshopPaintView.MAX_CANVAS_DIMENSION) {
+            throw new IOException("paint editing supports images up to 1024x1024");
+        }
+        Bitmap decoded = BitmapFactory.decodeFile(asset.file.getAbsolutePath());
+        if (decoded == null) throw new IOException("image could not be decoded for painting");
+        Bitmap mutable = decoded.copy(Bitmap.Config.ARGB_8888, true);
+        decoded.recycle();
+        return mutable;
+    }
+
     private static byte[] readBounded(ContentResolver resolver, Uri source) throws IOException {
         InputStream input = resolver.openInputStream(source);
         if (input == null) throw new IOException("document provider did not open the image");

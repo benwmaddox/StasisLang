@@ -1263,6 +1263,12 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { requestImageImport(); }
         });
         projectSettingsBody.addView(importImage, fullWidth());
+        Button newPaintedImage = new Button(this);
+        newPaintedImage.setText("New Painted Image");
+        newPaintedImage.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { requestNewPaintedImage(); }
+        });
+        projectSettingsBody.addView(newPaintedImage, fullWidth());
         Button restoreImage = new Button(this);
         restoreImage.setText("Restore Last Deleted Image");
         restoreImage.setOnClickListener(new View.OnClickListener() {
@@ -4730,19 +4736,248 @@ public final class MainActivity extends Activity {
 
     private void showImageAssetActions(final WorkshopImageAssets.AssetInfo asset) {
         final boolean selected = selectedImageAssets.contains(asset.relativePath);
-        String[] actions = new String[] {"Preview", selected ? "Unselect" : "Select", "Rename", "Delete"};
+        String[] actions = new String[] {"Preview", selected ? "Unselect" : "Select",
+                "Paint as Copy", "Rename", "Delete"};
         new AlertDialog.Builder(this)
                 .setTitle(asset.relativePath)
                 .setItems(actions, new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
                         if (which == 0) showImagePreview(asset);
                         else if (which == 1) toggleImageSelection(asset);
-                        else if (which == 2) requestImageRename(asset);
-                        else if (which == 3) requestImageDelete(asset);
+                        else if (which == 2) openPaintEditor(asset);
+                        else if (which == 3) requestImageRename(asset);
+                        else if (which == 4) requestImageDelete(asset);
                     }
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    private void requestNewPaintedImage() {
+        if (!canModifyImageAssets()) return;
+        final EditText width = new EditText(this);
+        width.setHint("Width");
+        width.setInputType(InputType.TYPE_CLASS_NUMBER);
+        width.setText("256");
+        final EditText height = new EditText(this);
+        height.setHint("Height");
+        height.setInputType(InputType.TYPE_CLASS_NUMBER);
+        height.setText("256");
+        LinearLayout dimensions = new LinearLayout(this);
+        dimensions.setOrientation(LinearLayout.HORIZONTAL);
+        dimensions.addView(width, weightedWidth());
+        dimensions.addView(height, weightedWidth());
+        new AlertDialog.Builder(this)
+                .setTitle("New Paint Canvas")
+                .setMessage("Canvas dimensions must be 16-1024 pixels.")
+                .setView(dimensions)
+                .setPositiveButton("Create", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        try {
+                            int requestedWidth = Integer.parseInt(width.getText().toString());
+                            int requestedHeight = Integer.parseInt(height.getText().toString());
+                            showPaintEditor(requestedWidth, requestedHeight, null, "painted_image");
+                        } catch (Exception error) {
+                            setStatusText("Paint canvas failed: " + error.getMessage());
+                        }
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void openPaintEditor(WorkshopImageAssets.AssetInfo asset) {
+        if (!canModifyImageAssets()) return;
+        try {
+            Bitmap initial = WorkshopImageAssets.decodeForPaint(asset);
+            String name = asset.file.getName();
+            int dot = name.lastIndexOf('.');
+            if (dot > 0) name = name.substring(0, dot);
+            showPaintEditor(asset.width, asset.height, initial, name + "_edit");
+            initial.recycle();
+        } catch (Exception error) {
+            setStatusText("Paint editor failed: " + error.getMessage());
+        }
+    }
+
+    private void showPaintEditor(int width, int height, Bitmap initial, String defaultName) {
+        final WorkshopPaintView paint = new WorkshopPaintView(this, width, height, initial);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(8), dp(8), dp(8), dp(8));
+        content.addView(paint, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(360)));
+
+        LinearLayout tools = new LinearLayout(this);
+        tools.setOrientation(LinearLayout.HORIZONTAL);
+        Button brush = compactButton("Brush");
+        Button eraser = compactButton("Eraser");
+        Button undo = compactButton("Undo");
+        Button redo = compactButton("Redo");
+        tools.addView(brush, weightedWidth());
+        tools.addView(eraser, weightedWidth());
+        tools.addView(undo, weightedWidth());
+        tools.addView(redo, weightedWidth());
+        content.addView(tools, fullWidth());
+        brush.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { paint.setEraser(false); setStatusText("Paint tool: brush"); }
+        });
+        eraser.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { paint.setEraser(true); setStatusText("Paint tool: eraser"); }
+        });
+        undo.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { paint.undo(); }
+        });
+        redo.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { paint.redo(); }
+        });
+
+        LinearLayout sizes = new LinearLayout(this);
+        sizes.setOrientation(LinearLayout.HORIZONTAL);
+        for (final int size : new int[] {2, 8, 24, 64}) {
+            Button choice = compactButton(Integer.toString(size) + "px");
+            choice.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View view) { paint.setBrushSize(size); }
+            });
+            sizes.addView(choice, weightedWidth());
+        }
+        content.addView(sizes, fullWidth());
+
+        LinearLayout palette = new LinearLayout(this);
+        palette.setOrientation(LinearLayout.HORIZONTAL);
+        final int[] colors = new int[] {Color.BLACK, Color.WHITE, Color.RED, Color.GREEN, Color.BLUE};
+        final String[] colorNames = new String[] {"Black", "White", "Red", "Green", "Blue"};
+        for (int index = 0; index < colors.length; index++) {
+            final int color = colors[index];
+            Button choice = compactButton(colorNames[index]);
+            choice.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View view) { paint.setBrushColor(color); }
+            });
+            palette.addView(choice, weightedWidth());
+        }
+        content.addView(palette, fullWidth());
+
+        LinearLayout customColor = new LinearLayout(this);
+        customColor.setOrientation(LinearLayout.HORIZONTAL);
+        final EditText hex = new EditText(this);
+        hex.setHint("#RRGGBB or #AARRGGBB");
+        hex.setSingleLine(true);
+        Button applyColor = compactButton("Set Color");
+        customColor.addView(hex, weightedWidth());
+        customColor.addView(applyColor, weightedWidth());
+        content.addView(customColor, fullWidth());
+        applyColor.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                try {
+                    paint.setBrushColor(Color.parseColor(hex.getText().toString().trim()));
+                    setStatusText("Paint color applied");
+                } catch (Exception error) {
+                    setStatusText("Paint color needs #RRGGBB or #AARRGGBB");
+                }
+            }
+        });
+
+        LinearLayout canvasActions = new LinearLayout(this);
+        canvasActions.setOrientation(LinearLayout.HORIZONTAL);
+        Button resize = compactButton("Resize / Crop");
+        Button clear = compactButton("Clear");
+        canvasActions.addView(resize, weightedWidth());
+        canvasActions.addView(clear, weightedWidth());
+        content.addView(canvasActions, fullWidth());
+        resize.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { requestPaintResize(paint); }
+        });
+        clear.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { paint.clearCanvas(); }
+        });
+
+        final EditText name = new EditText(this);
+        name.setHint("Save-as image name");
+        name.setSingleLine(true);
+        name.setText(defaultName);
+        content.addView(name, fullWidth());
+        LinearLayout finish = new LinearLayout(this);
+        finish.setOrientation(LinearLayout.HORIZONTAL);
+        Button save = compactButton("Save as PNG");
+        Button cancel = compactButton("Cancel");
+        finish.addView(save, weightedWidth());
+        finish.addView(cancel, weightedWidth());
+        content.addView(finish, fullWidth());
+
+        ScrollView editorScroll = new ScrollView(this);
+        editorScroll.addView(content, fullWidth());
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Mini Paint - " + width + "x" + height)
+                .setView(editorScroll)
+                .create();
+        save.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                Bitmap snapshot = paint.snapshot();
+                try {
+                    WorkshopImageAssets.AssetInfo saved = WorkshopImageAssets.savePainted(
+                            snapshot, activeProject.root, name.getText().toString());
+                    refreshImageAssetList();
+                    setStatusText("Painted image saved as copy: " + saved.relativePath);
+                    dialog.dismiss();
+                } catch (Exception error) {
+                    setStatusText("Paint save failed: " + error.getMessage());
+                } finally {
+                    snapshot.recycle();
+                }
+            }
+        });
+        cancel.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                setStatusText("Paint cancelled; project assets unchanged");
+                dialog.dismiss();
+            }
+        });
+        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface ignored) { paint.dispose(); }
+        });
+        dialog.show();
+    }
+
+    private void requestPaintResize(final WorkshopPaintView paint) {
+        final EditText width = new EditText(this);
+        width.setInputType(InputType.TYPE_CLASS_NUMBER);
+        width.setText(Integer.toString(paint.canvasWidth()));
+        final EditText height = new EditText(this);
+        height.setInputType(InputType.TYPE_CLASS_NUMBER);
+        height.setText(Integer.toString(paint.canvasHeight()));
+        LinearLayout dimensions = new LinearLayout(this);
+        dimensions.setOrientation(LinearLayout.HORIZONTAL);
+        dimensions.addView(width, weightedWidth());
+        dimensions.addView(height, weightedWidth());
+        new AlertDialog.Builder(this)
+                .setTitle("Resize / Crop Canvas")
+                .setMessage("Pixels outside the new bottom/right edges are cropped; new space is transparent.")
+                .setView(dimensions)
+                .setPositiveButton("Apply", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        try {
+                            paint.resizeCanvas(Integer.parseInt(width.getText().toString()),
+                                    Integer.parseInt(height.getText().toString()));
+                        } catch (Exception error) {
+                            setStatusText("Paint resize failed: " + error.getMessage());
+                        }
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private Button compactButton(String label) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setAllCaps(false);
+        button.setTextSize(11.0f);
+        button.setPadding(dp(2), 0, dp(2), 0);
+        return button;
+    }
+
+    private static LinearLayout.LayoutParams weightedWidth() {
+        return new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f);
     }
 
     private void toggleImageSelection(WorkshopImageAssets.AssetInfo asset) {
