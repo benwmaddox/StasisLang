@@ -89,6 +89,7 @@ pub fn run_android_workshop_stasis_tests(project_root: impl AsRef<Path>) -> Resu
             continue;
         }
         let mut jit = JitProcess::new();
+        jit.set_local_runtime_helper_trampolines(true);
         jit.upsert_file(path.to_string_lossy().replace('\\', "/"), rewritten);
         jit.set_required_emit_roots(&tests.iter().map(|test| test.generated_function_name.clone()).collect::<Vec<_>>());
         if let Err(error) = jit.compile() {
@@ -342,6 +343,7 @@ fn build_runtime_session(
     source_fingerprint: u64,
 ) -> Result<AndroidRuntimeSession, String> {
     let mut jit = JitProcess::new();
+    jit.set_local_runtime_helper_trampolines(true);
     configure_runtime_jit(&mut jit, project_root, files);
     jit.compile()
         .map_err(|error| format!("Android JIT compile failed: {error:?}"))?;

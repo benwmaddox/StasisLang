@@ -36,6 +36,7 @@ pub struct JitProcess {
     import_parse_cache: BTreeMap<String, ImportParseCacheEntry>,
     compile_analysis_cache: Option<CompileAnalysisCache>,
     required_emit_roots: Vec<String>,
+    local_runtime_helper_trampolines: bool,
     #[cfg(test)]
     _test_guard: MutexGuard<'static, ()>,
 }
@@ -79,6 +80,7 @@ impl JitProcess {
             import_parse_cache: BTreeMap::new(),
             compile_analysis_cache: None,
             required_emit_roots: Vec::new(),
+            local_runtime_helper_trampolines: false,
             #[cfg(test)]
             _test_guard,
         }
@@ -91,6 +93,10 @@ impl JitProcess {
     pub fn set_required_emit_roots(&mut self, roots: &[String]) {
         self.required_emit_roots.clear();
         self.required_emit_roots.extend_from_slice(roots);
+    }
+
+    pub fn set_local_runtime_helper_trampolines(&mut self, enabled: bool) {
+        self.local_runtime_helper_trampolines = enabled;
     }
 
     pub fn refresh_imported_sources_from_disk(&mut self, root_source_path: &str) -> bool {
@@ -191,6 +197,7 @@ impl JitProcess {
         let mut next_symbol_seq = self.next_symbol_seq;
         let mut staged_artifacts = self.artifacts.clone();
         let mut staged_modules: Vec<JITModule> = Vec::new();
+        let local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
         let emit = self.compiler.emit_pass_for_ids_with(
             &emit_function_ids,
             &mut |meta, hir, lowered_types| {
@@ -210,6 +217,7 @@ impl JitProcess {
                     &analysis.collection_infos,
                     &analysis.named_struct_field_types,
                     &analysis.extern_symbol_addresses,
+                    local_runtime_helper_trampolines,
                 )?;
                 let slot = next_slot;
                 next_slot = next_slot.saturating_add(1);
@@ -1035,6 +1043,7 @@ fn compile_function_to_jit_module(
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
     extern_symbol_addresses: &ExternSymbolAddressMap,
+    local_runtime_helper_trampolines: bool,
 ) -> Result<(JITModule, u64), String> {
     let mut jit_builder = new_stasis_jit_builder()?;
     jit_builder.symbol(
@@ -1239,13 +1248,18 @@ fn compile_function_to_jit_module(
         }
         jit_builder.symbol(extern_symbol, *address as *const u8);
     }
-    let runtime_helper_addresses = runtime_helper_addresses();
+    let runtime_helper_addresses = local_runtime_helper_trampolines.then(runtime_helper_addresses);
+    let runtime_helper_linkage = runtime_helper_addresses
+        .as_ref()
+        .map_or(RuntimeHelperLinkage::Imported, |addresses| {
+            RuntimeHelperLinkage::LocalTrampolines(addresses)
+        });
     compile_function_with_module(
         JITModule::new(jit_builder),
         meta,
         hir,
         symbol,
-        RuntimeHelperLinkage::LocalTrampolines(&runtime_helper_addresses),
+        runtime_helper_linkage,
         SharedCompileBackendMode::Jit,
         call_signatures,
         type_table,
