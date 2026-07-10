@@ -717,7 +717,7 @@ pub struct StasisStyleRules {
 }
 
 impl StasisStyleRules {
-    pub fn android_default() -> Self {
+    pub fn workshop_default() -> Self {
         Self {
             use_function_keyword: true,
             use_receiver_style_when_possible: true,
@@ -861,7 +861,7 @@ pub fn apply_ai_code_response_to_project(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AndroidWorkshopReload {
+pub enum WorkshopReload {
     InitialCompile,
     NoChange,
     FastReload,
@@ -869,19 +869,19 @@ pub enum AndroidWorkshopReload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AndroidWorkshopCompilePlan {
+pub struct WorkshopCompilePlan {
     pub status: i32,
-    pub reload: AndroidWorkshopReload,
+    pub reload: WorkshopReload,
     pub reason: String,
     pub project_hash: i32,
     pub layout_hash: i32,
     pub entrypoints: Vec<String>,
-    pub functions: Vec<AndroidWorkshopFunctionPlan>,
-    pub errors: Vec<AndroidWorkshopCompileError>,
+    pub functions: Vec<WorkshopFunctionPlan>,
+    pub errors: Vec<WorkshopCompileError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AndroidWorkshopFunctionPlan {
+pub struct WorkshopFunctionPlan {
     pub file: String,
     pub ordinal: usize,
     pub name: String,
@@ -896,18 +896,18 @@ pub struct AndroidWorkshopFunctionPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AndroidWorkshopCompileError {
+pub struct WorkshopCompileError {
     pub code: i32,
     pub pos: i32,
     pub detail_a: i32,
     pub detail_b: i32,
 }
 
-pub fn build_android_workshop_compile_plan(
+pub fn build_workshop_compile_plan(
     files: &[WorkshopSourceFile],
     compile: &IncrementalCompileOutput,
-    previous: Option<&AndroidWorkshopCompilePlan>,
-) -> Result<AndroidWorkshopCompilePlan, String> {
+    previous: Option<&WorkshopCompilePlan>,
+) -> Result<WorkshopCompilePlan, String> {
     let symbols = workshop_function_symbols_by_path_and_ordinal(files)?;
     let functions = compile
         .functions
@@ -919,14 +919,14 @@ pub fn build_android_workshop_compile_plan(
                     function.file_index
                 )
             })?;
-            let symbol = android_symbol_for_compiler_function(&symbols, file, function.ordinal)
+            let symbol = symbol_for_compiler_function(&symbols, file, function.ordinal)
                 .ok_or_else(|| {
                     format!(
                         "compile output referenced missing function ordinal {} in {}",
                         function.ordinal, file
                     )
                 })?;
-            Ok(AndroidWorkshopFunctionPlan {
+            Ok(WorkshopFunctionPlan {
                 file: symbol.file.clone(),
                 ordinal: function.ordinal,
                 name: symbol.name.clone(),
@@ -945,19 +945,19 @@ pub fn build_android_workshop_compile_plan(
     let errors = compile
         .errors
         .iter()
-        .map(|error| AndroidWorkshopCompileError {
+        .map(|error| WorkshopCompileError {
             code: error.code,
             pos: error.pos,
             detail_a: error.detail_a,
             detail_b: error.detail_b,
         })
         .collect::<Vec<_>>();
-    let layout_hash = android_workshop_layout_hash(files)?;
-    let project_hash = android_compile_project_hash(layout_hash, &functions);
-    let entrypoints = android_workshop_entrypoints(files)?;
-    let (reload, reason) = android_reload_from_previous(project_hash, layout_hash, previous);
+    let layout_hash = workshop_layout_hash(files)?;
+    let project_hash = compile_project_hash(layout_hash, &functions);
+    let entrypoints = workshop_entrypoints(files)?;
+    let (reload, reason) = reload_from_previous(project_hash, layout_hash, previous);
 
-    Ok(AndroidWorkshopCompilePlan {
+    Ok(WorkshopCompilePlan {
         status: compile.status,
         reload,
         reason,
@@ -970,29 +970,24 @@ pub fn build_android_workshop_compile_plan(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AndroidWorkshopArtifactSet {
+pub struct WorkshopArtifactSet {
     pub manifest_path: String,
     pub manifest: String,
     pub runtime_state_path: String,
     pub runtime_state: Option<String>,
-    pub function_artifacts: Vec<AndroidWorkshopFunctionArtifact>,
+    pub function_artifacts: Vec<WorkshopFunctionArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AndroidWorkshopFunctionArtifact {
+pub struct WorkshopFunctionArtifact {
     pub path: String,
     pub source: String,
 }
 
-pub fn render_android_workshop_artifacts(
-    plan: &AndroidWorkshopCompilePlan,
-) -> AndroidWorkshopArtifactSet {
+pub fn render_workshop_artifacts(plan: &WorkshopCompilePlan) -> WorkshopArtifactSet {
     let mut manifest = String::new();
     manifest.push_str("status=CompilePlanned\n");
-    manifest.push_str(&format!(
-        "reload={}\n",
-        android_reload_manifest_name(plan.reload)
-    ));
+    manifest.push_str(&format!("reload={}\n", reload_manifest_name(plan.reload)));
     manifest.push_str(&format!("project_hash={:08x}\n", plan.project_hash as u32));
     manifest.push_str(&format!("layout_hash={:08x}\n", plan.layout_hash as u32));
     manifest.push_str(&format!("functions={}\n", plan.functions.len()));
@@ -1024,20 +1019,18 @@ pub fn render_android_workshop_artifacts(
     }
 
     let runtime_state = match plan.reload {
-        AndroidWorkshopReload::InitialCompile | AndroidWorkshopReload::ResetRequired => {
-            Some(format!(
-                "status=RuntimeStateReady\nproject_hash={:08x}\nreload={}\ntick_count=0\n",
-                plan.project_hash as u32,
-                android_reload_manifest_name(plan.reload)
-            ))
-        }
-        AndroidWorkshopReload::NoChange | AndroidWorkshopReload::FastReload => None,
+        WorkshopReload::InitialCompile | WorkshopReload::ResetRequired => Some(format!(
+            "status=RuntimeStateReady\nproject_hash={:08x}\nreload={}\ntick_count=0\n",
+            plan.project_hash as u32,
+            reload_manifest_name(plan.reload)
+        )),
+        WorkshopReload::NoChange | WorkshopReload::FastReload => None,
     };
 
     let function_artifacts = plan
         .functions
         .iter()
-        .map(|function| AndroidWorkshopFunctionArtifact {
+        .map(|function| WorkshopFunctionArtifact {
             path: function.artifact.clone(),
             source: format!(
                 "status=CompiledStub\nname={}\nowner={}\nfile={}\nsignature={}\nid_hash={:08x}\nsignature_hash={:08x}\nbody_hash={:08x}\n",
@@ -1052,7 +1045,7 @@ pub fn render_android_workshop_artifacts(
         })
         .collect();
 
-    AndroidWorkshopArtifactSet {
+    WorkshopArtifactSet {
         manifest_path: "build/native_compile_manifest.txt".to_string(),
         manifest,
         runtime_state_path: "build/runtime_state.txt".to_string(),
@@ -1061,15 +1054,15 @@ pub fn render_android_workshop_artifacts(
     }
 }
 
-fn android_reload_manifest_name(reload: AndroidWorkshopReload) -> &'static str {
+fn reload_manifest_name(reload: WorkshopReload) -> &'static str {
     match reload {
-        AndroidWorkshopReload::InitialCompile => "InitialCompile",
-        AndroidWorkshopReload::NoChange => "NoChange",
-        AndroidWorkshopReload::FastReload => "FastReload",
-        AndroidWorkshopReload::ResetRequired => "ResetRequired",
+        WorkshopReload::InitialCompile => "InitialCompile",
+        WorkshopReload::NoChange => "NoChange",
+        WorkshopReload::FastReload => "FastReload",
+        WorkshopReload::ResetRequired => "ResetRequired",
     }
 }
-fn android_symbol_for_compiler_function<'a>(
+fn symbol_for_compiler_function<'a>(
     symbols: &'a BTreeMap<(String, usize), WorkshopSymbol>,
     compiler_file: &str,
     ordinal: usize,
@@ -1088,40 +1081,40 @@ fn android_symbol_for_compiler_function<'a>(
         }
     })
 }
-fn android_reload_from_previous(
+fn reload_from_previous(
     project_hash: i32,
     layout_hash: i32,
-    previous: Option<&AndroidWorkshopCompilePlan>,
-) -> (AndroidWorkshopReload, String) {
+    previous: Option<&WorkshopCompilePlan>,
+) -> (WorkshopReload, String) {
     let Some(previous) = previous else {
         return (
-            AndroidWorkshopReload::InitialCompile,
-            "No previous Android compile plan was available.".to_string(),
+            WorkshopReload::InitialCompile,
+            "No previous workshop compile plan was available.".to_string(),
         );
     };
     if previous.project_hash == project_hash {
         return (
-            AndroidWorkshopReload::NoChange,
+            WorkshopReload::NoChange,
             "Compiler-owned project hash is unchanged.".to_string(),
         );
     }
     if previous.layout_hash != layout_hash {
         return (
-            AndroidWorkshopReload::ResetRequired,
-            "Compiler layout hash changed; Android runtime state must be rebuilt.".to_string(),
+            WorkshopReload::ResetRequired,
+            "Compiler layout hash changed; runtime state must be rebuilt.".to_string(),
         );
     }
     (
-        AndroidWorkshopReload::FastReload,
+        WorkshopReload::FastReload,
         "Compiler layout hash is unchanged and reachable function code changed.".to_string(),
     )
 }
 
-fn android_workshop_layout_hash(files: &[WorkshopSourceFile]) -> Result<i32, String> {
-    Ok(android_stable_text_hash(&layout_fingerprint(files)?))
+fn workshop_layout_hash(files: &[WorkshopSourceFile]) -> Result<i32, String> {
+    Ok(stable_text_hash(&layout_fingerprint(files)?))
 }
 
-fn android_stable_text_hash(value: &str) -> i32 {
+fn stable_text_hash(value: &str) -> i32 {
     let mut hash = 2_166_136_261u32;
     for byte in value.as_bytes() {
         hash ^= u32::from(*byte);
@@ -1129,10 +1122,7 @@ fn android_stable_text_hash(value: &str) -> i32 {
     }
     hash as i32
 }
-fn android_compile_project_hash(
-    layout_hash: i32,
-    functions: &[AndroidWorkshopFunctionPlan],
-) -> i32 {
+fn compile_project_hash(layout_hash: i32, functions: &[WorkshopFunctionPlan]) -> i32 {
     let mut hash = layout_hash
         .wrapping_mul(16_777_619)
         .wrapping_add(2_166_136_261u32 as i32);
@@ -1144,7 +1134,7 @@ fn android_compile_project_hash(
     hash
 }
 
-fn android_workshop_entrypoints(files: &[WorkshopSourceFile]) -> Result<Vec<String>, String> {
+fn workshop_entrypoints(files: &[WorkshopSourceFile]) -> Result<Vec<String>, String> {
     let mut entrypoints = Vec::new();
     let functions = workshop_function_symbols_by_path_and_ordinal(files)?;
     for symbol in functions.values() {
@@ -1758,7 +1748,7 @@ mod ai_tests {
         let request = AiCodeRequest {
             user_prompt: "Make the player jump higher but prevent repeated jumps.".to_string(),
             selected_symbols: vec![selected_symbol_from_workshop_symbol(&symbol)],
-            stasis_style_rules: StasisStyleRules::android_default(),
+            stasis_style_rules: StasisStyleRules::workshop_default(),
         };
 
         let json = serde_json::to_string(&request).expect("serialize request");
@@ -2246,7 +2236,7 @@ mod placement_tests {
 }
 
 #[cfg(test)]
-mod android_compile_plan_tests {
+mod workshop_compile_plan_tests {
     use super::*;
     use crate::IncrementalCompilerHost;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2256,7 +2246,7 @@ mod android_compile_plan_tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("stasis_android_plan_{name}_{stamp}"));
+        let root = std::env::temp_dir().join(format!("stasis_workshop_plan_{name}_{stamp}"));
         fs::create_dir_all(root.join("src")).expect("create temp project");
         root
     }
@@ -2271,7 +2261,7 @@ mod android_compile_plan_tests {
     }
 
     #[test]
-    fn android_compile_plan_uses_incremental_compiler_metrics() {
+    fn workshop_compile_plan_uses_incremental_compiler_metrics() {
         let root = temp_project("initial");
         let main = write_project_file(
             &root,
@@ -2288,9 +2278,9 @@ mod android_compile_plan_tests {
             .compile_changed_files(std::slice::from_ref(&main))
             .expect("compile");
 
-        let plan = build_android_workshop_compile_plan(&files, &compile, None).expect("plan");
+        let plan = build_workshop_compile_plan(&files, &compile, None).expect("plan");
         assert_eq!(plan.status, 0);
-        assert_eq!(plan.reload, AndroidWorkshopReload::InitialCompile);
+        assert_eq!(plan.reload, WorkshopReload::InitialCompile);
         assert!(plan.entrypoints.contains(&"main".to_string()));
         assert!(plan.entrypoints.contains(&"tick".to_string()));
         assert!(plan.functions.iter().any(|function| {
@@ -2307,7 +2297,7 @@ mod android_compile_plan_tests {
     }
 
     #[test]
-    fn android_compile_plan_classifies_compiler_fast_reload_and_reset() {
+    fn workshop_compile_plan_classifies_compiler_fast_reload_and_reset() {
         let root = temp_project("reload");
         let main = write_project_file(
             &root,
@@ -2324,8 +2314,8 @@ mod android_compile_plan_tests {
             .expect("first compile");
         let first_files =
             load_workshop_project(&root, Path::new("src/main.stasis")).expect("load first");
-        let first_plan = build_android_workshop_compile_plan(&first_files, &first_compile, None)
-            .expect("first plan");
+        let first_plan =
+            build_workshop_compile_plan(&first_files, &first_compile, None).expect("first plan");
 
         fs::write(
             &main,
@@ -2340,11 +2330,10 @@ mod android_compile_plan_tests {
             .expect("body compile");
         let body_files =
             load_workshop_project(&root, Path::new("src/main.stasis")).expect("load body");
-        let body_plan =
-            build_android_workshop_compile_plan(&body_files, &body_compile, Some(&first_plan))
-                .expect("body plan");
-        assert_eq!(body_plan.reload, AndroidWorkshopReload::FastReload);
-        let body_artifacts = render_android_workshop_artifacts(&body_plan);
+        let body_plan = build_workshop_compile_plan(&body_files, &body_compile, Some(&first_plan))
+            .expect("body plan");
+        assert_eq!(body_plan.reload, WorkshopReload::FastReload);
+        let body_artifacts = render_workshop_artifacts(&body_plan);
         assert!(body_artifacts.runtime_state.is_none());
         assert!(body_artifacts.manifest.contains("reload=FastReload\n"));
 
@@ -2362,11 +2351,11 @@ mod android_compile_plan_tests {
         let layout_files =
             load_workshop_project(&root, Path::new("src/main.stasis")).expect("load layout");
         let layout_plan =
-            build_android_workshop_compile_plan(&layout_files, &layout_compile, Some(&body_plan))
+            build_workshop_compile_plan(&layout_files, &layout_compile, Some(&body_plan))
                 .expect("layout plan");
-        assert_eq!(layout_plan.reload, AndroidWorkshopReload::ResetRequired);
+        assert_eq!(layout_plan.reload, WorkshopReload::ResetRequired);
         assert!(layout_plan.reason.contains("layout hash changed"));
-        let layout_artifacts = render_android_workshop_artifacts(&layout_plan);
+        let layout_artifacts = render_workshop_artifacts(&layout_plan);
         assert!(layout_artifacts
             .runtime_state
             .as_deref()

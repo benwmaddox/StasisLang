@@ -1318,6 +1318,23 @@ mod tests {
     }
 
     #[test]
+    fn local_runtime_helper_trampolines_emit_only_referenced_helpers() {
+        crate::backend::emit::reset_runtime_helper_trampoline_count_for_test();
+        let mut process = JitProcess::new();
+        process.set_local_runtime_helper_trampolines(true);
+        process.upsert_file(
+            "sample.stasis",
+            "global State { value: i32; }\nfunction main(): i32 { State.value = 7; return State.value; }\n",
+        );
+        process.compile().expect("jit compile");
+        assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 7);
+        assert_eq!(
+            crate::backend::emit::runtime_helper_trampoline_count_for_test(),
+            2
+        );
+    }
+
+    #[test]
     fn jit_process_rejects_non_literal_i32_return() {
         let mut process = JitProcess::new();
         process.upsert_file(

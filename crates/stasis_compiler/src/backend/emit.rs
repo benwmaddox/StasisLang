@@ -16,8 +16,23 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(test)]
+static RUNTIME_HELPER_TRAMPOLINES_DEFINED: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_runtime_helper_trampoline_count_for_test() {
+    RUNTIME_HELPER_TRAMPOLINES_DEFINED.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_helper_trampoline_count_for_test() -> usize {
+    RUNTIME_HELPER_TRAMPOLINES_DEFINED.load(Ordering::SeqCst)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct CallSignature {
@@ -1661,6 +1676,12 @@ where
         builder.finalize();
     }
 
+    define_referenced_runtime_helper_trampolines(
+        &mut module,
+        runtime_helper_linkage,
+        &context.func,
+    )?;
+
     on_function_built(meta, &context.func);
     finalize(module, function_id, context)
 }
@@ -1694,53 +1715,116 @@ pub(crate) fn declare_runtime_helper(
             .declare_function(symbol, Linkage::Import, &signature)
             .map_err(|error| format!("failed to declare JIT import {symbol}: {error}")),
         RuntimeHelperLinkage::LocalTrampolines(addresses) => {
-            let address = addresses
-                .get(symbol)
-                .copied()
-                .ok_or_else(|| format!("missing runtime helper address for {symbol}"))?;
+            if !addresses.contains_key(symbol) {
+                return Err(format!("missing runtime helper address for {symbol}"));
+            }
             let local_symbol = format!("__stasis_runtime_helper_{symbol}");
-            let func_id = module
+            module
                 .declare_function(&local_symbol, Linkage::Local, &signature)
                 .map_err(|error| {
                     format!("failed to declare runtime helper trampoline {symbol}: {error}")
-                })?;
-            let pointer_type = module.target_config().pointer_type();
-            let pointer_bits = pointer_type.bits();
-            if pointer_bits < usize::BITS && address > u32::MAX as usize {
-                return Err(format!(
-                    "runtime helper address for {symbol} does not fit target pointer type"
-                ));
-            }
-            let mut context = module.make_context();
-            context.func.signature = signature.clone();
-            let mut builder_context = FunctionBuilderContext::new();
-            {
-                let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
-                let entry = builder.create_block();
-                for param in &signature.params {
-                    builder.append_block_param(entry, param.value_type);
-                }
-                builder.switch_to_block(entry);
-                builder.seal_block(entry);
-                let args = builder.block_params(entry).to_vec();
-                let address_value = builder.ins().iconst(pointer_type, address as i64);
-                let signature_ref = builder.func.import_signature(signature);
-                let call = builder
-                    .ins()
-                    .call_indirect(signature_ref, address_value, &args);
-                let results = builder.inst_results(call).to_vec();
-                builder.ins().return_(&results);
-                builder.finalize();
-            }
-            module
-                .define_function(func_id, &mut context)
-                .map_err(|error| {
-                    format!("failed to define runtime helper trampoline {symbol}: {error}")
-                })?;
-            module.clear_context(&mut context);
-            Ok(func_id)
+                })
         }
     }
+}
+
+fn define_referenced_runtime_helper_trampolines(
+    module: &mut impl Module,
+    linkage: RuntimeHelperLinkage<'_>,
+    function: &cranelift_codegen::ir::Function,
+) -> Result<(), String> {
+    let RuntimeHelperLinkage::LocalTrampolines(addresses) = linkage else {
+        return Ok(());
+    };
+    let mut referenced = BTreeSet::new();
+    for block in function.layout.blocks() {
+        for instruction in function.layout.block_insts(block) {
+            let cranelift_codegen::ir::InstructionData::Call { func_ref, .. } =
+                &function.dfg.insts[instruction]
+            else {
+                continue;
+            };
+            let cranelift_codegen::ir::ExternalName::User(name_ref) =
+                &function.dfg.ext_funcs[*func_ref].name
+            else {
+                continue;
+            };
+            let name = &function.params.user_named_funcs()[*name_ref];
+            if name.namespace == 0 {
+                referenced.insert(FuncId::from_u32(name.index));
+            }
+        }
+    }
+
+    let mut trampolines = Vec::new();
+    for func_id in referenced {
+        let declaration = module.declarations().get_function_decl(func_id);
+        let Some(symbol) = declaration
+            .name
+            .as_deref()
+            .and_then(|name| name.strip_prefix("__stasis_runtime_helper_"))
+        else {
+            continue;
+        };
+        let address = addresses
+            .get(symbol)
+            .copied()
+            .ok_or_else(|| format!("missing runtime helper address for {symbol}"))?;
+        trampolines.push((
+            func_id,
+            symbol.to_string(),
+            declaration.signature.clone(),
+            address,
+        ));
+    }
+    for (func_id, symbol, signature, address) in trampolines {
+        define_runtime_helper_trampoline(module, func_id, &symbol, signature, address)?;
+    }
+    Ok(())
+}
+
+fn define_runtime_helper_trampoline(
+    module: &mut impl Module,
+    func_id: FuncId,
+    symbol: &str,
+    signature: cranelift_codegen::ir::Signature,
+    address: usize,
+) -> Result<(), String> {
+    let pointer_type = module.target_config().pointer_type();
+    let pointer_bits = pointer_type.bits();
+    if pointer_bits < usize::BITS && address > u32::MAX as usize {
+        return Err(format!(
+            "runtime helper address for {symbol} does not fit target pointer type"
+        ));
+    }
+    let mut context = module.make_context();
+    context.func.signature = signature.clone();
+    let mut builder_context = FunctionBuilderContext::new();
+    {
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let entry = builder.create_block();
+        for param in &signature.params {
+            builder.append_block_param(entry, param.value_type);
+        }
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
+        let args = builder.block_params(entry).to_vec();
+        let address_value = builder.ins().iconst(pointer_type, address as i64);
+        let signature_ref = builder.func.import_signature(signature);
+        let call = builder
+            .ins()
+            .call_indirect(signature_ref, address_value, &args);
+        let results = builder.inst_results(call).to_vec();
+        builder.ins().return_(&results);
+        builder.finalize();
+    }
+    module
+        .define_function(func_id, &mut context)
+        .map_err(|error| format!("failed to define runtime helper trampoline {symbol}: {error}"))?;
+    module.clear_context(&mut context);
+    #[cfg(test)]
+    RUNTIME_HELPER_TRAMPOLINES_DEFINED.fetch_add(1, Ordering::SeqCst);
+    Ok(())
 }
 pub(crate) fn declare_i32_call_import(
     module: &mut impl Module,

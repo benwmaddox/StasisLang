@@ -21,7 +21,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 final class WorkshopProjectRegistry {
-    static final int FORMAT_VERSION = 1;
+    static final int FORMAT_VERSION = WorkshopProjectFormatPolicy.CURRENT_VERSION;
     static final String LEGACY_PROJECT_DIR = "workshop_project";
     private static final String PROJECTS_DIR = "workshop_projects";
     static final String METADATA_FILE = ".stasis-workshop.json";
@@ -30,7 +30,8 @@ final class WorkshopProjectRegistry {
 
     private WorkshopProjectRegistry() {}
 
-    static ProjectInfo initialize(Context context) throws Exception {
+    static ProjectInfo initialize(Context context, String defaultTemplateId) throws Exception {
+        WorkshopTemplateCatalog.require(defaultTemplateId);
         File legacyRoot = new File(context.getFilesDir(), LEGACY_PROJECT_DIR);
         if (!legacyRoot.isDirectory() && !legacyRoot.mkdirs()) {
             throw new IllegalStateException("unable to create legacy project directory");
@@ -38,7 +39,8 @@ final class WorkshopProjectRegistry {
         File legacyMetadata = new File(legacyRoot, METADATA_FILE);
         if (!legacyMetadata.isFile()) {
             writeMetadata(legacyRoot, new ProjectInfo(
-                    "bundled-workshop", "Bundled Workshop", "sample", LEGACY_PROJECT_DIR, legacyRoot));
+                    "bundled-workshop", "Bundled Workshop", "sample", defaultTemplateId,
+                    LEGACY_PROJECT_DIR, legacyRoot));
         }
         String activeDirectory = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(PREF_ACTIVE_PROJECT, LEGACY_PROJECT_DIR);
@@ -70,15 +72,17 @@ final class WorkshopProjectRegistry {
         return projects;
     }
 
-    static ProjectInfo createFromSample(Context context, String requestedName) throws Exception {
-        return createProject(context, requestedName, "sample");
+    static ProjectInfo createFromTemplate(Context context, String requestedName, String templateId) throws Exception {
+        WorkshopTemplateCatalog.require(templateId);
+        return createProject(context, requestedName, "sample", templateId);
     }
 
     static ProjectInfo createForImport(Context context, String requestedName) throws Exception {
-        return createProject(context, requestedName, "import");
+        return createProject(context, requestedName, "import", "");
     }
 
-    private static ProjectInfo createProject(Context context, String requestedName, String origin) throws Exception {
+    private static ProjectInfo createProject(Context context, String requestedName, String origin,
+            String templateId) throws Exception {
         String name = requestedName == null ? "" : requestedName.trim();
         validateRequestedName(name);
         File projectsRoot = new File(context.getFilesDir(), PROJECTS_DIR);
@@ -90,7 +94,8 @@ final class WorkshopProjectRegistry {
         for (int suffix = 2; root.exists(); suffix += 1) root = new File(projectsRoot, base + "-" + suffix);
         if (!root.mkdirs()) throw new IllegalStateException("unable to create project directory");
         String relativeDirectory = PROJECTS_DIR + "/" + root.getName();
-        ProjectInfo project = new ProjectInfo(UUID.randomUUID().toString(), name, origin, relativeDirectory, root);
+        ProjectInfo project = new ProjectInfo(UUID.randomUUID().toString(), name, origin, templateId,
+                relativeDirectory, root);
         try {
             writeMetadata(root, project);
         } catch (Exception error) {
@@ -138,7 +143,10 @@ final class WorkshopProjectRegistry {
         validateProjectRoot(context, root);
         JSONObject json = new JSONObject(readFile(new File(root, METADATA_FILE)));
         int version = json.optInt("format_version", 0);
-        if (version != FORMAT_VERSION) throw new IllegalStateException("unsupported project format version " + version);
+        if (!WorkshopProjectFormatPolicy.supported(version)) {
+            throw new IllegalStateException("unsupported project format version " + version
+                    + "; update the Workshop before opening this project");
+        }
         String id = json.optString("id", "").trim();
         String name = json.optString("name", "").trim();
         boolean originMissing = !json.has("origin");
@@ -146,20 +154,64 @@ final class WorkshopProjectRegistry {
         if (id.isEmpty() || name.isEmpty()) throw new IllegalStateException("project metadata needs id and name");
         if (!id.matches("[A-Za-z0-9][A-Za-z0-9-]{0,79}")) throw new IllegalStateException("project metadata id is invalid");
         if (!"sample".equals(origin) && !"import".equals(origin)) throw new IllegalStateException("project metadata origin is invalid");
-        ProjectInfo project = new ProjectInfo(id, name, origin, directoryName, root);
-        if (originMissing) replaceMetadata(root, project);
+        String templateId = WorkshopProjectFormatPolicy.templateId(
+                version, origin, json.optString("template_id", ""));
+        if (version >= 2
+                && !"stasis-workshop-project".equals(json.optString("schema", ""))) {
+            throw new IllegalStateException("project metadata schema is invalid");
+        }
+        if (version >= 2 && originMissing) {
+            throw new IllegalStateException("project metadata origin is missing");
+        }
+        if ("sample".equals(origin) && !WorkshopTemplateCatalog.isKnown(templateId)) {
+            throw new IllegalStateException("project template is missing or unknown: " + templateId);
+        }
+        ProjectInfo project = new ProjectInfo(id, name, origin, templateId, directoryName, root);
+        if (version < FORMAT_VERSION) migrateLegacyMetadata(root, project, version);
         return project;
     }
 
     private static void writeMetadata(File root, ProjectInfo project) throws Exception {
         File target = new File(root, METADATA_FILE);
         if (target.exists()) throw new IllegalStateException("project metadata already exists");
-        writeMetadataTemporary(root, project, target);
+        writeMetadataTemporary(root, project, target, 0);
     }
 
-    private static void replaceMetadata(File root, ProjectInfo project) throws Exception {
+    static void deleteProject(Context context, ProjectInfo project) throws Exception {
+        validateProjectRoot(context, project.root);
+        if (LEGACY_PROJECT_DIR.equals(project.directoryName)) {
+            throw new IllegalArgumentException("bundled project cannot be deleted");
+        }
+        String activeDirectory = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(PREF_ACTIVE_PROJECT, LEGACY_PROJECT_DIR);
+        if (project.directoryName.equals(activeDirectory)) {
+            throw new IllegalStateException("switch away from a project before deleting it");
+        }
+        deleteTree(project.root);
+        if (project.root.exists()) throw new IllegalStateException("project directory deletion did not complete");
+    }
+
+    private static void migrateLegacyMetadata(File root, ProjectInfo project, int sourceVersion) throws Exception {
+        File source = new File(root, METADATA_FILE);
+        File backup = new File(root, WorkshopProjectFormatPolicy.backupFileName(sourceVersion));
+        try {
+            if (!backup.isFile()) writeSyncedFile(backup, readFile(source));
+            replaceMetadata(root, project, sourceVersion);
+            JSONObject migrated = new JSONObject(readFile(source));
+            if (migrated.optInt("format_version", 0) != FORMAT_VERSION
+                    || !project.id.equals(migrated.optString("id", ""))
+                    || !project.templateId.equals(migrated.optString("template_id", ""))) {
+                throw new IllegalStateException("migrated metadata verification failed");
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException("project v" + sourceVersion
+                    + " migration failed; the fsynced v" + sourceVersion + " backup was preserved", error);
+        }
+    }
+
+    private static void replaceMetadata(File root, ProjectInfo project, int migratedFromVersion) throws Exception {
         File target = new File(root, METADATA_FILE);
-        File temporary = writeMetadataTemporary(root, project, null);
+        File temporary = writeMetadataTemporary(root, project, null, migratedFromVersion);
         try {
             Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (AtomicMoveNotSupportedException unsupported) {
@@ -167,12 +219,16 @@ final class WorkshopProjectRegistry {
         }
     }
 
-    private static File writeMetadataTemporary(File root, ProjectInfo project, File publishTarget) throws Exception {
+    private static File writeMetadataTemporary(File root, ProjectInfo project, File publishTarget,
+            int migratedFromVersion) throws Exception {
         JSONObject json = new JSONObject()
                 .put("format_version", FORMAT_VERSION)
+                .put("schema", "stasis-workshop-project")
                 .put("id", project.id)
                 .put("name", project.name)
-                .put("origin", project.origin);
+                .put("origin", project.origin)
+                .put("template_id", project.templateId)
+                .put("migrated_from_version", migratedFromVersion);
         File temporary = new File(root, METADATA_FILE + ".tmp");
         FileOutputStream output = new FileOutputStream(temporary);
         try {
@@ -187,6 +243,22 @@ final class WorkshopProjectRegistry {
             throw new IllegalStateException("unable to publish project metadata");
         }
         return publishTarget;
+    }
+
+    private static void writeSyncedFile(File file, String source) throws Exception {
+        File temporary = new File(file.getParentFile(), file.getName() + ".tmp");
+        FileOutputStream output = new FileOutputStream(temporary);
+        try {
+            output.write(source.getBytes(StandardCharsets.UTF_8));
+            output.getFD().sync();
+        } finally {
+            output.close();
+        }
+        try {
+            Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException unsupported) {
+            Files.move(temporary.toPath(), file.toPath());
+        }
     }
 
     private static void validateProjectRoot(Context context, File root) throws Exception {
@@ -246,13 +318,15 @@ final class WorkshopProjectRegistry {
         final String id;
         final String name;
         final String origin;
+        final String templateId;
         final String directoryName;
         final File root;
 
-        ProjectInfo(String id, String name, String origin, String directoryName, File root) {
+        ProjectInfo(String id, String name, String origin, String templateId, String directoryName, File root) {
             this.id = id;
             this.name = name;
             this.origin = origin;
+            this.templateId = templateId;
             this.directoryName = directoryName;
             this.root = root;
         }

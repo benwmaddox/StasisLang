@@ -1,0 +1,2 @@
+// Lesson map: capacities, MOVE_SPEED, PICKUP_RADIUS, and HUD_HEIGHT currently live in main.stasis.
+// They move here when every shared host resolves project-relative imports identically.

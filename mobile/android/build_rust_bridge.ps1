@@ -38,6 +38,7 @@ if (-not (Test-Path $linker)) {
 }
 
 $installedTargets = & rustup target list --installed
+if ($LASTEXITCODE -ne 0) { throw "rustup target discovery failed with exit code $LASTEXITCODE" }
 if ($installedTargets -notcontains "aarch64-linux-android") {
     throw "Rust target aarch64-linux-android is not installed. Run: rustup target add aarch64-linux-android"
 }
@@ -54,6 +55,7 @@ if ($Release) {
 Push-Location $repoRoot
 try {
     cargo build -p stasis_android_bridge --target aarch64-linux-android @profileArgs
+    if ($LASTEXITCODE -ne 0) { throw "Rust Android bridge build failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
 }
