@@ -403,8 +403,9 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress (device interruption validation deferred)`
 #### AW47 - Android Project Import, Export, and Switching
 - Scope: Support multiple normal Stasis projects, import/export archives, project metadata, and explicit project switching.
+- Progress: A versioned app-private registry now adopts the existing `workshop_project` without moving or replacing it, writes fsynced `.stasis-workshop.json` metadata with stable project IDs, confines roots to registered app-private directories, and persists the active project. Collapsed project controls create a named project from the bundled sample and explicitly switch projects; switching is blocked during AI/GitHub work or a pending source edit, refreshes symbols/history/sync state, and compiles the new root. Reset preserves registry metadata. GitHub repository/branch settings, review branches, reviewed fingerprints, and retry state are scoped by project ID while the encrypted token remains shared. Archive import/export and non-sample project baselines remain.
 - Done gate: A user can open, back up, restore, and switch projects while retaining symbol editing, tests, and compile behavior.
-- Status: `planned`
+- Status: `in progress`
 #### AW48 - Android Preview and Touch Gameplay Parity
 - Scope: Replace placeholder preview assumptions with a renderer/runtime contract that displays real game output and supports touch-first sample gameplay.
 - Done gate: A representative Stasis game renders and is playable on a phone using touch input through the same runtime used by the workshop.
