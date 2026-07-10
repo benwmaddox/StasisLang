@@ -648,6 +648,9 @@ def main() -> int:
     assert "Input.touch_x + GameState.camera_x" in exploration_main
     assert "WORLD_WIDTH: i32 = 720" in exploration_main
     assert "test `camera follow is deterministic and bounded`(): bool" in exploration_tests
+    assert "test `spawn capacity rejects player occupied and out of range slots`(): bool" in exploration_tests
+    assert "test `overlapping collectibles resolve in ascending entity order`(): bool" in exploration_tests
+    assert "last_collected_entity_id" in exploration_main
     assert "entity_alive: i32[8]" in exploration_main
     assert "Lesson map:" in exploration_components
     assert "test `new touch edge sets one clamped destination`(): bool" in exploration_tests
