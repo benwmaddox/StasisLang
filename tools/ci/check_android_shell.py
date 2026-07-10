@@ -290,6 +290,14 @@ def main() -> int:
     assert "recoverInterrupted" in ai_queue
     assert "cancelPending" in ai_queue
     assert "AiQueuePolicy.canTransition" in ai_queue
+    assert "loadPreview" in ai_queue
+    assert 'MAX_PREVIEW_BYTES = 12 * 1024 * 1024' in ai_queue
+    assert 'MessageDigest.getInstance("SHA-256")' in ai_queue
+    assert "writeSyncedAtomic(savedPreview, previewPng)" in ai_queue
+    assert "deletePreview(context, entry)" in ai_queue
+    assert "pruneOrphanPreviews" in ai_queue
+    assert "encodeBitmapPng" in activity
+    assert "queuedEntry.previewFile" in activity
     assert "nextPendingIndex" in ai_queue_policy
     assert "AI Settings" in activity
     assert "aiSettingsBody.setVisibility(View.GONE)" in activity

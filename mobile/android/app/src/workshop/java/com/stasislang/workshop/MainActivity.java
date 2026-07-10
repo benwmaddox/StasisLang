@@ -2227,18 +2227,19 @@ public final class MainActivity extends Activity {
             setStatusText("AI queue needs a request");
             return;
         }
-        if (attachPreviewPixels) {
-            setStatusText("Captured preview pixels cannot wait in the queue yet; remove them or wait for the active item");
-            return;
-        }
         try {
             List<WorkshopImageAssets.AssetInfo> images = selectedAiImageInfos();
             JSONArray metadata = aiImageMetadata(images);
             JSONObject logical = attachPreviewLogicalSnapshot && pendingPreviewLogicalSnapshot != null
                     ? new JSONObject(pendingPreviewLogicalSnapshot.toString()) : null;
             boolean imageGeneration = allowAiImageGeneration != null && allowAiImageGeneration.isChecked();
+            Bitmap preview = attachPreviewPixels ? pendingPreviewScreenshot : null;
+            if (attachPreviewPixels && preview == null) throw new IOException("selected preview pixels are unavailable");
+            if (preview != null && preview.isRecycled()) throw new IOException("selected preview pixels are unavailable");
+            byte[] previewPng = preview == null ? null : encodeBitmapPng(preview);
             AndroidAiQueue.enqueue(this, activeRecoveryProjectId(), source, prompt, metadata, logical,
-                    imageGeneration);
+                    imageGeneration, previewPng, preview == null ? 0 : preview.getWidth(),
+                    preview == null ? 0 : preview.getHeight());
             recordCommandHistory(prompt);
             if (imageGeneration) allowAiImageGeneration.setChecked(false);
             refreshAiQueue();
@@ -3432,14 +3433,25 @@ public final class MainActivity extends Activity {
             requestImageInfos = queuedEntry == null ? selectedAiImageInfos() : aiImageInfosForQueueEntry(queuedEntry);
             requestImageMetadata = queuedEntry == null ? aiImageMetadata(requestImageInfos)
                     : new JSONArray(queuedEntry.imageAttachments.toString());
-            if (queuedEntry == null && attachPreviewPixels) {
-                if (pendingPreviewScreenshot == null || pendingPreviewScreenshot.isRecycled()) {
-                    throw new IOException("selected preview pixels are no longer available");
-                }
+            boolean includePreview = queuedEntry == null ? attachPreviewPixels : !queuedEntry.previewFile.isEmpty();
+            if (includePreview) {
                 if (requestImageInfos.size() >= MAX_AI_IMAGE_ATTACHMENTS) {
                     throw new IOException("preview plus project images exceed the four-image request limit");
                 }
-                requestPreviewPixels = pendingPreviewScreenshot.copy(Bitmap.Config.ARGB_8888, false);
+                if (queuedEntry == null) {
+                    if (pendingPreviewScreenshot == null || pendingPreviewScreenshot.isRecycled()) {
+                        throw new IOException("selected preview pixels are no longer available");
+                    }
+                    requestPreviewPixels = pendingPreviewScreenshot.copy(Bitmap.Config.ARGB_8888, false);
+                } else {
+                    byte[] previewBytes = AndroidAiQueue.loadPreview(this, queuedEntry);
+                    requestPreviewPixels = android.graphics.BitmapFactory.decodeByteArray(
+                            previewBytes, 0, previewBytes.length);
+                    if (requestPreviewPixels == null || requestPreviewPixels.getWidth() != queuedEntry.previewWidth
+                            || requestPreviewPixels.getHeight() != queuedEntry.previewHeight) {
+                        throw new IOException("queued preview pixels failed decode or dimensions");
+                    }
+                }
                 requestImageMetadata.put(new JSONObject()
                         .put("kind", "captured_preview_pixels")
                         .put("width", requestPreviewPixels.getWidth())
@@ -3475,7 +3487,10 @@ public final class MainActivity extends Activity {
         try {
             if (queuedEntry == null) {
                 AndroidAiQueue.Entry submitted = AndroidAiQueue.enqueue(this, activeRecoveryProjectId(), queueSource, prompt,
-                        requestImageMetadata, requestLogicalSnapshot, requestImageGeneration);
+                        requestImageMetadata, requestLogicalSnapshot, requestImageGeneration,
+                        requestPreviewPixels == null ? null : encodeBitmapPng(requestPreviewPixels),
+                        requestPreviewPixels == null ? 0 : requestPreviewPixels.getWidth(),
+                        requestPreviewPixels == null ? 0 : requestPreviewPixels.getHeight());
                 activeAiQueueEntry = AndroidAiQueue.claimNext(this, activeRecoveryProjectId());
                 if (activeAiQueueEntry != null && !submitted.id.equals(activeAiQueueEntry.id)) {
                     if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
@@ -5909,6 +5924,14 @@ public final class MainActivity extends Activity {
         } catch (NoSuchAlgorithmException error) {
             throw new IOException("SHA-256 is unavailable", error);
         }
+    }
+
+    private static byte[] encodeBitmapPng(Bitmap bitmap) throws IOException {
+        ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, encoded)) {
+            throw new IOException("could not encode captured preview pixels");
+        }
+        return encoded.toByteArray();
     }
 
     private static List<AiImageAttachment> loadAiImageAttachments(
