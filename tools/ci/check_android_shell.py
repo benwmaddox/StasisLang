@@ -25,6 +25,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopMoney.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -40,6 +42,7 @@ REQUIRED_FILES = [
     "mobile/android/README.md",
     "tools/android_ai_agent_host.py",
     "tools/ci/check_android_published_apk.py",
+    "tests/android/AiQueuePolicyTest.java",
 ]
 
 STASIS_SAMPLE_FILES = [
@@ -170,6 +173,8 @@ def main() -> int:
     assert "target.renameTo(latest)" in audio_assets
     support_bundle = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java")
     crash_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java")
+    ai_queue = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java")
+    ai_queue_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "protected void onPause()" in activity
@@ -272,7 +277,20 @@ def main() -> int:
     assert "hot swap=FastReload" in activity
     assert "aiReloadPhase" in activity
     assert "Chat and Commands" in activity
-    assert "Run AI Change" in activity
+    assert "Queue AI Change" in activity
+    assert "AI Work Queue" in activity
+    assert 'runAiPatch("voice", null)' in activity
+    assert "cancelPendingAiItem" in activity
+    assert "startNextQueuedAiIfIdle" in activity
+    assert 'ROOT = "workshop_ai_queue"' in ai_queue
+    assert 'static final String PENDING = "pending"' in ai_queue
+    assert 'static final String IN_PROGRESS = "in_progress"' in ai_queue
+    assert "writeSyncedAtomic" not in ai_queue or "getFD().sync()" in ai_queue
+    assert "StandardCopyOption.ATOMIC_MOVE" in ai_queue
+    assert "recoverInterrupted" in ai_queue
+    assert "cancelPending" in ai_queue
+    assert "AiQueuePolicy.canTransition" in ai_queue
+    assert "nextPendingIndex" in ai_queue_policy
     assert "AI Settings" in activity
     assert "aiSettingsBody.setVisibility(View.GONE)" in activity
     assert "AI run started: preparing workspace and command context" in activity
@@ -315,7 +333,7 @@ def main() -> int:
     assert "Review Preview Capture" in activity
     assert "Attach these rendered pixels" in activity
     assert "Attach logical render/runtime/input snapshot" in activity
-    assert "Nothing is sent until selected here and Run AI is pressed" in activity
+    assert "Nothing is sent until selected here and Queue AI Change is pressed" in activity
     assert "GLES20.glReadPixels" in activity
     assert "lastDrawnFrame" in activity
     assert "MAX_PREVIEW_CAPTURE_PIXELS = 8_000_000L" in activity
@@ -413,7 +431,7 @@ def main() -> int:
     assert "Close Workshop menu" in activity
     assert "Start voice command recording" in activity
     assert "Stasis source editor for the selected symbol" in activity
-    assert "Run the requested AI change with current reviewed attachments" in activity
+    assert "Queue the requested AI change with current reviewed attachments" in activity
     assert "Cancel the active AI run after its current atomic operation" in activity
     assert "ACCESSIBILITY_LIVE_REGION_POLITE" in activity
     assert "ACCESSIBILITY_LIVE_REGION_ASSERTIVE" in activity
@@ -462,7 +480,7 @@ def main() -> int:
     assert "Cancel AI" in activity
     assert "aiRunActive" in activity
     assert "aiCancelRequested" in activity
-    assert "AI run already active; cancel it before starting another" in activity
+    assert "AI request queued behind the active item" in activity
     assert "throwIfAiCancelled()" in activity
     assert "if (!batchHasWrites) throwIfAiCancelled()" in activity
     assert "finishing any active call or atomic write batch" in activity
@@ -479,7 +497,7 @@ def main() -> int:
     assert "VOICE_RECORD_PERMISSION_REQUEST" in activity
     assert "voiceCancel.setText(\"Cancel\")" in activity
     assert "voiceRunButton.setText(\"Run\")" in activity
-    assert "Voice change confirmed: starting AI run" in activity
+    assert "Voice change confirmed: adding it to the AI queue" in activity
     assert "Voice change cancelled" in activity
     assert "GITHUB_PREF_TOKEN" in activity
     assert "GitHub Sync Settings" in activity

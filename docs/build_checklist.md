@@ -518,10 +518,11 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 
 #### AW66 - Unified Typed and Voice AI Work Queue
 - Scope: Treat every submitted typed or voice command as durable work instead of rejecting submissions while one AI run is active.
+- Progress: Typed `Queue AI Change` and voice `Run` now append versioned, bounded, per-project items to an fsynced atomically replaced queue. Stable UUIDs, source, prompt, creation time, project-image metadata/SHA-256, logical-preview consent, image-generation consent, and states persist. One FIFO worker claims only the active project's pending item; the UI shows the latest items and cancels pending work without a network call. Active cancellation retains the existing atomic write boundary, terminal outcomes advance the queue, startup explicitly fails interrupted active work while preserving pending work, and Privacy erase removes all queue records. Host policy vectors cover transition validity, FIFO/project isolation, source parity, cancellation, and recovery; the Android structural verifier and Java compilation cover integration. Durable captured-preview pixel snapshots, richer terminal detail/retry controls, queue pruning/archival, and device acceptance remain.
 - Deliverable: Both entry paths append a versioned per-project queue item with stable ID, source (`text` or `voice`), submitted prompt snapshot, attachment/consent snapshot, creation time, and state (`pending`, `in_progress`, `completed`, `failed`, or `cancelled`). A single worker claims items FIFO, visibly shows pending and active work, persists transitions atomically, recovers an interrupted active item explicitly, and starts the next eligible item only after the prior compile/test/rollback boundary. Users can cancel any not-yet-started item without an API call; active cancellation retains the existing safe boundary. Project switching never executes another project's item accidentally.
 - Tests: Pure queue transition/recovery tests, FIFO and project isolation, typed/voice parity, pending cancellation with zero network calls, active safe cancellation, attachment snapshot immutability, process-death recovery, structural UI checks, APK build, and device acceptance.
 - Done gate: Multiple text/voice requests can be submitted, inspected, and safely cancelled without losing ordering or hiding paid work.
-- Status: `planned`
+- Status: `in progress`
 
 #### AW67 - Cent-Rounded AI Budget Presentation
 - Scope: Make budget displays readable without weakening precise enforcement.
