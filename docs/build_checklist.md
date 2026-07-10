@@ -536,7 +536,8 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Deliverable: Tapping sets a world destination; a character moves toward it with deterministic fixed-tick motion, collects nearby items, and exposes a small inventory/status display. The project teaches data-oriented design using bounded structure-of-arrays components keyed by stable entity IDs, explicit system passes, deterministic spawn/collection order, render-command extraction, and separated configuration/data/behavior files. Onboarding introduces the architecture incrementally. Pong remains unchanged as a selectable bundled template and regression sample.
 - Tests: `.test.stasis` coverage for target selection, movement convergence/no overshoot, deterministic collection, capacity limits, inventory state, and render extraction; JIT/AOT parity; Android touch integration; template switching; Workshop and published package checks.
 - Done gate: First launch teaches a useful exploration loop, and Pong remains available without conflating either sample with the Workshop product itself.
-- Status: `planned`
+- Progress: `docs/android_exploration_sample_design.md` now fixes the first playable loop, bounded structure-of-arrays columns, stable-ID policy, deterministic system schedule, project/lesson layout, Stasis test matrix, and JIT/AOT/Android/package acceptance boundaries. Implementation and assets remain.
+- Status: `in progress (architecture complete; implementation pending)`
 
 #### AW69 - General Workshop vs Game-Specific Release Build Matrix
 - Scope: Make build identity explicit and prevent Workshop/editor content from leaking into releases.
