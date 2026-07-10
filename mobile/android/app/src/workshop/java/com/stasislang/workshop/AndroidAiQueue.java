@@ -45,7 +45,12 @@ final class AndroidAiQueue {
         }
         JSONObject document = loadDocument(context, projectId);
         JSONArray items = document.getJSONArray("items");
-        if (items.length() >= MAX_ITEMS) throw new IllegalStateException("AI queue has reached its 100-item limit");
+        while (items.length() >= MAX_ITEMS && removeOldestTerminal(items)) {
+            // Never prune pending or active work; one terminal record makes room for this submission.
+        }
+        if (items.length() >= MAX_ITEMS) {
+            throw new IllegalStateException("AI queue has reached its 100 non-terminal item limit");
+        }
         String id = UUID.randomUUID().toString();
         if (previewPng != null && (previewPng.length == 0 || previewPng.length > MAX_PREVIEW_BYTES
                 || previewWidth <= 0 || previewHeight <= 0)) {
@@ -92,6 +97,17 @@ final class AndroidAiQueue {
             }
         }
         return result;
+    }
+
+    private static boolean removeOldestTerminal(JSONArray items) throws Exception {
+        for (int index = 0; index < items.length(); index += 1) {
+            String state = items.getJSONObject(index).optString("state", "");
+            if (AiQueuePolicy.terminal(state)) {
+                items.remove(index);
+                return true;
+            }
+        }
+        return false;
     }
 
     static synchronized byte[] loadPreview(Context context, Entry entry) throws Exception {

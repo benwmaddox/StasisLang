@@ -12,6 +12,10 @@ public final class AiQueuePolicyTest {
         require(AiQueuePolicy.canTransition("in_progress", "completed"), "completion transition");
         require(AiQueuePolicy.canTransition("in_progress", "failed"), "failure transition");
         require(!AiQueuePolicy.canTransition("completed", "pending"), "terminal state immutable");
+        require(AiQueuePolicy.terminal("completed") && AiQueuePolicy.terminal("failed")
+                && AiQueuePolicy.terminal("cancelled"), "terminal records are prune eligible");
+        require(!AiQueuePolicy.terminal("pending") && !AiQueuePolicy.terminal("in_progress"),
+                "paid or pending work is never prune eligible");
         require(AiQueuePolicy.nextPendingIndex("alpha",
                 new String[] { "beta", "alpha", "alpha" },
                 new String[] { "pending", "cancelled", "pending" }) == 2,

@@ -2289,13 +2289,16 @@ public final class MainActivity extends Activity {
                 return;
             }
             int first = Math.max(0, items.size() - 20);
-            for (int index = first; index < items.size(); index += 1) {
+            for (int index = 0; index < items.size(); index += 1) {
                 final AndroidAiQueue.Entry item = items.get(index);
+                if (index < first && !AndroidAiQueue.PENDING.equals(item.state)
+                        && !AndroidAiQueue.IN_PROGRESS.equals(item.state)) continue;
                 LinearLayout row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
                 TextView label = new TextView(this);
                 String prompt = item.prompt.length() > 72 ? item.prompt.substring(0, 69) + "..." : item.prompt;
-                label.setText(item.state.replace('_', ' ') + " · " + item.source + " · " + prompt);
+                String detail = item.detail.isEmpty() ? "" : "\n" + item.detail;
+                label.setText(item.state.replace('_', ' ') + " · " + item.source + " · " + prompt + detail);
                 label.setTextColor(Color.rgb(73, 84, 100));
                 label.setContentDescription("AI queue item " + item.state + " from " + item.source + ": " + item.prompt);
                 row.addView(label, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
