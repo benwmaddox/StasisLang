@@ -13,6 +13,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -97,6 +98,7 @@ def main() -> int:
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
     secret_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java")
     project_registry = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java")
+    project_archive = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "private static native String nativeStatus()" in activity
@@ -239,8 +241,8 @@ def main() -> int:
     assert "New Project From Sample" in activity
     assert "Switch Project" in activity
     assert "projectSettingsBody.setVisibility(View.GONE)" in activity
-    assert "Project switch blocked while AI or GitHub work is active" in activity
-    assert "Project creation blocked while AI or GitHub work is active" in activity
+    assert "Project switch blocked while AI, GitHub, or project I/O is active" in activity
+    assert "Project creation blocked while AI, GitHub, or project I/O is active" in activity
     assert "WorkshopProjectRegistry.setActive(this, project)" in activity
     assert "nativeCompileProject(projectRootPath())" in activity
     assert "githubProjectPreferenceKey" in activity
@@ -258,6 +260,20 @@ def main() -> int:
     assert "output.getFD().sync()" in project_registry
     assert "active project preference commit failed" in project_registry
     assert "unsupported project format version" in project_registry
+    assert "Export Project Archive" in activity
+    assert "Intent.ACTION_CREATE_DOCUMENT" in activity
+    assert 'intent.setType("application/zip")' in activity
+    assert "FLAG_GRANT_WRITE_URI_PERMISSION" in activity
+    assert "projectIoExecutor.submit" in activity
+    assert "projectIoExecutor.shutdownNow()" in activity
+    assert "WorkshopProjectArchive.exportProject" in activity
+    assert "Apply or Reset the pending source edit before export" in activity
+    assert "MAX_FILES = 512" in project_archive
+    assert "MAX_ENTRY_BYTES = 32L * 1024L * 1024L" in project_archive
+    assert "MAX_TOTAL_BYTES = 128L * 1024L * 1024L" in project_archive
+    assert '"build".equals(current.getName())' in project_archive
+    assert "entry.setTime(0L)" in project_archive
+    assert "project file escaped project root" in project_archive
     assert "Manual Symbols and Source" in activity
     assert "manualEditBody.setVisibility(View.GONE)" in activity
     assert "selectedSourcePanel.addView(sourceEditor" in activity
