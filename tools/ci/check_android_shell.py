@@ -289,6 +289,10 @@ def main() -> int:
     assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in activity
     assert "budget=--%" in activity
     assert "debugColorForBudget" in activity
+    assert "appendExplorationProgress(debugTextBuilder)" in activity
+    assert '"GameState.collected_count"' in activity
+    assert '"keepsakes="' in activity
+    assert '"garden complete"' in activity
     assert "private String projectRootPath" in activity
     assert "nativeCompileProject(projectRootPath())" in activity
     assert "String.format" not in activity
