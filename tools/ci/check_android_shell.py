@@ -9,6 +9,7 @@ REQUIRED_FILES = [
     "mobile/android/build_published.ps1",
     "mobile/android/validate_device.ps1",
     "mobile/android/app/build.gradle",
+    "mobile/android/games/pong.gradle",
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
@@ -101,14 +102,21 @@ def main() -> int:
     assert "pidof" in device_script
 
     app_gradle = read("mobile/android/app/build.gradle")
+    pong_descriptor = read("mobile/android/games/pong.gradle")
     assert "flavorDimensions 'mode'" in app_gradle
     assert "workshop {" in app_gradle
     assert "published {" in app_gradle
     assert "applicationId 'com.stasislang.workshop'" in app_gradle
-    assert "applicationId 'com.stasislang.pong'" in app_gradle
-    assert "manifestPlaceholders = [appLabel: 'Stasis Pong']" in app_gradle
-    assert "buildConfigField 'String', 'STASIS_GAME_ID', '\"pong\"'" in app_gradle
-    assert "pongReleaseProjectDir" in app_gradle
+    assert "applicationId publishedGame.applicationId" in app_gradle
+    assert "manifestPlaceholders = [appLabel: publishedGame.label]" in app_gradle
+    assert "publishedGameDescriptorFile" in app_gradle
+    assert "STASIS_RUNTIME_ID" in app_gradle
+    assert "inputs.file(publishedGameDescriptorFile)" in app_gradle
+    assert "publishedGame.projectDirectory.absolutePath" in app_gradle
+    assert "applicationId: 'com.stasislang.pong'" in pong_descriptor
+    assert "label: 'Stasis Pong'" in pong_descriptor
+    assert "runtimeId: 'pong_aot'" in pong_descriptor
+    assert "entrySource: 'src/main.stasis'" in pong_descriptor
     assert "STASIS_PUBLISHED_BUILD" in app_gradle
     assert "abiFilters 'arm64-v8a'" in app_gradle
     assert "externalNativeBuild" in app_gradle
@@ -961,7 +969,7 @@ def main() -> int:
     assert "onDrawFrame" in published_activity
     assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in published_activity
     assert "event.getPointerCount() >= 3" in published_activity
-    assert 'PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_GAME_ID + "_aot"' in published_activity
+    assert "PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID" in published_activity
     assert '"com.stasislang.pong"' in device_script
     assert "ensureBundledProject" not in published_activity
     assert "AssetManager" not in published_activity
