@@ -224,6 +224,7 @@ global original_text_offsets: i32[42];
 global original_text_lengths: i32[42];
 global original_text_cursor: i32;
 global original_label_handles: i32[42];
+global original_label_runs: i32[42];
 global original_digit_handles: i32[10];
 global original_minus_handle: i32;
 
@@ -578,13 +579,54 @@ function original_glyph_row(code: i32, row: i32): i32 {
     return 0;
 }
 
+function original_draw_cached_label(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+    let run: i32 = gfx_cache_text(font, text);
+    draw_text_cached(font, run, original_screen_x(x), original_screen_y(y), r, g, b, a);
+}
+
 function original_draw_label(font: i32, label: i32, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
-    let pixel: f32 = 2.0;
-    if (font == original_state.assets.font_title) { pixel = 3.5; }
-    let count: i32 = original_text_lengths[label];
-    let count_f: f32; count_f.from_i32(count);
-    let alpha: i32; alpha.from_f32(a * 255.0);
-    original_draw_sprite(original_label_handles[label], x, y, count_f * pixel * 4.0 - pixel, pixel * 5.0, alpha);
+    if (label == TXT_WALL) { original_draw_cached_label(font, "WALL", x, y, r, g, b, a); }
+    if (label == TXT_STANDARD) { original_draw_cached_label(font, "STANDARD", x, y, r, g, b, a); }
+    if (label == TXT_RAPID) { original_draw_cached_label(font, "RAPID", x, y, r, g, b, a); }
+    if (label == TXT_HEALER) { original_draw_cached_label(font, "HEALER", x, y, r, g, b, a); }
+    if (label == TXT_SNIPER) { original_draw_cached_label(font, "SNIPER", x, y, r, g, b, a); }
+    if (label == TXT_ROCKET) { original_draw_cached_label(font, "ROCKET", x, y, r, g, b, a); }
+    if (label == TXT_GOLD_MINER) { original_draw_cached_label(font, "GOLD MINER", x, y, r, g, b, a); }
+    if (label == TXT_BASIC_BALL) { original_draw_cached_label(font, "BASIC BALL", x, y, r, g, b, a); }
+    if (label == TXT_FAST_BALL) { original_draw_cached_label(font, "FAST BALL", x, y, r, g, b, a); }
+    if (label == TXT_SLOW_BALL) { original_draw_cached_label(font, "SLOW BALL", x, y, r, g, b, a); }
+    if (label == TXT_CURVE_BALL) { original_draw_cached_label(font, "CURVE BALL", x, y, r, g, b, a); }
+    if (label == TXT_SWARM_BALL) { original_draw_cached_label(font, "SWARM BALL", x, y, r, g, b, a); }
+    if (label == TXT_SPLITTER) { original_draw_cached_label(font, "SPLITTER", x, y, r, g, b, a); }
+    if (label == TXT_FIRE_BALL) { original_draw_cached_label(font, "FIRE BALL", x, y, r, g, b, a); }
+    if (label == TXT_MOVER_BALL) { original_draw_cached_label(font, "MOVER BALL", x, y, r, g, b, a); }
+    if (label == TXT_COST) { original_draw_cached_label(font, "COST", x, y, r, g, b, a); }
+    if (label == TXT_DAMAGE) { original_draw_cached_label(font, "DAMAGE", x, y, r, g, b, a); }
+    if (label == TXT_HEALTH) { original_draw_cached_label(font, "HEALTH", x, y, r, g, b, a); }
+    if (label == TXT_RANGE) { original_draw_cached_label(font, "RANGE", x, y, r, g, b, a); }
+    if (label == TXT_RELOAD) { original_draw_cached_label(font, "RELOAD", x, y, r, g, b, a); }
+    if (label == TXT_LIVES) { original_draw_cached_label(font, "LIVES", x, y, r, g, b, a); }
+    if (label == TXT_GOLD) { original_draw_cached_label(font, "GOLD", x, y, r, g, b, a); }
+    if (label == TXT_NEXT_ENEMY) { original_draw_cached_label(font, "NEXT ENEMY", x, y, r, g, b, a); }
+    if (label == TXT_LEVELS_LEFT) { original_draw_cached_label(font, "LEVELS LEFT", x, y, r, g, b, a); }
+    if (label == TXT_SCORE) { original_draw_cached_label(font, "SCORE", x, y, r, g, b, a); }
+    if (label == TXT_PAUSED) { original_draw_cached_label(font, "PAUSED", x, y, r, g, b, a); }
+    if (label == TXT_BRICKOUT_DEFENSE) { original_draw_cached_label(font, "BRICKOUT DEFENSE", x, y, r, g, b, a); }
+    if (label == TXT_SELECT_OPTION) { original_draw_cached_label(font, "SELECT AN OPTION", x, y, r, g, b, a); }
+    if (label == TXT_CAMPAIGN_TUTORIAL) { original_draw_cached_label(font, "CAMPAIGN / TUTORIAL", x, y, r, g, b, a); }
+    if (label == TXT_CHALLENGE_LEVEL) { original_draw_cached_label(font, "CHALLENGE LEVEL", x, y, r, g, b, a); }
+    if (label == TXT_FORMER_CHALLENGES) { original_draw_cached_label(font, "FORMER CHALLENGES", x, y, r, g, b, a); }
+    if (label == TXT_UPGRADES) { original_draw_cached_label(font, "UPGRADES", x, y, r, g, b, a); }
+    if (label == TXT_SELECT_CAMPAIGN) { original_draw_cached_label(font, "SELECT CAMPAIGN", x, y, r, g, b, a); }
+    if (label == TXT_MARATHON) { original_draw_cached_label(font, "MARATHON", x, y, r, g, b, a); }
+    if (label == TXT_SPLIT_SWARM) { original_draw_cached_label(font, "SPLIT & SWARM", x, y, r, g, b, a); }
+    if (label == TXT_FORMER_RECOVERED) { original_draw_cached_label(font, "FORMER CHALLENGES", x, y, r, g, b, a); }
+    if (label == TXT_EARTHQUAKE) { original_draw_cached_label(font, "EARTHQUAKE", x, y, r, g, b, a); }
+    if (label == TXT_UPGRADE_PLACEHOLDER) { original_draw_cached_label(font, "UPGRADE PLACEHOLDER", x, y, r, g, b, a); }
+    if (label == TXT_TAP_ESC) { original_draw_cached_label(font, "TAP ESC", x, y, r, g, b, a); }
+    if (label == TXT_LEVEL_WON) { original_draw_cached_label(font, "LEVEL WON", x, y, r, g, b, a); }
+    if (label == TXT_LEVEL_LOST) { original_draw_cached_label(font, "LEVEL LOST", x, y, r, g, b, a); }
+    if (label == TXT_TAP_MENU) { original_draw_cached_label(font, "TAP TO MENU", x, y, r, g, b, a); }
 }
 
 function original_tower_asset(kind: OriginalTowerKind): i32 {
@@ -704,8 +746,8 @@ function original_load_assets(): void {
     original_state.assets.projectile_rapid = gfx_load_sprite("assets/original/projectile_rapid.svg", 8, 8);
     original_state.assets.projectile_sniper = gfx_load_sprite("assets/original/projectile_sniper.svg", 8, 8);
     original_state.assets.projectile_rocket = gfx_load_sprite("assets/original/projectile_rocket.svg", 8, 8);
-    original_state.assets.font_small = 1;
-    original_state.assets.font_title = 2;
+    original_state.assets.font_small = load_font("assets/original/estudio.ttf", 14);
+    original_state.assets.font_title = load_font("assets/original/estudio.ttf", 28);
     original_load_animation_assets();
 }
 
@@ -1410,14 +1452,23 @@ function original_handle_keyboard(): void {
 
 function original_draw_digit(digit: i32, x: f32, y: f32, scale: f32, r: f32, g: f32, b: f32): void {
     if (digit < 0 || digit > 9) { return; }
-    original_draw_sprite(original_digit_handles[digit], x, y, 4.5 * scale, 7.5 * scale, 255);
+    if (digit == 0) { original_draw_cached_label(original_state.assets.font_small, "0", x, y, r, g, b, 1.0); }
+    if (digit == 1) { original_draw_cached_label(original_state.assets.font_small, "1", x, y, r, g, b, 1.0); }
+    if (digit == 2) { original_draw_cached_label(original_state.assets.font_small, "2", x, y, r, g, b, 1.0); }
+    if (digit == 3) { original_draw_cached_label(original_state.assets.font_small, "3", x, y, r, g, b, 1.0); }
+    if (digit == 4) { original_draw_cached_label(original_state.assets.font_small, "4", x, y, r, g, b, 1.0); }
+    if (digit == 5) { original_draw_cached_label(original_state.assets.font_small, "5", x, y, r, g, b, 1.0); }
+    if (digit == 6) { original_draw_cached_label(original_state.assets.font_small, "6", x, y, r, g, b, 1.0); }
+    if (digit == 7) { original_draw_cached_label(original_state.assets.font_small, "7", x, y, r, g, b, 1.0); }
+    if (digit == 8) { original_draw_cached_label(original_state.assets.font_small, "8", x, y, r, g, b, 1.0); }
+    if (digit == 9) { original_draw_cached_label(original_state.assets.font_small, "9", x, y, r, g, b, 1.0); }
 }
 
 function original_draw_number(value: i32, x: f32, y: f32, scale: f32, r: f32, g: f32, b: f32): void {
     let n: i32 = value;
     let cursor: f32 = x;
     if (n < 0) {
-        original_draw_sprite(original_minus_handle, cursor, y, 4.5 * scale, 7.5 * scale, 255);
+        original_draw_cached_label(original_state.assets.font_small, "-", cursor, y, r, g, b, 1.0);
         cursor += 6.0 * scale;
         n = 0 - n;
     }
