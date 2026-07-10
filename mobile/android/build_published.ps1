@@ -23,6 +23,7 @@ try {
         Push-Location (Join-Path $scriptRoot "..\..")
         try {
             cargo test -p stasis_compiler backend::aot::tests::aot_engine_bundle_writes_manifest_and_required_entrypoints
+            if ($LASTEXITCODE -ne 0) { throw "Published AOT validation failed with exit code $LASTEXITCODE" }
         }
         finally {
             Pop-Location

@@ -1,13 +1,13 @@
 [package]
-name = "stasis_runner"
+name = "stasis_assets"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 serde.workspace = true
-crossbeam-channel.workspace = true
-stasis_assets = { path = "../stasis_assets" }
+serde_json.workspace = true
+sha2.workspace = true
 
 [lib]
 path = "src/lib.rs"
