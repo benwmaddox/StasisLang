@@ -1141,8 +1141,26 @@ public final class MainActivity extends Activity {
         appendMillis(debugTextBuilder, renderMillis);
         debugTextBuilder.append(" ms  budget=");
         appendPercent(debugTextBuilder, budgetPercent);
+        appendExplorationProgress(debugTextBuilder);
         gameStatus.setTextColor(debugColorForBudget(budgetPercent));
         gameStatus.setText(debugTextBuilder.toString());
+    }
+
+    private void appendExplorationProgress(StringBuilder text) {
+        if (!compileReady || activeProject == null || !"exploration".equals(activeProject.templateId)) return;
+        String collectedResult = nativeGetRuntimeI32(projectRootPath(), "GameState.collected_count");
+        String totalResult = nativeGetRuntimeI32(projectRootPath(), "GameState.total_collectibles");
+        String stageResult = nativeGetRuntimeI32(projectRootPath(), "GameState.tutorial_stage");
+        if (collectedResult == null || collectedResult.startsWith("StateError")
+                || totalResult == null || totalResult.startsWith("StateError")
+                || stageResult == null || stageResult.startsWith("StateError")) return;
+        int collected = extractIntField(collectedResult, "value", 0);
+        int total = extractIntField(totalResult, "value", 0);
+        int stage = extractIntField(stageResult, "value", 0);
+        text.append('\n').append("keepsakes=").append(collected).append('/').append(total).append("  lesson=");
+        if (stage <= 0) text.append("tap to explore");
+        else if (stage == 1) text.append("find the rest");
+        else text.append("garden complete");
     }
 
     private static int debugColorForBudget(int budgetPercent) {

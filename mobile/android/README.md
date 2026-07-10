@@ -11,6 +11,7 @@ Current scope:
 - Opens the native Android symbol browser and source editor from a top-right hamburger overlay grouped by Main, Structs, Systems, and Root.
 - Opens into a full-screen native Android preview surface by default and starts an automatic 60 fps compile/tick loop so the preview advances without pressing `Compile` and `Run Tick`.
 - Keeps the preview, status text, and menu button inside Android system-bar and display-cutout safe insets, so they do not sit under the bottom navigation bar or camera notch.
+- Keeps timing/budget diagnostics visible over the game; Exploration additionally shows keepsake progress and its current tap/find/complete lesson without covering the voice shortcut.
 - Seeds bundled `.stasis` files into app-private storage when missing and preserves edits across app launches.
 - Lets a selected symbol display and edit its source from the app-private `.stasis` file.
 - Saves selected symbol edits back to the app-private `.stasis` file, reparses the project so later edits use fresh symbol spans, and reports `FastReload` versus `ResetRequired` expectations.
