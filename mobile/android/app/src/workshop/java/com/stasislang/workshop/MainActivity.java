@@ -11,6 +11,7 @@ import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -104,6 +105,7 @@ public final class MainActivity extends Activity {
     private static final int AI_CONNECT_TIMEOUT_MS = 15_000;
     private static final int AI_READ_TIMEOUT_MS = 120_000;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
+    private static final int EXPORT_PROJECT_REQUEST = 71;
     private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
     private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
     private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125;
@@ -163,10 +165,12 @@ public final class MainActivity extends Activity {
     private TextView projectStatus;
     private final ArrayList<WorkshopProjectRegistry.ProjectInfo> availableProjects = new ArrayList<>();
     private WorkshopProjectRegistry.ProjectInfo activeProject;
+    private WorkshopProjectRegistry.ProjectInfo pendingExportProject;
     private String projectRegistryError = "";
     private String reviewedGitHubChangeFingerprint = "";
     private String credentialStorageError = "";
     private volatile boolean githubOperationActive;
+    private volatile boolean projectIoActive;
     private volatile boolean aiRunActive;
     private volatile boolean aiCancelRequested;
     private volatile HttpURLConnection activeAiConnection;
@@ -188,6 +192,7 @@ public final class MainActivity extends Activity {
     private String voiceTranscript = "";
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService githubSyncExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService projectIoExecutor = Executors.newSingleThreadExecutor();
     private Runnable gameLoop;
     private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY];
     private final StringBuilder debugTextBuilder = new StringBuilder(64);
@@ -247,10 +252,59 @@ public final class MainActivity extends Activity {
         HttpURLConnection aiConnection = activeAiConnection;
         if (aiConnection != null) aiConnection.disconnect();
         githubSyncExecutor.shutdownNow();
+        projectIoExecutor.shutdownNow();
         if (gameLoop != null) {
             gameLoopHandler.removeCallbacks(gameLoop);
         }
         super.onDestroy();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != EXPORT_PROJECT_REQUEST) return;
+        final WorkshopProjectRegistry.ProjectInfo exportProject = pendingExportProject == null
+                ? activeProject : pendingExportProject;
+        pendingExportProject = null;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            setStatusText("Project export cancelled");
+            return;
+        }
+        if (exportProject == null) {
+            setStatusText("Project export failed: no active registered project");
+            return;
+        }
+        final Uri destination = data.getData();
+        projectIoActive = true;
+        setStatusText("Project export started");
+        projectIoExecutor.submit(new Runnable() {
+            @Override public void run() {
+                try {
+                    OutputStream output = getContentResolver().openOutputStream(destination, "w");
+                    if (output == null) throw new IOException("document provider did not open the destination");
+                    final WorkshopProjectArchive.ExportSummary summary;
+                    try {
+                        summary = WorkshopProjectArchive.exportProject(exportProject.root, output);
+                    } finally {
+                        output.close();
+                    }
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            setStatusText("Project export complete: " + summary.fileCount
+                                    + " files, " + summary.totalBytes + " bytes");
+                        }
+                    });
+                } catch (final Exception error) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            setStatusText("Project export failed: " + error.getMessage());
+                        }
+                    });
+                } finally {
+                    projectIoActive = false;
+                }
+            }
+        });
     }
 
     private View createWorkshopView(ProjectSnapshot project) {
@@ -1031,6 +1085,12 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { createAndSwitchProject(); }
         });
         projectSettingsBody.addView(newSampleProject, fullWidth());
+        Button exportProject = new Button(this);
+        exportProject.setText("Export Project Archive");
+        exportProject.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { requestProjectExport(); }
+        });
+        projectSettingsBody.addView(exportProject, fullWidth());
         controls.addView(projectSettingsBody, fullWidth());
         refreshProjectControls();
 
@@ -1327,8 +1387,8 @@ public final class MainActivity extends Activity {
     }
 
     private void createAndSwitchProject() {
-        if (aiRunActive || githubOperationActive) {
-            setStatusText("Project creation blocked while AI or GitHub work is active");
+        if (aiRunActive || githubOperationActive || projectIoActive || pendingExportProject != null) {
+            setStatusText("Project creation blocked while AI, GitHub, or project I/O is active");
             return;
         }
         if (hasPendingSourceEdit()) {
@@ -1346,8 +1406,8 @@ public final class MainActivity extends Activity {
     }
 
     private void activateProject(WorkshopProjectRegistry.ProjectInfo project) {
-        if (aiRunActive || githubOperationActive) {
-            setStatusText("Project switch blocked while AI or GitHub work is active");
+        if (aiRunActive || githubOperationActive || projectIoActive || pendingExportProject != null) {
+            setStatusText("Project switch blocked while AI, GitHub, or project I/O is active");
             return;
         }
         if (hasPendingSourceEdit()) {
@@ -1385,6 +1445,33 @@ public final class MainActivity extends Activity {
     private boolean hasPendingSourceEdit() {
         return selectedSymbol != null && sourceEditor != null
                 && !sourceEditor.getText().toString().trim().equals(selectedSymbol.source.trim());
+    }
+
+    private void requestProjectExport() {
+        if (activeProject == null) {
+            setStatusText("Project export needs a registered active project");
+            return;
+        }
+        if (aiRunActive || githubOperationActive || projectIoActive || pendingExportProject != null) {
+            setStatusText("Project export blocked while other background work is active");
+            return;
+        }
+        if (hasPendingSourceEdit()) {
+            setStatusText("Apply or Reset the pending source edit before export");
+            return;
+        }
+        pendingExportProject = activeProject;
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/zip");
+        intent.putExtra(Intent.EXTRA_TITLE, "stasis-project-" + activeProject.id + ".zip");
+        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, EXPORT_PROJECT_REQUEST);
+        } catch (Exception error) {
+            pendingExportProject = null;
+            setStatusText("Project export picker failed: " + error.getMessage());
+        }
     }
 
     private void refreshGitHubSettingsEditors() {
