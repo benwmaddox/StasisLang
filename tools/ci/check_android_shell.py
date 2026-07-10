@@ -298,6 +298,19 @@ def main() -> int:
     assert "audio path escapes the active project" in audio_assets
     assert "output.getFD().sync()" in audio_assets
     assert 'TRASH_DIRECTORY = ".stasis-trash/audio"' in audio_assets
+    assert "Privacy & Data" in activity
+    assert "On-device by default: project code, assets, drafts, recovery, and traces" in activity
+    assert "only media explicitly selected in review" in activity
+    assert "Revoke OpenAI API Key" in activity
+    assert "Revoke GitHub Token" in activity
+    assert "writeSecretPreference(preferences, AI_PREF_API_KEY, \"\")" in activity
+    assert "writeSecretPreference(preferences, GITHUB_PREF_TOKEN, \"\")" in activity
+    assert "Clear Pending Media Consent" in activity
+    assert "selectedImageAssets.clear()" in activity
+    assert "Erase AI Histories + Trace" in activity
+    assert "preferences.getAll().keySet()" in activity
+    assert "aiTraceLogFile()" in activity
+    assert "Code and assets remain" in activity
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
     assert "Cancel AI" in activity

@@ -176,6 +176,7 @@ public final class MainActivity extends Activity {
     private LinearLayout commandHistoryBody;
     private TextView commandHistoryText;
     private LinearLayout githubSettingsBody;
+    private LinearLayout privacySettingsBody;
     private EditText githubTokenEditor;
     private EditText githubRepositoryEditor;
     private EditText githubBranchEditor;
@@ -1541,6 +1542,52 @@ public final class MainActivity extends Activity {
         });
         githubSettingsBody.addView(retryGitHubOperation, fullWidth());
         controls.addView(githubSettingsBody, fullWidth());
+
+        Button privacyToggle = new Button(this);
+        privacyToggle.setText("Privacy & Data");
+        privacyToggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                privacySettingsBody.setVisibility(
+                        privacySettingsBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+            }
+        });
+        controls.addView(privacyToggle, fullWidth());
+        privacySettingsBody = new LinearLayout(this);
+        privacySettingsBody.setOrientation(LinearLayout.VERTICAL);
+        privacySettingsBody.setVisibility(View.GONE);
+        TextView privacyDisclosure = new TextView(this);
+        privacyDisclosure.setText("On-device by default: project code, assets, drafts, recovery, and traces. "
+                + "Run AI sends the command, workspace context, and only media explicitly selected in review. "
+                + "GitHub receives project files only when Sync or PR is pressed. Microphone access is used only for explicit voice actions.");
+        privacyDisclosure.setTextSize(12.0f);
+        privacyDisclosure.setTextColor(Color.rgb(73, 84, 100));
+        privacyDisclosure.setPadding(dp(8), dp(8), dp(8), dp(8));
+        privacySettingsBody.addView(privacyDisclosure, fullWidth());
+        Button revokeOpenAi = new Button(this);
+        revokeOpenAi.setText("Revoke OpenAI API Key");
+        revokeOpenAi.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { revokeOpenAiCredential(); }
+        });
+        privacySettingsBody.addView(revokeOpenAi, fullWidth());
+        Button revokeGitHub = new Button(this);
+        revokeGitHub.setText("Revoke GitHub Token");
+        revokeGitHub.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { revokeGitHubCredential(); }
+        });
+        privacySettingsBody.addView(revokeGitHub, fullWidth());
+        Button clearPendingMedia = new Button(this);
+        clearPendingMedia.setText("Clear Pending Media Consent");
+        clearPendingMedia.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { clearPendingMediaConsent(); }
+        });
+        privacySettingsBody.addView(clearPendingMedia, fullWidth());
+        Button eraseAiActivity = new Button(this);
+        eraseAiActivity.setText("Erase AI Histories + Trace");
+        eraseAiActivity.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { confirmEraseAiActivity(); }
+        });
+        privacySettingsBody.addView(eraseAiActivity, fullWidth());
+        controls.addView(privacySettingsBody, fullWidth());
         return controls;
     }
 
@@ -1959,6 +2006,103 @@ public final class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    private void revokeOpenAiCredential() {
+        if (aiRunActive) {
+            setStatusText("OpenAI key revocation blocked until the active AI run is cancelled or complete");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Revoke OpenAI API Key?")
+                .setMessage("The encrypted credential is removed from this installation. Project files are unchanged.")
+                .setPositiveButton("Revoke", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        SharedPreferences preferences = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+                        if (!writeSecretPreference(preferences, AI_PREF_API_KEY, "")) return;
+                        if (aiApiKeyEditor != null) aiApiKeyEditor.setText("");
+                        setStatusText("OpenAI API key revoked from encrypted storage");
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void revokeGitHubCredential() {
+        if (githubOperationActive) {
+            setStatusText("GitHub token revocation blocked until the active operation finishes");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Revoke GitHub Token?")
+                .setMessage("The encrypted credential is removed. Repository/branch settings and project files remain.")
+                .setPositiveButton("Revoke", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+                        if (!writeSecretPreference(preferences, GITHUB_PREF_TOKEN, "")) return;
+                        if (githubTokenEditor != null) githubTokenEditor.setText("");
+                        refreshGitHubSyncStatus();
+                        setStatusText("GitHub token revoked from encrypted storage");
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void clearPendingMediaConsent() {
+        if (aiRunActive) {
+            setStatusText("Pending media cannot change during an active AI run");
+            return;
+        }
+        selectedImageAssets.clear();
+        clearPendingPreviewCapture();
+        if (allowAiImageGeneration != null) allowAiImageGeneration.setChecked(false);
+        refreshImageAssetList();
+        refreshAiAttachmentStatus();
+        refreshScreenshotAttachmentStatus();
+        setStatusText("Pending image, screenshot, logical snapshot, and generation consent cleared");
+    }
+
+    private void confirmEraseAiActivity() {
+        if (aiRunActive) {
+            setStatusText("AI history erase blocked until the active run is cancelled or complete");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Erase AI Histories and Trace?")
+                .setMessage("This removes command/outcome history for every project, usage records, monthly spend history, and the local AI trace. Code and assets remain.")
+                .setPositiveButton("Erase", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        eraseAiActivity();
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void eraseAiActivity() {
+        SharedPreferences preferences = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+        SharedPreferences.Editor editor = preferences.edit()
+                .remove(AI_PREF_LAST_USAGE)
+                .remove(AI_PREF_MONTH_KEY)
+                .remove(AI_PREF_MONTH_SPEND_USD);
+        for (String key : preferences.getAll().keySet()) {
+            if (key.startsWith(AI_PREF_COMMAND_HISTORY_PREFIX)
+                    || key.startsWith(AI_PREF_OUTCOME_HISTORY_PREFIX)) editor.remove(key);
+        }
+        if (!editor.commit()) {
+            setStatusText("AI history erase failed: preferences commit failed");
+            return;
+        }
+        File trace = aiTraceLogFile();
+        if (!trace.delete() && trace.exists()) {
+            setStatusText("AI histories erased but trace deletion failed");
+            return;
+        }
+        clearPendingMediaConsent();
+        refreshCommandHistory();
+        refreshAiBudgetStatus();
+        setStatusText("AI histories, usage records, monthly spend history, trace, and pending media erased");
     }
 
     private void markInterruptedAiOutcomeIfNeeded() {
