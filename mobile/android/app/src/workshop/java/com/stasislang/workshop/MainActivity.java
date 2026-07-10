@@ -186,6 +186,7 @@ public final class MainActivity extends Activity {
     private LinearLayout aiSettingsBody;
     private LinearLayout commandHistoryBody;
     private TextView commandHistoryText;
+    private LinearLayout aiQueueBody;
     private LinearLayout githubSettingsBody;
     private LinearLayout privacySettingsBody;
     private LinearLayout onboardingBody;
@@ -215,6 +216,7 @@ public final class MainActivity extends Activity {
     private volatile boolean aiCancelRequested;
     private volatile HttpURLConnection activeAiConnection;
     private String activeAiPrompt = "";
+    private AndroidAiQueue.Entry activeAiQueueEntry;
     private volatile List<AiImageAttachment> activeAiImageAttachments = Collections.emptyList();
     private Bitmap pendingPreviewScreenshot;
     private MediaPlayer activeAudioPreview;
@@ -306,6 +308,9 @@ public final class MainActivity extends Activity {
         markInterruptedAiOutcomeIfNeeded();
         restoreWorkshopUiState(savedInstanceState);
         restorePendingDraft();
+        gameLoopHandler.post(new Runnable() {
+            @Override public void run() { startNextQueuedAiIfIdle(); }
+        });
         if (AndroidCrashStore.safeSummary(this).optBoolean("present", false)) {
             setStatusText("Previous crash detected; export a redacted support bundle or clear the local crash record in Privacy & Data");
         }
@@ -903,8 +908,8 @@ public final class MainActivity extends Activity {
         if (voiceToggle != null) {
             voiceToggle.setEnabled(true);
         }
-        setStatusText("Voice change confirmed: starting AI run");
-        runAiPatch();
+        setStatusText("Voice change confirmed: adding it to the AI queue");
+        runAiPatch("voice", null);
     }
 
     private void stopVoiceRecognition() {
@@ -1324,15 +1329,15 @@ public final class MainActivity extends Activity {
         controls.addView(capturePreview, fullWidth());
         refreshScreenshotAttachmentStatus();
         allowAiImageGeneration = new CheckBox(this);
-        allowAiImageGeneration.setText("Allow one low-quality 1024x1024 AI image (~$0.006 plus Terra usage)");
+        allowAiImageGeneration.setText("Allow one low-quality 1024x1024 AI image (~$0.006 plus Sol usage)");
         allowAiImageGeneration.setChecked(false);
         controls.addView(allowAiImageGeneration, fullWidth());
 
         LinearLayout aiActionRow = new LinearLayout(this);
         aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
         Button aiPatch = new Button(this);
-        aiPatch.setText("Run AI Change");
-        aiPatch.setContentDescription("Run the requested AI change with current reviewed attachments and budget limits");
+        aiPatch.setText("Queue AI Change");
+        aiPatch.setContentDescription("Queue the requested AI change with current reviewed attachments and budget limits");
         aiPatch.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -1348,6 +1353,17 @@ public final class MainActivity extends Activity {
         });
         aiActionRow.addView(cancelAi, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         controls.addView(aiActionRow, fullWidth());
+
+        TextView queueTitle = new TextView(this);
+        queueTitle.setText("AI Work Queue");
+        queueTitle.setTextColor(Color.rgb(35, 45, 60));
+        queueTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        queueTitle.setPadding(0, dp(6), 0, dp(2));
+        controls.addView(queueTitle, fullWidth());
+        aiQueueBody = new LinearLayout(this);
+        aiQueueBody.setOrientation(LinearLayout.VERTICAL);
+        controls.addView(aiQueueBody, fullWidth());
+        refreshAiQueue();
 
         LinearLayout progressRow = new LinearLayout(this);
         progressRow.setOrientation(getResources().getConfiguration().screenWidthDp < 480
@@ -1682,7 +1698,7 @@ public final class MainActivity extends Activity {
         privacySettingsBody.setVisibility(View.GONE);
         TextView privacyDisclosure = new TextView(this);
         privacyDisclosure.setText("On-device by default: project code, assets, drafts, recovery, and traces. "
-                + "Run AI sends the command, workspace context, and only media explicitly selected in review. "
+                + "Queue AI Change snapshots the command, workspace context, and only media explicitly selected in review. "
                 + "GitHub receives project files only when Sync or PR is pressed. Microphone access is used only for explicit voice or audio-recording actions.");
         privacyDisclosure.setTextSize(12.0f);
         privacyDisclosure.setTextColor(Color.rgb(73, 84, 100));
@@ -1888,6 +1904,7 @@ public final class MainActivity extends Activity {
             getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
                     .putString(outcomeHistoryPreferenceKey(), updated.toString()).apply();
             refreshCommandHistory();
+            finishActiveAiQueueItem(status, summary);
         } catch (Exception ignored) {
             // Outcome history must not interfere with AI execution or source recovery.
         }
@@ -1996,6 +2013,7 @@ public final class MainActivity extends Activity {
             if (snapshot.firstSymbol != null) showSymbol(snapshot.firstSymbol);
             refreshChangeSummary(snapshot);
             refreshCommandHistory();
+            refreshAiQueue();
             refreshRecoveryStatus();
             refreshGitHubSettingsEditors();
             refreshGitHubSyncStatus();
@@ -2007,6 +2025,9 @@ public final class MainActivity extends Activity {
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
             setStatusText("Switched to " + project.name + " - " + compileResult);
+            gameLoopHandler.post(new Runnable() {
+                @Override public void run() { startNextQueuedAiIfIdle(); }
+            });
             return true;
         } catch (Exception error) {
             setStatusText("Project switch failed: " + error.getMessage());
@@ -2200,6 +2221,165 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void enqueuePendingAiRequest(String source) {
+        String prompt = aiPromptEditor == null ? "" : aiPromptEditor.getText().toString().trim();
+        if (prompt.isEmpty()) {
+            setStatusText("AI queue needs a request");
+            return;
+        }
+        if (attachPreviewPixels) {
+            setStatusText("Captured preview pixels cannot wait in the queue yet; remove them or wait for the active item");
+            return;
+        }
+        try {
+            List<WorkshopImageAssets.AssetInfo> images = selectedAiImageInfos();
+            JSONArray metadata = aiImageMetadata(images);
+            JSONObject logical = attachPreviewLogicalSnapshot && pendingPreviewLogicalSnapshot != null
+                    ? new JSONObject(pendingPreviewLogicalSnapshot.toString()) : null;
+            boolean imageGeneration = allowAiImageGeneration != null && allowAiImageGeneration.isChecked();
+            AndroidAiQueue.enqueue(this, activeRecoveryProjectId(), source, prompt, metadata, logical,
+                    imageGeneration);
+            recordCommandHistory(prompt);
+            if (imageGeneration) allowAiImageGeneration.setChecked(false);
+            refreshAiQueue();
+            setStatusText("AI request queued behind the active item");
+        } catch (Exception error) {
+            setStatusText("AI queue failed: " + error.getMessage());
+        }
+    }
+
+    private List<WorkshopImageAssets.AssetInfo> aiImageInfosForQueueEntry(AndroidAiQueue.Entry entry)
+            throws IOException {
+        if (entry.imageAttachments.length() == 0) return Collections.emptyList();
+        if (activeProject == null || !entry.projectId.equals(activeRecoveryProjectId())) {
+            throw new IOException("queued image request does not belong to the active project");
+        }
+        Map<String, WorkshopImageAssets.AssetInfo> available = new LinkedHashMap<>();
+        for (WorkshopImageAssets.AssetInfo image : WorkshopImageAssets.list(activeProject.root)) {
+            available.put(image.relativePath, image);
+        }
+        ArrayList<WorkshopImageAssets.AssetInfo> result = new ArrayList<>();
+        for (int index = 0; index < entry.imageAttachments.length(); index += 1) {
+            JSONObject expected = entry.imageAttachments.optJSONObject(index);
+            String path = expected == null ? "" : expected.optString("project_path", "");
+            WorkshopImageAssets.AssetInfo actual = available.get(path);
+            if (actual == null || actual.width != expected.optInt("width", -1)
+                    || actual.height != expected.optInt("height", -1)
+                    || actual.bytes != expected.optLong("bytes", -1L)
+                    || !sha256Bytes(WorkshopImageAssets.readForSync(actual))
+                            .equals(expected.optString("sha256", ""))) {
+                throw new IOException("queued image changed or disappeared: " + path);
+            }
+            result.add(actual);
+        }
+        return Collections.unmodifiableList(result);
+    }
+
+    private void refreshAiQueue() {
+        if (aiQueueBody == null) return;
+        aiQueueBody.removeAllViews();
+        try {
+            List<AndroidAiQueue.Entry> items = AndroidAiQueue.list(this, activeRecoveryProjectId());
+            if (items.isEmpty()) {
+                TextView empty = new TextView(this);
+                empty.setText("No queued AI work");
+                empty.setTextColor(Color.rgb(73, 84, 100));
+                aiQueueBody.addView(empty, fullWidth());
+                return;
+            }
+            int first = Math.max(0, items.size() - 20);
+            for (int index = first; index < items.size(); index += 1) {
+                final AndroidAiQueue.Entry item = items.get(index);
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                TextView label = new TextView(this);
+                String prompt = item.prompt.length() > 72 ? item.prompt.substring(0, 69) + "..." : item.prompt;
+                label.setText(item.state.replace('_', ' ') + " · " + item.source + " · " + prompt);
+                label.setTextColor(Color.rgb(73, 84, 100));
+                label.setContentDescription("AI queue item " + item.state + " from " + item.source + ": " + item.prompt);
+                row.addView(label, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+                if (AndroidAiQueue.PENDING.equals(item.state)) {
+                    Button cancel = new Button(this);
+                    cancel.setText("Cancel");
+                    cancel.setContentDescription("Cancel pending AI request " + item.prompt);
+                    cancel.setOnClickListener(new View.OnClickListener() {
+                        @Override public void onClick(View view) { cancelPendingAiItem(item); }
+                    });
+                    row.addView(cancel, new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+                }
+                aiQueueBody.addView(row, fullWidth());
+            }
+        } catch (Exception error) {
+            TextView unavailable = new TextView(this);
+            unavailable.setText("AI queue unavailable: " + error.getMessage());
+            aiQueueBody.addView(unavailable, fullWidth());
+        }
+    }
+
+    private void cancelPendingAiItem(AndroidAiQueue.Entry item) {
+        try {
+            if (!item.projectId.equals(activeRecoveryProjectId())
+                    || !AndroidAiQueue.cancelPending(this, item.projectId, item.id)) {
+                setStatusText("AI queue item is no longer pending");
+            } else {
+                setStatusText("Pending AI request cancelled before any API call");
+            }
+        } catch (Exception error) {
+            setStatusText("AI queue cancellation failed: " + error.getMessage());
+        }
+        refreshAiQueue();
+    }
+
+    private void finishActiveAiQueueItem(String outcomeStatus, String detail) {
+        AndroidAiQueue.Entry item = activeAiQueueEntry;
+        if (item == null || "started".equals(outcomeStatus)) return;
+        String terminal = ("complete".equals(outcomeStatus) || "applied".equals(outcomeStatus))
+                ? AndroidAiQueue.COMPLETED
+                : ("cancelled".equals(outcomeStatus) ? AndroidAiQueue.CANCELLED : AndroidAiQueue.FAILED);
+        try {
+            AndroidAiQueue.finish(this, item.projectId, item.id, terminal, detail);
+        } catch (Exception error) {
+            setStatusText("AI queue transition failed: " + error.getMessage());
+            return;
+        }
+        activeAiQueueEntry = null;
+        refreshAiQueue();
+        gameLoopHandler.postDelayed(new Runnable() {
+            @Override public void run() { startNextQueuedAiIfIdle(); }
+        }, 100L);
+    }
+
+    private void startNextQueuedAiIfIdle() {
+        if (aiRunActive || activeAiQueueEntry != null || audioRecordingActive) return;
+        try {
+            AndroidAiQueue.Entry next = AndroidAiQueue.claimNext(this, activeRecoveryProjectId());
+            if (next == null) {
+                refreshAiQueue();
+                return;
+            }
+            refreshAiQueue();
+            runAiPatch(next.source, next);
+        } catch (Exception error) {
+            setStatusText("AI queue could not start the next item: " + error.getMessage());
+            refreshAiQueue();
+        }
+    }
+
+    private void failQueuedAiPreflight(AndroidAiQueue.Entry entry, String detail) {
+        if (entry == null) return;
+        try {
+            AndroidAiQueue.finish(this, entry.projectId, entry.id, AndroidAiQueue.FAILED, detail);
+        } catch (Exception ignored) {
+            // The visible queue error remains available for recovery on the next app start.
+        }
+        if (activeAiQueueEntry != null && activeAiQueueEntry.id.equals(entry.id)) activeAiQueueEntry = null;
+        refreshAiQueue();
+        gameLoopHandler.postDelayed(new Runnable() {
+            @Override public void run() { startNextQueuedAiIfIdle(); }
+        }, 100L);
+    }
+
     private void revokeOpenAiCredential() {
         if (aiRunActive) {
             setStatusText("OpenAI key revocation blocked until the active AI run is cancelled or complete");
@@ -2286,6 +2466,12 @@ public final class MainActivity extends Activity {
             setStatusText("AI history erase failed: preferences commit failed");
             return;
         }
+        try {
+            AndroidAiQueue.clearAll(this);
+        } catch (Exception error) {
+            setStatusText("AI histories erased but queued work deletion failed: " + error.getMessage());
+            return;
+        }
         File trace = aiTraceLogFile();
         if (!trace.delete() && trace.exists()) {
             setStatusText("AI histories erased but trace deletion failed");
@@ -2293,8 +2479,9 @@ public final class MainActivity extends Activity {
         }
         clearPendingMediaConsent();
         refreshCommandHistory();
+        refreshAiQueue();
         refreshAiBudgetStatus();
-        setStatusText("AI histories, usage records, monthly spend history, trace, and pending media erased");
+        setStatusText("AI histories, queue, usage records, monthly spend history, trace, and pending media erased");
     }
 
     private void requestSupportBundleExport() {
@@ -2420,6 +2607,7 @@ public final class MainActivity extends Activity {
             if (baseline.exists()) throw new IOException("project baseline deletion did not complete");
             AndroidDraftStore.clear(this, target.id);
             AndroidEditRecoveryStore.clearProject(this, target.id);
+            AndroidAiQueue.clearProject(this, target.id);
             clearDeletedProjectPreferences(target);
             refreshProjectControls();
             setStatusText("Deleted project and scoped private data: " + target.name + "; Bundled Workshop is active");
@@ -2487,6 +2675,12 @@ public final class MainActivity extends Activity {
     }
 
     private void markInterruptedAiOutcomeIfNeeded() {
+        try {
+            int recovered = AndroidAiQueue.recoverInterrupted(this, activeRecoveryProjectId());
+            if (recovered > 0) refreshAiQueue();
+        } catch (Exception error) {
+            setStatusText("AI queue recovery failed: " + error.getMessage());
+        }
         JSONArray outcomes = aiOutcomeHistory();
         JSONObject latest = outcomes.optJSONObject(0);
         if (latest == null || !"started".equals(latest.optString("status", ""))) return;
@@ -3178,20 +3372,28 @@ public final class MainActivity extends Activity {
     }
 
     private void runAiPatch() {
+        runAiPatch("text", null);
+    }
+
+    private void runAiPatch(String queueSource, AndroidAiQueue.Entry queuedEntry) {
         if (audioRecordingActive) {
             setStatusText("Finish or cancel audio recording before running AI");
+            failQueuedAiPreflight(queuedEntry, "Audio recording was active");
             return;
         }
         if (aiRunActive) {
-            setStatusText("AI run already active; cancel it before starting another");
+            enqueuePendingAiRequest(queueSource);
             return;
         }
         String apiKey = aiApiKeyEditor == null ? "" : aiApiKeyEditor.getText().toString().trim();
-        String prompt = aiPromptEditor == null ? "" : aiPromptEditor.getText().toString().trim();
+        String prompt = queuedEntry == null
+                ? (aiPromptEditor == null ? "" : aiPromptEditor.getText().toString().trim())
+                : queuedEntry.prompt;
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
         if (apiKey.isEmpty() || prompt.isEmpty()) {
             setStatusText("AI run needs both a request and an API key; open AI Settings if the key is not saved");
             updateAiProgress(0, 0, "needs input");
+            failQueuedAiPreflight(queuedEntry, "API key or request was missing at execution time");
             return;
         }
         if (model.isEmpty()) {
@@ -3199,19 +3401,26 @@ public final class MainActivity extends Activity {
         }
         double maxRunUsd = configuredAiLimit(AI_PREF_MAX_RUN_USD, "0.25");
         double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
-        final boolean requestImageGeneration = allowAiImageGeneration != null && allowAiImageGeneration.isChecked();
+        final boolean requestImageGeneration = queuedEntry == null
+                ? allowAiImageGeneration != null && allowAiImageGeneration.isChecked()
+                : queuedEntry.imageGeneration;
         if (!hasKnownAiPricing(model)) {
             setStatusText("AI run blocked: pricing is unavailable for " + model);
             updateAiProgress(0, 0, "budget blocked");
+            failQueuedAiPreflight(queuedEntry, "Model pricing was unavailable at execution time");
             return;
         }
         if (maxRunUsd <= 0.0 || monthlyLimitUsd <= 0.0 || monthlyAiSpendUsd() >= monthlyLimitUsd) {
             setStatusText("AI run blocked by configured spending limit; open AI Settings");
             updateAiProgress(0, 0, "budget blocked");
+            failQueuedAiPreflight(queuedEntry, "Configured spending limit blocked execution");
             return;
         }
         recordCommandHistory(prompt);
-        if (!saveAiSettings(apiKey, model)) return;
+        if (!saveAiSettings(apiKey, model)) {
+            failQueuedAiPreflight(queuedEntry, "AI settings could not be saved");
+            return;
+        }
         final SymbolEntry symbol = selectedSymbol;
         final String selectedSource = symbol == null || sourceEditor == null ? "" : sourceEditor.getText().toString().trim();
         final ProjectSnapshot aiProject = loadBundledProject();
@@ -3220,9 +3429,10 @@ public final class MainActivity extends Activity {
         final Bitmap requestPreviewPixels;
         final JSONObject requestLogicalSnapshot;
         try {
-            requestImageInfos = selectedAiImageInfos();
-            requestImageMetadata = aiImageMetadata(requestImageInfos);
-            if (attachPreviewPixels) {
+            requestImageInfos = queuedEntry == null ? selectedAiImageInfos() : aiImageInfosForQueueEntry(queuedEntry);
+            requestImageMetadata = queuedEntry == null ? aiImageMetadata(requestImageInfos)
+                    : new JSONArray(queuedEntry.imageAttachments.toString());
+            if (queuedEntry == null && attachPreviewPixels) {
                 if (pendingPreviewScreenshot == null || pendingPreviewScreenshot.isRecycled()) {
                     throw new IOException("selected preview pixels are no longer available");
                 }
@@ -3240,23 +3450,51 @@ public final class MainActivity extends Activity {
             } else {
                 requestPreviewPixels = null;
             }
-            requestLogicalSnapshot = attachPreviewLogicalSnapshot && pendingPreviewLogicalSnapshot != null
-                    ? new JSONObject(pendingPreviewLogicalSnapshot.toString()) : null;
+            requestLogicalSnapshot = queuedEntry == null
+                    ? (attachPreviewLogicalSnapshot && pendingPreviewLogicalSnapshot != null
+                            ? new JSONObject(pendingPreviewLogicalSnapshot.toString()) : null)
+                    : (queuedEntry.logicalSnapshot == null ? null
+                            : new JSONObject(queuedEntry.logicalSnapshot.toString()));
         } catch (Exception error) {
             setStatusText("AI run blocked by image attachments: " + error.getMessage());
             updateAiProgress(0, 0, "attachment blocked");
+            failQueuedAiPreflight(queuedEntry, "Attachment snapshot failed validation: " + error.getMessage());
             return;
         }
         if (requestImageGeneration && (maxRunUsd < GPT_IMAGE_2_LOW_1024_USD
                 || monthlyLimitUsd - monthlyAiSpendUsd() < GPT_IMAGE_2_LOW_1024_USD)) {
             setStatusText("AI image generation blocked: spending limits do not cover the reserved image output");
             updateAiProgress(0, 0, "image budget blocked");
+            failQueuedAiPreflight(queuedEntry, "Image generation reserve exceeded the spending limit");
             return;
         }
         final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
                 requestImageMetadata, requestLogicalSnapshot);
         final String requestModel = model;
         final String requestApiKey = apiKey;
+        try {
+            if (queuedEntry == null) {
+                AndroidAiQueue.Entry submitted = AndroidAiQueue.enqueue(this, activeRecoveryProjectId(), queueSource, prompt,
+                        requestImageMetadata, requestLogicalSnapshot, requestImageGeneration);
+                activeAiQueueEntry = AndroidAiQueue.claimNext(this, activeRecoveryProjectId());
+                if (activeAiQueueEntry != null && !submitted.id.equals(activeAiQueueEntry.id)) {
+                    if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
+                    AndroidAiQueue.Entry older = activeAiQueueEntry;
+                    activeAiQueueEntry = null;
+                    refreshAiQueue();
+                    runAiPatch(older.source, older);
+                    return;
+                }
+            } else {
+                activeAiQueueEntry = queuedEntry;
+            }
+            if (activeAiQueueEntry == null) throw new IOException("queued AI request could not be claimed");
+        } catch (Exception error) {
+            setStatusText("AI queue failed: " + error.getMessage());
+            refreshAiQueue();
+            return;
+        }
+        refreshAiQueue();
         activeAiPrompt = prompt;
         aiCancelRequested = false;
         aiRunActive = true;
@@ -5645,15 +5883,32 @@ public final class MainActivity extends Activity {
     private static JSONArray aiImageMetadata(List<WorkshopImageAssets.AssetInfo> images) throws Exception {
         JSONArray metadata = new JSONArray();
         for (WorkshopImageAssets.AssetInfo image : images) {
+            byte[] bytes = WorkshopImageAssets.readForSync(image);
             metadata.put(new JSONObject()
                     .put("project_path", image.relativePath)
                     .put("width", image.width)
                     .put("height", image.height)
                     .put("bytes", image.bytes)
+                    .put("sha256", sha256Bytes(bytes))
                     .put("detail", "original")
                     .put("estimated_patch_tokens", ((image.width + 31L) / 32L) * ((image.height + 31L) / 32L)));
         }
         return metadata;
+    }
+
+    private static String sha256Bytes(byte[] bytes) throws IOException {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            String digits = "0123456789abcdef";
+            for (byte value : digest) {
+                int unsigned = value & 0xff;
+                hex.append(digits.charAt(unsigned >>> 4)).append(digits.charAt(unsigned & 0x0f));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException error) {
+            throw new IOException("SHA-256 is unavailable", error);
+        }
     }
 
     private static List<AiImageAttachment> loadAiImageAttachments(
@@ -6416,7 +6671,7 @@ public final class MainActivity extends Activity {
             aiAttachmentStatus.setText("AI images: " + selected.size() + " selected, about " + patches
                     + " original-detail image tokens / "
                     + formatAiCostUsd(patches * GPT_5_6_SOL_INPUT_USD_PER_MILLION / 1000000.0)
-                    + " Terra input (review before Run AI)");
+                    + " Sol input (review before Queue AI Change)");
         } catch (Exception error) {
             aiAttachmentStatus.setText("AI images: selection needs review - " + error.getMessage());
         }
@@ -6551,7 +6806,7 @@ public final class MainActivity extends Activity {
                 + pendingPreviewScreenshot.getWidth() + "x" + pendingPreviewScreenshot.getHeight()
                 + (attachPreviewPixels ? ", about " + patches + " image tokens / "
                         + formatAiCostUsd(patches * GPT_5_6_SOL_INPUT_USD_PER_MILLION / 1000000.0)
-                        + " Terra input" : "") + " (tap to review)");
+                        + " Sol input" : "") + " (tap to review)");
     }
 
     private void reviewPreviewCaptureForAi() {
@@ -6580,7 +6835,7 @@ public final class MainActivity extends Activity {
         content.addView(logical, fullWidth());
         new AlertDialog.Builder(this)
                 .setTitle("Review Preview Capture")
-                .setMessage("Nothing is sent until selected here and Run AI is pressed.")
+                .setMessage("Nothing is sent until selected here and Queue AI Change is pressed.")
                 .setView(content)
                 .setPositiveButton("Apply Selection", new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
