@@ -17,6 +17,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -117,6 +118,7 @@ def main() -> int:
     project_registry = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java")
     project_archive = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java")
     image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
+    paint_view = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "Intent.ACTION_OPEN_DOCUMENT" in activity
@@ -145,6 +147,18 @@ def main() -> int:
     assert '"image/png"' in image_assets
     assert '"image/jpeg"' in image_assets
     assert '"image/webp"' in image_assets
+    assert "New Painted Image" in activity
+    assert "Paint as Copy" in activity
+    assert "Paint cancelled; project assets unchanged" in activity
+    assert "Resize / Crop Canvas" in activity
+    assert "WorkshopImageAssets.savePainted" in activity
+    assert "MAX_CANVAS_DIMENSION = 1024" in paint_view
+    assert "MAX_HISTORY = 8" in paint_view
+    assert "PorterDuff.Mode.CLEAR" in paint_view
+    assert "void undo()" in paint_view
+    assert "void redo()" in paint_view
+    assert "void resizeCanvas" in paint_view
+    assert "Bitmap snapshot()" in paint_view
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
