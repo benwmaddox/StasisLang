@@ -21,17 +21,17 @@ import java.util.Locale;
 import java.util.UUID;
 
 final class WorkshopProjectRegistry {
-    static final int FORMAT_VERSION = 2;
+    static final int FORMAT_VERSION = WorkshopProjectFormatPolicy.CURRENT_VERSION;
     static final String LEGACY_PROJECT_DIR = "workshop_project";
     private static final String PROJECTS_DIR = "workshop_projects";
     static final String METADATA_FILE = ".stasis-workshop.json";
-    private static final String V1_BACKUP_FILE = ".stasis-workshop.json.v1.bak";
     private static final String PREFS = "workshop_project_registry";
     private static final String PREF_ACTIVE_PROJECT = "active_project_directory";
 
     private WorkshopProjectRegistry() {}
 
-    static ProjectInfo initialize(Context context) throws Exception {
+    static ProjectInfo initialize(Context context, String defaultTemplateId) throws Exception {
+        WorkshopTemplateCatalog.require(defaultTemplateId);
         File legacyRoot = new File(context.getFilesDir(), LEGACY_PROJECT_DIR);
         if (!legacyRoot.isDirectory() && !legacyRoot.mkdirs()) {
             throw new IllegalStateException("unable to create legacy project directory");
@@ -39,7 +39,8 @@ final class WorkshopProjectRegistry {
         File legacyMetadata = new File(legacyRoot, METADATA_FILE);
         if (!legacyMetadata.isFile()) {
             writeMetadata(legacyRoot, new ProjectInfo(
-                    "bundled-workshop", "Bundled Workshop", "sample", LEGACY_PROJECT_DIR, legacyRoot));
+                    "bundled-workshop", "Bundled Workshop", "sample", defaultTemplateId,
+                    LEGACY_PROJECT_DIR, legacyRoot));
         }
         String activeDirectory = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(PREF_ACTIVE_PROJECT, LEGACY_PROJECT_DIR);
@@ -71,15 +72,17 @@ final class WorkshopProjectRegistry {
         return projects;
     }
 
-    static ProjectInfo createFromSample(Context context, String requestedName) throws Exception {
-        return createProject(context, requestedName, "sample");
+    static ProjectInfo createFromTemplate(Context context, String requestedName, String templateId) throws Exception {
+        WorkshopTemplateCatalog.require(templateId);
+        return createProject(context, requestedName, "sample", templateId);
     }
 
     static ProjectInfo createForImport(Context context, String requestedName) throws Exception {
-        return createProject(context, requestedName, "import");
+        return createProject(context, requestedName, "import", "");
     }
 
-    private static ProjectInfo createProject(Context context, String requestedName, String origin) throws Exception {
+    private static ProjectInfo createProject(Context context, String requestedName, String origin,
+            String templateId) throws Exception {
         String name = requestedName == null ? "" : requestedName.trim();
         validateRequestedName(name);
         File projectsRoot = new File(context.getFilesDir(), PROJECTS_DIR);
@@ -91,7 +94,8 @@ final class WorkshopProjectRegistry {
         for (int suffix = 2; root.exists(); suffix += 1) root = new File(projectsRoot, base + "-" + suffix);
         if (!root.mkdirs()) throw new IllegalStateException("unable to create project directory");
         String relativeDirectory = PROJECTS_DIR + "/" + root.getName();
-        ProjectInfo project = new ProjectInfo(UUID.randomUUID().toString(), name, origin, relativeDirectory, root);
+        ProjectInfo project = new ProjectInfo(UUID.randomUUID().toString(), name, origin, templateId,
+                relativeDirectory, root);
         try {
             writeMetadata(root, project);
         } catch (Exception error) {
@@ -139,7 +143,7 @@ final class WorkshopProjectRegistry {
         validateProjectRoot(context, root);
         JSONObject json = new JSONObject(readFile(new File(root, METADATA_FILE)));
         int version = json.optInt("format_version", 0);
-        if (version != 1 && version != FORMAT_VERSION) {
+        if (!WorkshopProjectFormatPolicy.supported(version)) {
             throw new IllegalStateException("unsupported project format version " + version
                     + "; update the Workshop before opening this project");
         }
@@ -150,16 +154,20 @@ final class WorkshopProjectRegistry {
         if (id.isEmpty() || name.isEmpty()) throw new IllegalStateException("project metadata needs id and name");
         if (!id.matches("[A-Za-z0-9][A-Za-z0-9-]{0,79}")) throw new IllegalStateException("project metadata id is invalid");
         if (!"sample".equals(origin) && !"import".equals(origin)) throw new IllegalStateException("project metadata origin is invalid");
-        if (version == FORMAT_VERSION
+        String templateId = WorkshopProjectFormatPolicy.templateId(
+                version, origin, json.optString("template_id", ""));
+        if (version >= 2
                 && !"stasis-workshop-project".equals(json.optString("schema", ""))) {
-            throw new IllegalStateException("project format 2 metadata schema is invalid");
+            throw new IllegalStateException("project metadata schema is invalid");
         }
-        ProjectInfo project = new ProjectInfo(id, name, origin, directoryName, root);
-        if (version == 1) {
-            migrateV1Metadata(root, project);
-        } else if (originMissing) {
-            throw new IllegalStateException("project format 2 metadata origin is missing");
+        if (version >= 2 && originMissing) {
+            throw new IllegalStateException("project metadata origin is missing");
         }
+        if ("sample".equals(origin) && !WorkshopTemplateCatalog.isKnown(templateId)) {
+            throw new IllegalStateException("project template is missing or unknown: " + templateId);
+        }
+        ProjectInfo project = new ProjectInfo(id, name, origin, templateId, directoryName, root);
+        if (version < FORMAT_VERSION) migrateLegacyMetadata(root, project, version);
         return project;
     }
 
@@ -183,19 +191,21 @@ final class WorkshopProjectRegistry {
         if (project.root.exists()) throw new IllegalStateException("project directory deletion did not complete");
     }
 
-    private static void migrateV1Metadata(File root, ProjectInfo project) throws Exception {
+    private static void migrateLegacyMetadata(File root, ProjectInfo project, int sourceVersion) throws Exception {
         File source = new File(root, METADATA_FILE);
-        File backup = new File(root, V1_BACKUP_FILE);
+        File backup = new File(root, WorkshopProjectFormatPolicy.backupFileName(sourceVersion));
         try {
             if (!backup.isFile()) writeSyncedFile(backup, readFile(source));
-            replaceMetadata(root, project, 1);
+            replaceMetadata(root, project, sourceVersion);
             JSONObject migrated = new JSONObject(readFile(source));
             if (migrated.optInt("format_version", 0) != FORMAT_VERSION
-                    || !project.id.equals(migrated.optString("id", ""))) {
+                    || !project.id.equals(migrated.optString("id", ""))
+                    || !project.templateId.equals(migrated.optString("template_id", ""))) {
                 throw new IllegalStateException("migrated metadata verification failed");
             }
         } catch (Exception error) {
-            throw new IllegalStateException("project v1 migration failed; the fsynced v1 backup was preserved", error);
+            throw new IllegalStateException("project v" + sourceVersion
+                    + " migration failed; the fsynced v" + sourceVersion + " backup was preserved", error);
         }
     }
 
@@ -217,6 +227,7 @@ final class WorkshopProjectRegistry {
                 .put("id", project.id)
                 .put("name", project.name)
                 .put("origin", project.origin)
+                .put("template_id", project.templateId)
                 .put("migrated_from_version", migratedFromVersion);
         File temporary = new File(root, METADATA_FILE + ".tmp");
         FileOutputStream output = new FileOutputStream(temporary);
@@ -307,13 +318,15 @@ final class WorkshopProjectRegistry {
         final String id;
         final String name;
         final String origin;
+        final String templateId;
         final String directoryName;
         final File root;
 
-        ProjectInfo(String id, String name, String origin, String directoryName, File root) {
+        ProjectInfo(String id, String name, String origin, String templateId, String directoryName, File root) {
             this.id = id;
             this.name = name;
             this.origin = origin;
+            this.templateId = templateId;
             this.directoryName = directoryName;
             this.root = root;
         }

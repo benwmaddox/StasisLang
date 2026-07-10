@@ -99,7 +99,7 @@ final class WorkshopProjectArchive {
                 if (totalBytes > MAX_TOTAL_BYTES) throw new IOException("project archive exceeds total size limit");
                 if (METADATA_ENTRY.equals(path)) {
                     String metadata = entryBytes.utf8();
-                    if (!metadata.matches("(?s).*\\\"format_version\\\"\\s*:\\s*(?:1|2)(?:\\D.*|\\s*)")) {
+                    if (!metadata.matches("(?s).*\\\"format_version\\\"\\s*:\\s*(?:1|2|3)(?:\\D.*|\\s*)")) {
                         throw new IOException("project archive metadata format is unsupported");
                     }
                     metadataFound = true;

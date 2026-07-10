@@ -78,7 +78,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
-    private static final String ASSET_ROOT = "workshop_sample/";
     private static final String PROJECT_DIR = WorkshopProjectRegistry.LEGACY_PROJECT_DIR;
     private static final String PROJECT_BASELINES_DIR = "workshop_project_baselines";
     private static final String PROJECT_BASELINE_READY = ".ready";
@@ -152,20 +151,6 @@ public final class MainActivity extends Activity {
     private static final int SPRITE_VERTEX_BYTES = SPRITE_VERTEX_FLOATS * 4;
     private static final int SPRITE_VERTEX_BUFFER_FLOATS =
             MAX_RENDER_COMMANDS * RECT_VERTICES * SPRITE_VERTEX_FLOATS;
-    private static final String[] SAMPLE_FILES = new String[] {
-            "src/main.stasis",
-            "src/root.stasis",
-            "src/game_state.stasis",
-            "src/player.stasis",
-            "src/enemy.stasis",
-            "src/input.stasis",
-            "src/assets.stasis",
-            "src/systems/collision.stasis"
-    };
-    private static final String[] SAMPLE_TEST_FILES = new String[] {
-            "tests/enemy_paddle_speed_schedule.test.stasis"
-    };
-
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
     private LinearLayout manualEditBody;
@@ -197,6 +182,7 @@ public final class MainActivity extends Activity {
     private LinearLayout projectSettingsBody;
     private EditText newProjectNameEditor;
     private Spinner projectSelector;
+    private Spinner templateSelector;
     private TextView projectStatus;
     private LinearLayout imageAssetList;
     private LinearLayout audioAssetList;
@@ -286,7 +272,8 @@ public final class MainActivity extends Activity {
         AndroidCrashStore.install(this);
 
         try {
-            activeProject = WorkshopProjectRegistry.initialize(this);
+            activeProject = WorkshopProjectRegistry.initialize(this,
+                    WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID);
             projectRootFile = activeProject.root;
         } catch (Exception error) {
             projectRegistryError = error.getMessage();
@@ -1440,8 +1427,15 @@ public final class MainActivity extends Activity {
         newProjectNameEditor.setHint("New project name");
         newProjectNameEditor.setSingleLine(true);
         projectSettingsBody.addView(newProjectNameEditor, fullWidth());
+        templateSelector = new Spinner(this);
+        ArrayAdapter<WorkshopTemplateCatalog.Template> templateAdapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, WorkshopTemplateCatalog.list());
+        templateAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        templateSelector.setAdapter(templateAdapter);
+        templateSelector.setContentDescription("Bundled template for the new project");
+        projectSettingsBody.addView(templateSelector, fullWidth());
         Button newSampleProject = new Button(this);
-        newSampleProject.setText("New Project From Sample");
+        newSampleProject.setText("New Project From Selected Template");
         newSampleProject.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { createAndSwitchProject(); }
         });
@@ -1947,7 +1941,9 @@ public final class MainActivity extends Activity {
             if (!availableProjects.isEmpty()) projectSelector.setSelection(selected);
             projectStatus.setText(activeProject == null
                     ? "Active project: legacy workspace"
-                    : "Active project: " + activeProject.name + " (format " + WorkshopProjectRegistry.FORMAT_VERSION + ")");
+                    : "Active project: " + activeProject.name + " (format "
+                            + WorkshopProjectRegistry.FORMAT_VERSION + (activeProject.templateId.isEmpty()
+                                    ? ", imported" : ", template " + activeProject.templateId) + ")");
         } catch (Exception error) {
             projectStatus.setText("Project registry error: " + error.getMessage());
         }
@@ -1974,7 +1970,14 @@ public final class MainActivity extends Activity {
         }
         String name = newProjectNameEditor == null ? "" : newProjectNameEditor.getText().toString();
         try {
-            WorkshopProjectRegistry.ProjectInfo project = WorkshopProjectRegistry.createFromSample(this, name);
+            Object selectedTemplate = templateSelector == null ? null : templateSelector.getSelectedItem();
+            if (!(selectedTemplate instanceof WorkshopTemplateCatalog.Template)) {
+                setStatusText("Select a bundled template before creating the project");
+                return;
+            }
+            WorkshopTemplateCatalog.Template template = (WorkshopTemplateCatalog.Template)selectedTemplate;
+            WorkshopProjectRegistry.ProjectInfo project = WorkshopProjectRegistry.createFromTemplate(
+                    this, name, template.id);
             activateProject(project);
             newProjectNameEditor.setText("");
         } catch (Exception error) {
@@ -7187,24 +7190,35 @@ public final class MainActivity extends Activity {
         List<SourceFile> files = new ArrayList<>();
         AssetManager assets = getAssets();
         File projectRoot = projectRoot();
-        for (String file : SAMPLE_FILES) {
+        WorkshopTemplateCatalog.Template template = activeWorkshopTemplate();
+        for (String file : template.sourceFiles) {
             File diskFile = new File(projectRoot, file);
             try {
-                files.add(new SourceFile(file, diskFile, readAsset(assets, ASSET_ROOT + file)));
+                files.add(new SourceFile(file, diskFile, readAsset(assets, template.assetRoot + file)));
             } catch (IOException error) {
                 files.add(new SourceFile(file, diskFile, "// Unable to load " + file + ": " + error.getMessage()));
             }
         }
-        for (String file : SAMPLE_TEST_FILES) {
+        for (String file : template.testFiles) {
             File diskFile = new File(projectRoot, file);
             try {
-                files.add(new SourceFile(file, diskFile, readAsset(assets, ASSET_ROOT + file)));
+                files.add(new SourceFile(file, diskFile, readAsset(assets, template.assetRoot + file)));
             } catch (IOException error) {
                 files.add(new SourceFile(file, diskFile, "// Unable to load " + file + ": " + error.getMessage()));
             }
         }
 
         return ProjectSnapshot.from(files);
+    }
+
+    private WorkshopTemplateCatalog.Template activeWorkshopTemplate() throws IOException {
+        String templateId = activeProject == null
+                ? WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID : activeProject.templateId;
+        try {
+            return WorkshopTemplateCatalog.require(templateId);
+        } catch (IllegalArgumentException error) {
+            throw new IOException("active project template is unavailable: " + templateId, error);
+        }
     }
 
     private File activeProjectBaselineRoot() {
@@ -7215,7 +7229,11 @@ public final class MainActivity extends Activity {
 
     private void ensureActiveProjectBaseline(ProjectSnapshot current) throws IOException {
         File baselineRoot = activeProjectBaselineRoot();
-        if (new File(baselineRoot, PROJECT_BASELINE_READY).isFile()) return;
+        File readyFile = new File(baselineRoot, PROJECT_BASELINE_READY);
+        String templateId = activeProject == null ? WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID
+                : activeProject.templateId;
+        String expectedReady = "format=2\ntemplate_id=" + templateId + "\n";
+        if (readyFile.isFile() && expectedReady.equals(readTextFile(readyFile))) return;
         ProjectSnapshot baseline = activeProject != null && "import".equals(activeProject.origin)
                 ? current : loadBundledAssetSnapshot();
         deleteBaselineDirectory(baselineRoot);
@@ -7233,7 +7251,7 @@ public final class MainActivity extends Activity {
             if (!parent.isDirectory() && !parent.mkdirs()) throw new IOException("unable to create baseline source directory");
             writeTextFile(target, source.source);
         }
-        writeTextFile(new File(baselineRoot, PROJECT_BASELINE_READY), "format=1\n");
+        writeTextFile(readyFile, expectedReady);
     }
 
     private ProjectSnapshot loadProjectBaselineSnapshot() throws IOException {
@@ -7751,19 +7769,24 @@ public final class MainActivity extends Activity {
 
         boolean sampleProject = activeProject == null || "sample".equals(activeProject.origin);
         if (sampleProject) {
-            for (String file : SAMPLE_FILES) {
-                try {
-                    ensureProjectFile(assets, ASSET_ROOT + file, new File(projectRoot, file));
-                } catch (IOException ignored) {
-                    // The recursive load below includes files that were seeded successfully.
+            try {
+                WorkshopTemplateCatalog.Template template = activeWorkshopTemplate();
+                for (String file : template.sourceFiles) {
+                    try {
+                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
+                    } catch (IOException ignored) {
+                        // The recursive load below includes files that were seeded successfully.
+                    }
                 }
-            }
-            for (String file : SAMPLE_TEST_FILES) {
-                try {
-                    ensureProjectFile(assets, ASSET_ROOT + file, new File(projectRoot, file));
-                } catch (IOException ignored) {
-                    // The recursive load below includes files that were seeded successfully.
+                for (String file : template.testFiles) {
+                    try {
+                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
+                    } catch (IOException ignored) {
+                        // The recursive load below includes files that were seeded successfully.
+                    }
                 }
+            } catch (IOException ignored) {
+                // Registry validation normally prevents an unknown template from reaching this path.
             }
         }
         try {
