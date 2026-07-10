@@ -275,6 +275,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        AndroidCrashStore.install(this);
 
         try {
             activeProject = WorkshopProjectRegistry.initialize(this);
@@ -299,6 +300,9 @@ public final class MainActivity extends Activity {
         markInterruptedAiOutcomeIfNeeded();
         restoreWorkshopUiState(savedInstanceState);
         restorePendingDraft();
+        if (AndroidCrashStore.safeSummary(this).optBoolean("present", false)) {
+            setStatusText("Previous crash detected; export a redacted support bundle or clear the local crash record in Privacy & Data");
+        }
         if (!getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE)
                 .getBoolean(ONBOARDING_COMPLETE, false)) {
             gameLoopHandler.post(new Runnable() {
@@ -1696,6 +1700,19 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { requestSupportBundleExport(); }
         });
         privacySettingsBody.addView(exportSupport, fullWidth());
+        Button clearCrash = new Button(this);
+        clearCrash.setText("Clear Local Crash Record");
+        clearCrash.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                try {
+                    AndroidCrashStore.clear(MainActivity.this);
+                    setStatusText("Local redacted crash record cleared");
+                } catch (Exception error) {
+                    setStatusText("Crash record clear failed: " + error.getMessage());
+                }
+            }
+        });
+        privacySettingsBody.addView(clearCrash, fullWidth());
         Button deleteProject = new Button(this);
         deleteProject.setText("Delete Active Non-Bundled Project");
         deleteProject.setOnClickListener(new View.OnClickListener() {
@@ -2270,7 +2287,7 @@ public final class MainActivity extends Activity {
         new AlertDialog.Builder(this)
                 .setTitle("Export Redacted Support Bundle?")
                 .setMessage("Includes app/device versions, project file counts, compile/reload state, operation states, "
-                        + "AI outcome statuses, and up to 50 trace event names. Excludes credentials, source, prompts, "
+                        + "AI outcome statuses, up to 50 trace event names, and prior redacted crash type/class-method frames. Excludes credentials, source, prompts, "
                         + "file/media names and bytes, repository names, and absolute paths.")
                 .setPositiveButton("Choose Destination", new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {

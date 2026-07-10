@@ -21,6 +21,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -125,6 +126,7 @@ def main() -> int:
     paint_view = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java")
     audio_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java")
     support_bundle = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java")
+    crash_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "protected void onPause()" in activity
@@ -396,6 +398,22 @@ def main() -> int:
     assert "draft_source" not in support_bundle
     assert "before_source" not in support_bundle
     assert "api_key" not in support_bundle
+    assert "AndroidCrashStore.install(this)" in activity
+    assert "Previous crash detected" in activity
+    assert "Clear Local Crash Record" in activity
+    assert "AndroidCrashStore.clear" in activity
+    assert 'FILE_NAME = "android_crash_redacted.json"' in crash_store
+    assert "MAX_FRAMES = 30" in crash_store
+    assert "MAX_RECORD_BYTES = 64 * 1024" in crash_store
+    assert "Thread.setDefaultUncaughtExceptionHandler" in crash_store
+    assert "prior.uncaughtException(thread, error)" in crash_store
+    assert '"message_excluded"' in crash_store
+    assert '"paths_and_source_excluded"' in crash_store
+    assert "getClassName()" in crash_store
+    assert "getMethodName()" in crash_store
+    assert "getMessage()" not in crash_store
+    assert "output.getFD().sync()" in crash_store
+    assert '"previous_crash"' in support_bundle
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
     assert "Cancel AI" in activity
