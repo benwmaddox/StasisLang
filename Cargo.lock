@@ -694,6 +694,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "cranelift-object",
+ "object",
  "serde",
  "serde_json",
  "stasis_dynload",

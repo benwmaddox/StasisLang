@@ -3,7 +3,6 @@ use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32};
 use crate::ir::hir::FunctionHIR;
-use cranelift_codegen::isa;
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
 use cranelift_module::{default_libcall_names, Module};
@@ -29,7 +28,7 @@ pub struct AotArtifact {
 pub struct AotProcess {
     compiler: Compiler,
     optimization_profile: AotOptimizationProfile,
-    target: AotTarget,
+    target: stasis_jit::AotTarget,
     next_object_index: u32,
     artifacts: Vec<AotArtifact>,
     object_bytes: Vec<Vec<u8>>,
@@ -47,48 +46,16 @@ pub struct AotEngineBundle {
     pub optimization_profile: AotOptimizationProfile,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AotTarget {
-    Native,
-    Triple(String),
-}
-
-impl Default for AotTarget {
-    fn default() -> Self {
-        Self::Native
-    }
-}
-
-impl AotTarget {
-    pub fn android_arm64() -> Self {
-        Self::Triple("aarch64-linux-android".to_string())
-    }
-
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Native => "native",
-            Self::Triple(triple) => triple,
-        }
-    }
-}
-
 impl AotProcess {
     pub fn new() -> Self {
         Self::with_optimization_profile(AotOptimizationProfile::Speed)
     }
 
     pub fn with_optimization_profile(optimization_profile: AotOptimizationProfile) -> Self {
-        Self::with_optimization_profile_and_target(optimization_profile, AotTarget::Native)
-    }
-
-    pub fn with_optimization_profile_and_target(
-        optimization_profile: AotOptimizationProfile,
-        target: AotTarget,
-    ) -> Self {
         Self {
             compiler: Compiler::new(),
             optimization_profile,
-            target,
+            target: stasis_jit::AotTarget::default(),
             next_object_index: 0,
             artifacts: Vec::new(),
             object_bytes: Vec::new(),
@@ -103,6 +70,10 @@ impl AotProcess {
         self.compiler.upsert_file(path, content);
     }
 
+    pub fn set_target(&mut self, target: stasis_jit::AotTarget) {
+        self.target = target;
+    }
+
     pub fn set_required_emit_roots(&mut self, roots: &[String]) {
         self.required_emit_roots.clear();
         self.required_emit_roots.extend_from_slice(roots);
@@ -112,13 +83,15 @@ impl AotProcess {
         self.load_import_graph_sources()
             .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
-        let mut type_table = self.compiler.types().clone();
-        type_table
+        self.compiler
+            .types_mut()
             .ensure_utf8_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
-        type_table
+        self.compiler
+            .types_mut()
             .ensure_ascii_view_id()
             .map_err(crate::compiler::CompileError::Backend)?;
+        let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
         let cache_miss = self
             .compile_analysis_cache
@@ -129,7 +102,7 @@ impl AotProcess {
             let next_cache = build_compile_analysis_cache(
                 self.compiler.files(),
                 self.compiler.functions(),
-                &mut type_table,
+                &mut analysis_type_table,
                 files_fingerprint,
                 resolve_preferred_extern_call_signatures,
             )
@@ -140,6 +113,7 @@ impl AotProcess {
             }
             self.compile_analysis_cache = Some(next_cache);
         }
+        *self.compiler.types_mut() = analysis_type_table.clone();
         let analysis = self.compile_analysis_cache.as_ref().ok_or_else(|| {
             crate::compiler::CompileError::Invariant(
                 "aot compile analysis cache missing after refresh".to_string(),
@@ -153,7 +127,7 @@ impl AotProcess {
             }
         }
         self.collection_max_lengths =
-            collect_fixed_collection_max_lengths(&analysis.global_path_types, &type_table)
+            collect_fixed_collection_max_lengths(&analysis.global_path_types, &analysis_type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
         let compiled_body_hashes: HashMap<FunctionId, u64> = self
             .artifacts
@@ -173,49 +147,55 @@ impl AotProcess {
             artifacts,
             object_bytes,
             optimization_profile,
-            target,
             string_literals,
+            target,
         ) = (
             &mut self.compiler,
             &mut self.next_object_index,
             &mut self.artifacts,
             &mut self.object_bytes,
             self.optimization_profile,
-            self.target.clone(),
             &mut self.string_literals,
+            self.target.clone(),
         );
-        let emit = compiler.emit_pass_for_ids_with(&emit_function_ids, &mut |meta, hir| {
-            // Stable per-function symbols are required so AOT objects can reference each other
-            // directly without forcing recompilation of callers on every body change.
-            let symbol = format!("aot_fn_{}", meta.id);
-            let bytes = compile_function_to_object_bytes(
-                meta,
-                hir,
-                &symbol,
-                optimization_profile,
-                &target,
-                &analysis.call_signatures,
-                &mut type_table,
-                &analysis.global_path_types,
-                &analysis.constant_values,
-                string_literals,
-                &analysis.collection_infos,
-                &analysis.named_struct_field_types,
-            )?;
-            let object_index = *next_object_index;
-            *next_object_index = next_object_index.saturating_add(1);
-            object_bytes.push(bytes);
-            let object_bytes_len = object_bytes.last().map_or(0usize, std::vec::Vec::len);
-            artifacts.retain(|artifact| artifact.function_id != meta.id);
-            artifacts.push(AotArtifact {
-                function_id: meta.id,
-                object_index,
-                body_hash: meta.body_hash,
-                symbol_name: symbol,
-                object_bytes_len,
-            });
-            Ok(())
-        })?;
+        let emit = compiler.emit_pass_for_ids_with(
+            &emit_function_ids,
+            &mut |meta, hir, lowered_types| {
+                // Stable per-function symbols are required so AOT objects can reference each other
+                // directly without forcing recompilation of callers on every body change.
+                let symbol = format!("aot_fn_{}", meta.id);
+                let mut type_table = lowered_types.clone();
+                type_table.ensure_utf8_view_id()?;
+                type_table.ensure_ascii_view_id()?;
+                let bytes = compile_function_to_object_bytes(
+                    meta,
+                    hir,
+                    &symbol,
+                    optimization_profile,
+                    &analysis.call_signatures,
+                    &mut type_table,
+                    &analysis.global_path_types,
+                    &analysis.constant_values,
+                    string_literals,
+                    &target,
+                    &analysis.collection_infos,
+                    &analysis.named_struct_field_types,
+                )?;
+                let object_index = *next_object_index;
+                *next_object_index = next_object_index.saturating_add(1);
+                object_bytes.push(bytes);
+                let object_bytes_len = object_bytes.last().map_or(0usize, std::vec::Vec::len);
+                artifacts.retain(|artifact| artifact.function_id != meta.id);
+                artifacts.push(AotArtifact {
+                    function_id: meta.id,
+                    object_index,
+                    body_hash: meta.body_hash,
+                    symbol_name: symbol,
+                    object_bytes_len,
+                });
+                Ok(())
+            },
+        )?;
 
         let reachable = crate::backend::reachability::compute_reachable_function_ids(
             self.compiler.functions(),
@@ -287,10 +267,6 @@ impl AotProcess {
 
     pub fn optimization_profile(&self) -> AotOptimizationProfile {
         self.optimization_profile
-    }
-
-    pub fn target(&self) -> &AotTarget {
-        &self.target
     }
 
     pub fn link_executable_for_i32_noarg_function(
@@ -558,12 +534,12 @@ fn compile_function_to_object_bytes(
     hir: &FunctionHIR,
     symbol: &str,
     optimization_profile: AotOptimizationProfile,
-    target: &AotTarget,
     call_signatures: &CallSignatureMap,
     type_table: &mut TypeTable,
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     string_literals: &mut BTreeMap<i32, String>,
+    target: &stasis_jit::AotTarget,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<Vec<u8>, String> {
@@ -571,13 +547,20 @@ fn compile_function_to_object_bytes(
     flag_builder
         .set("opt_level", optimization_profile.as_cranelift_opt_level())
         .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
-    if !matches!(target, AotTarget::Native) {
-        flag_builder
-            .set("is_pic", "true")
-            .map_err(|error| format!("failed to configure Cranelift PIC mode: {error}"))?;
-    }
     let flags = settings::Flags::new(flag_builder);
-    let isa_builder = isa_builder_for_aot_target(target)?;
+    let isa_builder = match target.object_triple() {
+        Some(triple_text) => {
+            let triple = Triple::from_str(triple_text).map_err(|error| {
+                format!("failed to parse AOT target triple {triple_text}: {error}")
+            })?;
+            let triple_display = triple.to_string();
+            cranelift_codegen::isa::lookup(triple).map_err(|error| {
+                format!("failed to construct ISA builder for {triple_display}: {error}")
+            })?
+        }
+        None => cranelift_native::builder()
+            .map_err(|error| format!("failed to construct native ISA builder: {error}"))?,
+    };
     let isa = isa_builder
         .finish(flags)
         .map_err(|error| format!("failed to finalize native ISA: {error}"))?;
@@ -645,18 +628,6 @@ fn maybe_invoke_clif_dump_hook(meta: &FunctionMeta, func: &cranelift_codegen::ir
     hook(meta, func);
 }
 
-fn isa_builder_for_aot_target(target: &AotTarget) -> Result<isa::Builder, String> {
-    match target {
-        AotTarget::Native => cranelift_native::builder()
-            .map_err(|error| format!("failed to construct native ISA builder: {error}")),
-        AotTarget::Triple(triple) => {
-            let triple = Triple::from_str(triple)
-                .map_err(|error| format!("failed to parse AOT target triple: {error}"))?;
-            isa::lookup(triple)
-                .map_err(|error| format!("failed to construct target ISA builder: {error}"))
-        }
-    }
-}
 fn record_string_literal(out: &mut BTreeMap<i32, String>, value: &str) -> Result<(), String> {
     let id = hash_string_literal(value);
     if let Some(existing) = out.get(&id) {
@@ -937,6 +908,7 @@ mod tests {
     use super::*;
     use crate::backend::jit::JitProcess;
     use crate::backend::EngineEntrypoints;
+    use object::{Architecture, BinaryFormat, File, Object};
     #[cfg(windows)]
     use std::process::Command;
     use std::sync::Arc;
@@ -1146,6 +1118,18 @@ mod tests {
         assert_eq!(report.emit.emitted_functions, 1);
         assert_eq!(process.artifacts().len(), 1);
         assert!(process.artifacts()[0].object_bytes_len > 0);
+    }
+
+    #[test]
+    fn aot_process_supports_local_annotation_only_type_during_emit() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let token: local_only = 7; return token; }\n",
+        );
+        let report = process.compile().expect("aot compile");
+        assert_eq!(report.emit.emitted_functions, 1);
+        assert_eq!(process.artifacts().len(), 1);
     }
 
     #[test]
@@ -1411,21 +1395,21 @@ mod tests {
     }
 
     #[test]
-    fn aot_process_can_emit_android_arm64_objects() {
-        let mut process = AotProcess::with_optimization_profile_and_target(
-            AotOptimizationProfile::SpeedAndSize,
-            AotTarget::android_arm64(),
-        );
+    fn aot_process_emits_android_arm64_elf_objects_when_target_is_configured() {
+        let mut process = AotProcess::new();
+        process.set_target(stasis_jit::AotTarget::android_arm64_default());
         process.upsert_file("sample.stasis", "function main(): i32 { return 7; }\n");
-        process.compile().expect("compile android arm64 object");
+        process.compile().expect("android aot compile");
 
-        assert_eq!(process.target(), &AotTarget::android_arm64());
-        assert_eq!(process.artifacts().len(), 1);
-        assert!(
-            process.artifacts()[0].object_bytes_len > 0,
-            "expected non-empty android arm64 object bytes"
-        );
+        let bytes = process
+            .object_bytes
+            .first()
+            .expect("expected first object bytes");
+        let object = File::parse(bytes.as_slice()).expect("parse emitted object");
+        assert_eq!(object.format(), BinaryFormat::Elf);
+        assert_eq!(object.architecture(), Architecture::Aarch64);
     }
+
     #[test]
     fn aot_engine_bundle_writes_manifest_and_required_entrypoints() {
         let mut process = AotProcess::new();
@@ -1904,6 +1888,7 @@ mod tests {
             return Some(stasis_jit::AotLinkConfig {
                 linker_path: Some(explicit),
                 runtime_lib_paths: vec![],
+                target: stasis_jit::AotTarget::default(),
             });
         }
         for candidate in ["lld-link.exe", "link.exe"] {
@@ -1912,6 +1897,7 @@ mod tests {
                 return Some(stasis_jit::AotLinkConfig {
                     linker_path: Some(PathBuf::from(candidate)),
                     runtime_lib_paths: vec![],
+                    target: stasis_jit::AotTarget::default(),
                 });
             }
         }

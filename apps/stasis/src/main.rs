@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -15,8 +16,12 @@ use stasis::{
     run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
     RunnerConfig, StasisTestRunSession,
 };
-use stasis_compiler::backend::aot::{AotProcess, AotTarget};
+use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
+use stasis_compiler::frontend::parser::{
+    parse_top_level_functions, parse_top_level_struct_definitions,
+};
+use stasis_jit::AotTarget;
 use stasis_runner::swap::contracts::TargetMode;
 
 struct CliOptions {
@@ -57,10 +62,410 @@ struct PlayCliArgs {
     ticks: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LookupMode {
+    Signature,
+    Definition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LookupCliArgs {
+    mode: LookupMode,
+    query: String,
+    entry_file: Option<PathBuf>,
+    file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LookupMatch {
+    path: String,
+    text: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct CacheCleanupSummary {
     removed_files: u64,
     removed_dirs: u64,
+}
+
+fn parse_lookup_mode_alias(value: &str) -> Option<LookupMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "signature" | "sig" => Some(LookupMode::Signature),
+        "def" | "definition" => Some(LookupMode::Definition),
+        _ => None,
+    }
+}
+
+fn parse_lookup_cli_args(args: &[String]) -> Result<Option<LookupCliArgs>, String> {
+    let Some(first) = args.first() else {
+        return Ok(None);
+    };
+    let first_lower = first.to_ascii_lowercase();
+    let direct_mode = parse_lookup_mode_alias(first);
+    let expects_mode_arg = matches!(first_lower.as_str(), "s" | "search");
+    if !expects_mode_arg && direct_mode.is_none() {
+        return Ok(None);
+    }
+
+    let mut entry_file: Option<PathBuf> = None;
+    let mut file: Option<PathBuf> = None;
+    let mut positionals: Vec<String> = Vec::new();
+    let mut i = 1usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--entry" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --entry".to_string());
+                }
+                entry_file = Some(PathBuf::from(args[i + 1].clone()));
+                i += 2;
+            }
+            "--file" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --file".to_string());
+                }
+                file = Some(PathBuf::from(args[i + 1].clone()));
+                i += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown lookup flag '{other}'"));
+            }
+            _ => {
+                positionals.push(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+
+    if entry_file.is_some() && file.is_some() {
+        return Err("lookup accepts either --entry or --file, not both".to_string());
+    }
+
+    let (mode, query) = if expects_mode_arg {
+        let Some(mode_text) = positionals.first() else {
+            return Err("missing lookup mode. Use signature|sig or def|definition".to_string());
+        };
+        let Some(mode) = parse_lookup_mode_alias(mode_text) else {
+            return Err(format!(
+                "invalid lookup mode '{mode_text}'. Use signature|sig or def|definition"
+            ));
+        };
+        let Some(query) = positionals.get(1) else {
+            return Err("missing lookup query".to_string());
+        };
+        if positionals.len() > 2 {
+            return Err("unexpected extra lookup arguments".to_string());
+        }
+        (mode, query.clone())
+    } else {
+        let Some(mode) = direct_mode else {
+            return Err("missing lookup mode".to_string());
+        };
+        let Some(query) = positionals.first() else {
+            return Err("missing lookup query".to_string());
+        };
+        if positionals.len() > 1 {
+            return Err("unexpected extra lookup arguments".to_string());
+        }
+        (mode, query.clone())
+    };
+
+    if query.trim().is_empty() {
+        return Err("missing lookup query".to_string());
+    }
+
+    Ok(Some(LookupCliArgs {
+        mode,
+        query,
+        entry_file,
+        file,
+    }))
+}
+
+fn parse_lookup_import_paths(source: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("import ") {
+            continue;
+        }
+        let Some(first_quote) = trimmed.find('"') else {
+            continue;
+        };
+        let rest = &trimmed[first_quote + 1..];
+        let Some(second_quote_rel) = rest.find('"') else {
+            continue;
+        };
+        let candidate = &rest[..second_quote_rel];
+        let path = PathBuf::from(candidate);
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("stasis"))
+        {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn is_lookup_ignored_dir(name: &str) -> bool {
+    matches!(name, ".git" | ".stasis_cache" | "target")
+}
+
+fn collect_lookup_stasis_files_recursive(root: &Path) -> Result<Vec<PathBuf>, String> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+        let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+            .map_err(|error| format!("failed to read directory {}: {error}", dir.display()))?
+            .filter_map(|entry| entry.ok().map(|value| value.path()))
+            .collect();
+        entries.sort();
+        for path in entries {
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("failed to stat {}: {error}", path.display()))?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if is_lookup_ignored_dir(name) {
+                    continue;
+                }
+                walk(&path, out)?;
+                continue;
+            }
+            if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("stasis"))
+            {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    walk(root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_lookup_entry_files(root: &Path, entry_file: &Path) -> Result<Vec<PathBuf>, String> {
+    let root_canonical = root.canonicalize().map_err(|error| {
+        format!(
+            "failed to canonicalize lookup root {}: {error}",
+            root.display()
+        )
+    })?;
+    let entry_path = if entry_file.is_absolute() {
+        entry_file.to_path_buf()
+    } else {
+        root_canonical.join(entry_file)
+    };
+    if !entry_path.exists() {
+        return Err(format!(
+            "entry file does not exist: {}",
+            entry_path.display()
+        ));
+    }
+    let entry_canonical = entry_path.canonicalize().map_err(|error| {
+        format!(
+            "failed to canonicalize entry file {}: {error}",
+            entry_path.display()
+        )
+    })?;
+    if !entry_canonical.starts_with(&root_canonical) {
+        return Err(format!(
+            "entry file {} must be within current directory {}",
+            entry_canonical.display(),
+            root_canonical.display()
+        ));
+    }
+
+    let mut queue: Vec<PathBuf> = vec![entry_canonical];
+    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
+    while let Some(path) = queue.pop() {
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        let source = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        let parent = path.parent().unwrap_or(&root_canonical);
+        for import_path in parse_lookup_import_paths(&source) {
+            let candidate = parent.join(import_path);
+            if !candidate.exists() {
+                continue;
+            }
+            let canonical = candidate.canonicalize().map_err(|error| {
+                format!("failed to canonicalize {}: {error}", candidate.display())
+            })?;
+            if canonical.starts_with(&root_canonical) {
+                queue.push(canonical);
+            }
+        }
+    }
+
+    let mut files: Vec<PathBuf> = visited.into_iter().collect();
+    files.sort();
+    Ok(files)
+}
+
+fn collect_lookup_scan_files(root: &Path, parsed: &LookupCliArgs) -> Result<Vec<PathBuf>, String> {
+    if let Some(path) = parsed.file.as_deref() {
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        if !resolved.exists() {
+            return Err(format!(
+                "lookup file does not exist: {}",
+                resolved.display()
+            ));
+        }
+        let metadata = fs::metadata(&resolved)
+            .map_err(|error| format!("failed to stat {}: {error}", resolved.display()))?;
+        if metadata.is_dir() {
+            return Err(format!(
+                "lookup file must be a file: {}",
+                resolved.display()
+            ));
+        }
+        return resolved
+            .canonicalize()
+            .map(|path| vec![path])
+            .map_err(|error| format!("failed to canonicalize {}: {error}", resolved.display()));
+    }
+    if let Some(path) = parsed.entry_file.as_deref() {
+        return collect_lookup_entry_files(root, path);
+    }
+    collect_lookup_stasis_files_recursive(root)
+}
+
+fn lookup_name_matches(name: &str, query_lower: &str) -> bool {
+    name.to_ascii_lowercase().contains(query_lower)
+}
+
+fn lookup_display_path(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn collect_lookup_matches_in_source(
+    path: &Path,
+    root: &Path,
+    source: &str,
+    parsed: &LookupCliArgs,
+) -> Vec<LookupMatch> {
+    let query_lower = parsed.query.to_ascii_lowercase();
+    let display_path = lookup_display_path(path, root);
+    let mut matches = Vec::new();
+
+    if let Ok(functions) = parse_top_level_functions(source) {
+        for function in functions {
+            if !lookup_name_matches(&function.name, &query_lower) {
+                continue;
+            }
+            let text = match parsed.mode {
+                LookupMode::Signature => source.get(function.signature_range.clone()),
+                LookupMode::Definition => {
+                    source.get(function.signature_range.start..function.body_range.end)
+                }
+            };
+            if let Some(text) = text {
+                matches.push(LookupMatch {
+                    path: display_path.clone(),
+                    text: text.trim().to_string(),
+                });
+            }
+        }
+    }
+
+    if parsed.mode == LookupMode::Definition {
+        if let Ok(structs) = parse_top_level_struct_definitions(source) {
+            for definition in structs {
+                if !lookup_name_matches(&definition.name, &query_lower) {
+                    continue;
+                }
+                if let Some(text) = source.get(definition.definition_range.clone()) {
+                    matches.push(LookupMatch {
+                        path: display_path.clone(),
+                        text: text.trim().to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    matches
+}
+
+fn render_lookup_matches(matches: &[LookupMatch]) -> String {
+    let mut output = String::new();
+    for item in matches {
+        output.push_str(&item.path);
+        output.push('\n');
+        output.push_str(&item.text);
+        output.push_str("\n\n");
+    }
+    output
+}
+
+fn run_lookup_command(parsed: &LookupCliArgs, root: &Path) -> Result<String, String> {
+    let root_canonical = root.canonicalize().map_err(|error| {
+        format!(
+            "failed to canonicalize current directory {}: {error}",
+            root.display()
+        )
+    })?;
+    let files = collect_lookup_scan_files(&root_canonical, parsed)?;
+    let mut matches = Vec::new();
+    for path in files {
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        let source = String::from_utf8_lossy(&bytes).to_string();
+        matches.extend(collect_lookup_matches_in_source(
+            &path,
+            &root_canonical,
+            &source,
+            parsed,
+        ));
+    }
+    Ok(render_lookup_matches(&matches))
+}
+
+fn try_run_lookup_subcommand() -> Option<i32> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let parsed = match parse_lookup_cli_args(&args) {
+        Ok(Some(value)) => value,
+        Ok(None) => return None,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(2);
+        }
+    };
+    let root = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to read current directory: {error}");
+            return Some(1);
+        }
+    };
+    match run_lookup_command(&parsed, &root) {
+        Ok(output) => {
+            print!("{output}");
+            Some(0)
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            Some(1)
+        }
+    }
 }
 
 fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
@@ -810,10 +1215,8 @@ fn write_android_aot_engine_bundle(
     project_dir: &Path,
     output_dir: &Path,
 ) -> Result<AndroidAotBundleSummary, String> {
-    let mut process = AotProcess::with_optimization_profile_and_target(
-        AotOptimizationProfile::SpeedAndSize,
-        AotTarget::android_arm64(),
-    );
+    let mut process = AotProcess::with_optimization_profile(AotOptimizationProfile::SpeedAndSize);
+    process.set_target(AotTarget::android_arm64_default());
     for (path, source) in collect_android_aot_sources(project_dir)? {
         process.upsert_file(path, source);
     }
@@ -865,10 +1268,24 @@ fn collect_android_aot_sources_inner(
         let entry = entry.map_err(|error| format!("failed to read directory entry: {error}"))?;
         let path = entry.path();
         if path.is_dir() {
+            if path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name == "tests" || name == "build")
+            {
+                continue;
+            }
             collect_android_aot_sources_inner(root, &path, out)?;
             continue;
         }
         if path.extension().and_then(|value| value.to_str()) != Some("stasis") {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(".test.stasis"))
+        {
             continue;
         }
         let relative = path
@@ -1010,6 +1427,15 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_lookup_root(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("stasis_lookup_{name}_{stamp}"))
+    }
 
     #[test]
     fn parse_test_cli_args_accepts_required_dir_flag() {
@@ -1057,6 +1483,211 @@ mod tests {
         ];
         let error = parse_play_cli_args(&args).expect_err("parse should fail");
         assert!(error.contains("missing values for --data-bind"));
+    }
+
+    #[test]
+    fn parse_lookup_cli_args_accepts_search_alias_and_file_filter() {
+        let args = vec![
+            "s".to_string(),
+            "signature".to_string(),
+            "tick".to_string(),
+            "--file".to_string(),
+            "samples/example.stasis".to_string(),
+        ];
+        let parsed = parse_lookup_cli_args(&args)
+            .expect("parse should succeed")
+            .expect("lookup command");
+        assert_eq!(parsed.mode, LookupMode::Signature);
+        assert_eq!(parsed.query, "tick");
+        assert_eq!(parsed.file, Some(PathBuf::from("samples/example.stasis")));
+        assert_eq!(parsed.entry_file, None);
+    }
+
+    #[test]
+    fn parse_lookup_cli_args_accepts_direct_definition_alias() {
+        let args = vec!["definition".to_string(), "tick".to_string()];
+        let parsed = parse_lookup_cli_args(&args)
+            .expect("parse should succeed")
+            .expect("lookup command");
+        assert_eq!(parsed.mode, LookupMode::Definition);
+        assert_eq!(parsed.query, "tick");
+    }
+
+    #[test]
+    fn parse_lookup_cli_args_rejects_conflicting_scope_flags() {
+        let args = vec![
+            "search".to_string(),
+            "sig".to_string(),
+            "tick".to_string(),
+            "--entry".to_string(),
+            "entry.stasis".to_string(),
+            "--file".to_string(),
+            "only.stasis".to_string(),
+        ];
+        let error = parse_lookup_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("either --entry or --file"));
+    }
+
+    #[test]
+    fn run_lookup_command_signature_scans_directory_and_skips_invalid_files() {
+        let root = temp_lookup_root("signature_scope");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(
+            root.join("alpha.stasis"),
+            "function tick(): i32 { return 1; }\n",
+        )
+        .expect("write alpha");
+        std::fs::write(
+            root.join("beta.stasis"),
+            "function helper_tick(value: i32): i32 { return value; }\n",
+        )
+        .expect("write beta");
+        std::fs::write(
+            root.join("broken.stasis"),
+            "function tick_broken(): i32 { return 0;\n",
+        )
+        .expect("write broken");
+
+        let parsed = LookupCliArgs {
+            mode: LookupMode::Signature,
+            query: "tick".to_string(),
+            entry_file: None,
+            file: None,
+        };
+        let output = run_lookup_command(&parsed, &root).expect("lookup should succeed");
+        assert_eq!(
+            output,
+            "alpha.stasis\nfunction tick(): i32\n\nbeta.stasis\nfunction helper_tick(value: i32): i32\n\n"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn run_lookup_command_definition_entry_scans_import_closure_only() {
+        let root = temp_lookup_root("entry_scope");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(
+            root.join("entry.stasis"),
+            "import \"./nested/helper.stasis\";\nfunction tick_main(): i32 { return helper_tick(); }\n",
+        )
+        .expect("write entry");
+        std::fs::write(
+            nested.join("helper.stasis"),
+            "struct TickState {\n    value: i32;\n}\nfunction helper_tick(): i32 { return 7; }\n",
+        )
+        .expect("write helper");
+        std::fs::write(
+            root.join("unrelated.stasis"),
+            "function tick_unrelated(): i32 { return 99; }\n",
+        )
+        .expect("write unrelated");
+
+        let parsed = LookupCliArgs {
+            mode: LookupMode::Definition,
+            query: "tick".to_string(),
+            entry_file: Some(PathBuf::from("entry.stasis")),
+            file: None,
+        };
+        let output = run_lookup_command(&parsed, &root).expect("lookup should succeed");
+        assert_eq!(
+            output,
+            "entry.stasis\nfunction tick_main(): i32 { return helper_tick(); }\n\nnested/helper.stasis\nfunction helper_tick(): i32 { return 7; }\n\nnested/helper.stasis\nstruct TickState {\n    value: i32;\n}\n\n"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn run_lookup_command_definition_entry_follows_bom_prefixed_imports() {
+        let root = temp_lookup_root("entry_bom_scope");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(
+            root.join("entry.stasis"),
+            "\u{feff}import \"./nested/helper.stasis\";\nfunction tick_main(): i32 { return helper_tick(); }\n",
+        )
+        .expect("write entry");
+        std::fs::write(
+            nested.join("helper.stasis"),
+            "function helper_tick(): i32 { return 7; }\n",
+        )
+        .expect("write helper");
+
+        let parsed = LookupCliArgs {
+            mode: LookupMode::Definition,
+            query: "tick".to_string(),
+            entry_file: Some(PathBuf::from("entry.stasis")),
+            file: None,
+        };
+        let output = run_lookup_command(&parsed, &root).expect("lookup should succeed");
+        assert_eq!(
+            output,
+            "entry.stasis\nfunction tick_main(): i32 { return helper_tick(); }\n\nnested/helper.stasis\nfunction helper_tick(): i32 { return 7; }\n\n"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_lookup_command_signature_skips_symlinked_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_lookup_root("signature_symlink_scope");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(
+            nested.join("helper.stasis"),
+            "function tick_nested(): i32 { return 5; }\n",
+        )
+        .expect("write helper");
+        symlink("./nested", root.join("nested_link")).expect("create dir symlink");
+
+        let parsed = LookupCliArgs {
+            mode: LookupMode::Signature,
+            query: "tick".to_string(),
+            entry_file: None,
+            file: None,
+        };
+        let output = run_lookup_command(&parsed, &root).expect("lookup should succeed");
+        assert_eq!(
+            output,
+            "nested/helper.stasis\nfunction tick_nested(): i32\n\n"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn run_lookup_command_file_scope_limits_results_to_one_file() {
+        let root = temp_lookup_root("file_scope");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(
+            root.join("chosen.stasis"),
+            "function tick_local(): i32 { return 3; }\n",
+        )
+        .expect("write chosen");
+        std::fs::write(
+            root.join("other.stasis"),
+            "function tick_other(): i32 { return 4; }\n",
+        )
+        .expect("write other");
+
+        let parsed = LookupCliArgs {
+            mode: LookupMode::Definition,
+            query: "tick".to_string(),
+            entry_file: None,
+            file: Some(PathBuf::from("chosen.stasis")),
+        };
+        let output = run_lookup_command(&parsed, &root).expect("lookup should succeed");
+        assert_eq!(
+            output,
+            "chosen.stasis\nfunction tick_local(): i32 { return 3; }\n\n"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -1263,6 +1894,9 @@ fn main() {
     maybe_cleanup_stale_stasis_cache();
 
     if let Some(exit) = try_run_probe_graphics_runtime_subcommand() {
+        std::process::exit(exit);
+    }
+    if let Some(exit) = try_run_lookup_subcommand() {
         std::process::exit(exit);
     }
     if let Some(exit) = try_run_test_subcommand() {
