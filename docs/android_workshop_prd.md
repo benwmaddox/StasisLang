@@ -67,6 +67,7 @@ Workshop completion also requires:
 - The Workshop build is a general game workshop, never a game-specific product. It may preload an exploration tutorial, Pong, and additional templates, and users can create/import/switch arbitrary projects.
 - The default bundled project will become a touch-first exploration tutorial: tapping chooses a destination, a character walks toward it deterministically, and nearby collectible items enter an inventory.
 - The exploration tutorial uses a data-oriented learning architecture: stable entity IDs; bounded structure-of-arrays component storage; explicit input, movement, collection, inventory, and render-extraction systems; deterministic tick progression; no hidden object graph; and small files introduced in a teachable order.
+- The detailed architecture, lesson order, deterministic schedule, and acceptance matrix are canonicalized in `docs/android_exploration_sample_design.md`.
 - Pong remains bundled as a compact mechanics/hot-reload example and must remain selectable after the exploration tutorial becomes the default.
 - Every release build is game-specific. Its package, AOT roots, assets, display name, and acceptance tests identify exactly one game and contain no Workshop editor/JIT surface. The current reference release build is Pong.
 
