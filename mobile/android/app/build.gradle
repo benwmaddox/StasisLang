@@ -4,6 +4,7 @@ plugins {
 
 def repoRootDir = rootProject.projectDir.parentFile.parentFile
 def publishedAotDir = layout.buildDirectory.dir('generated/stasisAot/publishedArm64')
+def workshopAssetsDir = layout.buildDirectory.dir('generated/stasisAssets/workshop')
 
 android {
     namespace 'com.stasislang.workshop'
@@ -62,6 +63,19 @@ android {
             path file('src/main/cpp/CMakeLists.txt')
         }
     }
+
+    sourceSets {
+        main.assets.setSrcDirs([])
+        workshop.assets.setSrcDirs([workshopAssetsDir.get().asFile])
+        published.assets.setSrcDirs([])
+    }
+}
+
+tasks.register('prepareWorkshopAssets', Sync) {
+    from(file('src/main/assets')) {
+        exclude 'workshop_sample/build/**'
+    }
+    into(workshopAssetsDir)
 }
 
 tasks.register('generatePublishedAotBundle', Exec) {
@@ -75,6 +89,9 @@ tasks.register('generatePublishedAotBundle', Exec) {
 }
 
 tasks.configureEach { task ->
+    if (task.name.startsWith('preWorkshop')) {
+        task.dependsOn(tasks.named('prepareWorkshopAssets'))
+    }
     if (task.name.startsWith('prePublished') || (task.name.startsWith('configureCMake') && task.name.contains('Published'))) {
         task.dependsOn(tasks.named('generatePublishedAotBundle'))
     }
