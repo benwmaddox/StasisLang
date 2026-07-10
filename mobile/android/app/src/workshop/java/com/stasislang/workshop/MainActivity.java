@@ -13,6 +13,7 @@ import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -121,6 +122,7 @@ public final class MainActivity extends Activity {
     private static final int EXPORT_PROJECT_REQUEST = 71;
     private static final int IMPORT_PROJECT_REQUEST = 72;
     private static final int IMPORT_IMAGE_REQUEST = 73;
+    private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final double GPT_5_6_TERRA_INPUT_USD_PER_MILLION = 2.50;
     private static final double GPT_5_6_TERRA_CACHED_INPUT_USD_PER_MILLION = 0.25;
     private static final double GPT_5_6_TERRA_CACHE_WRITE_USD_PER_MILLION = 3.125;
@@ -183,6 +185,7 @@ public final class MainActivity extends Activity {
     private Spinner projectSelector;
     private TextView projectStatus;
     private LinearLayout imageAssetList;
+    private LinearLayout audioAssetList;
     private final ArrayList<WorkshopProjectRegistry.ProjectInfo> availableProjects = new ArrayList<>();
     private final HashSet<String> selectedImageAssets = new HashSet<>();
     private String selectedImageAssetProjectId = "";
@@ -200,6 +203,7 @@ public final class MainActivity extends Activity {
     private String activeAiPrompt = "";
     private volatile List<AiImageAttachment> activeAiImageAttachments = Collections.emptyList();
     private Bitmap pendingPreviewScreenshot;
+    private MediaPlayer activeAudioPreview;
     private JSONObject pendingPreviewLogicalSnapshot;
     private boolean attachPreviewPixels;
     private boolean attachPreviewLogicalSnapshot;
@@ -294,6 +298,7 @@ public final class MainActivity extends Activity {
         if (pendingPreviewScreenshot != null && !pendingPreviewScreenshot.isRecycled()) {
             pendingPreviewScreenshot.recycle();
         }
+        stopAudioPreview();
         if (gameLoop != null) {
             gameLoopHandler.removeCallbacks(gameLoop);
         }
@@ -309,6 +314,8 @@ public final class MainActivity extends Activity {
             completeProjectImport(resultCode, data);
         } else if (requestCode == IMPORT_IMAGE_REQUEST) {
             completeImageImport(resultCode, data);
+        } else if (requestCode == IMPORT_AUDIO_REQUEST) {
+            completeAudioImport(resultCode, data);
         }
     }
 
@@ -342,6 +349,42 @@ public final class MainActivity extends Activity {
                         @Override public void run() {
                             setStatusText("Image import failed: " + error.getMessage());
                         }
+                    });
+                } finally {
+                    projectIoActive = false;
+                }
+            }
+        });
+    }
+
+    private void completeAudioImport(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            setStatusText("Audio import cancelled");
+            return;
+        }
+        if (activeProject == null) {
+            setStatusText("Audio import needs a registered active project");
+            return;
+        }
+        final Uri source = data.getData();
+        final File targetProject = activeProject.root;
+        projectIoActive = true;
+        setStatusText("Audio import started");
+        projectIoExecutor.submit(new Runnable() {
+            @Override public void run() {
+                try {
+                    final WorkshopAudioAssets.AssetInfo asset = WorkshopAudioAssets.importAudio(
+                            getContentResolver(), source, targetProject);
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            refreshAudioAssetList();
+                            setStatusText("Audio imported: " + asset.relativePath + " ("
+                                    + asset.durationMs + " ms, " + asset.bytes + " bytes)");
+                        }
+                    });
+                } catch (final Exception error) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() { setStatusText("Audio import failed: " + error.getMessage()); }
                     });
                 } finally {
                     projectIoActive = false;
@@ -1328,9 +1371,37 @@ public final class MainActivity extends Activity {
         imageAssetList = new LinearLayout(this);
         imageAssetList.setOrientation(LinearLayout.VERTICAL);
         projectSettingsBody.addView(imageAssetList, fullWidth());
+        TextView audioAssetsTitle = new TextView(this);
+        audioAssetsTitle.setText("Audio Assets");
+        audioAssetsTitle.setTextSize(14.0f);
+        audioAssetsTitle.setTextColor(Color.rgb(34, 43, 55));
+        audioAssetsTitle.setPadding(0, dp(10), 0, dp(2));
+        projectSettingsBody.addView(audioAssetsTitle, fullWidth());
+        Button importAudio = new Button(this);
+        importAudio.setText("Import MP3, Ogg, WAV, or M4A");
+        importAudio.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { requestAudioImport(); }
+        });
+        projectSettingsBody.addView(importAudio, fullWidth());
+        Button stopAudio = new Button(this);
+        stopAudio.setText("Stop Audio Preview");
+        stopAudio.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { stopAudioPreview(); setStatusText("Audio preview stopped"); }
+        });
+        projectSettingsBody.addView(stopAudio, fullWidth());
+        Button restoreAudio = new Button(this);
+        restoreAudio.setText("Restore Last Deleted Audio");
+        restoreAudio.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { restoreLastDeletedAudio(); }
+        });
+        projectSettingsBody.addView(restoreAudio, fullWidth());
+        audioAssetList = new LinearLayout(this);
+        audioAssetList.setOrientation(LinearLayout.VERTICAL);
+        projectSettingsBody.addView(audioAssetList, fullWidth());
         controls.addView(projectSettingsBody, fullWidth());
         refreshProjectControls();
         refreshImageAssetList();
+        refreshAudioAssetList();
 
         githubSyncStatus = new TextView(this);
         githubSyncStatus.setTextSize(12.0f);
@@ -1660,6 +1731,7 @@ public final class MainActivity extends Activity {
             projectRootFile = project.root;
             projectRootPath = project.root.getAbsolutePath();
             clearPendingPreviewCapture();
+            stopAudioPreview();
             selectedSymbol = null;
             diagnosticFile = "";
             diagnosticSymbol = "";
@@ -1678,6 +1750,7 @@ public final class MainActivity extends Activity {
             refreshGitHubSyncStatus();
             refreshProjectControls();
             refreshImageAssetList();
+            refreshAudioAssetList();
             String compileResult = nativeCompileProject(projectRootPath());
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
@@ -1883,6 +1956,11 @@ public final class MainActivity extends Activity {
         if (activeProject != null) {
             for (WorkshopImageAssets.AssetInfo asset : WorkshopImageAssets.list(activeProject.root)) {
                 byte[] content = WorkshopImageAssets.readForSync(asset);
+                totalBytes = checkedGitHubBackupSize(totalBytes, content.length);
+                files.put(asset.relativePath, content);
+            }
+            for (WorkshopAudioAssets.AssetInfo asset : WorkshopAudioAssets.list(activeProject.root)) {
+                byte[] content = WorkshopAudioAssets.readForSync(asset);
                 totalBytes = checkedGitHubBackupSize(totalBytes, content.length);
                 files.put(asset.relativePath, content);
             }
@@ -4969,6 +5047,197 @@ public final class MainActivity extends Activity {
         } catch (Exception error) {
             setStatusText("Image picker failed: " + error.getMessage());
         }
+    }
+
+    private void requestAudioImport() {
+        if (!canModifyAudioAssets()) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("audio/*");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, IMPORT_AUDIO_REQUEST);
+        } catch (Exception error) {
+            setStatusText("Audio picker failed: " + error.getMessage());
+        }
+    }
+
+    private void refreshAudioAssetList() {
+        if (audioAssetList == null) return;
+        audioAssetList.removeAllViews();
+        if (activeProject == null) return;
+        try {
+            List<WorkshopAudioAssets.AssetInfo> assets = WorkshopAudioAssets.list(activeProject.root);
+            if (assets.isEmpty()) {
+                TextView empty = new TextView(this);
+                empty.setText("No imported audio");
+                empty.setTextSize(12.0f);
+                empty.setTextColor(Color.rgb(73, 84, 100));
+                audioAssetList.addView(empty, fullWidth());
+                return;
+            }
+            for (final WorkshopAudioAssets.AssetInfo asset : assets) {
+                Button actions = new Button(this);
+                actions.setAllCaps(false);
+                actions.setText(asset.relativePath + "\n" + formatDuration(asset.durationMs)
+                        + " - " + asset.bytes + " bytes");
+                actions.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View view) { showAudioAssetActions(asset); }
+                });
+                audioAssetList.addView(actions, fullWidth());
+            }
+        } catch (Exception error) {
+            TextView failure = new TextView(this);
+            failure.setText("Audio library unavailable: " + error.getMessage());
+            failure.setTextColor(Color.rgb(164, 45, 45));
+            audioAssetList.addView(failure, fullWidth());
+        }
+    }
+
+    private void showAudioAssetActions(final WorkshopAudioAssets.AssetInfo asset) {
+        new AlertDialog.Builder(this)
+                .setTitle(asset.relativePath)
+                .setItems(new String[] {"Preview", "Rename", "Delete"},
+                        new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        if (which == 0) previewAudioAsset(asset);
+                        else if (which == 1) requestAudioRename(asset);
+                        else if (which == 2) requestAudioDelete(asset);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void previewAudioAsset(final WorkshopAudioAssets.AssetInfo asset) {
+        stopAudioPreview();
+        try {
+            MediaPlayer player = new MediaPlayer();
+            player.setDataSource(asset.file.getAbsolutePath());
+            player.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                @Override public void onCompletion(MediaPlayer completed) {
+                    completed.release();
+                    if (activeAudioPreview == completed) activeAudioPreview = null;
+                    setStatusText("Audio preview complete: " + asset.relativePath);
+                }
+            });
+            player.prepare();
+            activeAudioPreview = player;
+            player.start();
+            setStatusText("Audio preview playing: " + asset.relativePath + " - " + formatDuration(asset.durationMs));
+        } catch (Exception error) {
+            stopAudioPreview();
+            setStatusText("Audio preview failed: " + error.getMessage());
+        }
+    }
+
+    private void stopAudioPreview() {
+        MediaPlayer player = activeAudioPreview;
+        activeAudioPreview = null;
+        if (player == null) return;
+        try {
+            if (player.isPlaying()) player.stop();
+        } catch (RuntimeException ignored) {
+        }
+        player.release();
+    }
+
+    private void requestAudioRename(final WorkshopAudioAssets.AssetInfo asset) {
+        if (!canModifyAudioAssets()) return;
+        List<String> references = audioReferences(asset);
+        if (!references.isEmpty()) {
+            setStatusText("Audio rename blocked: referenced by " + joinPaths(references));
+            return;
+        }
+        final EditText name = new EditText(this);
+        String current = asset.file.getName();
+        int dot = current.lastIndexOf('.');
+        name.setText(dot > 0 ? current.substring(0, dot) : current);
+        name.setSingleLine(true);
+        new AlertDialog.Builder(this)
+                .setTitle("Rename Audio")
+                .setView(name)
+                .setPositiveButton("Rename", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        try {
+                            stopAudioPreview();
+                            WorkshopAudioAssets.AssetInfo renamed = WorkshopAudioAssets.rename(
+                                    asset, activeProject.root, name.getText().toString());
+                            refreshAudioAssetList();
+                            setStatusText("Audio renamed: " + renamed.relativePath);
+                        } catch (Exception error) {
+                            setStatusText("Audio rename failed: " + error.getMessage());
+                        }
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void requestAudioDelete(final WorkshopAudioAssets.AssetInfo asset) {
+        if (!canModifyAudioAssets()) return;
+        List<String> references = audioReferences(asset);
+        if (!references.isEmpty()) {
+            setStatusText("Audio delete blocked: referenced by " + joinPaths(references));
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Delete Audio?")
+                .setMessage(asset.relativePath + " will move to bounded project recovery.")
+                .setPositiveButton("Delete", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        try {
+                            stopAudioPreview();
+                            WorkshopAudioAssets.moveToTrash(asset, activeProject.root);
+                            refreshAudioAssetList();
+                            setStatusText("Audio moved to recovery: " + asset.relativePath);
+                        } catch (Exception error) {
+                            setStatusText("Audio delete failed: " + error.getMessage());
+                        }
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void restoreLastDeletedAudio() {
+        if (!canModifyAudioAssets()) return;
+        try {
+            WorkshopAudioAssets.AssetInfo restored = WorkshopAudioAssets.restoreLatest(activeProject.root);
+            refreshAudioAssetList();
+            setStatusText("Audio restored: " + restored.relativePath);
+        } catch (Exception error) {
+            setStatusText("Audio restore failed: " + error.getMessage());
+        }
+    }
+
+    private boolean canModifyAudioAssets() {
+        if (activeProject == null) {
+            setStatusText("Audio changes need a registered active project");
+            return false;
+        }
+        if (aiRunActive || githubOperationActive || projectIoActive || hasPendingSourceEdit()) {
+            setStatusText("Audio change blocked by active work or a pending source edit");
+            return false;
+        }
+        return true;
+    }
+
+    private List<String> audioReferences(WorkshopAudioAssets.AssetInfo asset) {
+        ArrayList<String> references = new ArrayList<>();
+        for (SourceFile source : loadBundledProject().files) {
+            if (source.source.contains(asset.relativePath) || source.source.contains(asset.file.getName())) {
+                references.add(source.path);
+            }
+        }
+        return references;
+    }
+
+    private static String formatDuration(long durationMs) {
+        long seconds = durationMs / 1000L;
+        long minutes = seconds / 60L;
+        long remainder = seconds % 60L;
+        return minutes + ":" + (remainder < 10L ? "0" : "") + remainder;
     }
 
     private void reviewAiGeneratedImage(final AiGeneratedImageCandidate candidate) {

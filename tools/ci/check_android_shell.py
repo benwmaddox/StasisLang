@@ -18,6 +18,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -119,6 +120,7 @@ def main() -> int:
     project_archive = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java")
     image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
     paint_view = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java")
+    audio_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java")
     host_agent = read("tools/android_ai_agent_host.py")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "Intent.ACTION_OPEN_DOCUMENT" in activity
@@ -265,6 +267,20 @@ def main() -> int:
     assert "active project changed before image acceptance" in activity
     assert 'File.createTempFile(".ai-review-"' in image_assets
     assert "could not publish accepted AI image" in image_assets
+    assert 'intent.setType("audio/*")' in activity
+    assert "WorkshopAudioAssets.importAudio" in activity
+    assert "Audio Assets" in activity
+    assert "Stop Audio Preview" in activity
+    assert "MediaPlayer player = new MediaPlayer()" in activity
+    assert "Audio rename blocked: referenced by" in activity
+    assert "Audio delete blocked: referenced by" in activity
+    assert "WorkshopAudioAssets.readForSync" in activity
+    assert "MAX_AUDIO_BYTES = 16 * 1024 * 1024" in audio_assets
+    assert "MAX_DURATION_MS = 5L * 60L * 1000L" in audio_assets
+    assert "MediaMetadataRetriever" in audio_assets
+    assert "audio path escapes the active project" in audio_assets
+    assert "output.getFD().sync()" in audio_assets
+    assert 'TRASH_DIRECTORY = ".stasis-trash/audio"' in audio_assets
     assert "max_output_tokens" in activity
     assert "AI spending limit leaves insufficient budget" in activity
     assert "Cancel AI" in activity
