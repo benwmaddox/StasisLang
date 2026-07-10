@@ -45,6 +45,7 @@ final class AndroidSupportBundle {
                         .put("operation", safeOperation(githubOperation))
                         .put("state", safeState(githubState)))
                 .put("ai_outcomes", safeOutcomes(outcomes))
+                .put("previous_crash", AndroidCrashStore.safeSummary(context))
                 .put("trace_events", safeTraceEvents(traceFile));
         String json = bundle.toString(2);
         if (json.getBytes(StandardCharsets.UTF_8).length > 1024 * 1024) {
