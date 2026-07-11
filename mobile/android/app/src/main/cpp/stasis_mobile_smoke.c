@@ -25,6 +25,9 @@ typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root,
 typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_root, const char *entry_file, const char *path, int value);
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
+typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
+typedef int (*stasis_codex_android_initialize_fn)(void *env, void *context);
+typedef void (*stasis_codex_android_free_string_fn)(char *value);
 typedef struct CompileStats {
     int file_count;
     int function_count;
@@ -58,6 +61,16 @@ typedef struct RustBridgeApi {
 } RustBridgeApi;
 
 static RustBridgeApi rust_bridge_api = {0};
+typedef struct CodexBridgeApi {
+    void *handle;
+    stasis_codex_android_initialize_fn initialize;
+    stasis_codex_android_string_fn begin_device_login;
+    stasis_codex_android_string_fn account_status;
+    stasis_codex_android_free_string_fn free_string;
+    int attempted;
+} CodexBridgeApi;
+
+static CodexBridgeApi codex_bridge_api = {0};
 #if STASIS_ANDROID_PUBLISHED_AOT
 typedef struct PublishedRenderCommand {
     int32_t kind;
@@ -903,6 +916,60 @@ static RustBridgeApi *load_rust_bridge_api(void) {
     return &rust_bridge_api;
 }
 
+static CodexBridgeApi *load_codex_bridge_api(void) {
+    if (codex_bridge_api.attempted) {
+        return codex_bridge_api.handle == NULL ? NULL : &codex_bridge_api;
+    }
+
+    codex_bridge_api.attempted = 1;
+    codex_bridge_api.handle = dlopen("libstasis_codex_android.so", RTLD_NOW | RTLD_LOCAL);
+    if (codex_bridge_api.handle == NULL) {
+        __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG,
+                "Phone-native Codex bridge unavailable: %s", dlerror());
+        return NULL;
+    }
+    codex_bridge_api.begin_device_login = (stasis_codex_android_string_fn)dlsym(
+            codex_bridge_api.handle, "stasis_codex_android_begin_device_login");
+    codex_bridge_api.initialize = (stasis_codex_android_initialize_fn)dlsym(
+            codex_bridge_api.handle, "stasis_codex_android_initialize");
+    codex_bridge_api.account_status = (stasis_codex_android_string_fn)dlsym(
+            codex_bridge_api.handle, "stasis_codex_android_account_status");
+    codex_bridge_api.free_string = (stasis_codex_android_free_string_fn)dlsym(
+            codex_bridge_api.handle, "stasis_codex_android_free_string");
+    if (codex_bridge_api.initialize == NULL ||
+        codex_bridge_api.begin_device_login == NULL ||
+        codex_bridge_api.account_status == NULL ||
+        codex_bridge_api.free_string == NULL) {
+        __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG,
+                "Phone-native Codex bridge missing required symbols");
+        return NULL;
+    }
+    return &codex_bridge_api;
+}
+
+static jstring call_codex_bridge(JNIEnv *env, jstring codex_home, int begin_login) {
+    if (codex_home == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex home was null\"}");
+    }
+    const char *home = (*env)->GetStringUTFChars(env, codex_home, NULL);
+    if (home == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex home was unreadable\"}");
+    }
+    CodexBridgeApi *bridge = load_codex_bridge_api();
+    if (bridge == NULL) {
+        (*env)->ReleaseStringUTFChars(env, codex_home, home);
+        return (*env)->NewStringUTF(env, "{\"status\":\"unavailable\",\"error\":\"Phone-native Codex library is not packaged\"}");
+    }
+    char *response = begin_login ? bridge->begin_device_login(home) : bridge->account_status(home);
+    (*env)->ReleaseStringUTFChars(env, codex_home, home);
+    if (response == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Phone-native Codex returned no response\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, response);
+    bridge->free_string(response);
+    return result;
+}
+
 static int try_rust_bridge_compile(const char *project_root, char *message, size_t message_size) {
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->compile_project == NULL || bridge->free_string == NULL) {
@@ -1054,6 +1121,29 @@ Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activ
     (void)activity_class;
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "native smoke entry loaded");
     return (*env)->NewStringUTF(env, "Stasis Android native smoke loaded");
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeCodexBeginDeviceLogin(
+        JNIEnv *env, jclass activity_class, jstring codex_home) {
+    (void)activity_class;
+    return call_codex_bridge(env, codex_home, 1);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeCodexInitialize(
+        JNIEnv *env, jclass activity_class, jobject context) {
+    (void)activity_class;
+    CodexBridgeApi *bridge = load_codex_bridge_api();
+    if (bridge == NULL || context == NULL) return -1;
+    return bridge->initialize(env, context);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeCodexAccountStatus(
+        JNIEnv *env, jclass activity_class, jstring codex_home) {
+    (void)activity_class;
+    return call_codex_bridge(env, codex_home, 0);
 }
 
 JNIEXPORT jstring JNICALL

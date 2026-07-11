@@ -85,6 +85,9 @@ public final class MainActivity extends Activity {
     private static final String ONBOARDING_PREFS = "onboarding_settings";
     private static final String ONBOARDING_COMPLETE = "manual_tutorial_seen_v1";
     private static final String AI_PREF_API_KEY = "openai_api_key";
+    private static final String AI_PREF_PROVIDER = "ai_provider";
+    private static final String AI_PROVIDER_CODEX = "codex_on_device";
+    private static final String AI_PROVIDER_API = "openai_api";
     private static final String AI_PREF_MODEL = "openai_model";
     private static final String AI_PREF_MODEL_DEFAULT_VERSION = "openai_model_default_version";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
@@ -151,6 +154,8 @@ public final class MainActivity extends Activity {
     private EditText sourceEditor;
     private EditText aiPromptEditor;
     private EditText aiApiKeyEditor;
+    private Spinner aiProviderSelector;
+    private TextView codexAccountStatus;
     private EditText aiModelEditor;
     private EditText aiMonthlyLimitUsdEditor;
     private TextView aiBudgetStatus;
@@ -192,6 +197,7 @@ public final class MainActivity extends Activity {
     private volatile boolean githubOperationActive;
     private volatile boolean projectIoActive;
     private volatile boolean aiRunActive;
+    private boolean phoneNativeCodexReady;
     private volatile boolean aiCancelRequested;
     private volatile HttpURLConnection activeAiConnection;
     private String activeAiPrompt = "";
@@ -228,6 +234,7 @@ public final class MainActivity extends Activity {
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService githubSyncExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService projectIoExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService codexExecutor = Executors.newSingleThreadExecutor();
     private Runnable gameLoop;
     private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY];
     private final StringBuilder debugTextBuilder = new StringBuilder(64);
@@ -258,11 +265,15 @@ public final class MainActivity extends Activity {
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
     private static native String nativeGetRuntimeI32(String projectRoot, String path);
     private static native String nativeRunTests(String projectRoot);
+    private static native String nativeCodexBeginDeviceLogin(String codexHome);
+    private static native String nativeCodexAccountStatus(String codexHome);
+    private static native int nativeCodexInitialize(Object applicationContext);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         AndroidCrashStore.install(this);
+        phoneNativeCodexReady = nativeCodexInitialize(getApplicationContext()) == 0;
 
         try {
             activeProject = WorkshopProjectRegistry.initialize(this,
@@ -1574,8 +1585,45 @@ public final class MainActivity extends Activity {
         aiSettingsBody = new LinearLayout(this);
         aiSettingsBody.setOrientation(LinearLayout.VERTICAL);
         aiSettingsBody.setVisibility(View.GONE);
+
+        TextView providerLabel = new TextView(this);
+        providerLabel.setText("Primary AI provider");
+        providerLabel.setTextSize(12.0f);
+        aiSettingsBody.addView(providerLabel, fullWidth());
+        aiProviderSelector = new Spinner(this);
+        ArrayAdapter<String> providerAdapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item,
+                Arrays.asList("Codex subscription (on this phone)", "OpenAI API key (fallback)"));
+        providerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        aiProviderSelector.setAdapter(providerAdapter);
+        String configuredProvider = aiPrefs.getString(AI_PREF_PROVIDER, "");
+        if (configuredProvider.isEmpty()) {
+            configuredProvider = phoneNativeCodexReady
+                    && readSecretPreference(aiPrefs, AI_PREF_API_KEY).isEmpty()
+                    ? AI_PROVIDER_CODEX : AI_PROVIDER_API;
+        }
+        aiProviderSelector.setSelection(AI_PROVIDER_API.equals(configuredProvider) ? 1 : 0);
+        aiSettingsBody.addView(aiProviderSelector, fullWidth());
+
+        codexAccountStatus = new TextView(this);
+        codexAccountStatus.setText("Codex account: checking this phone...");
+        codexAccountStatus.setTextSize(12.0f);
+        codexAccountStatus.setPadding(0, dp(4), 0, dp(4));
+        aiSettingsBody.addView(codexAccountStatus, fullWidth());
+        Button codexSignIn = new Button(this);
+        codexSignIn.setText("Sign in to ChatGPT on this phone");
+        codexSignIn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { beginPhoneNativeCodexLogin(); }
+        });
+        aiSettingsBody.addView(codexSignIn, fullWidth());
+
+        TextView apiFallbackLabel = new TextView(this);
+        apiFallbackLabel.setText("Optional API fallback");
+        apiFallbackLabel.setTextSize(12.0f);
+        apiFallbackLabel.setPadding(0, dp(8), 0, 0);
+        aiSettingsBody.addView(apiFallbackLabel, fullWidth());
         aiApiKeyEditor = new EditText(this);
-        aiApiKeyEditor.setHint("OpenAI API key");
+        aiApiKeyEditor.setHint("OpenAI API key (fallback only)");
         aiApiKeyEditor.setSingleLine(true);
         aiApiKeyEditor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         aiApiKeyEditor.setText(readSecretPreference(aiPrefs, AI_PREF_API_KEY));
@@ -1617,6 +1665,7 @@ public final class MainActivity extends Activity {
         });
         aiSettingsBody.addView(saveSettings, fullWidth());
         controls.addView(aiSettingsBody, fullWidth());
+        refreshPhoneNativeCodexStatus();
 
         Button githubSettingsToggle = new Button(this);
         githubSettingsToggle.setText("GitHub Sync Settings");
@@ -3135,11 +3184,102 @@ public final class MainActivity extends Activity {
         aiSettingsBody.setVisibility(aiSettingsBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
     }
 
+    private String selectedAiProvider() {
+        return aiProviderSelector != null && aiProviderSelector.getSelectedItemPosition() == 1
+                ? AI_PROVIDER_API : AI_PROVIDER_CODEX;
+    }
+
+    private String codexHomePath() {
+        return new File(getFilesDir(), "codex").getAbsolutePath();
+    }
+
+    private void beginPhoneNativeCodexLogin() {
+        if (!phoneNativeCodexReady) {
+            if (codexAccountStatus != null) {
+                codexAccountStatus.setText("Codex account: Android certificate verifier initialization failed");
+            }
+            return;
+        }
+        if (codexAccountStatus != null) codexAccountStatus.setText("Codex account: requesting a device code...");
+        codexExecutor.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    final JSONObject status = new JSONObject(nativeCodexBeginDeviceLogin(codexHomePath()));
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            showPhoneNativeCodexStatus(status);
+                            String verificationUrl = status.optString("verification_url", "");
+                            if (!verificationUrl.isEmpty()) {
+                                try {
+                                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(verificationUrl)));
+                                } catch (Exception error) {
+                                    setStatusText("Open " + verificationUrl + " to finish Codex sign-in");
+                                }
+                            }
+                        }
+                    });
+                } catch (Exception error) {
+                    final String message = error.getMessage();
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (codexAccountStatus != null) codexAccountStatus.setText("Codex account error: " + message);
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    private void refreshPhoneNativeCodexStatus() {
+        codexExecutor.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    final JSONObject status = new JSONObject(nativeCodexAccountStatus(codexHomePath()));
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() { showPhoneNativeCodexStatus(status); }
+                    });
+                } catch (Exception error) {
+                    final String message = error.getMessage();
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (codexAccountStatus != null) codexAccountStatus.setText("Codex account error: " + message);
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    private void showPhoneNativeCodexStatus(JSONObject status) {
+        if (codexAccountStatus == null) return;
+        String state = status.optString("status", "error");
+        if ("signed_in".equals(state)) {
+            String plan = status.optString("plan_type", "");
+            codexAccountStatus.setText("Codex account: signed in on this phone"
+                    + (plan.isEmpty() ? "" : " (" + plan + ")"));
+            return;
+        }
+        if ("awaiting_user".equals(state)) {
+            codexAccountStatus.setText("Codex sign-in code: " + status.optString("user_code", "")
+                    + "\n" + status.optString("verification_url", "https://auth.openai.com/codex/device"));
+            gameLoopHandler.postDelayed(new Runnable() {
+                @Override public void run() { refreshPhoneNativeCodexStatus(); }
+            }, 2000L);
+            return;
+        }
+        if ("signed_out".equals(state)) {
+            codexAccountStatus.setText("Codex account: signed out on this phone");
+            return;
+        }
+        codexAccountStatus.setText("Codex account: " + status.optString("error", state));
+    }
+
     private void saveAiSettingsFromEditors() {
+        String provider = selectedAiProvider();
         String apiKey = aiApiKeyEditor == null ? "" : aiApiKeyEditor.getText().toString().trim();
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
         String monthlyLimitText = aiMonthlyLimitUsdEditor == null ? "5.00" : aiMonthlyLimitUsdEditor.getText().toString().trim();
-        if (apiKey.isEmpty()) {
+        if (AI_PROVIDER_API.equals(provider) && apiKey.isEmpty()) {
             setStatusText("AI settings need an API key before a run can start");
             return;
         }
@@ -3147,12 +3287,15 @@ public final class MainActivity extends Activity {
             setStatusText("The device monthly AI limit must be a non-negative USD value");
             return;
         }
-        if (!saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model)) return;
+        if (!apiKey.isEmpty() && !saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model)) return;
         getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                .putString(AI_PREF_PROVIDER, provider)
                 .putString(AI_PREF_MONTHLY_LIMIT_USD, monthlyLimitText)
                 .apply();
         refreshAiBudgetStatus();
-        setStatusText("AI settings saved");
+        setStatusText(AI_PROVIDER_CODEX.equals(provider)
+                ? "Phone-native Codex selected as the primary provider"
+                : "OpenAI API fallback selected");
     }
 
     private static double parseNonNegativeUsd(String value) {
@@ -3400,6 +3543,27 @@ public final class MainActivity extends Activity {
         String prompt = queuedEntry == null
                 ? (aiPromptEditor == null ? "" : aiPromptEditor.getText().toString().trim())
                 : queuedEntry.prompt;
+        if (AI_PROVIDER_CODEX.equals(selectedAiProvider())) {
+            if (prompt.isEmpty()) {
+                setStatusText("AI run needs a request");
+                failQueuedAiPreflight(queuedEntry, "Request was missing at execution time");
+                return;
+            }
+            try {
+                JSONObject account = new JSONObject(nativeCodexAccountStatus(codexHomePath()));
+                if (!account.optBoolean("signed_in", false)) {
+                    setStatusText("Sign in to ChatGPT under AI Settings to use phone-native Codex");
+                    failQueuedAiPreflight(queuedEntry, "Phone-native Codex is not signed in");
+                    return;
+                }
+                setStatusText("Phone-native Codex authentication is ready; the on-device turn bridge is the next implementation slice");
+                failQueuedAiPreflight(queuedEntry, "Phone-native Codex turn bridge is not available yet");
+            } catch (Exception error) {
+                setStatusText("Phone-native Codex status failed: " + error.getMessage());
+                failQueuedAiPreflight(queuedEntry, "Phone-native Codex status failed");
+            }
+            return;
+        }
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
         if (apiKey.isEmpty() || prompt.isEmpty()) {
             setStatusText("AI run needs both a request and an API key; open AI Settings if the key is not saved");

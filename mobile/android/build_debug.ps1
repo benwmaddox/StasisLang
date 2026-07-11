@@ -19,6 +19,7 @@ try {
     }
 
     & (Join-Path $scriptRoot "build_rust_bridge.ps1")
+    & (Join-Path $scriptRoot "build_codex_native.ps1") -Release
 
     $task = if ($Install) { ":app:installWorkshopDebug" } else { ":app:assembleWorkshopDebug" }
     $args = @($task)

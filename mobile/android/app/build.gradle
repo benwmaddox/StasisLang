@@ -94,6 +94,10 @@ android {
 
 dependencies {
     testImplementation 'junit:junit:4.13.2'
+    def rustlsVerifier = file('src/workshop/libs/rustls-platform-verifier.aar')
+    if (rustlsVerifier.isFile()) {
+        workshopImplementation files(rustlsVerifier)
+    }
 }
 
 tasks.register('prepareWorkshopAssets', Sync) {

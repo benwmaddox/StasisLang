@@ -1,0 +1,32 @@
+diff --git a/codex-rs/Cargo.toml b/codex-rs/Cargo.toml
+index 14669d2..2e86cff 100644
+--- a/codex-rs/Cargo.toml
++++ b/codex-rs/Cargo.toml
+@@ -1,5 +1,6 @@
+ [workspace]
+ members = [
++    "stasis-codex-android",
+     "aws-auth",
+     "analytics",
+     "agent-graph-store",
+@@ -354,7 +354,7 @@ once_cell = "1.20.2"
+ openssl-sys = "*"
+ opentelemetry = "0.31.0"
+ opentelemetry-appender-tracing = "0.31.0"
+-opentelemetry-otlp = "0.31.0"
++opentelemetry-otlp = { version = "0.31.0", default-features = false }
+ opentelemetry-semantic-conventions = "0.31.0"
+ opentelemetry_sdk = "0.31.0"
+ os_info = "3.12.0"
+@@ -374,7 +374,10 @@ rcgen = { version = "0.14.7", default-features = false, features = [
+ ] }
+ regex = "1.12.3"
+ regex-lite = "0.1.8"
+-reqwest = { version = "0.12", features = ["cookies"] }
++reqwest = { version = "0.12", default-features = false, features = [
++    "cookies",
++    "rustls-tls-native-roots",
++] }
+ rmcp = { version = "1.8.0", default-features = false }
+ runfiles = { git = "https://github.com/dzbarsky/rules_rust", rev = "b56cbaa8465e74127f1ea216f813cd377295ad81" }
+ rustls = { version = "0.23", default-features = false, features = [

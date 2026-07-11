@@ -15,7 +15,7 @@ Current scope:
 - Seeds bundled `.stasis` files into app-private storage when missing and preserves edits across app launches.
 - Lets a selected symbol display and edit its source from the app-private `.stasis` file.
 - Saves selected symbol edits back to the app-private `.stasis` file, reparses the project so later edits use fresh symbol spans, and reports `FastReload` versus `ResetRequired` expectations.
-- Provides a dev-first AI edit panel that stores an OpenAI API key/model in app-private preferences, sends the selected symbol context to the Responses API, applies supported `replace_function`/`replace_struct` JSON edits, and refreshes compile state. The default is `gpt-5.6-sol` with explicit medium reasoning; installations on the prior Terra default migrate once while later custom model choices remain intact.
+- Provides a dev-first AI edit panel whose primary provider is phone-native Codex with ChatGPT device-code sign-in. The existing OpenAI Responses API harness remains an explicit API-key fallback with `gpt-5.6-sol` and medium reasoning.
 - Provides an explicit `Reset Project` control for restoring the bundled sample. Manual `Apply` saves and compiles immediately; there is no separate manual compile button. The automatic loop and manual controls both use the native compile/run path, with runtime ticks routed through the Rust JIT bridge when packaged. The probe reads project `.stasis` files, validates basic source structure, checks lifecycle roots, and writes `build/native_compile_manifest.txt` with project counts, per-function signature/body hashes, per-function compiled-stub artifacts under `build/functions`, a `build/runtime_state.txt` state artifact, and a reload classification (`InitialCompile`, `NoChange`, `FastReload`, or `ResetRequired`), then returns `CompilePlanned` or `CompileError` diagnostics.
 - Resizes and scrolls the editor when the Android keyboard opens so the active source remains visible.
 - Keeps fixed trailing scroll space under the editor as a fallback for phones where IME resize is inconsistent.
@@ -58,7 +58,13 @@ From this directory:
 .\build_debug.ps1
 ```
 
-Or call Gradle directly:
+This builds the Stasis Rust bridge plus the optimized phone-native Codex login
+library from its pinned official revision, packages the Android Rustls verifier,
+and assembles the Workshop APK. The first Codex build downloads upstream Rust
+dependencies and takes longer; subsequent builds reuse Cargo output.
+
+For API-fallback-only iteration after the native artifacts already exist, call
+Gradle directly:
 
 ```powershell
 gradle :app:assembleWorkshopDebug
