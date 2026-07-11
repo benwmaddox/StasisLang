@@ -77,6 +77,8 @@ The current first slice provides:
   model discovery, and reuse of the existing bounded Workshop edit/test tools
 - immediate provider-choice persistence and a one-time signed-in migration from
   the historical API fallback default to the now-functional Codex turn bridge
+- direct rough-layout sketching from Context & Images, with explicit
+  save-and-attach behavior and queued `design_sketch` intent metadata
 - native Codex primary/secondary rate-limit reads using the official
   `usedPercent`, `windowDurationMins`, and `resetsAt` contract
 - an explicit OpenAI API-key fallback

@@ -107,6 +107,7 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_CODEX_LIMITS_JSON = "codex_limits_json";
     private static final String AI_PREF_CODEX_LIMITS_REFRESH_ATTEMPT_MS = "codex_limits_refresh_attempt_ms";
     private static final String AI_PREF_CODEX_PRIMARY_MIGRATION = "codex_primary_after_turn_bridge_v1";
+    private static final String AI_PREF_DESIGN_SKETCHES_PREFIX = "design_sketches_";
     private static final String GITHUB_PREFS = "github_sync_settings";
     private static final String GITHUB_PREF_TOKEN = "github_token";
     private static final String GITHUB_PREF_REPOSITORY = "github_repository";
@@ -202,6 +203,7 @@ public final class MainActivity extends Activity {
     private EditText audioRecordingNameEditor;
     private final ArrayList<WorkshopProjectRegistry.ProjectInfo> availableProjects = new ArrayList<>();
     private final HashSet<String> selectedImageAssets = new HashSet<>();
+    private final HashSet<String> selectedDesignSketchAssets = new HashSet<>();
     private String selectedImageAssetProjectId = "";
     private WorkshopProjectRegistry.ProjectInfo activeProject;
     private WorkshopProjectRegistry.ProjectInfo pendingExportProject;
@@ -376,6 +378,8 @@ public final class MainActivity extends Activity {
         outState.putBoolean("onboarding_open", onboardingBody != null && onboardingBody.getVisibility() == View.VISIBLE);
         outState.putInt("editor_scroll_y", editorPanel == null ? 0 : editorPanel.getScrollY());
         outState.putStringArrayList("selected_image_paths", new ArrayList<String>(selectedImageAssets));
+        outState.putStringArrayList("selected_design_sketch_paths",
+                new ArrayList<String>(selectedDesignSketchAssets));
         if (selectedSymbol != null) {
             outState.putString("selected_file", selectedSymbol.file);
             outState.putString("selected_kind", selectedSymbol.kind);
@@ -1385,6 +1389,16 @@ public final class MainActivity extends Activity {
         aiAttachmentStatus.setTextColor(Color.rgb(73, 84, 100));
         aiAttachmentStatus.setPadding(0, dp(3), 0, dp(2));
         contextBody.addView(aiAttachmentStatus, fullWidth());
+        Button sketchLayout = new Button(this);
+        sketchLayout.setText("Sketch Layout for AI");
+        sketchLayout.setContentDescription("Open a rough paint canvas and attach the saved sketch to the next AI command");
+        sketchLayout.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (!canModifyImageAssets()) return;
+                showPaintEditor(512, 512, null, "ai_layout_sketch", true);
+            }
+        });
+        contextBody.addView(sketchLayout, fullWidth());
         Button reviewAttachments = new Button(this);
         reviewAttachments.setText("Review AI Image Attachments");
         reviewAttachments.setContentDescription("Review or remove project images selected for the next AI request");
@@ -3111,6 +3125,9 @@ public final class MainActivity extends Activity {
         ArrayList<String> selectedPaths = state.getStringArrayList("selected_image_paths");
         selectedImageAssets.clear();
         if (selectedPaths != null) selectedImageAssets.addAll(selectedPaths);
+        ArrayList<String> designSketchPaths = state.getStringArrayList("selected_design_sketch_paths");
+        selectedDesignSketchAssets.clear();
+        if (designSketchPaths != null) selectedDesignSketchAssets.addAll(designSketchPaths);
         selectedImageAssetProjectId = activeProject == null ? "" : activeProject.id;
         refreshImageAssetList();
         refreshAiAttachmentStatus();
@@ -3485,6 +3502,7 @@ public final class MainActivity extends Activity {
             aiMonthlyLimitUsdEditor.setVisibility(codex ? View.GONE : View.VISIBLE);
         }
         refreshAiBudgetStatus();
+        refreshAiAttachmentStatus();
     }
 
     private String codexHomePath() {
@@ -4238,7 +4256,8 @@ public final class MainActivity extends Activity {
             @Override
             public void run() {
                 try {
-                    activeAiImageAttachments = loadAiImageAttachments(requestImageInfos, requestPreviewPixels);
+                    activeAiImageAttachments = loadAiImageAttachments(
+                            requestImageInfos, requestImageMetadata, requestPreviewPixels);
                     final AiAgentResult aiResult = runAiAgentLoop(
                             requestApiKey, requestModel, requestJson, requestImageGeneration, useCodex);
                     throwIfAiCancelled();
@@ -5834,9 +5853,15 @@ public final class MainActivity extends Activity {
     private static JSONObject aiImageInputMessage(List<AiImageAttachment> attachments) throws Exception {
         JSONArray content = new JSONArray();
         StringBuilder paths = new StringBuilder("Explicitly selected app-private project images: ");
+        boolean hasDesignSketch = false;
         for (AiImageAttachment attachment : attachments) {
             if (paths.charAt(paths.length() - 1) != ' ') paths.append(", ");
-            paths.append(attachment.projectPath);
+            paths.append(attachment.projectPath).append(" (").append(attachment.contextKind).append(")");
+            hasDesignSketch = hasDesignSketch
+                    || WorkshopAiImageContext.DESIGN_SKETCH.equals(attachment.contextKind);
+        }
+        if (hasDesignSketch) {
+            paths.append(". Design sketches are rough layout guidance: follow their structure and intent, not their draft art quality.");
         }
         content.put(new JSONObject().put("type", "input_text").put("text", paths.toString()));
         for (AiImageAttachment attachment : attachments) {
@@ -6640,11 +6665,16 @@ public final class MainActivity extends Activity {
         return patches;
     }
 
-    private static JSONArray aiImageMetadata(List<WorkshopImageAssets.AssetInfo> images) throws Exception {
+    private JSONArray aiImageMetadata(List<WorkshopImageAssets.AssetInfo> images) throws Exception {
         JSONArray metadata = new JSONArray();
         for (WorkshopImageAssets.AssetInfo image : images) {
             byte[] bytes = WorkshopImageAssets.readForSync(image);
+            boolean designSketch = selectedDesignSketchAssets.contains(image.relativePath);
             metadata.put(new JSONObject()
+                    .put("kind", WorkshopAiImageContext.kind(designSketch))
+                    .put("purpose", designSketch
+                            ? "rough visual layout guidance; interpret structure and intent, not final art quality"
+                            : "project art reference")
                     .put("project_path", image.relativePath)
                     .put("width", image.width)
                     .put("height", image.height)
@@ -6680,14 +6710,15 @@ public final class MainActivity extends Activity {
     }
 
     private static List<AiImageAttachment> loadAiImageAttachments(
-            List<WorkshopImageAssets.AssetInfo> images, Bitmap previewPixels) throws IOException {
+            List<WorkshopImageAssets.AssetInfo> images, JSONArray metadata, Bitmap previewPixels)
+            throws IOException {
         ArrayList<AiImageAttachment> attachments = new ArrayList<>();
         int totalBytes = 0;
         for (WorkshopImageAssets.AssetInfo image : images) {
             byte[] bytes = WorkshopImageAssets.readForSync(image);
             totalBytes += bytes.length;
             attachments.add(new AiImageAttachment(image.relativePath, imageMimeType(image.file.getName()),
-                    bytes, image.width, image.height));
+                    bytes, image.width, image.height, attachmentKind(metadata, image.relativePath)));
         }
         if (previewPixels != null) {
             ByteArrayOutputStream encoded = new ByteArrayOutputStream();
@@ -6699,9 +6730,20 @@ public final class MainActivity extends Activity {
                 throw new IOException("project images plus preview exceed the 12 MiB request limit");
             }
             attachments.add(new AiImageAttachment("captured-preview.png", "image/png", bytes,
-                    previewPixels.getWidth(), previewPixels.getHeight()));
+                    previewPixels.getWidth(), previewPixels.getHeight(), "captured_preview"));
         }
         return Collections.unmodifiableList(attachments);
+    }
+
+    private static String attachmentKind(JSONArray metadata, String projectPath) {
+        if (metadata == null) return WorkshopAiImageContext.PROJECT_ASSET;
+        for (int index = 0; index < metadata.length(); index += 1) {
+            JSONObject item = metadata.optJSONObject(index);
+            if (item != null && projectPath.equals(item.optString("project_path", ""))) {
+                return item.optString("kind", WorkshopAiImageContext.PROJECT_ASSET);
+            }
+        }
+        return WorkshopAiImageContext.PROJECT_ASSET;
     }
 
     private static String imageMimeType(String name) throws IOException {
@@ -7136,11 +7178,16 @@ public final class MainActivity extends Activity {
             String activeId = activeProject.id;
             if (!activeId.equals(selectedImageAssetProjectId)) {
                 selectedImageAssets.clear();
+                selectedDesignSketchAssets.clear();
+                selectedDesignSketchAssets.addAll(getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                        .getStringSet(AI_PREF_DESIGN_SKETCHES_PREFIX + activeId,
+                                Collections.<String>emptySet()));
                 selectedImageAssetProjectId = activeId;
             }
             HashSet<String> available = new HashSet<>();
             for (WorkshopImageAssets.AssetInfo asset : assets) available.add(asset.relativePath);
             selectedImageAssets.retainAll(available);
+            if (selectedDesignSketchAssets.retainAll(available)) persistDesignSketchAssets();
             refreshAiAttachmentStatus();
             if (assets.isEmpty()) {
                 TextView empty = new TextView(this);
@@ -7239,6 +7286,11 @@ public final class MainActivity extends Activity {
     }
 
     private void showPaintEditor(int width, int height, Bitmap initial, String defaultName) {
+        showPaintEditor(width, height, initial, defaultName, false);
+    }
+
+    private void showPaintEditor(int width, int height, Bitmap initial, String defaultName,
+                                 boolean suggestAiAttachment) {
         final WorkshopPaintView paint = new WorkshopPaintView(this, width, height, initial);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -7337,8 +7389,10 @@ public final class MainActivity extends Activity {
         LinearLayout finish = new LinearLayout(this);
         finish.setOrientation(LinearLayout.HORIZONTAL);
         Button save = compactButton("Save as PNG");
+        Button saveAndAttach = compactButton("Save + Attach to AI");
         Button cancel = compactButton("Cancel");
         finish.addView(save, weightedWidth());
+        finish.addView(saveAndAttach, weightedWidth());
         finish.addView(cancel, weightedWidth());
         content.addView(finish, fullWidth());
 
@@ -7350,20 +7404,15 @@ public final class MainActivity extends Activity {
                 .create();
         save.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
-                Bitmap snapshot = paint.snapshot();
-                try {
-                    WorkshopImageAssets.AssetInfo saved = WorkshopImageAssets.savePainted(
-                            snapshot, activeProject.root, name.getText().toString());
-                    refreshImageAssetList();
-                    setStatusText("Painted image saved as copy: " + saved.relativePath);
-                    dialog.dismiss();
-                } catch (Exception error) {
-                    setStatusText("Paint save failed: " + error.getMessage());
-                } finally {
-                    snapshot.recycle();
-                }
+                savePaintedImage(paint, name.getText().toString(), dialog, false);
             }
         });
+        saveAndAttach.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                savePaintedImage(paint, name.getText().toString(), dialog, true);
+            }
+        });
+        if (suggestAiAttachment) saveAndAttach.requestFocus();
         cancel.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
                 setStatusText("Paint cancelled; project assets unchanged");
@@ -7374,6 +7423,39 @@ public final class MainActivity extends Activity {
             @Override public void onDismiss(android.content.DialogInterface ignored) { paint.dispose(); }
         });
         dialog.show();
+    }
+
+    private void savePaintedImage(WorkshopPaintView paint, String name, AlertDialog dialog,
+                                  boolean attachToAi) {
+        Bitmap snapshot = paint.snapshot();
+        try {
+            WorkshopImageAssets.AssetInfo saved = WorkshopImageAssets.savePainted(
+                    snapshot, activeProject.root, name);
+            if (attachToAi) {
+                selectedImageAssetProjectId = activeProject.id;
+                selectedImageAssets.add(saved.relativePath);
+                selectedDesignSketchAssets.add(saved.relativePath);
+                persistDesignSketchAssets();
+            }
+            refreshImageAssetList();
+            refreshAiAttachmentStatus();
+            setStatusText(attachToAi
+                    ? "Design sketch saved and attached to the next AI command: " + saved.relativePath
+                    : "Painted image saved as copy: " + saved.relativePath);
+            dialog.dismiss();
+        } catch (Exception error) {
+            setStatusText("Paint save failed: " + error.getMessage());
+        } finally {
+            snapshot.recycle();
+        }
+    }
+
+    private void persistDesignSketchAssets() {
+        if (activeProject == null) return;
+        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                .putStringSet(AI_PREF_DESIGN_SKETCHES_PREFIX + activeProject.id,
+                        new HashSet<String>(selectedDesignSketchAssets))
+                .apply();
     }
 
     private void requestPaintResize(final WorkshopPaintView paint) {
@@ -7436,10 +7518,18 @@ public final class MainActivity extends Activity {
         try {
             List<WorkshopImageAssets.AssetInfo> selected = selectedAiImageInfos();
             long patches = estimatedImagePatchTokens(selected);
-            aiAttachmentStatus.setText("AI images: " + selected.size() + " selected, about " + patches
-                    + " original-detail image tokens / "
-                    + formatAiCostUsd(selectedAiInputCostUsd(patches))
-                    + " " + selectedAiModelForPricing() + " input (review before Queue AI Change)");
+            int sketches = 0;
+            for (WorkshopImageAssets.AssetInfo image : selected) {
+                if (selectedDesignSketchAssets.contains(image.relativePath)) sketches += 1;
+            }
+            String sketchText = sketches == 0 ? "" : ", " + sketches + " design sketch"
+                    + (sketches == 1 ? "" : "es");
+            String costText = AI_PROVIDER_CODEX.equals(selectedAiProvider()) ? ""
+                    : " / " + formatAiCostUsd(selectedAiInputCostUsd(patches))
+                    + " " + selectedAiModelForPricing() + " input";
+            aiAttachmentStatus.setText("AI images: " + selected.size() + " selected" + sketchText
+                    + ", about " + patches + " original-detail image tokens" + costText
+                    + " (review before Run)");
         } catch (Exception error) {
             aiAttachmentStatus.setText("AI images: selection needs review - " + error.getMessage());
         }
@@ -7469,8 +7559,9 @@ public final class MainActivity extends Activity {
                 thumbnail.setContentDescription("Preview of selected AI attachment " + asset.relativePath);
                 row.addView(thumbnail, new LinearLayout.LayoutParams(dp(72), dp(72)));
                 TextView label = new TextView(this);
+                boolean designSketch = selectedDesignSketchAssets.contains(asset.relativePath);
                 label.setText(asset.relativePath + "\n" + asset.width + "x" + asset.height
-                        + " - original detail");
+                        + " - original detail - " + WorkshopAiImageContext.reviewLabel(designSketch));
                 label.setPadding(dp(8), 0, dp(8), 0);
                 row.addView(label, weightedWidth());
                 Button remove = compactButton("Remove");
@@ -8790,13 +8881,16 @@ public final class MainActivity extends Activity {
         final byte[] bytes;
         final int width;
         final int height;
+        final String contextKind;
 
-        AiImageAttachment(String projectPath, String mimeType, byte[] bytes, int width, int height) {
+        AiImageAttachment(String projectPath, String mimeType, byte[] bytes, int width, int height,
+                          String contextKind) {
             this.projectPath = projectPath;
             this.mimeType = mimeType;
             this.bytes = bytes;
             this.width = width;
             this.height = height;
+            this.contextKind = contextKind;
         }
 
         long estimatedPatchTokens() {

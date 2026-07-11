@@ -374,20 +374,42 @@ async fn default_codex_model(
     }
     let body = bounded_response_bytes(response, MAX_CODEX_MODELS_BYTES, "Codex model discovery")
         .await?;
-    let mut models = serde_json::from_slice::<CodexModelsPayload>(&body)
+    let models = serde_json::from_slice::<CodexModelsPayload>(&body)
         .map_err(|error| format!("Codex model discovery was invalid: {error}"))?
         .models;
-    models.sort_by_key(|model| model.priority);
-    let model = models
-        .iter()
-        .find(|model| model.visibility == "list")
-        .cloned()
-        .or_else(|| models.first().cloned())
-        .ok_or_else(|| "Codex returned no available models".to_string())?;
+    let model = select_default_codex_model(models)?;
     *DEFAULT_CODEX_MODEL
         .lock()
         .map_err(|error| error.to_string())? = Some(model.clone());
     Ok(model)
+}
+
+fn select_default_codex_model(
+    mut models: Vec<CodexModelInfo>,
+) -> Result<CodexModelInfo, String> {
+    models.sort_by_key(|model| model.priority);
+    models
+        .iter()
+        .find(|model| model.visibility == "list")
+        .cloned()
+        .or_else(|| models.first().cloned())
+        .ok_or_else(|| "Codex returned no available models".to_string())
+}
+
+fn prepare_codex_payload(payload: &mut Value, model: &CodexModelInfo) -> Result<(), String> {
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "Codex request must be a JSON object".to_string())?;
+    object.insert("model".to_string(), Value::String(model.slug.clone()));
+    object.insert("store".to_string(), Value::Bool(false));
+    object.insert("stream".to_string(), Value::Bool(true));
+    if !model.base_instructions.is_empty() {
+        object.insert(
+            "instructions".to_string(),
+            Value::String(model.base_instructions.clone()),
+        );
+    }
+    Ok(())
 }
 
 fn completed_response_from_sse(body: &str) -> Result<Value, String> {
@@ -439,18 +461,7 @@ fn codex_response(codex_home: &Path, request_json: &str) -> Result<Value, String
             .build()
             .map_err(|error| error.to_string())?;
         let model = default_codex_model(&client, &auth).await?;
-        let object = payload
-            .as_object_mut()
-            .ok_or_else(|| "Codex request must be a JSON object".to_string())?;
-        object.insert("model".to_string(), Value::String(model.slug.clone()));
-        object.insert("store".to_string(), Value::Bool(false));
-        object.insert("stream".to_string(), Value::Bool(true));
-        if !model.base_instructions.is_empty() {
-            object.insert(
-                "instructions".to_string(),
-                Value::String(model.base_instructions),
-            );
-        }
+        prepare_codex_payload(&mut payload, &model)?;
         let request = client
             .post(CHATGPT_CODEX_RESPONSES_URL)
             .header("Content-Type", "application/json")
@@ -575,7 +586,11 @@ pub extern "C" fn stasis_codex_android_free_string(value: *mut c_char) {
 
 #[cfg(test)]
 mod tests {
+    use super::CodexModelInfo;
     use super::completed_response_from_sse;
+    use super::prepare_codex_payload;
+    use super::select_default_codex_model;
+    use serde_json::json;
 
     #[test]
     fn assembles_completed_response_items() {
@@ -596,5 +611,55 @@ mod tests {
             completed_response_from_sse(body).expect_err("failure event"),
             "denied"
         );
+    }
+
+    #[test]
+    fn selects_first_visible_model_by_priority() {
+        let hidden = CodexModelInfo {
+            slug: "hidden".to_string(),
+            base_instructions: String::new(),
+            visibility: "hide".to_string(),
+            priority: 0,
+        };
+        let visible = CodexModelInfo {
+            slug: "visible".to_string(),
+            base_instructions: "base".to_string(),
+            visibility: "list".to_string(),
+            priority: 4,
+        };
+        let later = CodexModelInfo {
+            slug: "later".to_string(),
+            base_instructions: String::new(),
+            visibility: "list".to_string(),
+            priority: 8,
+        };
+        assert_eq!(
+            select_default_codex_model(vec![later, visible, hidden])
+                .expect("default model")
+                .slug,
+            "visible"
+        );
+    }
+
+    #[test]
+    fn trusted_model_metadata_overrides_transport_fields() {
+        let model = CodexModelInfo {
+            slug: "gpt-test".to_string(),
+            base_instructions: "trusted instructions".to_string(),
+            visibility: "list".to_string(),
+            priority: 0,
+        };
+        let mut payload = json!({
+            "model": "untrusted",
+            "instructions": "untrusted",
+            "store": true,
+            "stream": false,
+            "input": []
+        });
+        prepare_codex_payload(&mut payload, &model).expect("prepared request");
+        assert_eq!(payload["model"], "gpt-test");
+        assert_eq!(payload["instructions"], "trusted instructions");
+        assert_eq!(payload["store"], false);
+        assert_eq!(payload["stream"], true);
     }
 }
