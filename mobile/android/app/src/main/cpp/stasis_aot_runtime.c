@@ -26,6 +26,7 @@ static F32ArraySlot f32_arrays[STASIS_ARRAY_CAPACITY];
 static int aot_main_ran;
 static int32_t frame_count;
 static int32_t next_asset_handle = 1;
+static int previous_touch_active;
 static int32_t sprite_literal_ids[STASIS_ASSET_HANDLE_CAPACITY];
 static int32_t text_run_literal_ids[STASIS_ASSET_HANDLE_CAPACITY];
 
@@ -161,10 +162,13 @@ static void write_host_frame(int touch_x, int touch_y, int touch_active, int scr
     stasis_jit_global_i32_array_store(host_i32, 0, 16, 60);
     stasis_jit_global_i32_array_store(host_i32, 0, 544, 0);
     stasis_jit_global_i32_array_store(host_i32, 0, 545, touch_active ? 1 : 0);
+    stasis_jit_global_i32_array_store(host_i32, 0, 546, touch_active && !previous_touch_active ? 1 : 0);
+    stasis_jit_global_i32_array_store(host_i32, 0, 547, !touch_active && previous_touch_active ? 1 : 0);
     stasis_jit_global_f32_array_store(host_f32, 0, 0, (float)touch_x);
     stasis_jit_global_f32_array_store(host_f32, 0, 1, (float)touch_y);
     stasis_jit_global_f32_array_store(host_f32, 0, 4, screen_w > 0 ? (float)touch_x / (float)screen_w : 0.0f);
     stasis_jit_global_f32_array_store(host_f32, 0, 5, screen_h > 0 ? (float)touch_y / (float)screen_h : 0.0f);
+    previous_touch_active = touch_active ? 1 : 0;
 }
 
 static void pack_preview_frame(int32_t *out_values, uintptr_t out_len) {
