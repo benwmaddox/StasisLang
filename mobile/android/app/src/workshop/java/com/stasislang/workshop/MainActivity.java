@@ -295,7 +295,10 @@ public final class MainActivity extends Activity {
     private static native String nativeCodexBeginDeviceLogin(String codexHome);
     private static native String nativeCodexAccountStatus(String codexHome);
     private static native String nativeCodexAccountRateLimits(String codexHome);
-    private static native String nativeCodexResponse(String codexHome, String requestJson);
+    private static native long nativeCodexBeginResponse();
+    private static native void nativeCodexCancelResponse();
+    private static native String nativeCodexResponse(String codexHome, String requestJson,
+                                                     long generation);
     private static native int nativeCodexInitialize(Object applicationContext);
 
     @Override
@@ -395,6 +398,7 @@ public final class MainActivity extends Activity {
         gameLoopHandler.removeCallbacks(codexStatusPoll);
         if (codexLoginDialog != null) codexLoginDialog.dismiss();
         aiCancelRequested = true;
+        nativeCodexCancelResponse();
         HttpURLConnection aiConnection = activeAiConnection;
         if (aiConnection != null) aiConnection.disconnect();
         githubSyncExecutor.shutdownNow();
@@ -4314,6 +4318,7 @@ public final class MainActivity extends Activity {
             return;
         }
         aiCancelRequested = true;
+        nativeCodexCancelResponse();
         HttpURLConnection connection = activeAiConnection;
         if (connection != null) connection.disconnect();
         updateAiProgress(aiProgressStep, aiProgressActions, "cancelling");
@@ -8651,7 +8656,11 @@ public final class MainActivity extends Activity {
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
         payload.put("text", buildAiResponseTextFormat());
 
-        JSONObject result = new JSONObject(nativeCodexResponse(codexHomePath(), payload.toString()));
+        long generation = nativeCodexBeginResponse();
+        if (generation == 0) throw new IOException("Phone-native Codex library is not packaged");
+        throwIfAiCancelled();
+        JSONObject result = new JSONObject(nativeCodexResponse(
+                codexHomePath(), payload.toString(), generation));
         if (!"ok".equals(result.optString("status", ""))) {
             throw new IOException(result.optString("error", "Phone-native Codex request failed"));
         }

@@ -1,10 +1,12 @@
 use std::ffi::{c_char, CStr, CString};
 use std::ffi::c_void;
+use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use codex_login::{
     complete_device_code_login, load_auth_dot_json, oauth_client_id, request_device_code,
@@ -63,6 +65,7 @@ enum LoginState {
 static LOGIN_STATE: LazyLock<Mutex<LoginState>> =
     LazyLock::new(|| Mutex::new(LoginState::Idle));
 static LOGIN_GENERATION: AtomicU64 = AtomicU64::new(0);
+static RESPONSE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static DEFAULT_CODEX_MODEL: LazyLock<Mutex<Option<CodexModelInfo>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -452,10 +455,35 @@ fn completed_response_from_sse(body: &str) -> Result<Value, String> {
     Ok(response)
 }
 
-fn codex_response(codex_home: &Path, request_json: &str) -> Result<Value, String> {
+fn begin_response_generation() -> u64 {
+    RESPONSE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn cancel_response_generation() {
+    RESPONSE_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+async fn cancel_on_generation_change<T>(
+    generation: u64,
+    response: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::pin!(response);
+    let cancelled = async move {
+        while RESPONSE_GENERATION.load(Ordering::SeqCst) == generation {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::pin!(cancelled);
+    tokio::select! {
+        result = &mut response => result,
+        _ = &mut cancelled => Err("Codex request cancelled".to_string()),
+    }
+}
+
+fn codex_response(codex_home: &Path, request_json: &str, generation: u64) -> Result<Value, String> {
     let mut payload: Value = serde_json::from_str(request_json)
         .map_err(|error| format!("Codex request JSON was invalid: {error}"))?;
-    runtime()?.block_on(async move {
+    runtime()?.block_on(cancel_on_generation_change(generation, async move {
         let auth = codex_auth(codex_home.to_path_buf()).await?;
         let client = reqwest::Client::builder()
             .build()
@@ -494,7 +522,7 @@ fn codex_response(codex_home: &Path, request_json: &str) -> Result<Value, String
             "response": completed_response_from_sse(&body)?,
             "upstream_revision": UPSTREAM_CODEX_REVISION,
         }))
-    })
+    }))
 }
 
 fn path_from_c(value: *const c_char) -> Result<PathBuf, String> {
@@ -557,9 +585,20 @@ pub extern "C" fn stasis_codex_android_account_rate_limits(
 }
 
 #[no_mangle]
+pub extern "C" fn stasis_codex_android_begin_response() -> u64 {
+    begin_response_generation()
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_codex_android_cancel_response() {
+    cancel_response_generation();
+}
+
+#[no_mangle]
 pub extern "C" fn stasis_codex_android_response(
     codex_home: *const c_char,
     request_json: *const c_char,
+    generation: u64,
 ) -> *mut c_char {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let home = path_from_c(codex_home)?;
@@ -569,7 +608,7 @@ pub extern "C" fn stasis_codex_android_response(
         let request = unsafe { CStr::from_ptr(request_json) }
             .to_str()
             .map_err(|error| error.to_string())?;
-        codex_response(&home, request)
+        codex_response(&home, request, generation)
     }));
     match result {
         Ok(value) => into_c_json(value),
@@ -590,7 +629,25 @@ mod tests {
     use super::completed_response_from_sse;
     use super::prepare_codex_payload;
     use super::select_default_codex_model;
+    use super::{begin_response_generation, cancel_on_generation_change, cancel_response_generation};
     use serde_json::json;
+
+    #[test]
+    fn cancellation_stops_an_active_response_future() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let generation = begin_response_generation();
+        let result = runtime.block_on(async {
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                cancel_response_generation();
+            });
+            cancel_on_generation_change(generation, async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                Ok(())
+            }).await
+        });
+        assert_eq!(result.unwrap_err(), "Codex request cancelled");
+    }
 
     #[test]
     fn assembles_completed_response_items() {

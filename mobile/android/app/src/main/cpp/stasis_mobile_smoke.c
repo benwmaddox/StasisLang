@@ -26,7 +26,9 @@ typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_roo
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
-typedef char *(*stasis_codex_android_response_fn)(const char *codex_home, const char *request_json);
+typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
+typedef void (*stasis_codex_android_cancel_response_fn)(void);
+typedef char *(*stasis_codex_android_response_fn)(const char *codex_home, const char *request_json, uint64_t generation);
 typedef int (*stasis_codex_android_initialize_fn)(void *env, void *context);
 typedef void (*stasis_codex_android_free_string_fn)(char *value);
 typedef struct CompileStats {
@@ -68,6 +70,8 @@ typedef struct CodexBridgeApi {
     stasis_codex_android_string_fn begin_device_login;
     stasis_codex_android_string_fn account_status;
     stasis_codex_android_string_fn account_rate_limits;
+    stasis_codex_android_begin_response_fn begin_response;
+    stasis_codex_android_cancel_response_fn cancel_response;
     stasis_codex_android_response_fn response;
     stasis_codex_android_free_string_fn free_string;
     int attempted;
@@ -939,6 +943,10 @@ static CodexBridgeApi *load_codex_bridge_api(void) {
             codex_bridge_api.handle, "stasis_codex_android_account_status");
     codex_bridge_api.account_rate_limits = (stasis_codex_android_string_fn)dlsym(
             codex_bridge_api.handle, "stasis_codex_android_account_rate_limits");
+    codex_bridge_api.begin_response = (stasis_codex_android_begin_response_fn)dlsym(
+            codex_bridge_api.handle, "stasis_codex_android_begin_response");
+    codex_bridge_api.cancel_response = (stasis_codex_android_cancel_response_fn)dlsym(
+            codex_bridge_api.handle, "stasis_codex_android_cancel_response");
     codex_bridge_api.response = (stasis_codex_android_response_fn)dlsym(
             codex_bridge_api.handle, "stasis_codex_android_response");
     codex_bridge_api.free_string = (stasis_codex_android_free_string_fn)dlsym(
@@ -947,6 +955,8 @@ static CodexBridgeApi *load_codex_bridge_api(void) {
         codex_bridge_api.begin_device_login == NULL ||
         codex_bridge_api.account_status == NULL ||
         codex_bridge_api.account_rate_limits == NULL ||
+        codex_bridge_api.begin_response == NULL ||
+        codex_bridge_api.cancel_response == NULL ||
         codex_bridge_api.response == NULL ||
         codex_bridge_api.free_string == NULL) {
         __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG,
@@ -1002,7 +1012,7 @@ static jstring call_codex_rate_limits(JNIEnv *env, jstring codex_home) {
     return result;
 }
 
-static jstring call_codex_response(JNIEnv *env, jstring codex_home, jstring request_json) {
+static jstring call_codex_response(JNIEnv *env, jstring codex_home, jstring request_json, uint64_t generation) {
     if (codex_home == NULL || request_json == NULL) {
         return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex request was null\"}");
     }
@@ -1019,7 +1029,7 @@ static jstring call_codex_response(JNIEnv *env, jstring codex_home, jstring requ
         (*env)->ReleaseStringUTFChars(env, request_json, request);
         return (*env)->NewStringUTF(env, "{\"status\":\"unavailable\",\"error\":\"Phone-native Codex library is not packaged\"}");
     }
-    char *response = bridge->response(home, request);
+    char *response = bridge->response(home, request, generation);
     (*env)->ReleaseStringUTFChars(env, codex_home, home);
     (*env)->ReleaseStringUTFChars(env, request_json, request);
     if (response == NULL) {
@@ -1215,9 +1225,27 @@ Java_com_stasislang_workshop_MainActivity_nativeCodexAccountRateLimits(
 
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeCodexResponse(
-        JNIEnv *env, jclass activity_class, jstring codex_home, jstring request_json) {
+        JNIEnv *env, jclass activity_class, jstring codex_home, jstring request_json, jlong generation) {
     (void)activity_class;
-    return call_codex_response(env, codex_home, request_json);
+    return call_codex_response(env, codex_home, request_json, (uint64_t)generation);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeCodexBeginResponse(
+        JNIEnv *env, jclass activity_class) {
+    (void)env;
+    (void)activity_class;
+    CodexBridgeApi *bridge = load_codex_bridge_api();
+    return bridge == NULL ? 0 : (jlong)bridge->begin_response();
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeCodexCancelResponse(
+        JNIEnv *env, jclass activity_class) {
+    (void)env;
+    (void)activity_class;
+    CodexBridgeApi *bridge = load_codex_bridge_api();
+    if (bridge != NULL) bridge->cancel_response();
 }
 
 JNIEXPORT jstring JNICALL
