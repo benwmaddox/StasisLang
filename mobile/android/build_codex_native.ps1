@@ -48,12 +48,12 @@ git -C $upstreamRoot fetch origin $codexRevision
 if ($LASTEXITCODE -ne 0) { throw "Codex fetch failed with exit code $LASTEXITCODE" }
 git -C $upstreamRoot checkout --detach --force $codexRevision
 if ($LASTEXITCODE -ne 0) { throw "Codex checkout failed with exit code $LASTEXITCODE" }
-git -C $upstreamRoot apply --check $patchPath
+git -C $upstreamRoot apply --ignore-space-change --check $patchPath
 if ($LASTEXITCODE -eq 0) {
-    git -C $upstreamRoot apply $patchPath
+    git -C $upstreamRoot apply --ignore-space-change $patchPath
     if ($LASTEXITCODE -ne 0) { throw "Codex Android TLS patch failed with exit code $LASTEXITCODE" }
 } else {
-    git -C $upstreamRoot apply --reverse --check $patchPath
+    git -C $upstreamRoot apply --ignore-space-change --reverse --check $patchPath
     if ($LASTEXITCODE -ne 0) { throw "Codex checkout does not match the pinned Android TLS patch" }
 }
 

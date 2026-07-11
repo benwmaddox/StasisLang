@@ -106,6 +106,7 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_MONTH_SPEND_USD = "monthly_spend_usd";
     private static final String AI_PREF_CODEX_LIMITS_JSON = "codex_limits_json";
     private static final String AI_PREF_CODEX_LIMITS_REFRESH_ATTEMPT_MS = "codex_limits_refresh_attempt_ms";
+    private static final String AI_PREF_CODEX_PRIMARY_MIGRATION = "codex_primary_after_turn_bridge_v1";
     private static final String GITHUB_PREFS = "github_sync_settings";
     private static final String GITHUB_PREF_TOKEN = "github_token";
     private static final String GITHUB_PREF_REPOSITORY = "github_repository";
@@ -166,6 +167,7 @@ public final class MainActivity extends Activity {
     private EditText aiPromptEditor;
     private EditText aiApiKeyEditor;
     private Spinner aiProviderSelector;
+    private boolean aiProviderSelectionFromTouch;
     private TextView codexAccountStatus;
     private EditText aiModelEditor;
     private EditText aiMonthlyLimitUsdEditor;
@@ -217,6 +219,10 @@ public final class MainActivity extends Activity {
     private String codexLoginUserCode = "";
     private String codexLoginVerificationUrl = "";
     private boolean showProjectChooserAfterCodexLogin;
+    private final WorkshopCodexLoginLifecycle codexLoginLifecycle = new WorkshopCodexLoginLifecycle();
+    private final Runnable codexStatusPoll = new Runnable() {
+        @Override public void run() { refreshPhoneNativeCodexStatus(); }
+    };
     private volatile boolean aiCancelRequested;
     private volatile HttpURLConnection activeAiConnection;
     private String activeAiPrompt = "";
@@ -287,6 +293,7 @@ public final class MainActivity extends Activity {
     private static native String nativeCodexBeginDeviceLogin(String codexHome);
     private static native String nativeCodexAccountStatus(String codexHome);
     private static native String nativeCodexAccountRateLimits(String codexHome);
+    private static native String nativeCodexResponse(String codexHome, String requestJson);
     private static native int nativeCodexInitialize(Object applicationContext);
 
     @Override
@@ -337,7 +344,16 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        codexLoginLifecycle.onResume();
+        refreshPhoneNativeCodexStatus();
+    }
+
+    @Override
     protected void onPause() {
+        codexLoginLifecycle.onPause();
+        gameLoopHandler.removeCallbacks(codexStatusPoll);
         persistPendingDraft();
         stopVoiceRecognition();
         stopAudioPreview();
@@ -372,12 +388,14 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         stopVoiceRecognition();
+        gameLoopHandler.removeCallbacks(codexStatusPoll);
         if (codexLoginDialog != null) codexLoginDialog.dismiss();
         aiCancelRequested = true;
         HttpURLConnection aiConnection = activeAiConnection;
         if (aiConnection != null) aiConnection.disconnect();
         githubSyncExecutor.shutdownNow();
         projectIoExecutor.shutdownNow();
+        codexExecutor.shutdownNow();
         if (pendingPreviewScreenshot != null && !pendingPreviewScreenshot.isRecycled()) {
             pendingPreviewScreenshot.recycle();
         }
@@ -1683,8 +1701,7 @@ public final class MainActivity extends Activity {
         aiProviderSelector.setAdapter(providerAdapter);
         String configuredProvider = aiPrefs.getString(AI_PREF_PROVIDER, "");
         if (configuredProvider.isEmpty()) {
-            configuredProvider = phoneNativeCodexReady
-                    && readSecretPreference(aiPrefs, AI_PREF_API_KEY).isEmpty()
+            configuredProvider = WorkshopAiProviderPolicy.defaultToCodex(phoneNativeCodexReady)
                     ? AI_PROVIDER_CODEX : AI_PROVIDER_API;
         }
         aiProviderSelector.setSelection(AI_PROVIDER_API.equals(configuredProvider) ? 1 : 0);
@@ -1739,9 +1756,22 @@ public final class MainActivity extends Activity {
         aiMonthlyLimitUsdEditor.setSingleLine(true);
         aiMonthlyLimitUsdEditor.setText(aiPrefs.getString(AI_PREF_MONTHLY_LIMIT_USD, "5.00"));
         aiSettingsBody.addView(aiMonthlyLimitUsdEditor, fullWidth());
+        aiProviderSelector.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View view, MotionEvent event) {
+                if (event.getAction() == MotionEvent.ACTION_DOWN) aiProviderSelectionFromTouch = true;
+                return false;
+            }
+        });
         aiProviderSelector.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 updateAiProviderVisibility();
+                SharedPreferences.Editor edit = getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                        .putString(AI_PREF_PROVIDER, position == 1 ? AI_PROVIDER_API : AI_PROVIDER_CODEX);
+                if (aiProviderSelectionFromTouch) {
+                    edit.putBoolean(AI_PREF_CODEX_PRIMARY_MIGRATION, true);
+                }
+                aiProviderSelectionFromTouch = false;
+                edit.apply();
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
@@ -3468,6 +3498,8 @@ public final class MainActivity extends Activity {
             }
             return;
         }
+        codexLoginLifecycle.onLoginStarted();
+        gameLoopHandler.removeCallbacks(codexStatusPoll);
         if (codexAccountStatus != null) codexAccountStatus.setText("Codex account: requesting a device code...");
         codexExecutor.execute(new Runnable() {
             @Override public void run() {
@@ -3475,12 +3507,14 @@ public final class MainActivity extends Activity {
                     final JSONObject status = new JSONObject(nativeCodexBeginDeviceLogin(codexHomePath()));
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
-                            showPhoneNativeCodexStatus(status);
                             if ("awaiting_user".equals(status.optString("status", ""))) {
                                 showCodexDeviceCodeDialog(
                                         status.optString("verification_url", ""),
                                         status.optString("user_code", ""));
-                            } else if (showProjectChooserAfterCodexLogin) {
+                            }
+                            showPhoneNativeCodexStatus(status);
+                            if (!"awaiting_user".equals(status.optString("status", ""))
+                                    && showProjectChooserAfterCodexLogin) {
                                 showProjectChooserAfterCodexLogin = false;
                                 showProjectChooser();
                             }
@@ -3503,18 +3537,27 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshPhoneNativeCodexStatus() {
+        if (!phoneNativeCodexReady || !codexLoginLifecycle.beginStatusRequest()) return;
         codexExecutor.execute(new Runnable() {
             @Override public void run() {
                 try {
                     final JSONObject status = new JSONObject(nativeCodexAccountStatus(codexHomePath()));
                     runOnUiThread(new Runnable() {
-                        @Override public void run() { showPhoneNativeCodexStatus(status); }
+                        @Override public void run() {
+                            codexLoginLifecycle.finishStatusRequest();
+                            showPhoneNativeCodexStatus(status);
+                        }
                     });
                 } catch (Exception error) {
                     final String message = error.getMessage();
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
+                            codexLoginLifecycle.finishStatusRequest();
                             if (codexAccountStatus != null) codexAccountStatus.setText("Codex account error: " + message);
+                            if (codexLoginLifecycle.schedulePoll()) {
+                                gameLoopHandler.removeCallbacks(codexStatusPoll);
+                                gameLoopHandler.postDelayed(codexStatusPoll, 2000L);
+                            }
                         }
                     });
                 }
@@ -3523,6 +3566,11 @@ public final class MainActivity extends Activity {
     }
 
     private void showCodexDeviceCodeDialog(String verificationUrl, String userCode) {
+        showCodexDeviceCodeDialog(verificationUrl, userCode, true);
+    }
+
+    private void showCodexDeviceCodeDialog(String verificationUrl, String userCode,
+                                           boolean openBrowserAutomatically) {
         if (!isOfficialCodexVerificationUrl(verificationUrl) || userCode.trim().isEmpty()) {
             setStatusText("Codex sign-in returned an invalid verification link or code; request a new code");
             if (showProjectChooserAfterCodexLogin) {
@@ -3563,16 +3611,7 @@ public final class MainActivity extends Activity {
                 .setView(content)
                 .setPositiveButton("Open Browser", null)
                 .setNeutralButton("Copy Code", null)
-                .setNegativeButton("Continue", new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        codexLoginDialog = null;
-                        codexLoginDialogStatus = null;
-                        if (showProjectChooserAfterCodexLogin) {
-                            showProjectChooserAfterCodexLogin = false;
-                            showProjectChooser();
-                        }
-                    }
-                })
+                .setNegativeButton("Continue", null)
                 .create();
         codexLoginDialog.show();
         codexLoginDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
@@ -3581,9 +3620,17 @@ public final class MainActivity extends Activity {
         codexLoginDialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { copyCodexLoginCode(); }
         });
-        content.postDelayed(new Runnable() {
-            @Override public void run() { openCodexVerificationUrl(); }
-        }, 250L);
+        codexLoginDialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                codexLoginDialogStatus.setText("Checking whether browser sign-in finished...");
+                refreshPhoneNativeCodexStatus();
+            }
+        });
+        if (openBrowserAutomatically) {
+            content.postDelayed(new Runnable() {
+                @Override public void run() { openCodexVerificationUrl(); }
+            }, 250L);
+        }
     }
 
     private static boolean isOfficialCodexVerificationUrl(String value) {
@@ -3658,14 +3705,30 @@ public final class MainActivity extends Activity {
         String state = status.optString("status", "error");
         if ("signed_in".equals(state)) {
             codexSignedIn = true;
+            SharedPreferences preferences = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+            boolean activeLogin = !codexLoginUserCode.isEmpty()
+                    || (codexLoginDialog != null && codexLoginDialog.isShowing());
+            if (WorkshopAiProviderPolicy.promoteCodexAfterSignIn(activeLogin,
+                    preferences.getBoolean(AI_PREF_CODEX_PRIMARY_MIGRATION, false))) {
+                preferences.edit()
+                        .putString(AI_PREF_PROVIDER, AI_PROVIDER_CODEX)
+                        .putBoolean(AI_PREF_CODEX_PRIMARY_MIGRATION, true)
+                        .apply();
+                if (aiProviderSelector != null && aiProviderSelector.getSelectedItemPosition() != 0) {
+                    aiProviderSelector.setSelection(0);
+                }
+            }
             String plan = status.optString("plan_type", "");
             codexAccountStatus.setText("Codex account: signed in on this phone"
                     + (plan.isEmpty() ? "" : " (" + plan + ")"));
+            boolean handleCompletion = codexLoginLifecycle.onSignedIn();
+            gameLoopHandler.removeCallbacks(codexStatusPoll);
             if (codexLoginDialogStatus != null) {
                 codexLoginDialogStatus.setText("Signed in successfully. Returning to Workshop...");
             }
             clearCopiedCodexLoginCode();
             refreshAiBudgetStatus();
+            if (!handleCompletion) return;
             final boolean showProjects = showProjectChooserAfterCodexLogin;
             showProjectChooserAfterCodexLogin = false;
             gameLoopHandler.postDelayed(new Runnable() {
@@ -3681,23 +3744,38 @@ public final class MainActivity extends Activity {
             return;
         }
         if ("awaiting_user".equals(state)) {
+            codexLoginLifecycle.onAwaitingUser();
             codexSignedIn = false;
-            codexAccountStatus.setText("Codex sign-in code: " + status.optString("user_code", "")
-                    + "\n" + status.optString("verification_url", "https://auth.openai.com/codex/device"));
+            String userCode = status.optString("user_code", "").trim();
+            String verificationUrl = status.optString(
+                    "verification_url", "https://auth.openai.com/codex/device");
+            codexLoginUserCode = userCode;
+            codexLoginVerificationUrl = verificationUrl;
+            codexAccountStatus.setText("Codex sign-in code: " + userCode + "\n" + verificationUrl);
             if (codexLoginDialogStatus != null) {
                 codexLoginDialogStatus.setText("Waiting for browser sign-in...");
             }
-            gameLoopHandler.postDelayed(new Runnable() {
-                @Override public void run() { refreshPhoneNativeCodexStatus(); }
-            }, 2000L);
+            boolean dialogShowing = codexLoginDialog != null && codexLoginDialog.isShowing();
+            boolean validCode = !userCode.isEmpty() && isOfficialCodexVerificationUrl(verificationUrl);
+            if (codexLoginLifecycle.shouldPresentDialog(dialogShowing, validCode)) {
+                showCodexDeviceCodeDialog(verificationUrl, userCode, false);
+            }
+            if (codexLoginLifecycle.schedulePoll()) {
+                gameLoopHandler.removeCallbacks(codexStatusPoll);
+                gameLoopHandler.postDelayed(codexStatusPoll, 2000L);
+            }
             return;
         }
         if ("signed_out".equals(state)) {
+            codexLoginLifecycle.onTerminalFailure();
+            gameLoopHandler.removeCallbacks(codexStatusPoll);
             codexSignedIn = false;
             codexAccountStatus.setText("Codex account: signed out on this phone");
             refreshAiBudgetStatus();
             return;
         }
+        codexLoginLifecycle.onTerminalFailure();
+        gameLoopHandler.removeCallbacks(codexStatusPoll);
         codexSignedIn = false;
         String error = status.optString("error", state);
         codexAccountStatus.setText("Codex sign-in failed: " + error);
@@ -4006,7 +4084,8 @@ public final class MainActivity extends Activity {
         String prompt = queuedEntry == null
                 ? (aiPromptEditor == null ? "" : aiPromptEditor.getText().toString().trim())
                 : queuedEntry.prompt;
-        if (AI_PROVIDER_CODEX.equals(selectedAiProvider())) {
+        final boolean useCodex = AI_PROVIDER_CODEX.equals(selectedAiProvider());
+        if (useCodex) {
             if (prompt.isEmpty()) {
                 setStatusText("AI run needs a request");
                 failQueuedAiPreflight(queuedEntry, "Request was missing at execution time");
@@ -4020,42 +4099,41 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 refreshCodexRateLimitsAfterAction();
-                setStatusText("Phone-native Codex authentication is ready; the on-device turn bridge is the next implementation slice");
-                failQueuedAiPreflight(queuedEntry, "Phone-native Codex turn bridge is not available yet");
             } catch (Exception error) {
                 setStatusText("Phone-native Codex status failed: " + error.getMessage());
                 failQueuedAiPreflight(queuedEntry, "Phone-native Codex status failed");
+                return;
             }
-            return;
         }
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
-        if (apiKey.isEmpty() || prompt.isEmpty()) {
+        if ((!useCodex && apiKey.isEmpty()) || prompt.isEmpty()) {
             setStatusText("AI run needs both a request and an API key; open AI Settings if the key is not saved");
             updateAiProgress(0, 0, "needs input");
             failQueuedAiPreflight(queuedEntry, "API key or request was missing at execution time");
             return;
         }
-        if (model.isEmpty()) {
+        if (!useCodex && model.isEmpty()) {
             model = DEFAULT_AI_MODEL;
         }
+        if (useCodex) model = "codex-default";
         double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
         final boolean requestImageGeneration = queuedEntry == null
                 ? allowAiImageGeneration != null && allowAiImageGeneration.isChecked()
                 : queuedEntry.imageGeneration;
-        if (!hasKnownAiPricing(model)) {
+        if (!useCodex && !hasKnownAiPricing(model)) {
             setStatusText("AI run blocked: pricing is unavailable for " + model);
             updateAiProgress(0, 0, "budget blocked");
             failQueuedAiPreflight(queuedEntry, "Model pricing was unavailable at execution time");
             return;
         }
-        if (!WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
+        if (!useCodex && !WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
             setStatusText("AI run blocked by the device monthly spending limit; open AI Settings");
             updateAiProgress(0, 0, "budget blocked");
             failQueuedAiPreflight(queuedEntry, "Device monthly AI limit blocked execution");
             return;
         }
         recordCommandHistory(prompt);
-        if (!saveAiSettings(apiKey, model)) {
+        if (!useCodex && !saveAiSettings(apiKey, model)) {
             failQueuedAiPreflight(queuedEntry, "AI settings could not be saved");
             return;
         }
@@ -4110,7 +4188,7 @@ public final class MainActivity extends Activity {
             failQueuedAiPreflight(queuedEntry, "Attachment snapshot failed validation: " + error.getMessage());
             return;
         }
-        if (requestImageGeneration && WorkshopAiBudgetPolicy.remainingUsd(
+        if (!useCodex && requestImageGeneration && WorkshopAiBudgetPolicy.remainingUsd(
                 monthlyLimitUsd, monthlyAiSpendUsd()) < GPT_IMAGE_2_LOW_1024_USD) {
             setStatusText("AI image generation blocked: the device monthly limit does not cover the reserved image output");
             updateAiProgress(0, 0, "image budget blocked");
@@ -4162,7 +4240,7 @@ public final class MainActivity extends Activity {
                 try {
                     activeAiImageAttachments = loadAiImageAttachments(requestImageInfos, requestPreviewPixels);
                     final AiAgentResult aiResult = runAiAgentLoop(
-                            requestApiKey, requestModel, requestJson, requestImageGeneration);
+                            requestApiKey, requestModel, requestJson, requestImageGeneration, useCodex);
                     throwIfAiCancelled();
                     runOnUiThread(new Runnable() {
                         @Override
@@ -4459,7 +4537,7 @@ public final class MainActivity extends Activity {
         return errors;
     }
     private AiAgentResult runAiAgentLoop(String apiKey, String model, String initialRequestJson,
-            boolean allowImageGeneration) throws Exception {
+            boolean allowImageGeneration, boolean useCodex) throws Exception {
         String currentRequestJson = initialRequestJson;
         AiAgentSession session = new AiAgentSession();
         AiUsageAccumulator usage = new AiUsageAccumulator();
@@ -4468,7 +4546,7 @@ public final class MainActivity extends Activity {
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             throwIfAiCancelled();
             double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
-            if (!WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
+            if (!useCodex && !WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
                 throw new IOException("Device monthly AI spending limit reached before agent turn " + (turn + 1));
             }
             session.currentStep = turn + 1;
@@ -4478,12 +4556,19 @@ public final class MainActivity extends Activity {
                     .put("model", model)
                     .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
             double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
-            boolean allowImageOnThisTurn = allowImageGeneration && turn == 0;
-            int maxOutputTokens = maxOutputTokensForBudget(model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
-            AiApiResponse apiResponse = callOpenAiResponsesApi(
-                    apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
-            usage.add(model, apiResponse.usage);
-            if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+            boolean allowImageOnThisTurn = !useCodex && allowImageGeneration && turn == 0;
+            AiApiResponse apiResponse;
+            if (useCodex) {
+                apiResponse = callCodexResponses(currentRequestJson);
+                usage.addUnpriced(apiResponse.model, apiResponse.usage);
+            } else {
+                int maxOutputTokens = maxOutputTokensForBudget(
+                        model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
+                apiResponse = callOpenAiResponsesApi(
+                        apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
+                usage.add(model, apiResponse.usage);
+                if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+            }
             List<AiGeneratedImageCandidate> callImages = extractAiGeneratedImages(apiResponse.body);
             if (!callImages.isEmpty()) {
                 generatedImages.addAll(callImages);
@@ -4517,7 +4602,8 @@ public final class MainActivity extends Activity {
             JSONArray toolCalls = response.optJSONArray("tool_calls");
             if (!"tool_calls".equals(mode) || toolCalls == null || toolCalls.length() == 0) {
                 postAiProgress(session.currentStep, session.actionCount, "finalizing");
-                return new AiAgentResult(aiJson, usage.toJson(model), usage.summary(), session.currentStep,
+                return new AiAgentResult(aiJson, usage.toJson(model),
+                        useCodex ? usage.subscriptionSummary() : usage.summary(), session.currentStep,
                         session.actionCount, generatedImages);
             }
             String currentToolCallBatch = toolCalls.toString();
@@ -4538,7 +4624,8 @@ public final class MainActivity extends Activity {
                         .put("last_error", session.lastToolError);
                 appendAiTrace("repeated_tool_calls", repeated);
                 if (session.successfulWriteCount > 0 && compileReady && session.latestRunnableTestsPassed()) {
-                    return new AiAgentResult(repeated.toString(), usage.toJson(model), usage.summary(), session.currentStep,
+                    return new AiAgentResult(repeated.toString(), usage.toJson(model),
+                            useCodex ? usage.subscriptionSummary() : usage.summary(), session.currentStep,
                             session.actionCount, generatedImages);
                 }
                 throw new IOException("AI repeated identical tool calls; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
@@ -4576,7 +4663,8 @@ public final class MainActivity extends Activity {
                     .put("last_tool", session.lastToolSummary)
                     .put("last_error", session.lastToolError);
             appendAiTrace("limit_after_successful_tested_writes", synthetic);
-            return new AiAgentResult(synthetic.toString(), usage.toJson(model), usage.summary(), MAX_AI_AGENT_TURNS,
+            return new AiAgentResult(synthetic.toString(), usage.toJson(model),
+                    useCodex ? usage.subscriptionSummary() : usage.summary(), MAX_AI_AGENT_TURNS,
                     session.actionCount, generatedImages);
         }
         throw new IOException("AI agent reached tool-call limit before returning edits; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
@@ -5829,7 +5917,7 @@ public final class MainActivity extends Activity {
             if (status < 200 || status >= 300) {
                 throw new IOException("OpenAI HTTP " + status + ": " + response);
             }
-            return new AiApiResponse(response, extractAiUsage(response));
+            return new AiApiResponse(response, extractAiUsage(response), model);
         } finally {
             connection.disconnect();
             if (activeAiConnection == connection) activeAiConnection = null;
@@ -8457,6 +8545,31 @@ public final class MainActivity extends Activity {
         return ProjectSnapshot.from(files);
     }
 
+    private AiApiResponse callCodexResponses(String requestJson) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("model", "");
+        payload.put("instructions", "");
+        payload.put("input", buildAiOpenAiInput(requestJson, true, false));
+        payload.put("tools", new JSONArray());
+        payload.put("tool_choice", "auto");
+        payload.put("parallel_tool_calls", false);
+        payload.put("reasoning", new JSONObject().put("effort", "medium").put("summary", "auto"));
+        payload.put("store", false);
+        payload.put("stream", true);
+        payload.put("include", new JSONArray().put("reasoning.encrypted_content"));
+        payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
+        payload.put("text", buildAiResponseTextFormat());
+
+        JSONObject result = new JSONObject(nativeCodexResponse(codexHomePath(), payload.toString()));
+        if (!"ok".equals(result.optString("status", ""))) {
+            throw new IOException(result.optString("error", "Phone-native Codex request failed"));
+        }
+        JSONObject response = result.optJSONObject("response");
+        if (response == null) throw new IOException("Phone-native Codex returned no response object");
+        String model = result.optString("model", "codex-default");
+        return new AiApiResponse(response.toString(), extractAiUsage(response.toString()), model);
+    }
+
     private boolean migrateBundledPongBallSpeed() throws IOException {
         if (activeProject == null || !"sample".equals(activeProject.origin)
                 || !WorkshopTemplateCatalog.LEGACY_TEMPLATE_ID.equals(activeProject.templateId)) {
@@ -8630,10 +8743,12 @@ public final class MainActivity extends Activity {
     private static final class AiApiResponse {
         final String body;
         final JSONObject usage;
+        final String model;
 
-        AiApiResponse(String body, JSONObject usage) {
+        AiApiResponse(String body, JSONObject usage, String model) {
             this.body = body;
             this.usage = usage;
+            this.model = model;
         }
     }
 
@@ -8731,6 +8846,27 @@ public final class MainActivity extends Activity {
             costAvailable = costAvailable && callCostAvailable;
         }
 
+        void addUnpriced(String model, JSONObject usage) throws Exception {
+            long callInputTokens = usageTokenCount(usage, "input_tokens", "prompt_tokens");
+            long callCachedInputTokens = cachedInputTokenCount(usage);
+            long callCacheWriteInputTokens = cacheWriteInputTokenCount(usage);
+            long callOutputTokens = usageTokenCount(usage, "output_tokens", "completion_tokens");
+            calls.put(new JSONObject()
+                    .put("turn", calls.length() + 1)
+                    .put("model", model)
+                    .put("input_tokens", callInputTokens)
+                    .put("cached_input_tokens", callCachedInputTokens)
+                    .put("cache_write_input_tokens", callCacheWriteInputTokens)
+                    .put("output_tokens", callOutputTokens)
+                    .put("billing", "codex_subscription"));
+            inputTokens += callInputTokens;
+            cachedInputTokens += callCachedInputTokens;
+            cacheWriteInputTokens += callCacheWriteInputTokens;
+            outputTokens += callOutputTokens;
+            costAvailable = false;
+            lastCallCostAvailable = false;
+        }
+
         void addImageGenerationCost(double costUsd, int count) {
             imageGenerationCostUsd += costUsd;
             generatedImageCount += count;
@@ -8762,6 +8898,10 @@ public final class MainActivity extends Activity {
                 builder.append("unavailable");
             }
             return builder.toString();
+        }
+
+        String subscriptionSummary() {
+            return "Codex subscription, turns=" + calls.length();
         }
     }
     private final class AiAgentSession {

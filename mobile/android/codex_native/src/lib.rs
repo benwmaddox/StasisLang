@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 #[no_mangle]
+#[cfg(target_os = "android")]
 pub extern "C" fn stasis_codex_android_initialize(
     raw_env: *mut c_void,
     raw_context: *mut c_void,
@@ -43,6 +44,10 @@ pub extern "C" fn stasis_codex_android_initialize(
 const UPSTREAM_CODEX_REVISION: &str = "5c19155cbd93bfa099016e7487259f61669823ff";
 const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const CHATGPT_CODEX_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
+const CHATGPT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const MAX_CODEX_MODELS_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CODEX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 enum LoginState {
@@ -58,6 +63,8 @@ enum LoginState {
 static LOGIN_STATE: LazyLock<Mutex<LoginState>> =
     LazyLock::new(|| Mutex::new(LoginState::Idle));
 static LOGIN_GENERATION: AtomicU64 = AtomicU64::new(0);
+static DEFAULT_CODEX_MODEL: LazyLock<Mutex<Option<CodexModelInfo>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 fn server_options(codex_home: PathBuf) -> ServerOptions {
     ServerOptions::new(
@@ -164,6 +171,15 @@ fn account_status(codex_home: &Path) -> Result<Value, String> {
     })
 }
 
+#[no_mangle]
+#[cfg(not(target_os = "android"))]
+pub extern "C" fn stasis_codex_android_initialize(
+    _raw_env: *mut c_void,
+    _raw_context: *mut c_void,
+) -> i32 {
+    -1
+}
+
 #[derive(Deserialize)]
 struct UsagePayload {
     rate_limit: Option<RateLimitDetails>,
@@ -249,6 +265,227 @@ fn account_rate_limits(codex_home: &Path) -> Result<Value, String> {
     })
 }
 
+#[derive(Clone, Deserialize)]
+struct CodexModelInfo {
+    slug: String,
+    #[serde(default)]
+    base_instructions: String,
+    #[serde(default)]
+    visibility: String,
+    #[serde(default)]
+    priority: i64,
+}
+
+#[derive(Deserialize)]
+struct CodexModelsPayload {
+    models: Vec<CodexModelInfo>,
+}
+
+async fn codex_auth(codex_home: PathBuf) -> Result<codex_login::CodexAuth, String> {
+    let auth_manager = AuthManager::new(
+        codex_home,
+        false,
+        AuthCredentialsStoreMode::File,
+        None,
+        Some(CHATGPT_BASE_URL.to_string()),
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await;
+    let auth = auth_manager
+        .auth()
+        .await
+        .ok_or_else(|| "ChatGPT sign-in is required to run Codex".to_string())?;
+    if !auth.uses_codex_backend() {
+        return Err("ChatGPT authentication is required to run Codex".to_string());
+    }
+    Ok(auth)
+}
+
+fn add_codex_auth_headers(
+    mut request: reqwest::RequestBuilder,
+    auth: &codex_login::CodexAuth,
+) -> Result<reqwest::RequestBuilder, String> {
+    let token = auth.get_token().map_err(|error| error.to_string())?;
+    request = request
+        .bearer_auth(token)
+        .header(
+            "User-Agent",
+            codex_login::default_client::get_codex_user_agent(),
+        )
+        .header(
+            "originator",
+            codex_login::default_client::originator().value,
+        );
+    if let Some(account_id) = auth.get_account_id() {
+        request = request.header("ChatGPT-Account-Id", account_id);
+    }
+    if auth.is_fedramp_account() {
+        request = request.header("X-OpenAI-Fedramp", "true");
+    }
+    Ok(request)
+}
+
+async fn bounded_response_bytes(
+    mut response: reqwest::Response,
+    limit: usize,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(format!("{label} exceeded the {limit}-byte limit"));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("{label} read failed: {error}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(format!("{label} exceeded the {limit}-byte limit"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn default_codex_model(
+    client: &reqwest::Client,
+    auth: &codex_login::CodexAuth,
+) -> Result<CodexModelInfo, String> {
+    if let Some(model) = DEFAULT_CODEX_MODEL
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone()
+    {
+        return Ok(model);
+    }
+    let request = client.get(format!(
+        "{CHATGPT_CODEX_MODELS_URL}?client_version=0.0.0"
+    ));
+    let response = add_codex_auth_headers(request, auth)?
+        .send()
+        .await
+        .map_err(|error| format!("Codex model discovery failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Codex model discovery failed: {}", response.status()));
+    }
+    let body = bounded_response_bytes(response, MAX_CODEX_MODELS_BYTES, "Codex model discovery")
+        .await?;
+    let mut models = serde_json::from_slice::<CodexModelsPayload>(&body)
+        .map_err(|error| format!("Codex model discovery was invalid: {error}"))?
+        .models;
+    models.sort_by_key(|model| model.priority);
+    let model = models
+        .iter()
+        .find(|model| model.visibility == "list")
+        .cloned()
+        .or_else(|| models.first().cloned())
+        .ok_or_else(|| "Codex returned no available models".to_string())?;
+    *DEFAULT_CODEX_MODEL
+        .lock()
+        .map_err(|error| error.to_string())? = Some(model.clone());
+    Ok(model)
+}
+
+fn completed_response_from_sse(body: &str) -> Result<Value, String> {
+    let mut output = Vec::new();
+    let mut completed = None;
+    for line in body.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let event: Value = serde_json::from_str(data)
+            .map_err(|error| format!("Codex stream contained invalid JSON: {error}"))?;
+        match event.get("type").and_then(Value::as_str).unwrap_or("") {
+            "response.output_item.done" => {
+                if let Some(item) = event.get("item") {
+                    output.push(item.clone());
+                }
+            }
+            "response.completed" => completed = event.get("response").cloned(),
+            "response.failed" | "error" => {
+                let detail = event
+                    .pointer("/response/error/message")
+                    .or_else(|| event.pointer("/error/message"))
+                    .or_else(|| event.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Codex response failed");
+                return Err(detail.to_string());
+            }
+            _ => {}
+        }
+    }
+    let mut response = completed.ok_or_else(|| "Codex stream ended without completion".to_string())?;
+    let object = response
+        .as_object_mut()
+        .ok_or_else(|| "Codex completion was not an object".to_string())?;
+    object.insert("output".to_string(), Value::Array(output));
+    Ok(response)
+}
+
+fn codex_response(codex_home: &Path, request_json: &str) -> Result<Value, String> {
+    let mut payload: Value = serde_json::from_str(request_json)
+        .map_err(|error| format!("Codex request JSON was invalid: {error}"))?;
+    runtime()?.block_on(async move {
+        let auth = codex_auth(codex_home.to_path_buf()).await?;
+        let client = reqwest::Client::builder()
+            .build()
+            .map_err(|error| error.to_string())?;
+        let model = default_codex_model(&client, &auth).await?;
+        let object = payload
+            .as_object_mut()
+            .ok_or_else(|| "Codex request must be a JSON object".to_string())?;
+        object.insert("model".to_string(), Value::String(model.slug.clone()));
+        object.insert("store".to_string(), Value::Bool(false));
+        object.insert("stream".to_string(), Value::Bool(true));
+        if !model.base_instructions.is_empty() {
+            object.insert(
+                "instructions".to_string(),
+                Value::String(model.base_instructions),
+            );
+        }
+        let request = client
+            .post(CHATGPT_CODEX_RESPONSES_URL)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(&payload);
+        let response = add_codex_auth_headers(request, &auth)?
+            .send()
+            .await
+            .map_err(|error| format!("Codex request failed: {error}"))?;
+        let status = response.status();
+        let body = bounded_response_bytes(response, MAX_CODEX_RESPONSE_BYTES, "Codex response")
+            .await?;
+        let body = String::from_utf8(body)
+            .map_err(|error| format!("Codex response was not UTF-8: {error}"))?;
+        if !status.is_success() {
+            let detail = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| body.chars().take(500).collect());
+            return Err(format!("Codex HTTP {status}: {detail}"));
+        }
+        Ok(json!({
+            "status": "ok",
+            "model": model.slug,
+            "response": completed_response_from_sse(&body)?,
+            "upstream_revision": UPSTREAM_CODEX_REVISION,
+        }))
+    })
+}
+
 fn path_from_c(value: *const c_char) -> Result<PathBuf, String> {
     if value.is_null() {
         return Err("Codex home path was null".to_string());
@@ -309,8 +546,55 @@ pub extern "C" fn stasis_codex_android_account_rate_limits(
 }
 
 #[no_mangle]
+pub extern "C" fn stasis_codex_android_response(
+    codex_home: *const c_char,
+    request_json: *const c_char,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let home = path_from_c(codex_home)?;
+        if request_json.is_null() {
+            return Err("Codex request was null".to_string());
+        }
+        let request = unsafe { CStr::from_ptr(request_json) }
+            .to_str()
+            .map_err(|error| error.to_string())?;
+        codex_response(&home, request)
+    }));
+    match result {
+        Ok(value) => into_c_json(value),
+        Err(_) => into_c_json(Err("Codex response bridge panicked".to_string())),
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn stasis_codex_android_free_string(value: *mut c_char) {
     if !value.is_null() {
         unsafe { drop(CString::from_raw(value)) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::completed_response_from_sse;
+
+    #[test]
+    fn assembles_completed_response_items() {
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":2}}}\n\n"
+        );
+        let response = completed_response_from_sse(body).expect("valid completion");
+        assert_eq!(response["id"], "resp_1");
+        assert_eq!(response["output"][0]["content"][0]["text"], "ok");
+        assert_eq!(response["usage"]["input_tokens"], 2);
+    }
+
+    #[test]
+    fn returns_stream_failure_message() {
+        let body = "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"denied\"}}}\n\n";
+        assert_eq!(
+            completed_response_from_sse(body).expect_err("failure event"),
+            "denied"
+        );
     }
 }

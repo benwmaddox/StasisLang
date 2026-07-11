@@ -45,9 +45,10 @@ the Workshop flavor.
 The full `codex-app-server` crate does not yet build unchanged for Android. Its
 Code Mode dependency requests a prebuilt Android Rusty V8 archive that is not
 published for the pinned V8 release. The phone-native integration therefore
-starts with the official login/account layer and will add the agent client and
-Workshop tool loop without V8. Code Mode should be gated out for Android rather
-than replaced with a fake implementation.
+uses the official login/account layer plus a narrow authenticated Responses
+transport and reuses Workshop's bounded Java tool loop. It does not embed Code
+Mode or V8. Code Mode remains gated out on Android rather than replaced with a
+fake implementation.
 
 ## Authentication
 
@@ -57,8 +58,12 @@ browser, copies the code to the clipboard before navigation, polls in the
 native layer, and stores the resulting `auth.json` under
 the application's private files directory. The credentials never leave the
 phone. The selectable in-app code and completion status remain visible when
-the user returns from the browser; the matching clipboard entry is cleared
-after successful sign-in. The app-server protocol documents this frontend-owned flow as
+the user returns from the browser. Activity resume performs an immediate status
+check, repeated browser visits reuse the same login, and a single lifecycle-aware
+poll is active at a time. Continue checks status without dismissing the result,
+and transient token-poll network failures retry during the 15-minute login
+window. The matching clipboard entry is cleared after successful sign-in. The
+app-server protocol documents this frontend-owned flow as
 `chatgptDeviceCode`; see the
 [Codex app-server documentation](https://learn.chatgpt.com/docs/app-server).
 
@@ -68,6 +73,10 @@ The current first slice provides:
   installations retain their fallback selection until the turn bridge is ready
 - real ChatGPT device-code login using upstream Codex code
 - persistent account detection and ChatGPT plan display
+- authenticated subscription-backed Codex Responses streaming, current default
+  model discovery, and reuse of the existing bounded Workshop edit/test tools
+- immediate provider-choice persistence and a one-time signed-in migration from
+  the historical API fallback default to the now-functional Codex turn bridge
 - native Codex primary/secondary rate-limit reads using the official
   `usedPercent`, `windowDurationMins`, and `resetsAt` contract
 - an explicit OpenAI API-key fallback

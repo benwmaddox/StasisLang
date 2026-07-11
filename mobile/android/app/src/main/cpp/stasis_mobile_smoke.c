@@ -26,6 +26,7 @@ typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_roo
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
+typedef char *(*stasis_codex_android_response_fn)(const char *codex_home, const char *request_json);
 typedef int (*stasis_codex_android_initialize_fn)(void *env, void *context);
 typedef void (*stasis_codex_android_free_string_fn)(char *value);
 typedef struct CompileStats {
@@ -67,6 +68,7 @@ typedef struct CodexBridgeApi {
     stasis_codex_android_string_fn begin_device_login;
     stasis_codex_android_string_fn account_status;
     stasis_codex_android_string_fn account_rate_limits;
+    stasis_codex_android_response_fn response;
     stasis_codex_android_free_string_fn free_string;
     int attempted;
 } CodexBridgeApi;
@@ -937,12 +939,15 @@ static CodexBridgeApi *load_codex_bridge_api(void) {
             codex_bridge_api.handle, "stasis_codex_android_account_status");
     codex_bridge_api.account_rate_limits = (stasis_codex_android_string_fn)dlsym(
             codex_bridge_api.handle, "stasis_codex_android_account_rate_limits");
+    codex_bridge_api.response = (stasis_codex_android_response_fn)dlsym(
+            codex_bridge_api.handle, "stasis_codex_android_response");
     codex_bridge_api.free_string = (stasis_codex_android_free_string_fn)dlsym(
             codex_bridge_api.handle, "stasis_codex_android_free_string");
     if (codex_bridge_api.initialize == NULL ||
         codex_bridge_api.begin_device_login == NULL ||
         codex_bridge_api.account_status == NULL ||
         codex_bridge_api.account_rate_limits == NULL ||
+        codex_bridge_api.response == NULL ||
         codex_bridge_api.free_string == NULL) {
         __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG,
                 "Phone-native Codex bridge missing required symbols");
@@ -991,6 +996,34 @@ static jstring call_codex_rate_limits(JNIEnv *env, jstring codex_home) {
     (*env)->ReleaseStringUTFChars(env, codex_home, home);
     if (response == NULL) {
         return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Phone-native Codex returned no rate limits\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, response);
+    bridge->free_string(response);
+    return result;
+}
+
+static jstring call_codex_response(JNIEnv *env, jstring codex_home, jstring request_json) {
+    if (codex_home == NULL || request_json == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex request was null\"}");
+    }
+    const char *home = (*env)->GetStringUTFChars(env, codex_home, NULL);
+    const char *request = (*env)->GetStringUTFChars(env, request_json, NULL);
+    if (home == NULL || request == NULL) {
+        if (home != NULL) (*env)->ReleaseStringUTFChars(env, codex_home, home);
+        if (request != NULL) (*env)->ReleaseStringUTFChars(env, request_json, request);
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex request was unreadable\"}");
+    }
+    CodexBridgeApi *bridge = load_codex_bridge_api();
+    if (bridge == NULL) {
+        (*env)->ReleaseStringUTFChars(env, codex_home, home);
+        (*env)->ReleaseStringUTFChars(env, request_json, request);
+        return (*env)->NewStringUTF(env, "{\"status\":\"unavailable\",\"error\":\"Phone-native Codex library is not packaged\"}");
+    }
+    char *response = bridge->response(home, request);
+    (*env)->ReleaseStringUTFChars(env, codex_home, home);
+    (*env)->ReleaseStringUTFChars(env, request_json, request);
+    if (response == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Phone-native Codex returned no response\"}");
     }
     jstring result = (*env)->NewStringUTF(env, response);
     bridge->free_string(response);
@@ -1178,6 +1211,13 @@ Java_com_stasislang_workshop_MainActivity_nativeCodexAccountRateLimits(
         JNIEnv *env, jclass activity_class, jstring codex_home) {
     (void)activity_class;
     return call_codex_rate_limits(env, codex_home);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeCodexResponse(
+        JNIEnv *env, jclass activity_class, jstring codex_home, jstring request_json) {
+    (void)activity_class;
+    return call_codex_response(env, codex_home, request_json);
 }
 
 JNIEXPORT jstring JNICALL
