@@ -51,7 +51,7 @@ The detailed editor, settings, GitHub review, and voice surfaces should preserve
 
 Workshop completion also requires:
 
-- Durable per-project command history, cancellation/retry, and explicit AI token/cost budgets.
+- Durable per-project command history, cancellation/retry, and provider-appropriate AI limits. API-key fallback work uses a device-wide monthly dollar limit with full-precision enforcement; ChatGPT/Codex subscription work shows native five-hour/weekly remaining windows and does not invent API-dollar costs.
 - A durable per-project AI work queue shared by typed and voice requests. Every submission becomes a visible item with `pending`, `in progress`, and terminal state; pending items can be cancelled before execution, while the active item uses the existing safe cancellation boundary.
 - Budget accounting retains full precision, while user-facing dollar totals and limits round to the nearest cent.
 - Audio import/recording and lightweight editing alongside image assets.
