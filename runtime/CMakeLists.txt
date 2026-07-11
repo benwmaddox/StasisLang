@@ -54,6 +54,7 @@ function(configure_stasis_target target is_static)
 
     if(WIN32)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_link_libraries(${target} PRIVATE winmm)
     endif()
 
     if(NOT WIN32 AND (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86"))

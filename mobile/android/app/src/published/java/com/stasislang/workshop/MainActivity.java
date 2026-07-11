@@ -13,6 +13,8 @@ import android.graphics.Typeface;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.media.MediaPlayer;
+import android.media.AudioAttributes;
+import android.media.SoundPool;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -62,6 +64,11 @@ public final class MainActivity extends Activity {
     private boolean compileReady;
     private long lastHudUpdateNanos;
     private MediaPlayer music;
+    private SoundPool effects;
+    private final int[] audioEvent = new int[4];
+    private final HashMap<Integer, String> musicPaths = new HashMap<>();
+    private final HashMap<Integer, Integer> effectIds = new HashMap<>();
+    private boolean musicRequested;
 
     private static native String nativeCompileProject(String projectRoot);
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
@@ -69,6 +76,8 @@ public final class MainActivity extends Activity {
     private static native String nativePublishedTextForRun(int runHandle);
     private static native String nativePublishedFontPath(int handle);
     private static native int nativePublishedFontSize(int handle);
+    private static native String nativePublishedAudioPath(int handle);
+    private static native int nativePopPublishedAudioEvent(int[] values);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -101,7 +110,13 @@ public final class MainActivity extends Activity {
         root.addView(hud, hudParams);
 
         setContentView(root);
-        startMusic();
+        effects = new SoundPool.Builder()
+                .setMaxStreams(12)
+                .setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_GAME)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build())
+                .build();
         startFrameLoop();
     }
 
@@ -113,6 +128,10 @@ public final class MainActivity extends Activity {
         if (music != null) {
             music.release();
             music = null;
+        }
+        if (effects != null) {
+            effects.release();
+            effects = null;
         }
         super.onDestroy();
     }
@@ -128,23 +147,56 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (music != null && !music.isPlaying()) {
+        if (musicRequested && music != null && !music.isPlaying()) {
             music.start();
         }
     }
 
-    private void startMusic() {
-        try (AssetFileDescriptor source = getAssets().openFd("assets/original/audio/background_music.mp3")) {
+    private void startMusic(int handle, boolean looping, float volume) {
+        String path = musicPaths.get(handle);
+        if (path == null) return;
+        if (music != null) music.release();
+        music = null;
+        try (AssetFileDescriptor source = getAssets().openFd(path)) {
             music = new MediaPlayer();
             music.setDataSource(source.getFileDescriptor(), source.getStartOffset(), source.getLength());
-            music.setLooping(true);
-            music.setVolume(0.65f, 0.65f);
+            music.setLooping(looping);
+            music.setVolume(volume, volume);
             music.prepare();
             music.start();
+            musicRequested = true;
         } catch (IOException ignored) {
             if (music != null) {
                 music.release();
                 music = null;
+            }
+            musicRequested = false;
+        }
+    }
+
+    private void drainAudioEvents() {
+        while (nativePopPublishedAudioEvent(audioEvent) != 0) {
+            int kind = audioEvent[0];
+            int handle = audioEvent[1];
+            float volume = Math.max(0.0f, Math.min(1.0f, audioEvent[3] / 1000.0f));
+            if (kind == 1) {
+                String path = nativePublishedAudioPath(handle);
+                if (path != null) musicPaths.put(handle, path);
+            } else if (kind == 2 && effects != null) {
+                String path = nativePublishedAudioPath(handle);
+                if (path != null) {
+                    try (AssetFileDescriptor source = getAssets().openFd(path)) {
+                        effectIds.put(handle, effects.load(source, 1));
+                    } catch (IOException ignored) { }
+                }
+            } else if (kind == 3) {
+                startMusic(handle, audioEvent[2] != 0, volume);
+            } else if (kind == 4) {
+                musicRequested = false;
+                if (music != null) { music.release(); music = null; }
+            } else if (kind == 5 && effects != null) {
+                Integer soundId = effectIds.get(handle);
+                if (soundId != null) effects.play(soundId, volume, volume, 1, 0, 1.0f);
             }
         }
     }
@@ -195,6 +247,7 @@ public final class MainActivity extends Activity {
                 height,
                 frameValues);
         tickMetric.add(System.nanoTime(), System.nanoTime() - start);
+        drainAudioEvents();
         if (status == 0 && frameValues[0] == 0 && gameSurface != null) {
             gameSurface.setRenderFrameValues(frameValues);
         }

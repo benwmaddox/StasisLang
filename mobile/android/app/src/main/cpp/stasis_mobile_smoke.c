@@ -1196,6 +1196,33 @@ Java_com_stasislang_workshop_MainActivity_nativePublishedFontSize(JNIEnv *env, j
     return 14;
 #endif
 }
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativePublishedAudioPath(JNIEnv *env, jclass activity_class, jint handle) {
+    (void)activity_class;
+#if STASIS_ANDROID_PUBLISHED_AOT
+    const char *path = stasis_published_audio_path((int32_t)handle);
+    return path == NULL ? NULL : (*env)->NewStringUTF(env, path);
+#else
+    (void)handle;
+    return NULL;
+#endif
+}
+
+JNIEXPORT jint JNICALL
+Java_com_stasislang_workshop_MainActivity_nativePopPublishedAudioEvent(JNIEnv *env, jclass activity_class, jintArray values) {
+    (void)activity_class;
+#if STASIS_ANDROID_PUBLISHED_AOT
+    int32_t event_values[4];
+    if (values == NULL || (*env)->GetArrayLength(env, values) < 4) return 0;
+    if (!stasis_published_pop_audio_event(event_values, 4)) return 0;
+    (*env)->SetIntArrayRegion(env, values, 0, 4, (const jint *)event_values);
+    return 1;
+#else
+    (void)env; (void)values;
+    return 0;
+#endif
+}
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h) {
     (void)activity_class;

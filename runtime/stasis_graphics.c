@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <direct.h>
 #include <windows.h>
+#include <mmsystem.h>
 #else
 #include <sys/stat.h>
 #include <unistd.h>
@@ -103,6 +104,53 @@ static float g_postfx_phase = 0.0f;
 static float g_postfx_speed = 0.0f;
 static float g_postfx_color[3] = {0.05f, 0.85f, 0.78f};
 static bool g_postfx_force_disable = false;
+static int stasis_audio_disabled(void);
+
+#if defined(_WIN32)
+#define STASIS_FILE_AUDIO_CAPACITY 64
+typedef struct {
+    char path[MAX_PATH];
+    int music;
+    int used;
+} StasisFileAudio;
+static StasisFileAudio g_file_audio[STASIS_FILE_AUDIO_CAPACITY];
+
+static int stasis_file_audio_load(const char* path, int music) {
+    int index;
+    if (!path || !*path || stasis_audio_disabled()) return 0;
+    for (index = 1; index < STASIS_FILE_AUDIO_CAPACITY; index += 1) {
+        if (!g_file_audio[index].used) {
+            DWORD length = GetFullPathNameA(path, MAX_PATH, g_file_audio[index].path, NULL);
+            if (length == 0 || length >= MAX_PATH) return 0;
+            g_file_audio[index].music = music;
+            g_file_audio[index].used = 1;
+            return index;
+        }
+    }
+    return 0;
+}
+
+static void stasis_file_audio_alias(int handle, char* out, size_t out_size) {
+    snprintf(out, out_size, "stasis_audio_%d", handle);
+}
+
+static int stasis_file_audio_play(int handle, int looping, float volume) {
+    char alias[32];
+    char command[MAX_PATH + 96];
+    if (handle <= 0 || handle >= STASIS_FILE_AUDIO_CAPACITY || !g_file_audio[handle].used) return 0;
+    stasis_file_audio_alias(handle, alias, sizeof(alias));
+    snprintf(command, sizeof(command), "close %s", alias);
+    mciSendStringA(command, NULL, 0, NULL);
+    snprintf(command, sizeof(command), "open \"%s\" type mpegvideo alias %s", g_file_audio[handle].path, alias);
+    if (mciSendStringA(command, NULL, 0, NULL) != 0) return 0;
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+    snprintf(command, sizeof(command), "setaudio %s volume to %d", alias, (int)(volume * 1000.0f));
+    mciSendStringA(command, NULL, 0, NULL);
+    snprintf(command, sizeof(command), "play %s from 0%s", alias, looping ? " repeat" : "");
+    return mciSendStringA(command, NULL, 0, NULL) == 0 ? 1 : 0;
+}
+#endif
 
 /* ============================================================
  * Input snapshot (mouse + touch) - per-frame deterministic view
@@ -4294,6 +4342,57 @@ STASIS_EXPORT int stasis_audio_push_f32_interleaved(const float* interleaved_lr,
 
     if (g_audio_channels <= 0) return 0;
     return accepted_samples / g_audio_channels;
+}
+
+STASIS_EXPORT int stasis_audio_load_music(const char* path) {
+#if defined(_WIN32)
+    return stasis_file_audio_load(path, 1);
+#else
+    (void)path;
+    return 0;
+#endif
+}
+
+STASIS_EXPORT int stasis_audio_load_effect(const char* path) {
+#if defined(_WIN32)
+    return stasis_file_audio_load(path, 0);
+#else
+    (void)path;
+    return 0;
+#endif
+}
+
+STASIS_EXPORT int stasis_audio_play_music(int handle, int looping, float volume) {
+#if defined(_WIN32)
+    if (handle <= 0 || handle >= STASIS_FILE_AUDIO_CAPACITY || !g_file_audio[handle].music) return 0;
+    return stasis_file_audio_play(handle, looping, volume);
+#else
+    (void)handle; (void)looping; (void)volume;
+    return 0;
+#endif
+}
+
+STASIS_EXPORT void stasis_audio_stop_music(int handle) {
+#if defined(_WIN32)
+    char alias[32];
+    char command[64];
+    if (handle <= 0 || handle >= STASIS_FILE_AUDIO_CAPACITY) return;
+    stasis_file_audio_alias(handle, alias, sizeof(alias));
+    snprintf(command, sizeof(command), "close %s", alias);
+    mciSendStringA(command, NULL, 0, NULL);
+#else
+    (void)handle;
+#endif
+}
+
+STASIS_EXPORT int stasis_audio_play_effect(int handle, float volume) {
+#if defined(_WIN32)
+    if (handle <= 0 || handle >= STASIS_FILE_AUDIO_CAPACITY || g_file_audio[handle].music) return 0;
+    return stasis_file_audio_play(handle, 0, volume);
+#else
+    (void)handle; (void)volume;
+    return 0;
+#endif
 }
 
 /*

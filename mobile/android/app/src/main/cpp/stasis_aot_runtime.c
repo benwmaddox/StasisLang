@@ -13,6 +13,7 @@
 #define STASIS_SCALAR_CAPACITY 512
 #define STASIS_ARRAY_CAPACITY 512
 #define STASIS_ASSET_HANDLE_CAPACITY 4096
+#define STASIS_AUDIO_EVENT_CAPACITY 64
 
 typedef struct I32ScalarSlot { int32_t hash; int32_t value; int used; } I32ScalarSlot;
 typedef struct F32ScalarSlot { int32_t hash; float value; int used; } F32ScalarSlot;
@@ -31,6 +32,24 @@ static int32_t sprite_literal_ids[STASIS_ASSET_HANDLE_CAPACITY];
 static int32_t text_run_literal_ids[STASIS_ASSET_HANDLE_CAPACITY];
 static int32_t font_literal_ids[STASIS_ASSET_HANDLE_CAPACITY];
 static int32_t font_sizes[STASIS_ASSET_HANDLE_CAPACITY];
+static int32_t audio_literal_ids[STASIS_ASSET_HANDLE_CAPACITY];
+static int32_t audio_event_values[STASIS_AUDIO_EVENT_CAPACITY][4];
+static int audio_event_read;
+static int audio_event_write;
+
+enum { STASIS_AUDIO_LOAD_MUSIC = 1, STASIS_AUDIO_LOAD_EFFECT = 2, STASIS_AUDIO_PLAY_MUSIC = 3,
+       STASIS_AUDIO_STOP_MUSIC = 4, STASIS_AUDIO_PLAY_EFFECT = 5 };
+
+static int stasis_audio_enqueue(int kind, int handle, int value, float volume) {
+    int next = (audio_event_write + 1) % STASIS_AUDIO_EVENT_CAPACITY;
+    if (next == audio_event_read) return 0;
+    audio_event_values[audio_event_write][0] = kind;
+    audio_event_values[audio_event_write][1] = handle;
+    audio_event_values[audio_event_write][2] = value;
+    audio_event_values[audio_event_write][3] = (int32_t)(volume * 1000.0f);
+    audio_event_write = next;
+    return 1;
+}
 
 static const char *stasis_literal_for_id(int32_t id) {
     int index;
@@ -143,6 +162,25 @@ int32_t stasis_gfx_cache_text(int32_t font, int32_t text_id) {
 }
 float stasis_gfx_measure_text_cached(int32_t run_handle) { (void)run_handle; return 0.0f; }
 int64_t stasis_jit_lookup_code_ptr(int32_t fn_id_raw) { (void)fn_id_raw; return 0; }
+int32_t stasis_jit_audio_load_music(int32_t path_id) {
+    int32_t handle = next_asset_handle++;
+    if (handle <= 0 || handle >= STASIS_ASSET_HANDLE_CAPACITY) return 0;
+    audio_literal_ids[handle] = path_id;
+    return stasis_audio_enqueue(STASIS_AUDIO_LOAD_MUSIC, handle, 0, 0.0f) ? handle : 0;
+}
+int32_t stasis_jit_audio_load_effect(int32_t path_id) {
+    int32_t handle = next_asset_handle++;
+    if (handle <= 0 || handle >= STASIS_ASSET_HANDLE_CAPACITY) return 0;
+    audio_literal_ids[handle] = path_id;
+    return stasis_audio_enqueue(STASIS_AUDIO_LOAD_EFFECT, handle, 0, 0.0f) ? handle : 0;
+}
+int32_t stasis_jit_audio_play_music(int32_t handle, int32_t looping, float volume) {
+    return stasis_audio_enqueue(STASIS_AUDIO_PLAY_MUSIC, handle, looping, volume);
+}
+void stasis_jit_audio_stop_music(int32_t handle) { (void)stasis_audio_enqueue(STASIS_AUDIO_STOP_MUSIC, handle, 0, 0.0f); }
+int32_t stasis_jit_audio_play_effect(int32_t handle, float volume) {
+    return stasis_audio_enqueue(STASIS_AUDIO_PLAY_EFFECT, handle, 0, volume);
+}
 
 const char *stasis_published_sprite_path(int32_t handle) {
     if (handle <= 0 || handle >= STASIS_ASSET_HANDLE_CAPACITY) return NULL;
@@ -162,6 +200,18 @@ const char *stasis_published_font_path(int32_t handle) {
 int32_t stasis_published_font_size(int32_t handle) {
     if (handle <= 0 || handle >= STASIS_ASSET_HANDLE_CAPACITY) return 14;
     return font_sizes[handle] > 0 ? font_sizes[handle] : 14;
+}
+
+const char *stasis_published_audio_path(int32_t handle) {
+    if (handle <= 0 || handle >= STASIS_ASSET_HANDLE_CAPACITY) return NULL;
+    return stasis_literal_for_id(audio_literal_ids[handle]);
+}
+
+int stasis_published_pop_audio_event(int32_t *out_values, uintptr_t out_len) {
+    if (out_values == NULL || out_len < 4 || audio_event_read == audio_event_write) return 0;
+    memcpy(out_values, audio_event_values[audio_event_read], 4 * sizeof(int32_t));
+    audio_event_read = (audio_event_read + 1) % STASIS_AUDIO_EVENT_CAPACITY;
+    return 1;
 }
 
 void stasis_published_init_globals(void) { }

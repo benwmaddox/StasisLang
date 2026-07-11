@@ -717,6 +717,21 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "audio_push_f32_interleaved" | "stasis_audio_push_f32_interleaved" => {
             function_address(stasis_dynload::stasis_jit_audio_push_f32_interleaved as *const ())
         }
+        "stasis_jit_audio_load_music" => {
+            function_address(stasis_dynload::stasis_jit_audio_load_music as *const ())
+        }
+        "stasis_jit_audio_load_effect" => {
+            function_address(stasis_dynload::stasis_jit_audio_load_effect as *const ())
+        }
+        "stasis_jit_audio_play_music" => {
+            function_address(stasis_dynload::stasis_jit_audio_play_music as *const ())
+        }
+        "stasis_jit_audio_stop_music" => {
+            function_address(stasis_dynload::stasis_jit_audio_stop_music as *const ())
+        }
+        "stasis_jit_audio_play_effect" => {
+            function_address(stasis_dynload::stasis_jit_audio_play_effect as *const ())
+        }
         "sin_fast" | "stasis_jit_sin_fast" => {
             function_address(stasis_dynload::stasis_jit_sin_fast as *const ())
         }
