@@ -559,8 +559,10 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AS1 - Sprite Decode, Texture Upload, and Lifetime
 - Scope: Implement bounded PNG/SVG sprite decoding, GPU upload, handle ownership, release, fallback texture, and deterministic load errors across supported render backends.
+- Progress: The existing SDL_image raster and NanoSVG decode paths now reject invalid/oversized requested dimensions, pixel counts, and source-file bytes before decode allocation. Limits have bounded environment overrides and deterministic diagnostic codes. SDL reload builds and uploads a replacement texture before destroying the prior texture; GL reload uses a fresh atlas allocation, checks upload errors, and releases the prior region only after successful publication. Explicit handle release, fallback textures, Android renderer consumption, and golden cross-backend parity remain.
+- Tests: Targeted runtime source-contract tests cover all decode bounds and transactional SDL/GL replacement invariants; the native Windows runtime builds successfully through `runtime/build.bat`.
 - Done gate: A packaged sprite loads and renders identically on desktop and Android, and malformed/missing assets fail safely.
-- Status: `planned`
+- Status: `in progress`
 #### AS2 - Sprite Batching and Hot Reload
 - Scope: Complete command batching, ordering, transforms, alpha, clipping/atlas policy, resource-generation swaps, and failed-reload preservation.
 - Done gate: A changed sprite becomes visible without restarting while the prior texture remains active if decode/upload fails.

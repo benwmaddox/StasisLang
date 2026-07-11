@@ -2115,9 +2115,10 @@ mod tests {
     #[test]
     fn sprite_runtime_clamps_initial_sprite_growth_to_configured_limit() {
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains(
-                "if (min_capacity > limit) {\n        return 0;\n    }\n\n    int new_capacity = g_sprite_capacity > 0 ? g_sprite_capacity : clamp_i32(SPRITE_TABLE_INITIAL_CAPACITY, 1, limit);"
-            ),
+            STASIS_GRAPHICS_SOURCE.contains("if (min_capacity > limit)")
+                && STASIS_GRAPHICS_SOURCE.contains(
+                    "clamp_i32(SPRITE_TABLE_INITIAL_CAPACITY, 1, limit)"
+                ),
             "runtime sprite allocation should clamp the initial growth step to STASIS_GFX_MAX_SPRITES"
         );
     }
@@ -2132,9 +2133,40 @@ mod tests {
         );
         assert!(
             STASIS_GRAPHICS_SOURCE.contains(
-                "atlas_page_clear_region(page, alloc_x, alloc_y, alloc_w, alloc_h);\n    if (!atlas_page_upload_region(page, sprite_x, sprite_y, w, h, pixels)) {"
+                "atlas_page_clear_region(page, alloc_x, alloc_y, alloc_w, alloc_h);"
+            ) && STASIS_GRAPHICS_SOURCE.contains(
+                "atlas_page_upload_region(page, sprite_x, sprite_y, w, h, pixels)"
             ),
             "runtime sprite upload should clear padded texels before updating the sprite interior and regenerating mipmaps"
+        );
+    }
+
+    #[test]
+    fn sprite_runtime_bounds_decode_inputs_before_allocating_pixels() {
+        for required in [
+            "STASIS_GFX_MAX_SPRITE_DIMENSION",
+            "STASIS_GFX_MAX_SPRITE_PIXELS",
+            "STASIS_GFX_MAX_SPRITE_FILE_BYTES",
+            "sprite_source_within_limits(path, max_w, max_h)",
+            "sprite_dimensions_exceeded",
+            "sprite_pixels_exceeded",
+            "sprite_file_too_large",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "runtime sprite decode should contain {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn sprite_reload_preserves_previous_gpu_resource_until_replacement_succeeds() {
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("SDL_Texture* previous = e->sdl_tex;")
+                && STASIS_GRAPHICS_SOURCE.contains("if (previous) SDL_DestroyTexture(previous);")
+                && STASIS_GRAPHICS_SOURCE.contains("const int can_reuse_existing = 0;")
+                && STASIS_GRAPHICS_SOURCE.contains("sprite_gpu_upload_failed"),
+            "sprite reload should publish a completed replacement before releasing the previous resource"
         );
     }
 

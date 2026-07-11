@@ -152,7 +152,7 @@ typedef struct SpriteEntry SpriteEntry;
 static SpriteEntry* sprite_get(int handle);
 static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int h, int rot_degrees, int a, int do_hash);
 static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_count);
-static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h, int allow_reuse_slot);
+static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -189,6 +189,9 @@ static SpriteEntry* g_sprites = NULL;
 static int g_sprite_capacity = 0;
 static int g_sprite_count = 0;
 static int g_sprite_table_limit = -1;
+static int g_sprite_max_dimension = -1;
+static int g_sprite_max_pixels = -1;
+static int g_sprite_max_file_bytes = -1;
 
 /* Font rendering with stb_truetype. */
 #define MAX_FONTS 8
@@ -1436,6 +1439,51 @@ static int parse_env_i32(const char* name, int fallback, int min_value, int max_
     return (int)parsed;
 }
 
+static int sprite_source_within_limits(const char* path, int max_w, int max_h) {
+    if (!path || !path[0] || max_w <= 0 || max_h <= 0) return 0;
+    if (g_sprite_max_dimension < 0) {
+        g_sprite_max_dimension = parse_env_i32(
+            "STASIS_GFX_MAX_SPRITE_DIMENSION", 16384, 1, 65536);
+        g_sprite_max_pixels = parse_env_i32(
+            "STASIS_GFX_MAX_SPRITE_PIXELS", 16 * 1024 * 1024, 1, INT_MAX);
+        g_sprite_max_file_bytes = parse_env_i32(
+            "STASIS_GFX_MAX_SPRITE_FILE_BYTES", 64 * 1024 * 1024, 1, INT_MAX);
+    }
+    if (max_w > g_sprite_max_dimension || max_h > g_sprite_max_dimension) {
+        SDL_Log("gfx_load_sprite: sprite_dimensions_exceeded requested=%dx%d limit=%d",
+                max_w, max_h, g_sprite_max_dimension);
+        return 0;
+    }
+    uint64_t requested_pixels = (uint64_t)(unsigned int)max_w * (uint64_t)(unsigned int)max_h;
+    if (requested_pixels > (uint64_t)(unsigned int)g_sprite_max_pixels) {
+        SDL_Log("gfx_load_sprite: sprite_pixels_exceeded requested=%llu limit=%d",
+                (unsigned long long)requested_pixels, g_sprite_max_pixels);
+        return 0;
+    }
+
+    char resolved[1024];
+    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+        SDL_Log("gfx_load_sprite: sprite_path_invalid");
+        return 0;
+    }
+#if defined(_WIN32)
+    struct _stat st;
+    if (_stat(resolved, &st) != 0 || st.st_size < 0) {
+#else
+    struct stat st;
+    if (stat(resolved, &st) != 0 || st.st_size < 0) {
+#endif
+        SDL_Log("gfx_load_sprite: sprite_file_unreadable path=%s", resolved);
+        return 0;
+    }
+    if ((uint64_t)st.st_size > (uint64_t)(unsigned int)g_sprite_max_file_bytes) {
+        SDL_Log("gfx_load_sprite: sprite_file_too_large bytes=%llu limit=%d",
+                (unsigned long long)st.st_size, g_sprite_max_file_bytes);
+        return 0;
+    }
+    return 1;
+}
+
 static int ensure_sprite_table_capacity(int min_capacity) {
     if (min_capacity <= g_sprite_capacity) return 1;
 
@@ -1619,10 +1667,18 @@ static void atlas_init_config(void) {
 
 static int atlas_page_upload_region(SpriteAtlasPage* page, int x, int y, int w, int h, const void* pixels) {
     if (!page || page->texture == 0 || w <= 0 || h <= 0) return 0;
+    while (glGetError() != GL_NO_ERROR) {
+        /* Clear stale errors so this upload has a deterministic result. */
+    }
     glBindTexture(GL_TEXTURE_2D, page->texture);
     glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     glGenerateMipmap(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, 0);
+    GLenum upload_error = glGetError();
+    if (upload_error != GL_NO_ERROR) {
+        SDL_Log("gfx_load_sprite: sprite_gpu_upload_failed gl_error=%u", (unsigned int)upload_error);
+        return 0;
+    }
     return 1;
 }
 
@@ -2640,7 +2696,7 @@ static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_cou
         if (!e) continue;
 
         if (e->needs_reraster) {
-            if (e->path) sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h, 1);
+            if (e->path) sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h);
         }
 
         if (rot_degrees != 0) {
@@ -3806,7 +3862,10 @@ static void sprite_set_gl_region(SpriteEntry* e, int page_index, int sprite_x, i
 /*
  * Build sprite at specified max size. Used for sized loading and re-rasterization.
  */
-static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h, int allow_reuse_slot) {
+static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h) {
+    if (!sprite_source_within_limits(path, max_w, max_h)) {
+        return 0;
+    }
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
     if (!bake_image_to_rgba_sized(path, max_w, max_h, &pixels, &w, &h)) {
@@ -3836,11 +3895,6 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
             p[2] = (unsigned char)((b * 255 + (a / 2)) / a);
         }
 
-        if (e->sdl_tex) {
-            SDL_DestroyTexture(e->sdl_tex);
-            e->sdl_tex = NULL;
-        }
-
         SDL_Texture* tex = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
         if (!tex) {
             SDL_Log("gfx_load_sprite: SDL_CreateTexture failed: %s", SDL_GetError());
@@ -3856,6 +3910,7 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
         }
 
         free(pixels);
+        SDL_Texture* previous = e->sdl_tex;
         e->w = w;
         e->h = h;
         e->max_w = max_w;
@@ -3870,6 +3925,7 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
         e->sdl_tex = tex;
         e->mtime = get_file_mtime(path);
         e->needs_reraster = 0;
+        if (previous) SDL_DestroyTexture(previous);
         return 1;
     }
 
@@ -3878,9 +3934,7 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
         flush_sprites();
     }
 
-    const int can_reuse_existing =
-        allow_reuse_slot && e->w > 0 && e->h > 0 && e->page_index >= 0 &&
-        w == e->w && h == e->h;
+    const int can_reuse_existing = 0;
 
     int page_index = e->page_index;
     int sprite_x = e->atlas_x;
@@ -3942,7 +3996,7 @@ static void gfx_asset_watch_apply_pending_changes(void) {
         uint64_t mt = get_file_mtime(e->path);
         if (!mt || mt <= e->mtime) continue;
 
-        if (!sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h, 1)) {
+        if (!sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h)) {
             SDL_Log("gfx_watch: reload failed for %s", e->path);
         } else {
             e->reload_pending = 1;
@@ -4001,7 +4055,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     e->path = stasis_strdup(resolved);
     if (!e->path) return 0;
     e->used = 1;
-    if (!sprite_build_into_entry_sized(e, resolved, max_w, max_h, 0)) {
+    if (!sprite_build_into_entry_sized(e, resolved, max_w, max_h)) {
         free(e->path);
         memset(e, 0, sizeof(*e));
         e->page_index = -1;
@@ -4056,7 +4110,7 @@ static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int
      * Sprites are baked at their load-time max size (max_w/max_h) and drawn scaled.
      */
     if (e->needs_reraster) {
-        if (e->path) sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h, 1);
+        if (e->path) sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h);
     }
 
     /* Convert degrees to radians */
