@@ -27,6 +27,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopMoney.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiPricing.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopConnectivity.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopNetworkQueuePolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java",
@@ -150,6 +152,7 @@ def main() -> int:
     assert "android.permission.INTERNET" not in manifest
     assert "android.permission.RECORD_AUDIO" in workshop_manifest
     assert "android.permission.INTERNET" in workshop_manifest
+    assert "android.permission.ACCESS_NETWORK_STATE" in workshop_manifest
     assert "${appLabel}" in manifest
     assert "android.intent.action.MAIN" in manifest
     assert "android.intent.category.LAUNCHER" in manifest
@@ -528,6 +531,10 @@ def main() -> int:
     assert "aiRunActive" in activity
     assert "aiCancelRequested" in activity
     assert "AI request queued behind the active item" in activity
+    assert "registerDefaultNetworkCallback" in activity
+    assert "unregisterNetworkCallback" in activity
+    assert "AI work is waiting for an internet connection" in activity
+    assert "WorkshopNetworkQueuePolicy.shouldWaitForNetwork" in activity
     assert "throwIfAiCancelled()" in activity
     assert "if (!batchHasWrites) throwIfAiCancelled()" in activity
     assert "finishing any active call or atomic write batch" in activity

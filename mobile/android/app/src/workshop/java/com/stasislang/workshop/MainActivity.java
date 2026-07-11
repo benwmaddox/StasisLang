@@ -17,6 +17,9 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -227,6 +230,9 @@ public final class MainActivity extends Activity {
     };
     private volatile boolean aiCancelRequested;
     private volatile HttpURLConnection activeAiConnection;
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private boolean networkCallbackRegistered;
     private String activeAiPrompt = "";
     private AndroidAiQueue.Entry activeAiQueueEntry;
     private volatile List<AiImageAttachment> activeAiImageAttachments = Collections.emptyList();
@@ -329,6 +335,7 @@ public final class MainActivity extends Activity {
             projectRegistryError = "baseline: " + error.getMessage();
         }
         setContentView(createWorkshopView(project));
+        registerNetworkMonitoring();
         markInterruptedAiOutcomeIfNeeded();
         restoreWorkshopUiState(savedInstanceState);
         restorePendingDraft();
@@ -353,6 +360,7 @@ public final class MainActivity extends Activity {
         super.onResume();
         codexLoginLifecycle.onResume();
         refreshPhoneNativeCodexStatus();
+        startNextQueuedAiIfIdle();
     }
 
     @Override
@@ -399,6 +407,7 @@ public final class MainActivity extends Activity {
         if (codexLoginDialog != null) codexLoginDialog.dismiss();
         aiCancelRequested = true;
         nativeCodexCancelResponse();
+        unregisterNetworkMonitoring();
         HttpURLConnection aiConnection = activeAiConnection;
         if (aiConnection != null) aiConnection.disconnect();
         githubSyncExecutor.shutdownNow();
@@ -2722,6 +2731,23 @@ public final class MainActivity extends Activity {
     private void startNextQueuedAiIfIdle() {
         if (aiRunActive || activeAiQueueEntry != null || audioRecordingActive) return;
         try {
+            boolean hasPending = false;
+            for (AndroidAiQueue.Entry item : AndroidAiQueue.list(this, activeRecoveryProjectId())) {
+                if (AndroidAiQueue.PENDING.equals(item.state)) {
+                    hasPending = true;
+                    break;
+                }
+            }
+            if (!hasPending) {
+                refreshAiQueue();
+                return;
+            }
+            if (WorkshopNetworkQueuePolicy.shouldWaitForNetwork(
+                    hasPending, WorkshopConnectivity.hasUsableNetwork(this))) {
+                setStatusText("AI work is waiting for an internet connection");
+                refreshAiQueue();
+                return;
+            }
             AndroidAiQueue.Entry next = AndroidAiQueue.claimNext(this, activeRecoveryProjectId());
             if (next == null) {
                 refreshAiQueue();
@@ -3655,6 +3681,41 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void registerNetworkMonitoring() {
+        connectivityManager = (ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
+        if (connectivityManager == null || networkCallbackRegistered) return;
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network network) { resumeQueuedAiAfterNetworkChange(); }
+            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                resumeQueuedAiAfterNetworkChange();
+            }
+        };
+        try {
+            connectivityManager.registerDefaultNetworkCallback(networkCallback);
+            networkCallbackRegistered = true;
+        } catch (RuntimeException error) {
+            networkCallback = null;
+        }
+    }
+
+    private void resumeQueuedAiAfterNetworkChange() {
+        if (!WorkshopConnectivity.hasUsableNetwork(this)) return;
+        runOnUiThread(new Runnable() {
+            @Override public void run() { startNextQueuedAiIfIdle(); }
+        });
+    }
+
+    private void unregisterNetworkMonitoring() {
+        if (!networkCallbackRegistered || connectivityManager == null || networkCallback == null) return;
+        try {
+            connectivityManager.unregisterNetworkCallback(networkCallback);
+        } catch (RuntimeException ignored) {
+            // Android may already have removed the callback during process teardown.
+        }
+        networkCallbackRegistered = false;
+        networkCallback = null;
+    }
+
     private static boolean isOfficialCodexVerificationUrl(String value) {
         try {
             Uri uri = Uri.parse(value);
@@ -4228,6 +4289,12 @@ public final class MainActivity extends Activity {
                         requestPreviewPixels == null ? null : encodeBitmapPng(requestPreviewPixels),
                         requestPreviewPixels == null ? 0 : requestPreviewPixels.getWidth(),
                         requestPreviewPixels == null ? 0 : requestPreviewPixels.getHeight());
+                if (!WorkshopConnectivity.hasUsableNetwork(this)) {
+                    if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
+                    refreshAiQueue();
+                    setStatusText("AI request queued and waiting for an internet connection");
+                    return;
+                }
                 activeAiQueueEntry = AndroidAiQueue.claimNext(this, activeRecoveryProjectId());
                 if (activeAiQueueEntry != null && !submitted.id.equals(activeAiQueueEntry.id)) {
                     if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
