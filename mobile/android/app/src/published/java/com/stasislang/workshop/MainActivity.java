@@ -2,6 +2,11 @@ package com.stasislang.workshop;
 
 import android.app.Activity;
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Rect;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.os.Build;
@@ -20,6 +25,8 @@ import android.widget.TextView;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.io.IOException;
+import java.util.HashMap;
 
 public final class MainActivity extends Activity {
     private static final String PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID;
@@ -27,7 +34,7 @@ public final class MainActivity extends Activity {
     private static final long FRAME_DELAY_MS = 16L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 200_000_000L;
-    private static final int MAX_RENDER_COMMANDS = 8;
+    private static final int MAX_RENDER_COMMANDS = 64;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
     private static final int RENDER_FRAME_I32_CAPACITY = RENDER_FRAME_HEADER_SIZE + MAX_RENDER_COMMANDS * RENDER_COMMAND_STRIDE;
@@ -53,6 +60,8 @@ public final class MainActivity extends Activity {
 
     private static native String nativeCompileProject(String projectRoot);
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
+    private static native String nativePublishedSpritePath(int handle);
+    private static native String nativePublishedTextForRun(int runHandle);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -221,9 +230,12 @@ public final class MainActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private static final class GameSurfaceView extends GLSurfaceView {
+    private static final class GameSurfaceView extends View {
         private final MainActivity activity;
-        private final PreviewRenderer renderer;
+        private final int[] frameValues = new int[RENDER_FRAME_I32_CAPACITY];
+        private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
+        private final HashMap<Integer, Bitmap> sprites = new HashMap<>();
+        private final HashMap<Integer, String> textRuns = new HashMap<>();
         private int touchX;
         private int touchY;
         private boolean touchActive;
@@ -231,10 +243,7 @@ public final class MainActivity extends Activity {
         GameSurfaceView(MainActivity activity) {
             super(activity);
             this.activity = activity;
-            setEGLContextClientVersion(2);
-            renderer = new PreviewRenderer(activity);
-            setRenderer(renderer);
-            setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
+            setBackgroundColor(Color.rgb(15, 20, 28));
         }
 
         int touchX() {
@@ -250,8 +259,8 @@ public final class MainActivity extends Activity {
         }
 
         void setRenderFrameValues(int[] values) {
-            renderer.setFrameValues(values);
-            requestRender();
+            System.arraycopy(values, 0, frameValues, 0, RENDER_FRAME_I32_CAPACITY);
+            invalidate();
         }
 
         @Override
@@ -264,6 +273,73 @@ public final class MainActivity extends Activity {
             }
             touchActive = action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL;
             return true;
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            long start = System.nanoTime();
+            super.onDraw(canvas);
+            int commandCount = Math.max(0, Math.min(MAX_RENDER_COMMANDS, frameValues[5]));
+            for (int index = 0; index < commandCount; index += 1) {
+                int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
+                int kind = frameValues[base];
+                int x = frameValues[base + 1];
+                int y = frameValues[base + 2];
+                int w = Math.max(1, frameValues[base + 3]);
+                int h = Math.max(1, frameValues[base + 4]);
+                if (kind == 1) {
+                    Bitmap sprite = spriteFor(frameValues[base + 6]);
+                    if (sprite != null) {
+                        canvas.drawBitmap(sprite, null, new Rect(x, y, x + w, y + h), paint);
+                        continue;
+                    }
+                }
+                if (kind == 3) {
+                    String text = textFor(frameValues[base + 6]);
+                    if (text != null) {
+                        paint.setColor(0xff000000 | frameValues[base + 5]);
+                        paint.setTextSize(20.0f);
+                        canvas.drawText(text, x, y + 20, paint);
+                    }
+                    continue;
+                }
+                if (kind == 1 || kind == 2) {
+                    paint.setColor(0xff000000 | frameValues[base + 5]);
+                    canvas.drawRect(x, y, x + w, y + h, paint);
+                }
+            }
+            activity.recordRenderTimeNanos(System.nanoTime() - start);
+        }
+
+        private Bitmap spriteFor(int handle) {
+            if (handle <= 0) {
+                return null;
+            }
+            if (sprites.containsKey(handle)) {
+                return sprites.get(handle);
+            }
+            String path = nativePublishedSpritePath(handle);
+            Bitmap sprite = null;
+            if (path != null) {
+                try {
+                    sprite = BitmapFactory.decodeStream(activity.getAssets().open(path));
+                } catch (IOException ignored) {
+                }
+            }
+            sprites.put(handle, sprite);
+            return sprite;
+        }
+
+        private String textFor(int handle) {
+            if (handle <= 0) {
+                return null;
+            }
+            if (textRuns.containsKey(handle)) {
+                return textRuns.get(handle);
+            }
+            String text = nativePublishedTextForRun(handle);
+            textRuns.put(handle, text);
+            return text;
         }
     }
 

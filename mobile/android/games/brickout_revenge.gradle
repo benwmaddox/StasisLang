@@ -1,0 +1,10 @@
+ext.stasisGameDescriptor = [
+        schemaVersion: 1,
+        id: 'brickout_revenge',
+        runtimeId: 'brickout_revenge_aot',
+        applicationId: 'com.rootbeergames.brickoutrevenge',
+        label: 'Brickout Revenge',
+        projectDirectory: new File(rootProject.projectDir.parentFile.parentFile, 'samples/brickout_revenge'),
+        entrySource: 'brickout_revenge_v1.stasis',
+        testPattern: '**/*.test.stasis'
+]

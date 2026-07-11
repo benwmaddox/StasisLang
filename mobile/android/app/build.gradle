@@ -5,6 +5,7 @@ plugins {
 def repoRootDir = rootProject.projectDir.parentFile.parentFile
 def publishedAotDir = layout.buildDirectory.dir('generated/stasisAot/publishedArm64')
 def workshopAssetsDir = layout.buildDirectory.dir('generated/stasisAssets/workshop')
+def publishedAssetsDir = layout.buildDirectory.dir('generated/stasisAssets/published')
 def publishedGameName = (project.findProperty('stasis.publishedGame') ?: 'pong').toString()
 def publishedGameDescriptorFile = rootProject.file("games/${publishedGameName}.gradle")
 if (!publishedGameDescriptorFile.isFile()) {
@@ -88,7 +89,7 @@ android {
     sourceSets {
         main.assets.setSrcDirs([])
         workshop.assets.setSrcDirs([workshopAssetsDir.get().asFile])
-        published.assets.setSrcDirs([])
+        published.assets.setSrcDirs([publishedAssetsDir.get().asFile])
     }
 }
 
@@ -100,14 +101,24 @@ tasks.register('prepareWorkshopAssets', Sync) {
     into(workshopAssetsDir)
 }
 
+tasks.register('preparePublishedAssets', Sync) {
+    from(new File(publishedGame.projectDirectory, 'assets/original/generated_4x')) {
+        into 'assets/original/generated_4x'
+    }
+    into(publishedAssetsDir)
+}
+
 tasks.register('generatePublishedAotBundle', Exec) {
     def outputDir = publishedAotDir.get().asFile
     inputs.file(publishedGameDescriptorFile)
     inputs.dir(publishedGame.projectDirectory)
+    inputs.file(new File(repoRootDir, 'apps/stasis/src/main.rs'))
     outputs.dir(outputDir)
+    outputs.file(new File(outputDir, 'published_aot_strings.h'))
     workingDir repoRootDir
     commandLine 'cargo', 'run', '-p', 'stasis', '--', 'android-aot-bundle',
             '--project-dir', publishedGame.projectDirectory.absolutePath,
+            '--entry-file', publishedGame.entrySource,
             '--out-dir', outputDir.absolutePath
 }
 
@@ -117,5 +128,6 @@ tasks.configureEach { task ->
     }
     if (task.name.startsWith('prePublished') || (task.name.startsWith('configureCMake') && task.name.contains('Published'))) {
         task.dependsOn(tasks.named('generatePublishedAotBundle'))
+        task.dependsOn(tasks.named('preparePublishedAssets'))
     }
 }

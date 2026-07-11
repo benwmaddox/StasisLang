@@ -5,7 +5,7 @@ option(STASIS_ANDROID_SMOKE_ONLY "Build the standalone Android native smoke entr
 option(STASIS_ANDROID_PUBLISHED_AOT "Link compiler-produced AOT objects for published Android builds" OFF)
 set(STASIS_PUBLISHED_AOT_DIR "" CACHE PATH "Directory containing generated published Stasis AOT objects")
 
-add_library(stasis_mobile_smoke SHARED stasis_mobile_smoke.c)
+add_library(stasis_mobile_smoke SHARED stasis_mobile_smoke.c stasis_aot_runtime.c)
 
 find_library(log_lib log)
 find_library(dl_lib dl)

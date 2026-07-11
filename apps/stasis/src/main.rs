@@ -50,6 +50,7 @@ struct AotCliContractArgs {
 struct AndroidAotBundleArgs {
     project_dir: PathBuf,
     output_dir: PathBuf,
+    entry_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1139,6 +1140,7 @@ fn parse_aot_cli_contract_args(args: &[String]) -> Result<AotCliContractArgs, St
 fn parse_android_aot_bundle_args(args: &[String]) -> Result<AndroidAotBundleArgs, String> {
     let mut project_dir: Option<PathBuf> = None;
     let mut output_dir: Option<PathBuf> = None;
+    let mut entry_file: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1156,6 +1158,13 @@ fn parse_android_aot_bundle_args(args: &[String]) -> Result<AndroidAotBundleArgs
                 output_dir = Some(PathBuf::from(args[i + 1].clone()));
                 i += 2;
             }
+            "--entry-file" => {
+                if i + 1 >= args.len() {
+                    return Err("missing value for --entry-file".to_string());
+                }
+                entry_file = Some(PathBuf::from(args[i + 1].clone()));
+                i += 2;
+            }
             _ => i += 1,
         }
     }
@@ -1168,6 +1177,7 @@ fn parse_android_aot_bundle_args(args: &[String]) -> Result<AndroidAotBundleArgs
     Ok(AndroidAotBundleArgs {
         project_dir,
         output_dir,
+        entry_file,
     })
 }
 
@@ -1186,7 +1196,11 @@ fn try_run_android_aot_bundle_subcommand() -> Option<i32> {
         }
     };
 
-    match write_android_aot_engine_bundle(&parsed.project_dir, &parsed.output_dir) {
+    match write_android_aot_engine_bundle(
+        &parsed.project_dir,
+        &parsed.output_dir,
+        parsed.entry_file.as_deref(),
+    ) {
         Ok(summary) => {
             println!("android_aot_bundle_dir={}", summary.bundle_dir.display());
             println!("android_aot_object_count={}", summary.object_count);
@@ -1214,10 +1228,11 @@ struct AndroidAotBundleSummary {
 fn write_android_aot_engine_bundle(
     project_dir: &Path,
     output_dir: &Path,
+    entry_file: Option<&Path>,
 ) -> Result<AndroidAotBundleSummary, String> {
     let mut process = AotProcess::with_optimization_profile(AotOptimizationProfile::SpeedAndSize);
     process.set_target(AotTarget::android_arm64_default());
-    for (path, source) in collect_android_aot_sources(project_dir)? {
+    for (path, source) in collect_android_aot_sources(project_dir, entry_file)? {
         process.upsert_file(path, source);
     }
     process
@@ -1233,8 +1248,10 @@ fn write_android_aot_engine_bundle(
     let manifest_json: serde_json::Value = serde_json::from_str(&manifest)
         .map_err(|error| format!("failed to parse Android AOT manifest: {error}"))?;
     let symbols_header = output_dir.join("published_aot_symbols.h");
+    let strings_header = output_dir.join("published_aot_strings.h");
     let cmake_file = output_dir.join("published_aot_objects.cmake");
     write_android_aot_symbols_header(&manifest_json, &symbols_header)?;
+    write_android_aot_strings_header(&manifest_json, &strings_header)?;
     write_android_aot_cmake_file(&bundle.object_paths_by_function, &cmake_file)?;
     Ok(AndroidAotBundleSummary {
         bundle_dir: bundle.output_dir,
@@ -1244,7 +1261,22 @@ fn write_android_aot_engine_bundle(
     })
 }
 
-fn collect_android_aot_sources(project_dir: &Path) -> Result<Vec<(String, String)>, String> {
+fn collect_android_aot_sources(
+    project_dir: &Path,
+    entry_file: Option<&Path>,
+) -> Result<Vec<(String, String)>, String> {
+    if let Some(entry_file) = entry_file {
+        let files = collect_lookup_entry_files(project_dir, entry_file)?;
+        return files
+            .into_iter()
+            .map(|path| {
+                let source_key = path.to_string_lossy().to_string();
+                let source = fs::read_to_string(&path)
+                    .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+                Ok((source_key, source))
+            })
+            .collect();
+    }
     let mut out = Vec::new();
     collect_android_aot_sources_inner(project_dir, project_dir, &mut out)?;
     out.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1355,6 +1387,55 @@ fn android_aot_symbol_for(
         .ok_or_else(|| {
             format!("Android AOT manifest missing symbol for function '{function_name}'")
         })
+}
+
+fn write_android_aot_strings_header(
+    manifest: &serde_json::Value,
+    output_path: &Path,
+) -> Result<(), String> {
+    let literals = manifest
+        .get("string_literals")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Android AOT manifest missing string_literals array".to_string())?;
+    let mut out = String::new();
+    out.push_str("#pragma once\n\n#include <stdint.h>\n\n");
+    out.push_str("typedef struct StasisAotStringLiteral { int32_t id; const char *value; } StasisAotStringLiteral;\n");
+    out.push_str("static const StasisAotStringLiteral STASIS_AOT_STRING_LITERALS[] = {\n");
+    for literal in literals {
+        let id = literal
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| "Android AOT string literal missing id".to_string())?;
+        let value = literal
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Android AOT string literal missing value".to_string())?;
+        let escaped = value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
+        out.push_str(&format!("  {{{id}, \"{escaped}\"}},\n"));
+    }
+    out.push_str("};\n");
+    out.push_str(&format!(
+        "#define STASIS_AOT_STRING_LITERAL_COUNT {}\n",
+        literals.len()
+    ));
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create string header directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(output_path, out).map_err(|error| {
+        format!(
+            "failed to write Android AOT string header {}: {error}",
+            output_path.display()
+        )
+    })
 }
 
 fn write_android_aot_cmake_file(
@@ -1771,6 +1852,8 @@ mod tests {
         let args = vec![
             "--project-dir".to_string(),
             "mobile/android/app/src/main/assets/workshop_sample".to_string(),
+            "--entry-file".to_string(),
+            "src/main.stasis".to_string(),
             "--out-dir".to_string(),
             "target/android-aot".to_string(),
         ];
@@ -1780,6 +1863,7 @@ mod tests {
             PathBuf::from("mobile/android/app/src/main/assets/workshop_sample")
         );
         assert_eq!(parsed.output_dir, PathBuf::from("target/android-aot"));
+        assert_eq!(parsed.entry_file, Some(PathBuf::from("src/main.stasis")));
     }
 
     #[test]
@@ -1792,7 +1876,7 @@ mod tests {
         let project_dir = repo_root.join("mobile/android/app/src/main/assets/workshop_sample");
         let output_dir = std::env::temp_dir().join(format!("stasis_android_aot_bundle_{stamp}"));
 
-        let summary = write_android_aot_engine_bundle(&project_dir, &output_dir)
+        let summary = write_android_aot_engine_bundle(&project_dir, &output_dir, None)
             .expect("write Android AOT bundle");
 
         assert!(summary.object_count >= 3, "expected lifecycle objects");

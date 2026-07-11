@@ -7,8 +7,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#if STASIS_ANDROID_PUBLISHED_AOT
+#if 0
 #include "published_aot_symbols.h"
+#endif
+#if STASIS_ANDROID_PUBLISHED_AOT
+#include "stasis_aot_runtime.h"
+#else
+#define STASIS_PUBLISHED_MAX_COMMANDS 64
+#define STASIS_PUBLISHED_FRAME_I32_COUNT (6 + STASIS_PUBLISHED_MAX_COMMANDS * 7)
 #endif
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
@@ -58,7 +64,7 @@ typedef struct RustBridgeApi {
 } RustBridgeApi;
 
 static RustBridgeApi rust_bridge_api = {0};
-#if STASIS_ANDROID_PUBLISHED_AOT
+#if 0
 typedef struct PublishedRenderCommand {
     int32_t kind;
     int32_t x;
@@ -1114,8 +1120,8 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
 JNIEXPORT jint JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jintArray frame_values) {
     (void)activity_class;
-    const int frame_len = 62;
-    int32_t values[62];
+    const int frame_len = STASIS_PUBLISHED_FRAME_I32_COUNT;
+    int32_t values[STASIS_PUBLISHED_FRAME_I32_COUNT];
     memset(values, 0, sizeof(values));
 
     if (frame_values == NULL || (*env)->GetArrayLength(env, frame_values) < frame_len) {
@@ -1141,6 +1147,30 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
     }
     (*env)->SetIntArrayRegion(env, frame_values, 0, frame_len, (const jint *)values);
     return (jint)status;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativePublishedSpritePath(JNIEnv *env, jclass activity_class, jint handle) {
+    (void)activity_class;
+#if STASIS_ANDROID_PUBLISHED_AOT
+    const char *path = stasis_published_sprite_path((int32_t)handle);
+    return path == NULL ? NULL : (*env)->NewStringUTF(env, path);
+#else
+    (void)handle;
+    return NULL;
+#endif
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativePublishedTextForRun(JNIEnv *env, jclass activity_class, jint run_handle) {
+    (void)activity_class;
+#if STASIS_ANDROID_PUBLISHED_AOT
+    const char *text = stasis_published_text_for_run((int32_t)run_handle);
+    return text == NULL ? NULL : (*env)->NewStringUTF(env, text);
+#else
+    (void)run_handle;
+    return NULL;
+#endif
 }
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h) {
