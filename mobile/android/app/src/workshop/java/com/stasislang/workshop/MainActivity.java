@@ -90,7 +90,6 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
     private static final String AI_PREF_COMMAND_HISTORY_PREFIX = "command_history_";
     private static final String AI_PREF_OUTCOME_HISTORY_PREFIX = "outcome_history_";
-    private static final String AI_PREF_MAX_RUN_USD = "max_run_usd";
     private static final String AI_PREF_MONTHLY_LIMIT_USD = "monthly_limit_usd";
     private static final String AI_PREF_MONTH_KEY = "monthly_spend_month";
     private static final String AI_PREF_MONTH_SPEND_USD = "monthly_spend_usd";
@@ -104,7 +103,6 @@ public final class MainActivity extends Activity {
     private static final String GITHUB_PREF_REVIEW_FINGERPRINT = "github_review_fingerprint";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
     private static final String DEFAULT_AI_MODEL = "gpt-5.6-sol";
-    private static final String DEFAULT_AI_REASONING_EFFORT = "medium";
     private static final int DEFAULT_AI_MODEL_VERSION = 2;
     private static final String AI_PROMPT_CACHE_KEY = "stasis-android-workshop-v2";
     private static final long AI_TRACE_RETENTION_MS = 24L * 60L * 60L * 1000L;
@@ -133,10 +131,6 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_IMAGE_REQUEST = 73;
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
-    private static final double GPT_5_6_SOL_INPUT_USD_PER_MILLION = 5.00;
-    private static final double GPT_5_6_SOL_CACHED_INPUT_USD_PER_MILLION = 0.50;
-    private static final double GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION = 6.25;
-    private static final double GPT_5_6_SOL_OUTPUT_USD_PER_MILLION = 30.00;
     private static final double GPT_IMAGE_2_LOW_1024_USD = 0.006;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
@@ -158,7 +152,6 @@ public final class MainActivity extends Activity {
     private EditText aiPromptEditor;
     private EditText aiApiKeyEditor;
     private EditText aiModelEditor;
-    private EditText aiMaxRunUsdEditor;
     private EditText aiMonthlyLimitUsdEditor;
     private TextView aiBudgetStatus;
     private TextView aiAttachmentStatus;
@@ -1608,14 +1601,8 @@ public final class MainActivity extends Activity {
         reasoningSummary.setTextSize(12.0f);
         aiSettingsBody.addView(reasoningSummary, fullWidth());
 
-        aiMaxRunUsdEditor = new EditText(this);
-        aiMaxRunUsdEditor.setHint("Maximum USD per AI run");
-        aiMaxRunUsdEditor.setSingleLine(true);
-        aiMaxRunUsdEditor.setText(aiPrefs.getString(AI_PREF_MAX_RUN_USD, "0.25"));
-        aiSettingsBody.addView(aiMaxRunUsdEditor, fullWidth());
-
         aiMonthlyLimitUsdEditor = new EditText(this);
-        aiMonthlyLimitUsdEditor.setHint("Monthly AI limit USD");
+        aiMonthlyLimitUsdEditor.setHint("Device monthly AI limit USD");
         aiMonthlyLimitUsdEditor.setSingleLine(true);
         aiMonthlyLimitUsdEditor.setText(aiPrefs.getString(AI_PREF_MONTHLY_LIMIT_USD, "5.00"));
         aiSettingsBody.addView(aiMonthlyLimitUsdEditor, fullWidth());
@@ -3151,19 +3138,17 @@ public final class MainActivity extends Activity {
     private void saveAiSettingsFromEditors() {
         String apiKey = aiApiKeyEditor == null ? "" : aiApiKeyEditor.getText().toString().trim();
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
-        String maxRunText = aiMaxRunUsdEditor == null ? "0.25" : aiMaxRunUsdEditor.getText().toString().trim();
         String monthlyLimitText = aiMonthlyLimitUsdEditor == null ? "5.00" : aiMonthlyLimitUsdEditor.getText().toString().trim();
         if (apiKey.isEmpty()) {
             setStatusText("AI settings need an API key before a run can start");
             return;
         }
-        if (parseNonNegativeUsd(maxRunText) < 0.0 || parseNonNegativeUsd(monthlyLimitText) < 0.0) {
-            setStatusText("AI budget limits must be non-negative USD values");
+        if (parseNonNegativeUsd(monthlyLimitText) < 0.0) {
+            setStatusText("The device monthly AI limit must be a non-negative USD value");
             return;
         }
         if (!saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model)) return;
         getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
-                .putString(AI_PREF_MAX_RUN_USD, maxRunText)
                 .putString(AI_PREF_MONTHLY_LIMIT_USD, monthlyLimitText)
                 .apply();
         refreshAiBudgetStatus();
@@ -3425,7 +3410,6 @@ public final class MainActivity extends Activity {
         if (model.isEmpty()) {
             model = DEFAULT_AI_MODEL;
         }
-        double maxRunUsd = configuredAiLimit(AI_PREF_MAX_RUN_USD, "0.25");
         double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
         final boolean requestImageGeneration = queuedEntry == null
                 ? allowAiImageGeneration != null && allowAiImageGeneration.isChecked()
@@ -3436,10 +3420,10 @@ public final class MainActivity extends Activity {
             failQueuedAiPreflight(queuedEntry, "Model pricing was unavailable at execution time");
             return;
         }
-        if (maxRunUsd <= 0.0 || monthlyLimitUsd <= 0.0 || monthlyAiSpendUsd() >= monthlyLimitUsd) {
-            setStatusText("AI run blocked by configured spending limit; open AI Settings");
+        if (!WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
+            setStatusText("AI run blocked by the device monthly spending limit; open AI Settings");
             updateAiProgress(0, 0, "budget blocked");
-            failQueuedAiPreflight(queuedEntry, "Configured spending limit blocked execution");
+            failQueuedAiPreflight(queuedEntry, "Device monthly AI limit blocked execution");
             return;
         }
         recordCommandHistory(prompt);
@@ -3498,11 +3482,11 @@ public final class MainActivity extends Activity {
             failQueuedAiPreflight(queuedEntry, "Attachment snapshot failed validation: " + error.getMessage());
             return;
         }
-        if (requestImageGeneration && (maxRunUsd < GPT_IMAGE_2_LOW_1024_USD
-                || monthlyLimitUsd - monthlyAiSpendUsd() < GPT_IMAGE_2_LOW_1024_USD)) {
-            setStatusText("AI image generation blocked: spending limits do not cover the reserved image output");
+        if (requestImageGeneration && WorkshopAiBudgetPolicy.remainingUsd(
+                monthlyLimitUsd, monthlyAiSpendUsd()) < GPT_IMAGE_2_LOW_1024_USD) {
+            setStatusText("AI image generation blocked: the device monthly limit does not cover the reserved image output");
             updateAiProgress(0, 0, "image budget blocked");
-            failQueuedAiPreflight(queuedEntry, "Image generation reserve exceeded the spending limit");
+            failQueuedAiPreflight(queuedEntry, "Image generation reserve exceeded the device monthly AI limit");
             return;
         }
         final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
@@ -3849,10 +3833,9 @@ public final class MainActivity extends Activity {
         String previousToolCallBatch = "";
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             throwIfAiCancelled();
-            double maxRunUsd = configuredAiLimit(AI_PREF_MAX_RUN_USD, "0.25");
             double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
-            if (usage.estimatedCostUsd >= maxRunUsd || monthlyAiSpendUsd() >= monthlyLimitUsd) {
-                throw new IOException("AI spending limit reached before agent turn " + (turn + 1));
+            if (!WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
+                throw new IOException("Device monthly AI spending limit reached before agent turn " + (turn + 1));
             }
             session.currentStep = turn + 1;
             postAiProgress(session.currentStep, session.actionCount, "calling AI");
@@ -3860,9 +3843,9 @@ public final class MainActivity extends Activity {
                     .put("turn", session.currentStep)
                     .put("model", model)
                     .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
-            double remainingUsd = Math.min(maxRunUsd - usage.estimatedCostUsd, monthlyLimitUsd - monthlyAiSpendUsd());
+            double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
             boolean allowImageOnThisTurn = allowImageGeneration && turn == 0;
-            int maxOutputTokens = maxOutputTokensForBudget(currentRequestJson, remainingUsd, allowImageOnThisTurn);
+            int maxOutputTokens = maxOutputTokensForBudget(model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
             AiApiResponse apiResponse = callOpenAiResponsesApi(
                     apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
             usage.add(model, apiResponse.usage);
@@ -5089,7 +5072,8 @@ public final class MainActivity extends Activity {
         return "function";
     }
 
-    private JSONArray buildAiOpenAiInput(String requestJson, boolean includeImages) throws Exception {
+    private JSONArray buildAiOpenAiInput(String requestJson, boolean includeImages,
+            boolean explicitCacheBreakpoints) throws Exception {
         JSONObject request = new JSONObject(requestJson);
         JSONObject stableRequest = request.optJSONObject("original_request");
         JSONObject volatileRequest = new JSONObject();
@@ -5109,7 +5093,7 @@ public final class MainActivity extends Activity {
         stableInstruction += " write_symbol creates or replaces a symbol. Before writing, inspect the current target. Follow game_design_rules, prefer_lifecycle_local_state, avoid_global_tick_for_per_entity_progression, and architecture_recommendations. Follow architecture_recommendations. Use command/event-style functions for durable gameplay concepts. Tool errors, validation_error observations, and test_observation failures are not final; correct them before returning mode=done. A failed write batch rolls back the whole batch and returns diagnostics.";
         JSONArray input = new JSONArray()
                 .put(aiInputMessage("system", stableInstruction, false))
-                .put(aiInputMessage("user", "Stable request context: " + stableRequest.toString(), true));
+                .put(aiInputMessage("user", "Stable request context: " + stableRequest.toString(), explicitCacheBreakpoints));
         if (includeImages && !activeAiImageAttachments.isEmpty()) {
             input.put(aiImageInputMessage(activeAiImageAttachments));
         }
@@ -5144,32 +5128,40 @@ public final class MainActivity extends Activity {
         return new JSONObject().put("role", "user").put("content", content);
     }
 
-    private int maxOutputTokensForBudget(String requestJson, double remainingUsd,
+    private int maxOutputTokensForBudget(String model, String requestJson, double remainingUsd,
             boolean reserveImageGeneration) throws Exception {
-        byte[] inputBytes = buildAiOpenAiInput(requestJson, false).toString().getBytes(StandardCharsets.UTF_8);
-        double inputRate = Math.max(GPT_5_6_SOL_INPUT_USD_PER_MILLION, GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION);
+        WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(model);
+        if (pricing == null) throw new IOException("AI pricing is unavailable for " + model);
+        byte[] inputBytes = buildAiOpenAiInput(requestJson, false, pricing.explicitCacheBreakpoints)
+                .toString().getBytes(StandardCharsets.UTF_8);
         long imageTokens = 0L;
         for (AiImageAttachment attachment : activeAiImageAttachments) imageTokens += attachment.estimatedPatchTokens();
-        double conservativeInputCost = (inputBytes.length + imageTokens) * inputRate / 1000000.0;
+        long conservativeInputTokens = inputBytes.length + imageTokens;
+        double conservativeInputCost = pricing.conservativeInputCostUsd(conservativeInputTokens);
         double outputBudget = remainingUsd - conservativeInputCost
                 - (reserveImageGeneration ? GPT_IMAGE_2_LOW_1024_USD : 0.0);
-        int outputTokens = (int)Math.floor(outputBudget * 1000000.0 / GPT_5_6_SOL_OUTPUT_USD_PER_MILLION);
+        int outputTokens = (int)Math.floor(outputBudget * 1000000.0
+                / pricing.effectiveOutputUsdPerMillion(conservativeInputTokens));
         if (outputTokens < 64) {
-            throw new IOException("AI spending limit leaves insufficient budget for another response");
+            throw new IOException("Device monthly AI limit leaves insufficient budget for another response");
         }
         return Math.min(MAX_AI_OUTPUT_TOKENS, outputTokens);
     }
 
     private AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson,
             int maxOutputTokens, boolean allowImageGeneration) throws Exception {
+        WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(model);
+        if (pricing == null) throw new IOException("AI pricing is unavailable for " + model);
         JSONObject payload = new JSONObject();
         payload.put("model", model);
-        payload.put("reasoning", new JSONObject().put("effort", DEFAULT_AI_REASONING_EFFORT));
+        payload.put("reasoning", new JSONObject().put("effort", pricing.reasoningEffort));
         payload.put("max_output_tokens", maxOutputTokens);
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
-        payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
-        payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", buildAiOpenAiInput(requestJson, true));
+        if (pricing.explicitCacheBreakpoints) {
+            payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
+        }
+        if (pricing.structuredOutputs) payload.put("text", buildAiResponseTextFormat());
+        payload.put("input", buildAiOpenAiInput(requestJson, true, pricing.explicitCacheBreakpoints));
         if (allowImageGeneration) {
             payload.put("tools", new JSONArray().put(new JSONObject()
                     .put("type", "image_generation")
@@ -5491,23 +5483,29 @@ public final class MainActivity extends Activity {
     }
 
     private static boolean hasKnownAiPricing(String model) {
-        return DEFAULT_AI_MODEL.equals(model);
+        return WorkshopAiPricing.isKnown(model);
     }
 
     private static double estimateAiCostUsd(String model, long inputTokens, long cachedInputTokens, long cacheWriteInputTokens, long outputTokens) {
-        if (!hasKnownAiPricing(model)) {
-            return 0.0;
-        }
-        double inputCost = Math.max(0L, inputTokens - cachedInputTokens - cacheWriteInputTokens) * GPT_5_6_SOL_INPUT_USD_PER_MILLION;
-        double cachedInputCost = cachedInputTokens * GPT_5_6_SOL_CACHED_INPUT_USD_PER_MILLION;
-        double cacheWriteCost = cacheWriteInputTokens * GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION;
-        double outputCost = outputTokens * GPT_5_6_SOL_OUTPUT_USD_PER_MILLION;
-        return (inputCost + cachedInputCost + cacheWriteCost + outputCost) / 1000000.0;
+        WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(model);
+        return pricing == null ? 0.0
+                : pricing.estimate(inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens);
     }
 
     private static String formatAiCostUsd(double costUsd) {
         return WorkshopMoney.formatUsd(costUsd);
     }
+
+    private String selectedAiModelForPricing() {
+        String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
+        return model.isEmpty() ? DEFAULT_AI_MODEL : model;
+    }
+
+    private double selectedAiInputCostUsd(long tokens) {
+        WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(selectedAiModelForPricing());
+        return pricing == null ? 0.0 : pricing.estimate(tokens, 0L, 0L, 0L);
+    }
+
     private void applyAiCodeResponse(AiAgentResult aiResult, SymbolEntry fallbackSymbol) {
         Map<String, String> originalSources = null;
         try {
@@ -6718,8 +6716,8 @@ public final class MainActivity extends Activity {
             long patches = estimatedImagePatchTokens(selected);
             aiAttachmentStatus.setText("AI images: " + selected.size() + " selected, about " + patches
                     + " original-detail image tokens / "
-                    + formatAiCostUsd(patches * GPT_5_6_SOL_INPUT_USD_PER_MILLION / 1000000.0)
-                    + " Sol input (review before Queue AI Change)");
+                    + formatAiCostUsd(selectedAiInputCostUsd(patches))
+                    + " " + selectedAiModelForPricing() + " input (review before Queue AI Change)");
         } catch (Exception error) {
             aiAttachmentStatus.setText("AI images: selection needs review - " + error.getMessage());
         }
@@ -6853,8 +6851,8 @@ public final class MainActivity extends Activity {
         screenshotAttachmentStatus.setText("AI preview: " + selections + " - "
                 + pendingPreviewScreenshot.getWidth() + "x" + pendingPreviewScreenshot.getHeight()
                 + (attachPreviewPixels ? ", about " + patches + " image tokens / "
-                        + formatAiCostUsd(patches * GPT_5_6_SOL_INPUT_USD_PER_MILLION / 1000000.0)
-                        + " Sol input" : "") + " (tap to review)");
+                        + formatAiCostUsd(selectedAiInputCostUsd(patches))
+                        + " " + selectedAiModelForPricing() + " input" : "") + " (tap to review)");
     }
 
     private void reviewPreviewCaptureForAi() {
