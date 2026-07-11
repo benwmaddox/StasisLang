@@ -31,6 +31,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopNetworkQueuePolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopRestartLoopPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
@@ -513,6 +514,9 @@ def main() -> int:
     assert "Previous crash detected" in activity
     assert "Clear Local Crash Record" in activity
     assert "AndroidCrashStore.clear" in activity
+    assert "Restart loop detected" in activity
+    assert "restartLoopRecoveryActive" in activity
+    assert "AndroidCrashStore.markLaunchStable" in activity
     assert 'FILE_NAME = "android_crash_redacted.json"' in crash_store
     assert "MAX_FRAMES = 30" in crash_store
     assert "MAX_RECORD_BYTES = 64 * 1024" in crash_store

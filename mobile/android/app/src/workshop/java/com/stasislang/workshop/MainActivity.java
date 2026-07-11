@@ -143,6 +143,7 @@ public final class MainActivity extends Activity {
     private static final int AI_CONNECT_TIMEOUT_MS = 15_000;
     private static final int AI_READ_TIMEOUT_MS = 120_000;
     private static final long CODEX_LIMIT_REFRESH_DEBOUNCE_MS = 30L * 60L * 1000L;
+    private static final long STABLE_LAUNCH_DELAY_MS = 60_000L;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
     private static final int AUDIO_RECORD_PERMISSION_REQUEST = 42;
     private static final int EXPORT_PROJECT_REQUEST = 71;
@@ -217,6 +218,7 @@ public final class MainActivity extends Activity {
     private volatile boolean githubOperationActive;
     private volatile boolean projectIoActive;
     private volatile boolean aiRunActive;
+    private boolean restartLoopRecoveryActive;
     private boolean phoneNativeCodexReady;
     private boolean codexSignedIn;
     private AlertDialog codexLoginDialog;
@@ -311,6 +313,8 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         AndroidCrashStore.install(this);
+        JSONObject crashState = AndroidCrashStore.noteLaunch(this);
+        restartLoopRecoveryActive = crashState.optBoolean("restart_loop_detected", false);
         phoneNativeCodexReady = nativeCodexInitialize(getApplicationContext()) == 0;
 
         try {
@@ -342,8 +346,13 @@ public final class MainActivity extends Activity {
         gameLoopHandler.post(new Runnable() {
             @Override public void run() { startNextQueuedAiIfIdle(); }
         });
-        if (AndroidCrashStore.safeSummary(this).optBoolean("present", false)) {
-            setStatusText("Previous crash detected; export a redacted support bundle or clear the local crash record in Privacy & Data");
+        gameLoopHandler.postDelayed(new Runnable() {
+            @Override public void run() { AndroidCrashStore.markLaunchStable(MainActivity.this); }
+        }, STABLE_LAUNCH_DELAY_MS);
+        if (crashState.optBoolean("present", false)) {
+            setStatusText(restartLoopRecoveryActive
+                    ? "Restart loop detected; preview and queued AI are paused until the local crash record is cleared in Privacy & Data"
+                    : "Previous crash detected; export a redacted support bundle or clear the local crash record in Privacy & Data");
         }
         if (savedInstanceState == null) {
             gameLoopHandler.post(new Runnable() {
@@ -1060,6 +1069,7 @@ public final class MainActivity extends Activity {
     }
 
     private void startGameLoop() {
+        if (restartLoopRecoveryActive) return;
         if (gameLoop != null) {
             return;
         }
@@ -1937,6 +1947,9 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) {
                 try {
                     AndroidCrashStore.clear(MainActivity.this);
+                    restartLoopRecoveryActive = false;
+                    startGameLoop();
+                    startNextQueuedAiIfIdle();
                     setStatusText("Local redacted crash record cleared");
                 } catch (Exception error) {
                     setStatusText("Crash record clear failed: " + error.getMessage());
@@ -2729,6 +2742,7 @@ public final class MainActivity extends Activity {
     }
 
     private void startNextQueuedAiIfIdle() {
+        if (restartLoopRecoveryActive) return;
         if (aiRunActive || activeAiQueueEntry != null || audioRecordingActive) return;
         try {
             boolean hasPending = false;
