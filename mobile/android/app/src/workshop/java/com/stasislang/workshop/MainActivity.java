@@ -87,6 +87,7 @@ public final class MainActivity extends Activity {
     private static final String AI_PREFS = "ai_settings";
     private static final String ONBOARDING_PREFS = "onboarding_settings";
     private static final String ONBOARDING_COMPLETE = "manual_tutorial_seen_v1";
+    private static final String AI_SETUP_COMPLETE = "ai_setup_complete_v1";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_PROVIDER = "ai_provider";
     private static final String AI_PROVIDER_CODEX = "codex_on_device";
@@ -169,6 +170,7 @@ public final class MainActivity extends Activity {
     private TextView aiActionPill;
     private TextView aiPhasePill;
     private TextView aiElapsedPill;
+    private Button aiCancelButton;
     private LinearLayout aiSettingsBody;
     private LinearLayout commandHistoryBody;
     private TextView commandHistoryText;
@@ -310,10 +312,12 @@ public final class MainActivity extends Activity {
         if (AndroidCrashStore.safeSummary(this).optBoolean("present", false)) {
             setStatusText("Previous crash detected; export a redacted support bundle or clear the local crash record in Privacy & Data");
         }
-        if (!getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE)
-                .getBoolean(ONBOARDING_COMPLETE, false)) {
+        if (savedInstanceState == null) {
             gameLoopHandler.post(new Runnable() {
-                @Override public void run() { showOnboardingGuide(true); }
+                @Override public void run() {
+                    if (needsFirstRunAiSetup()) showFirstRunAiSetup();
+                    else showProjectChooser();
+                }
             });
         }
     }
@@ -1333,7 +1337,6 @@ public final class MainActivity extends Activity {
 
         Button contextToggle = new Button(this);
         contextToggle.setText("Context & Images");
-        controls.addView(contextToggle, fullWidth());
         final LinearLayout contextBody = new LinearLayout(this);
         contextBody.setOrientation(LinearLayout.VERTICAL);
         contextBody.setVisibility(View.GONE);
@@ -1377,12 +1380,11 @@ public final class MainActivity extends Activity {
         allowAiImageGeneration.setText("Allow one low-quality 1024x1024 AI image (~$0.006 plus Sol usage)");
         allowAiImageGeneration.setChecked(false);
         contextBody.addView(allowAiImageGeneration, fullWidth());
-        controls.addView(contextBody, fullWidth());
 
         LinearLayout aiActionRow = new LinearLayout(this);
         aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
         Button aiPatch = new Button(this);
-        aiPatch.setText("Run Change");
+        aiPatch.setText("Run");
         aiPatch.setContentDescription("Queue the requested AI change with current reviewed attachments and budget limits");
         aiPatch.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -1391,13 +1393,23 @@ public final class MainActivity extends Activity {
             }
         });
         aiActionRow.addView(aiPatch, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
-        Button cancelAi = new Button(this);
-        cancelAi.setText("Stop");
-        cancelAi.setContentDescription("Cancel the active AI run after its current atomic operation");
-        cancelAi.setOnClickListener(new View.OnClickListener() {
+        Button voiceCommand = new Button(this);
+        voiceCommand.setText("Voice");
+        voiceCommand.setContentDescription("Speak a game change or command");
+        voiceCommand.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { startVoiceChange(); }
+        });
+        aiActionRow.addView(voiceCommand, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        aiCancelButton = new Button(this);
+        aiCancelButton.setText("Stop");
+        aiCancelButton.setVisibility(View.GONE);
+        aiCancelButton.setContentDescription("Cancel the active AI run after its current atomic operation");
+        aiCancelButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { cancelAiRun(); }
         });
-        aiActionRow.addView(cancelAi, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        aiActionRow.addView(aiCancelButton, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         controls.addView(aiActionRow, fullWidth());
 
         aiQueueSection = new LinearLayout(this);
@@ -1436,6 +1448,9 @@ public final class MainActivity extends Activity {
         aiBudgetStatus.setPadding(0, dp(4), 0, dp(2));
         controls.addView(aiBudgetStatus, fullWidth());
         refreshAiBudgetStatus();
+
+        controls.addView(contextToggle, fullWidth());
+        controls.addView(contextBody, fullWidth());
 
         Button moreToolsToggle = new Button(this);
         moreToolsToggle.setText("More Tools & Settings");
@@ -2029,6 +2044,164 @@ public final class MainActivity extends Activity {
         setStatusText("No AI request is available to retry");
     }
 
+    private boolean needsFirstRunAiSetup() {
+        SharedPreferences onboarding = getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE);
+        if (onboarding.getBoolean(AI_SETUP_COMPLETE, false)) return false;
+        SharedPreferences ai = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+        if (!ai.getString(AI_PREF_PROVIDER, "").isEmpty()
+                || !readSecretPreference(ai, AI_PREF_API_KEY).isEmpty()) {
+            onboarding.edit().putBoolean(AI_SETUP_COMPLETE, true).apply();
+            return false;
+        }
+        return true;
+    }
+
+    private void markAiSetupComplete() {
+        getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE).edit()
+                .putBoolean(AI_SETUP_COMPLETE, true).apply();
+    }
+
+    private void showFirstRunAiSetup() {
+        final EditText apiKey = new EditText(this);
+        apiKey.setHint("Optional OpenAI API key");
+        apiKey.setSingleLine(true);
+        apiKey.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        apiKey.setPadding(dp(20), dp(8), dp(20), dp(8));
+        new AlertDialog.Builder(this)
+                .setTitle("Set up AI")
+                .setMessage("Sign in with your ChatGPT subscription on this phone, or save an API key as the fallback. You can change both later in Settings.")
+                .setView(apiKey)
+                .setPositiveButton("ChatGPT Sign-in", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                                .putString(AI_PREF_PROVIDER, AI_PROVIDER_CODEX).apply();
+                        markAiSetupComplete();
+                        beginPhoneNativeCodexLogin();
+                        gameLoopHandler.post(new Runnable() {
+                            @Override public void run() { showProjectChooser(); }
+                        });
+                    }
+                })
+                .setNeutralButton("Save API Key", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        String key = apiKey.getText().toString().trim();
+                        if (key.isEmpty() || !saveAiSettings(key, DEFAULT_AI_MODEL)) {
+                            setStatusText("Enter a valid API key, or choose ChatGPT sign-in / without AI");
+                            gameLoopHandler.post(new Runnable() {
+                                @Override public void run() { showFirstRunAiSetup(); }
+                            });
+                            return;
+                        }
+                        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                                .putString(AI_PREF_PROVIDER, AI_PROVIDER_API).apply();
+                        markAiSetupComplete();
+                        showProjectChooser();
+                    }
+                })
+                .setNegativeButton("Without AI", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        markAiSetupComplete();
+                        showProjectChooser();
+                    }
+                })
+                .setCancelable(false)
+                .show();
+    }
+
+    private void showProjectChooser() {
+        if (isFinishing()) return;
+        final ArrayList<WorkshopProjectRegistry.ProjectInfo> projects = new ArrayList<>();
+        try {
+            projects.addAll(WorkshopProjectRegistry.list(this));
+        } catch (Exception error) {
+            setStatusText("Project list unavailable: " + error.getMessage());
+            return;
+        }
+        if (projects.isEmpty()) {
+            showNewProjectDialog();
+            return;
+        }
+        String[] labels = new String[projects.size()];
+        int current = 0;
+        for (int index = 0; index < projects.size(); index += 1) {
+            WorkshopProjectRegistry.ProjectInfo project = projects.get(index);
+            labels[index] = project.name + (project.templateId.isEmpty()
+                    ? " - imported" : " - " + project.templateId);
+            if (activeProject != null && activeProject.id.equals(project.id)) current = index;
+        }
+        final int[] selected = new int[] { current };
+        new AlertDialog.Builder(this)
+                .setTitle("Choose project")
+                .setSingleChoiceItems(labels, current, new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        selected[0] = which;
+                    }
+                })
+                .setPositiveButton("Open", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        WorkshopProjectRegistry.ProjectInfo project = projects.get(selected[0]);
+                        if (activeProject != null && activeProject.id.equals(project.id)) {
+                            setStatusText("Working on " + project.name);
+                        } else {
+                            activateProject(project);
+                        }
+                    }
+                })
+                .setNeutralButton("New", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        showNewProjectDialog();
+                    }
+                })
+                .setNegativeButton("Current", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        setStatusText(activeProject == null ? "Using current workspace"
+                                : "Working on " + activeProject.name);
+                    }
+                })
+                .show();
+    }
+
+    private void showNewProjectDialog() {
+        final LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(20), dp(4), dp(20), 0);
+        final EditText name = new EditText(this);
+        name.setHint("Project name");
+        name.setSingleLine(true);
+        content.addView(name, fullWidth());
+        final Spinner templates = new Spinner(this);
+        ArrayAdapter<WorkshopTemplateCatalog.Template> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, WorkshopTemplateCatalog.list());
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        templates.setAdapter(adapter);
+        content.addView(templates, fullWidth());
+        new AlertDialog.Builder(this)
+                .setTitle("New project")
+                .setView(content)
+                .setPositiveButton("Create", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        try {
+                            WorkshopTemplateCatalog.Template template =
+                                    (WorkshopTemplateCatalog.Template)templates.getSelectedItem();
+                            WorkshopProjectRegistry.ProjectInfo project = WorkshopProjectRegistry.createFromTemplate(
+                                    MainActivity.this, name.getText().toString(), template.id);
+                            activateProject(project);
+                        } catch (Exception error) {
+                            setStatusText("Project creation failed: " + error.getMessage());
+                            gameLoopHandler.post(new Runnable() {
+                                @Override public void run() { showNewProjectDialog(); }
+                            });
+                        }
+                    }
+                })
+                .setNegativeButton("Back", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        showProjectChooser();
+                    }
+                })
+                .show();
+    }
+
     private void toggleProjectSettings() {
         if (projectSettingsBody != null) {
             projectSettingsBody.setVisibility(projectSettingsBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
@@ -2137,7 +2310,8 @@ public final class MainActivity extends Activity {
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
-            setStatusText("Switched to " + project.name + " - " + compileResult);
+            setStatusText(compileReady ? "Working on " + project.name
+                    : "Unable to run " + project.name + " - " + compileResult);
             gameLoopHandler.post(new Runnable() {
                 @Override public void run() { startNextQueuedAiIfIdle(); }
             });
@@ -3748,6 +3922,7 @@ public final class MainActivity extends Activity {
         activeAiPrompt = prompt;
         aiCancelRequested = false;
         aiRunActive = true;
+        if (aiCancelButton != null) aiCancelButton.setVisibility(View.VISIBLE);
         recordAiOutcome(activeAiPrompt, "started", "AI run started", "");
         aiStartedAtNanos = System.nanoTime();
         appendAiTraceFields("request", "model", requestModel, "request_json", requestJson, null, null);
@@ -3793,6 +3968,11 @@ public final class MainActivity extends Activity {
                     if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
                     activeAiImageAttachments = Collections.emptyList();
                     aiRunActive = false;
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (aiCancelButton != null) aiCancelButton.setVisibility(View.GONE);
+                        }
+                    });
                     if (requestImageGeneration) {
                         runOnUiThread(new Runnable() {
                             @Override public void run() { allowAiImageGeneration.setChecked(false); }
