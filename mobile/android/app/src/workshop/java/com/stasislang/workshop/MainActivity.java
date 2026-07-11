@@ -104,7 +104,6 @@ public final class MainActivity extends Activity {
     private static final String GITHUB_PREF_REVIEW_FINGERPRINT = "github_review_fingerprint";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
     private static final String DEFAULT_AI_MODEL = "gpt-5.6-sol";
-    private static final String DEFAULT_AI_REASONING_EFFORT = "medium";
     private static final int DEFAULT_AI_MODEL_VERSION = 2;
     private static final String AI_PROMPT_CACHE_KEY = "stasis-android-workshop-v2";
     private static final long AI_TRACE_RETENTION_MS = 24L * 60L * 60L * 1000L;
@@ -5085,7 +5084,8 @@ public final class MainActivity extends Activity {
         return "function";
     }
 
-    private JSONArray buildAiOpenAiInput(String requestJson, boolean includeImages) throws Exception {
+    private JSONArray buildAiOpenAiInput(String requestJson, boolean includeImages,
+            boolean explicitCacheBreakpoints) throws Exception {
         JSONObject request = new JSONObject(requestJson);
         JSONObject stableRequest = request.optJSONObject("original_request");
         JSONObject volatileRequest = new JSONObject();
@@ -5105,7 +5105,7 @@ public final class MainActivity extends Activity {
         stableInstruction += " write_symbol creates or replaces a symbol. Before writing, inspect the current target. Follow game_design_rules, prefer_lifecycle_local_state, avoid_global_tick_for_per_entity_progression, and architecture_recommendations. Follow architecture_recommendations. Use command/event-style functions for durable gameplay concepts. Tool errors, validation_error observations, and test_observation failures are not final; correct them before returning mode=done. A failed write batch rolls back the whole batch and returns diagnostics.";
         JSONArray input = new JSONArray()
                 .put(aiInputMessage("system", stableInstruction, false))
-                .put(aiInputMessage("user", "Stable request context: " + stableRequest.toString(), true));
+                .put(aiInputMessage("user", "Stable request context: " + stableRequest.toString(), explicitCacheBreakpoints));
         if (includeImages && !activeAiImageAttachments.isEmpty()) {
             input.put(aiImageInputMessage(activeAiImageAttachments));
         }
@@ -5144,7 +5144,8 @@ public final class MainActivity extends Activity {
             boolean reserveImageGeneration) throws Exception {
         WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(model);
         if (pricing == null) throw new IOException("AI pricing is unavailable for " + model);
-        byte[] inputBytes = buildAiOpenAiInput(requestJson, false).toString().getBytes(StandardCharsets.UTF_8);
+        byte[] inputBytes = buildAiOpenAiInput(requestJson, false, pricing.explicitCacheBreakpoints)
+                .toString().getBytes(StandardCharsets.UTF_8);
         long imageTokens = 0L;
         for (AiImageAttachment attachment : activeAiImageAttachments) imageTokens += attachment.estimatedPatchTokens();
         long conservativeInputTokens = inputBytes.length + imageTokens;
@@ -5161,14 +5162,18 @@ public final class MainActivity extends Activity {
 
     private AiApiResponse callOpenAiResponsesApi(String apiKey, String model, String requestJson,
             int maxOutputTokens, boolean allowImageGeneration) throws Exception {
+        WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(model);
+        if (pricing == null) throw new IOException("AI pricing is unavailable for " + model);
         JSONObject payload = new JSONObject();
         payload.put("model", model);
-        payload.put("reasoning", new JSONObject().put("effort", DEFAULT_AI_REASONING_EFFORT));
+        payload.put("reasoning", new JSONObject().put("effort", pricing.reasoningEffort));
         payload.put("max_output_tokens", maxOutputTokens);
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
-        payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
-        payload.put("text", buildAiResponseTextFormat());
-        payload.put("input", buildAiOpenAiInput(requestJson, true));
+        if (pricing.explicitCacheBreakpoints) {
+            payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
+        }
+        if (pricing.structuredOutputs) payload.put("text", buildAiResponseTextFormat());
+        payload.put("input", buildAiOpenAiInput(requestJson, true, pricing.explicitCacheBreakpoints));
         if (allowImageGeneration) {
             payload.put("tools", new JSONArray().put(new JSONObject()
                     .put("type", "image_generation")
