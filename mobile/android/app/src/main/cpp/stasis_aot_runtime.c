@@ -29,6 +29,8 @@ static int32_t next_asset_handle = 1;
 static int previous_touch_active;
 static int32_t sprite_literal_ids[STASIS_ASSET_HANDLE_CAPACITY];
 static int32_t text_run_literal_ids[STASIS_ASSET_HANDLE_CAPACITY];
+static int32_t font_literal_ids[STASIS_ASSET_HANDLE_CAPACITY];
+static int32_t font_sizes[STASIS_ASSET_HANDLE_CAPACITY];
 
 static const char *stasis_literal_for_id(int32_t id) {
     int index;
@@ -124,7 +126,14 @@ int32_t stasis_jit_gfx_load_sprite(int32_t path_id, int32_t max_w, int32_t max_h
     if (handle > 0 && handle < STASIS_ASSET_HANDLE_CAPACITY) sprite_literal_ids[handle] = path_id;
     return handle;
 }
-int32_t stasis_jit_load_font(int32_t path_id, int32_t size) { (void)path_id; (void)size; return next_asset_handle++; }
+int32_t stasis_jit_load_font(int32_t path_id, int32_t size) {
+    int32_t handle = next_asset_handle++;
+    if (handle > 0 && handle < STASIS_ASSET_HANDLE_CAPACITY) {
+        font_literal_ids[handle] = path_id;
+        font_sizes[handle] = size;
+    }
+    return handle;
+}
 float stasis_jit_measure_text(int32_t font, int32_t text_id) { (void)font; (void)text_id; return 0.0f; }
 int32_t stasis_gfx_cache_text(int32_t font, int32_t text_id) {
     int32_t handle = next_asset_handle++;
@@ -145,30 +154,42 @@ const char *stasis_published_text_for_run(int32_t run_handle) {
     return stasis_literal_for_id(text_run_literal_ids[run_handle]);
 }
 
+const char *stasis_published_font_path(int32_t handle) {
+    if (handle <= 0 || handle >= STASIS_ASSET_HANDLE_CAPACITY) return NULL;
+    return stasis_literal_for_id(font_literal_ids[handle]);
+}
+
+int32_t stasis_published_font_size(int32_t handle) {
+    if (handle <= 0 || handle >= STASIS_ASSET_HANDLE_CAPACITY) return 14;
+    return font_sizes[handle] > 0 ? font_sizes[handle] : 14;
+}
+
 void stasis_published_init_globals(void) { }
 
 static void write_host_frame(int touch_x, int touch_y, int touch_active, int screen_w, int screen_h) {
+    int active = touch_active != 0;
+    int pressed = touch_active == 2;
     int32_t host_i32 = stasis_hash_path("host_i32");
     int32_t host_f32 = stasis_hash_path("host_f32");
     stasis_jit_global_i32_array_store(host_i32, 0, 1, screen_w);
     stasis_jit_global_i32_array_store(host_i32, 0, 2, screen_h);
     stasis_jit_global_i32_array_store(host_i32, 0, 5, screen_w);
     stasis_jit_global_i32_array_store(host_i32, 0, 6, screen_h);
-    stasis_jit_global_i32_array_store(host_i32, 0, 7, touch_active ? 1 : 0);
+    stasis_jit_global_i32_array_store(host_i32, 0, 7, active ? 1 : 0);
     stasis_jit_global_i32_array_store(host_i32, 0, 10, frame_count);
     stasis_jit_global_i32_array_store(host_i32, 0, 12, screen_w);
     stasis_jit_global_i32_array_store(host_i32, 0, 13, screen_h);
     stasis_jit_global_i32_array_store(host_i32, 0, 14, 1);
     stasis_jit_global_i32_array_store(host_i32, 0, 16, 60);
     stasis_jit_global_i32_array_store(host_i32, 0, 544, 0);
-    stasis_jit_global_i32_array_store(host_i32, 0, 545, touch_active ? 1 : 0);
-    stasis_jit_global_i32_array_store(host_i32, 0, 546, touch_active && !previous_touch_active ? 1 : 0);
-    stasis_jit_global_i32_array_store(host_i32, 0, 547, !touch_active && previous_touch_active ? 1 : 0);
+    stasis_jit_global_i32_array_store(host_i32, 0, 545, active ? 1 : 0);
+    stasis_jit_global_i32_array_store(host_i32, 0, 546, pressed || (active && !previous_touch_active) ? 1 : 0);
+    stasis_jit_global_i32_array_store(host_i32, 0, 547, !active && previous_touch_active ? 1 : 0);
     stasis_jit_global_f32_array_store(host_f32, 0, 0, (float)touch_x);
     stasis_jit_global_f32_array_store(host_f32, 0, 1, (float)touch_y);
     stasis_jit_global_f32_array_store(host_f32, 0, 4, screen_w > 0 ? (float)touch_x / (float)screen_w : 0.0f);
     stasis_jit_global_f32_array_store(host_f32, 0, 5, screen_h > 0 ? (float)touch_y / (float)screen_h : 0.0f);
-    previous_touch_active = touch_active ? 1 : 0;
+    previous_touch_active = active ? 1 : 0;
 }
 
 static void pack_preview_frame(int32_t *out_values, uintptr_t out_len) {
@@ -206,10 +227,8 @@ static void pack_preview_frame(int32_t *out_values, uintptr_t out_len) {
             out_values[dest] = 2;
             out_values[dest + 1] = (int32_t)x1;
             out_values[dest + 2] = (int32_t)y1;
-            out_values[dest + 3] = (int32_t)(x2 - x1);
-            out_values[dest + 4] = (int32_t)(y2 - y1);
-            if (out_values[dest + 3] == 0) out_values[dest + 3] = 2;
-            if (out_values[dest + 4] == 0) out_values[dest + 4] = 2;
+            out_values[dest + 3] = (int32_t)x2;
+            out_values[dest + 4] = (int32_t)y2;
             out_values[dest + 5] = ((red & 255) << 16) | ((green & 255) << 8) | (blue & 255);
         } else if (index < line_count + sprite_count) {
             int32_t source = 32 + (index - line_count) * 7;
@@ -219,7 +238,7 @@ static void pack_preview_frame(int32_t *out_values, uintptr_t out_len) {
             out_values[dest + 2] = stasis_jit_global_i32_array_load(gfx_i32, 0, source + 2);
             out_values[dest + 3] = stasis_jit_global_i32_array_load(gfx_i32, 0, source + 3);
             out_values[dest + 4] = stasis_jit_global_i32_array_load(gfx_i32, 0, source + 4);
-            out_values[dest + 5] = 0x3A6EA5 + (handle * 0x1D2B3) % 0x6A6A6A;
+            out_values[dest + 5] = stasis_jit_global_i32_array_load(gfx_i32, 0, source + 6);
             out_values[dest + 6] = handle;
         } else {
             int32_t text_index = index - line_count - sprite_count;
@@ -232,6 +251,7 @@ static void pack_preview_frame(int32_t *out_values, uintptr_t out_len) {
             out_values[dest] = 3;
             out_values[dest + 1] = (int32_t)stasis_jit_global_f32_array_load(gfx_f32, 0, source_f);
             out_values[dest + 2] = (int32_t)stasis_jit_global_f32_array_load(gfx_f32, 0, source_f + 1);
+            out_values[dest + 3] = stasis_jit_global_i32_array_load(gfx_i32, 0, source_i);
             out_values[dest + 5] = ((red & 255) << 16) | ((green & 255) << 8) | (blue & 255);
             out_values[dest + 6] = cached_run;
         }

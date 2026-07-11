@@ -105,6 +105,11 @@ tasks.register('preparePublishedAssets', Sync) {
     from(new File(publishedGame.projectDirectory, 'assets/original/generated_4x')) {
         into 'assets/original/generated_4x'
     }
+    from(new File(publishedGame.projectDirectory, 'assets/original')) {
+        include '*.png'
+        include '*.ttf'
+        into 'assets/original'
+    }
     into(publishedAssetsDir)
 }
 

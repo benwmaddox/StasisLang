@@ -13,7 +13,7 @@
 #if STASIS_ANDROID_PUBLISHED_AOT
 #include "stasis_aot_runtime.h"
 #else
-#define STASIS_PUBLISHED_MAX_COMMANDS 64
+#define STASIS_PUBLISHED_MAX_COMMANDS 512
 #define STASIS_PUBLISHED_FRAME_I32_COUNT (6 + STASIS_PUBLISHED_MAX_COMMANDS * 7)
 #endif
 
@@ -1170,6 +1170,30 @@ Java_com_stasislang_workshop_MainActivity_nativePublishedTextForRun(JNIEnv *env,
 #else
     (void)run_handle;
     return NULL;
+#endif
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativePublishedFontPath(JNIEnv *env, jclass activity_class, jint handle) {
+    (void)activity_class;
+#if STASIS_ANDROID_PUBLISHED_AOT
+    const char *path = stasis_published_font_path((int32_t)handle);
+    return path == NULL ? NULL : (*env)->NewStringUTF(env, path);
+#else
+    (void)handle;
+    return NULL;
+#endif
+}
+
+JNIEXPORT jint JNICALL
+Java_com_stasislang_workshop_MainActivity_nativePublishedFontSize(JNIEnv *env, jclass activity_class, jint handle) {
+    (void)env;
+    (void)activity_class;
+#if STASIS_ANDROID_PUBLISHED_AOT
+    return (jint)stasis_published_font_size((int32_t)handle);
+#else
+    (void)handle;
+    return 14;
 #endif
 }
 JNIEXPORT jstring JNICALL

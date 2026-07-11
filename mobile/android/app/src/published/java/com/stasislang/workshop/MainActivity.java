@@ -7,6 +7,8 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.os.Build;
@@ -34,7 +36,7 @@ public final class MainActivity extends Activity {
     private static final long FRAME_DELAY_MS = 16L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 200_000_000L;
-    private static final int MAX_RENDER_COMMANDS = 64;
+    private static final int MAX_RENDER_COMMANDS = 512;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
     private static final int RENDER_FRAME_I32_CAPACITY = RENDER_FRAME_HEADER_SIZE + MAX_RENDER_COMMANDS * RENDER_COMMAND_STRIDE;
@@ -62,6 +64,8 @@ public final class MainActivity extends Activity {
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
     private static native String nativePublishedSpritePath(int handle);
     private static native String nativePublishedTextForRun(int runHandle);
+    private static native String nativePublishedFontPath(int handle);
+    private static native int nativePublishedFontSize(int handle);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -146,7 +150,7 @@ public final class MainActivity extends Activity {
                 PUBLISHED_RUNTIME_ID,
                 gameSurface == null ? 0 : gameSurface.touchX(),
                 gameSurface == null ? 0 : gameSurface.touchY(),
-                gameSurface == null ? 0 : gameSurface.touchActive(),
+                gameSurface == null ? 0 : gameSurface.consumeTouchInput(),
                 width,
                 height,
                 frameValues);
@@ -233,12 +237,15 @@ public final class MainActivity extends Activity {
     private static final class GameSurfaceView extends View {
         private final MainActivity activity;
         private final int[] frameValues = new int[RENDER_FRAME_I32_CAPACITY];
-        private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final HashMap<Integer, Bitmap> sprites = new HashMap<>();
+        private final HashMap<Integer, String> spritePaths = new HashMap<>();
         private final HashMap<Integer, String> textRuns = new HashMap<>();
+        private final HashMap<Integer, Typeface> fonts = new HashMap<>();
         private int touchX;
         private int touchY;
         private boolean touchActive;
+        private boolean touchPressed;
 
         GameSurfaceView(MainActivity activity) {
             super(activity);
@@ -254,7 +261,11 @@ public final class MainActivity extends Activity {
             return touchY;
         }
 
-        int touchActive() {
+        int consumeTouchInput() {
+            if (touchPressed) {
+                touchPressed = false;
+                return 2;
+            }
             return touchActive ? 1 : 0;
         }
 
@@ -268,6 +279,9 @@ public final class MainActivity extends Activity {
             touchX = Math.round(event.getX());
             touchY = Math.round(event.getY());
             int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                touchPressed = true;
+            }
             if (action == MotionEvent.ACTION_POINTER_DOWN && event.getPointerCount() >= 3) {
                 activity.toggleHud();
             }
@@ -288,9 +302,24 @@ public final class MainActivity extends Activity {
                 int w = Math.max(1, frameValues[base + 3]);
                 int h = Math.max(1, frameValues[base + 4]);
                 if (kind == 1) {
-                    Bitmap sprite = spriteFor(frameValues[base + 6]);
+                    int handle = frameValues[base + 6];
+                    Bitmap sprite = spriteFor(handle);
                     if (sprite != null) {
+                        paint.setAlpha(Math.max(0, Math.min(255, frameValues[base + 5])));
                         canvas.drawBitmap(sprite, null, new Rect(x, y, x + w, y + h), paint);
+                        paint.setAlpha(255);
+                        continue;
+                    }
+                    if ("assets/original/range_ring.svg".equals(spritePathFor(handle))) {
+                        int alpha = Math.max(0, Math.min(255, frameValues[base + 5]));
+                        paint.setStyle(Paint.Style.FILL);
+                        paint.setColor(((0x24 * alpha / 255) << 24) | 0x00e83737);
+                        canvas.drawOval(new RectF(x, y, x + w, y + h), paint);
+                        paint.setStyle(Paint.Style.STROKE);
+                        paint.setStrokeWidth(2.0f);
+                        paint.setColor((alpha << 24) | 0x00ff4a4a);
+                        canvas.drawOval(new RectF(x + 1, y + 1, x + w - 1, y + h - 1), paint);
+                        paint.setStyle(Paint.Style.FILL);
                         continue;
                     }
                 }
@@ -298,12 +327,20 @@ public final class MainActivity extends Activity {
                     String text = textFor(frameValues[base + 6]);
                     if (text != null) {
                         paint.setColor(0xff000000 | frameValues[base + 5]);
-                        paint.setTextSize(20.0f);
-                        canvas.drawText(text, x, y + 20, paint);
+                        int font = frameValues[base + 3];
+                        paint.setTypeface(typefaceFor(font));
+                        paint.setTextSize(nativePublishedFontSize(font));
+                        canvas.drawText(text, x, y + nativePublishedFontSize(font), paint);
                     }
                     continue;
                 }
-                if (kind == 1 || kind == 2) {
+                if (kind == 2) {
+                    paint.setColor(0xff000000 | frameValues[base + 5]);
+                    paint.setStrokeWidth(2.0f);
+                    canvas.drawLine(x, y, frameValues[base + 3], frameValues[base + 4], paint);
+                    continue;
+                }
+                if (kind == 1) {
                     paint.setColor(0xff000000 | frameValues[base + 5]);
                     canvas.drawRect(x, y, x + w, y + h, paint);
                 }
@@ -318,7 +355,7 @@ public final class MainActivity extends Activity {
             if (sprites.containsKey(handle)) {
                 return sprites.get(handle);
             }
-            String path = nativePublishedSpritePath(handle);
+            String path = spritePathFor(handle);
             Bitmap sprite = null;
             if (path != null) {
                 try {
@@ -328,6 +365,16 @@ public final class MainActivity extends Activity {
             }
             sprites.put(handle, sprite);
             return sprite;
+        }
+
+        private String spritePathFor(int handle) {
+            if (handle <= 0) {
+                return null;
+            }
+            if (!spritePaths.containsKey(handle)) {
+                spritePaths.put(handle, nativePublishedSpritePath(handle));
+            }
+            return spritePaths.get(handle);
         }
 
         private String textFor(int handle) {
@@ -340,6 +387,24 @@ public final class MainActivity extends Activity {
             String text = nativePublishedTextForRun(handle);
             textRuns.put(handle, text);
             return text;
+        }
+
+        private Typeface typefaceFor(int handle) {
+            if (handle <= 0) {
+                return Typeface.DEFAULT;
+            }
+            if (!fonts.containsKey(handle)) {
+                Typeface font = Typeface.DEFAULT;
+                String path = nativePublishedFontPath(handle);
+                if (path != null) {
+                    try {
+                        font = Typeface.createFromAsset(activity.getAssets(), path);
+                    } catch (RuntimeException ignored) {
+                    }
+                }
+                fonts.put(handle, font);
+            }
+            return fonts.get(handle);
         }
     }
 

@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define STASIS_PUBLISHED_MAX_COMMANDS 64
+#define STASIS_PUBLISHED_MAX_COMMANDS 512
 #define STASIS_PUBLISHED_FRAME_I32_COUNT (6 + STASIS_PUBLISHED_MAX_COMMANDS * 7)
 
 void stasis_published_init_globals(void);
@@ -17,5 +17,7 @@ int stasis_published_run_tick_frame(
         uintptr_t out_len);
 const char *stasis_published_sprite_path(int32_t handle);
 const char *stasis_published_text_for_run(int32_t run_handle);
+const char *stasis_published_font_path(int32_t handle);
+int32_t stasis_published_font_size(int32_t handle);
 
 #endif
