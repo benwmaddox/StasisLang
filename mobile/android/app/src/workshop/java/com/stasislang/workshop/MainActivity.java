@@ -90,7 +90,6 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
     private static final String AI_PREF_COMMAND_HISTORY_PREFIX = "command_history_";
     private static final String AI_PREF_OUTCOME_HISTORY_PREFIX = "outcome_history_";
-    private static final String AI_PREF_MAX_RUN_USD = "max_run_usd";
     private static final String AI_PREF_MONTHLY_LIMIT_USD = "monthly_limit_usd";
     private static final String AI_PREF_MONTH_KEY = "monthly_spend_month";
     private static final String AI_PREF_MONTH_SPEND_USD = "monthly_spend_usd";
@@ -153,7 +152,6 @@ public final class MainActivity extends Activity {
     private EditText aiPromptEditor;
     private EditText aiApiKeyEditor;
     private EditText aiModelEditor;
-    private EditText aiMaxRunUsdEditor;
     private EditText aiMonthlyLimitUsdEditor;
     private TextView aiBudgetStatus;
     private TextView aiAttachmentStatus;
@@ -1603,14 +1601,8 @@ public final class MainActivity extends Activity {
         reasoningSummary.setTextSize(12.0f);
         aiSettingsBody.addView(reasoningSummary, fullWidth());
 
-        aiMaxRunUsdEditor = new EditText(this);
-        aiMaxRunUsdEditor.setHint("Maximum USD per AI run");
-        aiMaxRunUsdEditor.setSingleLine(true);
-        aiMaxRunUsdEditor.setText(aiPrefs.getString(AI_PREF_MAX_RUN_USD, "0.25"));
-        aiSettingsBody.addView(aiMaxRunUsdEditor, fullWidth());
-
         aiMonthlyLimitUsdEditor = new EditText(this);
-        aiMonthlyLimitUsdEditor.setHint("Monthly AI limit USD");
+        aiMonthlyLimitUsdEditor.setHint("Device monthly AI limit USD");
         aiMonthlyLimitUsdEditor.setSingleLine(true);
         aiMonthlyLimitUsdEditor.setText(aiPrefs.getString(AI_PREF_MONTHLY_LIMIT_USD, "5.00"));
         aiSettingsBody.addView(aiMonthlyLimitUsdEditor, fullWidth());
@@ -3146,19 +3138,17 @@ public final class MainActivity extends Activity {
     private void saveAiSettingsFromEditors() {
         String apiKey = aiApiKeyEditor == null ? "" : aiApiKeyEditor.getText().toString().trim();
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
-        String maxRunText = aiMaxRunUsdEditor == null ? "0.25" : aiMaxRunUsdEditor.getText().toString().trim();
         String monthlyLimitText = aiMonthlyLimitUsdEditor == null ? "5.00" : aiMonthlyLimitUsdEditor.getText().toString().trim();
         if (apiKey.isEmpty()) {
             setStatusText("AI settings need an API key before a run can start");
             return;
         }
-        if (parseNonNegativeUsd(maxRunText) < 0.0 || parseNonNegativeUsd(monthlyLimitText) < 0.0) {
-            setStatusText("AI budget limits must be non-negative USD values");
+        if (parseNonNegativeUsd(monthlyLimitText) < 0.0) {
+            setStatusText("The device monthly AI limit must be a non-negative USD value");
             return;
         }
         if (!saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model)) return;
         getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
-                .putString(AI_PREF_MAX_RUN_USD, maxRunText)
                 .putString(AI_PREF_MONTHLY_LIMIT_USD, monthlyLimitText)
                 .apply();
         refreshAiBudgetStatus();
@@ -3420,7 +3410,6 @@ public final class MainActivity extends Activity {
         if (model.isEmpty()) {
             model = DEFAULT_AI_MODEL;
         }
-        double maxRunUsd = configuredAiLimit(AI_PREF_MAX_RUN_USD, "0.25");
         double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
         final boolean requestImageGeneration = queuedEntry == null
                 ? allowAiImageGeneration != null && allowAiImageGeneration.isChecked()
@@ -3431,10 +3420,10 @@ public final class MainActivity extends Activity {
             failQueuedAiPreflight(queuedEntry, "Model pricing was unavailable at execution time");
             return;
         }
-        if (maxRunUsd <= 0.0 || monthlyLimitUsd <= 0.0 || monthlyAiSpendUsd() >= monthlyLimitUsd) {
-            setStatusText("AI run blocked by configured spending limit; open AI Settings");
+        if (!WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
+            setStatusText("AI run blocked by the device monthly spending limit; open AI Settings");
             updateAiProgress(0, 0, "budget blocked");
-            failQueuedAiPreflight(queuedEntry, "Configured spending limit blocked execution");
+            failQueuedAiPreflight(queuedEntry, "Device monthly AI limit blocked execution");
             return;
         }
         recordCommandHistory(prompt);
@@ -3493,11 +3482,11 @@ public final class MainActivity extends Activity {
             failQueuedAiPreflight(queuedEntry, "Attachment snapshot failed validation: " + error.getMessage());
             return;
         }
-        if (requestImageGeneration && (maxRunUsd < GPT_IMAGE_2_LOW_1024_USD
-                || monthlyLimitUsd - monthlyAiSpendUsd() < GPT_IMAGE_2_LOW_1024_USD)) {
-            setStatusText("AI image generation blocked: spending limits do not cover the reserved image output");
+        if (requestImageGeneration && WorkshopAiBudgetPolicy.remainingUsd(
+                monthlyLimitUsd, monthlyAiSpendUsd()) < GPT_IMAGE_2_LOW_1024_USD) {
+            setStatusText("AI image generation blocked: the device monthly limit does not cover the reserved image output");
             updateAiProgress(0, 0, "image budget blocked");
-            failQueuedAiPreflight(queuedEntry, "Image generation reserve exceeded the spending limit");
+            failQueuedAiPreflight(queuedEntry, "Image generation reserve exceeded the device monthly AI limit");
             return;
         }
         final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
@@ -3844,10 +3833,9 @@ public final class MainActivity extends Activity {
         String previousToolCallBatch = "";
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             throwIfAiCancelled();
-            double maxRunUsd = configuredAiLimit(AI_PREF_MAX_RUN_USD, "0.25");
             double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
-            if (usage.estimatedCostUsd >= maxRunUsd || monthlyAiSpendUsd() >= monthlyLimitUsd) {
-                throw new IOException("AI spending limit reached before agent turn " + (turn + 1));
+            if (!WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
+                throw new IOException("Device monthly AI spending limit reached before agent turn " + (turn + 1));
             }
             session.currentStep = turn + 1;
             postAiProgress(session.currentStep, session.actionCount, "calling AI");
@@ -3855,7 +3843,7 @@ public final class MainActivity extends Activity {
                     .put("turn", session.currentStep)
                     .put("model", model)
                     .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
-            double remainingUsd = Math.min(maxRunUsd - usage.estimatedCostUsd, monthlyLimitUsd - monthlyAiSpendUsd());
+            double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
             boolean allowImageOnThisTurn = allowImageGeneration && turn == 0;
             int maxOutputTokens = maxOutputTokensForBudget(model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
             AiApiResponse apiResponse = callOpenAiResponsesApi(
@@ -5155,7 +5143,7 @@ public final class MainActivity extends Activity {
         int outputTokens = (int)Math.floor(outputBudget * 1000000.0
                 / pricing.effectiveOutputUsdPerMillion(conservativeInputTokens));
         if (outputTokens < 64) {
-            throw new IOException("AI spending limit leaves insufficient budget for another response");
+            throw new IOException("Device monthly AI limit leaves insufficient budget for another response");
         }
         return Math.min(MAX_AI_OUTPUT_TOKENS, outputTokens);
     }
