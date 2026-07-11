@@ -414,11 +414,15 @@ public final class MainActivity extends Activity {
         stopVoiceRecognition();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
         if (codexLoginDialog != null) codexLoginDialog.dismiss();
-        aiCancelRequested = true;
-        nativeCodexCancelResponse();
+        if (!WorkshopLongWorkCoordinator.isAiActive()) {
+            aiCancelRequested = true;
+            nativeCodexCancelResponse();
+        }
         unregisterNetworkMonitoring();
-        HttpURLConnection aiConnection = activeAiConnection;
-        if (aiConnection != null) aiConnection.disconnect();
+        if (!WorkshopLongWorkCoordinator.isAiActive()) {
+            HttpURLConnection aiConnection = activeAiConnection;
+            if (aiConnection != null) aiConnection.disconnect();
+        }
         githubSyncExecutor.shutdownNow();
         projectIoExecutor.shutdownNow();
         codexExecutor.shutdownNow();
@@ -2092,6 +2096,7 @@ public final class MainActivity extends Activity {
     }
 
     private void recordAiOutcome(String prompt, String status, String summary, String usage) {
+        boolean terminal = !"started".equals(status);
         try {
             JSONArray existing = aiOutcomeHistory();
             JSONArray updated = new JSONArray();
@@ -2118,6 +2123,12 @@ public final class MainActivity extends Activity {
             finishActiveAiQueueItem(status, summary);
         } catch (Exception ignored) {
             // Outcome history must not interfere with AI execution or source recovery.
+        } finally {
+            if (terminal && WorkshopLongWorkCoordinator.isAiActive()) {
+                aiRunActive = false;
+                WorkshopLongWorkCoordinator.finishAi(this);
+                if (aiCancelButton != null) aiCancelButton.setVisibility(View.GONE);
+            }
         }
     }
 
@@ -2743,7 +2754,8 @@ public final class MainActivity extends Activity {
 
     private void startNextQueuedAiIfIdle() {
         if (restartLoopRecoveryActive) return;
-        if (aiRunActive || activeAiQueueEntry != null || audioRecordingActive) return;
+        if (aiRunActive || WorkshopLongWorkCoordinator.isAiActive()
+                || activeAiQueueEntry != null || audioRecordingActive) return;
         try {
             boolean hasPending = false;
             for (AndroidAiQueue.Entry item : AndroidAiQueue.list(this, activeRecoveryProjectId())) {
@@ -4331,6 +4343,15 @@ public final class MainActivity extends Activity {
         activeAiPrompt = prompt;
         aiCancelRequested = false;
         aiRunActive = true;
+        if (!WorkshopLongWorkCoordinator.beginAi(this, "Running queued game change", new Runnable() {
+            @Override public void run() { cancelAiRun(); }
+        })) {
+            aiRunActive = false;
+            failQueuedAiPreflight(activeAiQueueEntry,
+                    "Android could not start the required foreground work service");
+            setStatusText("AI work could not start its Android foreground service");
+            return;
+        }
         if (aiCancelButton != null) aiCancelButton.setVisibility(View.VISIBLE);
         recordAiOutcome(activeAiPrompt, "started", "AI run started", "");
         aiStartedAtNanos = System.nanoTime();
@@ -4377,12 +4398,6 @@ public final class MainActivity extends Activity {
                 } finally {
                     if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
                     activeAiImageAttachments = Collections.emptyList();
-                    aiRunActive = false;
-                    runOnUiThread(new Runnable() {
-                        @Override public void run() {
-                            if (aiCancelButton != null) aiCancelButton.setVisibility(View.GONE);
-                        }
-                    });
                     if (requestImageGeneration) {
                         runOnUiThread(new Runnable() {
                             @Override public void run() { allowAiImageGeneration.setChecked(false); }

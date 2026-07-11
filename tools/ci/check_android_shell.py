@@ -29,6 +29,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiPricing.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopConnectivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopNetworkQueuePolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkCoordinator.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkService.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopRestartLoopPolicy.java",
@@ -154,6 +156,9 @@ def main() -> int:
     assert "android.permission.RECORD_AUDIO" in workshop_manifest
     assert "android.permission.INTERNET" in workshop_manifest
     assert "android.permission.ACCESS_NETWORK_STATE" in workshop_manifest
+    assert "android.permission.FOREGROUND_SERVICE" in workshop_manifest
+    assert "android.permission.FOREGROUND_SERVICE_DATA_SYNC" in workshop_manifest
+    assert 'android:foregroundServiceType="dataSync"' in workshop_manifest
     assert "${appLabel}" in manifest
     assert "android.intent.action.MAIN" in manifest
     assert "android.intent.category.LAUNCHER" in manifest
@@ -539,6 +544,9 @@ def main() -> int:
     assert "unregisterNetworkCallback" in activity
     assert "AI work is waiting for an internet connection" in activity
     assert "WorkshopNetworkQueuePolicy.shouldWaitForNetwork" in activity
+    assert "WorkshopLongWorkCoordinator.beginAi" in activity
+    assert "WorkshopLongWorkCoordinator.finishAi" in activity
+    assert "WorkshopLongWorkCoordinator.isAiActive" in activity
     assert "throwIfAiCancelled()" in activity
     assert "if (!batchHasWrites) throwIfAiCancelled()" in activity
     assert "finishing any active call or atomic write batch" in activity

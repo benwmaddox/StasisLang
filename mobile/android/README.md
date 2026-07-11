@@ -135,6 +135,8 @@ Typed `Run` and confirmed voice `Run` append to the same durable per-project FIF
 
 Pending AI work is not claimed while Android has no validated internet connection. It stays visible and cancellable in the durable queue, then resumes when Android's default-network callback reports usable connectivity.
 
+Active AI work holds a process-level foreground lease with an Android `dataSync` notification. The notification opens the Workshop and exposes `Stop`, which uses the same safe API/Codex cancellation path; destroying the Activity does not silently disconnect the leased request.
+
 `Recent Commands` also shows bounded per-project AI outcomes, including cancellation/failure/rollback status, usage summaries when available, and the local trace path. `Retry Last AI` restores the latest recorded request and starts it again through the selected provider's normal sign-in/key and limit checks.
 
 `Projects` is collapsed below the command workflow. Fresh installs start with Exploration Garden; existing v1/v2 sample projects retain Pong identity. `New Project From Selected Template` offers Exploration Garden and Pong, creates a separately identified app-private project, and records the choice. `Switch Project` changes the root used by symbols, compile, tests, AI history, and GitHub state and immediately recompiles it. Reset and Changes use the recorded template baseline rather than whichever template is currently the default. Project creation/switching is blocked while AI or GitHub work is active or the source editor contains an unapplied edit. GitHub repository/branch targets and review/retry state are project-specific; the encrypted token is shared.
