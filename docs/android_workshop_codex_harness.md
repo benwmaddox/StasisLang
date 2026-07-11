@@ -53,9 +53,12 @@ than replaced with a fake implementation.
 
 The Workshop calls Codex's official device-code flow from its native Rust
 library. It displays the verification URL and one-time code, opens the Android
-browser, polls in the native layer, and stores the resulting `auth.json` under
+browser, copies the code to the clipboard before navigation, polls in the
+native layer, and stores the resulting `auth.json` under
 the application's private files directory. The credentials never leave the
-phone. The app-server protocol documents this frontend-owned flow as
+phone. The selectable in-app code and completion status remain visible when
+the user returns from the browser; the matching clipboard entry is cleared
+after successful sign-in. The app-server protocol documents this frontend-owned flow as
 `chatgptDeviceCode`; see the
 [Codex app-server documentation](https://learn.chatgpt.com/docs/app-server).
 
@@ -65,6 +68,8 @@ The current first slice provides:
   installations retain their fallback selection until the turn bridge is ready
 - real ChatGPT device-code login using upstream Codex code
 - persistent account detection and ChatGPT plan display
+- native Codex primary/secondary rate-limit reads using the official
+  `usedPercent`, `windowDurationMins`, and `resetsAt` contract
 - an explicit OpenAI API-key fallback
 - a deterministic pinned-source Android build
 
@@ -88,7 +93,9 @@ their behavior.
 ## Limits
 
 - **Codex subscription:** do not estimate dollars. Display Codex account
-  rate-limit data when the native account client is connected.
+  rate-limit data as remaining percentage for the five-hour and weekly windows.
+  Refresh after a Codex action with a 30-minute attempt debounce and retain the
+  last successful snapshot if a refresh fails.
 - **Direct API fallback:** show estimated API cost and enforce the device-wide
   monthly USD limit after every response or image generation.
 
@@ -98,8 +105,7 @@ their behavior.
    the V8-backed Code Mode component.
 2. Adapt the existing Workshop tool handlers to Codex tool calls and verify a
    complete edit-compile-test-screenshot turn on the phone.
-3. Add native subscription rate-limit reads, cancellation, approvals, and
-   persisted thread resume.
+3. Add cancellation, approvals, and persisted thread resume.
 4. Encrypt or wrap the private Codex credential file with Android Keystore
    protection and add logout/account-switch controls.
 5. Retain paired desktop execution only as an optional provider for large

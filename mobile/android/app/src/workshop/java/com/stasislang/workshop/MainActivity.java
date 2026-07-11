@@ -3,6 +3,8 @@ package com.stasislang.workshop;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.Manifest;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
@@ -33,6 +35,7 @@ import android.view.WindowInsets;
 import android.util.Base64;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -42,6 +45,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -100,6 +104,8 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_MONTHLY_LIMIT_USD = "monthly_limit_usd";
     private static final String AI_PREF_MONTH_KEY = "monthly_spend_month";
     private static final String AI_PREF_MONTH_SPEND_USD = "monthly_spend_usd";
+    private static final String AI_PREF_CODEX_LIMITS_JSON = "codex_limits_json";
+    private static final String AI_PREF_CODEX_LIMITS_REFRESH_ATTEMPT_MS = "codex_limits_refresh_attempt_ms";
     private static final String GITHUB_PREFS = "github_sync_settings";
     private static final String GITHUB_PREF_TOKEN = "github_token";
     private static final String GITHUB_PREF_REPOSITORY = "github_repository";
@@ -131,6 +137,7 @@ public final class MainActivity extends Activity {
     private static final int VOICE_ACTION_TOP_MARGIN_DP = 120;
     private static final int AI_CONNECT_TIMEOUT_MS = 15_000;
     private static final int AI_READ_TIMEOUT_MS = 120_000;
+    private static final long CODEX_LIMIT_REFRESH_DEBOUNCE_MS = 30L * 60L * 1000L;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
     private static final int AUDIO_RECORD_PERMISSION_REQUEST = 42;
     private static final int EXPORT_PROJECT_REQUEST = 71;
@@ -204,6 +211,12 @@ public final class MainActivity extends Activity {
     private volatile boolean projectIoActive;
     private volatile boolean aiRunActive;
     private boolean phoneNativeCodexReady;
+    private boolean codexSignedIn;
+    private AlertDialog codexLoginDialog;
+    private TextView codexLoginDialogStatus;
+    private String codexLoginUserCode = "";
+    private String codexLoginVerificationUrl = "";
+    private boolean showProjectChooserAfterCodexLogin;
     private volatile boolean aiCancelRequested;
     private volatile HttpURLConnection activeAiConnection;
     private String activeAiPrompt = "";
@@ -273,6 +286,7 @@ public final class MainActivity extends Activity {
     private static native String nativeRunTests(String projectRoot);
     private static native String nativeCodexBeginDeviceLogin(String codexHome);
     private static native String nativeCodexAccountStatus(String codexHome);
+    private static native String nativeCodexAccountRateLimits(String codexHome);
     private static native int nativeCodexInitialize(Object applicationContext);
 
     @Override
@@ -358,6 +372,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         stopVoiceRecognition();
+        if (codexLoginDialog != null) codexLoginDialog.dismiss();
         aiCancelRequested = true;
         HttpURLConnection aiConnection = activeAiConnection;
         if (aiConnection != null) aiConnection.disconnect();
@@ -1724,6 +1739,13 @@ public final class MainActivity extends Activity {
         aiMonthlyLimitUsdEditor.setSingleLine(true);
         aiMonthlyLimitUsdEditor.setText(aiPrefs.getString(AI_PREF_MONTHLY_LIMIT_USD, "5.00"));
         aiSettingsBody.addView(aiMonthlyLimitUsdEditor, fullWidth());
+        aiProviderSelector.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                updateAiProviderVisibility();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
+        updateAiProviderVisibility();
 
         Button saveSettings = new Button(this);
         saveSettings.setText("Save AI Settings");
@@ -2075,11 +2097,11 @@ public final class MainActivity extends Activity {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
                         getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
                                 .putString(AI_PREF_PROVIDER, AI_PROVIDER_CODEX).apply();
+                        if (aiProviderSelector != null) aiProviderSelector.setSelection(0);
                         markAiSetupComplete();
+                        refreshAiBudgetStatus();
+                        showProjectChooserAfterCodexLogin = true;
                         beginPhoneNativeCodexLogin();
-                        gameLoopHandler.post(new Runnable() {
-                            @Override public void run() { showProjectChooser(); }
-                        });
                     }
                 })
                 .setNeutralButton("Save API Key", new android.content.DialogInterface.OnClickListener() {
@@ -2094,7 +2116,9 @@ public final class MainActivity extends Activity {
                         }
                         getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
                                 .putString(AI_PREF_PROVIDER, AI_PROVIDER_API).apply();
+                        if (aiProviderSelector != null) aiProviderSelector.setSelection(1);
                         markAiSetupComplete();
+                        refreshAiBudgetStatus();
                         showProjectChooser();
                     }
                 })
@@ -3425,6 +3449,14 @@ public final class MainActivity extends Activity {
                 ? AI_PROVIDER_API : AI_PROVIDER_CODEX;
     }
 
+    private void updateAiProviderVisibility() {
+        boolean codex = AI_PROVIDER_CODEX.equals(selectedAiProvider());
+        if (aiMonthlyLimitUsdEditor != null) {
+            aiMonthlyLimitUsdEditor.setVisibility(codex ? View.GONE : View.VISIBLE);
+        }
+        refreshAiBudgetStatus();
+    }
+
     private String codexHomePath() {
         return new File(getFilesDir(), "codex").getAbsolutePath();
     }
@@ -3444,13 +3476,13 @@ public final class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             showPhoneNativeCodexStatus(status);
-                            String verificationUrl = status.optString("verification_url", "");
-                            if (!verificationUrl.isEmpty()) {
-                                try {
-                                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(verificationUrl)));
-                                } catch (Exception error) {
-                                    setStatusText("Open " + verificationUrl + " to finish Codex sign-in");
-                                }
+                            if ("awaiting_user".equals(status.optString("status", ""))) {
+                                showCodexDeviceCodeDialog(
+                                        status.optString("verification_url", ""),
+                                        status.optString("user_code", ""));
+                            } else if (showProjectChooserAfterCodexLogin) {
+                                showProjectChooserAfterCodexLogin = false;
+                                showProjectChooser();
                             }
                         }
                     });
@@ -3459,6 +3491,10 @@ public final class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             if (codexAccountStatus != null) codexAccountStatus.setText("Codex account error: " + message);
+                            if (showProjectChooserAfterCodexLogin) {
+                                showProjectChooserAfterCodexLogin = false;
+                                showProjectChooser();
+                            }
                         }
                     });
                 }
@@ -3486,28 +3522,190 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void showCodexDeviceCodeDialog(String verificationUrl, String userCode) {
+        if (!isOfficialCodexVerificationUrl(verificationUrl) || userCode.trim().isEmpty()) {
+            setStatusText("Codex sign-in returned an invalid verification link or code; request a new code");
+            if (showProjectChooserAfterCodexLogin) {
+                showProjectChooserAfterCodexLogin = false;
+                showProjectChooser();
+            }
+            return;
+        }
+        codexLoginVerificationUrl = verificationUrl;
+        codexLoginUserCode = userCode.trim();
+        copyCodexLoginCode();
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(22), dp(8), dp(22), 0);
+        TextView instructions = new TextView(this);
+        instructions.setText("The one-time code is copied. In the browser, paste it, finish sign-in, then return here. Workshop will verify completion automatically.");
+        instructions.setTextSize(14.0f);
+        content.addView(instructions, fullWidth());
+        TextView code = new TextView(this);
+        code.setText(codexLoginUserCode);
+        code.setTextSize(24.0f);
+        code.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        code.setTextIsSelectable(true);
+        code.setGravity(Gravity.CENTER);
+        code.setPadding(0, dp(16), 0, dp(12));
+        code.setContentDescription("Codex one-time sign-in code " + codexLoginUserCode);
+        content.addView(code, fullWidth());
+        codexLoginDialogStatus = new TextView(this);
+        codexLoginDialogStatus.setText("Waiting for browser sign-in...");
+        codexLoginDialogStatus.setTextSize(13.0f);
+        codexLoginDialogStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        content.addView(codexLoginDialogStatus, fullWidth());
+
+        if (codexLoginDialog != null) codexLoginDialog.dismiss();
+        codexLoginDialog = new AlertDialog.Builder(this)
+                .setTitle("Sign in to Codex")
+                .setView(content)
+                .setPositiveButton("Open Browser", null)
+                .setNeutralButton("Copy Code", null)
+                .setNegativeButton("Continue", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        codexLoginDialog = null;
+                        codexLoginDialogStatus = null;
+                        if (showProjectChooserAfterCodexLogin) {
+                            showProjectChooserAfterCodexLogin = false;
+                            showProjectChooser();
+                        }
+                    }
+                })
+                .create();
+        codexLoginDialog.show();
+        codexLoginDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { openCodexVerificationUrl(); }
+        });
+        codexLoginDialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { copyCodexLoginCode(); }
+        });
+        content.postDelayed(new Runnable() {
+            @Override public void run() { openCodexVerificationUrl(); }
+        }, 250L);
+    }
+
+    private static boolean isOfficialCodexVerificationUrl(String value) {
+        try {
+            Uri uri = Uri.parse(value);
+            return "https".equalsIgnoreCase(uri.getScheme())
+                    && "auth.openai.com".equalsIgnoreCase(uri.getHost());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private void openCodexVerificationUrl() {
+        if (!isOfficialCodexVerificationUrl(codexLoginVerificationUrl)) {
+            setStatusText("Codex verification link is unavailable; request a new code");
+            return;
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(codexLoginVerificationUrl)));
+        } catch (Exception error) {
+            setStatusText("Open " + codexLoginVerificationUrl + " to finish Codex sign-in");
+        }
+    }
+
+    private void copyCodexLoginCode() {
+        if (codexLoginUserCode.isEmpty()) return;
+        ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) {
+            setStatusText("Clipboard is unavailable; press and hold the visible code to copy it");
+            return;
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText("Codex sign-in code", codexLoginUserCode));
+        Toast.makeText(this, "Codex code copied", Toast.LENGTH_SHORT).show();
+    }
+
+    private void clearCopiedCodexLoginCode() {
+        if (codexLoginUserCode.isEmpty()) return;
+        ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null || !clipboard.hasPrimaryClip() || clipboard.getPrimaryClip() == null
+                || clipboard.getPrimaryClip().getItemCount() == 0) return;
+        CharSequence current = clipboard.getPrimaryClip().getItemAt(0).coerceToText(this);
+        if (!codexLoginUserCode.contentEquals(current)) return;
+        if (Build.VERSION.SDK_INT >= 28) clipboard.clearPrimaryClip();
+        else clipboard.setPrimaryClip(ClipData.newPlainText("", ""));
+    }
+
+    private void refreshCodexRateLimitsAfterAction() {
+        SharedPreferences preferences = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+        long now = System.currentTimeMillis();
+        long lastAttempt = preferences.getLong(AI_PREF_CODEX_LIMITS_REFRESH_ATTEMPT_MS, 0L);
+        if (now - lastAttempt < CODEX_LIMIT_REFRESH_DEBOUNCE_MS) return;
+        preferences.edit().putLong(AI_PREF_CODEX_LIMITS_REFRESH_ATTEMPT_MS, now).apply();
+        codexExecutor.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    final JSONObject limits = new JSONObject(nativeCodexAccountRateLimits(codexHomePath()));
+                    if (!"ok".equals(limits.optString("status", ""))) return;
+                    getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                            .putString(AI_PREF_CODEX_LIMITS_JSON, limits.toString()).apply();
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() { refreshAiBudgetStatus(); }
+                    });
+                } catch (Exception ignored) {
+                    // Keep the last successful snapshot; the next action retries after the debounce.
+                }
+            }
+        });
+    }
+
     private void showPhoneNativeCodexStatus(JSONObject status) {
         if (codexAccountStatus == null) return;
         String state = status.optString("status", "error");
         if ("signed_in".equals(state)) {
+            codexSignedIn = true;
             String plan = status.optString("plan_type", "");
             codexAccountStatus.setText("Codex account: signed in on this phone"
                     + (plan.isEmpty() ? "" : " (" + plan + ")"));
+            if (codexLoginDialogStatus != null) {
+                codexLoginDialogStatus.setText("Signed in successfully. Returning to Workshop...");
+            }
+            clearCopiedCodexLoginCode();
+            refreshAiBudgetStatus();
+            final boolean showProjects = showProjectChooserAfterCodexLogin;
+            showProjectChooserAfterCodexLogin = false;
+            gameLoopHandler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (codexLoginDialog != null) codexLoginDialog.dismiss();
+                    codexLoginDialog = null;
+                    codexLoginDialogStatus = null;
+                    codexLoginUserCode = "";
+                    codexLoginVerificationUrl = "";
+                    if (showProjects) showProjectChooser();
+                }
+            }, 750L);
             return;
         }
         if ("awaiting_user".equals(state)) {
+            codexSignedIn = false;
             codexAccountStatus.setText("Codex sign-in code: " + status.optString("user_code", "")
                     + "\n" + status.optString("verification_url", "https://auth.openai.com/codex/device"));
+            if (codexLoginDialogStatus != null) {
+                codexLoginDialogStatus.setText("Waiting for browser sign-in...");
+            }
             gameLoopHandler.postDelayed(new Runnable() {
                 @Override public void run() { refreshPhoneNativeCodexStatus(); }
             }, 2000L);
             return;
         }
         if ("signed_out".equals(state)) {
+            codexSignedIn = false;
             codexAccountStatus.setText("Codex account: signed out on this phone");
+            refreshAiBudgetStatus();
             return;
         }
-        codexAccountStatus.setText("Codex account: " + status.optString("error", state));
+        codexSignedIn = false;
+        String error = status.optString("error", state);
+        codexAccountStatus.setText("Codex sign-in failed: " + error);
+        if (codexLoginDialogStatus != null) {
+            codexLoginDialogStatus.setText("Sign-in failed: " + error
+                    + "\nClose this message and request a new code to try again.");
+        }
+        refreshAiBudgetStatus();
     }
 
     private void saveAiSettingsFromEditors() {
@@ -3570,9 +3768,38 @@ public final class MainActivity extends Activity {
 
     private void refreshAiBudgetStatus() {
         if (aiBudgetStatus == null) return;
+        if (AI_PROVIDER_CODEX.equals(selectedAiProvider())) {
+            aiBudgetStatus.setText(cachedCodexLimitText());
+            return;
+        }
         double monthlyLimit = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
         double spent = monthlyAiSpendUsd();
         aiBudgetStatus.setText("AI budget: " + formatAiCostUsd(spent) + " / " + formatAiCostUsd(monthlyLimit) + " this month");
+    }
+
+    private String cachedCodexLimitText() {
+        String cached = getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                .getString(AI_PREF_CODEX_LIMITS_JSON, "");
+        if (!codexSignedIn) return "Codex limits: sign in to view";
+        if (cached.isEmpty()) return "Codex limits: refresh after the next AI action";
+        try {
+            JSONObject limits = new JSONObject(cached);
+            String primary = formatCodexLimitWindow(limits.optJSONObject("primary"));
+            String secondary = formatCodexLimitWindow(limits.optJSONObject("secondary"));
+            if (primary.isEmpty() && secondary.isEmpty()) return "Codex limits: unavailable";
+            if (primary.isEmpty()) return "Codex: " + secondary;
+            if (secondary.isEmpty()) return "Codex: " + primary;
+            return "Codex: " + primary + " | " + secondary;
+        } catch (Exception error) {
+            return "Codex limits: refresh after the next AI action";
+        }
+    }
+
+    private static String formatCodexLimitWindow(JSONObject window) {
+        if (window == null) return "";
+        return WorkshopCodexLimits.formatWindow(
+                window.optLong("window_duration_mins", 0L),
+                window.optDouble("used_percent", 0.0));
     }
     private LinearLayout createEditControls() {
         LinearLayout controls = new LinearLayout(this);
@@ -3792,6 +4019,7 @@ public final class MainActivity extends Activity {
                     failQueuedAiPreflight(queuedEntry, "Phone-native Codex is not signed in");
                     return;
                 }
+                refreshCodexRateLimitsAfterAction();
                 setStatusText("Phone-native Codex authentication is ready; the on-device turn bridge is the next implementation slice");
                 failQueuedAiPreflight(queuedEntry, "Phone-native Codex turn bridge is not available yet");
             } catch (Exception error) {
