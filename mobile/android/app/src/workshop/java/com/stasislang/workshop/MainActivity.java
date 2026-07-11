@@ -133,10 +133,6 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_IMAGE_REQUEST = 73;
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
-    private static final double GPT_5_6_SOL_INPUT_USD_PER_MILLION = 5.00;
-    private static final double GPT_5_6_SOL_CACHED_INPUT_USD_PER_MILLION = 0.50;
-    private static final double GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION = 6.25;
-    private static final double GPT_5_6_SOL_OUTPUT_USD_PER_MILLION = 30.00;
     private static final double GPT_IMAGE_2_LOW_1024_USD = 0.006;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
     private static final int RENDER_COMMAND_STRIDE = 7;
@@ -3862,7 +3858,7 @@ public final class MainActivity extends Activity {
                     .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
             double remainingUsd = Math.min(maxRunUsd - usage.estimatedCostUsd, monthlyLimitUsd - monthlyAiSpendUsd());
             boolean allowImageOnThisTurn = allowImageGeneration && turn == 0;
-            int maxOutputTokens = maxOutputTokensForBudget(currentRequestJson, remainingUsd, allowImageOnThisTurn);
+            int maxOutputTokens = maxOutputTokensForBudget(model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
             AiApiResponse apiResponse = callOpenAiResponsesApi(
                     apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
             usage.add(model, apiResponse.usage);
@@ -5144,16 +5140,19 @@ public final class MainActivity extends Activity {
         return new JSONObject().put("role", "user").put("content", content);
     }
 
-    private int maxOutputTokensForBudget(String requestJson, double remainingUsd,
+    private int maxOutputTokensForBudget(String model, String requestJson, double remainingUsd,
             boolean reserveImageGeneration) throws Exception {
+        WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(model);
+        if (pricing == null) throw new IOException("AI pricing is unavailable for " + model);
         byte[] inputBytes = buildAiOpenAiInput(requestJson, false).toString().getBytes(StandardCharsets.UTF_8);
-        double inputRate = Math.max(GPT_5_6_SOL_INPUT_USD_PER_MILLION, GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION);
         long imageTokens = 0L;
         for (AiImageAttachment attachment : activeAiImageAttachments) imageTokens += attachment.estimatedPatchTokens();
-        double conservativeInputCost = (inputBytes.length + imageTokens) * inputRate / 1000000.0;
+        long conservativeInputTokens = inputBytes.length + imageTokens;
+        double conservativeInputCost = pricing.conservativeInputCostUsd(conservativeInputTokens);
         double outputBudget = remainingUsd - conservativeInputCost
                 - (reserveImageGeneration ? GPT_IMAGE_2_LOW_1024_USD : 0.0);
-        int outputTokens = (int)Math.floor(outputBudget * 1000000.0 / GPT_5_6_SOL_OUTPUT_USD_PER_MILLION);
+        int outputTokens = (int)Math.floor(outputBudget * 1000000.0
+                / pricing.effectiveOutputUsdPerMillion(conservativeInputTokens));
         if (outputTokens < 64) {
             throw new IOException("AI spending limit leaves insufficient budget for another response");
         }
@@ -5491,23 +5490,29 @@ public final class MainActivity extends Activity {
     }
 
     private static boolean hasKnownAiPricing(String model) {
-        return DEFAULT_AI_MODEL.equals(model);
+        return WorkshopAiPricing.isKnown(model);
     }
 
     private static double estimateAiCostUsd(String model, long inputTokens, long cachedInputTokens, long cacheWriteInputTokens, long outputTokens) {
-        if (!hasKnownAiPricing(model)) {
-            return 0.0;
-        }
-        double inputCost = Math.max(0L, inputTokens - cachedInputTokens - cacheWriteInputTokens) * GPT_5_6_SOL_INPUT_USD_PER_MILLION;
-        double cachedInputCost = cachedInputTokens * GPT_5_6_SOL_CACHED_INPUT_USD_PER_MILLION;
-        double cacheWriteCost = cacheWriteInputTokens * GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION;
-        double outputCost = outputTokens * GPT_5_6_SOL_OUTPUT_USD_PER_MILLION;
-        return (inputCost + cachedInputCost + cacheWriteCost + outputCost) / 1000000.0;
+        WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(model);
+        return pricing == null ? 0.0
+                : pricing.estimate(inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens);
     }
 
     private static String formatAiCostUsd(double costUsd) {
         return WorkshopMoney.formatUsd(costUsd);
     }
+
+    private String selectedAiModelForPricing() {
+        String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
+        return model.isEmpty() ? DEFAULT_AI_MODEL : model;
+    }
+
+    private double selectedAiInputCostUsd(long tokens) {
+        WorkshopAiPricing.Rates pricing = WorkshopAiPricing.forModel(selectedAiModelForPricing());
+        return pricing == null ? 0.0 : pricing.estimate(tokens, 0L, 0L, 0L);
+    }
+
     private void applyAiCodeResponse(AiAgentResult aiResult, SymbolEntry fallbackSymbol) {
         Map<String, String> originalSources = null;
         try {
@@ -6718,8 +6723,8 @@ public final class MainActivity extends Activity {
             long patches = estimatedImagePatchTokens(selected);
             aiAttachmentStatus.setText("AI images: " + selected.size() + " selected, about " + patches
                     + " original-detail image tokens / "
-                    + formatAiCostUsd(patches * GPT_5_6_SOL_INPUT_USD_PER_MILLION / 1000000.0)
-                    + " Sol input (review before Queue AI Change)");
+                    + formatAiCostUsd(selectedAiInputCostUsd(patches))
+                    + " " + selectedAiModelForPricing() + " input (review before Queue AI Change)");
         } catch (Exception error) {
             aiAttachmentStatus.setText("AI images: selection needs review - " + error.getMessage());
         }
@@ -6853,8 +6858,8 @@ public final class MainActivity extends Activity {
         screenshotAttachmentStatus.setText("AI preview: " + selections + " - "
                 + pendingPreviewScreenshot.getWidth() + "x" + pendingPreviewScreenshot.getHeight()
                 + (attachPreviewPixels ? ", about " + patches + " image tokens / "
-                        + formatAiCostUsd(patches * GPT_5_6_SOL_INPUT_USD_PER_MILLION / 1000000.0)
-                        + " Sol input" : "") + " (tap to review)");
+                        + formatAiCostUsd(selectedAiInputCostUsd(patches))
+                        + " " + selectedAiModelForPricing() + " input" : "") + " (tap to review)");
     }
 
     private void reviewPreviewCaptureForAi() {

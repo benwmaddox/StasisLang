@@ -92,6 +92,10 @@ android {
     }
 }
 
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}
+
 tasks.register('prepareWorkshopAssets', Sync) {
     from(file('src/main/assets')) {
         exclude 'workshop_sample/build/**'
