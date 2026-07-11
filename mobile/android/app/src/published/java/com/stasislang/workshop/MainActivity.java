@@ -1,6 +1,7 @@
 package com.stasislang.workshop;
 
 import android.app.Activity;
+import android.content.res.AssetFileDescriptor;
 import android.graphics.Color;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -11,6 +12,7 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
+import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -59,6 +61,7 @@ public final class MainActivity extends Activity {
     private boolean compileAttempted;
     private boolean compileReady;
     private long lastHudUpdateNanos;
+    private MediaPlayer music;
 
     private static native String nativeCompileProject(String projectRoot);
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
@@ -98,6 +101,7 @@ public final class MainActivity extends Activity {
         root.addView(hud, hudParams);
 
         setContentView(root);
+        startMusic();
         startFrameLoop();
     }
 
@@ -106,7 +110,43 @@ public final class MainActivity extends Activity {
         if (frameLoop != null) {
             frameHandler.removeCallbacks(frameLoop);
         }
+        if (music != null) {
+            music.release();
+            music = null;
+        }
         super.onDestroy();
+    }
+
+    @Override
+    protected void onPause() {
+        if (music != null && music.isPlaying()) {
+            music.pause();
+        }
+        super.onPause();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (music != null && !music.isPlaying()) {
+            music.start();
+        }
+    }
+
+    private void startMusic() {
+        try (AssetFileDescriptor source = getAssets().openFd("assets/original/audio/background_music.mp3")) {
+            music = new MediaPlayer();
+            music.setDataSource(source.getFileDescriptor(), source.getStartOffset(), source.getLength());
+            music.setLooping(true);
+            music.setVolume(0.65f, 0.65f);
+            music.prepare();
+            music.start();
+        } catch (IOException ignored) {
+            if (music != null) {
+                music.release();
+                music = null;
+            }
+        }
     }
 
     void toggleHud() {

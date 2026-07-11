@@ -50,6 +50,10 @@ android {
         buildConfig true
     }
 
+    androidResources {
+        noCompress 'mp3'
+    }
+
     flavorDimensions 'mode'
     productFlavors {
         workshop {
@@ -109,6 +113,10 @@ tasks.register('preparePublishedAssets', Sync) {
         include '*.png'
         include '*.ttf'
         into 'assets/original'
+    }
+    from(new File(publishedGame.projectDirectory, 'assets/original/audio')) {
+        include '*.mp3'
+        into 'assets/original/audio'
     }
     into(publishedAssetsDir)
 }
