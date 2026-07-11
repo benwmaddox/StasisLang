@@ -135,7 +135,7 @@ Typed `Run` and confirmed voice `Run` append to the same durable per-project FIF
 
 Pending AI work is not claimed while Android has no validated internet connection. It stays visible and cancellable in the durable queue, then resumes when Android's default-network callback reports usable connectivity.
 
-Active AI work holds a process-level foreground lease with an Android `dataSync` notification. The notification opens the Workshop and exposes `Stop`, which uses the same safe API/Codex cancellation path; destroying the Activity does not silently disconnect the leased request.
+AI, GitHub sync/PR, project/media import/export, and support export share one process-level foreground lease with an Android `dataSync` notification. The notification opens the Workshop; AI also exposes `Stop` through the same safe API/Codex cancellation path. Destroying the Activity does not silently terminate the leased operation. Explicit user work continues during battery saver, while the shared policy reserves unplugged battery-saver deferral for future automatic work.
 
 `Recent Commands` also shows bounded per-project AI outcomes, including cancellation/failure/rollback status, usage summaries when available, and the local trace path. `Retry Last AI` restores the latest recorded request and starts it again through the selected provider's normal sign-in/key and limit checks.
 

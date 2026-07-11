@@ -218,6 +218,7 @@ public final class MainActivity extends Activity {
     private volatile boolean githubOperationActive;
     private volatile boolean projectIoActive;
     private volatile boolean aiRunActive;
+    private volatile boolean activityDestroyed;
     private boolean restartLoopRecoveryActive;
     private boolean phoneNativeCodexReady;
     private boolean codexSignedIn;
@@ -411,6 +412,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        activityDestroyed = true;
         stopVoiceRecognition();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
         if (codexLoginDialog != null) codexLoginDialog.dismiss();
@@ -423,8 +425,8 @@ public final class MainActivity extends Activity {
             HttpURLConnection aiConnection = activeAiConnection;
             if (aiConnection != null) aiConnection.disconnect();
         }
-        githubSyncExecutor.shutdownNow();
-        projectIoExecutor.shutdownNow();
+        if (!WorkshopLongWorkCoordinator.isGitHubActive()) githubSyncExecutor.shutdownNow();
+        if (!WorkshopLongWorkCoordinator.isProjectIoActive()) projectIoExecutor.shutdownNow();
         codexExecutor.shutdownNow();
         if (pendingPreviewScreenshot != null && !pendingPreviewScreenshot.isRecycled()) {
             pendingPreviewScreenshot.recycle();
@@ -464,7 +466,7 @@ public final class MainActivity extends Activity {
         }
         final Uri source = data.getData();
         final File targetProject = activeProject.root;
-        projectIoActive = true;
+        if (!beginProjectIoWork("Importing a project image")) return;
         setStatusText("Image import started");
         projectIoExecutor.submit(new Runnable() {
             @Override public void run() {
@@ -485,7 +487,7 @@ public final class MainActivity extends Activity {
                         }
                     });
                 } finally {
-                    projectIoActive = false;
+                    finishProjectIoWork();
                 }
             }
         });
@@ -502,7 +504,7 @@ public final class MainActivity extends Activity {
         }
         final Uri source = data.getData();
         final File targetProject = activeProject.root;
-        projectIoActive = true;
+        if (!beginProjectIoWork("Importing project audio")) return;
         setStatusText("Audio import started");
         projectIoExecutor.submit(new Runnable() {
             @Override public void run() {
@@ -521,7 +523,7 @@ public final class MainActivity extends Activity {
                         @Override public void run() { setStatusText("Audio import failed: " + error.getMessage()); }
                     });
                 } finally {
-                    projectIoActive = false;
+                    finishProjectIoWork();
                 }
             }
         });
@@ -540,7 +542,7 @@ public final class MainActivity extends Activity {
             return;
         }
         final Uri destination = data.getData();
-        projectIoActive = true;
+        if (!beginProjectIoWork("Exporting the active project")) return;
         setStatusText("Project export started");
         projectIoExecutor.submit(new Runnable() {
             @Override public void run() {
@@ -566,7 +568,7 @@ public final class MainActivity extends Activity {
                         }
                     });
                 } finally {
-                    projectIoActive = false;
+                    finishProjectIoWork();
                 }
             }
         });
@@ -580,7 +582,7 @@ public final class MainActivity extends Activity {
             return;
         }
         final Uri source = data.getData();
-        projectIoActive = true;
+        if (!beginProjectIoWork("Importing a Stasis project")) return;
         setStatusText("Project import started");
         projectIoExecutor.submit(new Runnable() {
             @Override public void run() {
@@ -596,7 +598,7 @@ public final class MainActivity extends Activity {
                         input.close();
                     }
                     final WorkshopProjectRegistry.ProjectInfo completedProject = imported;
-                    projectIoActive = false;
+                    finishProjectIoWork();
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             if (activateProject(completedProject)) {
@@ -616,7 +618,7 @@ public final class MainActivity extends Activity {
                             error.addSuppressed(cleanupError);
                         }
                     }
-                    projectIoActive = false;
+                    finishProjectIoWork();
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             setStatusText("Project import failed and was discarded: " + error.getMessage());
@@ -2754,7 +2756,7 @@ public final class MainActivity extends Activity {
 
     private void startNextQueuedAiIfIdle() {
         if (restartLoopRecoveryActive) return;
-        if (aiRunActive || WorkshopLongWorkCoordinator.isAiActive()
+        if (aiRunActive || WorkshopLongWorkCoordinator.isAnyActive()
                 || activeAiQueueEntry != null || audioRecordingActive) return;
         try {
             boolean hasPending = false;
@@ -2768,8 +2770,9 @@ public final class MainActivity extends Activity {
                 refreshAiQueue();
                 return;
             }
-            if (WorkshopNetworkQueuePolicy.shouldWaitForNetwork(
-                    hasPending, WorkshopConnectivity.hasUsableNetwork(this))) {
+            if (WorkshopBackgroundWorkPolicy.decide(true,
+                    WorkshopConnectivity.hasUsableNetwork(this), false, false)
+                    == WorkshopBackgroundWorkPolicy.Decision.WAIT_FOR_NETWORK) {
                 setStatusText("AI work is waiting for an internet connection");
                 refreshAiQueue();
                 return;
@@ -2946,7 +2949,7 @@ public final class MainActivity extends Activity {
         SharedPreferences github = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
         final String operation = github.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
         final String state = github.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
-        projectIoActive = true;
+        if (!beginProjectIoWork("Building a redacted support bundle")) return;
         setStatusText("Building redacted support bundle");
         projectIoExecutor.submit(new Runnable() {
             @Override public void run() {
@@ -2970,7 +2973,7 @@ public final class MainActivity extends Activity {
                         @Override public void run() { setStatusText("Support export failed: " + error.getMessage()); }
                     });
                 } finally {
-                    projectIoActive = false;
+                    finishProjectIoWork();
                 }
             }
         });
@@ -3497,9 +3500,28 @@ public final class MainActivity extends Activity {
         return legacy;
     }
 
+    private synchronized boolean beginProjectIoWork(String detail) {
+        if (projectIoActive || !WorkshopLongWorkCoordinator.beginProjectIo(this, detail)) {
+            setStatusText("Project operation blocked while another foreground operation is active");
+            return false;
+        }
+        projectIoActive = true;
+        return true;
+    }
+
+    private void finishProjectIoWork() {
+        projectIoActive = false;
+        WorkshopLongWorkCoordinator.finishProjectIo(this);
+        if (activityDestroyed) projectIoExecutor.shutdown();
+    }
+
     private synchronized boolean beginGitHubOperation(String operation, String status) {
         if (githubOperationActive) {
             githubSyncStatus.setText("GitHub sync: another operation is already queued or running");
+            return false;
+        }
+        if (!WorkshopLongWorkCoordinator.beginGitHub(this, "Syncing reviewed project files")) {
+            githubSyncStatus.setText("GitHub sync: another foreground operation is active");
             return false;
         }
         githubOperationActive = true;
@@ -3509,7 +3531,11 @@ public final class MainActivity extends Activity {
 
     private void postGitHubOperationState(final String operation, final String state, final String status) {
         persistGitHubOperationState(operation, state, status);
-        if ("complete".equals(state) || "error".equals(state)) githubOperationActive = false;
+        if ("complete".equals(state) || "error".equals(state)) {
+            githubOperationActive = false;
+            WorkshopLongWorkCoordinator.finishGitHub(this);
+            if (activityDestroyed) githubSyncExecutor.shutdown();
+        }
         runOnUiThread(new Runnable() {
             @Override public void run() { if (githubSyncStatus != null) githubSyncStatus.setText(status); }
         });
@@ -4319,6 +4345,12 @@ public final class MainActivity extends Activity {
                     if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
                     refreshAiQueue();
                     setStatusText("AI request queued and waiting for an internet connection");
+                    return;
+                }
+                if (WorkshopLongWorkCoordinator.isAnyActive()) {
+                    if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
+                    refreshAiQueue();
+                    setStatusText("AI request queued behind the active foreground operation");
                     return;
                 }
                 activeAiQueueEntry = AndroidAiQueue.claimNext(this, activeRecoveryProjectId());
