@@ -15,7 +15,12 @@ Current scope:
 - Seeds bundled `.stasis` files into app-private storage when missing and preserves edits across app launches.
 - Lets a selected symbol display and edit its source from the app-private `.stasis` file.
 - Saves selected symbol edits back to the app-private `.stasis` file, reparses the project so later edits use fresh symbol spans, and reports `FastReload` versus `ResetRequired` expectations.
-- Provides a dev-first AI edit panel that stores an OpenAI API key/model in app-private preferences, sends the selected symbol context to the Responses API, applies supported `replace_function`/`replace_struct` JSON edits, and refreshes compile state. The default is `gpt-5.6-sol` with explicit medium reasoning; installations on the prior Terra default migrate once while later custom model choices remain intact.
+- Provides a dev-first AI edit panel whose primary provider is phone-native Codex with ChatGPT device-code sign-in. The existing OpenAI Responses API harness remains an explicit API-key fallback with `gpt-5.6-sol` and medium reasoning.
+- Codex sign-in copies the one-time device code before opening the official verification page, survives repeated browser/app switching with one resumable poll, keeps a selectable copy and explicit completion status in-app, retries transient polling network failures, and clears the matching clipboard value after success.
+- Codex subscription runs discover the account's current default model, stream through the phone-native authenticated bridge, and drive the same bounded Workshop inspect/edit/compile/test loop without API-key dollar budgeting.
+- Provider selection persists immediately. Existing signed-in installations receive a one-time migration to Codex primary now that the turn bridge is available; later manual API/Codex choices are respected.
+- Context & Images includes a direct 512x512 rough-layout sketch action. Mini Paint can save any canvas as a project PNG or save-and-attach it to the next AI command; queued metadata preserves its `design_sketch` role so the model treats structure as guidance rather than draft art as a final-quality target.
+- Shows monthly USD spend only for the API-key fallback. Codex mode instead shows the last native five-hour/weekly remaining percentages and refreshes them after a Codex action with a 30-minute attempt debounce.
 - Provides an explicit `Reset Project` control for restoring the bundled sample. Manual `Apply` saves and compiles immediately; there is no separate manual compile button. The automatic loop and manual controls both use the native compile/run path, with runtime ticks routed through the Rust JIT bridge when packaged. The probe reads project `.stasis` files, validates basic source structure, checks lifecycle roots, and writes `build/native_compile_manifest.txt` with project counts, per-function signature/body hashes, per-function compiled-stub artifacts under `build/functions`, a `build/runtime_state.txt` state artifact, and a reload classification (`InitialCompile`, `NoChange`, `FastReload`, or `ResetRequired`), then returns `CompilePlanned` or `CompileError` diagnostics.
 - Resizes and scrolls the editor when the Android keyboard opens so the active source remains visible.
 - Keeps fixed trailing scroll space under the editor as a fallback for phones where IME resize is inconsistent.
@@ -58,7 +63,13 @@ From this directory:
 .\build_debug.ps1
 ```
 
-Or call Gradle directly:
+This builds the Stasis Rust bridge plus the optimized phone-native Codex login
+library from its pinned official revision, packages the Android Rustls verifier,
+and assembles the Workshop APK. The first Codex build downloads upstream Rust
+dependencies and takes longer; subsequent builds reuse Cargo output.
+
+For API-fallback-only iteration after the native artifacts already exist, call
+Gradle directly:
 
 ```powershell
 gradle :app:assembleWorkshopDebug
@@ -120,9 +131,13 @@ OpenAI and GitHub secrets are encrypted with AES-GCM using a key held by Android
 
 GitHub uploads and pull-request operations share one serial background queue. The app persists whether an operation was queued, running, completed, failed, or interrupted. `Retry GitHub Operation` reconstructs failed work from current app-private files; pull-request retries also recheck the saved review fingerprint and stop if the files changed after review.
 
-`Queue AI Change` and the voice `Run` action append to the same durable per-project FIFO. The queue visibly distinguishes pending, active, and terminal work; pending items can be cancelled before any API call. `Cancel AI` disconnects the active model request and prevents later model/tool turns. If cancellation arrives during an atomic source-write batch, that batch first reaches its existing compile/test/rollback boundary so source is never left partially applied. Any model call that already returned remains included in budget totals. Project-image paths, dimensions, byte counts, and SHA-256 values plus logical-preview consent are snapshotted at submission and revalidated before delayed execution. Explicitly selected captured-preview pixels are encoded into a bounded, hashed, fsynced queue file and deleted on cancellation or terminal completion.
+Typed `Run` and confirmed voice `Run` append to the same durable per-project FIFO. The queue visibly distinguishes pending, active, and terminal work; pending items can be cancelled before any call. Active `Stop` disconnects the API request or drops the phone-native Codex response future, then prevents later model/tool turns. If cancellation arrives during an atomic source-write batch, that batch first reaches its existing compile/test/rollback boundary so source is never left partially applied. Any call that already returned remains included in the applicable provider usage totals. Project-image paths, dimensions, byte counts, and SHA-256 values plus logical-preview consent are snapshotted at submission and revalidated before delayed execution. Explicitly selected captured-preview pixels are encoded into a bounded, hashed, fsynced queue file and deleted on cancellation or terminal completion.
 
-`Recent Commands` also shows bounded per-project AI outcomes, including cancellation/failure/rollback status, usage summaries when available, and the local trace path. `Retry Last AI` restores the latest recorded request and starts it again through the normal key, pricing, per-run, and monthly budget checks.
+Pending AI work is not claimed while Android has no validated internet connection. It stays visible and cancellable in the durable queue, then resumes when Android's default-network callback reports usable connectivity.
+
+AI, GitHub sync/PR, project/media import/export, and support export share one process-level foreground lease with an Android `dataSync` notification. The notification opens the Workshop; AI also exposes `Stop` through the same safe API/Codex cancellation path. Destroying the Activity does not silently terminate the leased operation. Explicit user work continues during battery saver, while the shared policy reserves unplugged battery-saver deferral for future automatic work.
+
+`Recent Commands` also shows bounded per-project AI outcomes, including cancellation/failure/rollback status, usage summaries when available, and the local trace path. `Retry Last AI` restores the latest recorded request and starts it again through the selected provider's normal sign-in/key and limit checks.
 
 `Projects` is collapsed below the command workflow. Fresh installs start with Exploration Garden; existing v1/v2 sample projects retain Pong identity. `New Project From Selected Template` offers Exploration Garden and Pong, creates a separately identified app-private project, and records the choice. `Switch Project` changes the root used by symbols, compile, tests, AI history, and GitHub state and immediately recompiles it. Reset and Changes use the recorded template baseline rather than whichever template is currently the default. Project creation/switching is blocked while AI or GitHub work is active or the source editor contains an unapplied edit. GitHub repository/branch targets and review/retry state are project-specific; the encrypted token is shared.
 

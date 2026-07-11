@@ -26,13 +26,20 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopMoney.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiPricing.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopConnectivity.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopBackgroundWorkPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkCoordinator.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkService.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopRestartLoopPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
+    "mobile/android/codex_native/src/lib.rs",
     "mobile/android/app/src/main/res/values/styles.xml",
     "mobile/android/app/src/main/assets/workshop_sample/src/main.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/root.stasis",
@@ -148,6 +155,10 @@ def main() -> int:
     assert "android.permission.INTERNET" not in manifest
     assert "android.permission.RECORD_AUDIO" in workshop_manifest
     assert "android.permission.INTERNET" in workshop_manifest
+    assert "android.permission.ACCESS_NETWORK_STATE" in workshop_manifest
+    assert "android.permission.FOREGROUND_SERVICE" in workshop_manifest
+    assert "android.permission.FOREGROUND_SERVICE_DATA_SYNC" in workshop_manifest
+    assert 'android:foregroundServiceType="dataSync"' in workshop_manifest
     assert "${appLabel}" in manifest
     assert "android.intent.action.MAIN" in manifest
     assert "android.intent.category.LAUNCHER" in manifest
@@ -168,6 +179,7 @@ def main() -> int:
     asset_manifest = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java")
     asset_identity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java")
     money = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopMoney.java")
+    ai_pricing = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiPricing.java")
     assert "MediaExtractor" in audio_assets
     assert "MediaFormat.KEY_SAMPLE_RATE" in audio_assets
     assert "MediaFormat.KEY_CHANNEL_COUNT" in audio_assets
@@ -308,8 +320,9 @@ def main() -> int:
     assert "time 0.0s" in activity
     assert "hot swap=FastReload" in activity
     assert "aiReloadPhase" in activity
-    assert "Chat and Commands" in activity
-    assert "Queue AI Change" in activity
+    assert "Context & Images" in activity
+    assert 'aiPatch.setText("Run")' in activity
+    assert 'aiCancelButton.setText("Stop")' in activity
     assert "AI Work Queue" in activity
     assert 'runAiPatch("voice", null)' in activity
     assert "cancelPendingAiItem" in activity
@@ -330,7 +343,8 @@ def main() -> int:
     assert "pruneOrphanPreviews" in ai_queue
     assert "removeOldestTerminal" in ai_queue
     assert "AiQueuePolicy.terminal(state)" in ai_queue
-    assert "index < first && !AndroidAiQueue.PENDING.equals(item.state)" in activity
+    assert "!AndroidAiQueue.PENDING.equals(item.state)" in activity
+    assert "&& !AndroidAiQueue.IN_PROGRESS.equals(item.state)" in activity
     assert "encodeBitmapPng" in activity
     assert "queuedEntry.previewFile" in activity
     assert "nextPendingIndex" in ai_queue_policy
@@ -354,11 +368,10 @@ def main() -> int:
     assert 'recordAiOutcome(activeAiPrompt, "cancelled"' in activity
     assert 'recordAiOutcome(activeAiPrompt, "applied"' in activity
     assert 'recordAiOutcome(activeAiPrompt, "rolled_back"' in activity
-    assert "Maximum USD per AI run" in activity
-    assert "Monthly AI limit USD" in activity
+    assert "Device monthly AI limit USD" in activity
     assert "AI budget:" in activity
-    assert "AI run blocked by configured spending limit" in activity
-    assert "AI spending limit reached before agent turn" in activity
+    assert "AI run blocked by the device monthly spending limit" in activity
+    assert "Device monthly AI spending limit reached before agent turn" in activity
     assert "recordMonthlyAiSpend" in activity
     assert "maxOutputTokensForBudget" in activity
     assert "MAX_AI_IMAGE_ATTACHMENTS = 4" in activity
@@ -368,8 +381,8 @@ def main() -> int:
     assert 'put("type", "input_image")' in activity
     assert 'put("detail", "original")' in activity
     assert '"data:" + attachment.mimeType + ";base64,"' in activity
-    assert "buildAiOpenAiInput(requestJson, false)" in activity
-    assert "buildAiOpenAiInput(requestJson, true)" in activity
+    assert "buildAiOpenAiInput(requestJson, false, pricing.explicitCacheBreakpoints)" in activity
+    assert "buildAiOpenAiInput(requestJson, true, pricing.explicitCacheBreakpoints)" in activity
     assert "selected_images_are_explicit_project_assets_only" in activity
     assert "activeAiImageAttachments = Collections.emptyList()" in activity
     assert "Capture Preview for AI" in activity
@@ -506,6 +519,9 @@ def main() -> int:
     assert "Previous crash detected" in activity
     assert "Clear Local Crash Record" in activity
     assert "AndroidCrashStore.clear" in activity
+    assert "Restart loop detected" in activity
+    assert "restartLoopRecoveryActive" in activity
+    assert "AndroidCrashStore.markLaunchStable" in activity
     assert 'FILE_NAME = "android_crash_redacted.json"' in crash_store
     assert "MAX_FRAMES = 30" in crash_store
     assert "MAX_RECORD_BYTES = 64 * 1024" in crash_store
@@ -519,15 +535,28 @@ def main() -> int:
     assert "output.getFD().sync()" in crash_store
     assert '"previous_crash"' in support_bundle
     assert "max_output_tokens" in activity
-    assert "AI spending limit leaves insufficient budget" in activity
-    assert "Cancel AI" in activity
+    assert "Device monthly AI spending limit reached" in activity
+    assert 'aiCancelButton.setText("Stop")' in activity
     assert "aiRunActive" in activity
     assert "aiCancelRequested" in activity
     assert "AI request queued behind the active item" in activity
+    assert "registerDefaultNetworkCallback" in activity
+    assert "unregisterNetworkCallback" in activity
+    assert "AI work is waiting for an internet connection" in activity
+    assert "WorkshopBackgroundWorkPolicy.decide" in activity
+    assert "WorkshopLongWorkCoordinator.beginAi" in activity
+    assert "WorkshopLongWorkCoordinator.finishAi" in activity
+    assert "WorkshopLongWorkCoordinator.isAiActive" in activity
+    assert "WorkshopLongWorkCoordinator.beginGitHub" in activity
+    assert "WorkshopLongWorkCoordinator.finishGitHub" in activity
+    assert "WorkshopLongWorkCoordinator.beginProjectIo" in activity
+    assert "WorkshopLongWorkCoordinator.finishProjectIo" in activity
     assert "throwIfAiCancelled()" in activity
     assert "if (!batchHasWrites) throwIfAiCancelled()" in activity
     assert "finishing any active call or atomic write batch" in activity
     assert "activeAiConnection" in activity
+    assert "nativeCodexBeginResponse()" in activity
+    assert "nativeCodexCancelResponse()" in activity
     assert "AI_CONNECT_TIMEOUT_MS" in activity
     assert "AI_READ_TIMEOUT_MS" in activity
     assert "completed calls remain in usage totals" in activity
@@ -750,10 +779,7 @@ def main() -> int:
     assert "AI read_symbol target ambiguous: " in activity
     assert "AI read_symbol target not found: " in activity
     assert "AI read_symbol target ambiguous or not found" not in activity
-    assert "private static final double GPT_5_6_SOL_INPUT_USD_PER_MILLION = 5.00" in activity
-    assert "private static final double GPT_5_6_SOL_CACHED_INPUT_USD_PER_MILLION = 0.50" in activity
-    assert "private static final double GPT_5_6_SOL_CACHE_WRITE_USD_PER_MILLION = 6.25" in activity
-    assert "private static final double GPT_5_6_SOL_OUTPUT_USD_PER_MILLION = 30.00" in activity
+    assert "SOL = gpt56(5.00, 0.50, 6.25, 30.00)" in ai_pricing
     assert "private AiApiResponse callOpenAiResponsesApi" in activity
     assert "extractAiUsage(response)" in activity
     assert "saveLastAiUsage(aiResult.usageJson)" in activity
@@ -903,8 +929,8 @@ def main() -> int:
     assert "readSecretPreference(aiPrefs, AI_PREF_API_KEY)" in activity
     assert "aiPrefs.getString(AI_PREF_MODEL" in activity
     assert 'DEFAULT_AI_MODEL = "gpt-5.6-sol"' in activity
-    assert 'DEFAULT_AI_REASONING_EFFORT = "medium"' in activity
     assert 'reasoningSummary.setText("Reasoning: medium")' in activity
+    assert 'put("effort", "medium")' in activity
     assert 'GPT-5.6 Sol defaults to medium reasoning' in activity
     assert '"gpt-5.6-terra".equals(configuredModel)' in activity
     assert "AI_PREF_MODEL_DEFAULT_VERSION" in activity
@@ -915,7 +941,7 @@ def main() -> int:
     assert "prompt_cache_breakpoint" in activity
     assert 'content.put("prompt_cache_breakpoint", new JSONObject().put("mode", "explicit"))' in activity
     assert 'payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"))' in activity
-    assert 'payload.put("reasoning", new JSONObject().put("effort", DEFAULT_AI_REASONING_EFFORT))' in activity
+    assert 'payload.put("reasoning", new JSONObject().put("effort", pricing.reasoningEffort))' in activity
     assert 'put("type", "prompt_cache_breakpoint")' not in activity
     assert 'payload.put("prompt_cache_retention"' not in activity
     assert '"prompt_cache_options": {"mode": "explicit", "ttl": "30m"}' in host_agent
@@ -1041,6 +1067,11 @@ def main() -> int:
     assert "status=CompiledStub" in workshop
 
     native = read("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
+    codex_native = read("mobile/android/codex_native/src/lib.rs")
+    assert "stasis_codex_android_begin_response" in native
+    assert "stasis_codex_android_cancel_response" in native
+    assert "cancel_on_generation_change" in codex_native
+    assert "Codex request cancelled" in codex_native
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
     assert "try_rust_bridge_compile" in native
