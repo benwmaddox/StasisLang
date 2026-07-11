@@ -36,6 +36,7 @@ import android.widget.CheckBox;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -81,6 +82,8 @@ public final class MainActivity extends Activity {
     private static final String PROJECT_DIR = WorkshopProjectRegistry.LEGACY_PROJECT_DIR;
     private static final String PROJECT_BASELINES_DIR = "workshop_project_baselines";
     private static final String PROJECT_BASELINE_READY = ".ready";
+    private static final String SAMPLE_MIGRATION_PREFS = "workshop_sample_migrations";
+    private static final String PONG_SLOW_BALL_MIGRATION = "pong_slow_ball_v1";
     private static final String AI_PREFS = "ai_settings";
     private static final String ONBOARDING_PREFS = "onboarding_settings";
     private static final String ONBOARDING_COMPLETE = "manual_tutorial_seen_v1";
@@ -169,6 +172,7 @@ public final class MainActivity extends Activity {
     private LinearLayout aiSettingsBody;
     private LinearLayout commandHistoryBody;
     private TextView commandHistoryText;
+    private LinearLayout aiQueueSection;
     private LinearLayout aiQueueBody;
     private LinearLayout githubSettingsBody;
     private LinearLayout privacySettingsBody;
@@ -291,6 +295,7 @@ public final class MainActivity extends Activity {
 
         ProjectSnapshot project = loadBundledProject();
         try {
+            if (migrateBundledPongBallSpeed()) project = loadBundledProject();
             ensureActiveProjectBaseline(project);
         } catch (IOException error) {
             projectRegistryError = "baseline: " + error.getMessage();
@@ -643,12 +648,25 @@ public final class MainActivity extends Activity {
         reloadStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         content.addView(reloadStatus, fullWidth());
 
+        Button diagnosticToggle = new Button(this);
+        diagnosticToggle.setText("Diagnostics & Recovery");
+        content.addView(diagnosticToggle, fullWidth());
+        final LinearLayout diagnosticBody = new LinearLayout(this);
+        diagnosticBody.setOrientation(LinearLayout.VERTICAL);
+        diagnosticBody.setVisibility(View.GONE);
+        diagnosticToggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                diagnosticBody.setVisibility(diagnosticBody.getVisibility() == View.VISIBLE
+                        ? View.GONE : View.VISIBLE);
+            }
+        });
+
         diagnosticStatus = new TextView(this);
         diagnosticStatus.setTextSize(12.0f);
         diagnosticStatus.setTextColor(Color.rgb(125, 55, 45));
         diagnosticStatus.setTypeface(Typeface.MONOSPACE);
         diagnosticStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE);
-        content.addView(diagnosticStatus, fullWidth());
+        diagnosticBody.addView(diagnosticStatus, fullWidth());
         LinearLayout diagnosticActions = new LinearLayout(this);
         boolean narrowLayout = getResources().getConfiguration().screenWidthDp < 480;
         diagnosticActions.setOrientation(narrowLayout ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
@@ -673,7 +691,7 @@ public final class MainActivity extends Activity {
         });
         diagnosticActions.addView(undoFailedApply, narrowLayout ? fullWidth()
                 : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
-        content.addView(diagnosticActions, fullWidth());
+        diagnosticBody.addView(diagnosticActions, fullWidth());
         refreshRecoveryStatus();
 
         changeSummary = new TextView(this);
@@ -681,7 +699,8 @@ public final class MainActivity extends Activity {
         changeSummary.setTextSize(12.0f);
         changeSummary.setTypeface(Typeface.MONOSPACE);
         changeSummary.setPadding(0, dp(6), 0, dp(6));
-        content.addView(changeSummary, fullWidth());
+        diagnosticBody.addView(changeSummary, fullWidth());
+        content.addView(diagnosticBody, fullWidth());
         refreshChangeSummary(project);
 
         View keyboardSpacer = new View(this);
@@ -981,7 +1000,8 @@ public final class MainActivity extends Activity {
             voiceActionRow.bringToFront();
         }
         if (voiceToggle != null) {
-            voiceToggle.bringToFront();
+            voiceToggle.setVisibility(opening ? View.GONE : View.VISIBLE);
+            if (!opening) voiceToggle.bringToFront();
         }
     }
 
@@ -1014,8 +1034,19 @@ public final class MainActivity extends Activity {
 
     private void setStatusText(String status) {
         if (reloadStatus != null) {
-            reloadStatus.setText(status);
+            reloadStatus.setText(compactStatusText(status));
         }
+    }
+
+    private static String compactStatusText(String status) {
+        if (status == null) return "";
+        if (status.startsWith("CompilePlanned") && status.contains("status=0")) {
+            String reload = reloadKind(status);
+            if ("FastReload".equals(reload)) return "Game updated - hot swapped";
+            if ("ResetRequired".equals(reload)) return "Game updated - restarted";
+            return "Game ready";
+        }
+        return status;
     }
 
     private TextView createAiProgressPill(String text) {
@@ -1290,36 +1321,41 @@ public final class MainActivity extends Activity {
         controls.setOrientation(LinearLayout.VERTICAL);
         controls.setPadding(0, dp(8), 0, 0);
 
-        TextView aiTitle = new TextView(this);
-        aiTitle.setText("Chat and Commands");
-        aiTitle.setTextColor(Color.rgb(35, 45, 60));
-        aiTitle.setTextSize(14.0f);
-        aiTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        if (Build.VERSION.SDK_INT >= 28) aiTitle.setAccessibilityHeading(true);
-        controls.addView(aiTitle, fullWidth());
-
         SharedPreferences aiPrefs = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
 
         aiPromptEditor = new EditText(this);
         aiPromptEditor.setHint("Describe a game change or command. The workspace will inspect, edit, compile, and test it.");
         aiPromptEditor.setSingleLine(false);
-        aiPromptEditor.setMinLines(2);
-        aiPromptEditor.setTextSize(12.0f);
+        aiPromptEditor.setMinLines(3);
+        aiPromptEditor.setTextSize(14.0f);
         aiPromptEditor.setContentDescription("Game change or command for the AI workshop agent");
         controls.addView(aiPromptEditor, fullWidth());
+
+        Button contextToggle = new Button(this);
+        contextToggle.setText("Context & Images");
+        controls.addView(contextToggle, fullWidth());
+        final LinearLayout contextBody = new LinearLayout(this);
+        contextBody.setOrientation(LinearLayout.VERTICAL);
+        contextBody.setVisibility(View.GONE);
+        contextToggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                contextBody.setVisibility(contextBody.getVisibility() == View.VISIBLE
+                        ? View.GONE : View.VISIBLE);
+            }
+        });
 
         aiAttachmentStatus = new TextView(this);
         aiAttachmentStatus.setTextSize(12.0f);
         aiAttachmentStatus.setTextColor(Color.rgb(73, 84, 100));
         aiAttachmentStatus.setPadding(0, dp(3), 0, dp(2));
-        controls.addView(aiAttachmentStatus, fullWidth());
+        contextBody.addView(aiAttachmentStatus, fullWidth());
         Button reviewAttachments = new Button(this);
         reviewAttachments.setText("Review AI Image Attachments");
         reviewAttachments.setContentDescription("Review or remove project images selected for the next AI request");
         reviewAttachments.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { reviewAiImageAttachments(); }
         });
-        controls.addView(reviewAttachments, fullWidth());
+        contextBody.addView(reviewAttachments, fullWidth());
         refreshAiAttachmentStatus();
         screenshotAttachmentStatus = new TextView(this);
         screenshotAttachmentStatus.setTextSize(12.0f);
@@ -1328,24 +1364,25 @@ public final class MainActivity extends Activity {
         screenshotAttachmentStatus.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { reviewPreviewCaptureForAi(); }
         });
-        controls.addView(screenshotAttachmentStatus, fullWidth());
+        contextBody.addView(screenshotAttachmentStatus, fullWidth());
         Button capturePreview = new Button(this);
         capturePreview.setText("Capture Preview for AI");
         capturePreview.setContentDescription("Capture and review the rendered game preview for the next AI request");
         capturePreview.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { capturePreviewForAi(); }
         });
-        controls.addView(capturePreview, fullWidth());
+        contextBody.addView(capturePreview, fullWidth());
         refreshScreenshotAttachmentStatus();
         allowAiImageGeneration = new CheckBox(this);
         allowAiImageGeneration.setText("Allow one low-quality 1024x1024 AI image (~$0.006 plus Sol usage)");
         allowAiImageGeneration.setChecked(false);
-        controls.addView(allowAiImageGeneration, fullWidth());
+        contextBody.addView(allowAiImageGeneration, fullWidth());
+        controls.addView(contextBody, fullWidth());
 
         LinearLayout aiActionRow = new LinearLayout(this);
         aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
         Button aiPatch = new Button(this);
-        aiPatch.setText("Queue AI Change");
+        aiPatch.setText("Run Change");
         aiPatch.setContentDescription("Queue the requested AI change with current reviewed attachments and budget limits");
         aiPatch.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -1355,7 +1392,7 @@ public final class MainActivity extends Activity {
         });
         aiActionRow.addView(aiPatch, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         Button cancelAi = new Button(this);
-        cancelAi.setText("Cancel AI");
+        cancelAi.setText("Stop");
         cancelAi.setContentDescription("Cancel the active AI run after its current atomic operation");
         cancelAi.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { cancelAiRun(); }
@@ -1363,20 +1400,22 @@ public final class MainActivity extends Activity {
         aiActionRow.addView(cancelAi, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         controls.addView(aiActionRow, fullWidth());
 
+        aiQueueSection = new LinearLayout(this);
+        aiQueueSection.setOrientation(LinearLayout.VERTICAL);
         TextView queueTitle = new TextView(this);
         queueTitle.setText("AI Work Queue");
         queueTitle.setTextColor(Color.rgb(35, 45, 60));
         queueTitle.setTypeface(Typeface.DEFAULT_BOLD);
         queueTitle.setPadding(0, dp(6), 0, dp(2));
-        controls.addView(queueTitle, fullWidth());
+        aiQueueSection.addView(queueTitle, fullWidth());
         aiQueueBody = new LinearLayout(this);
         aiQueueBody.setOrientation(LinearLayout.VERTICAL);
-        controls.addView(aiQueueBody, fullWidth());
+        aiQueueSection.addView(aiQueueBody, fullWidth());
+        controls.addView(aiQueueSection, fullWidth());
         refreshAiQueue();
 
         LinearLayout progressRow = new LinearLayout(this);
-        progressRow.setOrientation(getResources().getConfiguration().screenWidthDp < 480
-                ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        progressRow.setOrientation(LinearLayout.HORIZONTAL);
         progressRow.setGravity(Gravity.LEFT);
         aiStepPill = createAiProgressPill("step 0/" + MAX_AI_AGENT_TURNS);
         aiActionPill = createAiProgressPill("actions 0");
@@ -1386,7 +1425,10 @@ public final class MainActivity extends Activity {
         progressRow.addView(aiActionPill);
         progressRow.addView(aiPhasePill);
         progressRow.addView(aiElapsedPill);
-        controls.addView(progressRow, fullWidth());
+        HorizontalScrollView progressScroller = new HorizontalScrollView(this);
+        progressScroller.setHorizontalScrollBarEnabled(false);
+        progressScroller.addView(progressRow);
+        controls.addView(progressScroller, fullWidth());
 
         aiBudgetStatus = new TextView(this);
         aiBudgetStatus.setTextSize(12.0f);
@@ -1395,12 +1437,25 @@ public final class MainActivity extends Activity {
         controls.addView(aiBudgetStatus, fullWidth());
         refreshAiBudgetStatus();
 
+        Button moreToolsToggle = new Button(this);
+        moreToolsToggle.setText("More Tools & Settings");
+        controls.addView(moreToolsToggle, fullWidth());
+        final LinearLayout moreToolsBody = new LinearLayout(this);
+        moreToolsBody.setOrientation(LinearLayout.VERTICAL);
+        moreToolsBody.setVisibility(View.GONE);
+        moreToolsToggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                moreToolsBody.setVisibility(moreToolsBody.getVisibility() == View.VISIBLE
+                        ? View.GONE : View.VISIBLE);
+            }
+        });
+
         Button historyToggle = new Button(this);
         historyToggle.setText("Recent Commands");
         historyToggle.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { toggleCommandHistory(); }
         });
-        controls.addView(historyToggle, fullWidth());
+        moreToolsBody.addView(historyToggle, fullWidth());
         commandHistoryBody = new LinearLayout(this);
         commandHistoryBody.setOrientation(LinearLayout.VERTICAL);
         commandHistoryBody.setVisibility(View.GONE);
@@ -1421,7 +1476,7 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { retryLastAiRequest(); }
         });
         commandHistoryBody.addView(retryLastAi, fullWidth());
-        controls.addView(commandHistoryBody, fullWidth());
+        moreToolsBody.addView(commandHistoryBody, fullWidth());
         refreshCommandHistory();
 
         Button projectSettingsToggle = new Button(this);
@@ -1429,7 +1484,7 @@ public final class MainActivity extends Activity {
         projectSettingsToggle.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { toggleProjectSettings(); }
         });
-        controls.addView(projectSettingsToggle, fullWidth());
+        moreToolsBody.addView(projectSettingsToggle, fullWidth());
         projectSettingsBody = new LinearLayout(this);
         projectSettingsBody.setOrientation(LinearLayout.VERTICAL);
         projectSettingsBody.setVisibility(View.GONE);
@@ -1560,7 +1615,7 @@ public final class MainActivity extends Activity {
         audioAssetList = new LinearLayout(this);
         audioAssetList.setOrientation(LinearLayout.VERTICAL);
         projectSettingsBody.addView(audioAssetList, fullWidth());
-        controls.addView(projectSettingsBody, fullWidth());
+        moreToolsBody.addView(projectSettingsBody, fullWidth());
         refreshProjectControls();
         refreshImageAssetList();
         refreshAudioAssetList();
@@ -1569,7 +1624,7 @@ public final class MainActivity extends Activity {
         githubSyncStatus.setTextSize(12.0f);
         githubSyncStatus.setTextColor(Color.rgb(73, 84, 100));
         githubSyncStatus.setPadding(0, dp(4), 0, dp(2));
-        controls.addView(githubSyncStatus, fullWidth());
+        moreToolsBody.addView(githubSyncStatus, fullWidth());
         refreshGitHubSyncStatus();
 
         Button settingsToggle = new Button(this);
@@ -1580,7 +1635,7 @@ public final class MainActivity extends Activity {
                 toggleAiSettings();
             }
         });
-        controls.addView(settingsToggle, fullWidth());
+        moreToolsBody.addView(settingsToggle, fullWidth());
 
         aiSettingsBody = new LinearLayout(this);
         aiSettingsBody.setOrientation(LinearLayout.VERTICAL);
@@ -1664,7 +1719,7 @@ public final class MainActivity extends Activity {
             }
         });
         aiSettingsBody.addView(saveSettings, fullWidth());
-        controls.addView(aiSettingsBody, fullWidth());
+        moreToolsBody.addView(aiSettingsBody, fullWidth());
         refreshPhoneNativeCodexStatus();
 
         Button githubSettingsToggle = new Button(this);
@@ -1675,7 +1730,7 @@ public final class MainActivity extends Activity {
                 toggleGitHubSettings();
             }
         });
-        controls.addView(githubSettingsToggle, fullWidth());
+        moreToolsBody.addView(githubSettingsToggle, fullWidth());
 
         SharedPreferences githubPrefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
         githubSettingsBody = new LinearLayout(this);
@@ -1730,7 +1785,7 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { retryGitHubOperation(); }
         });
         githubSettingsBody.addView(retryGitHubOperation, fullWidth());
-        controls.addView(githubSettingsBody, fullWidth());
+        moreToolsBody.addView(githubSettingsBody, fullWidth());
 
         Button privacyToggle = new Button(this);
         privacyToggle.setText("Privacy & Data");
@@ -1740,7 +1795,7 @@ public final class MainActivity extends Activity {
                         privacySettingsBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
             }
         });
-        controls.addView(privacyToggle, fullWidth());
+        moreToolsBody.addView(privacyToggle, fullWidth());
         privacySettingsBody = new LinearLayout(this);
         privacySettingsBody.setOrientation(LinearLayout.VERTICAL);
         privacySettingsBody.setVisibility(View.GONE);
@@ -1801,7 +1856,7 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { confirmDeleteActiveProject(); }
         });
         privacySettingsBody.addView(deleteProject, fullWidth());
-        controls.addView(privacySettingsBody, fullWidth());
+        moreToolsBody.addView(privacySettingsBody, fullWidth());
 
         Button onboardingToggle = new Button(this);
         onboardingToggle.setText("Help & Onboarding");
@@ -1810,7 +1865,7 @@ public final class MainActivity extends Activity {
                 onboardingBody.setVisibility(onboardingBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
             }
         });
-        controls.addView(onboardingToggle, fullWidth());
+        moreToolsBody.addView(onboardingToggle, fullWidth());
         onboardingBody = new LinearLayout(this);
         onboardingBody.setOrientation(LinearLayout.VERTICAL);
         onboardingBody.setVisibility(View.GONE);
@@ -1838,7 +1893,8 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { startManualTutorial(); }
         });
         onboardingBody.addView(startManual, fullWidth());
-        controls.addView(onboardingBody, fullWidth());
+        moreToolsBody.addView(onboardingBody, fullWidth());
+        controls.addView(moreToolsBody, fullWidth());
         return controls;
     }
 
@@ -2338,17 +2394,22 @@ public final class MainActivity extends Activity {
         aiQueueBody.removeAllViews();
         try {
             List<AndroidAiQueue.Entry> items = AndroidAiQueue.list(this, activeRecoveryProjectId());
-            if (items.isEmpty()) {
-                TextView empty = new TextView(this);
-                empty.setText("No queued AI work");
-                empty.setTextColor(Color.rgb(73, 84, 100));
-                aiQueueBody.addView(empty, fullWidth());
+            boolean hasActiveItems = false;
+            for (AndroidAiQueue.Entry item : items) {
+                if (AndroidAiQueue.PENDING.equals(item.state)
+                        || AndroidAiQueue.IN_PROGRESS.equals(item.state)) {
+                    hasActiveItems = true;
+                    break;
+                }
+            }
+            if (!hasActiveItems) {
+                if (aiQueueSection != null) aiQueueSection.setVisibility(View.GONE);
                 return;
             }
-            int first = Math.max(0, items.size() - 20);
+            if (aiQueueSection != null) aiQueueSection.setVisibility(View.VISIBLE);
             for (int index = 0; index < items.size(); index += 1) {
                 final AndroidAiQueue.Entry item = items.get(index);
-                if (index < first && !AndroidAiQueue.PENDING.equals(item.state)
+                if (!AndroidAiQueue.PENDING.equals(item.state)
                         && !AndroidAiQueue.IN_PROGRESS.equals(item.state)) continue;
                 LinearLayout row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
@@ -2372,6 +2433,7 @@ public final class MainActivity extends Activity {
                 aiQueueBody.addView(row, fullWidth());
             }
         } catch (Exception error) {
+            if (aiQueueSection != null) aiQueueSection.setVisibility(View.VISIBLE);
             TextView unavailable = new TextView(this);
             unavailable.setText("AI queue unavailable: " + error.getMessage());
             aiQueueBody.addView(unavailable, fullWidth());
@@ -7413,7 +7475,7 @@ public final class MainActivity extends Activity {
         File readyFile = new File(baselineRoot, PROJECT_BASELINE_READY);
         String templateId = activeProject == null ? WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID
                 : activeProject.templateId;
-        String expectedReady = "format=2\ntemplate_id=" + templateId + "\n";
+        String expectedReady = "format=3\ntemplate_id=" + templateId + "\n";
         if (readyFile.isFile() && expectedReady.equals(readTextFile(readyFile))) return;
         ProjectSnapshot baseline = activeProject != null && "import".equals(activeProject.origin)
                 ? current : loadBundledAssetSnapshot();
@@ -7985,6 +8047,29 @@ public final class MainActivity extends Activity {
         }
 
         return ProjectSnapshot.from(files);
+    }
+
+    private boolean migrateBundledPongBallSpeed() throws IOException {
+        if (activeProject == null || !"sample".equals(activeProject.origin)
+                || !WorkshopTemplateCatalog.LEGACY_TEMPLATE_ID.equals(activeProject.templateId)) {
+            return false;
+        }
+        SharedPreferences preferences = getSharedPreferences(SAMPLE_MIGRATION_PREFS, MODE_PRIVATE);
+        String key = activeProject.id + ":" + PONG_SLOW_BALL_MIGRATION;
+        if (preferences.getBoolean(key, false)) return false;
+
+        File sourceFile = new File(projectRoot(), "src/main.stasis");
+        if (!sourceFile.isFile()) return false;
+        String before = readTextFile(sourceFile);
+        String after = before
+                .replace("GameState.ball_vx = 5;", "GameState.ball_vx = 3;")
+                .replace("GameState.ball_vx = -5;", "GameState.ball_vx = -3;")
+                .replace("GameState.ball_vy = 4;", "GameState.ball_vy = 3;");
+        if (!after.equals(before)) writeTextFile(sourceFile, after);
+        if (!preferences.edit().putBoolean(key, true).commit()) {
+            throw new IOException("unable to record bundled Pong speed migration");
+        }
+        return !after.equals(before);
     }
 
     private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile) throws IOException {

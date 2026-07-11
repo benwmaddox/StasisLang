@@ -73,8 +73,8 @@ function init(): void {
     GameState.ai_y = 320;
     GameState.ball_x = 180;
     GameState.ball_y = 320;
-    GameState.ball_vx = 5;
-    GameState.ball_vy = 4;
+    GameState.ball_vx = 3;
+    GameState.ball_vy = 3;
     GameState.ball_age_ticks = 0;
     GameState.enemy_paddle_speed_x100 = 1500;
     GameState.player_score = 0;
@@ -163,11 +163,11 @@ function update_ball(): void {
     }
 
     if (ball_overlaps_vertical_paddle(28, GameState.player_y) && GameState.ball_vx < 0) {
-        GameState.ball_vx = 5;
+        GameState.ball_vx = 3;
     }
 
     if (ball_overlaps_vertical_paddle(GameState.screen_w - 28, GameState.ai_y) && GameState.ball_vx > 0) {
-        GameState.ball_vx = -5;
+        GameState.ball_vx = -3;
     }
 
     if (GameState.ball_x < 0) {
