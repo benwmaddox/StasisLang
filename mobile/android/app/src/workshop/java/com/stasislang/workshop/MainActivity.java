@@ -97,6 +97,7 @@ public final class MainActivity extends Activity {
     private static final String AI_SETUP_COMPLETE = "ai_setup_complete_v1";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_PROVIDER = "ai_provider";
+    private static final String AI_PREF_CODEX_FAST_MODE = "codex_fast_mode";
     private static final String AI_PROVIDER_CODEX = "codex_on_device";
     private static final String AI_PROVIDER_API = "openai_api";
     private static final String AI_PREF_MODEL = "openai_model";
@@ -175,6 +176,7 @@ public final class MainActivity extends Activity {
     private EditText aiApiKeyEditor;
     private Spinner aiProviderSelector;
     private boolean aiProviderSelectionFromTouch;
+    private CheckBox codexFastMode;
     private TextView codexAccountStatus;
     private EditText aiModelEditor;
     private EditText aiMonthlyLimitUsdEditor;
@@ -1763,6 +1765,11 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { beginPhoneNativeCodexLogin(); }
         });
         aiSettingsBody.addView(codexSignIn, fullWidth());
+
+        codexFastMode = new CheckBox(this);
+        codexFastMode.setText("Fast Codex responses (about 1.5x speed; uses subscription allowance faster)");
+        codexFastMode.setChecked(aiPrefs.getBoolean(AI_PREF_CODEX_FAST_MODE, false));
+        aiSettingsBody.addView(codexFastMode, fullWidth());
 
         TextView apiFallbackLabel = new TextView(this);
         apiFallbackLabel.setText("Optional API fallback");
@@ -3585,6 +3592,7 @@ public final class MainActivity extends Activity {
         if (aiMonthlyLimitUsdEditor != null) {
             aiMonthlyLimitUsdEditor.setVisibility(codex ? View.GONE : View.VISIBLE);
         }
+        if (codexFastMode != null) codexFastMode.setVisibility(codex ? View.VISIBLE : View.GONE);
         refreshAiBudgetStatus();
         refreshAiAttachmentStatus();
     }
@@ -3948,6 +3956,8 @@ public final class MainActivity extends Activity {
         if (!apiKey.isEmpty() && !saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model)) return;
         getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
                 .putString(AI_PREF_PROVIDER, provider)
+                .putBoolean(AI_PREF_CODEX_FAST_MODE,
+                        codexFastMode != null && codexFastMode.isChecked())
                 .putString(AI_PREF_MONTHLY_LIMIT_USD, monthlyLimitText)
                 .apply();
         refreshAiBudgetStatus();
@@ -8922,6 +8932,13 @@ public final class MainActivity extends Activity {
         payload.put("include", new JSONArray().put("reasoning.encrypted_content"));
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
         payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
+        String serviceTier = WorkshopCodexServiceTier.requestTier(
+                getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                        .getBoolean(AI_PREF_CODEX_FAST_MODE, false));
+        if (!serviceTier.isEmpty()) payload.put("service_tier", serviceTier);
+        appendAiTrace("codex_request_tier", new JSONObject()
+                .put("mode", serviceTier.isEmpty() ? "standard" : "fast")
+                .put("request_service_tier", serviceTier));
         payload.put("text", buildAiResponseTextFormat());
 
         long generation = nativeCodexBeginResponse();

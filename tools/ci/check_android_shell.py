@@ -877,6 +877,10 @@ def main() -> int:
     assert 'request.put("stasis_basics", aiStasisBasics())' in activity
     assert '"kind": "auto_finalize_tested_writes"' in host_agent
     assert 'buildAiOpenAiInput(requestJson, true, true)' in activity
+    assert 'AI_PREF_CODEX_FAST_MODE = "codex_fast_mode"' in activity
+    assert 'WorkshopCodexServiceTier.requestTier' in activity
+    assert 'payload.put("service_tier", serviceTier)' in activity
+    assert 'appendAiTrace("codex_request_tier"' in activity
     assert "global instance_name: StructType" in activity
     assert "function name(arg_name: Type, other: Type): ReturnType" in activity
     assert "struct TypeName { field_name: Type; ... }" in activity
@@ -981,6 +985,8 @@ def main() -> int:
     assert 'put("type", "prompt_cache_breakpoint")' not in activity
     assert 'payload.put("prompt_cache_retention"' not in activity
     assert '"prompt_cache_options": {"mode": "explicit", "ttl": "30m"}' in host_agent
+    assert 'parser.add_argument("--service-tier", choices=("standard", "priority")' in host_agent
+    assert 'payload["service_tier"] = "priority"' in host_agent
     assert '"reasoning": {"effort": DEFAULT_REASONING_EFFORT}' in host_agent
     assert 'payload.get("reasoning") != {"effort": "medium"}' in host_agent
     assert '"prompt_cache_breakpoint": {"mode": "explicit"}' in host_agent

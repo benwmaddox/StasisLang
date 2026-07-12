@@ -699,7 +699,7 @@ def summarize_response_for_trace(body: dict[str, Any], parsed: dict[str, Any]) -
     }
 
 
-def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
+def build_openai_payload(model: str, request: dict[str, Any], service_tier: str = "standard") -> dict[str, Any]:
     stable_instruction = (
         "Return only one JSON object matching request.shared_context.protocol.response_contract exactly. "
         "Follow request.shared_context.stasis_basics as the authoritative language/runtime orientation. "
@@ -715,7 +715,7 @@ def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
     shared_context = request.get("shared_context", {})
     turn_state = request.get("turn_state", {})
     schema = response_json_schema()
-    return {
+    payload = {
         "model": model,
         "reasoning": {"effort": DEFAULT_REASONING_EFFORT},
         "prompt_cache_key": PROMPT_CACHE_KEY,
@@ -737,6 +737,9 @@ def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
             },
         ],
     }
+    if service_tier == "priority":
+        payload["service_tier"] = "priority"
+    return payload
 
 
 def validate_openai_payload(payload: dict[str, Any]) -> list[str]:
@@ -747,6 +750,8 @@ def validate_openai_payload(payload: dict[str, Any]) -> list[str]:
         errors.append("prompt_cache_options must use explicit 30m caching")
     if payload.get("reasoning") != {"effort": "medium"}:
         errors.append("reasoning effort must be medium")
+    if payload.get("service_tier", "default") not in {"default", "priority"}:
+        errors.append("service_tier must be omitted or priority")
     input_items = payload.get("input")
     if not isinstance(input_items, list) or len(input_items) != 3:
         errors.append("input must contain stable instruction, stable context, and volatile context messages")
@@ -782,12 +787,13 @@ def summarize_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "reasoning": payload.get("reasoning"),
         "prompt_cache_key": payload.get("prompt_cache_key"),
         "prompt_cache_options": payload.get("prompt_cache_options"),
+        "service_tier": payload.get("service_tier", "default"),
         "messages": messages,
     }
 
 
-def call_openai(api_key: str, model: str, request: dict[str, Any], trace_events: list[dict[str, Any]] | None = None, turn: int = 0) -> dict[str, Any]:
-    payload = build_openai_payload(model, request)
+def call_openai(api_key: str, model: str, request: dict[str, Any], service_tier: str = "standard", trace_events: list[dict[str, Any]] | None = None, turn: int = 0) -> dict[str, Any]:
+    payload = build_openai_payload(model, request, service_tier)
     payload_errors = validate_openai_payload(payload)
     if payload_errors:
         raise RuntimeError("OpenAI payload preflight failed: " + "; ".join(payload_errors))
@@ -1000,6 +1006,8 @@ def main() -> int:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--service-tier", choices=("standard", "priority"), default="standard",
+                        help="Use standard API processing or opt into separately billed Priority processing.")
     parser.add_argument("--reset-paddle-speed-feature", action="store_true", help="Reset the bundled Pong sample to the baseline before the requested paddle-speed feature.")
     parser.add_argument("--trace-file", type=Path, help="Write the run trace JSON to this file; defaults to artifacts/android_ai_runs/.")
     parser.add_argument("--preflight", action="store_true", help="Validate the outgoing Responses payload locally without calling OpenAI or editing the project.")
@@ -1009,14 +1017,14 @@ def main() -> int:
     trace_file = args.trace_file or default_trace_file()
     request = build_agent_request(project, args.prompt, {"phase": "initial", "instruction": "Inspect the workspace with fine-grained tools, make the requested behavior change, add or update tests, run tests, then return done only after tests pass."})
     trace_events: list[dict[str, Any]] = []
-    trace_meta = {"prompt": args.prompt, "model": args.model, "project_root": str(project), "reset_paddle_speed_feature": bool(args.reset_paddle_speed_feature)}
+    trace_meta = {"prompt": args.prompt, "model": args.model, "service_tier": args.service_tier, "project_root": str(project), "reset_paddle_speed_feature": bool(args.reset_paddle_speed_feature)}
     trace_events.append({"kind": "trace_meta", "meta": trace_meta})
     trace_events.append({"kind": "initial_request", "summary": summarize_request_for_trace(request)})
     print(f"Trace file: {trace_file}")
     started_at_iso = datetime.now(timezone.utc).isoformat()
     started_at_perf = time.perf_counter()
     if args.preflight:
-        payload = build_openai_payload(args.model, request)
+        payload = build_openai_payload(args.model, request, args.service_tier)
         errors = validate_openai_payload(payload)
         trace_events.append({"kind": "payload_preflight", "ok": not errors, "errors": errors,
                              "payload": summarize_openai_payload(payload)})
@@ -1036,7 +1044,7 @@ def main() -> int:
     working_notes = ""
     for turn in range(1, MAX_TURNS + 1):
         try:
-            response = call_openai(api_key, args.model, request, trace_events, turn)
+            response = call_openai(api_key, args.model, request, args.service_tier, trace_events, turn)
         except Exception as error:
             trace_events.append({"kind": "api_error", "turn": turn, "error_type": type(error).__name__, "error": str(error)})
             write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)

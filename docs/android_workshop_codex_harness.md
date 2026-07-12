@@ -132,6 +132,17 @@ token count, and provider-reported cached tokens. After a batch writes a behavio
 finishes locally when writes compiled and all runnable tests pass instead of
 requesting a redundant final model response.
 
+AI Settings also offers an opt-in Fast Codex mode for ChatGPT-signed-in calls.
+It requests the model catalog's `priority` service tier while retaining the same
+model, reasoning effort, tools, and cacheable request prefix. Standard remains
+the default because Fast consumes subscription allowance more quickly. The API
+key fallback does not reuse this subscription Fast setting.
+
+For host-only API timing, `tools/android_ai_agent_host.py --service-tier
+priority` opts into the API's separately billed Priority processing. This is a
+useful request/cache latency comparison, but it is not billed against ChatGPT
+subscription Fast-mode allowance and is reported separately.
+
 ## Limits
 
 - **Codex subscription:** do not estimate dollars. Display Codex account
