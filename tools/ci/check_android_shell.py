@@ -981,15 +981,15 @@ def main() -> int:
     assert "gamePreview.touchActive()" in activity
     assert "MotionEvent" in activity
     assert "RENDER_COMMAND_STRIDE = 9" in activity
+    assert "drawBatch((runEnd - index) * RECT_VERTICES)" in activity
+    assert "drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture)" in activity
     assert "frameValues[5]" in activity
     assert "frameValues[base + 6]" in activity
     assert "GLES20.glDrawArrays" in activity
     assert "GL_TRIANGLES" in activity
     assert "glUniform4f" not in activity
     assert "attribute vec4 aColor" in activity
-    assert "drawBatch(RECT_VERTICES)" in activity
     assert "TEXTURE_FRAGMENT_SHADER" in activity
-    assert "drawSpriteBatch(RECT_VERTICES, spriteTexture" in activity
     assert "nativeResolveSpriteAsset" in activity
     assert "nativeDecodeSvgSprite" in activity
     assert "createFallbackTexture" in activity

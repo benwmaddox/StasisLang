@@ -335,12 +335,23 @@ public final class MainActivity extends Activity {
             int vertexCount = 0;
             synchronized (this) {
                 int commandCount = Math.max(0, Math.min(MAX_RENDER_COMMANDS, frameValues[5]));
-                for (int index = 0; index < commandCount; index += 1) {
+                int index = 0;
+                while (index < commandCount) {
                     int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
                     int kind = frameValues[base];
                     if (kind == 1 || kind == 2) {
-                        appendRect(base);
-                        vertexCount += RECT_VERTICES;
+                        int runEnd = index;
+                        while (runEnd < commandCount) {
+                            int runBase = RENDER_FRAME_HEADER_SIZE + runEnd * RENDER_COMMAND_STRIDE;
+                            int runKind = frameValues[runBase];
+                            if (runKind != 1 && runKind != 2) break;
+                            appendRect(runBase);
+                            vertexCount += RECT_VERTICES;
+                            runEnd += 1;
+                        }
+                        index = runEnd;
+                    } else {
+                        index += 1;
                     }
                 }
             }

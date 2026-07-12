@@ -9708,19 +9708,39 @@ public final class MainActivity extends Activity {
             synchronized (this) {
                 System.arraycopy(frameValues, 0, lastDrawnFrame, 0, lastDrawnFrame.length);
                 int commandCount = Math.max(0, Math.min(MAX_RENDER_COMMANDS, frameValues[5]));
-                for (int index = 0; index < commandCount; index += 1) {
+                int index = 0;
+                while (index < commandCount) {
                     int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
                     int kind = frameValues[base];
                     if (kind == 1) {
                         vertexBuffer.clear();
-                        appendRect(base);
+                        int runEnd = index;
+                        while (runEnd < commandCount) {
+                            int runBase = RENDER_FRAME_HEADER_SIZE + runEnd * RENDER_COMMAND_STRIDE;
+                            if (frameValues[runBase] != 1) break;
+                            appendRect(runBase);
+                            runEnd += 1;
+                        }
                         vertexBuffer.flip();
-                        drawBatch(RECT_VERTICES);
+                        drawBatch((runEnd - index) * RECT_VERTICES);
+                        index = runEnd;
                     } else if (kind == 2) {
+                        int texture = spriteTexture(frameValues[base + 6]);
                         spriteVertexBuffer.clear();
-                        appendSprite(base);
+                        int runEnd = index;
+                        while (runEnd < commandCount) {
+                            int runBase = RENDER_FRAME_HEADER_SIZE + runEnd * RENDER_COMMAND_STRIDE;
+                            if (frameValues[runBase] != 2) break;
+                            int runTexture = spriteTexture(frameValues[runBase + 6]);
+                            if (runTexture != texture) break;
+                            appendSprite(runBase);
+                            runEnd += 1;
+                        }
                         spriteVertexBuffer.flip();
-                        drawSpriteBatch(RECT_VERTICES, spriteTexture(frameValues[base + 6]));
+                        drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture);
+                        index = runEnd;
+                    } else {
+                        index += 1;
                     }
                 }
             }
