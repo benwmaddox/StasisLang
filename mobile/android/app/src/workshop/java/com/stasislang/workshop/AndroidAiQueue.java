@@ -68,6 +68,7 @@ final class AndroidAiQueue {
         String previewFile = previewPng == null ? "" : projectId + "-" + id + ".png";
         Entry entry = new Entry(id, projectId, source, cleanPrompt,
                 System.currentTimeMillis(), PENDING,
+                WorkshopAiRunPhase.QUEUED.wireValue(),
                 projectImages,
                 logicalSnapshot == null ? null : new JSONObject(logicalSnapshot.toString()), imageGeneration,
                 "", previewFile, previewWidth, previewHeight,
@@ -147,15 +148,45 @@ final class AndroidAiQueue {
     }
 
     static synchronized boolean cancelPending(Context context, String projectId, String itemId) throws Exception {
-        return transition(context, projectId, itemId, PENDING, CANCELLED, "Cancelled before execution");
+        return transition(context, projectId, itemId, PENDING, CANCELLED,
+                WorkshopAiRunPhase.CANCELLED, "Cancelled before execution");
     }
 
     static synchronized boolean finish(Context context, String projectId, String itemId,
             String terminalState, String detail) throws Exception {
+        WorkshopAiRunPhase phase = COMPLETED.equals(terminalState) ? WorkshopAiRunPhase.VERIFIED
+                : (CANCELLED.equals(terminalState) ? WorkshopAiRunPhase.CANCELLED
+                        : WorkshopAiRunPhase.FAILED);
+        return finish(context, projectId, itemId, terminalState, phase, detail);
+    }
+
+    static synchronized boolean finish(Context context, String projectId, String itemId,
+            String terminalState, WorkshopAiRunPhase terminalPhase, String detail) throws Exception {
         if (!COMPLETED.equals(terminalState) && !FAILED.equals(terminalState) && !CANCELLED.equals(terminalState)) {
             throw new IllegalArgumentException("AI queue terminal state is invalid");
         }
-        return transition(context, projectId, itemId, IN_PROGRESS, terminalState, detail);
+        if (terminalPhase == null || !terminalPhase.terminal()) {
+            throw new IllegalArgumentException("AI queue terminal phase is invalid");
+        }
+        return transition(context, projectId, itemId, IN_PROGRESS, terminalState, terminalPhase, detail);
+    }
+
+    static synchronized boolean updatePhase(Context context, String projectId, String itemId,
+            WorkshopAiRunPhase phase, String detail) throws Exception {
+        if (phase == null || phase.terminal()) {
+            throw new IllegalArgumentException("active AI queue phase is invalid");
+        }
+        JSONObject document = loadDocument(context, projectId);
+        JSONArray items = document.getJSONArray("items");
+        for (int index = 0; index < items.length(); index += 1) {
+            Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
+            if (!entry.id.equals(itemId)) continue;
+            if (!IN_PROGRESS.equals(entry.state)) return false;
+            items.put(index, entry.withPhase(phase.wireValue(), detail).toJson());
+            writeDocument(context, projectId, document);
+            return true;
+        }
+        return false;
     }
 
     static synchronized int recoverInterrupted(Context context, String projectId) throws Exception {
@@ -213,7 +244,8 @@ final class AndroidAiQueue {
     }
 
     private static boolean transition(Context context, String projectId, String itemId,
-            String expectedState, String nextState, String detail) throws Exception {
+            String expectedState, String nextState, WorkshopAiRunPhase nextPhase,
+            String detail) throws Exception {
         if (!AiQueuePolicy.canTransition(expectedState, nextState)) {
             throw new IllegalArgumentException("AI queue state transition is invalid");
         }
@@ -223,7 +255,8 @@ final class AndroidAiQueue {
             Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
             if (!entry.id.equals(itemId)) continue;
             if (!expectedState.equals(entry.state)) return false;
-            items.put(index, entry.withState(nextState, detail).toJson());
+            items.put(index, entry.withState(nextState, detail)
+                    .withPhase(nextPhase.wireValue(), detail).toJson());
             writeDocument(context, projectId, document);
             if (CANCELLED.equals(nextState) || COMPLETED.equals(nextState) || FAILED.equals(nextState)) {
                 deletePreview(context, entry);
@@ -407,6 +440,7 @@ final class AndroidAiQueue {
         final String prompt;
         final long createdAtMs;
         final String state;
+        final String phase;
         final JSONArray imageAttachments;
         final JSONObject logicalSnapshot;
         final boolean imageGeneration;
@@ -418,6 +452,7 @@ final class AndroidAiQueue {
         final String previewSha256;
 
         Entry(String id, String projectId, String source, String prompt, long createdAtMs, String state,
+                String phase,
                 JSONArray imageAttachments, JSONObject logicalSnapshot, boolean imageGeneration, String detail,
                 String previewFile, int previewWidth, int previewHeight, int previewBytes, String previewSha256) {
             this.id = id;
@@ -426,6 +461,7 @@ final class AndroidAiQueue {
             this.prompt = prompt;
             this.createdAtMs = createdAtMs;
             this.state = state;
+            this.phase = phase;
             this.imageAttachments = imageAttachments;
             this.logicalSnapshot = logicalSnapshot;
             this.imageGeneration = imageGeneration;
@@ -438,15 +474,31 @@ final class AndroidAiQueue {
         }
 
         Entry withState(String nextState, String nextDetail) {
-            return new Entry(id, projectId, source, prompt, createdAtMs, nextState, imageAttachments,
+            String nextPhase = IN_PROGRESS.equals(nextState)
+                    ? WorkshopAiRunPhase.PREPARING.wireValue()
+                    : (COMPLETED.equals(nextState) ? WorkshopAiRunPhase.VERIFIED.wireValue()
+                            : (CANCELLED.equals(nextState) ? WorkshopAiRunPhase.CANCELLED.wireValue()
+                                    : WorkshopAiRunPhase.FAILED.wireValue()));
+            return new Entry(id, projectId, source, prompt, createdAtMs, nextState, nextPhase, imageAttachments,
                     logicalSnapshot, imageGeneration, nextDetail == null ? "" : nextDetail,
                     previewFile, previewWidth, previewHeight, previewBytes, previewSha256);
+        }
+
+        Entry withPhase(String nextPhase, String nextDetail) {
+            if (!WorkshopAiRunPhase.isWireValue(nextPhase)) {
+                throw new IllegalArgumentException("AI queue phase is invalid");
+            }
+            return new Entry(id, projectId, source, prompt, createdAtMs, state, nextPhase,
+                    imageAttachments, logicalSnapshot, imageGeneration,
+                    nextDetail == null ? "" : nextDetail, previewFile, previewWidth, previewHeight,
+                    previewBytes, previewSha256);
         }
 
         JSONObject toJson() throws Exception {
             JSONObject json = new JSONObject().put("id", id).put("project_id", projectId)
                     .put("source", source).put("prompt", prompt).put("created_at_ms", createdAtMs)
-                    .put("state", state).put("image_attachments", new JSONArray(imageAttachments.toString()))
+                    .put("state", state).put("phase", phase)
+                    .put("image_attachments", new JSONArray(imageAttachments.toString()))
                     .put("image_generation", imageGeneration).put("detail", detail)
                     .put("preview_file", previewFile).put("preview_width", previewWidth)
                     .put("preview_height", previewHeight).put("preview_bytes", previewBytes)
@@ -463,6 +515,10 @@ final class AndroidAiQueue {
             String projectId = json.getString("project_id");
             if (!expectedProjectId.equals(projectId)) throw new IllegalArgumentException("AI queue item crossed projects");
             String id = json.getString("id");
+            String phase = json.optString("phase", defaultPhaseForState(state));
+            if (!WorkshopAiRunPhase.isWireValue(phase)) {
+                throw new IllegalArgumentException("AI queue item phase is invalid");
+            }
             String source = json.getString("source");
             String prompt = json.getString("prompt");
             if (!id.matches("[0-9a-f-]{36}") || !AiQueuePolicy.validSource(source)
@@ -480,12 +536,21 @@ final class AndroidAiQueue {
                 throw new IllegalArgumentException("AI queue preview metadata is invalid");
             }
             return new Entry(id, projectId, source, prompt,
-                    json.getLong("created_at_ms"), state, json.optJSONArray("image_attachments") == null
+                    json.getLong("created_at_ms"), state, phase,
+                    json.optJSONArray("image_attachments") == null
                             ? new JSONArray() : new JSONArray(json.getJSONArray("image_attachments").toString()),
                     json.optJSONObject("logical_snapshot") == null ? null
                             : new JSONObject(json.getJSONObject("logical_snapshot").toString()),
                     json.optBoolean("image_generation", false), json.optString("detail", ""),
                     previewFile, previewWidth, previewHeight, previewBytes, previewSha256);
+        }
+
+        private static String defaultPhaseForState(String state) {
+            if (PENDING.equals(state)) return WorkshopAiRunPhase.QUEUED.wireValue();
+            if (IN_PROGRESS.equals(state)) return WorkshopAiRunPhase.PREPARING.wireValue();
+            if (COMPLETED.equals(state)) return WorkshopAiRunPhase.VERIFIED.wireValue();
+            if (CANCELLED.equals(state)) return WorkshopAiRunPhase.CANCELLED.wireValue();
+            return WorkshopAiRunPhase.FAILED.wireValue();
         }
     }
 }

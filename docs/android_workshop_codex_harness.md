@@ -177,6 +177,23 @@ Both the Android Workshop and host comparison harness allow up to 25 model
 turns per queued AI request. The separate safety cap remains 12 tool calls in
 one model response.
 
+Android Workshop now places a verification gate between tested provisional
+writes and application. Queue phases persist `editing`, `compiling`, `generated
+tests`, `verifying`, `repairing`, and `applying`. Gameplay, structural, and
+visual changes receive a separate restricted reviewer call that may author one
+temporary `.test.stasis` file but cannot write production source. The native
+test total must increase, the temporary file is always removed, and a failed
+review test returns bounded evidence to the primary agent for at most two
+repair cycles. Inconclusive verification requires an explicit Apply Anyway or
+Restore choice.
+
+The project transaction includes all `.stasis` source and test files. It is
+persisted app-private against the active queue item, restored on cancellation
+or failure, and restored before an interrupted queue item is marked failed on
+restart. Successful write observations are reduced to identity, character
+count, SHA-256, and results before a follow-up call; failed attempts retain
+their complete source for repair.
+
 Use `tools/run_android_ai_model_comparison.py` to summarize isolated Sol,
 Terra, and Luna runs with actual model time, local tool time, token/cache usage,
 estimated standard API cost, and a model-independent acceptance suite. Keep

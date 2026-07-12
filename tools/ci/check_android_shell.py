@@ -217,6 +217,11 @@ def main() -> int:
     support_bundle = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java")
     crash_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java")
     ai_queue = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java")
+    ai_transaction = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiTransactionStore.java")
+    verification_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiVerificationPolicy.java")
+    verification_runner = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiVerificationRunner.java")
+    temporary_verification = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiTemporaryVerification.java")
+    project_transaction = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiProjectTransaction.java")
     ai_queue_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java")
     host_agent = read("tools/android_ai_agent_host.py")
     host_comparison = read("tools/run_android_ai_model_comparison.py")
@@ -329,7 +334,7 @@ def main() -> int:
     assert "createAiProgressPill" in activity
     assert "postAiProgress" in activity
     assert "actions " in activity
-    assert "calling AI" in activity
+    assert "WorkshopAiRunPhase.EDITING.wireValue()" in activity
     assert "time 0.0s" in activity
     assert "hot swap=FastReload" in activity
     assert "aiReloadPhase" in activity
@@ -353,6 +358,22 @@ def main() -> int:
     assert "writeSyncedAtomic" not in ai_queue or "getFD().sync()" in ai_queue
     assert "StandardCopyOption.ATOMIC_MOVE" in ai_queue
     assert "recoverInterrupted" in ai_queue
+    assert 'put("phase", phase)' in ai_queue
+    assert "AndroidAiQueue.updatePhase" in activity
+    assert "AndroidAiTransactionStore.save" in activity
+    assert "restoreInterruptedAiTransactions" in activity
+    assert "WorkshopAiProjectTransaction.restore" in activity
+    assert "independent_test_author" in activity
+    assert "verifierCallCount >= 2" in activity
+    assert "verification_repair_requested" in activity
+    assert "generated_test_audit" in activity
+    assert "WorkshopAiObservationCompactor.compactSuccessfulWrite" in activity
+    assert 'ROOT = "workshop_ai_transactions"' in ai_transaction
+    assert "StandardCopyOption.ATOMIC_MOVE" in ai_transaction
+    assert "requiresIndependentReview" in verification_policy
+    assert "independent verification is required" in verification_runner
+    assert "temporary verification test cleanup failed" in temporary_verification
+    assert "failed to remove provisional file" in project_transaction
     assert "cancelPending" in ai_queue
     assert "AiQueuePolicy.canTransition" in ai_queue
     assert "loadPreview" in ai_queue
@@ -385,7 +406,8 @@ def main() -> int:
     assert "updated.length() < MAX_COMMAND_HISTORY" in activity
     assert '"started".equals(prior.optString("status", ""))' in activity
     assert "Retrying last AI request as a new budget-checked run" in activity
-    assert 'recordAiOutcome(activeAiPrompt, "cancelled"' in activity
+    assert '"Cancelled by user; project restored"' in activity
+    assert 'finalTransactionRestoreError.isEmpty() ? "cancelled" : "rollback_failed"' in activity
     assert 'recordAiOutcome(activeAiPrompt, "applied"' in activity
     assert 'recordAiOutcome(activeAiPrompt, "rolled_back"' in activity
     assert "Device monthly AI limit USD" in activity
