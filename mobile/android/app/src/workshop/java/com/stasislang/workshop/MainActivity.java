@@ -4511,9 +4511,6 @@ public final class MainActivity extends Activity {
                         availableCount += 1;
                         if (!accepting) continue;
                         JSONObject compact = symbolToJson(symbol, false);
-                        if ("function".equals(symbol.kind)) {
-                            compact.put("preferred_call", preferredFunctionCall(symbol));
-                        }
                         int candidateChars = compact.toString().length();
                         if (!WorkshopAiInitialContextPolicy.canAppend(
                                 serializedChars, candidateChars, symbols.length())) {
@@ -4532,6 +4529,24 @@ public final class MainActivity extends Activity {
                 .put("included_count", symbols.length())
                 .put("available_count", availableCount)
                 .put("truncated", symbols.length() < availableCount);
+    }
+
+    private static JSONObject aiStasisBasics() throws Exception {
+        return new JSONObject()
+                .put("language", new JSONArray()
+                        .put("Declare functions with function name(params): return_type { ... }.")
+                        .put("Arithmetic, comparison, and assignment operators are infix.")
+                        .put("Receiver calls value.method(args) are preferred when the function's first parameter is self: Type; function-form calls remain valid.")
+                        .put("global Name { fields } stores inspectable state addressed as Name.field; struct defines a value type."))
+                .put("runtime", new JSONArray()
+                        .put("main() initializes state, tick() advances deterministic fixed-tick simulation, and render() projects current state into render commands.")
+                        .put("on_code_swap() is only for migration or reinitialization required after a hot swap.")
+                        .put("Gameplay progression is tick-based rather than dt-based."))
+                .put("editing", new JSONArray()
+                        .put("Functions, structs, globals, imports, and tests are the editable units; inspect a symbol before replacing it.")
+                        .put("Function-body and tuning changes can fast reload; struct/global layout changes require reset compatibility handling."))
+                .put("tests", new JSONArray()
+                        .put("Behavior tests use test `name`(): bool and return true or false."));
     }
 
     private void runNativeTests() {
@@ -4592,6 +4607,7 @@ public final class MainActivity extends Activity {
             JSONObject request = new JSONObject();
             request.put("cache_layout", "Stable request context is first. Volatile tool observations are sent after the prompt cache breakpoint.");
             request.put("scope", "entire_workspace");
+            request.put("stasis_basics", aiStasisBasics());
             request.put("response_contract", aiResponseContract());
             request.put("available_tools", supportedAiTools());
             request.put("tool_specs", aiToolSpecs());
@@ -5332,7 +5348,6 @@ public final class MainActivity extends Activity {
                     }
                     JSONObject entry = symbolToJson(symbol, false);
                     if ("function".equals(symbol.kind)) {
-                        entry.put("preferred_call", preferredFunctionCall(symbol));
                         functions.put(entry);
                     } else if ("struct".equals(symbol.kind)) {
                         structs.put(entry);
@@ -6003,53 +6018,6 @@ public final class MainActivity extends Activity {
         return json;
     }
 
-    private static String preferredFunctionCall(SymbolEntry symbol) {
-        if (!"function".equals(symbol.kind)) {
-            return symbol.name;
-        }
-        String first = firstParameter(symbol.signature);
-        if (first != null) {
-            String[] parts = first.split(":", 2);
-            if (parts.length == 2 && "self".equals(parts[0].trim()) && parts[1].trim().equals(symbol.owner)) {
-                return lowerFirst(symbol.owner) + "." + symbol.name + "(" + callArgumentList(symbol.signature, true) + ")";
-            }
-        }
-        return symbol.name + "(" + callArgumentList(symbol.signature, false) + ")";
-    }
-
-    private static String callArgumentList(String signature, boolean skipFirst) {
-        int open = signature.indexOf('(');
-        int close = signature.indexOf(')', open + 1);
-        if (open < 0 || close < 0 || close <= open + 1) {
-            return "";
-        }
-        String parameters = signature.substring(open + 1, close).trim();
-        if (parameters.isEmpty()) {
-            return "";
-        }
-        String[] parts = parameters.split(",");
-        StringBuilder builder = new StringBuilder();
-        for (int index = skipFirst ? 1 : 0; index < parts.length; index += 1) {
-            String parameter = parts[index].trim();
-            int colon = parameter.indexOf(':');
-            String name = colon > 0 ? parameter.substring(0, colon).trim() : parameter;
-            if (name.isEmpty()) {
-                continue;
-            }
-            if (builder.length() > 0) {
-                builder.append(", ");
-            }
-            builder.append(name);
-        }
-        return builder.toString();
-    }
-
-    private static String lowerFirst(String text) {
-        if (text == null || text.isEmpty()) {
-            return "value";
-        }
-        return Character.toLowerCase(text.charAt(0)) + text.substring(1);
-    }
     private static String aiLookupExpectedKind(String kind) {
         if ("replace_struct".equals(kind) || "struct".equals(kind)) {
             return "struct";
@@ -6077,7 +6045,7 @@ public final class MainActivity extends Activity {
                 }
             }
         }
-        String stableInstruction = "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when the index already identifies the target. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; use either the initial index, a compact list tool, or a direct read when possible, not every inspection tool. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
+        String stableInstruction = "Return only one JSON object. Follow the cached stasis_basics as the authoritative language/runtime orientation. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when the index already identifies the target. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; use either the initial index, a compact list tool, or a direct read when possible, not every inspection tool. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
         stableInstruction += " Every response must include working_notes as a concise user-visible state summary of at most 2000 characters using Intent, Observed, Next, and Blocker. Report decisions and evidence, not private chain-of-thought. Update working_notes from the retained prior note and current observations on every call.";
         stableInstruction += " write_symbol creates or replaces a symbol. Before writing, inspect the current target. Follow game_design_rules, prefer_lifecycle_local_state, avoid_global_tick_for_per_entity_progression, and architecture_recommendations. Follow architecture_recommendations. Use command/event-style functions for durable gameplay concepts. Tool errors, validation_error observations, and test_observation failures are not final; correct them before returning mode=done. A failed write batch rolls back the whole batch and returns diagnostics.";
         JSONArray input = new JSONArray()

@@ -184,19 +184,6 @@ def symbol_json(symbol: Symbol, include_source: bool) -> dict[str, Any]:
     return result
 
 
-def preferred_call(symbol: Symbol) -> str:
-    if symbol.kind != "function":
-        return symbol.name
-    params = symbol.signature[symbol.signature.find("(") + 1:symbol.signature.find(")")].strip()
-    pieces = [part.strip() for part in params.split(",") if part.strip()]
-    if pieces and pieces[0].startswith("self:") and pieces[0].split(":", 1)[1].strip() == symbol.owner:
-        args = ", ".join(part.split(":", 1)[0].strip() for part in pieces[1:])
-        receiver = symbol.owner[:1].lower() + symbol.owner[1:]
-        return f"{receiver}.{symbol.name}({args})"
-    args = ", ".join(part.split(":", 1)[0].strip() for part in pieces)
-    return f"{symbol.name}({args})"
-
-
 DEFAULT_MODEL_PRICING_PER_MILLION = {
     "gpt-5.6-sol": {
         "input": 5.00,
@@ -529,8 +516,6 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
     serialized_chars = 2
     for symbol in symbols:
         compact = symbol_json(symbol, False)
-        if symbol.kind == "function":
-            compact["preferred_call"] = preferred_call(symbol)
         candidate_chars = len(json.dumps(compact, separators=(",", ":")))
         separator_chars = 0 if not compact_symbols else 1
         if (len(compact_symbols) >= MAX_INITIAL_SYMBOLS
@@ -540,6 +525,24 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
         compact_symbols.append(compact)
     return {
         "cache_layout": "Stable shared context is first. Volatile per-turn tool observations live in turn_state after this object.",
+        "stasis_basics": {
+            "language": [
+                "Declare functions with function name(params): return_type { ... }.",
+                "Arithmetic, comparison, and assignment operators are infix.",
+                "Receiver calls value.method(args) are preferred when the first parameter is self: Type; function-form calls remain valid.",
+                "global Name { fields } stores inspectable state as Name.field; struct defines a value type.",
+            ],
+            "runtime": [
+                "main initializes state, tick advances deterministic fixed-tick simulation, and render projects current state into render commands.",
+                "on_code_swap is only for migration or reinitialization required after a hot swap.",
+                "Gameplay progression is tick-based rather than dt-based.",
+            ],
+            "editing": [
+                "Functions, structs, globals, imports, and tests are editable units; inspect a symbol before replacing it.",
+                "Function-body and tuning changes can fast reload; struct/global layout changes require reset compatibility handling.",
+            ],
+            "tests": ["Behavior tests use test `name`(): bool and return true or false."],
+        },
         "protocol": {
             "response_contract": response_contract(),
             "available_tools": [s["tool"] for s in tool_specs()],
@@ -696,6 +699,7 @@ def summarize_response_for_trace(body: dict[str, Any], parsed: dict[str, Any]) -
 def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
     stable_instruction = (
         "Return only one JSON object matching request.shared_context.protocol.response_contract exactly. "
+        "Follow request.shared_context.stasis_basics as the authoritative language/runtime orientation. "
         "Every response must include working_notes of at most 2000 characters with concise Intent, Observed, Next, and Blocker facts. These are user-visible state notes, not private chain-of-thought. "
         "The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when it already identifies the target. "
         "Use mode=tool_calls to inspect/write with the provided fine-grained symbol, import, and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/read_imports/list_tests/read_test_file instead. "
@@ -955,7 +959,7 @@ def execute_tool(project: Path, tool: str, args: dict[str, Any], last_diagnostic
     if tool == "list_owner_symbols":
         owner = args.get("owner", "")
         owned = [s for s in symbols if s.owner == owner or s.name == owner]
-        return {"owner": owner, "symbols": [dict(symbol_json(s, False), preferred_call=preferred_call(s)) for s in owned]}
+        return {"owner": owner, "symbols": [symbol_json(s, False) for s in owned]}
     if tool == "read_symbol":
         candidates = [s for s in symbols if s.name == args.get("name")]
         if args.get("file"):

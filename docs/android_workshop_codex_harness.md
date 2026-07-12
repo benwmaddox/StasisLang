@@ -102,10 +102,16 @@ should adapt those handlers at the tool-call boundary instead of duplicating
 their behavior.
 
 The initial cached request includes a source-free `project_symbol_index` with
-kind, name, owner, file, signature, and preferred receiver call. It is bounded
+kind, name, owner, file, and signature. It is bounded
 to 256 symbols and 16 KiB, reports truncation, and lets straightforward prompts
 read the likely target directly instead of spending the first turn on
 `list_symbols`. Full source remains opt-in through `read_symbol`.
+
+The same cached section includes compact `stasis_basics` covering function and
+global syntax, receiver-form versus function-form calls, deterministic
+`main`/`tick`/`render` lifecycle ownership, limited `on_code_swap` use,
+hot-reload layout implications, and real `.test.stasis` test shape. These rules
+replace per-symbol derived call suggestions.
 
 Every model response also carries required, user-visible `working_notes`,
 bounded to 2,000 characters. The note records concise `Intent`, `Observed`,

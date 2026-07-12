@@ -865,8 +865,10 @@ def main() -> int:
     assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
     assert "list_owner_symbols" in activity
-    assert "preferredFunctionCall" in activity
-    assert "preferred_call" in activity
+    assert "preferredFunctionCall" not in activity
+    assert "preferred_call" not in activity
+    assert 'request.put("stasis_basics", aiStasisBasics())' in activity
+    assert "Gameplay progression is tick-based rather than dt-based" in activity
     assert "read_symbol" in activity
     assert "read_file" in activity
     assert "write_symbol" in activity
