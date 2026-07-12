@@ -32,6 +32,25 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         )
         self.assertTrue(comparison.DEFAULT_ACCEPTANCE_TEST.is_file())
 
+    def test_comparison_reports_acceptance_ratio_and_cache_rate(self) -> None:
+        trace = {
+            "meta": {"model": "gpt-5.6-luna", "total_actions": 2},
+            "usage_summary": {"calls": 1, "totals": {"input_tokens": 100, "cached_input_tokens": 60}},
+            "events": [
+                {"kind": "openai_exchange", "response": {"response_model": "gpt-5.6-luna"}},
+                {"kind": "response_validation_errors", "errors": [{}]},
+            ],
+            "exit_code": 0,
+        }
+        row = comparison.summarize(trace, 0, {
+            "ok": False,
+            "acceptance_tests_passed": 3,
+            "acceptance_tests_total": 4,
+        })
+        self.assertEqual((3, 4), (row["acceptance_tests_passed"], row["acceptance_tests_total"]))
+        self.assertEqual(60.0, row["cached_input_percent"])
+        self.assertEqual(1, row["validation_retries"])
+
     def test_host_run_finishes_before_repository_command_limit(self) -> None:
         self.assertLess(host.DEFAULT_MAX_RUN_SECONDS, 300.0)
 
@@ -70,6 +89,19 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertIn("exceeds 12 calls", errors[0]["error"])
 
+    def test_empty_irrelevant_action_array_is_harmless(self) -> None:
+        response = {
+            "mode": "tool_calls",
+            "working_notes": "Intent: inspect. Observed: none. Next: inspect. Blocker: none.",
+            "tool_calls": [{"tool": "list_symbols", "args": {}}],
+            "edits": [],
+        }
+        calls, errors = host.validate_response_shape(response)
+        self.assertEqual([], errors)
+        self.assertEqual("list_symbols", calls[0]["tool"])
+        response["edits"] = [{"name": "conflict"}]
+        self.assertTrue(host.validate_response_shape(response)[1])
+
     def test_tool_batch_keys_ignore_object_key_order(self) -> None:
         first = [{"tool": "read_symbol", "args": {"name": "tick", "file": "src/main.stasis"}}]
         second = [{"args": {"file": "src/main.stasis", "name": "tick"}, "tool": "read_symbol"}]
@@ -92,6 +124,21 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         (project / "src/main.stasis").write_text("function main(): void {\n}\n", encoding="utf-8")
         followup = host.build_followup_request(initial["shared_context"], {"phase": "tools"})
         self.assertEqual(stable, json.dumps(followup["shared_context"], separators=(",", ":")))
+
+    def test_behavior_expectations_are_request_generic(self) -> None:
+        expectations = host.behavior_test_expectations()
+        encoded = json.dumps(expectations)
+        self.assertNotIn("enemy_paddle", encoded)
+        self.assertNotIn("1500", encoded)
+        self.assertIn("both sides", encoded)
+
+    def test_shared_context_includes_geometry_invariants(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        context = host.build_shared_context(project, "resize a sprite")
+        recommendations = context["workflow_rules"]["architecture_recommendations"]
+        self.assertTrue(any("rendered rectangles as one contract" in item for item in recommendations))
+        self.assertTrue(any("just-inside" in item for item in recommendations))
 
     def test_failed_selected_project_compile_rolls_back_source_batch(self) -> None:
         temporary, project = self.make_project()

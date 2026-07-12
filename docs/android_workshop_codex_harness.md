@@ -167,6 +167,12 @@ elapsed time, and successful versus rolled-back write counts. Host API traces
 and phone-native Codex subscription traces must not be combined as if they were
 the same provider or allowance.
 
+Behavior-test expectations in the shared context are request-generic. They
+require observable coverage and both sides of changed boundaries without
+embedding values from an earlier task. Game geometry guidance also treats
+stored positions, rendered rectangles, half extents, collision bounds, wall
+bounds, and offscreen transitions as one contract on both host and Android.
+
 Both the Android Workshop and host comparison harness allow up to 25 model
 turns per queued AI request. The separate safety cap remains 12 tool calls in
 one model response.
@@ -176,7 +182,10 @@ Terra, and Luna runs with actual model time, local tool time, token/cache usage,
 estimated standard API cost, and a model-independent acceptance suite. Keep
 each live model invocation as a separate bounded command; use
 `--summarize-only` after all traces exist. The first recorded comparison is in
-`docs/android_ai_model_comparison_2026-07-12.md`.
+`docs/android_ai_model_comparison_2026-07-12.md`. Summary rows include the
+independent pass ratio, tool batches, schema retries, rolled-back writes, and
+cached-input percentage so a self-authored-test pass cannot mask incomplete
+behavior or retry waste.
 
 ## Limits
 

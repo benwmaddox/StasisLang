@@ -789,6 +789,7 @@ def main() -> int:
     assert '.put("response_model", apiResponse.model)' in activity
     assert '.put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)' in activity
     assert '.put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable' in activity
+    assert 'harmless != null && harmless.length() == 0' in activity
     assert '.put("successful_writes", session.successfulWriteCount)' in activity
     assert "AI_PREF_LAST_USAGE" in activity
     assert "AI_TRACE_LOG" in activity
@@ -955,6 +956,8 @@ def main() -> int:
     assert "durable gameplay concepts" in activity
     assert "spawn_actor" in activity
     assert "Follow architecture_recommendations" in activity
+    assert "rendered rectangles as one contract" in activity
+    assert "just-inside, exact-boundary, and just-outside" in activity
     assert "Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits" in activity
     assert "Tool errors, validation_error observations, and test_observation failures are not final" in activity
     assert "mode=done" in activity

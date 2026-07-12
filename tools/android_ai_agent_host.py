@@ -346,11 +346,12 @@ def ensure_stasis_test_runner() -> dict[str, Any]:
 
 def behavior_test_expectations() -> dict[str, Any]:
     return {
-        "test_name": "android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear",
-        "required_file": "tests/enemy_paddle_speed_schedule.test.stasis",
         "syntax": "test `descriptive name`(): bool { if (condition) { return false; } return true; }",
-        "expected_checks": ["1500 at ball age 0", "875 at ball age 1800", "250 at ball age 3600 and above", "reset_ball restores age 0 and speed 1500"],
-        "implementation_hint": "Use persistent GameState fields for ball_age_ticks and enemy_paddle_speed_x100. Reset ball_age_ticks in reset_ball(), increment it once per tick/update_ball while the ball is alive, and update enemy_paddle_speed_x100 from ball_age_ticks before moving the enemy paddle. Clamp enemy_paddle_speed_x100 so it never drops below 250 after 60 seconds.",
+        "required_coverage": [
+            "Add or update a tests/*.test.stasis test for behavior changed by the request.",
+            "Check externally observable state or render commands, not only a new helper in isolation.",
+            "For thresholds, geometry, bounds, or state transitions, check representative values on both sides of each changed boundary.",
+        ],
     }
 
 
@@ -656,6 +657,8 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
                 "write_symbol writes are compiled once after the whole tool-call batch, so a batch may create helpers and edit callers together.",
                 "Use lifecycle-local state for time since creation; reset it in reset/create functions and increment it during tick.",
                 "Use on_code_swap() for post-hot-swap migration or reinitialization if running state needs adjustment.",
+                "For geometry changes, treat stored positions and rendered rectangles as one contract: derive centers, half extents, collisions, walls, and offscreen transitions consistently.",
+                "Test geometry and thresholds at just-inside, exact-boundary, and just-outside values through public update/render behavior.",
                 "Make the smallest structural change with clear state fields and testable invariants.",
             ],
         },
@@ -942,7 +945,10 @@ def validate_response_shape(response: dict[str, Any]) -> tuple[list[dict[str, An
         errors.append({"kind": "validation_error", "error": "response requires top-level mode equal to tool_calls, done, or edits", "received_keys": sorted(response.keys()), "received_mode": mode, "response_contract": contract})
         return [], errors
     allowed_top_level = {"tool_calls": {"mode", "working_notes", "summary", "tool_calls"}, "done": {"mode", "working_notes", "summary"}, "edits": {"mode", "working_notes", "summary", "edits"}}[mode]
-    extra_top_level = sorted(set(response.keys()) - allowed_top_level)
+    extra_top_level = sorted(
+        key for key in set(response.keys()) - allowed_top_level
+        if key not in {"tool_calls", "edits"} or response.get(key) != []
+    )
     if extra_top_level:
         errors.append({"kind": "validation_error", "error": "response contains unsupported top-level properties for this mode", "mode": mode, "unsupported_properties": extra_top_level, "accepted_top_level_properties": sorted(allowed_top_level), "response_contract": contract})
         return [], errors

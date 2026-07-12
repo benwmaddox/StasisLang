@@ -4686,6 +4686,8 @@ public final class MainActivity extends Activity {
                     .put("For multi-symbol behavior changes, inspect the relevant state, lifecycle, update, render, and test paths; for small constant or dimension edits, inspect only the target symbol and its test.")
                     .put("Keep mobile input abstracted through Stasis Input globals and helper functions so logic can move across platforms.")
                     .put("Add or use testable invariants by setting input/state, running ticks, and checking state or render output.")
+                    .put("For geometry changes, treat stored positions and rendered rectangles as one contract: derive centers, half extents, collisions, walls, and offscreen transitions consistently.")
+                    .put("Test geometry and thresholds at just-inside, exact-boundary, and just-outside values through public update/render behavior.")
                     .put("Avoid broad rewrites; make the smallest structural change that gives the feature a clear owner.")
                     .put("Prefer data-oriented clarity over deep abstractions: arrays, IDs, counters, and explicit update loops.")
                     .put("Avoid per-tick allocation/object churn and keep new systems within the visible 60 fps budget.");
@@ -4800,6 +4802,12 @@ public final class MainActivity extends Activity {
                 : ("done".equals(mode)
                         ? unsupportedJsonKeys(response, "mode", "working_notes", "summary")
                         : unsupportedJsonKeys(response, "mode", "working_notes", "summary", "edits"));
+        for (int index = unsupported.length() - 1; index >= 0; index -= 1) {
+            String key = unsupported.optString(index, "");
+            JSONArray harmless = ("tool_calls".equals(key) || "edits".equals(key))
+                    ? response.optJSONArray(key) : null;
+            if (harmless != null && harmless.length() == 0) unsupported.remove(index);
+        }
         if (unsupported.length() > 0) {
             errors.put(new JSONObject()
                     .put("kind", "validation_error")

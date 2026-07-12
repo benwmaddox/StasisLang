@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,8 @@ def summarize(trace: dict[str, Any], process_code: int, acceptance: dict[str, An
     ]
     usage = trace.get("usage_summary", {})
     totals = usage.get("totals", {})
+    input_tokens = int(totals.get("input_tokens", 0) or 0)
+    cached_input_tokens = int(totals.get("cached_input_tokens", 0) or 0)
     response_models = sorted({
         event.get("response", {}).get("response_model") for event in exchanges
     } - {None})
@@ -43,17 +46,24 @@ def summarize(trace: dict[str, Any], process_code: int, acceptance: dict[str, An
         "response_models": response_models,
         "passed": process_code == 0 and trace.get("exit_code") == 0,
         "acceptance_passed": bool(acceptance and acceptance.get("ok")),
+        "acceptance_tests_passed": (acceptance or {}).get("acceptance_tests_passed", 0),
+        "acceptance_tests_total": (acceptance or {}).get("acceptance_tests_total", 0),
         "process_exit_code": process_code,
         "trace_exit_code": trace.get("exit_code"),
         "total_seconds": trace.get("meta", {}).get("elapsed_seconds", 0.0),
         "model_seconds": sum(float(event.get("elapsed_seconds") or 0.0) for event in exchanges),
         "tool_seconds": sum(float(event.get("elapsed_seconds") or 0.0) for event in tool_events),
         "calls": usage.get("calls", 0),
+        "tool_batches": len(tool_events),
+        "validation_retries": sum(
+            1 for event in trace.get("events", []) if event.get("kind") == "response_validation_errors"
+        ),
         "actions": trace.get("meta", {}).get("total_actions", 0),
         "successful_writes": trace.get("meta", {}).get("successful_write_count", 0),
         "rolled_back_writes": trace.get("meta", {}).get("rolled_back_write_count", 0),
-        "input_tokens": totals.get("input_tokens", 0),
-        "cached_input_tokens": totals.get("cached_input_tokens", 0),
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "cached_input_percent": (100.0 * cached_input_tokens / input_tokens) if input_tokens else 0.0,
         "cache_write_input_tokens": totals.get("cache_write_input_tokens", 0),
         "output_tokens": totals.get("output_tokens", 0),
         "estimated_cost_usd": usage.get("estimated_cost_usd"),
@@ -65,7 +75,14 @@ def summarize(trace: dict[str, Any], process_code: int, acceptance: dict[str, An
 def run_acceptance(project: Path, acceptance_test: Path) -> dict[str, Any]:
     target = project / "tests/comparison_acceptance.test.stasis"
     shutil.copyfile(acceptance_test, target)
-    return host.run_behavior_tests(project)
+    result = host.run_behavior_tests(project)
+    source = acceptance_test.read_text(encoding="utf-8")
+    total = len(re.findall(r"\btest\s+`[^`]+`\s*\(", source))
+    output = str(result.get("output_tail", ""))
+    failed = len(re.findall(r"comparison_acceptance\.test\.stasis\s+::", output))
+    result["acceptance_tests_total"] = total
+    result["acceptance_tests_passed"] = max(0, total - failed)
+    return result
 
 
 def write_markdown(path: Path, prompt: str, rows: list[dict[str, Any]]) -> None:
@@ -76,14 +93,17 @@ def write_markdown(path: Path, prompt: str, rows: list[dict[str, Any]]) -> None:
         "",
         "All runs use fresh copies of the same baseline, medium reasoning, standard API service, and a 25-turn cap.",
         "",
-        "| Model | Harness pass | Acceptance pass | Total s | Model s | Tool s | Calls | Actions | Input | Cached | Cache write | Output | Est. USD |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Model | Harness | Acceptance | Total s | Model s | Tool s | Calls | Batches | Actions | Retries | Rollbacks | Input | Cached | Cache % | Cache write | Output | Est. USD |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
-            f"| {row['requested_model']} | {'yes' if row['passed'] else 'no'} | {'yes' if row['acceptance_passed'] else 'no'} | "
+            f"| {row['requested_model']} | {'pass' if row['passed'] else 'fail'} | "
+            f"{row['acceptance_tests_passed']}/{row['acceptance_tests_total']} | "
             f"{row['total_seconds']:.1f} | {row['model_seconds']:.1f} | {row['tool_seconds']:.1f} | "
-            f"{row['calls']} | {row['actions']} | {row['input_tokens']} | {row['cached_input_tokens']} | "
+            f"{row['calls']} | {row['tool_batches']} | {row['actions']} | {row['validation_retries']} | "
+            f"{row['rolled_back_writes']} | {row['input_tokens']} | {row['cached_input_tokens']} | "
+            f"{row['cached_input_percent']:.1f}% | "
             f"{row['cache_write_input_tokens']} | {row['output_tokens']} | {row['estimated_cost_usd'] or 0.0:.4f} |"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
