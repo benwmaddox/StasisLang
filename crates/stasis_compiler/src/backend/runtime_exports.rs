@@ -18,6 +18,7 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_gfx_cache_text",
     "stasis_jit_gfx_dump_bmp",
     "stasis_jit_gfx_load_sprite",
+    "stasis_jit_gfx_release_sprite",
     "stasis_jit_gfx_measure_text_cached",
     "stasis_jit_gfx_poll_reload",
     "stasis_jit_global_f32_array_load",
@@ -60,6 +61,7 @@ mod tests {
     #[test]
     fn aot_runtime_export_contract_requires_exact_symbol_matches() {
         assert!(is_aot_runtime_export_symbol("stasis_jit_gfx_load_sprite"));
+        assert!(is_aot_runtime_export_symbol("stasis_jit_gfx_release_sprite"));
         assert!(!is_aot_runtime_export_symbol(
             "stasis_jit_gfx_totally_missing"
         ));

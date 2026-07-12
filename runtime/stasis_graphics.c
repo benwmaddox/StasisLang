@@ -163,6 +163,9 @@ static void reset_sprite_program(void);
 
 /* Sprite atlas bookkeeping (paths + rasterized sprites). */
 #define SPRITE_TABLE_INITIAL_CAPACITY 256
+#define SPRITE_HANDLE_INDEX_BITS 20
+#define SPRITE_HANDLE_INDEX_MASK ((1u << SPRITE_HANDLE_INDEX_BITS) - 1u)
+#define SPRITE_HANDLE_GENERATION_MASK 0x7ffu
 
 typedef struct SpriteEntry {
     char* path;
@@ -183,6 +186,8 @@ typedef struct SpriteEntry {
     int used;
     int needs_reraster;  /* flag for window resize */
     int reload_pending;  /* set when the asset watcher reloads this sprite */
+    uint32_t generation;
+    int retired;         /* generation wrapped; never reuse this slot */
 } SpriteEntry;
 
 static SpriteEntry* g_sprites = NULL;
@@ -1493,8 +1498,9 @@ static int ensure_sprite_table_capacity(int min_capacity) {
 
     int limit = g_sprite_table_limit;
     if (limit <= 0) {
-        limit = INT_MAX / 2;
+        limit = (int)SPRITE_HANDLE_INDEX_MASK;
     }
+    if (limit > (int)SPRITE_HANDLE_INDEX_MASK) limit = (int)SPRITE_HANDLE_INDEX_MASK;
     if (min_capacity > limit) {
         return 0;
     }
@@ -3806,11 +3812,21 @@ STASIS_EXPORT void stasis_gfx_submit_u8(const int32_t* cmd_i32, const float* cmd
 }
 
 static SpriteEntry* sprite_get(int handle) {
-    int idx = handle - 1;
+    if (handle <= 0) return NULL;
+    uint32_t raw = (uint32_t)handle;
+    int idx = (int)(raw & SPRITE_HANDLE_INDEX_MASK) - 1;
+    uint32_t generation = (raw >> SPRITE_HANDLE_INDEX_BITS) & SPRITE_HANDLE_GENERATION_MASK;
     if (idx < 0 || idx >= g_sprite_capacity) return NULL;
     if (!g_sprites) return NULL;
     if (!g_sprites[idx].used) return NULL;
+    if (g_sprites[idx].generation != generation) return NULL;
     return &g_sprites[idx];
+}
+
+static int sprite_handle_for_slot(int slot) {
+    if (slot < 0 || slot >= (int)SPRITE_HANDLE_INDEX_MASK) return 0;
+    uint32_t generation = g_sprites[slot].generation & SPRITE_HANDLE_GENERATION_MASK;
+    return (int)((generation << SPRITE_HANDLE_INDEX_BITS) | (uint32_t)(slot + 1));
 }
 
 STASIS_EXPORT int stasis_gfx_poll_reload(int handle) {
@@ -4033,7 +4049,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     int slot = -1;
     while (slot < 0) {
         for (int i = 0; i < g_sprite_capacity; i++) {
-            if (!g_sprites[i].used) {
+            if (!g_sprites[i].used && !g_sprites[i].retired) {
                 slot = i;
                 break;
             }
@@ -4050,7 +4066,9 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     }
 
     SpriteEntry* e = &g_sprites[slot];
+    uint32_t generation = e->generation;
     memset(e, 0, sizeof(*e));
+    e->generation = generation;
     e->page_index = -1;
     e->path = stasis_strdup(resolved);
     if (!e->path) return 0;
@@ -4058,6 +4076,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     if (!sprite_build_into_entry_sized(e, resolved, max_w, max_h)) {
         free(e->path);
         memset(e, 0, sizeof(*e));
+        e->generation = generation;
         e->page_index = -1;
         return 0;
     }
@@ -4070,14 +4089,40 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
         const int page_count_for_log = 0;
 #endif
         SDL_Log("gfx_load_sprite: %s (%dx%d) -> handle=%d raster=%dx%d backend=%s page=%d pages=%d sprites=%d/%d",
-                resolved, max_w, max_h, slot + 1, e->w, e->h,
+                resolved, max_w, max_h, sprite_handle_for_slot(slot), e->w, e->h,
                 g_use_sdl_renderer ? "sdl" : "gl",
                 e->page_index,
                 page_count_for_log,
                 g_sprite_count,
                 g_sprite_capacity);
     }
-    return slot + 1;
+    return sprite_handle_for_slot(slot);
+}
+
+STASIS_EXPORT void stasis_gfx_release_sprite(int handle) {
+    SpriteEntry* e = sprite_get(handle);
+    if (!e) return;
+
+    if (g_use_sdl_renderer) {
+        if (e->sdl_tex) SDL_DestroyTexture(e->sdl_tex);
+    } else {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        if (g_sprite_vert_count > 0) flush_sprites();
+        if (e->page_index >= 0 && e->alloc_w > 0 && e->alloc_h > 0) {
+            atlas_page_clear_region(
+                &g_sprite_atlas_pages[e->page_index],
+                e->alloc_x, e->alloc_y, e->alloc_w, e->alloc_h);
+            atlas_release_rect(e->page_index, e->alloc_x, e->alloc_y, e->alloc_w, e->alloc_h);
+        }
+#endif
+    }
+    free(e->path);
+    uint32_t next_generation = (e->generation + 1u) & SPRITE_HANDLE_GENERATION_MASK;
+    memset(e, 0, sizeof(*e));
+    e->generation = next_generation;
+    e->retired = next_generation == 0u ? 1 : 0;
+    e->page_index = -1;
+    if (g_sprite_count > 0) g_sprite_count--;
 }
 
 /*
@@ -4477,6 +4522,9 @@ STASIS_EXPORT void stasis_shutdown(void) {
     g_sprite_capacity = 0;
     g_sprite_count = 0;
     g_sprite_table_limit = -1;
+    g_sprite_max_dimension = -1;
+    g_sprite_max_pixels = -1;
+    g_sprite_max_file_bytes = -1;
 
     for (int i = 0; i < MAX_FONTS; i++) {
         if (g_fonts[i].active) {

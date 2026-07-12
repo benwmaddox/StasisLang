@@ -48,6 +48,7 @@ EXPORTS
     stasis_host_get_frame
     stasis_gfx_notify_file_changed
     stasis_gfx_load_sprite
+    stasis_gfx_release_sprite
     stasis_gfx_draw_sprite
     stasis_gfx_submit
     stasis_gfx_submit_u8

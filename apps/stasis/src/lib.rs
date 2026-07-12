@@ -2170,6 +2170,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sprite_release_invalidates_stale_handles_before_slot_reuse() {
+        for required in [
+            "stasis_gfx_release_sprite",
+            "SPRITE_HANDLE_INDEX_BITS",
+            "SPRITE_HANDLE_GENERATION_MASK",
+            "g_sprites[idx].generation != generation",
+            "!g_sprites[i].used && !g_sprites[i].retired",
+            "e->retired = next_generation == 0u ? 1 : 0",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "sprite lifetime ownership should contain {required}"
+            );
+        }
+    }
+
     fn decode_zero_terminated_utf8(bytes: &[u8]) -> String {
         let end = bytes
             .iter()

@@ -20,6 +20,7 @@ function get_time_us(): i32 { return host_time_us(); }
 
 // Startup / assets (host calls; avoid in hot paths)
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+extern function gfx_release_sprite(handle: i32): void;
 extern function gfx_poll_reload(handle: i32): bool;
 extern function gfx_dump_bmp(path: string): i32;
 extern function load_font(path: string, size: i32): i32;

@@ -699,6 +699,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "gfx_load_sprite" | "stasis_gfx_load_sprite" => {
             function_address(stasis_dynload::stasis_jit_gfx_load_sprite as *const ())
         }
+        "gfx_release_sprite" | "stasis_gfx_release_sprite" => {
+            function_address(stasis_dynload::stasis_jit_gfx_release_sprite as *const ())
+        }
         "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => {
             function_address(stasis_dynload::stasis_jit_gfx_dump_bmp as *const ())
         }
