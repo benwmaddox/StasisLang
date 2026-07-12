@@ -3,6 +3,8 @@ package com.stasislang.workshop;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.Manifest;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
@@ -15,6 +17,9 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -33,14 +38,17 @@ import android.view.WindowInsets;
 import android.util.Base64;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -81,10 +89,16 @@ public final class MainActivity extends Activity {
     private static final String PROJECT_DIR = WorkshopProjectRegistry.LEGACY_PROJECT_DIR;
     private static final String PROJECT_BASELINES_DIR = "workshop_project_baselines";
     private static final String PROJECT_BASELINE_READY = ".ready";
+    private static final String SAMPLE_MIGRATION_PREFS = "workshop_sample_migrations";
+    private static final String PONG_SLOW_BALL_MIGRATION = "pong_slow_ball_v1";
     private static final String AI_PREFS = "ai_settings";
     private static final String ONBOARDING_PREFS = "onboarding_settings";
     private static final String ONBOARDING_COMPLETE = "manual_tutorial_seen_v1";
+    private static final String AI_SETUP_COMPLETE = "ai_setup_complete_v1";
     private static final String AI_PREF_API_KEY = "openai_api_key";
+    private static final String AI_PREF_PROVIDER = "ai_provider";
+    private static final String AI_PROVIDER_CODEX = "codex_on_device";
+    private static final String AI_PROVIDER_API = "openai_api";
     private static final String AI_PREF_MODEL = "openai_model";
     private static final String AI_PREF_MODEL_DEFAULT_VERSION = "openai_model_default_version";
     private static final String AI_PREF_LAST_USAGE = "last_ai_usage";
@@ -93,6 +107,10 @@ public final class MainActivity extends Activity {
     private static final String AI_PREF_MONTHLY_LIMIT_USD = "monthly_limit_usd";
     private static final String AI_PREF_MONTH_KEY = "monthly_spend_month";
     private static final String AI_PREF_MONTH_SPEND_USD = "monthly_spend_usd";
+    private static final String AI_PREF_CODEX_LIMITS_JSON = "codex_limits_json";
+    private static final String AI_PREF_CODEX_LIMITS_REFRESH_ATTEMPT_MS = "codex_limits_refresh_attempt_ms";
+    private static final String AI_PREF_CODEX_PRIMARY_MIGRATION = "codex_primary_after_turn_bridge_v1";
+    private static final String AI_PREF_DESIGN_SKETCHES_PREFIX = "design_sketches_";
     private static final String GITHUB_PREFS = "github_sync_settings";
     private static final String GITHUB_PREF_TOKEN = "github_token";
     private static final String GITHUB_PREF_REPOSITORY = "github_repository";
@@ -124,6 +142,8 @@ public final class MainActivity extends Activity {
     private static final int VOICE_ACTION_TOP_MARGIN_DP = 120;
     private static final int AI_CONNECT_TIMEOUT_MS = 15_000;
     private static final int AI_READ_TIMEOUT_MS = 120_000;
+    private static final long CODEX_LIMIT_REFRESH_DEBOUNCE_MS = 30L * 60L * 1000L;
+    private static final long STABLE_LAUNCH_DELAY_MS = 60_000L;
     private static final int VOICE_RECORD_PERMISSION_REQUEST = 41;
     private static final int AUDIO_RECORD_PERMISSION_REQUEST = 42;
     private static final int EXPORT_PROJECT_REQUEST = 71;
@@ -151,6 +171,9 @@ public final class MainActivity extends Activity {
     private EditText sourceEditor;
     private EditText aiPromptEditor;
     private EditText aiApiKeyEditor;
+    private Spinner aiProviderSelector;
+    private boolean aiProviderSelectionFromTouch;
+    private TextView codexAccountStatus;
     private EditText aiModelEditor;
     private EditText aiMonthlyLimitUsdEditor;
     private TextView aiBudgetStatus;
@@ -161,9 +184,11 @@ public final class MainActivity extends Activity {
     private TextView aiActionPill;
     private TextView aiPhasePill;
     private TextView aiElapsedPill;
+    private Button aiCancelButton;
     private LinearLayout aiSettingsBody;
     private LinearLayout commandHistoryBody;
     private TextView commandHistoryText;
+    private LinearLayout aiQueueSection;
     private LinearLayout aiQueueBody;
     private LinearLayout githubSettingsBody;
     private LinearLayout privacySettingsBody;
@@ -182,6 +207,7 @@ public final class MainActivity extends Activity {
     private EditText audioRecordingNameEditor;
     private final ArrayList<WorkshopProjectRegistry.ProjectInfo> availableProjects = new ArrayList<>();
     private final HashSet<String> selectedImageAssets = new HashSet<>();
+    private final HashSet<String> selectedDesignSketchAssets = new HashSet<>();
     private String selectedImageAssetProjectId = "";
     private WorkshopProjectRegistry.ProjectInfo activeProject;
     private WorkshopProjectRegistry.ProjectInfo pendingExportProject;
@@ -192,8 +218,24 @@ public final class MainActivity extends Activity {
     private volatile boolean githubOperationActive;
     private volatile boolean projectIoActive;
     private volatile boolean aiRunActive;
+    private volatile boolean activityDestroyed;
+    private boolean restartLoopRecoveryActive;
+    private boolean phoneNativeCodexReady;
+    private boolean codexSignedIn;
+    private AlertDialog codexLoginDialog;
+    private TextView codexLoginDialogStatus;
+    private String codexLoginUserCode = "";
+    private String codexLoginVerificationUrl = "";
+    private boolean showProjectChooserAfterCodexLogin;
+    private final WorkshopCodexLoginLifecycle codexLoginLifecycle = new WorkshopCodexLoginLifecycle();
+    private final Runnable codexStatusPoll = new Runnable() {
+        @Override public void run() { refreshPhoneNativeCodexStatus(); }
+    };
     private volatile boolean aiCancelRequested;
     private volatile HttpURLConnection activeAiConnection;
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private boolean networkCallbackRegistered;
     private String activeAiPrompt = "";
     private AndroidAiQueue.Entry activeAiQueueEntry;
     private volatile List<AiImageAttachment> activeAiImageAttachments = Collections.emptyList();
@@ -228,6 +270,7 @@ public final class MainActivity extends Activity {
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService githubSyncExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService projectIoExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService codexExecutor = Executors.newSingleThreadExecutor();
     private Runnable gameLoop;
     private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY];
     private final StringBuilder debugTextBuilder = new StringBuilder(64);
@@ -260,11 +303,22 @@ public final class MainActivity extends Activity {
     private static native String nativeResolveSpriteAsset(String projectRoot, int handle);
     private static native int[] nativeDecodeSvgSprite(String path, int width, int height);
     private static native String nativeRunTests(String projectRoot);
+    private static native String nativeCodexBeginDeviceLogin(String codexHome);
+    private static native String nativeCodexAccountStatus(String codexHome);
+    private static native String nativeCodexAccountRateLimits(String codexHome);
+    private static native long nativeCodexBeginResponse();
+    private static native void nativeCodexCancelResponse();
+    private static native String nativeCodexResponse(String codexHome, String requestJson,
+                                                     long generation);
+    private static native int nativeCodexInitialize(Object applicationContext);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         AndroidCrashStore.install(this);
+        JSONObject crashState = AndroidCrashStore.noteLaunch(this);
+        restartLoopRecoveryActive = crashState.optBoolean("restart_loop_detected", false);
+        phoneNativeCodexReady = nativeCodexInitialize(getApplicationContext()) == 0;
 
         try {
             activeProject = WorkshopProjectRegistry.initialize(this,
@@ -282,30 +336,49 @@ public final class MainActivity extends Activity {
 
         ProjectSnapshot project = loadBundledProject();
         try {
+            if (migrateBundledPongBallSpeed()) project = loadBundledProject();
             ensureActiveProjectBaseline(project);
         } catch (IOException error) {
             projectRegistryError = "baseline: " + error.getMessage();
         }
         setContentView(createWorkshopView(project));
+        registerNetworkMonitoring();
         markInterruptedAiOutcomeIfNeeded();
         restoreWorkshopUiState(savedInstanceState);
         restorePendingDraft();
         gameLoopHandler.post(new Runnable() {
             @Override public void run() { startNextQueuedAiIfIdle(); }
         });
-        if (AndroidCrashStore.safeSummary(this).optBoolean("present", false)) {
-            setStatusText("Previous crash detected; export a redacted support bundle or clear the local crash record in Privacy & Data");
+        gameLoopHandler.postDelayed(new Runnable() {
+            @Override public void run() { AndroidCrashStore.markLaunchStable(MainActivity.this); }
+        }, STABLE_LAUNCH_DELAY_MS);
+        if (crashState.optBoolean("present", false)) {
+            setStatusText(restartLoopRecoveryActive
+                    ? "Restart loop detected; preview and queued AI are paused until the local crash record is cleared in Privacy & Data"
+                    : "Previous crash detected; export a redacted support bundle or clear the local crash record in Privacy & Data");
         }
-        if (!getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE)
-                .getBoolean(ONBOARDING_COMPLETE, false)) {
+        if (savedInstanceState == null) {
             gameLoopHandler.post(new Runnable() {
-                @Override public void run() { showOnboardingGuide(true); }
+                @Override public void run() {
+                    if (needsFirstRunAiSetup()) showFirstRunAiSetup();
+                    else showProjectChooser();
+                }
             });
         }
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        codexLoginLifecycle.onResume();
+        refreshPhoneNativeCodexStatus();
+        startNextQueuedAiIfIdle();
+    }
+
+    @Override
     protected void onPause() {
+        codexLoginLifecycle.onPause();
+        gameLoopHandler.removeCallbacks(codexStatusPoll);
         persistPendingDraft();
         stopVoiceRecognition();
         stopAudioPreview();
@@ -328,6 +401,8 @@ public final class MainActivity extends Activity {
         outState.putBoolean("onboarding_open", onboardingBody != null && onboardingBody.getVisibility() == View.VISIBLE);
         outState.putInt("editor_scroll_y", editorPanel == null ? 0 : editorPanel.getScrollY());
         outState.putStringArrayList("selected_image_paths", new ArrayList<String>(selectedImageAssets));
+        outState.putStringArrayList("selected_design_sketch_paths",
+                new ArrayList<String>(selectedDesignSketchAssets));
         if (selectedSymbol != null) {
             outState.putString("selected_file", selectedSymbol.file);
             outState.putString("selected_kind", selectedSymbol.kind);
@@ -339,12 +414,22 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        activityDestroyed = true;
         stopVoiceRecognition();
-        aiCancelRequested = true;
-        HttpURLConnection aiConnection = activeAiConnection;
-        if (aiConnection != null) aiConnection.disconnect();
-        githubSyncExecutor.shutdownNow();
-        projectIoExecutor.shutdownNow();
+        gameLoopHandler.removeCallbacks(codexStatusPoll);
+        if (codexLoginDialog != null) codexLoginDialog.dismiss();
+        if (!WorkshopLongWorkCoordinator.isAiActive()) {
+            aiCancelRequested = true;
+            nativeCodexCancelResponse();
+        }
+        unregisterNetworkMonitoring();
+        if (!WorkshopLongWorkCoordinator.isAiActive()) {
+            HttpURLConnection aiConnection = activeAiConnection;
+            if (aiConnection != null) aiConnection.disconnect();
+        }
+        if (!WorkshopLongWorkCoordinator.isGitHubActive()) githubSyncExecutor.shutdownNow();
+        if (!WorkshopLongWorkCoordinator.isProjectIoActive()) projectIoExecutor.shutdownNow();
+        codexExecutor.shutdownNow();
         if (pendingPreviewScreenshot != null && !pendingPreviewScreenshot.isRecycled()) {
             pendingPreviewScreenshot.recycle();
         }
@@ -383,7 +468,7 @@ public final class MainActivity extends Activity {
         }
         final Uri source = data.getData();
         final File targetProject = activeProject.root;
-        projectIoActive = true;
+        if (!beginProjectIoWork("Importing a project image")) return;
         setStatusText("Image import started");
         projectIoExecutor.submit(new Runnable() {
             @Override public void run() {
@@ -404,7 +489,7 @@ public final class MainActivity extends Activity {
                         }
                     });
                 } finally {
-                    projectIoActive = false;
+                    finishProjectIoWork();
                 }
             }
         });
@@ -421,7 +506,7 @@ public final class MainActivity extends Activity {
         }
         final Uri source = data.getData();
         final File targetProject = activeProject.root;
-        projectIoActive = true;
+        if (!beginProjectIoWork("Importing project audio")) return;
         setStatusText("Audio import started");
         projectIoExecutor.submit(new Runnable() {
             @Override public void run() {
@@ -440,7 +525,7 @@ public final class MainActivity extends Activity {
                         @Override public void run() { setStatusText("Audio import failed: " + error.getMessage()); }
                     });
                 } finally {
-                    projectIoActive = false;
+                    finishProjectIoWork();
                 }
             }
         });
@@ -459,7 +544,7 @@ public final class MainActivity extends Activity {
             return;
         }
         final Uri destination = data.getData();
-        projectIoActive = true;
+        if (!beginProjectIoWork("Exporting the active project")) return;
         setStatusText("Project export started");
         projectIoExecutor.submit(new Runnable() {
             @Override public void run() {
@@ -485,7 +570,7 @@ public final class MainActivity extends Activity {
                         }
                     });
                 } finally {
-                    projectIoActive = false;
+                    finishProjectIoWork();
                 }
             }
         });
@@ -499,7 +584,7 @@ public final class MainActivity extends Activity {
             return;
         }
         final Uri source = data.getData();
-        projectIoActive = true;
+        if (!beginProjectIoWork("Importing a Stasis project")) return;
         setStatusText("Project import started");
         projectIoExecutor.submit(new Runnable() {
             @Override public void run() {
@@ -515,7 +600,7 @@ public final class MainActivity extends Activity {
                         input.close();
                     }
                     final WorkshopProjectRegistry.ProjectInfo completedProject = imported;
-                    projectIoActive = false;
+                    finishProjectIoWork();
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             if (activateProject(completedProject)) {
@@ -535,7 +620,7 @@ public final class MainActivity extends Activity {
                             error.addSuppressed(cleanupError);
                         }
                     }
-                    projectIoActive = false;
+                    finishProjectIoWork();
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             setStatusText("Project import failed and was discarded: " + error.getMessage());
@@ -634,12 +719,25 @@ public final class MainActivity extends Activity {
         reloadStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         content.addView(reloadStatus, fullWidth());
 
+        Button diagnosticToggle = new Button(this);
+        diagnosticToggle.setText("Diagnostics & Recovery");
+        content.addView(diagnosticToggle, fullWidth());
+        final LinearLayout diagnosticBody = new LinearLayout(this);
+        diagnosticBody.setOrientation(LinearLayout.VERTICAL);
+        diagnosticBody.setVisibility(View.GONE);
+        diagnosticToggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                diagnosticBody.setVisibility(diagnosticBody.getVisibility() == View.VISIBLE
+                        ? View.GONE : View.VISIBLE);
+            }
+        });
+
         diagnosticStatus = new TextView(this);
         diagnosticStatus.setTextSize(12.0f);
         diagnosticStatus.setTextColor(Color.rgb(125, 55, 45));
         diagnosticStatus.setTypeface(Typeface.MONOSPACE);
         diagnosticStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE);
-        content.addView(diagnosticStatus, fullWidth());
+        diagnosticBody.addView(diagnosticStatus, fullWidth());
         LinearLayout diagnosticActions = new LinearLayout(this);
         boolean narrowLayout = getResources().getConfiguration().screenWidthDp < 480;
         diagnosticActions.setOrientation(narrowLayout ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
@@ -664,7 +762,7 @@ public final class MainActivity extends Activity {
         });
         diagnosticActions.addView(undoFailedApply, narrowLayout ? fullWidth()
                 : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
-        content.addView(diagnosticActions, fullWidth());
+        diagnosticBody.addView(diagnosticActions, fullWidth());
         refreshRecoveryStatus();
 
         changeSummary = new TextView(this);
@@ -672,7 +770,8 @@ public final class MainActivity extends Activity {
         changeSummary.setTextSize(12.0f);
         changeSummary.setTypeface(Typeface.MONOSPACE);
         changeSummary.setPadding(0, dp(6), 0, dp(6));
-        content.addView(changeSummary, fullWidth());
+        diagnosticBody.addView(changeSummary, fullWidth());
+        content.addView(diagnosticBody, fullWidth());
         refreshChangeSummary(project);
 
         View keyboardSpacer = new View(this);
@@ -972,11 +1071,13 @@ public final class MainActivity extends Activity {
             voiceActionRow.bringToFront();
         }
         if (voiceToggle != null) {
-            voiceToggle.bringToFront();
+            voiceToggle.setVisibility(opening ? View.GONE : View.VISIBLE);
+            if (!opening) voiceToggle.bringToFront();
         }
     }
 
     private void startGameLoop() {
+        if (restartLoopRecoveryActive) return;
         if (gameLoop != null) {
             return;
         }
@@ -1005,8 +1106,19 @@ public final class MainActivity extends Activity {
 
     private void setStatusText(String status) {
         if (reloadStatus != null) {
-            reloadStatus.setText(status);
+            reloadStatus.setText(compactStatusText(status));
         }
+    }
+
+    private static String compactStatusText(String status) {
+        if (status == null) return "";
+        if (status.startsWith("CompilePlanned") && status.contains("status=0")) {
+            String reload = reloadKind(status);
+            if ("FastReload".equals(reload)) return "Game updated - hot swapped";
+            if ("ResetRequired".equals(reload)) return "Game updated - restarted";
+            return "Game ready";
+        }
+        return status;
     }
 
     private TextView createAiProgressPill(String text) {
@@ -1281,36 +1393,50 @@ public final class MainActivity extends Activity {
         controls.setOrientation(LinearLayout.VERTICAL);
         controls.setPadding(0, dp(8), 0, 0);
 
-        TextView aiTitle = new TextView(this);
-        aiTitle.setText("Chat and Commands");
-        aiTitle.setTextColor(Color.rgb(35, 45, 60));
-        aiTitle.setTextSize(14.0f);
-        aiTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        if (Build.VERSION.SDK_INT >= 28) aiTitle.setAccessibilityHeading(true);
-        controls.addView(aiTitle, fullWidth());
-
         SharedPreferences aiPrefs = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
 
         aiPromptEditor = new EditText(this);
         aiPromptEditor.setHint("Describe a game change or command. The workspace will inspect, edit, compile, and test it.");
         aiPromptEditor.setSingleLine(false);
-        aiPromptEditor.setMinLines(2);
-        aiPromptEditor.setTextSize(12.0f);
+        aiPromptEditor.setMinLines(3);
+        aiPromptEditor.setTextSize(14.0f);
         aiPromptEditor.setContentDescription("Game change or command for the AI workshop agent");
         controls.addView(aiPromptEditor, fullWidth());
+
+        Button contextToggle = new Button(this);
+        contextToggle.setText("Context & Images");
+        final LinearLayout contextBody = new LinearLayout(this);
+        contextBody.setOrientation(LinearLayout.VERTICAL);
+        contextBody.setVisibility(View.GONE);
+        contextToggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                contextBody.setVisibility(contextBody.getVisibility() == View.VISIBLE
+                        ? View.GONE : View.VISIBLE);
+            }
+        });
 
         aiAttachmentStatus = new TextView(this);
         aiAttachmentStatus.setTextSize(12.0f);
         aiAttachmentStatus.setTextColor(Color.rgb(73, 84, 100));
         aiAttachmentStatus.setPadding(0, dp(3), 0, dp(2));
-        controls.addView(aiAttachmentStatus, fullWidth());
+        contextBody.addView(aiAttachmentStatus, fullWidth());
+        Button sketchLayout = new Button(this);
+        sketchLayout.setText("Sketch Layout for AI");
+        sketchLayout.setContentDescription("Open a rough paint canvas and attach the saved sketch to the next AI command");
+        sketchLayout.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (!canModifyImageAssets()) return;
+                showPaintEditor(512, 512, null, "ai_layout_sketch", true);
+            }
+        });
+        contextBody.addView(sketchLayout, fullWidth());
         Button reviewAttachments = new Button(this);
         reviewAttachments.setText("Review AI Image Attachments");
         reviewAttachments.setContentDescription("Review or remove project images selected for the next AI request");
         reviewAttachments.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { reviewAiImageAttachments(); }
         });
-        controls.addView(reviewAttachments, fullWidth());
+        contextBody.addView(reviewAttachments, fullWidth());
         refreshAiAttachmentStatus();
         screenshotAttachmentStatus = new TextView(this);
         screenshotAttachmentStatus.setTextSize(12.0f);
@@ -1319,24 +1445,24 @@ public final class MainActivity extends Activity {
         screenshotAttachmentStatus.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { reviewPreviewCaptureForAi(); }
         });
-        controls.addView(screenshotAttachmentStatus, fullWidth());
+        contextBody.addView(screenshotAttachmentStatus, fullWidth());
         Button capturePreview = new Button(this);
         capturePreview.setText("Capture Preview for AI");
         capturePreview.setContentDescription("Capture and review the rendered game preview for the next AI request");
         capturePreview.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { capturePreviewForAi(); }
         });
-        controls.addView(capturePreview, fullWidth());
+        contextBody.addView(capturePreview, fullWidth());
         refreshScreenshotAttachmentStatus();
         allowAiImageGeneration = new CheckBox(this);
         allowAiImageGeneration.setText("Allow one low-quality 1024x1024 AI image (~$0.006 plus Sol usage)");
         allowAiImageGeneration.setChecked(false);
-        controls.addView(allowAiImageGeneration, fullWidth());
+        contextBody.addView(allowAiImageGeneration, fullWidth());
 
         LinearLayout aiActionRow = new LinearLayout(this);
         aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
         Button aiPatch = new Button(this);
-        aiPatch.setText("Queue AI Change");
+        aiPatch.setText("Run");
         aiPatch.setContentDescription("Queue the requested AI change with current reviewed attachments and budget limits");
         aiPatch.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -1345,29 +1471,41 @@ public final class MainActivity extends Activity {
             }
         });
         aiActionRow.addView(aiPatch, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
-        Button cancelAi = new Button(this);
-        cancelAi.setText("Cancel AI");
-        cancelAi.setContentDescription("Cancel the active AI run after its current atomic operation");
-        cancelAi.setOnClickListener(new View.OnClickListener() {
+        Button voiceCommand = new Button(this);
+        voiceCommand.setText("Voice");
+        voiceCommand.setContentDescription("Speak a game change or command");
+        voiceCommand.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { startVoiceChange(); }
+        });
+        aiActionRow.addView(voiceCommand, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        aiCancelButton = new Button(this);
+        aiCancelButton.setText("Stop");
+        aiCancelButton.setVisibility(View.GONE);
+        aiCancelButton.setContentDescription("Cancel the active AI run after its current atomic operation");
+        aiCancelButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { cancelAiRun(); }
         });
-        aiActionRow.addView(cancelAi, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        aiActionRow.addView(aiCancelButton, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
         controls.addView(aiActionRow, fullWidth());
 
+        aiQueueSection = new LinearLayout(this);
+        aiQueueSection.setOrientation(LinearLayout.VERTICAL);
         TextView queueTitle = new TextView(this);
         queueTitle.setText("AI Work Queue");
         queueTitle.setTextColor(Color.rgb(35, 45, 60));
         queueTitle.setTypeface(Typeface.DEFAULT_BOLD);
         queueTitle.setPadding(0, dp(6), 0, dp(2));
-        controls.addView(queueTitle, fullWidth());
+        aiQueueSection.addView(queueTitle, fullWidth());
         aiQueueBody = new LinearLayout(this);
         aiQueueBody.setOrientation(LinearLayout.VERTICAL);
-        controls.addView(aiQueueBody, fullWidth());
+        aiQueueSection.addView(aiQueueBody, fullWidth());
+        controls.addView(aiQueueSection, fullWidth());
         refreshAiQueue();
 
         LinearLayout progressRow = new LinearLayout(this);
-        progressRow.setOrientation(getResources().getConfiguration().screenWidthDp < 480
-                ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        progressRow.setOrientation(LinearLayout.HORIZONTAL);
         progressRow.setGravity(Gravity.LEFT);
         aiStepPill = createAiProgressPill("step 0/" + MAX_AI_AGENT_TURNS);
         aiActionPill = createAiProgressPill("actions 0");
@@ -1377,7 +1515,10 @@ public final class MainActivity extends Activity {
         progressRow.addView(aiActionPill);
         progressRow.addView(aiPhasePill);
         progressRow.addView(aiElapsedPill);
-        controls.addView(progressRow, fullWidth());
+        HorizontalScrollView progressScroller = new HorizontalScrollView(this);
+        progressScroller.setHorizontalScrollBarEnabled(false);
+        progressScroller.addView(progressRow);
+        controls.addView(progressScroller, fullWidth());
 
         aiBudgetStatus = new TextView(this);
         aiBudgetStatus.setTextSize(12.0f);
@@ -1386,12 +1527,28 @@ public final class MainActivity extends Activity {
         controls.addView(aiBudgetStatus, fullWidth());
         refreshAiBudgetStatus();
 
+        controls.addView(contextToggle, fullWidth());
+        controls.addView(contextBody, fullWidth());
+
+        Button moreToolsToggle = new Button(this);
+        moreToolsToggle.setText("More Tools & Settings");
+        controls.addView(moreToolsToggle, fullWidth());
+        final LinearLayout moreToolsBody = new LinearLayout(this);
+        moreToolsBody.setOrientation(LinearLayout.VERTICAL);
+        moreToolsBody.setVisibility(View.GONE);
+        moreToolsToggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                moreToolsBody.setVisibility(moreToolsBody.getVisibility() == View.VISIBLE
+                        ? View.GONE : View.VISIBLE);
+            }
+        });
+
         Button historyToggle = new Button(this);
         historyToggle.setText("Recent Commands");
         historyToggle.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { toggleCommandHistory(); }
         });
-        controls.addView(historyToggle, fullWidth());
+        moreToolsBody.addView(historyToggle, fullWidth());
         commandHistoryBody = new LinearLayout(this);
         commandHistoryBody.setOrientation(LinearLayout.VERTICAL);
         commandHistoryBody.setVisibility(View.GONE);
@@ -1412,7 +1569,7 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { retryLastAiRequest(); }
         });
         commandHistoryBody.addView(retryLastAi, fullWidth());
-        controls.addView(commandHistoryBody, fullWidth());
+        moreToolsBody.addView(commandHistoryBody, fullWidth());
         refreshCommandHistory();
 
         Button projectSettingsToggle = new Button(this);
@@ -1420,7 +1577,7 @@ public final class MainActivity extends Activity {
         projectSettingsToggle.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { toggleProjectSettings(); }
         });
-        controls.addView(projectSettingsToggle, fullWidth());
+        moreToolsBody.addView(projectSettingsToggle, fullWidth());
         projectSettingsBody = new LinearLayout(this);
         projectSettingsBody.setOrientation(LinearLayout.VERTICAL);
         projectSettingsBody.setVisibility(View.GONE);
@@ -1551,7 +1708,7 @@ public final class MainActivity extends Activity {
         audioAssetList = new LinearLayout(this);
         audioAssetList.setOrientation(LinearLayout.VERTICAL);
         projectSettingsBody.addView(audioAssetList, fullWidth());
-        controls.addView(projectSettingsBody, fullWidth());
+        moreToolsBody.addView(projectSettingsBody, fullWidth());
         refreshProjectControls();
         refreshImageAssetList();
         refreshAudioAssetList();
@@ -1560,7 +1717,7 @@ public final class MainActivity extends Activity {
         githubSyncStatus.setTextSize(12.0f);
         githubSyncStatus.setTextColor(Color.rgb(73, 84, 100));
         githubSyncStatus.setPadding(0, dp(4), 0, dp(2));
-        controls.addView(githubSyncStatus, fullWidth());
+        moreToolsBody.addView(githubSyncStatus, fullWidth());
         refreshGitHubSyncStatus();
 
         Button settingsToggle = new Button(this);
@@ -1571,13 +1728,49 @@ public final class MainActivity extends Activity {
                 toggleAiSettings();
             }
         });
-        controls.addView(settingsToggle, fullWidth());
+        moreToolsBody.addView(settingsToggle, fullWidth());
 
         aiSettingsBody = new LinearLayout(this);
         aiSettingsBody.setOrientation(LinearLayout.VERTICAL);
         aiSettingsBody.setVisibility(View.GONE);
+
+        TextView providerLabel = new TextView(this);
+        providerLabel.setText("Primary AI provider");
+        providerLabel.setTextSize(12.0f);
+        aiSettingsBody.addView(providerLabel, fullWidth());
+        aiProviderSelector = new Spinner(this);
+        ArrayAdapter<String> providerAdapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item,
+                Arrays.asList("Codex subscription (on this phone)", "OpenAI API key (fallback)"));
+        providerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        aiProviderSelector.setAdapter(providerAdapter);
+        String configuredProvider = aiPrefs.getString(AI_PREF_PROVIDER, "");
+        if (configuredProvider.isEmpty()) {
+            configuredProvider = WorkshopAiProviderPolicy.defaultToCodex(phoneNativeCodexReady)
+                    ? AI_PROVIDER_CODEX : AI_PROVIDER_API;
+        }
+        aiProviderSelector.setSelection(AI_PROVIDER_API.equals(configuredProvider) ? 1 : 0);
+        aiSettingsBody.addView(aiProviderSelector, fullWidth());
+
+        codexAccountStatus = new TextView(this);
+        codexAccountStatus.setText("Codex account: checking this phone...");
+        codexAccountStatus.setTextSize(12.0f);
+        codexAccountStatus.setPadding(0, dp(4), 0, dp(4));
+        aiSettingsBody.addView(codexAccountStatus, fullWidth());
+        Button codexSignIn = new Button(this);
+        codexSignIn.setText("Sign in to ChatGPT on this phone");
+        codexSignIn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { beginPhoneNativeCodexLogin(); }
+        });
+        aiSettingsBody.addView(codexSignIn, fullWidth());
+
+        TextView apiFallbackLabel = new TextView(this);
+        apiFallbackLabel.setText("Optional API fallback");
+        apiFallbackLabel.setTextSize(12.0f);
+        apiFallbackLabel.setPadding(0, dp(8), 0, 0);
+        aiSettingsBody.addView(apiFallbackLabel, fullWidth());
         aiApiKeyEditor = new EditText(this);
-        aiApiKeyEditor.setHint("OpenAI API key");
+        aiApiKeyEditor.setHint("OpenAI API key (fallback only)");
         aiApiKeyEditor.setSingleLine(true);
         aiApiKeyEditor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         aiApiKeyEditor.setText(readSecretPreference(aiPrefs, AI_PREF_API_KEY));
@@ -1608,6 +1801,26 @@ public final class MainActivity extends Activity {
         aiMonthlyLimitUsdEditor.setSingleLine(true);
         aiMonthlyLimitUsdEditor.setText(aiPrefs.getString(AI_PREF_MONTHLY_LIMIT_USD, "5.00"));
         aiSettingsBody.addView(aiMonthlyLimitUsdEditor, fullWidth());
+        aiProviderSelector.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View view, MotionEvent event) {
+                if (event.getAction() == MotionEvent.ACTION_DOWN) aiProviderSelectionFromTouch = true;
+                return false;
+            }
+        });
+        aiProviderSelector.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                updateAiProviderVisibility();
+                SharedPreferences.Editor edit = getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                        .putString(AI_PREF_PROVIDER, position == 1 ? AI_PROVIDER_API : AI_PROVIDER_CODEX);
+                if (aiProviderSelectionFromTouch) {
+                    edit.putBoolean(AI_PREF_CODEX_PRIMARY_MIGRATION, true);
+                }
+                aiProviderSelectionFromTouch = false;
+                edit.apply();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
+        updateAiProviderVisibility();
 
         Button saveSettings = new Button(this);
         saveSettings.setText("Save AI Settings");
@@ -1618,7 +1831,8 @@ public final class MainActivity extends Activity {
             }
         });
         aiSettingsBody.addView(saveSettings, fullWidth());
-        controls.addView(aiSettingsBody, fullWidth());
+        moreToolsBody.addView(aiSettingsBody, fullWidth());
+        refreshPhoneNativeCodexStatus();
 
         Button githubSettingsToggle = new Button(this);
         githubSettingsToggle.setText("GitHub Sync Settings");
@@ -1628,7 +1842,7 @@ public final class MainActivity extends Activity {
                 toggleGitHubSettings();
             }
         });
-        controls.addView(githubSettingsToggle, fullWidth());
+        moreToolsBody.addView(githubSettingsToggle, fullWidth());
 
         SharedPreferences githubPrefs = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
         githubSettingsBody = new LinearLayout(this);
@@ -1683,7 +1897,7 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { retryGitHubOperation(); }
         });
         githubSettingsBody.addView(retryGitHubOperation, fullWidth());
-        controls.addView(githubSettingsBody, fullWidth());
+        moreToolsBody.addView(githubSettingsBody, fullWidth());
 
         Button privacyToggle = new Button(this);
         privacyToggle.setText("Privacy & Data");
@@ -1693,7 +1907,7 @@ public final class MainActivity extends Activity {
                         privacySettingsBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
             }
         });
-        controls.addView(privacyToggle, fullWidth());
+        moreToolsBody.addView(privacyToggle, fullWidth());
         privacySettingsBody = new LinearLayout(this);
         privacySettingsBody.setOrientation(LinearLayout.VERTICAL);
         privacySettingsBody.setVisibility(View.GONE);
@@ -1741,6 +1955,9 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) {
                 try {
                     AndroidCrashStore.clear(MainActivity.this);
+                    restartLoopRecoveryActive = false;
+                    startGameLoop();
+                    startNextQueuedAiIfIdle();
                     setStatusText("Local redacted crash record cleared");
                 } catch (Exception error) {
                     setStatusText("Crash record clear failed: " + error.getMessage());
@@ -1754,7 +1971,7 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { confirmDeleteActiveProject(); }
         });
         privacySettingsBody.addView(deleteProject, fullWidth());
-        controls.addView(privacySettingsBody, fullWidth());
+        moreToolsBody.addView(privacySettingsBody, fullWidth());
 
         Button onboardingToggle = new Button(this);
         onboardingToggle.setText("Help & Onboarding");
@@ -1763,7 +1980,7 @@ public final class MainActivity extends Activity {
                 onboardingBody.setVisibility(onboardingBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
             }
         });
-        controls.addView(onboardingToggle, fullWidth());
+        moreToolsBody.addView(onboardingToggle, fullWidth());
         onboardingBody = new LinearLayout(this);
         onboardingBody.setOrientation(LinearLayout.VERTICAL);
         onboardingBody.setVisibility(View.GONE);
@@ -1791,7 +2008,8 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { startManualTutorial(); }
         });
         onboardingBody.addView(startManual, fullWidth());
-        controls.addView(onboardingBody, fullWidth());
+        moreToolsBody.addView(onboardingBody, fullWidth());
+        controls.addView(moreToolsBody, fullWidth());
         return controls;
     }
 
@@ -1882,6 +2100,7 @@ public final class MainActivity extends Activity {
     }
 
     private void recordAiOutcome(String prompt, String status, String summary, String usage) {
+        boolean terminal = !"started".equals(status);
         try {
             JSONArray existing = aiOutcomeHistory();
             JSONArray updated = new JSONArray();
@@ -1908,6 +2127,12 @@ public final class MainActivity extends Activity {
             finishActiveAiQueueItem(status, summary);
         } catch (Exception ignored) {
             // Outcome history must not interfere with AI execution or source recovery.
+        } finally {
+            if (terminal && WorkshopLongWorkCoordinator.isAiActive()) {
+                aiRunActive = false;
+                WorkshopLongWorkCoordinator.finishAi(this);
+                if (aiCancelButton != null) aiCancelButton.setVisibility(View.GONE);
+            }
         }
     }
 
@@ -1924,6 +2149,166 @@ public final class MainActivity extends Activity {
             }
         }
         setStatusText("No AI request is available to retry");
+    }
+
+    private boolean needsFirstRunAiSetup() {
+        SharedPreferences onboarding = getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE);
+        if (onboarding.getBoolean(AI_SETUP_COMPLETE, false)) return false;
+        SharedPreferences ai = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+        if (!ai.getString(AI_PREF_PROVIDER, "").isEmpty()
+                || !readSecretPreference(ai, AI_PREF_API_KEY).isEmpty()) {
+            onboarding.edit().putBoolean(AI_SETUP_COMPLETE, true).apply();
+            return false;
+        }
+        return true;
+    }
+
+    private void markAiSetupComplete() {
+        getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE).edit()
+                .putBoolean(AI_SETUP_COMPLETE, true).apply();
+    }
+
+    private void showFirstRunAiSetup() {
+        final EditText apiKey = new EditText(this);
+        apiKey.setHint("Optional OpenAI API key");
+        apiKey.setSingleLine(true);
+        apiKey.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        apiKey.setPadding(dp(20), dp(8), dp(20), dp(8));
+        new AlertDialog.Builder(this)
+                .setTitle("Set up AI")
+                .setMessage("Sign in with your ChatGPT subscription on this phone, or save an API key as the fallback. You can change both later in Settings.")
+                .setView(apiKey)
+                .setPositiveButton("ChatGPT Sign-in", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                                .putString(AI_PREF_PROVIDER, AI_PROVIDER_CODEX).apply();
+                        if (aiProviderSelector != null) aiProviderSelector.setSelection(0);
+                        markAiSetupComplete();
+                        refreshAiBudgetStatus();
+                        showProjectChooserAfterCodexLogin = true;
+                        beginPhoneNativeCodexLogin();
+                    }
+                })
+                .setNeutralButton("Save API Key", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        String key = apiKey.getText().toString().trim();
+                        if (key.isEmpty() || !saveAiSettings(key, DEFAULT_AI_MODEL)) {
+                            setStatusText("Enter a valid API key, or choose ChatGPT sign-in / without AI");
+                            gameLoopHandler.post(new Runnable() {
+                                @Override public void run() { showFirstRunAiSetup(); }
+                            });
+                            return;
+                        }
+                        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                                .putString(AI_PREF_PROVIDER, AI_PROVIDER_API).apply();
+                        if (aiProviderSelector != null) aiProviderSelector.setSelection(1);
+                        markAiSetupComplete();
+                        refreshAiBudgetStatus();
+                        showProjectChooser();
+                    }
+                })
+                .setNegativeButton("Without AI", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        markAiSetupComplete();
+                        showProjectChooser();
+                    }
+                })
+                .setCancelable(false)
+                .show();
+    }
+
+    private void showProjectChooser() {
+        if (isFinishing()) return;
+        final ArrayList<WorkshopProjectRegistry.ProjectInfo> projects = new ArrayList<>();
+        try {
+            projects.addAll(WorkshopProjectRegistry.list(this));
+        } catch (Exception error) {
+            setStatusText("Project list unavailable: " + error.getMessage());
+            return;
+        }
+        if (projects.isEmpty()) {
+            showNewProjectDialog();
+            return;
+        }
+        String[] labels = new String[projects.size()];
+        int current = 0;
+        for (int index = 0; index < projects.size(); index += 1) {
+            WorkshopProjectRegistry.ProjectInfo project = projects.get(index);
+            labels[index] = project.name + (project.templateId.isEmpty()
+                    ? " - imported" : " - " + project.templateId);
+            if (activeProject != null && activeProject.id.equals(project.id)) current = index;
+        }
+        final int[] selected = new int[] { current };
+        new AlertDialog.Builder(this)
+                .setTitle("Choose project")
+                .setSingleChoiceItems(labels, current, new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        selected[0] = which;
+                    }
+                })
+                .setPositiveButton("Open", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        WorkshopProjectRegistry.ProjectInfo project = projects.get(selected[0]);
+                        if (activeProject != null && activeProject.id.equals(project.id)) {
+                            setStatusText("Working on " + project.name);
+                        } else {
+                            activateProject(project);
+                        }
+                    }
+                })
+                .setNeutralButton("New", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        showNewProjectDialog();
+                    }
+                })
+                .setNegativeButton("Current", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        setStatusText(activeProject == null ? "Using current workspace"
+                                : "Working on " + activeProject.name);
+                    }
+                })
+                .show();
+    }
+
+    private void showNewProjectDialog() {
+        final LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(20), dp(4), dp(20), 0);
+        final EditText name = new EditText(this);
+        name.setHint("Project name");
+        name.setSingleLine(true);
+        content.addView(name, fullWidth());
+        final Spinner templates = new Spinner(this);
+        ArrayAdapter<WorkshopTemplateCatalog.Template> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, WorkshopTemplateCatalog.list());
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        templates.setAdapter(adapter);
+        content.addView(templates, fullWidth());
+        new AlertDialog.Builder(this)
+                .setTitle("New project")
+                .setView(content)
+                .setPositiveButton("Create", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        try {
+                            WorkshopTemplateCatalog.Template template =
+                                    (WorkshopTemplateCatalog.Template)templates.getSelectedItem();
+                            WorkshopProjectRegistry.ProjectInfo project = WorkshopProjectRegistry.createFromTemplate(
+                                    MainActivity.this, name.getText().toString(), template.id);
+                            activateProject(project);
+                        } catch (Exception error) {
+                            setStatusText("Project creation failed: " + error.getMessage());
+                            gameLoopHandler.post(new Runnable() {
+                                @Override public void run() { showNewProjectDialog(); }
+                            });
+                        }
+                    }
+                })
+                .setNegativeButton("Back", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        showProjectChooser();
+                    }
+                })
+                .show();
     }
 
     private void toggleProjectSettings() {
@@ -2034,7 +2419,8 @@ public final class MainActivity extends Activity {
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
-            setStatusText("Switched to " + project.name + " - " + compileResult);
+            setStatusText(compileReady ? "Working on " + project.name
+                    : "Unable to run " + project.name + " - " + compileResult);
             gameLoopHandler.post(new Runnable() {
                 @Override public void run() { startNextQueuedAiIfIdle(); }
             });
@@ -2291,17 +2677,22 @@ public final class MainActivity extends Activity {
         aiQueueBody.removeAllViews();
         try {
             List<AndroidAiQueue.Entry> items = AndroidAiQueue.list(this, activeRecoveryProjectId());
-            if (items.isEmpty()) {
-                TextView empty = new TextView(this);
-                empty.setText("No queued AI work");
-                empty.setTextColor(Color.rgb(73, 84, 100));
-                aiQueueBody.addView(empty, fullWidth());
+            boolean hasActiveItems = false;
+            for (AndroidAiQueue.Entry item : items) {
+                if (AndroidAiQueue.PENDING.equals(item.state)
+                        || AndroidAiQueue.IN_PROGRESS.equals(item.state)) {
+                    hasActiveItems = true;
+                    break;
+                }
+            }
+            if (!hasActiveItems) {
+                if (aiQueueSection != null) aiQueueSection.setVisibility(View.GONE);
                 return;
             }
-            int first = Math.max(0, items.size() - 20);
+            if (aiQueueSection != null) aiQueueSection.setVisibility(View.VISIBLE);
             for (int index = 0; index < items.size(); index += 1) {
                 final AndroidAiQueue.Entry item = items.get(index);
-                if (index < first && !AndroidAiQueue.PENDING.equals(item.state)
+                if (!AndroidAiQueue.PENDING.equals(item.state)
                         && !AndroidAiQueue.IN_PROGRESS.equals(item.state)) continue;
                 LinearLayout row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
@@ -2325,6 +2716,7 @@ public final class MainActivity extends Activity {
                 aiQueueBody.addView(row, fullWidth());
             }
         } catch (Exception error) {
+            if (aiQueueSection != null) aiQueueSection.setVisibility(View.VISIBLE);
             TextView unavailable = new TextView(this);
             unavailable.setText("AI queue unavailable: " + error.getMessage());
             aiQueueBody.addView(unavailable, fullWidth());
@@ -2365,8 +2757,28 @@ public final class MainActivity extends Activity {
     }
 
     private void startNextQueuedAiIfIdle() {
-        if (aiRunActive || activeAiQueueEntry != null || audioRecordingActive) return;
+        if (restartLoopRecoveryActive) return;
+        if (aiRunActive || WorkshopLongWorkCoordinator.isAnyActive()
+                || activeAiQueueEntry != null || audioRecordingActive) return;
         try {
+            boolean hasPending = false;
+            for (AndroidAiQueue.Entry item : AndroidAiQueue.list(this, activeRecoveryProjectId())) {
+                if (AndroidAiQueue.PENDING.equals(item.state)) {
+                    hasPending = true;
+                    break;
+                }
+            }
+            if (!hasPending) {
+                refreshAiQueue();
+                return;
+            }
+            if (WorkshopBackgroundWorkPolicy.decide(true,
+                    WorkshopConnectivity.hasUsableNetwork(this), false, false)
+                    == WorkshopBackgroundWorkPolicy.Decision.WAIT_FOR_NETWORK) {
+                setStatusText("AI work is waiting for an internet connection");
+                refreshAiQueue();
+                return;
+            }
             AndroidAiQueue.Entry next = AndroidAiQueue.claimNext(this, activeRecoveryProjectId());
             if (next == null) {
                 refreshAiQueue();
@@ -2539,7 +2951,7 @@ public final class MainActivity extends Activity {
         SharedPreferences github = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
         final String operation = github.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
         final String state = github.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
-        projectIoActive = true;
+        if (!beginProjectIoWork("Building a redacted support bundle")) return;
         setStatusText("Building redacted support bundle");
         projectIoExecutor.submit(new Runnable() {
             @Override public void run() {
@@ -2563,7 +2975,7 @@ public final class MainActivity extends Activity {
                         @Override public void run() { setStatusText("Support export failed: " + error.getMessage()); }
                     });
                 } finally {
-                    projectIoActive = false;
+                    finishProjectIoWork();
                 }
             }
         });
@@ -2774,6 +3186,9 @@ public final class MainActivity extends Activity {
         ArrayList<String> selectedPaths = state.getStringArrayList("selected_image_paths");
         selectedImageAssets.clear();
         if (selectedPaths != null) selectedImageAssets.addAll(selectedPaths);
+        ArrayList<String> designSketchPaths = state.getStringArrayList("selected_design_sketch_paths");
+        selectedDesignSketchAssets.clear();
+        if (designSketchPaths != null) selectedDesignSketchAssets.addAll(designSketchPaths);
         selectedImageAssetProjectId = activeProject == null ? "" : activeProject.id;
         refreshImageAssetList();
         refreshAiAttachmentStatus();
@@ -3087,9 +3502,28 @@ public final class MainActivity extends Activity {
         return legacy;
     }
 
+    private synchronized boolean beginProjectIoWork(String detail) {
+        if (projectIoActive || !WorkshopLongWorkCoordinator.beginProjectIo(this, detail)) {
+            setStatusText("Project operation blocked while another foreground operation is active");
+            return false;
+        }
+        projectIoActive = true;
+        return true;
+    }
+
+    private void finishProjectIoWork() {
+        projectIoActive = false;
+        WorkshopLongWorkCoordinator.finishProjectIo(this);
+        if (activityDestroyed) projectIoExecutor.shutdown();
+    }
+
     private synchronized boolean beginGitHubOperation(String operation, String status) {
         if (githubOperationActive) {
             githubSyncStatus.setText("GitHub sync: another operation is already queued or running");
+            return false;
+        }
+        if (!WorkshopLongWorkCoordinator.beginGitHub(this, "Syncing reviewed project files")) {
+            githubSyncStatus.setText("GitHub sync: another foreground operation is active");
             return false;
         }
         githubOperationActive = true;
@@ -3099,7 +3533,11 @@ public final class MainActivity extends Activity {
 
     private void postGitHubOperationState(final String operation, final String state, final String status) {
         persistGitHubOperationState(operation, state, status);
-        if ("complete".equals(state) || "error".equals(state)) githubOperationActive = false;
+        if ("complete".equals(state) || "error".equals(state)) {
+            githubOperationActive = false;
+            WorkshopLongWorkCoordinator.finishGitHub(this);
+            if (activityDestroyed) githubSyncExecutor.shutdown();
+        }
         runOnUiThread(new Runnable() {
             @Override public void run() { if (githubSyncStatus != null) githubSyncStatus.setText(status); }
         });
@@ -3137,11 +3575,360 @@ public final class MainActivity extends Activity {
         aiSettingsBody.setVisibility(aiSettingsBody.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
     }
 
+    private String selectedAiProvider() {
+        return aiProviderSelector != null && aiProviderSelector.getSelectedItemPosition() == 1
+                ? AI_PROVIDER_API : AI_PROVIDER_CODEX;
+    }
+
+    private void updateAiProviderVisibility() {
+        boolean codex = AI_PROVIDER_CODEX.equals(selectedAiProvider());
+        if (aiMonthlyLimitUsdEditor != null) {
+            aiMonthlyLimitUsdEditor.setVisibility(codex ? View.GONE : View.VISIBLE);
+        }
+        refreshAiBudgetStatus();
+        refreshAiAttachmentStatus();
+    }
+
+    private String codexHomePath() {
+        return new File(getFilesDir(), "codex").getAbsolutePath();
+    }
+
+    private void beginPhoneNativeCodexLogin() {
+        if (!phoneNativeCodexReady) {
+            if (codexAccountStatus != null) {
+                codexAccountStatus.setText("Codex account: Android certificate verifier initialization failed");
+            }
+            return;
+        }
+        codexLoginLifecycle.onLoginStarted();
+        gameLoopHandler.removeCallbacks(codexStatusPoll);
+        if (codexAccountStatus != null) codexAccountStatus.setText("Codex account: requesting a device code...");
+        codexExecutor.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    final JSONObject status = new JSONObject(nativeCodexBeginDeviceLogin(codexHomePath()));
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if ("awaiting_user".equals(status.optString("status", ""))) {
+                                showCodexDeviceCodeDialog(
+                                        status.optString("verification_url", ""),
+                                        status.optString("user_code", ""));
+                            }
+                            showPhoneNativeCodexStatus(status);
+                            if (!"awaiting_user".equals(status.optString("status", ""))
+                                    && showProjectChooserAfterCodexLogin) {
+                                showProjectChooserAfterCodexLogin = false;
+                                showProjectChooser();
+                            }
+                        }
+                    });
+                } catch (Exception error) {
+                    final String message = error.getMessage();
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (codexAccountStatus != null) codexAccountStatus.setText("Codex account error: " + message);
+                            if (showProjectChooserAfterCodexLogin) {
+                                showProjectChooserAfterCodexLogin = false;
+                                showProjectChooser();
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    private void refreshPhoneNativeCodexStatus() {
+        if (!phoneNativeCodexReady || !codexLoginLifecycle.beginStatusRequest()) return;
+        codexExecutor.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    final JSONObject status = new JSONObject(nativeCodexAccountStatus(codexHomePath()));
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            codexLoginLifecycle.finishStatusRequest();
+                            showPhoneNativeCodexStatus(status);
+                        }
+                    });
+                } catch (Exception error) {
+                    final String message = error.getMessage();
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            codexLoginLifecycle.finishStatusRequest();
+                            if (codexAccountStatus != null) codexAccountStatus.setText("Codex account error: " + message);
+                            if (codexLoginLifecycle.schedulePoll()) {
+                                gameLoopHandler.removeCallbacks(codexStatusPoll);
+                                gameLoopHandler.postDelayed(codexStatusPoll, 2000L);
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    private void showCodexDeviceCodeDialog(String verificationUrl, String userCode) {
+        showCodexDeviceCodeDialog(verificationUrl, userCode, true);
+    }
+
+    private void showCodexDeviceCodeDialog(String verificationUrl, String userCode,
+                                           boolean openBrowserAutomatically) {
+        if (!isOfficialCodexVerificationUrl(verificationUrl) || userCode.trim().isEmpty()) {
+            setStatusText("Codex sign-in returned an invalid verification link or code; request a new code");
+            if (showProjectChooserAfterCodexLogin) {
+                showProjectChooserAfterCodexLogin = false;
+                showProjectChooser();
+            }
+            return;
+        }
+        codexLoginVerificationUrl = verificationUrl;
+        codexLoginUserCode = userCode.trim();
+        copyCodexLoginCode();
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(22), dp(8), dp(22), 0);
+        TextView instructions = new TextView(this);
+        instructions.setText("The one-time code is copied. In the browser, paste it, finish sign-in, then return here. Workshop will verify completion automatically.");
+        instructions.setTextSize(14.0f);
+        content.addView(instructions, fullWidth());
+        TextView code = new TextView(this);
+        code.setText(codexLoginUserCode);
+        code.setTextSize(24.0f);
+        code.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        code.setTextIsSelectable(true);
+        code.setGravity(Gravity.CENTER);
+        code.setPadding(0, dp(16), 0, dp(12));
+        code.setContentDescription("Codex one-time sign-in code " + codexLoginUserCode);
+        content.addView(code, fullWidth());
+        codexLoginDialogStatus = new TextView(this);
+        codexLoginDialogStatus.setText("Waiting for browser sign-in...");
+        codexLoginDialogStatus.setTextSize(13.0f);
+        codexLoginDialogStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        content.addView(codexLoginDialogStatus, fullWidth());
+
+        if (codexLoginDialog != null) codexLoginDialog.dismiss();
+        codexLoginDialog = new AlertDialog.Builder(this)
+                .setTitle("Sign in to Codex")
+                .setView(content)
+                .setPositiveButton("Open Browser", null)
+                .setNeutralButton("Copy Code", null)
+                .setNegativeButton("Continue", null)
+                .create();
+        codexLoginDialog.show();
+        codexLoginDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { openCodexVerificationUrl(); }
+        });
+        codexLoginDialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { copyCodexLoginCode(); }
+        });
+        codexLoginDialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                codexLoginDialogStatus.setText("Checking whether browser sign-in finished...");
+                refreshPhoneNativeCodexStatus();
+            }
+        });
+        if (openBrowserAutomatically) {
+            content.postDelayed(new Runnable() {
+                @Override public void run() { openCodexVerificationUrl(); }
+            }, 250L);
+        }
+    }
+
+    private void registerNetworkMonitoring() {
+        connectivityManager = (ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
+        if (connectivityManager == null || networkCallbackRegistered) return;
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network network) { resumeQueuedAiAfterNetworkChange(); }
+            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                resumeQueuedAiAfterNetworkChange();
+            }
+        };
+        try {
+            connectivityManager.registerDefaultNetworkCallback(networkCallback);
+            networkCallbackRegistered = true;
+        } catch (RuntimeException error) {
+            networkCallback = null;
+        }
+    }
+
+    private void resumeQueuedAiAfterNetworkChange() {
+        if (!WorkshopConnectivity.hasUsableNetwork(this)) return;
+        runOnUiThread(new Runnable() {
+            @Override public void run() { startNextQueuedAiIfIdle(); }
+        });
+    }
+
+    private void unregisterNetworkMonitoring() {
+        if (!networkCallbackRegistered || connectivityManager == null || networkCallback == null) return;
+        try {
+            connectivityManager.unregisterNetworkCallback(networkCallback);
+        } catch (RuntimeException ignored) {
+            // Android may already have removed the callback during process teardown.
+        }
+        networkCallbackRegistered = false;
+        networkCallback = null;
+    }
+
+    private static boolean isOfficialCodexVerificationUrl(String value) {
+        try {
+            Uri uri = Uri.parse(value);
+            return "https".equalsIgnoreCase(uri.getScheme())
+                    && "auth.openai.com".equalsIgnoreCase(uri.getHost());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private void openCodexVerificationUrl() {
+        if (!isOfficialCodexVerificationUrl(codexLoginVerificationUrl)) {
+            setStatusText("Codex verification link is unavailable; request a new code");
+            return;
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(codexLoginVerificationUrl)));
+        } catch (Exception error) {
+            setStatusText("Open " + codexLoginVerificationUrl + " to finish Codex sign-in");
+        }
+    }
+
+    private void copyCodexLoginCode() {
+        if (codexLoginUserCode.isEmpty()) return;
+        ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) {
+            setStatusText("Clipboard is unavailable; press and hold the visible code to copy it");
+            return;
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText("Codex sign-in code", codexLoginUserCode));
+        Toast.makeText(this, "Codex code copied", Toast.LENGTH_SHORT).show();
+    }
+
+    private void clearCopiedCodexLoginCode() {
+        if (codexLoginUserCode.isEmpty()) return;
+        ClipboardManager clipboard = (ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null || !clipboard.hasPrimaryClip() || clipboard.getPrimaryClip() == null
+                || clipboard.getPrimaryClip().getItemCount() == 0) return;
+        CharSequence current = clipboard.getPrimaryClip().getItemAt(0).coerceToText(this);
+        if (!codexLoginUserCode.contentEquals(current)) return;
+        if (Build.VERSION.SDK_INT >= 28) clipboard.clearPrimaryClip();
+        else clipboard.setPrimaryClip(ClipData.newPlainText("", ""));
+    }
+
+    private void refreshCodexRateLimitsAfterAction() {
+        SharedPreferences preferences = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+        long now = System.currentTimeMillis();
+        long lastAttempt = preferences.getLong(AI_PREF_CODEX_LIMITS_REFRESH_ATTEMPT_MS, 0L);
+        if (now - lastAttempt < CODEX_LIMIT_REFRESH_DEBOUNCE_MS) return;
+        preferences.edit().putLong(AI_PREF_CODEX_LIMITS_REFRESH_ATTEMPT_MS, now).apply();
+        codexExecutor.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    final JSONObject limits = new JSONObject(nativeCodexAccountRateLimits(codexHomePath()));
+                    if (!"ok".equals(limits.optString("status", ""))) return;
+                    getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                            .putString(AI_PREF_CODEX_LIMITS_JSON, limits.toString()).apply();
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() { refreshAiBudgetStatus(); }
+                    });
+                } catch (Exception ignored) {
+                    // Keep the last successful snapshot; the next action retries after the debounce.
+                }
+            }
+        });
+    }
+
+    private void showPhoneNativeCodexStatus(JSONObject status) {
+        if (codexAccountStatus == null) return;
+        String state = status.optString("status", "error");
+        if ("signed_in".equals(state)) {
+            codexSignedIn = true;
+            SharedPreferences preferences = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
+            boolean activeLogin = !codexLoginUserCode.isEmpty()
+                    || (codexLoginDialog != null && codexLoginDialog.isShowing());
+            if (WorkshopAiProviderPolicy.promoteCodexAfterSignIn(activeLogin,
+                    preferences.getBoolean(AI_PREF_CODEX_PRIMARY_MIGRATION, false))) {
+                preferences.edit()
+                        .putString(AI_PREF_PROVIDER, AI_PROVIDER_CODEX)
+                        .putBoolean(AI_PREF_CODEX_PRIMARY_MIGRATION, true)
+                        .apply();
+                if (aiProviderSelector != null && aiProviderSelector.getSelectedItemPosition() != 0) {
+                    aiProviderSelector.setSelection(0);
+                }
+            }
+            String plan = status.optString("plan_type", "");
+            codexAccountStatus.setText("Codex account: signed in on this phone"
+                    + (plan.isEmpty() ? "" : " (" + plan + ")"));
+            boolean handleCompletion = codexLoginLifecycle.onSignedIn();
+            gameLoopHandler.removeCallbacks(codexStatusPoll);
+            if (codexLoginDialogStatus != null) {
+                codexLoginDialogStatus.setText("Signed in successfully. Returning to Workshop...");
+            }
+            clearCopiedCodexLoginCode();
+            refreshAiBudgetStatus();
+            if (!handleCompletion) return;
+            final boolean showProjects = showProjectChooserAfterCodexLogin;
+            showProjectChooserAfterCodexLogin = false;
+            gameLoopHandler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (codexLoginDialog != null) codexLoginDialog.dismiss();
+                    codexLoginDialog = null;
+                    codexLoginDialogStatus = null;
+                    codexLoginUserCode = "";
+                    codexLoginVerificationUrl = "";
+                    if (showProjects) showProjectChooser();
+                }
+            }, 750L);
+            return;
+        }
+        if ("awaiting_user".equals(state)) {
+            codexLoginLifecycle.onAwaitingUser();
+            codexSignedIn = false;
+            String userCode = status.optString("user_code", "").trim();
+            String verificationUrl = status.optString(
+                    "verification_url", "https://auth.openai.com/codex/device");
+            codexLoginUserCode = userCode;
+            codexLoginVerificationUrl = verificationUrl;
+            codexAccountStatus.setText("Codex sign-in code: " + userCode + "\n" + verificationUrl);
+            if (codexLoginDialogStatus != null) {
+                codexLoginDialogStatus.setText("Waiting for browser sign-in...");
+            }
+            boolean dialogShowing = codexLoginDialog != null && codexLoginDialog.isShowing();
+            boolean validCode = !userCode.isEmpty() && isOfficialCodexVerificationUrl(verificationUrl);
+            if (codexLoginLifecycle.shouldPresentDialog(dialogShowing, validCode)) {
+                showCodexDeviceCodeDialog(verificationUrl, userCode, false);
+            }
+            if (codexLoginLifecycle.schedulePoll()) {
+                gameLoopHandler.removeCallbacks(codexStatusPoll);
+                gameLoopHandler.postDelayed(codexStatusPoll, 2000L);
+            }
+            return;
+        }
+        if ("signed_out".equals(state)) {
+            codexLoginLifecycle.onTerminalFailure();
+            gameLoopHandler.removeCallbacks(codexStatusPoll);
+            codexSignedIn = false;
+            codexAccountStatus.setText("Codex account: signed out on this phone");
+            refreshAiBudgetStatus();
+            return;
+        }
+        codexLoginLifecycle.onTerminalFailure();
+        gameLoopHandler.removeCallbacks(codexStatusPoll);
+        codexSignedIn = false;
+        String error = status.optString("error", state);
+        codexAccountStatus.setText("Codex sign-in failed: " + error);
+        if (codexLoginDialogStatus != null) {
+            codexLoginDialogStatus.setText("Sign-in failed: " + error
+                    + "\nClose this message and request a new code to try again.");
+        }
+        refreshAiBudgetStatus();
+    }
+
     private void saveAiSettingsFromEditors() {
+        String provider = selectedAiProvider();
         String apiKey = aiApiKeyEditor == null ? "" : aiApiKeyEditor.getText().toString().trim();
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
         String monthlyLimitText = aiMonthlyLimitUsdEditor == null ? "5.00" : aiMonthlyLimitUsdEditor.getText().toString().trim();
-        if (apiKey.isEmpty()) {
+        if (AI_PROVIDER_API.equals(provider) && apiKey.isEmpty()) {
             setStatusText("AI settings need an API key before a run can start");
             return;
         }
@@ -3149,12 +3936,15 @@ public final class MainActivity extends Activity {
             setStatusText("The device monthly AI limit must be a non-negative USD value");
             return;
         }
-        if (!saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model)) return;
+        if (!apiKey.isEmpty() && !saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model)) return;
         getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                .putString(AI_PREF_PROVIDER, provider)
                 .putString(AI_PREF_MONTHLY_LIMIT_USD, monthlyLimitText)
                 .apply();
         refreshAiBudgetStatus();
-        setStatusText("AI settings saved");
+        setStatusText(AI_PROVIDER_CODEX.equals(provider)
+                ? "Phone-native Codex selected as the primary provider"
+                : "OpenAI API fallback selected");
     }
 
     private static double parseNonNegativeUsd(String value) {
@@ -3193,9 +3983,38 @@ public final class MainActivity extends Activity {
 
     private void refreshAiBudgetStatus() {
         if (aiBudgetStatus == null) return;
+        if (AI_PROVIDER_CODEX.equals(selectedAiProvider())) {
+            aiBudgetStatus.setText(cachedCodexLimitText());
+            return;
+        }
         double monthlyLimit = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
         double spent = monthlyAiSpendUsd();
         aiBudgetStatus.setText("AI budget: " + formatAiCostUsd(spent) + " / " + formatAiCostUsd(monthlyLimit) + " this month");
+    }
+
+    private String cachedCodexLimitText() {
+        String cached = getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                .getString(AI_PREF_CODEX_LIMITS_JSON, "");
+        if (!codexSignedIn) return "Codex limits: sign in to view";
+        if (cached.isEmpty()) return "Codex limits: refresh after the next AI action";
+        try {
+            JSONObject limits = new JSONObject(cached);
+            String primary = formatCodexLimitWindow(limits.optJSONObject("primary"));
+            String secondary = formatCodexLimitWindow(limits.optJSONObject("secondary"));
+            if (primary.isEmpty() && secondary.isEmpty()) return "Codex limits: unavailable";
+            if (primary.isEmpty()) return "Codex: " + secondary;
+            if (secondary.isEmpty()) return "Codex: " + primary;
+            return "Codex: " + primary + " | " + secondary;
+        } catch (Exception error) {
+            return "Codex limits: refresh after the next AI action";
+        }
+    }
+
+    private static String formatCodexLimitWindow(JSONObject window) {
+        if (window == null) return "";
+        return WorkshopCodexLimits.formatWindow(
+                window.optLong("window_duration_mins", 0L),
+                window.optDouble("used_percent", 0.0));
     }
     private LinearLayout createEditControls() {
         LinearLayout controls = new LinearLayout(this);
@@ -3402,34 +4221,56 @@ public final class MainActivity extends Activity {
         String prompt = queuedEntry == null
                 ? (aiPromptEditor == null ? "" : aiPromptEditor.getText().toString().trim())
                 : queuedEntry.prompt;
+        final boolean useCodex = AI_PROVIDER_CODEX.equals(selectedAiProvider());
+        if (useCodex) {
+            if (prompt.isEmpty()) {
+                setStatusText("AI run needs a request");
+                failQueuedAiPreflight(queuedEntry, "Request was missing at execution time");
+                return;
+            }
+            try {
+                JSONObject account = new JSONObject(nativeCodexAccountStatus(codexHomePath()));
+                if (!account.optBoolean("signed_in", false)) {
+                    setStatusText("Sign in to ChatGPT under AI Settings to use phone-native Codex");
+                    failQueuedAiPreflight(queuedEntry, "Phone-native Codex is not signed in");
+                    return;
+                }
+                refreshCodexRateLimitsAfterAction();
+            } catch (Exception error) {
+                setStatusText("Phone-native Codex status failed: " + error.getMessage());
+                failQueuedAiPreflight(queuedEntry, "Phone-native Codex status failed");
+                return;
+            }
+        }
         String model = aiModelEditor == null ? "" : aiModelEditor.getText().toString().trim();
-        if (apiKey.isEmpty() || prompt.isEmpty()) {
+        if ((!useCodex && apiKey.isEmpty()) || prompt.isEmpty()) {
             setStatusText("AI run needs both a request and an API key; open AI Settings if the key is not saved");
             updateAiProgress(0, 0, "needs input");
             failQueuedAiPreflight(queuedEntry, "API key or request was missing at execution time");
             return;
         }
-        if (model.isEmpty()) {
+        if (!useCodex && model.isEmpty()) {
             model = DEFAULT_AI_MODEL;
         }
+        if (useCodex) model = "codex-default";
         double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
         final boolean requestImageGeneration = queuedEntry == null
                 ? allowAiImageGeneration != null && allowAiImageGeneration.isChecked()
                 : queuedEntry.imageGeneration;
-        if (!hasKnownAiPricing(model)) {
+        if (!useCodex && !hasKnownAiPricing(model)) {
             setStatusText("AI run blocked: pricing is unavailable for " + model);
             updateAiProgress(0, 0, "budget blocked");
             failQueuedAiPreflight(queuedEntry, "Model pricing was unavailable at execution time");
             return;
         }
-        if (!WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
+        if (!useCodex && !WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
             setStatusText("AI run blocked by the device monthly spending limit; open AI Settings");
             updateAiProgress(0, 0, "budget blocked");
             failQueuedAiPreflight(queuedEntry, "Device monthly AI limit blocked execution");
             return;
         }
         recordCommandHistory(prompt);
-        if (!saveAiSettings(apiKey, model)) {
+        if (!useCodex && !saveAiSettings(apiKey, model)) {
             failQueuedAiPreflight(queuedEntry, "AI settings could not be saved");
             return;
         }
@@ -3484,7 +4325,7 @@ public final class MainActivity extends Activity {
             failQueuedAiPreflight(queuedEntry, "Attachment snapshot failed validation: " + error.getMessage());
             return;
         }
-        if (requestImageGeneration && WorkshopAiBudgetPolicy.remainingUsd(
+        if (!useCodex && requestImageGeneration && WorkshopAiBudgetPolicy.remainingUsd(
                 monthlyLimitUsd, monthlyAiSpendUsd()) < GPT_IMAGE_2_LOW_1024_USD) {
             setStatusText("AI image generation blocked: the device monthly limit does not cover the reserved image output");
             updateAiProgress(0, 0, "image budget blocked");
@@ -3502,6 +4343,18 @@ public final class MainActivity extends Activity {
                         requestPreviewPixels == null ? null : encodeBitmapPng(requestPreviewPixels),
                         requestPreviewPixels == null ? 0 : requestPreviewPixels.getWidth(),
                         requestPreviewPixels == null ? 0 : requestPreviewPixels.getHeight());
+                if (!WorkshopConnectivity.hasUsableNetwork(this)) {
+                    if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
+                    refreshAiQueue();
+                    setStatusText("AI request queued and waiting for an internet connection");
+                    return;
+                }
+                if (WorkshopLongWorkCoordinator.isAnyActive()) {
+                    if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
+                    refreshAiQueue();
+                    setStatusText("AI request queued behind the active foreground operation");
+                    return;
+                }
                 activeAiQueueEntry = AndroidAiQueue.claimNext(this, activeRecoveryProjectId());
                 if (activeAiQueueEntry != null && !submitted.id.equals(activeAiQueueEntry.id)) {
                     if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
@@ -3524,6 +4377,16 @@ public final class MainActivity extends Activity {
         activeAiPrompt = prompt;
         aiCancelRequested = false;
         aiRunActive = true;
+        if (!WorkshopLongWorkCoordinator.beginAi(this, "Running queued game change", new Runnable() {
+            @Override public void run() { cancelAiRun(); }
+        })) {
+            aiRunActive = false;
+            failQueuedAiPreflight(activeAiQueueEntry,
+                    "Android could not start the required foreground work service");
+            setStatusText("AI work could not start its Android foreground service");
+            return;
+        }
+        if (aiCancelButton != null) aiCancelButton.setVisibility(View.VISIBLE);
         recordAiOutcome(activeAiPrompt, "started", "AI run started", "");
         aiStartedAtNanos = System.nanoTime();
         appendAiTraceFields("request", "model", requestModel, "request_json", requestJson, null, null);
@@ -3533,9 +4396,10 @@ public final class MainActivity extends Activity {
             @Override
             public void run() {
                 try {
-                    activeAiImageAttachments = loadAiImageAttachments(requestImageInfos, requestPreviewPixels);
+                    activeAiImageAttachments = loadAiImageAttachments(
+                            requestImageInfos, requestImageMetadata, requestPreviewPixels);
                     final AiAgentResult aiResult = runAiAgentLoop(
-                            requestApiKey, requestModel, requestJson, requestImageGeneration);
+                            requestApiKey, requestModel, requestJson, requestImageGeneration, useCodex);
                     throwIfAiCancelled();
                     runOnUiThread(new Runnable() {
                         @Override
@@ -3568,7 +4432,6 @@ public final class MainActivity extends Activity {
                 } finally {
                     if (requestPreviewPixels != null && !requestPreviewPixels.isRecycled()) requestPreviewPixels.recycle();
                     activeAiImageAttachments = Collections.emptyList();
-                    aiRunActive = false;
                     if (requestImageGeneration) {
                         runOnUiThread(new Runnable() {
                             @Override public void run() { allowAiImageGeneration.setChecked(false); }
@@ -3585,6 +4448,7 @@ public final class MainActivity extends Activity {
             return;
         }
         aiCancelRequested = true;
+        nativeCodexCancelResponse();
         HttpURLConnection connection = activeAiConnection;
         if (connection != null) connection.disconnect();
         updateAiProgress(aiProgressStep, aiProgressActions, "cancelling");
@@ -3827,7 +4691,7 @@ public final class MainActivity extends Activity {
         return errors;
     }
     private AiAgentResult runAiAgentLoop(String apiKey, String model, String initialRequestJson,
-            boolean allowImageGeneration) throws Exception {
+            boolean allowImageGeneration, boolean useCodex) throws Exception {
         String currentRequestJson = initialRequestJson;
         AiAgentSession session = new AiAgentSession();
         AiUsageAccumulator usage = new AiUsageAccumulator();
@@ -3836,7 +4700,7 @@ public final class MainActivity extends Activity {
         for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             throwIfAiCancelled();
             double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
-            if (!WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
+            if (!useCodex && !WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
                 throw new IOException("Device monthly AI spending limit reached before agent turn " + (turn + 1));
             }
             session.currentStep = turn + 1;
@@ -3846,12 +4710,19 @@ public final class MainActivity extends Activity {
                     .put("model", model)
                     .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
             double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
-            boolean allowImageOnThisTurn = allowImageGeneration && turn == 0;
-            int maxOutputTokens = maxOutputTokensForBudget(model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
-            AiApiResponse apiResponse = callOpenAiResponsesApi(
-                    apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
-            usage.add(model, apiResponse.usage);
-            if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+            boolean allowImageOnThisTurn = !useCodex && allowImageGeneration && turn == 0;
+            AiApiResponse apiResponse;
+            if (useCodex) {
+                apiResponse = callCodexResponses(currentRequestJson);
+                usage.addUnpriced(apiResponse.model, apiResponse.usage);
+            } else {
+                int maxOutputTokens = maxOutputTokensForBudget(
+                        model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
+                apiResponse = callOpenAiResponsesApi(
+                        apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
+                usage.add(model, apiResponse.usage);
+                if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+            }
             List<AiGeneratedImageCandidate> callImages = extractAiGeneratedImages(apiResponse.body);
             if (!callImages.isEmpty()) {
                 generatedImages.addAll(callImages);
@@ -3885,7 +4756,8 @@ public final class MainActivity extends Activity {
             JSONArray toolCalls = response.optJSONArray("tool_calls");
             if (!"tool_calls".equals(mode) || toolCalls == null || toolCalls.length() == 0) {
                 postAiProgress(session.currentStep, session.actionCount, "finalizing");
-                return new AiAgentResult(aiJson, usage.toJson(model), usage.summary(), session.currentStep,
+                return new AiAgentResult(aiJson, usage.toJson(model),
+                        useCodex ? usage.subscriptionSummary() : usage.summary(), session.currentStep,
                         session.actionCount, generatedImages);
             }
             String currentToolCallBatch = toolCalls.toString();
@@ -3906,7 +4778,8 @@ public final class MainActivity extends Activity {
                         .put("last_error", session.lastToolError);
                 appendAiTrace("repeated_tool_calls", repeated);
                 if (session.successfulWriteCount > 0 && compileReady && session.latestRunnableTestsPassed()) {
-                    return new AiAgentResult(repeated.toString(), usage.toJson(model), usage.summary(), session.currentStep,
+                    return new AiAgentResult(repeated.toString(), usage.toJson(model),
+                            useCodex ? usage.subscriptionSummary() : usage.summary(), session.currentStep,
                             session.actionCount, generatedImages);
                 }
                 throw new IOException("AI repeated identical tool calls; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
@@ -3944,7 +4817,8 @@ public final class MainActivity extends Activity {
                     .put("last_tool", session.lastToolSummary)
                     .put("last_error", session.lastToolError);
             appendAiTrace("limit_after_successful_tested_writes", synthetic);
-            return new AiAgentResult(synthetic.toString(), usage.toJson(model), usage.summary(), MAX_AI_AGENT_TURNS,
+            return new AiAgentResult(synthetic.toString(), usage.toJson(model),
+                    useCodex ? usage.subscriptionSummary() : usage.summary(), MAX_AI_AGENT_TURNS,
                     session.actionCount, generatedImages);
         }
         throw new IOException("AI agent reached tool-call limit before returning edits; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
@@ -5114,9 +5988,15 @@ public final class MainActivity extends Activity {
     private static JSONObject aiImageInputMessage(List<AiImageAttachment> attachments) throws Exception {
         JSONArray content = new JSONArray();
         StringBuilder paths = new StringBuilder("Explicitly selected app-private project images: ");
+        boolean hasDesignSketch = false;
         for (AiImageAttachment attachment : attachments) {
             if (paths.charAt(paths.length() - 1) != ' ') paths.append(", ");
-            paths.append(attachment.projectPath);
+            paths.append(attachment.projectPath).append(" (").append(attachment.contextKind).append(")");
+            hasDesignSketch = hasDesignSketch
+                    || WorkshopAiImageContext.DESIGN_SKETCH.equals(attachment.contextKind);
+        }
+        if (hasDesignSketch) {
+            paths.append(". Design sketches are rough layout guidance: follow their structure and intent, not their draft art quality.");
         }
         content.put(new JSONObject().put("type", "input_text").put("text", paths.toString()));
         for (AiImageAttachment attachment : attachments) {
@@ -5197,7 +6077,7 @@ public final class MainActivity extends Activity {
             if (status < 200 || status >= 300) {
                 throw new IOException("OpenAI HTTP " + status + ": " + response);
             }
-            return new AiApiResponse(response, extractAiUsage(response));
+            return new AiApiResponse(response, extractAiUsage(response), model);
         } finally {
             connection.disconnect();
             if (activeAiConnection == connection) activeAiConnection = null;
@@ -5920,11 +6800,16 @@ public final class MainActivity extends Activity {
         return patches;
     }
 
-    private static JSONArray aiImageMetadata(List<WorkshopImageAssets.AssetInfo> images) throws Exception {
+    private JSONArray aiImageMetadata(List<WorkshopImageAssets.AssetInfo> images) throws Exception {
         JSONArray metadata = new JSONArray();
         for (WorkshopImageAssets.AssetInfo image : images) {
             byte[] bytes = WorkshopImageAssets.readForSync(image);
+            boolean designSketch = selectedDesignSketchAssets.contains(image.relativePath);
             metadata.put(new JSONObject()
+                    .put("kind", WorkshopAiImageContext.kind(designSketch))
+                    .put("purpose", designSketch
+                            ? "rough visual layout guidance; interpret structure and intent, not final art quality"
+                            : "project art reference")
                     .put("project_path", image.relativePath)
                     .put("width", image.width)
                     .put("height", image.height)
@@ -5960,14 +6845,15 @@ public final class MainActivity extends Activity {
     }
 
     private static List<AiImageAttachment> loadAiImageAttachments(
-            List<WorkshopImageAssets.AssetInfo> images, Bitmap previewPixels) throws IOException {
+            List<WorkshopImageAssets.AssetInfo> images, JSONArray metadata, Bitmap previewPixels)
+            throws IOException {
         ArrayList<AiImageAttachment> attachments = new ArrayList<>();
         int totalBytes = 0;
         for (WorkshopImageAssets.AssetInfo image : images) {
             byte[] bytes = WorkshopImageAssets.readForSync(image);
             totalBytes += bytes.length;
             attachments.add(new AiImageAttachment(image.relativePath, imageMimeType(image.file.getName()),
-                    bytes, image.width, image.height));
+                    bytes, image.width, image.height, attachmentKind(metadata, image.relativePath)));
         }
         if (previewPixels != null) {
             ByteArrayOutputStream encoded = new ByteArrayOutputStream();
@@ -5979,9 +6865,20 @@ public final class MainActivity extends Activity {
                 throw new IOException("project images plus preview exceed the 12 MiB request limit");
             }
             attachments.add(new AiImageAttachment("captured-preview.png", "image/png", bytes,
-                    previewPixels.getWidth(), previewPixels.getHeight()));
+                    previewPixels.getWidth(), previewPixels.getHeight(), "captured_preview"));
         }
         return Collections.unmodifiableList(attachments);
+    }
+
+    private static String attachmentKind(JSONArray metadata, String projectPath) {
+        if (metadata == null) return WorkshopAiImageContext.PROJECT_ASSET;
+        for (int index = 0; index < metadata.length(); index += 1) {
+            JSONObject item = metadata.optJSONObject(index);
+            if (item != null && projectPath.equals(item.optString("project_path", ""))) {
+                return item.optString("kind", WorkshopAiImageContext.PROJECT_ASSET);
+            }
+        }
+        return WorkshopAiImageContext.PROJECT_ASSET;
     }
 
     private static String imageMimeType(String name) throws IOException {
@@ -6416,11 +7313,16 @@ public final class MainActivity extends Activity {
             String activeId = activeProject.id;
             if (!activeId.equals(selectedImageAssetProjectId)) {
                 selectedImageAssets.clear();
+                selectedDesignSketchAssets.clear();
+                selectedDesignSketchAssets.addAll(getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                        .getStringSet(AI_PREF_DESIGN_SKETCHES_PREFIX + activeId,
+                                Collections.<String>emptySet()));
                 selectedImageAssetProjectId = activeId;
             }
             HashSet<String> available = new HashSet<>();
             for (WorkshopImageAssets.AssetInfo asset : assets) available.add(asset.relativePath);
             selectedImageAssets.retainAll(available);
+            if (selectedDesignSketchAssets.retainAll(available)) persistDesignSketchAssets();
             refreshAiAttachmentStatus();
             if (assets.isEmpty()) {
                 TextView empty = new TextView(this);
@@ -6519,6 +7421,11 @@ public final class MainActivity extends Activity {
     }
 
     private void showPaintEditor(int width, int height, Bitmap initial, String defaultName) {
+        showPaintEditor(width, height, initial, defaultName, false);
+    }
+
+    private void showPaintEditor(int width, int height, Bitmap initial, String defaultName,
+                                 boolean suggestAiAttachment) {
         final WorkshopPaintView paint = new WorkshopPaintView(this, width, height, initial);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -6617,8 +7524,10 @@ public final class MainActivity extends Activity {
         LinearLayout finish = new LinearLayout(this);
         finish.setOrientation(LinearLayout.HORIZONTAL);
         Button save = compactButton("Save as PNG");
+        Button saveAndAttach = compactButton("Save + Attach to AI");
         Button cancel = compactButton("Cancel");
         finish.addView(save, weightedWidth());
+        finish.addView(saveAndAttach, weightedWidth());
         finish.addView(cancel, weightedWidth());
         content.addView(finish, fullWidth());
 
@@ -6630,20 +7539,15 @@ public final class MainActivity extends Activity {
                 .create();
         save.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
-                Bitmap snapshot = paint.snapshot();
-                try {
-                    WorkshopImageAssets.AssetInfo saved = WorkshopImageAssets.savePainted(
-                            snapshot, activeProject.root, name.getText().toString());
-                    refreshImageAssetList();
-                    setStatusText("Painted image saved as copy: " + saved.relativePath);
-                    dialog.dismiss();
-                } catch (Exception error) {
-                    setStatusText("Paint save failed: " + error.getMessage());
-                } finally {
-                    snapshot.recycle();
-                }
+                savePaintedImage(paint, name.getText().toString(), dialog, false);
             }
         });
+        saveAndAttach.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                savePaintedImage(paint, name.getText().toString(), dialog, true);
+            }
+        });
+        if (suggestAiAttachment) saveAndAttach.requestFocus();
         cancel.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
                 setStatusText("Paint cancelled; project assets unchanged");
@@ -6654,6 +7558,39 @@ public final class MainActivity extends Activity {
             @Override public void onDismiss(android.content.DialogInterface ignored) { paint.dispose(); }
         });
         dialog.show();
+    }
+
+    private void savePaintedImage(WorkshopPaintView paint, String name, AlertDialog dialog,
+                                  boolean attachToAi) {
+        Bitmap snapshot = paint.snapshot();
+        try {
+            WorkshopImageAssets.AssetInfo saved = WorkshopImageAssets.savePainted(
+                    snapshot, activeProject.root, name);
+            if (attachToAi) {
+                selectedImageAssetProjectId = activeProject.id;
+                selectedImageAssets.add(saved.relativePath);
+                selectedDesignSketchAssets.add(saved.relativePath);
+                persistDesignSketchAssets();
+            }
+            refreshImageAssetList();
+            refreshAiAttachmentStatus();
+            setStatusText(attachToAi
+                    ? "Design sketch saved and attached to the next AI command: " + saved.relativePath
+                    : "Painted image saved as copy: " + saved.relativePath);
+            dialog.dismiss();
+        } catch (Exception error) {
+            setStatusText("Paint save failed: " + error.getMessage());
+        } finally {
+            snapshot.recycle();
+        }
+    }
+
+    private void persistDesignSketchAssets() {
+        if (activeProject == null) return;
+        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
+                .putStringSet(AI_PREF_DESIGN_SKETCHES_PREFIX + activeProject.id,
+                        new HashSet<String>(selectedDesignSketchAssets))
+                .apply();
     }
 
     private void requestPaintResize(final WorkshopPaintView paint) {
@@ -6716,10 +7653,18 @@ public final class MainActivity extends Activity {
         try {
             List<WorkshopImageAssets.AssetInfo> selected = selectedAiImageInfos();
             long patches = estimatedImagePatchTokens(selected);
-            aiAttachmentStatus.setText("AI images: " + selected.size() + " selected, about " + patches
-                    + " original-detail image tokens / "
-                    + formatAiCostUsd(selectedAiInputCostUsd(patches))
-                    + " " + selectedAiModelForPricing() + " input (review before Queue AI Change)");
+            int sketches = 0;
+            for (WorkshopImageAssets.AssetInfo image : selected) {
+                if (selectedDesignSketchAssets.contains(image.relativePath)) sketches += 1;
+            }
+            String sketchText = sketches == 0 ? "" : ", " + sketches + " design sketch"
+                    + (sketches == 1 ? "" : "es");
+            String costText = AI_PROVIDER_CODEX.equals(selectedAiProvider()) ? ""
+                    : " / " + formatAiCostUsd(selectedAiInputCostUsd(patches))
+                    + " " + selectedAiModelForPricing() + " input";
+            aiAttachmentStatus.setText("AI images: " + selected.size() + " selected" + sketchText
+                    + ", about " + patches + " original-detail image tokens" + costText
+                    + " (review before Run)");
         } catch (Exception error) {
             aiAttachmentStatus.setText("AI images: selection needs review - " + error.getMessage());
         }
@@ -6749,8 +7694,9 @@ public final class MainActivity extends Activity {
                 thumbnail.setContentDescription("Preview of selected AI attachment " + asset.relativePath);
                 row.addView(thumbnail, new LinearLayout.LayoutParams(dp(72), dp(72)));
                 TextView label = new TextView(this);
+                boolean designSketch = selectedDesignSketchAssets.contains(asset.relativePath);
                 label.setText(asset.relativePath + "\n" + asset.width + "x" + asset.height
-                        + " - original detail");
+                        + " - original detail - " + WorkshopAiImageContext.reviewLabel(designSketch));
                 label.setPadding(dp(8), 0, dp(8), 0);
                 row.addView(label, weightedWidth());
                 Button remove = compactButton("Remove");
@@ -7251,7 +8197,7 @@ public final class MainActivity extends Activity {
         File readyFile = new File(baselineRoot, PROJECT_BASELINE_READY);
         String templateId = activeProject == null ? WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID
                 : activeProject.templateId;
-        String expectedReady = "format=2\ntemplate_id=" + templateId + "\n";
+        String expectedReady = "format=3\ntemplate_id=" + templateId + "\n";
         if (readyFile.isFile() && expectedReady.equals(readTextFile(readyFile))) return;
         ProjectSnapshot baseline = activeProject != null && "import".equals(activeProject.origin)
                 ? current : loadBundledAssetSnapshot();
@@ -7825,6 +8771,58 @@ public final class MainActivity extends Activity {
         return ProjectSnapshot.from(files);
     }
 
+    private AiApiResponse callCodexResponses(String requestJson) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("model", "");
+        payload.put("instructions", "");
+        payload.put("input", buildAiOpenAiInput(requestJson, true, false));
+        payload.put("tools", new JSONArray());
+        payload.put("tool_choice", "auto");
+        payload.put("parallel_tool_calls", false);
+        payload.put("reasoning", new JSONObject().put("effort", "medium").put("summary", "auto"));
+        payload.put("store", false);
+        payload.put("stream", true);
+        payload.put("include", new JSONArray().put("reasoning.encrypted_content"));
+        payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
+        payload.put("text", buildAiResponseTextFormat());
+
+        long generation = nativeCodexBeginResponse();
+        if (generation == 0) throw new IOException("Phone-native Codex library is not packaged");
+        throwIfAiCancelled();
+        JSONObject result = new JSONObject(nativeCodexResponse(
+                codexHomePath(), payload.toString(), generation));
+        if (!"ok".equals(result.optString("status", ""))) {
+            throw new IOException(result.optString("error", "Phone-native Codex request failed"));
+        }
+        JSONObject response = result.optJSONObject("response");
+        if (response == null) throw new IOException("Phone-native Codex returned no response object");
+        String model = result.optString("model", "codex-default");
+        return new AiApiResponse(response.toString(), extractAiUsage(response.toString()), model);
+    }
+
+    private boolean migrateBundledPongBallSpeed() throws IOException {
+        if (activeProject == null || !"sample".equals(activeProject.origin)
+                || !WorkshopTemplateCatalog.LEGACY_TEMPLATE_ID.equals(activeProject.templateId)) {
+            return false;
+        }
+        SharedPreferences preferences = getSharedPreferences(SAMPLE_MIGRATION_PREFS, MODE_PRIVATE);
+        String key = activeProject.id + ":" + PONG_SLOW_BALL_MIGRATION;
+        if (preferences.getBoolean(key, false)) return false;
+
+        File sourceFile = new File(projectRoot(), "src/main.stasis");
+        if (!sourceFile.isFile()) return false;
+        String before = readTextFile(sourceFile);
+        String after = before
+                .replace("GameState.ball_vx = 5;", "GameState.ball_vx = 3;")
+                .replace("GameState.ball_vx = -5;", "GameState.ball_vx = -3;")
+                .replace("GameState.ball_vy = 4;", "GameState.ball_vy = 3;");
+        if (!after.equals(before)) writeTextFile(sourceFile, after);
+        if (!preferences.edit().putBoolean(key, true).commit()) {
+            throw new IOException("unable to record bundled Pong speed migration");
+        }
+        return !after.equals(before);
+    }
+
     private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile) throws IOException {
         if (diskFile.isFile()) {
             return;
@@ -7975,10 +8973,12 @@ public final class MainActivity extends Activity {
     private static final class AiApiResponse {
         final String body;
         final JSONObject usage;
+        final String model;
 
-        AiApiResponse(String body, JSONObject usage) {
+        AiApiResponse(String body, JSONObject usage, String model) {
             this.body = body;
             this.usage = usage;
+            this.model = model;
         }
     }
 
@@ -8020,13 +9020,16 @@ public final class MainActivity extends Activity {
         final byte[] bytes;
         final int width;
         final int height;
+        final String contextKind;
 
-        AiImageAttachment(String projectPath, String mimeType, byte[] bytes, int width, int height) {
+        AiImageAttachment(String projectPath, String mimeType, byte[] bytes, int width, int height,
+                          String contextKind) {
             this.projectPath = projectPath;
             this.mimeType = mimeType;
             this.bytes = bytes;
             this.width = width;
             this.height = height;
+            this.contextKind = contextKind;
         }
 
         long estimatedPatchTokens() {
@@ -8076,6 +9079,27 @@ public final class MainActivity extends Activity {
             costAvailable = costAvailable && callCostAvailable;
         }
 
+        void addUnpriced(String model, JSONObject usage) throws Exception {
+            long callInputTokens = usageTokenCount(usage, "input_tokens", "prompt_tokens");
+            long callCachedInputTokens = cachedInputTokenCount(usage);
+            long callCacheWriteInputTokens = cacheWriteInputTokenCount(usage);
+            long callOutputTokens = usageTokenCount(usage, "output_tokens", "completion_tokens");
+            calls.put(new JSONObject()
+                    .put("turn", calls.length() + 1)
+                    .put("model", model)
+                    .put("input_tokens", callInputTokens)
+                    .put("cached_input_tokens", callCachedInputTokens)
+                    .put("cache_write_input_tokens", callCacheWriteInputTokens)
+                    .put("output_tokens", callOutputTokens)
+                    .put("billing", "codex_subscription"));
+            inputTokens += callInputTokens;
+            cachedInputTokens += callCachedInputTokens;
+            cacheWriteInputTokens += callCacheWriteInputTokens;
+            outputTokens += callOutputTokens;
+            costAvailable = false;
+            lastCallCostAvailable = false;
+        }
+
         void addImageGenerationCost(double costUsd, int count) {
             imageGenerationCostUsd += costUsd;
             generatedImageCount += count;
@@ -8107,6 +9131,10 @@ public final class MainActivity extends Activity {
                 builder.append("unavailable");
             }
             return builder.toString();
+        }
+
+        String subscriptionSummary() {
+            return "Codex subscription, turns=" + calls.length();
         }
     }
     private final class AiAgentSession {

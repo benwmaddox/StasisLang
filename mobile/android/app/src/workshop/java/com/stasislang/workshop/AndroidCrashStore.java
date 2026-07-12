@@ -14,6 +14,9 @@ import java.nio.file.StandardCopyOption;
 
 final class AndroidCrashStore {
     private static final String FILE_NAME = "android_crash_redacted.json";
+    private static final String RESTART_PREFS = "android_crash_restart_state";
+    private static final String LAST_SEEN_TIMESTAMP = "last_seen_timestamp_ms";
+    private static final String CONSECUTIVE_CRASHES = "consecutive_early_crashes";
     private static final int MAX_FRAMES = 30;
     private static final int MAX_RECORD_BYTES = 64 * 1024;
     private static boolean installed;
@@ -57,12 +60,18 @@ final class AndroidCrashStore {
                             .put("method", safeName(frame.optString("method", "unknown"))));
                 }
             }
+            android.content.SharedPreferences restart =
+                    context.getSharedPreferences(RESTART_PREFS, Context.MODE_PRIVATE);
+            int consecutive = Math.max(0, restart.getInt(CONSECUTIVE_CRASHES, 0));
             return new JSONObject()
                     .put("present", true)
                     .put("timestamp_ms", stored.optLong("timestamp_ms", 0L))
                     .put("exception_type", safeName(stored.optString("exception_type", "unknown")))
                     .put("thread", safeName(stored.optString("thread", "unknown")))
-                    .put("frames", safeFrames);
+                    .put("frames", safeFrames)
+                    .put("consecutive_early_crashes", consecutive)
+                    .put("restart_loop_detected",
+                            consecutive >= WorkshopRestartLoopPolicy.LOOP_CRASH_THRESHOLD);
         } catch (Exception ignored) {
             return new JSONObject();
         }
@@ -71,6 +80,36 @@ final class AndroidCrashStore {
     static void clear(Context context) throws Exception {
         File file = recordFile(context);
         if (!file.delete() && file.exists()) throw new IllegalStateException("crash record delete failed");
+        if (!context.getSharedPreferences(RESTART_PREFS, Context.MODE_PRIVATE).edit().clear().commit()) {
+            throw new IllegalStateException("crash restart state clear failed");
+        }
+    }
+
+    static JSONObject noteLaunch(Context context) {
+        JSONObject crash = safeSummary(context);
+        if (!crash.optBoolean("present", false)) return crash;
+        android.content.SharedPreferences preferences =
+                context.getSharedPreferences(RESTART_PREFS, Context.MODE_PRIVATE);
+        WorkshopRestartLoopPolicy.Result result = WorkshopRestartLoopPolicy.noteCrash(
+                preferences.getLong(LAST_SEEN_TIMESTAMP, 0L),
+                preferences.getInt(CONSECUTIVE_CRASHES, 0),
+                crash.optLong("timestamp_ms", 0L), System.currentTimeMillis());
+        preferences.edit()
+                .putLong(LAST_SEEN_TIMESTAMP, result.lastSeenCrashTimestampMs)
+                .putInt(CONSECUTIVE_CRASHES, result.consecutiveEarlyCrashes)
+                .commit();
+        try {
+            return crash
+                    .put("consecutive_early_crashes", result.consecutiveEarlyCrashes)
+                    .put("restart_loop_detected", result.restartLoopDetected);
+        } catch (Exception ignored) {
+            return crash;
+        }
+    }
+
+    static void markLaunchStable(Context context) {
+        context.getSharedPreferences(RESTART_PREFS, Context.MODE_PRIVATE).edit()
+                .putInt(CONSECUTIVE_CRASHES, 0).apply();
     }
 
     private static void record(Context context, Thread thread, Throwable error) throws Exception {

@@ -109,6 +109,7 @@
 - Workflow contract: `docs/contributor_workflow.md`
 - Reviewer personas: `docs/review_personas.md`
 - Validation entrypoint: `tools/validate_repo.sh`
+- Android Workshop PRD task loop: `docs/android_workshop_tasks.md` (Maddox Tasks parent #116).
 - GitHub issues, PR comments, and PR reviews are the only source of work selection for Night Shift runs.
 - Repo docs such as `docs/build_checklist.md` and `docs/bugs.md` are context only; they explain constraints, history, and validation, but they do not override the selected GitHub item.
 - Branch setup, fetch/fast-forward, and executor launch are owned by the central Ned inbox runner rather than a repo-local wrapper script.
