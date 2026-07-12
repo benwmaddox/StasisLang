@@ -23,7 +23,7 @@ final class WorkshopTemplateCatalog {
                     "src/systems/collision.stasis"
             },
             new String[] { "tests/enemy_paddle_speed_schedule.test.stasis" },
-            new String[0]);
+            new String[] { "assets/manifest.json", "assets/ball.svg" });
 
     private static final Template EXPLORATION = new Template(
             "exploration",

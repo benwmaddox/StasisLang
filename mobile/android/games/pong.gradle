@@ -6,5 +6,6 @@ ext.stasisGameDescriptor = [
         label: 'Stasis Pong',
         projectDirectory: new File(rootProject.projectDir, 'app/src/main/assets/workshop_sample'),
         entrySource: 'src/main.stasis',
+        assetManifest: 'assets/manifest.json',
         testPattern: 'tests/**/*.test.stasis'
 ]

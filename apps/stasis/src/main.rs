@@ -16,6 +16,7 @@ use stasis::{
     run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
     RunnerConfig, StasisTestRunSession,
 };
+use stasis_assets::{load_project_asset_manifest, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH};
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
 use stasis_compiler::frontend::parser::{
@@ -1195,6 +1196,7 @@ fn try_run_android_aot_bundle_subcommand() -> Option<i32> {
                 summary.symbols_header.display()
             );
             println!("android_aot_cmake_file={}", summary.cmake_file.display());
+            println!("android_aot_asset_dir={}", summary.asset_dir.display());
             Some(0)
         }
         Err(message) => {
@@ -1209,6 +1211,7 @@ struct AndroidAotBundleSummary {
     object_count: usize,
     symbols_header: PathBuf,
     cmake_file: PathBuf,
+    asset_dir: PathBuf,
 }
 
 fn write_android_aot_engine_bundle(
@@ -1236,12 +1239,46 @@ fn write_android_aot_engine_bundle(
     let cmake_file = output_dir.join("published_aot_objects.cmake");
     write_android_aot_symbols_header(&manifest_json, &symbols_header)?;
     write_android_aot_cmake_file(&bundle.object_paths_by_function, &cmake_file)?;
+    let asset_dir = write_android_asset_bundle(project_dir, output_dir)?;
     Ok(AndroidAotBundleSummary {
         bundle_dir: bundle.output_dir,
         object_count: bundle.object_paths_by_function.len(),
         symbols_header,
         cmake_file,
+        asset_dir,
     })
+}
+
+fn write_android_asset_bundle(project_dir: &Path, output_dir: &Path) -> Result<PathBuf, String> {
+    let resolved = load_project_asset_manifest(project_dir, AssetLimits::default())
+        .map_err(|error| format!("failed to resolve Android AOT assets: {error}"))?;
+    let apk_asset_root = output_dir.join("apk_assets");
+    if apk_asset_root.exists() {
+        fs::remove_dir_all(&apk_asset_root).map_err(|error| {
+            format!(
+                "failed to clear Android AOT asset output {}: {error}",
+                apk_asset_root.display()
+            )
+        })?;
+    }
+    let game_root = apk_asset_root.join("stasis_game");
+    let manifest_destination = game_root.join(DEFAULT_ASSET_MANIFEST_PATH);
+    fs::create_dir_all(manifest_destination.parent().expect("manifest parent"))
+        .map_err(|error| format!("failed to create Android AOT manifest directory: {error}"))?;
+    fs::copy(&resolved.manifest_path, &manifest_destination)
+        .map_err(|error| format!("failed to package Android AOT asset manifest: {error}"))?;
+    for asset in resolved.assets {
+        let destination = game_root.join(&asset.entry.path);
+        fs::create_dir_all(destination.parent().expect("asset parent"))
+            .map_err(|error| format!("failed to create Android AOT asset directory: {error}"))?;
+        fs::copy(&asset.absolute_path, &destination).map_err(|error| {
+            format!(
+                "failed to package Android AOT asset {}: {error}",
+                asset.entry.id
+            )
+        })?;
+    }
+    Ok(apk_asset_root)
 }
 
 fn collect_android_aot_sources(project_dir: &Path) -> Result<Vec<(String, String)>, String> {
@@ -1802,6 +1839,14 @@ mod tests {
         assert!(header.contains("#define STASIS_AOT_RENDER aot_fn_"));
         let cmake = fs::read_to_string(&summary.cmake_file).expect("read cmake file");
         assert!(cmake.contains("set(STASIS_PUBLISHED_AOT_OBJECTS"));
+        assert!(summary
+            .asset_dir
+            .join("stasis_game/assets/manifest.json")
+            .is_file());
+        assert!(summary
+            .asset_dir
+            .join("stasis_game/assets/ball.svg")
+            .is_file());
 
         std::fs::remove_dir_all(&output_dir).ok();
     }

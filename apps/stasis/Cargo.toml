@@ -13,6 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 stasis_dynload = { path = "../../crates/stasis_dynload" }
+stasis_assets = { path = "../../crates/stasis_assets" }
 
 [dev-dependencies]
 object = "0.36"

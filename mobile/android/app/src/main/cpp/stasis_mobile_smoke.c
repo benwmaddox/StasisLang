@@ -15,6 +15,11 @@
 #define STASIS_COMPILE_MANIFEST_RELATIVE_PATH "build/native_compile_manifest.txt"
 #define STASIS_FUNCTION_ARTIFACT_DIR "build/functions"
 #define STASIS_RUNTIME_STATE_RELATIVE_PATH "build/runtime_state.txt"
+#define STASIS_RENDER_COMMAND_CAPACITY 8
+#define STASIS_RENDER_COMMAND_STRIDE 13
+#define STASIS_RENDER_FRAME_HEADER_SIZE 6
+#define STASIS_RENDER_FRAME_I32_CAPACITY \
+    (STASIS_RENDER_FRAME_HEADER_SIZE + STASIS_RENDER_COMMAND_CAPACITY * STASIS_RENDER_COMMAND_STRIDE)
 #define FNV_OFFSET_BASIS 1469598103934665603ULL
 #define FNV_PRIME 1099511628211ULL
 
@@ -24,6 +29,7 @@ typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, con
 typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len);
 typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_root, const char *entry_file, const char *path, int value);
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
+typedef char *(*stasis_android_bridge_resolve_sprite_asset_fn)(const char *project_root, int handle);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
 typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
@@ -59,6 +65,7 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_run_tick_frame_fn run_tick_frame;
     stasis_android_bridge_set_i32_global_fn set_i32_global;
     stasis_android_bridge_get_i32_global_fn get_i32_global;
+    stasis_android_bridge_resolve_sprite_asset_fn resolve_sprite_asset;
     stasis_android_bridge_free_string_fn free_string;
     int attempted;
 } RustBridgeApi;
@@ -87,6 +94,12 @@ typedef struct PublishedRenderCommand {
     int32_t h;
     int32_t color;
     int32_t asset;
+    int32_t rotation_degrees;
+    int32_t alpha;
+    int32_t clip_x;
+    int32_t clip_y;
+    int32_t clip_w;
+    int32_t clip_h;
 } PublishedRenderCommand;
 
 typedef struct PublishedI32Global {
@@ -114,7 +127,8 @@ static int32_t published_game_enemy_paddle_speed_x100;
 static int32_t published_game_player_score;
 static int32_t published_game_ai_score;
 static int32_t published_render_command_count;
-static PublishedRenderCommand published_render_commands[8];
+static int32_t published_render_command_schema_version;
+static PublishedRenderCommand published_render_commands[STASIS_RENDER_COMMAND_CAPACITY];
 static int published_aot_globals_initialized;
 static int published_aot_main_ran;
 static int32_t published_runtime_tick_count;
@@ -126,7 +140,13 @@ static int32_t published_runtime_tick_count;
     {"Render.command" #index "_w", &published_render_commands[index].w, 0}, \
     {"Render.command" #index "_h", &published_render_commands[index].h, 0}, \
     {"Render.command" #index "_color", &published_render_commands[index].color, 0}, \
-    {"Render.command" #index "_asset", &published_render_commands[index].asset, 0}
+    {"Render.command" #index "_asset", &published_render_commands[index].asset, 0}, \
+    {"Render.command" #index "_rotation_degrees", &published_render_commands[index].rotation_degrees, 0}, \
+    {"Render.command" #index "_alpha", &published_render_commands[index].alpha, 0}, \
+    {"Render.command" #index "_clip_x", &published_render_commands[index].clip_x, 0}, \
+    {"Render.command" #index "_clip_y", &published_render_commands[index].clip_y, 0}, \
+    {"Render.command" #index "_clip_w", &published_render_commands[index].clip_w, 0}, \
+    {"Render.command" #index "_clip_h", &published_render_commands[index].clip_h, 0}
 
 static PublishedI32Global published_i32_globals[] = {
     {"Input.touch_x", &published_input_touch_x, 0},
@@ -148,6 +168,7 @@ static PublishedI32Global published_i32_globals[] = {
     {"GameState.player_score", &published_game_player_score, 0},
     {"GameState.ai_score", &published_game_ai_score, 0},
     {"Render.command_count", &published_render_command_count, 0},
+    {"Render.command_schema_version", &published_render_command_schema_version, 0},
     RENDER_GLOBALS(0),
     RENDER_GLOBALS(1),
     RENDER_GLOBALS(2),
@@ -211,16 +232,16 @@ int64_t stasis_jit_lookup_code_ptr(int32_t fn_id_raw) {
 }
 
 static void stasis_published_pack_frame(int32_t *out, uintptr_t out_len) {
-    if (out_len < 62) {
+    if (out_len < STASIS_RENDER_FRAME_I32_CAPACITY) {
         return;
     }
-    memset(out, 0, sizeof(int32_t) * 62);
+    memset(out, 0, sizeof(int32_t) * STASIS_RENDER_FRAME_I32_CAPACITY);
     int32_t command_count = published_render_command_count;
     if (command_count < 0) {
         command_count = 0;
     }
-    if (command_count > 8) {
-        command_count = 8;
+    if (command_count > STASIS_RENDER_COMMAND_CAPACITY) {
+        command_count = STASIS_RENDER_COMMAND_CAPACITY;
     }
     out[0] = 0;
     out[1] = published_runtime_tick_count;
@@ -229,7 +250,7 @@ static void stasis_published_pack_frame(int32_t *out, uintptr_t out_len) {
     out[4] = published_aot_main_ran ? 1 : 0;
     out[5] = command_count;
     for (int32_t index = 0; index < command_count; index += 1) {
-        int base = 6 + index * 7;
+        int base = STASIS_RENDER_FRAME_HEADER_SIZE + index * STASIS_RENDER_COMMAND_STRIDE;
         out[base] = published_render_commands[index].kind;
         out[base + 1] = published_render_commands[index].x;
         out[base + 2] = published_render_commands[index].y;
@@ -237,11 +258,20 @@ static void stasis_published_pack_frame(int32_t *out, uintptr_t out_len) {
         out[base + 4] = published_render_commands[index].h;
         out[base + 5] = published_render_commands[index].color;
         out[base + 6] = published_render_commands[index].asset;
+        out[base + 7] = published_render_commands[index].rotation_degrees;
+        out[base + 8] = published_render_command_schema_version >= 2
+                ? published_render_commands[index].alpha : 255;
+        if (published_render_command_schema_version >= 3) {
+            out[base + 9] = published_render_commands[index].clip_x;
+            out[base + 10] = published_render_commands[index].clip_y;
+            out[base + 11] = published_render_commands[index].clip_w;
+            out[base + 12] = published_render_commands[index].clip_h;
+        }
     }
 }
 
 static int stasis_published_run_tick_frame(int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len) {
-    if (out_values == NULL || out_len < 62) {
+    if (out_values == NULL || out_len < STASIS_RENDER_FRAME_I32_CAPACITY) {
         return -1;
     }
     stasis_published_init_globals();
@@ -911,6 +941,8 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_set_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_set_i32_global");
     rust_bridge_api.get_i32_global =
             (stasis_android_bridge_get_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_get_i32_global");
+    rust_bridge_api.resolve_sprite_asset =
+            (stasis_android_bridge_resolve_sprite_asset_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_sprite_asset");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
     if (rust_bridge_api.compile_project == NULL ||
@@ -1194,6 +1226,32 @@ Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activ
 }
 
 JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeResolveSpriteAsset(
+        JNIEnv *env, jclass activity_class, jstring project_root, jint handle) {
+    (void)activity_class;
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    if (root == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"unable to read project root\"}");
+    }
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->resolve_sprite_asset == NULL || bridge->free_string == NULL) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"shared sprite resolver unavailable\"}");
+    }
+    char *message = bridge->resolve_sprite_asset(root, (int)handle);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"shared sprite resolver returned no result\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeCodexBeginDeviceLogin(
         JNIEnv *env, jclass activity_class, jstring codex_home) {
     (void)activity_class;
@@ -1306,8 +1364,8 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
 JNIEXPORT jint JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jintArray frame_values) {
     (void)activity_class;
-    const int frame_len = 62;
-    int32_t values[62];
+    const int frame_len = STASIS_RENDER_FRAME_I32_CAPACITY;
+    int32_t values[STASIS_RENDER_FRAME_I32_CAPACITY];
     memset(values, 0, sizeof(values));
 
     if (frame_values == NULL || (*env)->GetArrayLength(env, frame_values) < frame_len) {

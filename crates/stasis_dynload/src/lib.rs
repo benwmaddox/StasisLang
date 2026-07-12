@@ -422,6 +422,7 @@ impl StasisGraphicsApi {
 struct StasisGraphicsAssetsApi {
     _lib: Library,
     stasis_gfx_load_sprite: usize,
+    stasis_gfx_release_sprite: usize,
     stasis_gfx_dump_bmp: usize,
     stasis_gfx_poll_reload: usize,
     stasis_load_font: usize,
@@ -448,6 +449,7 @@ impl StasisGraphicsAssetsApi {
         let lib = Library::load(path)?;
         Ok(Self {
             stasis_gfx_load_sprite: lib.symbol_address("stasis_gfx_load_sprite")?,
+            stasis_gfx_release_sprite: lib.symbol_address("stasis_gfx_release_sprite")?,
             stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
             stasis_gfx_poll_reload: lib.symbol_address("stasis_gfx_poll_reload")?,
             stasis_load_font: lib.symbol_address("stasis_load_font")?,
@@ -1143,6 +1145,23 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
         let _ = max_w;
         let _ = max_h;
         0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_release_sprite(handle: i32) {
+    #[cfg(windows)]
+    {
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return;
+        };
+        let callback: extern "system" fn(i32) =
+            unsafe { std::mem::transmute(api.stasis_gfx_release_sprite) };
+        callback(handle);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = handle;
     }
 }
 

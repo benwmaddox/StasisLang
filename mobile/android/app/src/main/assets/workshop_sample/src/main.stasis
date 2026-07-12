@@ -23,6 +23,7 @@ global GameState {
 }
 
 global Render {
+    command_schema_version: i32;
     command_count: i32;
     command0_kind: i32;
     command0_x: i32;
@@ -31,6 +32,9 @@ global Render {
     command0_h: i32;
     command0_color: i32;
     command0_asset: i32;
+    command0_rotation_degrees: i32;
+    command0_alpha: i32;
+    command0_clip_x: i32; command0_clip_y: i32; command0_clip_w: i32; command0_clip_h: i32;
     command1_kind: i32;
     command1_x: i32;
     command1_y: i32;
@@ -38,6 +42,9 @@ global Render {
     command1_h: i32;
     command1_color: i32;
     command1_asset: i32;
+    command1_rotation_degrees: i32;
+    command1_alpha: i32;
+    command1_clip_x: i32; command1_clip_y: i32; command1_clip_w: i32; command1_clip_h: i32;
     command2_kind: i32;
     command2_x: i32;
     command2_y: i32;
@@ -45,6 +52,9 @@ global Render {
     command2_h: i32;
     command2_color: i32;
     command2_asset: i32;
+    command2_rotation_degrees: i32;
+    command2_alpha: i32;
+    command2_clip_x: i32; command2_clip_y: i32; command2_clip_w: i32; command2_clip_h: i32;
     command3_kind: i32;
     command3_x: i32;
     command3_y: i32;
@@ -52,6 +62,9 @@ global Render {
     command3_h: i32;
     command3_color: i32;
     command3_asset: i32;
+    command3_rotation_degrees: i32;
+    command3_alpha: i32;
+    command3_clip_x: i32; command3_clip_y: i32; command3_clip_w: i32; command3_clip_h: i32;
     command4_kind: i32;
     command4_x: i32;
     command4_y: i32;
@@ -59,6 +72,9 @@ global Render {
     command4_h: i32;
     command4_color: i32;
     command4_asset: i32;
+    command4_rotation_degrees: i32;
+    command4_alpha: i32;
+    command4_clip_x: i32; command4_clip_y: i32; command4_clip_w: i32; command4_clip_h: i32;
 }
 
 function main(): void {
@@ -197,6 +213,7 @@ function reset_ball(): void {
 }
 
 function render(): void {
+    Render.command_schema_version = 3;
     Render.command_count = 5;
 
     Render.command0_kind = 1;
@@ -206,6 +223,8 @@ function render(): void {
     Render.command0_h = GameState.screen_h;
     Render.command0_asset = 0;
     Render.command0_color = 990236;
+    Render.command0_rotation_degrees = 0;
+    Render.command0_alpha = 255;
 
     Render.command1_kind = 1;
     Render.command1_x = 24;
@@ -214,6 +233,8 @@ function render(): void {
     Render.command1_h = 72;
     Render.command1_asset = 0;
     Render.command1_color = 6013118;
+    Render.command1_rotation_degrees = 0;
+    Render.command1_alpha = 255;
 
     Render.command2_kind = 1;
     Render.command2_x = GameState.screen_w - 34;
@@ -222,14 +243,18 @@ function render(): void {
     Render.command2_h = 72;
     Render.command2_asset = 0;
     Render.command2_color = 6013118;
+    Render.command2_rotation_degrees = 0;
+    Render.command2_alpha = 255;
 
     Render.command3_kind = 2;
     Render.command3_x = GameState.ball_x - 7;
     Render.command3_y = GameState.ball_y - 7;
     Render.command3_w = 14;
     Render.command3_h = 14;
-    Render.command3_asset = 1;
-    Render.command3_color = 16032865;
+    Render.command3_asset = -1520461853;
+    Render.command3_color = 16777215;
+    Render.command3_rotation_degrees = (GameState.tick_count * 3) % 360;
+    Render.command3_alpha = 255;
 
     Render.command4_kind = 1;
     Render.command4_x = (GameState.screen_w / 2) - 1;
@@ -238,6 +263,14 @@ function render(): void {
     Render.command4_h = GameState.screen_h;
     Render.command4_asset = 0;
     Render.command4_color = 4473924;
+    Render.command4_rotation_degrees = 0;
+    Render.command4_alpha = 255;
+
+    Render.command0_clip_x = 0; Render.command0_clip_y = 0; Render.command0_clip_w = GameState.screen_w; Render.command0_clip_h = GameState.screen_h;
+    Render.command1_clip_x = 0; Render.command1_clip_y = 0; Render.command1_clip_w = GameState.screen_w; Render.command1_clip_h = GameState.screen_h;
+    Render.command2_clip_x = 0; Render.command2_clip_y = 0; Render.command2_clip_w = GameState.screen_w; Render.command2_clip_h = GameState.screen_h;
+    Render.command3_clip_x = 0; Render.command3_clip_y = 0; Render.command3_clip_w = GameState.screen_w; Render.command3_clip_h = GameState.screen_h;
+    Render.command4_clip_x = 0; Render.command4_clip_y = 0; Render.command4_clip_w = GameState.screen_w; Render.command4_clip_h = GameState.screen_h;
 }
 
 function on_code_swap(): void {

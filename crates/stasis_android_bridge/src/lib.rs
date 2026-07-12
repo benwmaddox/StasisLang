@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use stasis_assets::{AssetLimits, ResolvedAssetManifest};
+use stasis_assets::{AssetFormat, AssetHandle, AssetLimits, ResolvedAssetManifest};
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_compiler::frontend::workshop::{
@@ -17,7 +17,7 @@ use stasis_compiler::IncrementalCompilerHost;
 
 pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
 pub const ANDROID_RENDER_FRAME_HEADER_SIZE: usize = 6;
-pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 7;
+pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 13;
 pub const ANDROID_RENDER_FRAME_I32_CAPACITY: usize = ANDROID_RENDER_FRAME_HEADER_SIZE
     + ANDROID_RENDER_COMMAND_CAPACITY * ANDROID_RENDER_COMMAND_STRIDE;
 
@@ -39,6 +39,12 @@ pub struct AndroidBridgeRenderCommand {
     pub h: i32,
     pub color: i32,
     pub asset: i32,
+    pub rotation_degrees: i32,
+    pub alpha: i32,
+    pub clip_x: i32,
+    pub clip_y: i32,
+    pub clip_w: i32,
+    pub clip_h: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +84,45 @@ pub fn load_android_workshop_asset_manifest(
 ) -> Result<ResolvedAssetManifest, String> {
     stasis_assets::load_project_asset_manifest(project_root, AssetLimits::default())
         .map_err(|error| error.to_string())
+}
+
+pub fn resolve_android_workshop_sprite_asset(
+    project_root: impl AsRef<Path>,
+    handle: i32,
+) -> Result<serde_json::Value, String> {
+    let handle = AssetHandle::from_i32(handle)
+        .ok_or_else(|| "sprite asset handle must be nonzero".to_string())?;
+    let manifest = load_android_workshop_asset_manifest(project_root)?;
+    let asset = manifest.by_handle(handle).ok_or_else(|| {
+        format!(
+            "sprite asset handle {} is not in the manifest",
+            handle.get()
+        )
+    })?;
+    let (encoding, width, height) = match asset.entry.format {
+        AssetFormat::Sprite {
+            encoding,
+            width,
+            height,
+        } => (format!("{encoding:?}").to_ascii_lowercase(), width, height),
+        AssetFormat::Audio { .. } => {
+            return Err(format!(
+                "asset handle {} identifies audio, not a sprite",
+                handle.get()
+            ));
+        }
+    };
+    Ok(serde_json::json!({
+        "status": "ok",
+        "handle": handle.as_i32(),
+        "id": asset.entry.id,
+        "path": asset.absolute_path,
+        "content_sha256": asset.entry.content_sha256,
+        "byte_length": asset.byte_length,
+        "encoding": encoding,
+        "width": width,
+        "height": height,
+    }))
 }
 
 pub fn run_android_workshop_stasis_tests(
@@ -482,6 +527,11 @@ fn read_render_commands(
     jit: &JitProcess,
 ) -> [AndroidBridgeRenderCommand; ANDROID_RENDER_COMMAND_CAPACITY] {
     let mut commands = [AndroidBridgeRenderCommand::default(); ANDROID_RENDER_COMMAND_CAPACITY];
+    let schema_version = if jit.has_global_path("Render.command_schema_version") {
+        jit.read_i32_global_path("Render.command_schema_version")
+    } else {
+        1
+    };
     for (index, command) in commands.iter_mut().enumerate() {
         command.kind = jit.read_i32_global_path(&format!("Render.command{index}_kind"));
         command.x = jit.read_i32_global_path(&format!("Render.command{index}_x"));
@@ -490,6 +540,22 @@ fn read_render_commands(
         command.h = jit.read_i32_global_path(&format!("Render.command{index}_h"));
         command.color = jit.read_i32_global_path(&format!("Render.command{index}_color"));
         command.asset = jit.read_i32_global_path(&format!("Render.command{index}_asset"));
+        let rotation_path = format!("Render.command{index}_rotation_degrees");
+        if jit.has_global_path(&rotation_path) {
+            command.rotation_degrees = jit.read_i32_global_path(&rotation_path);
+        }
+        command.alpha = if schema_version >= 2 {
+            jit.read_i32_global_path(&format!("Render.command{index}_alpha"))
+                .clamp(0, 255)
+        } else {
+            255
+        };
+        if schema_version >= 3 {
+            command.clip_x = jit.read_i32_global_path(&format!("Render.command{index}_clip_x"));
+            command.clip_y = jit.read_i32_global_path(&format!("Render.command{index}_clip_y"));
+            command.clip_w = jit.read_i32_global_path(&format!("Render.command{index}_clip_w"));
+            command.clip_h = jit.read_i32_global_path(&format!("Render.command{index}_clip_h"));
+        }
     }
     commands
 }
@@ -502,8 +568,10 @@ fn render_command_state_lines(
     let count = render_command_count.clamp(0, ANDROID_RENDER_COMMAND_CAPACITY as i32) as usize;
     for (index, command) in render_commands.iter().enumerate().take(count) {
         lines.push_str(&format!(
-            "render{index}_kind={}\nrender{index}_x={}\nrender{index}_y={}\nrender{index}_w={}\nrender{index}_h={}\nrender{index}_color={}\nrender{index}_asset={}\n",
-            command.kind, command.x, command.y, command.w, command.h, command.color, command.asset
+            "render{index}_kind={}\nrender{index}_x={}\nrender{index}_y={}\nrender{index}_w={}\nrender{index}_h={}\nrender{index}_color={}\nrender{index}_asset={}\nrender{index}_rotation_degrees={}\nrender{index}_alpha={}\nrender{index}_clip_x={}\nrender{index}_clip_y={}\nrender{index}_clip_w={}\nrender{index}_clip_h={}\n",
+            command.kind, command.x, command.y, command.w, command.h, command.color,
+            command.asset, command.rotation_degrees, command.alpha, command.clip_x,
+            command.clip_y, command.clip_w, command.clip_h
         ));
     }
     lines
@@ -543,6 +611,12 @@ fn write_render_frame_i32s(
         out[base + 4] = command.h;
         out[base + 5] = command.color;
         out[base + 6] = command.asset;
+        out[base + 7] = command.rotation_degrees;
+        out[base + 8] = command.alpha;
+        out[base + 9] = command.clip_x;
+        out[base + 10] = command.clip_y;
+        out[base + 11] = command.clip_w;
+        out[base + 12] = command.clip_h;
     }
     Ok(())
 }
@@ -555,8 +629,10 @@ fn render_command_message_fields(
     let mut fields = format!("render_command_count={count}");
     for (index, command) in render_commands.iter().enumerate().take(count) {
         fields.push_str(&format!(
-            " render{index}_kind={} render{index}_x={} render{index}_y={} render{index}_w={} render{index}_h={} render{index}_color={} render{index}_asset={}",
-            command.kind, command.x, command.y, command.w, command.h, command.color, command.asset
+            " render{index}_kind={} render{index}_x={} render{index}_y={} render{index}_w={} render{index}_h={} render{index}_color={} render{index}_asset={} render{index}_rotation_degrees={} render{index}_alpha={} render{index}_clip_x={} render{index}_clip_y={} render{index}_clip_w={} render{index}_clip_h={}",
+            command.kind, command.x, command.y, command.w, command.h, command.color,
+            command.asset, command.rotation_degrees, command.alpha, command.clip_x,
+            command.clip_y, command.clip_w, command.clip_h
         ));
     }
     fields
@@ -858,6 +934,36 @@ pub extern "C" fn stasis_android_bridge_run_tick(
         .into_raw()
 }
 
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_resolve_sprite_asset(
+    project_root: *const c_char,
+    handle: i32,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        if project_root.is_null() {
+            return Err("null project root".to_string());
+        }
+        let project_root = CStr::from_ptr(project_root)
+            .to_str()
+            .map_err(|error| format!("project root was not UTF-8: {error}"))?;
+        resolve_android_workshop_sprite_asset(project_root, handle)
+    }));
+    let value = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => serde_json::json!({ "status": "error", "error": error }),
+        Err(_) => serde_json::json!({
+            "status": "error",
+            "error": "panic while resolving Android sprite asset"
+        }),
+    };
+    let message = serde_json::to_string(&value).unwrap_or_else(|_| {
+        "{\"status\":\"error\",\"error\":\"invalid sprite response\"}".to_string()
+    });
+    CString::new(message)
+        .unwrap_or_else(|_| CString::new("{\"status\":\"error\"}").unwrap())
+        .into_raw()
+}
+
 unsafe fn run_tick_from_c(
     project_root: *const c_char,
     entry_file: *const c_char,
@@ -927,6 +1033,67 @@ mod tests {
         assert!(resolved.assets.is_empty());
         fs::remove_dir_all(root).ok();
     }
+
+    #[test]
+    fn android_bridge_resolves_sprite_metadata_by_stable_handle() {
+        let root = temp_project("sprite_asset");
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        let pixels = b"representative sprite bytes";
+        fs::write(root.join("assets/hero.png"), pixels).expect("write sprite");
+        let hash = stasis_assets::sha256_bytes(pixels);
+        fs::write(
+            root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
+            format!(r#"{{"schema":"stasis-assets","version":1,"assets":[{{"id":"hero","path":"assets/hero.png","content_sha256":"{hash}","format":{{"kind":"sprite","encoding":"png","width":4,"height":6}},"dependencies":[]}}]}}"#),
+        )
+        .expect("write manifest");
+
+        let manifest = load_android_workshop_asset_manifest(&root).expect("load manifest");
+        let handle = manifest.by_id("hero").expect("hero entry").handle.as_i32();
+        let resolved =
+            resolve_android_workshop_sprite_asset(&root, handle).expect("resolve sprite");
+        assert_eq!(resolved["status"], "ok");
+        assert_eq!(resolved["handle"], handle);
+        assert_eq!(resolved["encoding"], "png");
+        assert_eq!(resolved["width"], 4);
+        assert_eq!(resolved["height"], 6);
+        assert_eq!(resolved["content_sha256"], hash);
+        assert!(resolved["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("hero.png"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_bridge_rejects_missing_sprite_handle() {
+        let root = temp_project("missing_sprite_asset");
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        fs::write(
+            root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
+            r#"{"schema":"stasis-assets","version":1,"assets":[]}"#,
+        )
+        .expect("write manifest");
+
+        let error = resolve_android_workshop_sprite_asset(&root, 7).expect_err("missing handle");
+        assert!(error.contains("is not in the manifest"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bundled_pong_sprite_uses_shared_manifest_handle() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mobile/android/app/src/main/assets/workshop_sample")
+            .canonicalize()
+            .expect("Pong template root");
+        let resolved = resolve_android_workshop_sprite_asset(&root, -1_520_461_853)
+            .expect("resolve bundled ball");
+        assert_eq!(resolved["id"], "ball");
+        assert_eq!(resolved["encoding"], "svg");
+        assert_eq!(resolved["width"], 32);
+        assert_eq!(resolved["height"], 32);
+    }
+
     fn temp_project(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1134,6 +1301,8 @@ mod tests {
         assert_eq!(result.render_commands[0].h, 64);
         assert_eq!(result.render_commands[0].color, 65535);
         assert_eq!(result.render_commands[0].asset, 0);
+        assert_eq!(result.render_commands[0].rotation_degrees, 0);
+        assert_eq!(result.render_commands[0].alpha, 255);
 
         let state = fs::read_to_string(root.join("build/runtime_state.txt"))
             .expect("read JIT runtime state");
@@ -1185,7 +1354,13 @@ mod tests {
         assert_eq!(result.render_commands[0].w, 360);
         assert_eq!(result.render_commands[1].y, 204);
         assert_eq!(result.render_commands[3].kind, 2);
-        assert_eq!(result.render_commands[3].asset, 1);
+        assert_eq!(result.render_commands[3].asset, -1520461853);
+        assert_eq!(result.render_commands[3].rotation_degrees, 3);
+        assert_eq!(result.render_commands[3].alpha, 255);
+        assert_eq!(result.render_commands[3].clip_x, 0);
+        assert_eq!(result.render_commands[3].clip_y, 0);
+        assert_eq!(result.render_commands[3].clip_w, 360);
+        assert_eq!(result.render_commands[3].clip_h, 640);
         assert!(result.observed_game_tick_count >= 1);
     }
 
@@ -1327,11 +1502,15 @@ mod tests {
             .join("../../mobile/android/app/src/main/assets/exploration_sample")
             .canonicalize()
             .expect("exploration template root");
-        let result = run_android_workshop_stasis_tests(&root).expect("run exploration Stasis tests");
+        let result =
+            run_android_workshop_stasis_tests(&root).expect("run exploration Stasis tests");
         assert_eq!(result["passed"], 7);
         assert_eq!(result["failed"], 0);
         assert_eq!(result["all_passed"], true);
-        assert_eq!(result["results"][0]["file"], "tests/exploration_gameplay.test.stasis");
+        assert_eq!(
+            result["results"][0]["file"],
+            "tests/exploration_gameplay.test.stasis"
+        );
     }
 
     #[test]
@@ -1388,6 +1567,12 @@ function render(): void { Render.command_count = 1; Render.command0_kind = 1; Re
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 1], 9);
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 5], 5);
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 6], 0);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 7], 0);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 8], 255);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 9], 0);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 10], 0);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 11], 0);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 12], 0);
         fs::remove_dir_all(&root).ok();
     }
 

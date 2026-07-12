@@ -14,6 +14,8 @@ REQUIRED_ENTRIES = {
     "AndroidManifest.xml",
     "classes.dex",
     "lib/arm64-v8a/libstasis_mobile_smoke.so",
+    "assets/stasis_game/assets/manifest.json",
+    "assets/stasis_game/assets/ball.svg",
 }
 FORBIDDEN_SUFFIXES = {
     "libstasis_android_bridge.so",

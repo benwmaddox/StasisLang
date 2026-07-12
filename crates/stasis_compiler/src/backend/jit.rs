@@ -315,6 +315,12 @@ impl JitProcess {
         stasis_dynload::stasis_jit_global_i32_load(hash_global_path(path))
     }
 
+    pub fn has_global_path(&self, path: &str) -> bool {
+        self.compile_analysis_cache
+            .as_ref()
+            .is_some_and(|analysis| analysis.global_path_types.contains_key(path))
+    }
+
     pub fn write_i32_global_path(&self, path: &str, value: i32) {
         stasis_dynload::stasis_jit_global_i32_store(hash_global_path(path), value);
     }
@@ -698,6 +704,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         }
         "gfx_load_sprite" | "stasis_gfx_load_sprite" => {
             function_address(stasis_dynload::stasis_jit_gfx_load_sprite as *const ())
+        }
+        "gfx_release_sprite" | "stasis_gfx_release_sprite" => {
+            function_address(stasis_dynload::stasis_jit_gfx_release_sprite as *const ())
         }
         "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => {
             function_address(stasis_dynload::stasis_jit_gfx_dump_bmp as *const ())
