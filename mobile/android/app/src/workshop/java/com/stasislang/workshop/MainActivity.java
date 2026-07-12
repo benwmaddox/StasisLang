@@ -8992,7 +8992,9 @@ public final class MainActivity extends Activity {
 
     private AiApiResponse callCodexResponses(String requestJson) throws Exception {
         JSONObject payload = new JSONObject();
-        payload.put("model", "");
+        String requestedModel = getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                .getString(AI_PREF_MODEL, DEFAULT_AI_MODEL).trim();
+        payload.put("model", requestedModel.isEmpty() ? DEFAULT_AI_MODEL : requestedModel);
         payload.put("instructions", "");
         payload.put("input", buildAiOpenAiInput(requestJson, true, false));
         payload.put("tools", new JSONArray());

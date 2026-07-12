@@ -882,6 +882,7 @@ def main() -> int:
     assert 'WorkshopCodexServiceTier.requestTier' in activity
     assert 'payload.put("service_tier", serviceTier)' in activity
     assert 'appendAiTrace("codex_request_tier"' in activity
+    assert 'payload.put("model", requestedModel.isEmpty() ? DEFAULT_AI_MODEL : requestedModel)' in activity
     assert "installAiGameProgressOverlay(root)" in activity
     assert "WorkshopAiOverlayPolicy.shouldShow" in activity
     assert 'setContentDescription("AI work status; tap to open Workshop")' in activity
@@ -1121,6 +1122,8 @@ def main() -> int:
     assert "stasis_codex_android_cancel_response" in native
     assert "cancel_on_generation_change" in codex_native
     assert "Codex request cancelled" in codex_native
+    assert "select_codex_model" in codex_native
+    assert "Codex model is unavailable" in codex_native
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
     assert "try_rust_bridge_compile" in native

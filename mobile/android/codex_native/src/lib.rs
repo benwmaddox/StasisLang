@@ -66,7 +66,7 @@ static LOGIN_STATE: LazyLock<Mutex<LoginState>> =
     LazyLock::new(|| Mutex::new(LoginState::Idle));
 static LOGIN_GENERATION: AtomicU64 = AtomicU64::new(0);
 static RESPONSE_GENERATION: AtomicU64 = AtomicU64::new(0);
-static DEFAULT_CODEX_MODEL: LazyLock<Mutex<Option<CodexModelInfo>>> =
+static CODEX_MODELS: LazyLock<Mutex<Option<Vec<CodexModelInfo>>>> =
     LazyLock::new(|| Mutex::new(None));
 
 fn server_options(codex_home: PathBuf) -> ServerOptions {
@@ -268,7 +268,7 @@ fn account_rate_limits(codex_home: &Path) -> Result<Value, String> {
     })
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct CodexModelInfo {
     slug: String,
     #[serde(default)]
@@ -354,16 +354,16 @@ async fn bounded_response_bytes(
     Ok(body)
 }
 
-async fn default_codex_model(
+async fn codex_models(
     client: &reqwest::Client,
     auth: &codex_login::CodexAuth,
-) -> Result<CodexModelInfo, String> {
-    if let Some(model) = DEFAULT_CODEX_MODEL
+) -> Result<Vec<CodexModelInfo>, String> {
+    if let Some(models) = CODEX_MODELS
         .lock()
         .map_err(|error| error.to_string())?
         .clone()
     {
-        return Ok(model);
+        return Ok(models);
     }
     let request = client.get(format!(
         "{CHATGPT_CODEX_MODELS_URL}?client_version=0.0.0"
@@ -380,17 +380,26 @@ async fn default_codex_model(
     let models = serde_json::from_slice::<CodexModelsPayload>(&body)
         .map_err(|error| format!("Codex model discovery was invalid: {error}"))?
         .models;
-    let model = select_default_codex_model(models)?;
-    *DEFAULT_CODEX_MODEL
+    if models.is_empty() {
+        return Err("Codex returned no available models".to_string());
+    }
+    *CODEX_MODELS
         .lock()
-        .map_err(|error| error.to_string())? = Some(model.clone());
-    Ok(model)
+        .map_err(|error| error.to_string())? = Some(models.clone());
+    Ok(models)
 }
 
-fn select_default_codex_model(
+fn select_codex_model(
     mut models: Vec<CodexModelInfo>,
+    requested_slug: &str,
 ) -> Result<CodexModelInfo, String> {
     models.sort_by_key(|model| model.priority);
+    if !requested_slug.is_empty() {
+        return models
+            .into_iter()
+            .find(|model| model.slug == requested_slug && model.visibility == "list")
+            .ok_or_else(|| format!("Codex model is unavailable: {requested_slug}"));
+    }
     models
         .iter()
         .find(|model| model.visibility == "list")
@@ -483,12 +492,18 @@ async fn cancel_on_generation_change<T>(
 fn codex_response(codex_home: &Path, request_json: &str, generation: u64) -> Result<Value, String> {
     let mut payload: Value = serde_json::from_str(request_json)
         .map_err(|error| format!("Codex request JSON was invalid: {error}"))?;
+    let requested_model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     runtime()?.block_on(cancel_on_generation_change(generation, async move {
         let auth = codex_auth(codex_home.to_path_buf()).await?;
         let client = reqwest::Client::builder()
             .build()
             .map_err(|error| error.to_string())?;
-        let model = default_codex_model(&client, &auth).await?;
+        let model = select_codex_model(codex_models(&client, &auth).await?, &requested_model)?;
         prepare_codex_payload(&mut payload, &model)?;
         let request = client
             .post(CHATGPT_CODEX_RESPONSES_URL)
@@ -628,7 +643,7 @@ mod tests {
     use super::CodexModelInfo;
     use super::completed_response_from_sse;
     use super::prepare_codex_payload;
-    use super::select_default_codex_model;
+    use super::select_codex_model;
     use super::{begin_response_generation, cancel_on_generation_change, cancel_response_generation};
     use serde_json::json;
 
@@ -691,10 +706,47 @@ mod tests {
             priority: 8,
         };
         assert_eq!(
-            select_default_codex_model(vec![later, visible, hidden])
+            select_codex_model(vec![later, visible, hidden], "")
                 .expect("default model")
                 .slug,
             "visible"
+        );
+    }
+
+    #[test]
+    fn selects_requested_visible_model() {
+        let sol = CodexModelInfo {
+            slug: "gpt-5.6-sol".to_string(),
+            base_instructions: String::new(),
+            visibility: "list".to_string(),
+            priority: 1,
+        };
+        let luna = CodexModelInfo {
+            slug: "gpt-5.6-luna".to_string(),
+            base_instructions: "luna instructions".to_string(),
+            visibility: "list".to_string(),
+            priority: 3,
+        };
+        assert_eq!(
+            select_codex_model(vec![sol, luna], "gpt-5.6-luna")
+                .expect("requested model")
+                .slug,
+            "gpt-5.6-luna"
+        );
+    }
+
+    #[test]
+    fn rejects_unavailable_requested_model() {
+        let sol = CodexModelInfo {
+            slug: "gpt-5.6-sol".to_string(),
+            base_instructions: String::new(),
+            visibility: "list".to_string(),
+            priority: 1,
+        };
+        assert_eq!(
+            select_codex_model(vec![sol], "gpt-5.6-luna")
+                .expect_err("unavailable model"),
+            "Codex model is unavailable: gpt-5.6-luna"
         );
     }
 
