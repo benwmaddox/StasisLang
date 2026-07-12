@@ -122,6 +122,15 @@ valid note is shown in the Workshop status, written to the private bounded trace
 and supplied with retained tool observations on the next otherwise stateless
 call. Oversized, missing, empty, or non-string notes fail response validation.
 
+Follow-up calls use a provider-independent compact context because device traces
+show that Codex subscription calls may report zero cached input tokens. The
+compact form retains the original user goal, Stasis basics, available tools,
+selected source, game-design rules, cumulative observations, test results, and
+working notes while dropping the initial symbol index, full tool examples, and
+other discovery-only context. After a batch writes a behavior test, Workshop
+finishes locally when writes compiled and all runnable tests pass instead of
+requesting a redundant final model response.
+
 ## Limits
 
 - **Codex subscription:** do not estimate dollars. Display Codex account

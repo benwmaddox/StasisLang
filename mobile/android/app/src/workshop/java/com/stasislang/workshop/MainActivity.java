@@ -4631,6 +4631,20 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private static JSONObject compactAiFollowupBase(String initialRequestJson) throws Exception {
+        JSONObject initial = new JSONObject(initialRequestJson);
+        JSONObject compact = new JSONObject()
+                .put("scope", initial.optString("scope", "entire_workspace"))
+                .put("user_prompt", initial.optString("user_prompt", ""))
+                .put("stasis_basics", initial.optJSONObject("stasis_basics"))
+                .put("available_tools", initial.optJSONArray("available_tools"))
+                .put("selected_symbols", initial.optJSONArray("selected_symbols"))
+                .put("selected_symbols_are_context_only", true)
+                .put("game_design_rules", initial.optJSONObject("game_design_rules"))
+                .put("followup_context", "Compacted after the initial inspection turn; retained observations contain the current source and diagnostics needed to continue.");
+        return compact;
+    }
+
     private static JSONObject aiResponseContract() throws Exception {
         JSONArray acceptedShapes = new JSONArray()
                 .put(new JSONObject()
@@ -4831,7 +4845,7 @@ public final class MainActivity extends Activity {
                     throw new IOException("AI response shape invalid: " + responseValidationErrors.toString());
                 }
                 JSONObject followup = new JSONObject();
-                followup.put("original_request", new JSONObject(initialRequestJson));
+                followup.put("original_request", compactAiFollowupBase(initialRequestJson));
                 followup.put("tool_observations", responseValidationErrors);
                 followup.put("response_contract", aiResponseContract());
                 if (!session.workingNotes.isEmpty()) {
@@ -4909,12 +4923,25 @@ public final class MainActivity extends Activity {
                         .put("status", "not_run_for_read_only_batch");
             }
             appendAiTrace("test_observation", new JSONObject().put("turn", session.currentStep).put("result", testObservation));
+            if (batchHasWrites && WorkshopAiCompletionStatus.canFinalizeTestedWrites(
+                    aiToolCallsContainTestWrite(toolCalls), session.successfulWriteCount,
+                    compileReady, session.latestRunnableTestsPassed())) {
+                JSONObject completed = new JSONObject()
+                        .put("mode", "done")
+                        .put("working_notes", session.workingNotes)
+                        .put("summary", "Applied and tested " + session.successfulWriteCount + " tool write(s)")
+                        .put("applied_tool_writes", true)
+                        .put("reason", "Successful tool writes compiled and all runnable tests passed; skipped a redundant final model call.");
+                appendAiTrace("auto_finalize_tested_writes", completed);
+                return new AiAgentResult(completed.toString(), usage.toJson(model),
+                        useCodex ? usage.subscriptionSummary() : usage.summary(), session.currentStep,
+                        session.actionCount, generatedImages);
+            }
             JSONObject followup = new JSONObject();
-            followup.put("original_request", new JSONObject(initialRequestJson));
+            followup.put("original_request", compactAiFollowupBase(initialRequestJson));
             followup.put("tool_observations", session.retainedToolObservations());
             followup.put("latest_tool_observations", observations);
             followup.put("test_observation", testObservation);
-            followup.put("tool_specs", aiToolSpecs());
             followup.put("working_notes", session.workingNotes);
             String instruction = "Use the retained tool_observations and working_notes as cumulative memory; update working_notes with concise Intent, Observed, Next, and Blocker facts on this response. Do not expose private chain-of-thought. Do not read targets already present in retained observations. Inspect only the minimum missing context needed for the requested change. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so compile failures and test results return observations you can correct. Tool errors, validation_error observations, and test failures are not final; correct them. Return mode=edits only after the intended code has been written, compiled, and the latest runnable tests pass. If no further action is needed, return mode=done.";
             if (session.toolLoopPolicy.requiresWriteOrDone()) {
@@ -5056,6 +5083,14 @@ public final class MainActivity extends Activity {
         for (int index = 0; index < toolCalls.length(); index += 1) {
             JSONObject call = toolCalls.optJSONObject(index);
             if (call != null && isAiWriteTool(call.optString("tool", ""))) return true;
+        }
+        return false;
+    }
+
+    private static boolean aiToolCallsContainTestWrite(JSONArray toolCalls) {
+        for (int index = 0; index < toolCalls.length(); index += 1) {
+            JSONObject call = toolCalls.optJSONObject(index);
+            if (call != null && "write_test_file".equals(call.optString("tool", ""))) return true;
         }
         return false;
     }
@@ -6049,6 +6084,7 @@ public final class MainActivity extends Activity {
             }
         }
         String stableInstruction = "Return only one JSON object. Follow the cached stasis_basics as the authoritative language/runtime orientation. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when the index already identifies the target. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; use either the initial index, a compact list tool, or a direct read when possible, not every inspection tool. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
+        stableInstruction = stableInstruction.replace("Use tool_specs in the request", "Use tool_specs when present in the request");
         stableInstruction += " Every response must include working_notes as a concise user-visible state summary of at most 2000 characters using Intent, Observed, Next, and Blocker. Report decisions and evidence, not private chain-of-thought. Update working_notes from the retained prior note and current observations on every call.";
         stableInstruction += " write_symbol creates or replaces a symbol. Before writing, inspect the current target. Follow game_design_rules, prefer_lifecycle_local_state, avoid_global_tick_for_per_entity_progression, and architecture_recommendations. Follow architecture_recommendations. Use command/event-style functions for durable gameplay concepts. Tool errors, validation_error observations, and test_observation failures are not final; correct them before returning mode=done. A failed write batch rolls back the whole batch and returns diagnostics.";
         JSONArray input = new JSONArray()
@@ -6500,11 +6536,21 @@ public final class MainActivity extends Activity {
                 compileReady = isRunnableCompile(compileResult);
                 compileAttempted = true;
                 String elapsed = currentAiElapsedText();
-                updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, aiReloadPhase(compileResult));
+                boolean appliedToolWrites = response.optBoolean("applied_tool_writes", false);
+                String completionPhase = appliedToolWrites
+                        ? WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult))
+                        : aiReloadPhase(compileResult);
+                updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, completionPhase);
                 JSONObject testRun = aiToolRunTests(new AiAgentSession());
                 appendAiTrace("apply_done", new JSONObject().put("summary", response.optString("summary", "no actions")).put("compile", compileResult).put("tests", testRun).put("elapsed", elapsed));
-                recordAiOutcome(activeAiPrompt, "complete", response.optString("summary", "no actions"), aiResult.usageSummary);
-                setStatusText("AI edit complete: " + response.optString("summary", "no actions") + " - no actions - " + aiReloadSummary(compileResult) + " - " + testSummaryText(testRun) + " - elapsed=" + elapsed + " - " + compileResult + " - " + aiResult.usageSummary + " - trace=" + aiTraceLogPath());
+                recordAiOutcome(activeAiPrompt, appliedToolWrites ? "applied" : "complete",
+                        response.optString("summary", "no actions"), aiResult.usageSummary);
+                String actionSummary = appliedToolWrites ? "tested tool writes" : "no actions";
+                setStatusText("AI edit " + (appliedToolWrites ? "applied" : "complete") + ": "
+                        + response.optString("summary", "no actions") + " - " + actionSummary + " - "
+                        + aiReloadSummary(compileResult) + " - " + testSummaryText(testRun) + " - elapsed="
+                        + elapsed + " - " + compileResult + " - " + aiResult.usageSummary
+                        + " - trace=" + aiTraceLogPath());
                 return;
             }
             ProjectSnapshot project = loadBundledProject();

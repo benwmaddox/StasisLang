@@ -325,6 +325,10 @@ def main() -> int:
     assert "hot swap=FastReload" in activity
     assert "aiReloadPhase" in activity
     assert "WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult))" in activity
+    assert "WorkshopAiCompletionStatus.canFinalizeTestedWrites" in activity
+    assert "auto_finalize_tested_writes" in activity
+    assert "compactAiFollowupBase(initialRequestJson)" in activity
+    assert 'response.optBoolean("applied_tool_writes", false)' in activity
     assert "Context & Images" in activity
     assert 'aiPatch.setText("Run")' in activity
     assert 'aiCancelButton.setText("Stop")' in activity
@@ -869,6 +873,8 @@ def main() -> int:
     assert "preferredFunctionCall" not in activity
     assert "preferred_call" not in activity
     assert 'request.put("stasis_basics", aiStasisBasics())' in activity
+    assert "def compact_followup_context" in host_agent
+    assert '"kind": "auto_finalize_tested_writes"' in host_agent
     assert "global instance_name: StructType" in activity
     assert "function name(arg_name: Type, other: Type): ReturnType" in activity
     assert "struct TypeName { field_name: Type; ... }" in activity
@@ -926,7 +932,8 @@ def main() -> int:
     assert "Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits" in activity
     assert "Tool errors, validation_error observations, and test_observation failures are not final" in activity
     assert "mode=done" in activity
-    assert "AI edit complete" in activity
+    assert 'appliedToolWrites ? "applied" : "complete"' in activity
+    assert 'appliedToolWrites ? "tested tool writes" : "no actions"' in activity
     assert "rolls back the whole batch and returns diagnostics" in activity
     assert "AI edit apply failed and rolled back" in activity
     assert "appendAiFunction" in activity
