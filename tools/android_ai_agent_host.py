@@ -27,6 +27,7 @@ DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_TRACE_DIR = ROOT / "artifacts/android_ai_runs"
 MAX_TURNS = 15
+MAX_WORKING_NOTES_CHARS = 2_000
 PROMPT_CACHE_KEY = "stasis-android-ai-agent-v2"
 
 
@@ -492,11 +493,11 @@ def tool_specs() -> list[dict[str, Any]]:
 
 def response_contract() -> dict[str, Any]:
     return {
-        "required": "Return exactly one JSON object. The top-level object must match one of the accepted_response_shapes.",
+        "required": "Return exactly one JSON object. Include user-visible working_notes of at most 2000 characters.",
         "accepted_response_shapes": [
-            {"mode": "tool_calls", "summary": "short optional status", "tool_calls": [{"tool": "read_symbol", "args": {"name": "tick"}}]},
-            {"mode": "done", "summary": "what was verified"},
-            {"mode": "edits", "summary": "short change summary", "edits": [{"kind": "replace_function", "owner": "Player", "name": "jump", "file": "src/player.stasis", "new_source": "function jump(self: Player): void {\n}"}]},
+            {"mode": "tool_calls", "working_notes": "Intent: inspect. Observed: facts. Next: action. Blocker: none.", "summary": "short optional status", "tool_calls": [{"tool": "read_symbol", "args": {"name": "tick"}}]},
+            {"mode": "done", "working_notes": "Intent: finish. Observed: verified. Next: none. Blocker: none.", "summary": "what was verified"},
+            {"mode": "edits", "working_notes": "Intent: finish. Observed: writes and tests passed. Next: apply. Blocker: none.", "summary": "short change summary", "edits": [{"kind": "replace_function", "owner": "Player", "name": "jump", "file": "src/player.stasis", "new_source": "function jump(self: Player): void {\n}"}]},
         ],
         "tool_call_rules": [
             "Use the exact top-level property tool_calls for tool use.",
@@ -555,6 +556,13 @@ def build_agent_request(project: Path, prompt: str, turn_state: dict[str, Any]) 
     }
 
 
+def retain_working_notes(turn_state: dict[str, Any], working_notes: str) -> dict[str, Any]:
+    retained = dict(turn_state)
+    if working_notes:
+        retained["working_notes"] = working_notes
+    return retained
+
+
 def parse_json_object(text: str) -> dict[str, Any]:
     stripped = text.strip()
     try:
@@ -594,6 +602,7 @@ def response_json_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {
             "mode": {"type": "string"},
+            "working_notes": {"type": "string", "minLength": 1, "maxLength": MAX_WORKING_NOTES_CHARS},
             "summary": {"type": "string"},
             "tool_calls": {
                 "type": "array",
@@ -623,7 +632,7 @@ def response_json_schema() -> dict[str, Any]:
                 },
             },
         },
-        "required": ["mode"],
+        "required": ["mode", "working_notes"],
         "additionalProperties": False,
     }
 
@@ -653,6 +662,7 @@ def summarize_response_for_trace(body: dict[str, Any], parsed: dict[str, Any]) -
         "usage": response_usage_from_body(body),
         "mode": parsed.get("mode"),
         "summary": parsed.get("summary", ""),
+        "working_notes": parsed.get("working_notes", ""),
         "tool_call_count": len(parsed.get("tool_calls") or []),
         "edit_count": len(parsed.get("edits") or []),
         "response_keys": sorted(parsed.keys()),
@@ -662,6 +672,7 @@ def summarize_response_for_trace(body: dict[str, Any], parsed: dict[str, Any]) -
 def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
     stable_instruction = (
         "Return only one JSON object matching request.shared_context.protocol.response_contract exactly. "
+        "Every response must include working_notes of at most 2000 characters with concise Intent, Observed, Next, and Blocker facts. These are user-visible state notes, not private chain-of-thought. "
         "Use mode=tool_calls to inspect/write with the provided fine-grained symbol, import, and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/read_imports/list_tests/read_test_file instead. "
         "For tool calls, the top-level key is tool_calls and each call is exactly {\"tool\":\"name\",\"args\":{...}}. "
         "Do not use aliases such as calls, name, function, arguments, type, or source. "
@@ -782,10 +793,14 @@ def validate_response_shape(response: dict[str, Any]) -> tuple[list[dict[str, An
     errors: list[dict[str, Any]] = []
     contract = response_contract()
     mode = response.get("mode")
+    working_notes = response.get("working_notes")
+    if not isinstance(working_notes, str) or not working_notes.strip() or len(working_notes) > MAX_WORKING_NOTES_CHARS:
+        errors.append({"kind": "validation_error", "error": "response requires nonempty string working_notes within 2000 characters", "maximum_characters": MAX_WORKING_NOTES_CHARS, "accepted_shape": "Intent: ... Observed: ... Next: ... Blocker: ..."})
+        return [], errors
     if mode not in {"tool_calls", "done", "edits"}:
         errors.append({"kind": "validation_error", "error": "response requires top-level mode equal to tool_calls, done, or edits", "received_keys": sorted(response.keys()), "received_mode": mode, "response_contract": contract})
         return [], errors
-    allowed_top_level = {"tool_calls": {"mode", "summary", "tool_calls"}, "done": {"mode", "summary"}, "edits": {"mode", "summary", "edits"}}[mode]
+    allowed_top_level = {"tool_calls": {"mode", "working_notes", "summary", "tool_calls"}, "done": {"mode", "working_notes", "summary"}, "edits": {"mode", "working_notes", "summary", "edits"}}[mode]
     extra_top_level = sorted(set(response.keys()) - allowed_top_level)
     if extra_top_level:
         errors.append({"kind": "validation_error", "error": "response contains unsupported top-level properties for this mode", "mode": mode, "unsupported_properties": extra_top_level, "accepted_top_level_properties": sorted(allowed_top_level), "response_contract": contract})
@@ -986,6 +1001,7 @@ def main() -> int:
         reset_paddle_speed_feature(project)
     last_diagnostics: dict[str, Any] = {}
     total_actions = 0
+    working_notes = ""
     for turn in range(1, MAX_TURNS + 1):
         try:
             response = call_openai(api_key, args.model, request, trace_events, turn)
@@ -996,16 +1012,18 @@ def main() -> int:
             return 1
         mode = response.get("mode")
         tool_calls, response_validation_errors = validate_response_shape(response)
-        print(json.dumps({"turn": turn, "mode": mode, "response_keys": sorted(response.keys()), "summary": response.get("summary", ""), "tool_call_count": len(tool_calls), "validation_error_count": len(response_validation_errors), "edit_count": len(response.get("edits") or [])}, indent=2))
+        print(json.dumps({"turn": turn, "mode": mode, "working_notes": response.get("working_notes", ""), "response_keys": sorted(response.keys()), "summary": response.get("summary", ""), "tool_call_count": len(tool_calls), "validation_error_count": len(response_validation_errors), "edit_count": len(response.get("edits") or [])}, indent=2))
         if response_validation_errors:
             print(json.dumps({"response_validation_errors": response_validation_errors}, indent=2))
             trace_events.append({"kind": "response_validation_errors", "turn": turn, "errors": response_validation_errors})
             if turn >= MAX_TURNS:
                 write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = build_agent_request(project, args.prompt, {"phase": "response_validation_error", "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching shared_context.protocol.response_contract. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."})
+            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "response_validation_error", "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching shared_context.protocol.response_contract, including bounded working_notes. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."}, working_notes))
             trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
             continue
+        working_notes = response["working_notes"].strip()
+        trace_events.append({"kind": "working_notes", "turn": turn, "notes": working_notes})
         if mode == "edits" or (mode != "tool_calls" and response.get("edits")):
             observations = []
             for edit in response.get("edits") or []:
@@ -1020,7 +1038,7 @@ def main() -> int:
             if turn >= MAX_TURNS:
                 write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = build_agent_request(project, args.prompt, {"phase": "direct_edit_test_failure", "tool_observations": observations, "test_observation": final, "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Inspect shared_context.workflow_rules.behavior_test_expectations and current source, then fix it using tool calls. Use precise write_symbol calls; write_file is reserved for host recovery and is not part of the normal tool list."})
+            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "direct_edit_test_failure", "tool_observations": observations, "test_observation": final, "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Update working_notes, inspect the exact failure, then fix it using precise tool calls."}, working_notes))
             continue
         if mode != "tool_calls" or not tool_calls:
             final = run_behavior_tests(project)
@@ -1032,13 +1050,13 @@ def main() -> int:
             if turn >= MAX_TURNS:
                 write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = build_agent_request(project, args.prompt, {"phase": "done_or_empty_test_failure", "tool_observations": [], "test_observation": final, "instruction": "The model returned done or an unsupported shape, but the required local behavior test failed. Inspect shared_context.workflow_rules.behavior_test_expectations and current source, then fix it using tool calls. Fix duplicate or misplaced symbols with precise write_symbol calls; write_file is not part of the normal tool list."})
+            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "done_or_empty_test_failure", "tool_observations": [], "test_observation": final, "instruction": "The model returned done, but the required local behavior test failed. Update working_notes with the failure and fix it using precise tool calls."}, working_notes))
             continue
         observations, last_diagnostics = execute_tool_batch(project, tool_calls, last_diagnostics)
         total_actions += len(tool_calls)
         print(json.dumps({"tool_observations": summarize_observations(observations)}, indent=2))
         trace_events.append({"kind": "tool_observations", "turn": turn, "observations": observations, "summary": summarize_observations(observations)})
-        request = build_agent_request(project, args.prompt, {"phase": "tool_observations", "tool_observations": observations, "instruction": "Use observations to continue or return mode=done. If tests fail, inspect shared_context.workflow_rules.behavior_test_expectations and fix the exact required state/checks. Do not repeat identical tool calls."})
+        request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "tool_observations", "tool_observations": observations, "instruction": "Use observations and retained working_notes to continue or return mode=done. Update Intent, Observed, Next, and Blocker on the next response. If tests fail, fix the exact required state/checks. Do not repeat identical tool calls."}, working_notes))
         trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
     print(json.dumps({"error": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
     trace_events.append({"kind": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics})
