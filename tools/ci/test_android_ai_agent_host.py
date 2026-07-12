@@ -39,6 +39,10 @@ class AndroidAiAgentHostTests(unittest.TestCase):
             "events": [
                 {"kind": "openai_exchange", "response": {"response_model": "gpt-5.6-luna"}},
                 {"kind": "response_validation_errors", "errors": [{}]},
+                {"kind": "tool_observations", "summary": [
+                    {"tool": "write_symbol", "status": "rolled_back"},
+                    {"tool": "write_test_file", "status": "rolled_back"},
+                ]},
             ],
             "exit_code": 0,
         }
@@ -50,6 +54,7 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         self.assertEqual((3, 4), (row["acceptance_tests_passed"], row["acceptance_tests_total"]))
         self.assertEqual(60.0, row["cached_input_percent"])
         self.assertEqual(1, row["validation_retries"])
+        self.assertEqual(1, row["rollback_batches"])
 
     def test_host_run_finishes_before_repository_command_limit(self) -> None:
         self.assertLess(host.DEFAULT_MAX_RUN_SECONDS, 300.0)

@@ -183,9 +183,9 @@ estimated standard API cost, and a model-independent acceptance suite. Keep
 each live model invocation as a separate bounded command; use
 `--summarize-only` after all traces exist. The first recorded comparison is in
 `docs/android_ai_model_comparison_2026-07-12.md`. Summary rows include the
-independent pass ratio, tool batches, schema retries, rolled-back writes, and
-cached-input percentage so a self-authored-test pass cannot mask incomplete
-behavior or retry waste.
+independent pass ratio, tool batches, schema retries, failed write batches,
+restored write counts, and cached-input percentage so a self-authored-test pass
+cannot mask incomplete behavior or retry waste.
 
 ## Limits
 

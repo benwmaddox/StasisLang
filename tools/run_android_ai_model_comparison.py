@@ -29,6 +29,10 @@ def reset_copy(baseline: Path, destination: Path) -> None:
 def summarize(trace: dict[str, Any], process_code: int, acceptance: dict[str, Any] | None = None) -> dict[str, Any]:
     exchanges = [event for event in trace.get("events", []) if event.get("kind") == "openai_exchange"]
     tool_events = [event for event in trace.get("events", []) if event.get("kind") == "tool_observations"]
+    rollback_batches = sum(
+        1 for event in tool_events
+        if any(item.get("status") == "rolled_back" for item in event.get("summary", []))
+    )
     final_tests = [
         event.get("final_test", {})
         for event in trace.get("events", [])
@@ -61,6 +65,7 @@ def summarize(trace: dict[str, Any], process_code: int, acceptance: dict[str, An
         "actions": trace.get("meta", {}).get("total_actions", 0),
         "successful_writes": trace.get("meta", {}).get("successful_write_count", 0),
         "rolled_back_writes": trace.get("meta", {}).get("rolled_back_write_count", 0),
+        "rollback_batches": rollback_batches,
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_input_tokens,
         "cached_input_percent": (100.0 * cached_input_tokens / input_tokens) if input_tokens else 0.0,
@@ -93,8 +98,8 @@ def write_markdown(path: Path, prompt: str, rows: list[dict[str, Any]]) -> None:
         "",
         "All runs use fresh copies of the same baseline, medium reasoning, standard API service, and a 25-turn cap.",
         "",
-        "| Model | Harness | Acceptance | Total s | Model s | Tool s | Calls | Batches | Actions | Retries | Rollbacks | Input | Cached | Cache % | Cache write | Output | Est. USD |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Model | Harness | Acceptance | Total s | Model s | Tool s | Calls | Tool batches | Actions | Schema retries | Failed write batches | Restored writes | Input | Cached | Cache % | Cache write | Output | Est. USD |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
@@ -102,7 +107,7 @@ def write_markdown(path: Path, prompt: str, rows: list[dict[str, Any]]) -> None:
             f"{row['acceptance_tests_passed']}/{row['acceptance_tests_total']} | "
             f"{row['total_seconds']:.1f} | {row['model_seconds']:.1f} | {row['tool_seconds']:.1f} | "
             f"{row['calls']} | {row['tool_batches']} | {row['actions']} | {row['validation_retries']} | "
-            f"{row['rolled_back_writes']} | {row['input_tokens']} | {row['cached_input_tokens']} | "
+            f"{row['rollback_batches']} | {row['rolled_back_writes']} | {row['input_tokens']} | {row['cached_input_tokens']} | "
             f"{row['cached_input_percent']:.1f}% | "
             f"{row['cache_write_input_tokens']} | {row['output_tokens']} | {row['estimated_cost_usd'] or 0.0:.4f} |"
         )

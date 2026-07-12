@@ -16,11 +16,11 @@ This is one trial per model. It is useful for finding large differences, but rep
 
 ## Results
 
-| Model | Generated tests | Independent acceptance | Total | Model | Tools | Calls | Actions | Rollbacks | Input | Cached | Cache rate | Cache write | Output | Estimated cost |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| GPT-5.6 Sol | pass | 4/4 | 57.70s | 56.72s | 0.67s | 4 | 17 | 5 | 28,495 | 9,807 | 34.4% | 3,269 | 5,555 | $0.26908 |
-| GPT-5.6 Terra | pass | 3/4 | 54.05s | 53.29s | 0.75s | 4 | 16 | 4 | 27,510 | 9,807 | 35.6% | 3,269 | 7,914 | $0.16746 |
-| GPT-5.6 Luna | pass | 2/4 | 32.56s | 31.19s | 1.07s | 5 | 19 | 8 | 40,215 | 13,076 | 32.5% | 3,269 | 6,276 | $0.06692 |
+| Model | Generated tests | Independent acceptance | Total | Model | Tools | Calls | Actions | Failed write batches | Restored writes | Input | Cached | Cache rate | Cache write | Output | Estimated cost |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| GPT-5.6 Sol | pass | 4/4 | 57.70s | 56.72s | 0.67s | 4 | 17 | 1 | 5 | 28,495 | 9,807 | 34.4% | 3,269 | 5,555 | $0.26908 |
+| GPT-5.6 Terra | pass | 3/4 | 54.05s | 53.29s | 0.75s | 4 | 16 | 1 | 4 | 27,510 | 9,807 | 35.6% | 3,269 | 7,914 | $0.16746 |
+| GPT-5.6 Luna | pass | 2/4 | 32.56s | 31.19s | 1.07s | 5 | 19 | 2 | 8 | 40,215 | 13,076 | 32.5% | 3,269 | 6,276 | $0.06692 |
 
 ## Quality findings
 
