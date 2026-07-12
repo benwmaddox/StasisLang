@@ -101,6 +101,12 @@ set and its deterministic edit/compile/test loop. The phone-native Codex client
 should adapt those handlers at the tool-call boundary instead of duplicating
 their behavior.
 
+The initial cached request includes a source-free `project_symbol_index` with
+kind, name, owner, file, signature, and preferred receiver call. It is bounded
+to 256 symbols and 16 KiB, reports truncation, and lets straightforward prompts
+read the likely target directly instead of spending the first turn on
+`list_symbols`. Full source remains opt-in through `read_symbol`.
+
 Every model response also carries required, user-visible `working_notes`,
 bounded to 2,000 characters. The note records concise `Intent`, `Observed`,
 `Next`, and `Blocker` facts rather than private chain-of-thought. The latest

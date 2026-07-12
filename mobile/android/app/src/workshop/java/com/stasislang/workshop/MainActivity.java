@@ -4499,6 +4499,41 @@ public final class MainActivity extends Activity {
         return globals;
     }
 
+    private static JSONObject aiProjectSymbolIndex(ProjectSnapshot project) throws Exception {
+        JSONArray symbols = new JSONArray();
+        int availableCount = 0;
+        int serializedChars = 2;
+        boolean accepting = true;
+        if (project != null) {
+            for (SymbolSection section : project.sections) {
+                for (SymbolGroup group : section.groups) {
+                    for (SymbolEntry symbol : group.symbols) {
+                        availableCount += 1;
+                        if (!accepting) continue;
+                        JSONObject compact = symbolToJson(symbol, false);
+                        if ("function".equals(symbol.kind)) {
+                            compact.put("preferred_call", preferredFunctionCall(symbol));
+                        }
+                        int candidateChars = compact.toString().length();
+                        if (!WorkshopAiInitialContextPolicy.canAppend(
+                                serializedChars, candidateChars, symbols.length())) {
+                            accepting = false;
+                            continue;
+                        }
+                        if (symbols.length() > 0) serializedChars += 1;
+                        serializedChars += candidateChars;
+                        symbols.put(compact);
+                    }
+                }
+            }
+        }
+        return new JSONObject()
+                .put("symbols", symbols)
+                .put("included_count", symbols.length())
+                .put("available_count", availableCount)
+                .put("truncated", symbols.length() < availableCount);
+    }
+
     private void runNativeTests() {
         try {
             JSONObject result = aiToolRunTests(new AiAgentSession());
@@ -4564,6 +4599,7 @@ public final class MainActivity extends Activity {
             request.put("game_design_rules", gameRules);
             request.put("architecture_recommendations", architectureRecommendations);
             request.put("project_globals", aiProjectGlobals(project));
+            request.put("project_symbol_index", aiProjectSymbolIndex(project));
             request.put("user_prompt", prompt);
             request.put("selected_symbols", selectedSymbols);
             request.put("selected_symbols_are_context_only", true);
@@ -6041,7 +6077,7 @@ public final class MainActivity extends Activity {
                 }
             }
         }
-        String stableInstruction = "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; use either a compact list tool or a direct read when possible, not every inspection tool. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
+        String stableInstruction = "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when the index already identifies the target. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; use either the initial index, a compact list tool, or a direct read when possible, not every inspection tool. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
         stableInstruction += " Every response must include working_notes as a concise user-visible state summary of at most 2000 characters using Intent, Observed, Next, and Blocker. Report decisions and evidence, not private chain-of-thought. Update working_notes from the retained prior note and current observations on every call.";
         stableInstruction += " write_symbol creates or replaces a symbol. Before writing, inspect the current target. Follow game_design_rules, prefer_lifecycle_local_state, avoid_global_tick_for_per_entity_progression, and architecture_recommendations. Follow architecture_recommendations. Use command/event-style functions for durable gameplay concepts. Tool errors, validation_error observations, and test_observation failures are not final; correct them before returning mode=done. A failed write batch rolls back the whole batch and returns diagnostics.";
         JSONArray input = new JSONArray()
@@ -6352,6 +6388,7 @@ public final class MainActivity extends Activity {
             }
         }
         JSONArray globals = stable.optJSONArray("project_globals");
+        JSONObject symbolIndex = stable.optJSONObject("project_symbol_index");
         JSONArray selected = stable.optJSONArray("selected_symbols");
         JSONArray tools = stable.optJSONArray("available_tools");
         return new JSONObject()
@@ -6361,6 +6398,8 @@ public final class MainActivity extends Activity {
                 .put("stable_keys", sortedJsonKeys(stable))
                 .put("volatile_keys", sortedJsonKeys(volatileContext))
                 .put("project_global_count", globals == null ? 0 : globals.length())
+                .put("project_symbol_index_count", symbolIndex == null ? 0 : symbolIndex.optInt("included_count", 0))
+                .put("project_symbol_index_truncated", symbolIndex != null && symbolIndex.optBoolean("truncated", false))
                 .put("selected_symbol_count", selected == null ? 0 : selected.length())
                 .put("available_tool_count", tools == null ? 0 : tools.length());
     }

@@ -28,6 +28,8 @@ DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_TRACE_DIR = ROOT / "artifacts/android_ai_runs"
 MAX_TURNS = 15
 MAX_WORKING_NOTES_CHARS = 2_000
+MAX_INITIAL_SYMBOLS = 256
+MAX_INITIAL_SYMBOL_INDEX_CHARS = 16 * 1024
 PROMPT_CACHE_KEY = "stasis-android-ai-agent-v2"
 
 
@@ -523,6 +525,19 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
         if symbol.kind == "global":
             body = symbol.source[symbol.source.find("{"):]
             globals_payload.append({"kind": "global", "name": symbol.name, "file": symbol.file, "backing_struct_type": symbol.name, "backing_struct_source": f"struct {symbol.name} {body}"})
+    compact_symbols: list[dict[str, Any]] = []
+    serialized_chars = 2
+    for symbol in symbols:
+        compact = symbol_json(symbol, False)
+        if symbol.kind == "function":
+            compact["preferred_call"] = preferred_call(symbol)
+        candidate_chars = len(json.dumps(compact, separators=(",", ":")))
+        separator_chars = 0 if not compact_symbols else 1
+        if (len(compact_symbols) >= MAX_INITIAL_SYMBOLS
+                or serialized_chars + separator_chars + candidate_chars > MAX_INITIAL_SYMBOL_INDEX_CHARS):
+            break
+        serialized_chars += separator_chars + candidate_chars
+        compact_symbols.append(compact)
     return {
         "cache_layout": "Stable shared context is first. Volatile per-turn tool observations live in turn_state after this object.",
         "protocol": {
@@ -543,6 +558,12 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
         "user_request": {"scope": "entire_workspace", "user_prompt": prompt},
         "project_context": {
             "project_globals": globals_payload,
+            "project_symbol_index": {
+                "symbols": compact_symbols,
+                "included_count": len(compact_symbols),
+                "available_count": len(symbols),
+                "truncated": len(compact_symbols) < len(symbols),
+            },
             "selected_symbols": [],
             "selected_symbols_are_context_only": True,
         },
@@ -643,11 +664,14 @@ def summarize_request_for_trace(request: dict[str, Any]) -> dict[str, Any]:
     turn_state = request.get("turn_state", {})
     globals_payload = project_context.get("project_globals", []) if isinstance(project_context, dict) else []
     selected_symbols = project_context.get("selected_symbols", []) if isinstance(project_context, dict) else []
+    symbol_index = project_context.get("project_symbol_index", {}) if isinstance(project_context, dict) else {}
     return {
         "shared_context_keys": sorted(shared_context.keys()) if isinstance(shared_context, dict) else [],
         "available_tools": protocol.get("available_tools", []) if isinstance(protocol, dict) else [],
         "project_global_count": len(globals_payload) if isinstance(globals_payload, list) else 0,
         "selected_symbol_count": len(selected_symbols) if isinstance(selected_symbols, list) else 0,
+        "project_symbol_index_count": symbol_index.get("included_count", 0) if isinstance(symbol_index, dict) else 0,
+        "project_symbol_index_truncated": symbol_index.get("truncated", False) if isinstance(symbol_index, dict) else False,
         "turn_phase": turn_state.get("phase") if isinstance(turn_state, dict) else None,
         "turn_state_keys": sorted(turn_state.keys()) if isinstance(turn_state, dict) else [],
         "cache_breakpoint_after": "shared_context",
@@ -673,6 +697,7 @@ def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
     stable_instruction = (
         "Return only one JSON object matching request.shared_context.protocol.response_contract exactly. "
         "Every response must include working_notes of at most 2000 characters with concise Intent, Observed, Next, and Blocker facts. These are user-visible state notes, not private chain-of-thought. "
+        "The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when it already identifies the target. "
         "Use mode=tool_calls to inspect/write with the provided fine-grained symbol, import, and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/read_imports/list_tests/read_test_file instead. "
         "For tool calls, the top-level key is tool_calls and each call is exactly {\"tool\":\"name\",\"args\":{...}}. "
         "Do not use aliases such as calls, name, function, arguments, type, or source. "

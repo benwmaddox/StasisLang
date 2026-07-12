@@ -30,6 +30,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiObservationMemory.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiToolLoopPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiWorkingNotes.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiInitialContextPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopConnectivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopBackgroundWorkPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkCoordinator.java",
@@ -889,6 +890,9 @@ def main() -> int:
     assert "Never reread a target already present" in activity
     assert 'responseProperties.put("working_notes"' in activity
     assert 'put("maxLength", WorkshopAiWorkingNotes.MAX_CHARS)' in activity
+    assert 'request.put("project_symbol_index", aiProjectSymbolIndex(project))' in activity
+    assert "WorkshopAiInitialContextPolicy.canAppend" in activity
+    assert "project_symbol_index_count" in activity
     assert 'setStatusText("AI working notes: " + display)' in activity
     assert 'appendAiTrace("working_notes"' in activity
     assert "Report decisions and evidence, not private chain-of-thought" in activity
