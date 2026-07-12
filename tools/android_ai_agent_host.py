@@ -515,8 +515,7 @@ def is_simple_tuning_prompt(prompt: str) -> bool:
     if any(term in normalized for term in ("add a new", "create a new", "multiplayer", "network", "system", "level editor")):
         return False
     return any(term in normalized for term in (
-        "size", "width", "wide", "wider", "height", "tall", "taller",
-        "bigger", "larger", "smaller", "shorter", "double", "half",
+        "size", "width", "height", "bigger", "smaller", "double", "half",
         "increase", "decrease", "faster", "slower", "speed", "color", "position",
     ))
 
