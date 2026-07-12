@@ -25,6 +25,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
@@ -129,7 +130,7 @@ public final class MainActivity extends Activity {
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
-    private static final int MAX_AI_AGENT_TURNS = 15;
+    private static final int MAX_AI_AGENT_TURNS = 25;
     private static final int MAX_AI_TOOL_CALLS_PER_BATCH = 12;
     private static final int MAX_AI_READ_ONLY_BATCHES = 2;
     private static final int MAX_AI_OUTPUT_TOKENS = 8192;
@@ -4875,11 +4876,13 @@ public final class MainActivity extends Activity {
             postAiProgress(session.currentStep, session.actionCount, "calling AI");
             appendAiTrace("llm_request", new JSONObject()
                     .put("turn", session.currentStep)
-                    .put("model", model)
+                    .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                    .put("requested_model", model)
                     .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
             double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
             boolean allowImageOnThisTurn = !useCodex && allowImageGeneration && turn == 0;
             AiApiResponse apiResponse;
+            long llmStartedMs = SystemClock.elapsedRealtime();
             if (useCodex) {
                 apiResponse = callCodexResponses(currentRequestJson);
                 usage.addUnpriced(apiResponse.model, apiResponse.usage);
@@ -4903,6 +4906,16 @@ public final class MainActivity extends Activity {
             JSONObject response = new JSONObject(aiJson);
             appendAiTrace("llm_response", new JSONObject()
                     .put("turn", session.currentStep)
+                    .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                    .put("requested_model", model)
+                    .put("response_model", apiResponse.model)
+                    .put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)
+                    .put("usage", apiResponse.usage)
+                    .put("cost_available", !useCodex && usage.lastCallCostAvailable)
+                    .put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable
+                            ? usage.lastCallEstimatedCostUsd : JSONObject.NULL)
+                    .put("cumulative_estimated_cost_usd", useCodex
+                            ? JSONObject.NULL : usage.estimatedCostUsd)
                     .put("summary", summarizeAiResponseForTrace(apiResponse.body, response)));
             appendAiTrace("llm_json", new JSONObject().put("turn", session.currentStep).put("response", response));
             JSONArray responseValidationErrors = validateAiResponseShape(response);
@@ -4968,6 +4981,7 @@ public final class MainActivity extends Activity {
             boolean batchHasWrites = aiToolCallsContainWrites(toolCalls);
             boolean blockedReadOnlyBatch = !session.toolLoopPolicy.shouldExecute(batchHasWrites);
             JSONArray observations;
+            long toolsStartedMs = SystemClock.elapsedRealtime();
             if (blockedReadOnlyBatch) {
                 observations = new JSONArray().put(new JSONObject()
                         .put("kind", "progress_policy")
@@ -4980,8 +4994,17 @@ public final class MainActivity extends Activity {
             }
             session.toolLoopPolicy.recordBatch(batchHasWrites);
             throwIfAiCancelled();
-            appendAiTrace("tool_observations", new JSONObject().put("turn", session.currentStep).put("observations", observations));
+            appendAiTrace("tool_observations", new JSONObject()
+                    .put("turn", session.currentStep)
+                    .put("elapsed_ms", SystemClock.elapsedRealtime() - toolsStartedMs)
+                    .put("requested_call_count", toolCalls.length())
+                    .put("executed", !blockedReadOnlyBatch)
+                    .put("action_count", session.actionCount)
+                    .put("successful_writes", session.successfulWriteCount)
+                    .put("rolled_back_writes", session.rolledBackWriteCount)
+                    .put("observations", observations));
             JSONObject testObservation;
+            long testsStartedMs = SystemClock.elapsedRealtime();
             if (batchHasWrites) {
                 testObservation = runAiTestsAfterBatch(session);
                 session.latestTestObservation = testObservation;
@@ -4990,7 +5013,10 @@ public final class MainActivity extends Activity {
                         .put("kind", "test_run")
                         .put("status", "not_run_for_read_only_batch");
             }
-            appendAiTrace("test_observation", new JSONObject().put("turn", session.currentStep).put("result", testObservation));
+            appendAiTrace("test_observation", new JSONObject()
+                    .put("turn", session.currentStep)
+                    .put("elapsed_ms", SystemClock.elapsedRealtime() - testsStartedMs)
+                    .put("result", testObservation));
             if (batchHasWrites && WorkshopAiCompletionStatus.canFinalizeTestedWrites(
                     aiToolCallsContainTestWrite(toolCalls), session.successfulWriteCount,
                     compileReady, session.latestRunnableTestsPassed())) {
@@ -5029,8 +5055,8 @@ public final class MainActivity extends Activity {
                     .put("tool_calls", new JSONArray())
                     .put("edits", new JSONArray())
                     .put("expected_reload", reloadKind(lastCompileResult))
-                    .put("reason", "The model reached the tool-call limit after successful write_symbol calls with passing runnable tests; accepted tested tool writes.")
-                    .put("warning", "tool_call_limit_after_successful_tested_writes")
+                    .put("reason", "The model reached the agent turn limit after successful writes with passing runnable tests; accepted tested tool writes.")
+                    .put("warning", "agent_turn_limit_after_successful_tested_writes")
                     .put("successful_writes", session.successfulWriteCount)
                     .put("rolled_back_writes", session.rolledBackWriteCount)
                     .put("last_tool", session.lastToolSummary)
@@ -5040,7 +5066,7 @@ public final class MainActivity extends Activity {
                     useCodex ? usage.subscriptionSummary() : usage.summary(), MAX_AI_AGENT_TURNS,
                     session.actionCount, generatedImages);
         }
-        throw new IOException("AI agent reached tool-call limit before returning edits; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
+        throw new IOException("AI agent reached turn limit before returning edits; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
     }
 
     private JSONArray executeAiToolCalls(JSONArray toolCalls, AiAgentSession session) throws Exception {

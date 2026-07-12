@@ -12,9 +12,37 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import android_ai_agent_host as host
+import run_android_ai_model_comparison as comparison
 
 
 class AndroidAiAgentHostTests(unittest.TestCase):
+    def test_agent_turn_limit_is_twenty_five(self) -> None:
+        self.assertEqual(25, host.MAX_TURNS)
+
+    def test_all_gpt_5_6_comparison_models_have_pricing(self) -> None:
+        self.assertEqual(
+            {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"},
+            set(host.DEFAULT_MODEL_PRICING_PER_MILLION),
+        )
+
+    def test_comparison_defaults_cover_all_gpt_5_6_models(self) -> None:
+        self.assertEqual(
+            ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+            comparison.DEFAULT_MODELS,
+        )
+        self.assertTrue(comparison.DEFAULT_ACCEPTANCE_TEST.is_file())
+
+    def test_host_run_finishes_before_repository_command_limit(self) -> None:
+        self.assertLess(host.DEFAULT_MAX_RUN_SECONDS, 300.0)
+
+    def test_prebuilt_test_runner_command_avoids_cargo_run(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        command = host.stasis_test_command(project)
+        self.assertNotEqual("cargo", Path(command[0]).name.lower())
+        self.assertNotIn("run", command[1:])
+        self.assertIn("stasis", " ".join(command).lower())
+
     def make_project(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         project = Path(temporary.name)
@@ -41,6 +69,20 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         calls, errors = host.validate_response_shape(response)
         self.assertEqual([], calls)
         self.assertIn("exceeds 12 calls", errors[0]["error"])
+
+    def test_tool_batch_keys_ignore_object_key_order(self) -> None:
+        first = [{"tool": "read_symbol", "args": {"name": "tick", "file": "src/main.stasis"}}]
+        second = [{"args": {"file": "src/main.stasis", "name": "tick"}, "tool": "read_symbol"}]
+        self.assertEqual(host.tool_call_batch_key(first), host.tool_call_batch_key(second))
+
+    def test_observation_memory_is_deduplicated_and_bounded(self) -> None:
+        memory: dict[str, dict] = {}
+        for index in range(20):
+            host.remember_observations(memory, [{"tool": "read_symbol", "args": {"name": str(index)}, "result": {"source": "x"}}])
+        host.remember_observations(memory, [{"tool": "read_symbol", "args": {"name": "19"}, "result": {"source": "new"}}])
+        retained = host.retained_observations(memory)
+        self.assertEqual(16, len(retained))
+        self.assertEqual("new", retained[0]["result"]["source"])
 
     def test_followup_keeps_shared_context_byte_stable(self) -> None:
         temporary, project = self.make_project()
@@ -101,6 +143,12 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         self.assertEqual(test_result, diagnostics)
         self.assertIn("main();", (project / "src/main.stasis").read_text(encoding="utf-8"))
         run_tests.assert_called_once_with(project, compile_first=False)
+
+    def test_rolled_back_writes_do_not_count_as_successful(self) -> None:
+        observations = [{"tool": "write_test_file", "args": {}, "result": {"status": "rolled_back"}}]
+        self.assertEqual((0, 1), host.write_outcome_counts(observations))
+        self.assertFalse(host.can_auto_finalize_tested_writes(True, {"ok": True}, 0))
+        self.assertTrue(host.can_auto_finalize_tested_writes(True, {"ok": True}, 1))
 
 
 if __name__ == "__main__":

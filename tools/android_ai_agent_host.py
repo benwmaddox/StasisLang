@@ -26,12 +26,17 @@ DEFAULT_PROJECT = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_TRACE_DIR = ROOT / "artifacts/android_ai_runs"
-MAX_TURNS = 15
+MAX_TURNS = 25
 MAX_WORKING_NOTES_CHARS = 2_000
 MAX_INITIAL_SYMBOLS = 256
 MAX_INITIAL_SYMBOL_INDEX_CHARS = 16 * 1024
 MAX_TOOL_CALLS_PER_BATCH = 12
+MAX_READ_ONLY_BATCHES = 2
+MAX_RETAINED_OBSERVATIONS = 16
+MAX_RETAINED_OBSERVATION_CHARS = 96 * 1024
 PROMPT_CACHE_KEY = "stasis-android-ai-agent-v2"
+DEFAULT_MAX_RUN_SECONDS = 285.0
+_STASIS_TEST_RUNNER_READY = False
 
 
 @dataclass
@@ -191,8 +196,22 @@ DEFAULT_MODEL_PRICING_PER_MILLION = {
         "cached_input": 0.50,
         "cache_write": 6.25,
         "output": 30.00,
-        "source": "User-provided pricing on 2026-07-10: gpt-5.6-sol $5.00 input / $0.50 cached input / $30.00 output per 1M tokens; cache writes use the documented GPT-5.6 1.25x input rate.",
-    }
+        "source": "OpenAI standard API pricing checked 2026-07-12.",
+    },
+    "gpt-5.6-terra": {
+        "input": 2.50,
+        "cached_input": 0.25,
+        "cache_write": 3.125,
+        "output": 15.00,
+        "source": "OpenAI standard API pricing checked 2026-07-12.",
+    },
+    "gpt-5.6-luna": {
+        "input": 1.00,
+        "cached_input": 0.10,
+        "cache_write": 1.25,
+        "output": 6.00,
+        "source": "OpenAI standard API pricing checked 2026-07-12.",
+    },
 }
 
 def response_usage_from_body(body: dict[str, Any]) -> dict[str, int]:
@@ -251,7 +270,7 @@ def aggregate_trace_usage(trace_events: list[dict[str, Any]], model: str) -> dic
     }
 
 
-def write_trace_file(path: Path, meta: dict[str, Any], trace_events: list[dict[str, Any]], exit_code: int, started_at_iso: str, elapsed_seconds: float, total_actions: int) -> None:
+def write_trace_file(path: Path, meta: dict[str, Any], trace_events: list[dict[str, Any]], exit_code: int | None, started_at_iso: str, elapsed_seconds: float, total_actions: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     usage_summary = aggregate_trace_usage(trace_events, meta.get("model", ""))
     payload = {
@@ -278,6 +297,51 @@ def run_compile_check(project: Path) -> dict[str, Any]:
     return run_command([
         "cargo", "run", "-p", "stasis_android_bridge", "--bin", "android_workshop_compile", "--", str(project.resolve())
     ])
+
+
+def stasis_test_executable() -> Path:
+    return ROOT / "target/release" / ("stasis.exe" if os.name == "nt" else "stasis")
+
+
+def stasis_test_command(project: Path) -> list[str]:
+    executable = stasis_test_executable()
+    if os.name == "nt":
+        runner = ROOT / ".cargo/stasis-sign-and-run.cmd"
+        return [str(runner), str(executable), "test", "--dir", str(project / "tests")]
+    return [str(executable), "test", "--dir", str(project / "tests")]
+
+
+def stasis_test_runner_is_fresh() -> bool:
+    executable = stasis_test_executable()
+    if not executable.is_file():
+        return False
+    executable_mtime = executable.stat().st_mtime
+    roots = [
+        ROOT / "apps/stasis",
+        ROOT / "crates/stasis_assets",
+        ROOT / "crates/stasis_compiler",
+        ROOT / "crates/stasis_dynload",
+        ROOT / "crates/stasis_jit",
+        ROOT / "crates/stasis_runner",
+    ]
+    inputs = [ROOT / "Cargo.toml", ROOT / "Cargo.lock"]
+    for source_root in roots:
+        inputs.extend(source_root.rglob("Cargo.toml"))
+        inputs.extend(source_root.rglob("*.rs"))
+    return all(not path.is_file() or path.stat().st_mtime <= executable_mtime for path in inputs)
+
+
+def ensure_stasis_test_runner() -> dict[str, Any]:
+    global _STASIS_TEST_RUNNER_READY
+    if _STASIS_TEST_RUNNER_READY:
+        return {"ok": True, "status": "ready"}
+    if stasis_test_runner_is_fresh():
+        _STASIS_TEST_RUNNER_READY = True
+        return {"ok": True, "status": "fresh_prebuilt"}
+    build = run_command(["cargo", "build", "-p", "stasis", "--release"])
+    if build.get("ok"):
+        _STASIS_TEST_RUNNER_READY = True
+    return build
 
 
 def behavior_test_expectations() -> dict[str, Any]:
@@ -380,7 +444,10 @@ def run_behavior_tests(project: Path, compile_first: bool = True) -> dict[str, A
                 "compile": compile_result,
                 "behavior_test_expectations": behavior_test_expectations(),
             }
-    result = run_command(["cargo", "run", "-p", "stasis", "--release", "--", "test", "--dir", str(project / "tests")])
+    runner = ensure_stasis_test_runner()
+    if not runner.get("ok"):
+        return {"kind": "behavior_tests", "ok": False, "status": "runner_build_failed", "runner_build": runner}
+    result = run_command(stasis_test_command(project))
     result["kind"] = "behavior_tests"
     tests = list_test_files(project)
     stasis_tests = [test for test in tests if test.get("kind") == "stasis_test"]
@@ -827,7 +894,7 @@ def summarize_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def call_openai(api_key: str, model: str, request: dict[str, Any], service_tier: str = "standard", trace_events: list[dict[str, Any]] | None = None, turn: int = 0) -> dict[str, Any]:
+def call_openai(api_key: str, model: str, request: dict[str, Any], service_tier: str = "standard", trace_events: list[dict[str, Any]] | None = None, turn: int = 0, timeout_seconds: float = 120.0) -> dict[str, Any]:
     started_at = time.perf_counter()
     payload = build_openai_payload(model, request, service_tier)
     payload_errors = validate_openai_payload(payload)
@@ -842,7 +909,7 @@ def call_openai(api_key: str, model: str, request: dict[str, Any], service_tier:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as response:
+        with urllib.request.urlopen(req, timeout=max(1.0, min(120.0, timeout_seconds))) as response:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
@@ -943,6 +1010,37 @@ def write_outcome_counts(observations: list[dict[str, Any]]) -> tuple[int, int]:
         successful += int(status in {"written", "created", "deleted"})
         rolled_back += int(status == "rolled_back")
     return successful, rolled_back
+
+
+def can_auto_finalize_tested_writes(wrote_test: bool, final_test: dict[str, Any], successful_writes: int) -> bool:
+    return wrote_test and bool(final_test.get("ok")) and successful_writes > 0
+
+
+def tool_call_batch_key(tool_calls: list[dict[str, Any]]) -> str:
+    return json.dumps(tool_calls, sort_keys=True, separators=(",", ":"))
+
+
+def remember_observations(memory: dict[str, dict[str, Any]], observations: list[dict[str, Any]]) -> None:
+    for observation in observations:
+        key = f"{observation.get('tool', 'observation')}|{json.dumps(observation.get('args', {}), sort_keys=True, separators=(',', ':'))}"
+        memory.pop(key, None)
+        memory[key] = observation
+        while len(memory) > MAX_RETAINED_OBSERVATIONS:
+            memory.pop(next(iter(memory)))
+
+
+def retained_observations(memory: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    retained: list[dict[str, Any]] = []
+    chars = 0
+    for observation in reversed(memory.values()):
+        size = len(json.dumps(observation, separators=(",", ":")))
+        if size > MAX_RETAINED_OBSERVATION_CHARS:
+            continue
+        if chars + size > MAX_RETAINED_OBSERVATION_CHARS:
+            break
+        retained.append(observation)
+        chars += size
+    return retained
 
 def execute_tool_batch(project: Path, tool_calls: list[dict[str, Any]], last_diagnostics: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     write_tools = {"write_symbol", "delete_symbol", "write_file", "write_test_file", "delete_test_file"}
@@ -1093,6 +1191,7 @@ def main() -> int:
     parser.add_argument("--reset-paddle-speed-feature", action="store_true", help="Reset the bundled Pong sample to the baseline before the requested paddle-speed feature.")
     parser.add_argument("--trace-file", type=Path, help="Write the run trace JSON to this file; defaults to artifacts/android_ai_runs/.")
     parser.add_argument("--preflight", action="store_true", help="Validate the outgoing Responses payload locally without calling OpenAI or editing the project.")
+    parser.add_argument("--max-seconds", type=float, default=DEFAULT_MAX_RUN_SECONDS, help="Stop the host comparison cleanly before the repository's five-minute command limit.")
     args = parser.parse_args()
     load_env_file(ROOT / ".env")
     project = args.project_root.resolve()
@@ -1128,9 +1227,19 @@ def main() -> int:
     last_diagnostics: dict[str, Any] = {}
     total_actions = 0
     working_notes = ""
+    previous_tool_call_batch = ""
+    read_only_batches = 0
+    observation_memory: dict[str, dict[str, Any]] = {}
     for turn in range(1, MAX_TURNS + 1):
+        elapsed_before_turn = time.perf_counter() - started_at_perf
+        remaining_seconds = args.max_seconds - elapsed_before_turn
+        if remaining_seconds <= 0:
+            trace_events.append({"kind": "time_limit", "turn": turn, "max_seconds": args.max_seconds, "actions": total_actions})
+            write_trace_file(trace_file, trace_meta, trace_events, 124, started_at_iso, elapsed_before_turn, total_actions)
+            print(json.dumps({"error": "time_limit", "max_seconds": args.max_seconds, "actions": total_actions}, indent=2), file=sys.stderr)
+            return 124
         try:
-            response = call_openai(api_key, args.model, request, args.service_tier, trace_events, turn)
+            response = call_openai(api_key, args.model, request, args.service_tier, trace_events, turn, remaining_seconds)
         except Exception as error:
             trace_events.append({"kind": "api_error", "turn": turn, "error_type": type(error).__name__, "error": str(error)})
             write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
@@ -1145,11 +1254,12 @@ def main() -> int:
             if turn >= MAX_TURNS:
                 write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = build_followup_request(shared_context, retain_working_notes({"phase": "response_validation_error", "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching shared_context.protocol.response_contract, including bounded working_notes. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."}, working_notes))
+            request = build_followup_request(shared_context, retain_working_notes({"phase": "response_validation_error", "tool_observations": retained_observations(observation_memory), "latest_tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching shared_context.protocol.response_contract, including bounded working_notes. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."}, working_notes))
             trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
             continue
         working_notes = response["working_notes"].strip()
         trace_events.append({"kind": "working_notes", "turn": turn, "notes": working_notes})
+        write_trace_file(trace_file, trace_meta, trace_events, None, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
         if mode == "edits" or (mode != "tool_calls" and response.get("edits")):
             observations = []
             for edit in response.get("edits") or []:
@@ -1181,13 +1291,33 @@ def main() -> int:
                 return 1
             request = build_followup_request(shared_context, retain_working_notes({"phase": "done_or_empty_test_failure", "tool_observations": [], "test_observation": final, "instruction": "The model returned done, but the required local behavior test failed. Update working_notes with the failure and fix it using precise tool calls."}, working_notes))
             continue
+        current_tool_call_batch = tool_call_batch_key(tool_calls)
+        if current_tool_call_batch == previous_tool_call_batch:
+            repeated = {"kind": "repeated_tool_calls", "turn": turn, "tool_calls": tool_calls, "actions": total_actions}
+            trace_events.append(repeated)
+            passed_after_writes = trace_meta["successful_write_count"] > 0 and last_diagnostics.get("kind") == "behavior_tests" and last_diagnostics.get("ok")
+            write_trace_file(trace_file, trace_meta, trace_events, 0 if passed_after_writes else 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
+            print(json.dumps({"error": "repeated_tool_calls", "accepted_tested_writes": passed_after_writes, "actions": total_actions}, indent=2), file=sys.stderr)
+            return 0 if passed_after_writes else 1
+        previous_tool_call_batch = current_tool_call_batch
+        batch_has_writes = any(call.get("tool") in {"write_symbol", "delete_symbol", "write_file", "write_test_file", "delete_test_file"} for call in tool_calls)
+        blocked_read_only_batch = not batch_has_writes and read_only_batches >= MAX_READ_ONLY_BATCHES
         tool_started_at = time.perf_counter()
-        observations, last_diagnostics = execute_tool_batch(project, tool_calls, last_diagnostics)
+        if blocked_read_only_batch:
+            observations = [{"tool": "progress_policy", "args": {}, "result": {"status": "read_only_batch_not_executed", "error": "Inspection is complete; the next response must write the intended change or return done.", "retained_observation_count": len(observation_memory)}}]
+            last_diagnostics = observations[0]["result"]
+            executed_actions = 0
+        else:
+            observations, last_diagnostics = execute_tool_batch(project, tool_calls, last_diagnostics)
+            remember_observations(observation_memory, observations)
+            executed_actions = len(tool_calls)
+        if not batch_has_writes:
+            read_only_batches += 1
         tool_elapsed_seconds = time.perf_counter() - tool_started_at
         successful, rolled_back = write_outcome_counts(observations)
         trace_meta["successful_write_count"] += successful
         trace_meta["rolled_back_write_count"] += rolled_back
-        total_actions += len(tool_calls)
+        total_actions += executed_actions
         print(json.dumps({"tool_observations": summarize_observations(observations)}, indent=2))
         trace_events.append({"kind": "tool_observations", "turn": turn, "elapsed_seconds": tool_elapsed_seconds, "observations": observations, "summary": summarize_observations(observations)})
         wrote_source = any(call.get("tool") in {"write_symbol", "delete_symbol", "write_test_file", "delete_test_file"} for call in tool_calls)
@@ -1195,11 +1325,15 @@ def main() -> int:
         if wrote_source:
             final = last_diagnostics if wrote_test and last_diagnostics.get("kind") == "behavior_tests" else run_behavior_tests(project)
             trace_events.append({"kind": "automatic_test_after_writes", "turn": turn, "final_test": final})
-            if wrote_test and final.get("ok"):
+            if can_auto_finalize_tested_writes(wrote_test, final, trace_meta["successful_write_count"]):
                 trace_events.append({"kind": "auto_finalize_tested_writes", "turn": turn})
                 write_trace_file(trace_file, trace_meta, trace_events, 0, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 0
-        request = build_followup_request(shared_context, retain_working_notes({"phase": "tool_observations", "tool_observations": observations, "instruction": "Use observations and retained working_notes to continue or return mode=done. Update Intent, Observed, Next, and Blocker on the next response. If tests fail, fix the exact required state/checks. Do not repeat identical tool calls."}, working_notes))
+        write_trace_file(trace_file, trace_meta, trace_events, None, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
+        instruction = "Use retained tool_observations and working_notes as cumulative memory; update Intent, Observed, Next, and Blocker. Do not reread targets already present in retained observations. If tests fail, fix the exact required state/checks. Do not repeat identical tool calls."
+        if read_only_batches >= MAX_READ_ONLY_BATCHES:
+            instruction += " You have completed the maximum read-only inspection batches. Your next response must contain at least one write tool call or mode=done."
+        request = build_followup_request(shared_context, retain_working_notes({"phase": "tool_observations", "tool_observations": retained_observations(observation_memory), "latest_tool_observations": observations, "instruction": instruction}, working_notes))
         trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
     print(json.dumps({"error": "turn_limit", "turns": MAX_TURNS, "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
     trace_events.append({"kind": "turn_limit", "turns": MAX_TURNS, "actions": total_actions, "last_diagnostics": last_diagnostics})

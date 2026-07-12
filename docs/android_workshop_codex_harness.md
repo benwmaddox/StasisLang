@@ -167,6 +167,17 @@ elapsed time, and successful versus rolled-back write counts. Host API traces
 and phone-native Codex subscription traces must not be combined as if they were
 the same provider or allowance.
 
+Both the Android Workshop and host comparison harness allow up to 25 model
+turns per queued AI request. The separate safety cap remains 12 tool calls in
+one model response.
+
+Use `tools/run_android_ai_model_comparison.py` to summarize isolated Sol,
+Terra, and Luna runs with actual model time, local tool time, token/cache usage,
+estimated standard API cost, and a model-independent acceptance suite. Keep
+each live model invocation as a separate bounded command; use
+`--summarize-only` after all traces exist. The first recorded comparison is in
+`docs/android_ai_model_comparison_2026-07-12.md`.
+
 ## Limits
 
 - **Codex subscription:** do not estimate dollars. Display Codex account

@@ -219,6 +219,7 @@ def main() -> int:
     ai_queue = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java")
     ai_queue_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java")
     host_agent = read("tools/android_ai_agent_host.py")
+    host_comparison = read("tools/run_android_ai_model_comparison.py")
     host_compile = read("crates/stasis_android_bridge/src/android_workshop_compile.rs")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "protected void onPause()" in activity
@@ -291,6 +292,7 @@ def main() -> int:
     assert "build_followup_request(shared_context" in host_agent
     assert "source_file_path(project" in host_agent
     assert "MAX_TOOL_CALLS_PER_BATCH = 12" in host_agent
+    assert 'DEFAULT_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")' in host_comparison
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
     assert "private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues)" in activity
     assert 'assetRoot = "workshop_sample/"' not in template_catalog
@@ -783,7 +785,11 @@ def main() -> int:
     assert "compile.setText(\"Compile\")" not in activity
     assert "https://api.openai.com/v1/responses" in activity
     assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
-    assert "private static final int MAX_AI_AGENT_TURNS = 15" in activity
+    assert "private static final int MAX_AI_AGENT_TURNS = 25" in activity
+    assert '.put("response_model", apiResponse.model)' in activity
+    assert '.put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)' in activity
+    assert '.put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable' in activity
+    assert '.put("successful_writes", session.successfulWriteCount)' in activity
     assert "AI_PREF_LAST_USAGE" in activity
     assert "AI_TRACE_LOG" in activity
     assert "appendAiTrace" in activity
@@ -824,7 +830,7 @@ def main() -> int:
     assert "required_args" in activity
     assert "Tool errors, validation_error observations, and test_observation failures are not final" in activity
     assert "recordAiToolResult" in activity
-    assert "tool_call_limit_after_successful_tested_writes" in activity
+    assert "agent_turn_limit_after_successful_tested_writes" in activity
     assert "repeated_tool_calls" in activity
     assert "repeated tools" in activity
     assert "successful_writes" in activity
