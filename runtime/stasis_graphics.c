@@ -150,6 +150,7 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
 /* Forward decls for internal helpers used before their definitions. */
 typedef struct SpriteEntry SpriteEntry;
 static SpriteEntry* sprite_get(int handle);
+static SpriteEntry* sprite_fallback_get(void);
 static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int h, int rot_degrees, int a, int do_hash);
 static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_count);
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h);
@@ -197,6 +198,7 @@ static int g_sprite_table_limit = -1;
 static int g_sprite_max_dimension = -1;
 static int g_sprite_max_pixels = -1;
 static int g_sprite_max_file_bytes = -1;
+static SpriteEntry g_sprite_fallback;
 
 /* Font rendering with stb_truetype. */
 #define MAX_FONTS 8
@@ -2699,6 +2701,7 @@ static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_cou
 
         if (w <= 0 || h <= 0) continue;
         SpriteEntry* e = sprite_get(handle);
+        if (!e) e = sprite_fallback_get();
         if (!e) continue;
 
         if (e->needs_reraster) {
@@ -4099,6 +4102,56 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     return sprite_handle_for_slot(slot);
 }
 
+static SpriteEntry* sprite_fallback_get(void) {
+    if (g_sprite_fallback.used) return &g_sprite_fallback;
+    if (!g_window) return NULL;
+
+    static const unsigned char pixels[16] = {
+        255, 0, 255, 255, 24, 24, 24, 255,
+        24, 24, 24, 255, 255, 0, 255, 255
+    };
+    SpriteEntry next;
+    memset(&next, 0, sizeof(next));
+    next.page_index = -1;
+    next.w = 2;
+    next.h = 2;
+    next.max_w = 2;
+    next.max_h = 2;
+
+    if (g_use_sdl_renderer) {
+        if (!g_renderer) return NULL;
+        next.sdl_tex = SDL_CreateTexture(
+            g_renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, 2, 2);
+        if (!next.sdl_tex) return NULL;
+        SDL_SetTextureBlendMode(next.sdl_tex, SDL_BLENDMODE_BLEND);
+        if (SDL_UpdateTexture(next.sdl_tex, NULL, pixels, 2 * 4) != 0) {
+            SDL_DestroyTexture(next.sdl_tex);
+            return NULL;
+        }
+    } else {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        int page_index, sprite_x, sprite_y, alloc_x, alloc_y, alloc_w, alloc_h;
+        if (!atlas_alloc(2, 2, "<fallback>", &page_index, &sprite_x, &sprite_y,
+                         &alloc_x, &alloc_y, &alloc_w, &alloc_h)) {
+            return NULL;
+        }
+        SpriteAtlasPage* page = &g_sprite_atlas_pages[page_index];
+        atlas_page_clear_region(page, alloc_x, alloc_y, alloc_w, alloc_h);
+        if (!atlas_page_upload_region(page, sprite_x, sprite_y, 2, 2, pixels)) {
+            atlas_release_rect(page_index, alloc_x, alloc_y, alloc_w, alloc_h);
+            return NULL;
+        }
+        sprite_set_gl_region(&next, page_index, sprite_x, sprite_y,
+                             alloc_x, alloc_y, alloc_w, alloc_h, 2, 2);
+#else
+        return NULL;
+#endif
+    }
+    next.used = 1;
+    g_sprite_fallback = next;
+    return &g_sprite_fallback;
+}
+
 STASIS_EXPORT void stasis_gfx_release_sprite(int handle) {
     SpriteEntry* e = sprite_get(handle);
     if (!e) return;
@@ -4145,6 +4198,7 @@ static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int
         gfx_debug_hash_i32(a);
     }
     SpriteEntry* e = sprite_get(handle);
+    if (!e) e = sprite_fallback_get();
     if (!e) return;
 
     if (w <= 0 || h <= 0) return;
@@ -4525,6 +4579,9 @@ STASIS_EXPORT void stasis_shutdown(void) {
     g_sprite_max_dimension = -1;
     g_sprite_max_pixels = -1;
     g_sprite_max_file_bytes = -1;
+    if (g_sprite_fallback.sdl_tex) SDL_DestroyTexture(g_sprite_fallback.sdl_tex);
+    memset(&g_sprite_fallback, 0, sizeof(g_sprite_fallback));
+    g_sprite_fallback.page_index = -1;
 
     for (int i = 0; i < MAX_FONTS; i++) {
         if (g_fonts[i].active) {

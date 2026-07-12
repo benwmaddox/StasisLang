@@ -2187,6 +2187,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn invalid_sprite_draws_use_a_procedural_fallback_resource() {
+        for required in [
+            "static SpriteEntry g_sprite_fallback",
+            "static const unsigned char pixels[16]",
+            "if (!e) e = sprite_fallback_get()",
+            "SDL_CreateTexture(",
+            "atlas_alloc(2, 2, \"<fallback>\"",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "fallback sprite path should contain {required}"
+            );
+        }
+    }
+
     fn decode_zero_terminated_utf8(bytes: &[u8]) -> String {
         let end = bytes
             .iter()
