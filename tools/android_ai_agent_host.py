@@ -30,8 +30,8 @@ MAX_TURNS = 15
 MAX_WORKING_NOTES_CHARS = 2_000
 MAX_INITIAL_SYMBOLS = 256
 MAX_INITIAL_SYMBOL_INDEX_CHARS = 16 * 1024
-MAX_FAST_PATH_SYMBOLS = 16
-MAX_FAST_PATH_SOURCE_CHARS = 16 * 1024
+MAX_FAST_PATH_SYMBOLS = 32
+MAX_FAST_PATH_SOURCE_CHARS = 24 * 1024
 PROMPT_CACHE_KEY = "stasis-android-ai-agent-v2"
 
 
@@ -132,7 +132,7 @@ def owner_for_function(file: str, name: str, signature: str, structs: set[str]) 
 
 
 def parse_symbols(project: Path) -> list[Symbol]:
-    files = sorted(list(project.glob("src/**/*.stasis")) + list(project.glob("tests/**/*.test.stasis")))
+    files = sorted(project.glob("src/**/*.stasis"))
     structs: set[str] = set()
     sources: dict[str, str] = {}
     for file_path in files:
@@ -145,18 +145,12 @@ def parse_symbols(project: Path) -> list[Symbol]:
     for rel, source in sources.items():
         cursor = 0
         while cursor < len(source):
-            matches = [(source.find(token, cursor), token) for token in ("struct ", "global ", "function ", "test ")]
+            matches = [(source.find(token, cursor), token) for token in ("struct ", "global ", "function ")]
             matches = [(idx, token) for idx, token in matches if idx >= 0]
             if not matches:
                 break
             start, token = min(matches, key=lambda item: item[0])
-            if token == "test ":
-                name_start = source.find("`", start + len(token))
-                name_end = source.find("`", name_start + 1) if name_start >= 0 else -1
-                name = source[name_start + 1:name_end] if name_end > name_start else ""
-                name_end += 1
-            else:
-                name, name_end = read_identifier(source, start + len(token))
+            name, name_end = read_identifier(source, start + len(token))
             body_start = source.find("{", name_end)
             end = find_matching_brace(source, body_start) if body_start >= 0 else -1
             if not name or body_start < 0 or end < 0:
@@ -167,9 +161,6 @@ def parse_symbols(project: Path) -> list[Symbol]:
                 symbols.append(Symbol("struct", name, name, rel, f"struct {name}", full_source, start, end))
             elif token == "global ":
                 symbols.append(Symbol("global", name, "Globals", rel, f"global {name}", full_source, start, end))
-            elif token == "test ":
-                signature = source[start + len(token):body_start].strip()
-                symbols.append(Symbol("test", name, "Tests", rel, signature, full_source, start, end))
             else:
                 signature = source[start + len(token):body_start].strip()
                 func_name = signature.split("(", 1)[0].strip()
@@ -529,28 +520,6 @@ def is_simple_tuning_prompt(prompt: str) -> bool:
         "increase", "decrease", "faster", "slower", "speed", "color", "position",
     ))
 
-
-def fast_path_relevance(prompt: str, symbol: Symbol) -> int:
-    normalized_prompt = re.sub(r"[^a-z0-9]+", " ", prompt.lower())
-    normalized_name = symbol.name.lower().replace("_", " ")
-    tuning = {
-        "size", "width", "wide", "wider", "height", "tall", "taller", "bigger",
-        "larger", "smaller", "shorter", "double", "half", "increase", "decrease",
-        "faster", "slower", "speed", "color", "position",
-    }
-    ignored = tuning | {"make", "both", "pixel", "instead", "should"}
-    score = 0
-    for raw in normalized_prompt.split():
-        token = raw[:-1] if raw.endswith("s") and len(raw) > 4 else raw
-        if len(token) >= 4 and token not in ignored and token in normalized_name:
-            score += 4
-    visual = {"size", "width", "wide", "height", "tall", "color", "position", "bigger", "larger", "smaller", "shorter"}
-    if normalized_name == "render" and any(term in normalized_prompt for term in visual):
-        score += 3
-    if symbol.kind == "test" and score > 0:
-        score += 2
-    return score
-
 def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
     symbols = parse_symbols(project)
     globals_payload = []
@@ -573,11 +542,7 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
     fast_path_symbols: list[dict[str, Any]] = []
     fast_path_chars = 2
     if fast_path_enabled:
-        relevant_symbols = sorted(
-            (symbol for symbol in symbols if fast_path_relevance(prompt, symbol) > 0),
-            key=lambda symbol: -fast_path_relevance(prompt, symbol),
-        )
-        for symbol in relevant_symbols:
+        for symbol in symbols:
             source_symbol = symbol_json(symbol, True)
             candidate_chars = len(json.dumps(source_symbol, separators=(",", ":")))
             separator_chars = 0 if not fast_path_symbols else 1
@@ -638,8 +603,8 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
                 "reason": "short tuning request" if fast_path_enabled else "standard agent path",
                 "source_symbols": fast_path_symbols,
                 "included_count": len(fast_path_symbols),
-                "available_count": len(relevant_symbols) if fast_path_enabled else 0,
-                "truncated": fast_path_enabled and len(fast_path_symbols) < len(relevant_symbols),
+                "available_count": len(symbols),
+                "truncated": fast_path_enabled and len(fast_path_symbols) < len(symbols),
                 "instruction": "Use these bounded current sources to write the complete change and a behavior test in the first response; do not spend a read-only turn when the needed source is present." if fast_path_enabled else "Use the normal inspect-write-test loop.",
             },
             "selected_symbols": [],

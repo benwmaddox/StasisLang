@@ -37,15 +37,4 @@ public final class WorkshopAiFastPathPolicyTest {
         assertFalse(WorkshopAiFastPathPolicy.canAutoFinalize(true, 2, false, true));
         assertFalse(WorkshopAiFastPathPolicy.canAutoFinalize(true, 2, true, false));
     }
-
-    @Test
-    public void selectsEntityRenderAndCoupledTests() {
-        String prompt = "make both paddles 14 pixels wide";
-        assertTrue(WorkshopAiFastPathPolicy.relevanceScore(
-                prompt, "update_player_paddle", "function") > 0);
-        assertTrue(WorkshopAiFastPathPolicy.relevanceScore(prompt, "render", "function") > 0);
-        assertTrue(WorkshopAiFastPathPolicy.relevanceScore(
-                prompt, "paddles are double height", "test") > 0);
-        assertTrue(WorkshopAiFastPathPolicy.relevanceScore(prompt, "update_ball", "function") == 0);
-    }
 }
