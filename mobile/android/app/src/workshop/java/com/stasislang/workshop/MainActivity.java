@@ -6539,7 +6539,10 @@ public final class MainActivity extends Activity {
             }
             refreshChangeSummary(project);
             String elapsed = currentAiElapsedText();
-            updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, aiReloadPhase(compileResult));
+            updateAiProgress(
+                    aiResult.finalStep,
+                    aiResult.finalActionCount,
+                    WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult)));
             JSONObject testRun = aiToolRunTests(new AiAgentSession());
             appendAiTrace("apply_edits", new JSONObject().put("summary", response.optString("summary", "updated workspace")).put("compile", compileResult).put("tests", testRun).put("elapsed", elapsed));
             recordAiOutcome(activeAiPrompt, "applied", response.optString("summary", "updated workspace"), aiResult.usageSummary);

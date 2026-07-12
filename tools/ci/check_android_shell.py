@@ -324,6 +324,7 @@ def main() -> int:
     assert "time 0.0s" in activity
     assert "hot swap=FastReload" in activity
     assert "aiReloadPhase" in activity
+    assert "WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult))" in activity
     assert "Context & Images" in activity
     assert 'aiPatch.setText("Run")' in activity
     assert 'aiCancelButton.setText("Stop")' in activity
