@@ -12,14 +12,15 @@ if (!publishedGameDescriptorFile.isFile()) {
 }
 apply from: publishedGameDescriptorFile
 def publishedGame = ext.stasisGameDescriptor
-def requiredGameFields = ['id', 'runtimeId', 'applicationId', 'label', 'projectDirectory', 'entrySource', 'testPattern']
+def requiredGameFields = ['id', 'runtimeId', 'applicationId', 'label', 'projectDirectory', 'entrySource', 'assetManifest', 'testPattern']
 requiredGameFields.each { field ->
     if (!publishedGame.containsKey(field) || publishedGame[field] == null || publishedGame[field].toString().isBlank()) {
         throw new GradleException("Stasis published game descriptor is missing ${field}")
     }
 }
 if (publishedGame.schemaVersion != 1 || !publishedGame.projectDirectory.isDirectory()
-        || !new File(publishedGame.projectDirectory, publishedGame.entrySource).isFile()) {
+        || !new File(publishedGame.projectDirectory, publishedGame.entrySource).isFile()
+        || !new File(publishedGame.projectDirectory, publishedGame.assetManifest).isFile()) {
     throw new GradleException("Stasis published game descriptor is invalid: ${publishedGameName}")
 }
 
@@ -88,7 +89,7 @@ android {
     sourceSets {
         main.assets.setSrcDirs([])
         workshop.assets.setSrcDirs([workshopAssetsDir.get().asFile])
-        published.assets.setSrcDirs([])
+        published.assets.setSrcDirs([publishedAotDir.map { it.dir('apk_assets') }.get().asFile])
     }
 }
 

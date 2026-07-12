@@ -16,7 +16,7 @@
 #define STASIS_FUNCTION_ARTIFACT_DIR "build/functions"
 #define STASIS_RUNTIME_STATE_RELATIVE_PATH "build/runtime_state.txt"
 #define STASIS_RENDER_COMMAND_CAPACITY 8
-#define STASIS_RENDER_COMMAND_STRIDE 9
+#define STASIS_RENDER_COMMAND_STRIDE 13
 #define STASIS_RENDER_FRAME_HEADER_SIZE 6
 #define STASIS_RENDER_FRAME_I32_CAPACITY \
     (STASIS_RENDER_FRAME_HEADER_SIZE + STASIS_RENDER_COMMAND_CAPACITY * STASIS_RENDER_COMMAND_STRIDE)
@@ -96,6 +96,10 @@ typedef struct PublishedRenderCommand {
     int32_t asset;
     int32_t rotation_degrees;
     int32_t alpha;
+    int32_t clip_x;
+    int32_t clip_y;
+    int32_t clip_w;
+    int32_t clip_h;
 } PublishedRenderCommand;
 
 typedef struct PublishedI32Global {
@@ -138,7 +142,11 @@ static int32_t published_runtime_tick_count;
     {"Render.command" #index "_color", &published_render_commands[index].color, 0}, \
     {"Render.command" #index "_asset", &published_render_commands[index].asset, 0}, \
     {"Render.command" #index "_rotation_degrees", &published_render_commands[index].rotation_degrees, 0}, \
-    {"Render.command" #index "_alpha", &published_render_commands[index].alpha, 0}
+    {"Render.command" #index "_alpha", &published_render_commands[index].alpha, 0}, \
+    {"Render.command" #index "_clip_x", &published_render_commands[index].clip_x, 0}, \
+    {"Render.command" #index "_clip_y", &published_render_commands[index].clip_y, 0}, \
+    {"Render.command" #index "_clip_w", &published_render_commands[index].clip_w, 0}, \
+    {"Render.command" #index "_clip_h", &published_render_commands[index].clip_h, 0}
 
 static PublishedI32Global published_i32_globals[] = {
     {"Input.touch_x", &published_input_touch_x, 0},
@@ -253,6 +261,12 @@ static void stasis_published_pack_frame(int32_t *out, uintptr_t out_len) {
         out[base + 7] = published_render_commands[index].rotation_degrees;
         out[base + 8] = published_render_command_schema_version >= 2
                 ? published_render_commands[index].alpha : 255;
+        if (published_render_command_schema_version >= 3) {
+            out[base + 9] = published_render_commands[index].clip_x;
+            out[base + 10] = published_render_commands[index].clip_y;
+            out[base + 11] = published_render_commands[index].clip_w;
+            out[base + 12] = published_render_commands[index].clip_h;
+        }
     }
 }
 

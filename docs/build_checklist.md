@@ -565,8 +565,9 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `in progress`
 #### AS2 - Sprite Batching and Hot Reload
 - Scope: Complete command batching, ordering, transforms, alpha, clipping/atlas policy, resource-generation swaps, and failed-reload preservation.
+- Progress: Desktop SDL/GL reloads publish a replacement only after successful decode/upload and preserve the prior resource on failure. Android render-command schema v3 carries per-command rotation, clamped alpha, and optional top-left clip rectangles; scissor state is bounded to the surface. Consecutive rectangles and consecutive same-texture sprites with identical clip state batch without changing mixed-command order. Android intentionally keeps one texture per manifest sprite while desktop atlas layout remains backend-private. Workshop hot reload preserves the prior texture after a failed replacement. Device-captured golden parity remains.
 - Done gate: A changed sprite becomes visible without restarting while the prior texture remains active if decode/upload fails.
-- Status: `planned`
+- Status: `in progress (host implementation complete; device golden remains)`
 #### AS3 - Audio Decode, Mixer, and Playback API
 - Scope: Add bounded sound/music decode, voices/streams, play/stop/pause, loop, volume/pan, mixing, asset handles, and deterministic audio-event submission.
 - Done gate: Stasis code can play overlapping effects and streaming music through a real mixer rather than the current unavailable stub.
@@ -577,8 +578,9 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 - Status: `planned`
 #### AS5 - Asset Packaging and JIT/AOT Parity
 - Scope: Package referenced assets for dev/JIT, production/AOT, Android Workshop, published APK, import/export, and GitHub sync with reachability and size diagnostics.
+- Progress: The Android AOT bundle command now resolves the shared manifest with `stasis_assets`, verifies hashes and confinement, and stages only validated manifest entries under the runtime-only APK asset root. The published renderer consumes that packaged manifest directly, decodes bounded raster/SVG sprites, verifies content hashes and dimensions, uploads textures, and uses the same stable handle and fallback behavior as Workshop. The Pong APK verifier requires the representative manifest and ball sprite while continuing to reject source/JIT content. Broader import/export/GitHub reachability packaging and non-Android production parity remain.
 - Done gate: A representative game uses the same source/manifest in every execution mode with no missing runtime-only asset path.
-- Status: `planned`
+- Status: `in progress`
 #### AS6 - Headless Asset and Event Tests
 - Scope: Add deterministic manifest/decode/event/mixer tests, golden sprite output, audio buffer checks, corruption/limit cases, and host-set denial tests without requiring hardware.
 - Done gate: CI proves asset semantics, hot-reload safety, and audio mixing deterministically; hardware checks are a separate acceptance layer.

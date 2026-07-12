@@ -14,25 +14,8 @@
 #define STASIS_MAX_SPRITE_PIXELS 16000000
 #define STASIS_MAX_SPRITE_FILE_BYTES (64 * 1024 * 1024)
 
-JNIEXPORT jintArray JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeDecodeSvgSprite(
-        JNIEnv *env, jclass activity_class, jstring path, jint width, jint height) {
-    (void)activity_class;
-    if (path == NULL || width <= 0 || height <= 0 ||
-        width > STASIS_MAX_SPRITE_DIMENSION || height > STASIS_MAX_SPRITE_DIMENSION ||
-        (int64_t)width * (int64_t)height > STASIS_MAX_SPRITE_PIXELS) {
-        return NULL;
-    }
-    const char *native_path = (*env)->GetStringUTFChars(env, path, NULL);
-    if (native_path == NULL) return NULL;
-    struct stat info;
-    if (stat(native_path, &info) != 0 || info.st_size < 0 ||
-        info.st_size > STASIS_MAX_SPRITE_FILE_BYTES) {
-        (*env)->ReleaseStringUTFChars(env, path, native_path);
-        return NULL;
-    }
-    NSVGimage *image = nsvgParseFromFile(native_path, "px", 96.0f);
-    (*env)->ReleaseStringUTFChars(env, path, native_path);
+static jintArray stasis_rasterize_svg_image(
+        JNIEnv *env, NSVGimage *image, jint width, jint height) {
     if (image == NULL || image->width <= 0.0f || image->height <= 0.0f) {
         if (image != NULL) nsvgDelete(image);
         return NULL;
@@ -75,4 +58,50 @@ Java_com_stasislang_workshop_MainActivity_nativeDecodeSvgSprite(
     nsvgDeleteRasterizer(rasterizer);
     nsvgDelete(image);
     return result;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeDecodeSvgSprite(
+        JNIEnv *env, jclass activity_class, jstring path, jint width, jint height) {
+    (void)activity_class;
+    if (path == NULL || width <= 0 || height <= 0 ||
+        width > STASIS_MAX_SPRITE_DIMENSION || height > STASIS_MAX_SPRITE_DIMENSION ||
+        (int64_t)width * (int64_t)height > STASIS_MAX_SPRITE_PIXELS) {
+        return NULL;
+    }
+    const char *native_path = (*env)->GetStringUTFChars(env, path, NULL);
+    if (native_path == NULL) return NULL;
+    struct stat info;
+    if (stat(native_path, &info) != 0 || info.st_size < 0 ||
+        info.st_size > STASIS_MAX_SPRITE_FILE_BYTES) {
+        (*env)->ReleaseStringUTFChars(env, path, native_path);
+        return NULL;
+    }
+    NSVGimage *image = nsvgParseFromFile(native_path, "px", 96.0f);
+    (*env)->ReleaseStringUTFChars(env, path, native_path);
+    return stasis_rasterize_svg_image(env, image, width, height);
+}
+
+JNIEXPORT jintArray JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeDecodeSvgSpriteBytes(
+        JNIEnv *env, jclass activity_class, jbyteArray bytes, jint width, jint height) {
+    (void)activity_class;
+    if (bytes == NULL || width <= 0 || height <= 0 ||
+        width > STASIS_MAX_SPRITE_DIMENSION || height > STASIS_MAX_SPRITE_DIMENSION ||
+        (int64_t)width * (int64_t)height > STASIS_MAX_SPRITE_PIXELS) {
+        return NULL;
+    }
+    jsize length = (*env)->GetArrayLength(env, bytes);
+    if (length <= 0 || length > STASIS_MAX_SPRITE_FILE_BYTES) return NULL;
+    char *source = (char *)malloc((size_t)length + 1u);
+    if (source == NULL) return NULL;
+    (*env)->GetByteArrayRegion(env, bytes, 0, length, (jbyte *)source);
+    if ((*env)->ExceptionCheck(env)) {
+        free(source);
+        return NULL;
+    }
+    source[length] = '\0';
+    NSVGimage *image = nsvgParse(source, "px", 96.0f);
+    free(source);
+    return stasis_rasterize_svg_image(env, image, width, height);
 }

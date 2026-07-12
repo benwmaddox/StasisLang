@@ -153,7 +153,7 @@ public final class MainActivity extends Activity {
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
     private static final double GPT_IMAGE_2_LOW_1024_USD = 0.006;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
-    private static final int RENDER_COMMAND_STRIDE = 9;
+    private static final int RENDER_COMMAND_STRIDE = 13;
     private static final int RENDER_FRAME_I32_CAPACITY =
             RENDER_FRAME_HEADER_SIZE + MAX_RENDER_COMMANDS * RENDER_COMMAND_STRIDE;
     private static final int RECT_VERTICES = 6;
@@ -5830,7 +5830,11 @@ public final class MainActivity extends Activity {
                      .put("color", frame[base + 5])
                     .put("asset", frame[base + 6])
                     .put("rotation_degrees", frame[base + 7])
-                    .put("alpha", frame[base + 8]));
+                    .put("alpha", frame[base + 8])
+                    .put("clip_x", frame[base + 9])
+                    .put("clip_y", frame[base + 10])
+                    .put("clip_w", frame[base + 11])
+                    .put("clip_h", frame[base + 12]));
         }
         return new JSONObject()
                 .put("status", frame.length > 0 ? frame[0] : -1)
@@ -9717,11 +9721,12 @@ public final class MainActivity extends Activity {
                         int runEnd = index;
                         while (runEnd < commandCount) {
                             int runBase = RENDER_FRAME_HEADER_SIZE + runEnd * RENDER_COMMAND_STRIDE;
-                            if (frameValues[runBase] != 1) break;
+                            if (frameValues[runBase] != 1 || !sameClip(base, runBase)) break;
                             appendRect(runBase);
                             runEnd += 1;
                         }
                         vertexBuffer.flip();
+                        applyClip(base);
                         drawBatch((runEnd - index) * RECT_VERTICES);
                         index = runEnd;
                     } else if (kind == 2) {
@@ -9730,19 +9735,21 @@ public final class MainActivity extends Activity {
                         int runEnd = index;
                         while (runEnd < commandCount) {
                             int runBase = RENDER_FRAME_HEADER_SIZE + runEnd * RENDER_COMMAND_STRIDE;
-                            if (frameValues[runBase] != 2) break;
+                            if (frameValues[runBase] != 2 || !sameClip(base, runBase)) break;
                             int runTexture = spriteTexture(frameValues[runBase + 6]);
                             if (runTexture != texture) break;
                             appendSprite(runBase);
                             runEnd += 1;
                         }
                         spriteVertexBuffer.flip();
+                        applyClip(base);
                         drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture);
                         index = runEnd;
                     } else {
                         index += 1;
                     }
                 }
+                GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
             }
             captureRenderedPixelsIfRequested();
             activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
@@ -9819,6 +9826,30 @@ public final class MainActivity extends Activity {
             putVertex(right, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
             putVertex(right, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
             putVertex(left, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
+        }
+
+        private boolean sameClip(int leftBase, int rightBase) {
+            return frameValues[leftBase + 9] == frameValues[rightBase + 9]
+                    && frameValues[leftBase + 10] == frameValues[rightBase + 10]
+                    && frameValues[leftBase + 11] == frameValues[rightBase + 11]
+                    && frameValues[leftBase + 12] == frameValues[rightBase + 12];
+        }
+
+        private void applyClip(int base) {
+            int width = frameValues[base + 11];
+            int height = frameValues[base + 12];
+            if (width <= 0 || height <= 0) {
+                GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+                return;
+            }
+            long sourceRight = (long)frameValues[base + 9] + width;
+            long sourceBottom = (long)frameValues[base + 10] + height;
+            int left = Math.max(0, Math.min(surfaceWidth, frameValues[base + 9]));
+            int top = Math.max(0, Math.min(surfaceHeight, frameValues[base + 10]));
+            int right = Math.max(left, (int)Math.max(0L, Math.min((long)surfaceWidth, sourceRight)));
+            int bottom = Math.max(top, (int)Math.max(0L, Math.min((long)surfaceHeight, sourceBottom)));
+            GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
+            GLES20.glScissor(left, surfaceHeight - bottom, right - left, bottom - top);
         }
 
         private void putVertex(float x, float y, float centerX, float centerY,

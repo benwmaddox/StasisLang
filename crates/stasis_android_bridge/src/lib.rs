@@ -17,7 +17,7 @@ use stasis_compiler::IncrementalCompilerHost;
 
 pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
 pub const ANDROID_RENDER_FRAME_HEADER_SIZE: usize = 6;
-pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 9;
+pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 13;
 pub const ANDROID_RENDER_FRAME_I32_CAPACITY: usize = ANDROID_RENDER_FRAME_HEADER_SIZE
     + ANDROID_RENDER_COMMAND_CAPACITY * ANDROID_RENDER_COMMAND_STRIDE;
 
@@ -41,6 +41,10 @@ pub struct AndroidBridgeRenderCommand {
     pub asset: i32,
     pub rotation_degrees: i32,
     pub alpha: i32,
+    pub clip_x: i32,
+    pub clip_y: i32,
+    pub clip_w: i32,
+    pub clip_h: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -523,7 +527,11 @@ fn read_render_commands(
     jit: &JitProcess,
 ) -> [AndroidBridgeRenderCommand; ANDROID_RENDER_COMMAND_CAPACITY] {
     let mut commands = [AndroidBridgeRenderCommand::default(); ANDROID_RENDER_COMMAND_CAPACITY];
-    let schema_version = jit.read_i32_global_path("Render.command_schema_version");
+    let schema_version = if jit.has_global_path("Render.command_schema_version") {
+        jit.read_i32_global_path("Render.command_schema_version")
+    } else {
+        1
+    };
     for (index, command) in commands.iter_mut().enumerate() {
         command.kind = jit.read_i32_global_path(&format!("Render.command{index}_kind"));
         command.x = jit.read_i32_global_path(&format!("Render.command{index}_x"));
@@ -532,14 +540,22 @@ fn read_render_commands(
         command.h = jit.read_i32_global_path(&format!("Render.command{index}_h"));
         command.color = jit.read_i32_global_path(&format!("Render.command{index}_color"));
         command.asset = jit.read_i32_global_path(&format!("Render.command{index}_asset"));
-        command.rotation_degrees =
-            jit.read_i32_global_path(&format!("Render.command{index}_rotation_degrees"));
+        let rotation_path = format!("Render.command{index}_rotation_degrees");
+        if jit.has_global_path(&rotation_path) {
+            command.rotation_degrees = jit.read_i32_global_path(&rotation_path);
+        }
         command.alpha = if schema_version >= 2 {
             jit.read_i32_global_path(&format!("Render.command{index}_alpha"))
                 .clamp(0, 255)
         } else {
             255
         };
+        if schema_version >= 3 {
+            command.clip_x = jit.read_i32_global_path(&format!("Render.command{index}_clip_x"));
+            command.clip_y = jit.read_i32_global_path(&format!("Render.command{index}_clip_y"));
+            command.clip_w = jit.read_i32_global_path(&format!("Render.command{index}_clip_w"));
+            command.clip_h = jit.read_i32_global_path(&format!("Render.command{index}_clip_h"));
+        }
     }
     commands
 }
@@ -552,9 +568,10 @@ fn render_command_state_lines(
     let count = render_command_count.clamp(0, ANDROID_RENDER_COMMAND_CAPACITY as i32) as usize;
     for (index, command) in render_commands.iter().enumerate().take(count) {
         lines.push_str(&format!(
-            "render{index}_kind={}\nrender{index}_x={}\nrender{index}_y={}\nrender{index}_w={}\nrender{index}_h={}\nrender{index}_color={}\nrender{index}_asset={}\nrender{index}_rotation_degrees={}\nrender{index}_alpha={}\n",
+            "render{index}_kind={}\nrender{index}_x={}\nrender{index}_y={}\nrender{index}_w={}\nrender{index}_h={}\nrender{index}_color={}\nrender{index}_asset={}\nrender{index}_rotation_degrees={}\nrender{index}_alpha={}\nrender{index}_clip_x={}\nrender{index}_clip_y={}\nrender{index}_clip_w={}\nrender{index}_clip_h={}\n",
             command.kind, command.x, command.y, command.w, command.h, command.color,
-            command.asset, command.rotation_degrees, command.alpha
+            command.asset, command.rotation_degrees, command.alpha, command.clip_x,
+            command.clip_y, command.clip_w, command.clip_h
         ));
     }
     lines
@@ -596,6 +613,10 @@ fn write_render_frame_i32s(
         out[base + 6] = command.asset;
         out[base + 7] = command.rotation_degrees;
         out[base + 8] = command.alpha;
+        out[base + 9] = command.clip_x;
+        out[base + 10] = command.clip_y;
+        out[base + 11] = command.clip_w;
+        out[base + 12] = command.clip_h;
     }
     Ok(())
 }
@@ -608,9 +629,10 @@ fn render_command_message_fields(
     let mut fields = format!("render_command_count={count}");
     for (index, command) in render_commands.iter().enumerate().take(count) {
         fields.push_str(&format!(
-            " render{index}_kind={} render{index}_x={} render{index}_y={} render{index}_w={} render{index}_h={} render{index}_color={} render{index}_asset={} render{index}_rotation_degrees={} render{index}_alpha={}",
+            " render{index}_kind={} render{index}_x={} render{index}_y={} render{index}_w={} render{index}_h={} render{index}_color={} render{index}_asset={} render{index}_rotation_degrees={} render{index}_alpha={} render{index}_clip_x={} render{index}_clip_y={} render{index}_clip_w={} render{index}_clip_h={}",
             command.kind, command.x, command.y, command.w, command.h, command.color,
-            command.asset, command.rotation_degrees, command.alpha
+            command.asset, command.rotation_degrees, command.alpha, command.clip_x,
+            command.clip_y, command.clip_w, command.clip_h
         ));
     }
     fields
@@ -1335,6 +1357,10 @@ mod tests {
         assert_eq!(result.render_commands[3].asset, -1520461853);
         assert_eq!(result.render_commands[3].rotation_degrees, 3);
         assert_eq!(result.render_commands[3].alpha, 255);
+        assert_eq!(result.render_commands[3].clip_x, 0);
+        assert_eq!(result.render_commands[3].clip_y, 0);
+        assert_eq!(result.render_commands[3].clip_w, 360);
+        assert_eq!(result.render_commands[3].clip_h, 640);
         assert!(result.observed_game_tick_count >= 1);
     }
 
@@ -1476,11 +1502,15 @@ mod tests {
             .join("../../mobile/android/app/src/main/assets/exploration_sample")
             .canonicalize()
             .expect("exploration template root");
-        let result = run_android_workshop_stasis_tests(&root).expect("run exploration Stasis tests");
+        let result =
+            run_android_workshop_stasis_tests(&root).expect("run exploration Stasis tests");
         assert_eq!(result["passed"], 7);
         assert_eq!(result["failed"], 0);
         assert_eq!(result["all_passed"], true);
-        assert_eq!(result["results"][0]["file"], "tests/exploration_gameplay.test.stasis");
+        assert_eq!(
+            result["results"][0]["file"],
+            "tests/exploration_gameplay.test.stasis"
+        );
     }
 
     #[test]
@@ -1539,6 +1569,10 @@ function render(): void { Render.command_count = 1; Render.command0_kind = 1; Re
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 6], 0);
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 7], 0);
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 8], 255);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 9], 0);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 10], 0);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 11], 0);
+        assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 12], 0);
         fs::remove_dir_all(&root).ok();
     }
 

@@ -315,6 +315,12 @@ impl JitProcess {
         stasis_dynload::stasis_jit_global_i32_load(hash_global_path(path))
     }
 
+    pub fn has_global_path(&self, path: &str) -> bool {
+        self.compile_analysis_cache
+            .as_ref()
+            .is_some_and(|analysis| analysis.global_path_types.contains_key(path))
+    }
+
     pub fn write_i32_global_path(&self, path: &str, value: i32) {
         stasis_dynload::stasis_jit_global_i32_store(hash_global_path(path), value);
     }

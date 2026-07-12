@@ -37,6 +37,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
+    "mobile/android/app/src/published/java/com/stasislang/workshop/PublishedSpriteCatalog.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_android_sprite.c",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -142,6 +143,7 @@ def main() -> int:
     assert "label: 'Stasis Pong'" in pong_descriptor
     assert "runtimeId: 'pong_aot'" in pong_descriptor
     assert "entrySource: 'src/main.stasis'" in pong_descriptor
+    assert "assetManifest: 'assets/manifest.json'" in pong_descriptor
     assert "STASIS_PUBLISHED_BUILD" in app_gradle
     assert "abiFilters 'arm64-v8a'" in app_gradle
     assert "externalNativeBuild" in app_gradle
@@ -151,7 +153,7 @@ def main() -> int:
     assert "prepareWorkshopAssets" in app_gradle
     assert "workshop_sample/build/**" in app_gradle
     assert "exploration_sample/build/**" in app_gradle
-    assert "published.assets.setSrcDirs([])" in app_gradle
+    assert "published.assets.setSrcDirs([publishedAotDir.map { it.dir('apk_assets') }.get().asFile])" in app_gradle
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
     workshop_manifest = read("mobile/android/app/src/workshop/AndroidManifest.xml")
@@ -980,9 +982,11 @@ def main() -> int:
     assert "gamePreview.touchY()" in activity
     assert "gamePreview.touchActive()" in activity
     assert "MotionEvent" in activity
-    assert "RENDER_COMMAND_STRIDE = 9" in activity
+    assert "RENDER_COMMAND_STRIDE = 13" in activity
     assert "drawBatch((runEnd - index) * RECT_VERTICES)" in activity
     assert "drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture)" in activity
+    assert "GLES20.glScissor" in activity
+    assert "sameClip(base, runBase)" in activity
     assert "frameValues[5]" in activity
     assert "frameValues[base + 6]" in activity
     assert "GLES20.glDrawArrays" in activity
@@ -1046,6 +1050,7 @@ def main() -> int:
     assert "setContentView(status)" not in activity
 
     published_activity = read("mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java")
+    published_sprites = read("mobile/android/app/src/published/java/com/stasislang/workshop/PublishedSpriteCatalog.java")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in published_activity
     assert "nativeCompileProject(String projectRoot)" in published_activity
     assert "nativeRunFrameInto(String projectRoot" in published_activity
@@ -1059,9 +1064,14 @@ def main() -> int:
     assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in published_activity
     assert "event.getPointerCount() >= 3" in published_activity
     assert "PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID" in published_activity
+    assert "PublishedSpriteCatalog" in published_activity
+    assert "drawSpriteBatch" in published_activity
+    assert "nativeDecodeSvgSpriteBytes" in published_activity
+    assert 'MANIFEST = ROOT + "assets/manifest.json"' in published_sprites
+    assert "MessageDigest.getInstance(\"SHA-256\")" in published_sprites
+    assert "spriteCatalog.textureFor" in published_activity
     assert '"com.stasislang.pong"' in device_script
     assert "ensureBundledProject" not in published_activity
-    assert "AssetManager" not in published_activity
     workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")
     assert "build_workshop_compile_plan" in workshop
     assert "WorkshopCompilePlan" in workshop
@@ -1091,7 +1101,7 @@ def main() -> int:
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
     assert "const int frame_len = STASIS_RENDER_FRAME_I32_CAPACITY" in native
-    assert "#define STASIS_RENDER_COMMAND_STRIDE 9" in native
+    assert "#define STASIS_RENDER_COMMAND_STRIDE 13" in native
     assert '"Render.command_schema_version"' in native
     assert '"Render.command" #index "_rotation_degrees"' in native
     assert '"Render.command" #index "_alpha"' in native
@@ -1162,9 +1172,10 @@ def main() -> int:
     assert "command3_asset" in sample_main
     assert "Render.command3_kind = 2" in sample_main
     assert "Render.command3_asset = -1520461853" in sample_main
-    assert "Render.command_schema_version = 2" in sample_main
+    assert "Render.command_schema_version = 3" in sample_main
     assert "Render.command3_rotation_degrees" in sample_main
     assert "Render.command3_alpha = 255" in sample_main
+    assert "Render.command3_clip_w = GameState.screen_w" in sample_main
     pong_manifest = read("mobile/android/app/src/main/assets/workshop_sample/assets/manifest.json")
     assert '"id": "ball"' in pong_manifest
     assert '"encoding": "svg"' in pong_manifest
