@@ -957,7 +957,8 @@ def main() -> int:
     assert "aiPrefs.getString(AI_PREF_MODEL" in activity
     assert 'DEFAULT_AI_MODEL = "gpt-5.6-sol"' in activity
     assert 'reasoningSummary.setText("Reasoning: medium")' in activity
-    assert 'isFastPathRequest(requestJson) ? "low" : "medium"' in activity
+    assert 'isFastPathRequest(requestJson) ? "minimal" : "medium"' in activity
+    assert 'isFastPathRequest(requestJson) ? "none" : "auto"' in activity
     assert 'GPT-5.6 Sol defaults to medium reasoning' in activity
     assert '"gpt-5.6-terra".equals(configuredModel)' in activity
     assert "AI_PREF_MODEL_DEFAULT_VERSION" in activity

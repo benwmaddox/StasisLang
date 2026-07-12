@@ -4540,22 +4540,29 @@ public final class MainActivity extends Activity {
         int serializedChars = 2;
         boolean accepting = enabled;
         if (enabled && project != null) {
-            for (SymbolSection section : project.sections) {
-                for (SymbolGroup group : section.groups) {
-                    for (SymbolEntry symbol : group.symbols) {
-                        if ("test".equals(symbol.kind)) continue;
-                        availableCount += 1;
-                        if (!accepting) continue;
-                        JSONObject source = symbolToJson(symbol, true);
-                        int candidateChars = source.toString().length();
-                        if (!WorkshopAiFastPathPolicy.canAppendSource(
-                                serializedChars, candidateChars, symbols.length())) {
-                            accepting = false;
-                            continue;
+            TreeSet<String> added = new TreeSet<>();
+            for (int wantedScore = 32; wantedScore >= 1; wantedScore -= 1) {
+                for (SymbolSection section : project.sections) {
+                    for (SymbolGroup group : section.groups) {
+                        for (SymbolEntry symbol : group.symbols) {
+                            int score = WorkshopAiFastPathPolicy.relevanceScore(
+                                    prompt, symbol.name, symbol.kind);
+                            String key = symbol.kind + "|" + symbol.file + "|" + symbol.name;
+                            if (score <= 0 || added.contains(key)) continue;
+                            if (wantedScore == 32) availableCount += 1;
+                            if (score != wantedScore || !accepting) continue;
+                            JSONObject source = symbolToJson(symbol, true);
+                            int candidateChars = source.toString().length();
+                            if (!WorkshopAiFastPathPolicy.canAppendSource(
+                                    serializedChars, candidateChars, symbols.length())) {
+                                accepting = false;
+                                continue;
+                            }
+                            if (symbols.length() > 0) serializedChars += 1;
+                            serializedChars += candidateChars;
+                            symbols.put(source);
+                            added.add(key);
                         }
-                        if (symbols.length() > 0) serializedChars += 1;
-                        serializedChars += candidateChars;
-                        symbols.put(source);
                     }
                 }
             }
@@ -8942,7 +8949,8 @@ public final class MainActivity extends Activity {
         payload.put("tool_choice", "auto");
         payload.put("parallel_tool_calls", false);
         payload.put("reasoning", new JSONObject().put("effort",
-                isFastPathRequest(requestJson) ? "low" : "medium").put("summary", "auto"));
+                isFastPathRequest(requestJson) ? "minimal" : "medium").put("summary",
+                isFastPathRequest(requestJson) ? "none" : "auto"));
         payload.put("store", false);
         payload.put("stream", true);
         payload.put("include", new JSONArray().put("reasoning.encrypted_content"));
