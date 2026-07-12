@@ -19,6 +19,7 @@ issue **#116** (`da0c5e05-fb79-46b8-a0ce-942934d3c8ff`). Use the released
 - #126 (`78624c35`) - Finish the Exploration Garden tutorial.
 - #130 (`edf60a67`) - Finish GitHub sync semantics and acceptance.
 - #134 (`af6a9a54`) - Reconcile the PRD checklist and current UI.
+- #135 (`d48673e6`) - Prevent read-only AI tool-loop exhaustion.
 
 ## Device acceptance
 

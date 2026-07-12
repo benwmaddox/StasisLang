@@ -27,6 +27,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopMoney.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiPricing.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiObservationMemory.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiToolLoopPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopConnectivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopBackgroundWorkPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkCoordinator.java",
@@ -877,8 +879,13 @@ def main() -> int:
     assert "aiToolSetInputState" in activity
     assert "nativeRunTests" in activity
     assert "test `name`(): bool" in activity
-    assert "The app compiles once after each tool-call batch that contains writes and runs tests after each tool-call batch" in activity
-    assert "Use on_code_swap() for post-hot-swap migration" in activity
+    assert "read-only inspection batches do not rerun tests" in activity
+    assert "Use on_code_swap() only for post-hot-swap migration" in activity
+    assert "MAX_AI_TOOL_CALLS_PER_BATCH = 12" in activity
+    assert "MAX_AI_READ_ONLY_BATCHES = 2" in activity
+    assert "retainedToolObservations" in activity
+    assert "read_only_batch_not_executed" in activity
+    assert "Never reread a target already present" in activity
     assert "runtimeStateJson" in activity
     assert "frameValuesToJson" in activity
     assert "aiToolGetDiagnostics" in activity
