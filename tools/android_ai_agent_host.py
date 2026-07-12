@@ -30,6 +30,7 @@ MAX_TURNS = 15
 MAX_WORKING_NOTES_CHARS = 2_000
 MAX_INITIAL_SYMBOLS = 256
 MAX_INITIAL_SYMBOL_INDEX_CHARS = 16 * 1024
+MAX_TOOL_CALLS_PER_BATCH = 12
 PROMPT_CACHE_KEY = "stasis-android-ai-agent-v2"
 
 
@@ -273,8 +274,10 @@ def run_command(args: list[str]) -> dict[str, Any]:
     return {"ok": proc.returncode == 0, "returncode": proc.returncode, "output_tail": proc.stdout[-6000:]}
 
 
-def run_compile_check() -> dict[str, Any]:
-    return run_command(["cargo", "test", "-p", "stasis_android_bridge", "android_bundled_touch_pong_sample_compile_plan_is_runnable", "--", "--nocapture"])
+def run_compile_check(project: Path) -> dict[str, Any]:
+    return run_command([
+        "cargo", "run", "-p", "stasis_android_bridge", "--bin", "android_workshop_compile", "--", str(project.resolve())
+    ])
 
 
 def behavior_test_expectations() -> dict[str, Any]:
@@ -292,6 +295,19 @@ def test_file_path(project: Path, file: str) -> Path:
     if relative.is_absolute() or ".." in relative.parts or not relative.parts or relative.parts[0] != "tests":
         raise ValueError("test file path must be under tests/")
     return project / relative
+
+
+def source_file_path(project: Path, file: str, must_exist: bool = True) -> Path:
+    relative = Path(file.replace("\\", "/"))
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts or relative.parts[0] != "src":
+        raise ValueError("source file path must be under src/")
+    path = (project / relative).resolve()
+    project_root = project.resolve()
+    if project_root not in path.parents:
+        raise ValueError("source file path escaped the selected project")
+    if must_exist and not path.is_file():
+        raise ValueError(f"source file does not exist: {relative.as_posix()}")
+    return path
 
 
 def list_test_files(project: Path) -> list[dict[str, Any]]:
@@ -353,8 +369,19 @@ def reset_paddle_speed_feature(project: Path) -> None:
     for generated_test in (project / "tests").glob("*enemy_paddle_speed*.test.stasis"):
         generated_test.unlink()
 
-def run_behavior_tests(project: Path) -> dict[str, Any]:
+def run_behavior_tests(project: Path, compile_first: bool = True) -> dict[str, Any]:
+    if compile_first:
+        compile_result = run_compile_check(project)
+        if not compile_result.get("ok"):
+            return {
+                "kind": "behavior_tests",
+                "ok": False,
+                "status": "compile_failed",
+                "compile": compile_result,
+                "behavior_test_expectations": behavior_test_expectations(),
+            }
     result = run_command(["cargo", "run", "-p", "stasis", "--release", "--", "test", "--dir", str(project / "tests")])
+    result["kind"] = "behavior_tests"
     tests = list_test_files(project)
     stasis_tests = [test for test in tests if test.get("kind") == "stasis_test"]
     result["test_files"] = tests
@@ -402,13 +429,13 @@ def delete_symbol(project: Path, name: str, file: str = "", owner: str = "", kin
     if len(symbols) > 1:
         return {"status": "ambiguous", "name": name, "matches": [symbol_json(s, False) for s in symbols]}
     target = symbols[0]
-    path = project / target.file
+    path = source_file_path(project, target.file)
     source = read_text(path)
     updated = source[:target.start].rstrip() + "\n\n" + source[target.end:].lstrip()
     write_text(path, updated.rstrip() + "\n")
     if not compile_after_write:
         return {"status": "deleted", "file": target.file, "name": target.name, "kind": target.kind, "compile": {"status": "pending_batch_compile"}}
-    compile_result = run_compile_check()
+    compile_result = run_compile_check(project)
     if not compile_result.get("ok"):
         write_text(path, source)
         return {"status": "rolled_back", "file": target.file, "name": target.name, "kind": target.kind, "compile": compile_result}
@@ -426,7 +453,10 @@ def replace_symbol(project: Path, name: str, file: str, new_source: str, compile
     valid, validation_message = validate_single_replacement_source(name, new_source)
     if not valid:
         return {"status": "validation_error", "file": file, "name": name, "error": validation_message}
-    path = project / file
+    try:
+        path = source_file_path(project, file)
+    except ValueError as error:
+        return {"status": "validation_error", "file": file, "name": name, "error": str(error)}
     source = read_text(path)
     symbols = [s for s in parse_symbols(project) if s.file == file and s.name == name]
     if symbols:
@@ -439,7 +469,7 @@ def replace_symbol(project: Path, name: str, file: str, new_source: str, compile
     write_text(path, updated)
     if not compile_after_write:
         return {"status": status, "file": file, "name": name, "compile": {"status": "pending_batch_compile"}}
-    compile_result = run_compile_check()
+    compile_result = run_compile_check(project)
     if not compile_result["ok"]:
         write_text(path, source)
         return {"status": "rolled_back", "file": file, "name": name, "compile": compile_result}
@@ -447,14 +477,15 @@ def replace_symbol(project: Path, name: str, file: str, new_source: str, compile
 
 
 def write_project_file(project: Path, file: str, source: str, compile_after_write: bool = True) -> dict[str, Any]:
-    path = project / file
-    if not path.is_file():
-        return {"status": "not_found", "file": file}
+    try:
+        path = source_file_path(project, file)
+    except ValueError as error:
+        return {"status": "validation_error", "file": file, "error": str(error)}
     original = read_text(path)
     write_text(path, source.rstrip() + "\n")
     if not compile_after_write:
         return {"status": "written", "file": file, "compile": {"status": "pending_batch_compile"}}
-    compile_result = run_compile_check()
+    compile_result = run_compile_check(project)
     if not compile_result["ok"]:
         write_text(path, original)
         return {"status": "rolled_back", "file": file, "compile": compile_result}
@@ -583,6 +614,10 @@ def build_agent_request(project: Path, prompt: str, turn_state: dict[str, Any]) 
     }
 
 
+def build_followup_request(shared_context: dict[str, Any], turn_state: dict[str, Any]) -> dict[str, Any]:
+    return {"shared_context": shared_context, "turn_state": turn_state}
+
+
 def retain_working_notes(turn_state: dict[str, Any], working_notes: str) -> dict[str, Any]:
     retained = dict(turn_state)
     if working_notes:
@@ -705,7 +740,7 @@ def build_openai_payload(model: str, request: dict[str, Any], service_tier: str 
         "Follow request.shared_context.stasis_basics as the authoritative language/runtime orientation. "
         "Every response must include working_notes of at most 2000 characters with concise Intent, Observed, Next, and Blocker facts. These are user-visible state notes, not private chain-of-thought. "
         "The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when it already identifies the target. "
-        "Use mode=tool_calls to inspect/write with the provided fine-grained symbol, import, and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/read_imports/list_tests/read_test_file instead. "
+        "Use mode=tool_calls to inspect/write with the provided fine-grained symbol and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/list_tests/read_test_file instead. "
         "For tool calls, the top-level key is tool_calls and each call is exactly {\"tool\":\"name\",\"args\":{...}}. "
         "Do not use aliases such as calls, name, function, arguments, type, or source. "
         "After a tool-call batch with writes, compile runs locally once and failed compiles roll back the whole batch. Use run_tests to verify the behavior. "
@@ -793,6 +828,7 @@ def summarize_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def call_openai(api_key: str, model: str, request: dict[str, Any], service_tier: str = "standard", trace_events: list[dict[str, Any]] | None = None, turn: int = 0) -> dict[str, Any]:
+    started_at = time.perf_counter()
     payload = build_openai_payload(model, request, service_tier)
     payload_errors = validate_openai_payload(payload)
     if payload_errors:
@@ -823,7 +859,7 @@ def call_openai(api_key: str, model: str, request: dict[str, Any], service_tier:
         text = "".join(chunks)
     parsed = parse_json_object(text)
     if trace_events is not None:
-        trace_events.append({"kind": "openai_exchange", "turn": turn, "request": summarize_request_for_trace(request), "response": summarize_response_for_trace(body, parsed), "usage": response_usage_from_body(body)})
+        trace_events.append({"kind": "openai_exchange", "turn": turn, "elapsed_seconds": time.perf_counter() - started_at, "request": summarize_request_for_trace(request), "response": summarize_response_for_trace(body, parsed), "usage": response_usage_from_body(body)})
     return parsed
 
 
@@ -852,6 +888,14 @@ def validate_response_shape(response: dict[str, Any]) -> tuple[list[dict[str, An
     raw_calls = response.get("tool_calls")
     if not isinstance(raw_calls, list):
         errors.append({"kind": "validation_error", "error": "mode=tool_calls requires top-level tool_calls array", "received_tool_calls_type": type(raw_calls).__name__, "response_contract": contract})
+        return [], errors
+    if len(raw_calls) > MAX_TOOL_CALLS_PER_BATCH:
+        errors.append({
+            "kind": "validation_error",
+            "error": f"tool-call batch exceeds {MAX_TOOL_CALLS_PER_BATCH} calls",
+            "received_count": len(raw_calls),
+            "maximum_count": MAX_TOOL_CALLS_PER_BATCH,
+        })
         return [], errors
     normalized: list[dict[str, Any]] = []
     for index, call in enumerate(raw_calls):
@@ -887,77 +931,115 @@ def summarize_observations(observations: list[dict[str, Any]]) -> list[dict[str,
         })
     return summary
 
+
+def write_outcome_counts(observations: list[dict[str, Any]]) -> tuple[int, int]:
+    successful = 0
+    rolled_back = 0
+    for observation in observations:
+        if observation.get("tool") not in {"write_symbol", "delete_symbol", "write_file", "write_test_file", "delete_test_file", "edit"}:
+            continue
+        result = observation.get("result", {})
+        status = result.get("status") if isinstance(result, dict) else None
+        successful += int(status in {"written", "created", "deleted"})
+        rolled_back += int(status == "rolled_back")
+    return successful, rolled_back
+
 def execute_tool_batch(project: Path, tool_calls: list[dict[str, Any]], last_diagnostics: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    original_sources: dict[Path, str] = {}
+    write_tools = {"write_symbol", "delete_symbol", "write_file", "write_test_file", "delete_test_file"}
+    original_files: dict[Path, str | None] = {}
     observations: list[dict[str, Any]] = []
     pending_run_tests: list[int] = []
-    wrote_source = False
+    batch_has_writes = any(call.get("tool") in write_tools for call in tool_calls)
+    batch_has_test_writes = any(call.get("tool") in {"write_test_file", "delete_test_file"} for call in tool_calls)
+    wrote_any = False
+    batch_tool_error = False
 
-    def snapshot_file(file: str) -> None:
-        path = project / file
-        if path.is_file() and path not in original_sources:
-            original_sources[path] = read_text(path)
+    def snapshot_path(path: Path) -> None:
+        if path not in original_files:
+            original_files[path] = read_text(path) if path.is_file() else None
+
+    def restore_files() -> None:
+        for path, source in original_files.items():
+            if source is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                write_text(path, source)
+
+    def mark_rolled_back(failure: dict[str, Any], restored_compile: dict[str, Any]) -> None:
+        for observation in observations:
+            if observation.get("tool") in write_tools:
+                result = observation.get("result", {})
+                if isinstance(result, dict) and result.get("status") in {"written", "created", "deleted"}:
+                    result["status"] = "rolled_back"
+                    result["compile"] = failure
+                    result["restored_compile"] = restored_compile
+            if observation.get("tool") == "run_tests":
+                observation["result"] = {"status": "blocked_by_batch_failure", "diagnostics": failure}
 
     for call in tool_calls:
         tool = call.get("tool", "")
         tool_args = call.get("args") or {}
-        if tool == "run_tests" and wrote_source:
+        if tool == "run_tests" and batch_has_writes:
             observations.append({"tool": tool, "args": tool_args, "result": {"status": "pending_batch_compile"}})
             pending_run_tests.append(len(observations) - 1)
             continue
-        if tool == "write_symbol":
-            snapshot_file(tool_args.get("file", ""))
-            result = replace_symbol(project, tool_args.get("name", ""), tool_args.get("file", ""), tool_args.get("new_source", ""), compile_after_write=False)
-            wrote_source = result.get("status") in {"written", "created"} or wrote_source
-        elif tool == "delete_symbol":
-            target_file = tool_args.get("file", "")
-            if not target_file:
-                candidates = [s for s in parse_symbols(project) if s.name == tool_args.get("name", "")]
-                if tool_args.get("owner", ""):
-                    candidates = [s for s in candidates if s.owner == tool_args.get("owner", "")]
-                if tool_args.get("kind", ""):
-                    expected = "global" if tool_args.get("kind") == "global" else "struct" if tool_args.get("kind") in {"struct", "replace_struct"} else "function" if tool_args.get("kind") in {"function", "replace_function"} else tool_args.get("kind")
-                    candidates = [s for s in candidates if s.kind == expected]
-                if len(candidates) == 1:
-                    target_file = candidates[0].file
-            if target_file:
-                snapshot_file(target_file)
-            result = delete_symbol(project, tool_args.get("name", ""), target_file, tool_args.get("owner", ""), tool_args.get("kind", ""), compile_after_write=False)
-            wrote_source = result.get("status") == "deleted" or wrote_source
-        elif tool == "write_file":
-            snapshot_file(tool_args.get("file", ""))
-            result = write_project_file(project, tool_args.get("file", ""), tool_args.get("source", ""), compile_after_write=False)
-            wrote_source = result.get("status") == "written" or wrote_source
-        else:
-            result = execute_tool(project, tool, tool_args, last_diagnostics)
+        try:
+            if tool == "write_symbol":
+                snapshot_path(source_file_path(project, tool_args.get("file", "")))
+                result = replace_symbol(project, tool_args.get("name", ""), tool_args.get("file", ""), tool_args.get("new_source", ""), compile_after_write=False)
+            elif tool == "delete_symbol":
+                target_file = tool_args.get("file", "")
+                if not target_file:
+                    candidates = [s for s in parse_symbols(project) if s.name == tool_args.get("name", "")]
+                    if tool_args.get("owner", ""):
+                        candidates = [s for s in candidates if s.owner == tool_args.get("owner", "")]
+                    if tool_args.get("kind", ""):
+                        expected = "global" if tool_args.get("kind") == "global" else "struct" if tool_args.get("kind") in {"struct", "replace_struct"} else "function" if tool_args.get("kind") in {"function", "replace_function"} else tool_args.get("kind")
+                        candidates = [s for s in candidates if s.kind == expected]
+                    if len(candidates) == 1:
+                        target_file = candidates[0].file
+                if target_file:
+                    snapshot_path(source_file_path(project, target_file))
+                result = delete_symbol(project, tool_args.get("name", ""), target_file, tool_args.get("owner", ""), tool_args.get("kind", ""), compile_after_write=False)
+            elif tool == "write_file":
+                snapshot_path(source_file_path(project, tool_args.get("file", "")))
+                result = write_project_file(project, tool_args.get("file", ""), tool_args.get("source", ""), compile_after_write=False)
+            elif tool == "write_test_file":
+                snapshot_path(test_file_path(project, tool_args.get("file", "")))
+                result = write_test_file(project, tool_args.get("file", ""), tool_args.get("source", ""))
+            elif tool == "delete_test_file":
+                snapshot_path(test_file_path(project, tool_args.get("file", "")))
+                result = delete_test_file(project, tool_args.get("file", ""))
+            else:
+                result = execute_tool(project, tool, tool_args, last_diagnostics)
+        except Exception as error:
+            result = {"status": "tool_error", "error_type": type(error).__name__, "error": str(error)}
         observations.append({"tool": tool, "args": tool_args, "result": result})
+        if tool in write_tools:
+            success = result.get("status") in {"written", "created", "deleted"}
+            wrote_any = wrote_any or success
+            batch_tool_error = batch_tool_error or not success
 
     batch_compile: dict[str, Any] | None = None
-    if wrote_source:
-        batch_compile = run_compile_check()
+    if wrote_any:
+        batch_compile = {"ok": False, "status": "batch_tool_error"} if batch_tool_error else run_compile_check(project)
+        if batch_compile.get("ok") and batch_has_test_writes:
+            batch_compile = run_behavior_tests(project, compile_first=False)
         if not batch_compile.get("ok"):
-            for path, source in original_sources.items():
-                write_text(path, source)
-            restored_compile = run_compile_check()
-            for observation in observations:
-                if observation.get("tool") in {"write_symbol", "delete_symbol", "write_file"}:
-                    result = observation.get("result", {})
-                    if isinstance(result, dict) and result.get("status") in {"written", "created", "deleted"}:
-                        result["status"] = "rolled_back"
-                        result["compile"] = batch_compile
-                        result["restored_compile"] = restored_compile
-                if observation.get("tool") == "run_tests":
-                    observation["result"] = {"status": "blocked_by_compile_failure", "compile": batch_compile}
+            restore_files()
+            restored_compile = run_compile_check(project)
+            mark_rolled_back(batch_compile, restored_compile)
             return observations, batch_compile
         for observation in observations:
-            if observation.get("tool") in {"write_symbol", "delete_symbol", "write_file"}:
+            if observation.get("tool") in write_tools:
                 result = observation.get("result", {})
                 if isinstance(result, dict) and result.get("status") in {"written", "created", "deleted"}:
                     result["compile"] = batch_compile
 
     latest_diagnostics = batch_compile or last_diagnostics
     for index in pending_run_tests:
-        test_result = run_behavior_tests(project)
+        test_result = batch_compile if batch_has_test_writes and batch_compile and batch_compile.get("kind") == "behavior_tests" else run_behavior_tests(project, compile_first=not wrote_any)
         observations[index]["result"] = test_result
         latest_diagnostics = test_result
     return observations, latest_diagnostics
@@ -1016,8 +1098,9 @@ def main() -> int:
     project = args.project_root.resolve()
     trace_file = args.trace_file or default_trace_file()
     request = build_agent_request(project, args.prompt, {"phase": "initial", "instruction": "Inspect the workspace with fine-grained tools, make the requested behavior change, add or update tests, run tests, then return done only after tests pass."})
+    shared_context = request["shared_context"]
     trace_events: list[dict[str, Any]] = []
-    trace_meta = {"prompt": args.prompt, "model": args.model, "service_tier": args.service_tier, "project_root": str(project), "reset_paddle_speed_feature": bool(args.reset_paddle_speed_feature)}
+    trace_meta = {"prompt": args.prompt, "provider": "openai_api", "model": args.model, "service_tier": args.service_tier, "project_root": str(project), "reset_paddle_speed_feature": bool(args.reset_paddle_speed_feature), "successful_write_count": 0, "rolled_back_write_count": 0}
     trace_events.append({"kind": "trace_meta", "meta": trace_meta})
     trace_events.append({"kind": "initial_request", "summary": summarize_request_for_trace(request)})
     print(f"Trace file: {trace_file}")
@@ -1039,6 +1122,9 @@ def main() -> int:
         return 2
     if args.reset_paddle_speed_feature:
         reset_paddle_speed_feature(project)
+        request = build_agent_request(project, args.prompt, request["turn_state"])
+        shared_context = request["shared_context"]
+        trace_events[1] = {"kind": "initial_request", "summary": summarize_request_for_trace(request)}
     last_diagnostics: dict[str, Any] = {}
     total_actions = 0
     working_notes = ""
@@ -1059,7 +1145,7 @@ def main() -> int:
             if turn >= MAX_TURNS:
                 write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "response_validation_error", "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching shared_context.protocol.response_contract, including bounded working_notes. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."}, working_notes))
+            request = build_followup_request(shared_context, retain_working_notes({"phase": "response_validation_error", "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching shared_context.protocol.response_contract, including bounded working_notes. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."}, working_notes))
             trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
             continue
         working_notes = response["working_notes"].strip()
@@ -1069,6 +1155,9 @@ def main() -> int:
             for edit in response.get("edits") or []:
                 result = replace_symbol(project, edit.get("name", ""), edit.get("file", ""), edit.get("new_source", ""))
                 observations.append({"tool": "edit", "args": {"file": edit.get("file", ""), "name": edit.get("name", "")}, "result": result})
+            successful, rolled_back = write_outcome_counts(observations)
+            trace_meta["successful_write_count"] += successful
+            trace_meta["rolled_back_write_count"] += rolled_back
             final = run_behavior_tests(project)
             print(json.dumps({"edit_observations": summarize_observations(observations), "final_test": final}, indent=2))
             trace_events.append({"kind": "direct_edit_observations", "turn": turn, "observations": observations, "final_test": final})
@@ -1078,7 +1167,7 @@ def main() -> int:
             if turn >= MAX_TURNS:
                 write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "direct_edit_test_failure", "tool_observations": observations, "test_observation": final, "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Update working_notes, inspect the exact failure, then fix it using precise tool calls."}, working_notes))
+            request = build_followup_request(shared_context, retain_working_notes({"phase": "direct_edit_test_failure", "tool_observations": observations, "test_observation": final, "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Update working_notes, inspect the exact failure, then fix it using precise tool calls."}, working_notes))
             continue
         if mode != "tool_calls" or not tool_calls:
             final = run_behavior_tests(project)
@@ -1090,25 +1179,30 @@ def main() -> int:
             if turn >= MAX_TURNS:
                 write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "done_or_empty_test_failure", "tool_observations": [], "test_observation": final, "instruction": "The model returned done, but the required local behavior test failed. Update working_notes with the failure and fix it using precise tool calls."}, working_notes))
+            request = build_followup_request(shared_context, retain_working_notes({"phase": "done_or_empty_test_failure", "tool_observations": [], "test_observation": final, "instruction": "The model returned done, but the required local behavior test failed. Update working_notes with the failure and fix it using precise tool calls."}, working_notes))
             continue
+        tool_started_at = time.perf_counter()
         observations, last_diagnostics = execute_tool_batch(project, tool_calls, last_diagnostics)
+        tool_elapsed_seconds = time.perf_counter() - tool_started_at
+        successful, rolled_back = write_outcome_counts(observations)
+        trace_meta["successful_write_count"] += successful
+        trace_meta["rolled_back_write_count"] += rolled_back
         total_actions += len(tool_calls)
         print(json.dumps({"tool_observations": summarize_observations(observations)}, indent=2))
-        trace_events.append({"kind": "tool_observations", "turn": turn, "observations": observations, "summary": summarize_observations(observations)})
+        trace_events.append({"kind": "tool_observations", "turn": turn, "elapsed_seconds": tool_elapsed_seconds, "observations": observations, "summary": summarize_observations(observations)})
         wrote_source = any(call.get("tool") in {"write_symbol", "delete_symbol", "write_test_file", "delete_test_file"} for call in tool_calls)
         wrote_test = any(call.get("tool") == "write_test_file" for call in tool_calls)
         if wrote_source:
-            final = run_behavior_tests(project)
+            final = last_diagnostics if wrote_test and last_diagnostics.get("kind") == "behavior_tests" else run_behavior_tests(project)
             trace_events.append({"kind": "automatic_test_after_writes", "turn": turn, "final_test": final})
             if wrote_test and final.get("ok"):
                 trace_events.append({"kind": "auto_finalize_tested_writes", "turn": turn})
                 write_trace_file(trace_file, trace_meta, trace_events, 0, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 0
-        request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "tool_observations", "tool_observations": observations, "instruction": "Use observations and retained working_notes to continue or return mode=done. Update Intent, Observed, Next, and Blocker on the next response. If tests fail, fix the exact required state/checks. Do not repeat identical tool calls."}, working_notes))
+        request = build_followup_request(shared_context, retain_working_notes({"phase": "tool_observations", "tool_observations": observations, "instruction": "Use observations and retained working_notes to continue or return mode=done. Update Intent, Observed, Next, and Blocker on the next response. If tests fail, fix the exact required state/checks. Do not repeat identical tool calls."}, working_notes))
         trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
-    print(json.dumps({"error": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
-    trace_events.append({"kind": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics})
+    print(json.dumps({"error": "turn_limit", "turns": MAX_TURNS, "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
+    trace_events.append({"kind": "turn_limit", "turns": MAX_TURNS, "actions": total_actions, "last_diagnostics": last_diagnostics})
     write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
     return 1
 

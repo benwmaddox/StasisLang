@@ -219,6 +219,7 @@ def main() -> int:
     ai_queue = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java")
     ai_queue_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java")
     host_agent = read("tools/android_ai_agent_host.py")
+    host_compile = read("crates/stasis_android_bridge/src/android_workshop_compile.rs")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "protected void onPause()" in activity
     assert "protected void onSaveInstanceState(Bundle outState)" in activity
@@ -285,6 +286,11 @@ def main() -> int:
     assert "Bitmap snapshot()" in paint_view
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
+    assert "compile_android_workshop_project" in host_compile
+    assert "run_compile_check(project" in host_agent
+    assert "build_followup_request(shared_context" in host_agent
+    assert "source_file_path(project" in host_agent
+    assert "MAX_TOOL_CALLS_PER_BATCH = 12" in host_agent
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
     assert "private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues)" in activity
     assert 'assetRoot = "workshop_sample/"' not in template_catalog

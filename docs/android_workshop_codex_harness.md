@@ -156,6 +156,17 @@ priority` opts into the API's separately billed Priority processing. This is a
 useful request/cache latency comparison, but it is not billed against ChatGPT
 subscription Fast-mode allowance and is reported separately.
 
+The host runner compiles the selected `--project-root` through the same
+`compile_android_workshop_project` bridge used by Android before accepting
+writes or final test success. Source and test writes are one atomic batch:
+failed tools, compilation, or changed tests restore every touched file.
+Follow-up requests retain the initial shared-context bytes so the explicit
+cache breakpoint remains stable while only turn state changes. Traces identify
+the requested provider/model, the response model, per-model-call and tool-batch
+elapsed time, and successful versus rolled-back write counts. Host API traces
+and phone-native Codex subscription traces must not be combined as if they were
+the same provider or allowance.
+
 ## Limits
 
 - **Codex subscription:** do not estimate dollars. Display Codex account
