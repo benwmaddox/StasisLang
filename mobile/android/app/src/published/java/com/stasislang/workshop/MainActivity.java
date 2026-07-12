@@ -29,7 +29,7 @@ public final class MainActivity extends Activity {
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 200_000_000L;
     private static final int MAX_RENDER_COMMANDS = 8;
     private static final int RENDER_FRAME_HEADER_SIZE = 6;
-    private static final int RENDER_COMMAND_STRIDE = 7;
+    private static final int RENDER_COMMAND_STRIDE = 9;
     private static final int RENDER_FRAME_I32_CAPACITY = RENDER_FRAME_HEADER_SIZE + MAX_RENDER_COMMANDS * RENDER_COMMAND_STRIDE;
     private static final int RECT_VERTICES = 6;
     private static final int RECT_VERTEX_FLOATS = 6;
@@ -364,20 +364,31 @@ public final class MainActivity extends Activity {
             float red = ((color >> 16) & 255) / 255.0f;
             float green = ((color >> 8) & 255) / 255.0f;
             float blue = (color & 255) / 255.0f;
+            float alpha = Math.max(0, Math.min(255, frameValues[base + 8])) / 255.0f;
             float left = frameValues[base + 1];
             float top = frameValues[base + 2];
             float right = frameValues[base + 1] + frameValues[base + 3];
             float bottom = frameValues[base + 2] + frameValues[base + 4];
-            putVertex(left, top, red, green, blue);
-            putVertex(right, top, red, green, blue);
-            putVertex(left, bottom, red, green, blue);
-            putVertex(right, top, red, green, blue);
-            putVertex(right, bottom, red, green, blue);
-            putVertex(left, bottom, red, green, blue);
+            float centerX = (left + right) * 0.5f;
+            float centerY = (top + bottom) * 0.5f;
+            double radians = Math.toRadians(frameValues[base + 7] % 360);
+            float cosine = (float)Math.cos(radians);
+            float sine = (float)Math.sin(radians);
+            putVertex(left, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
+            putVertex(right, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
+            putVertex(left, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
+            putVertex(right, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
+            putVertex(right, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
+            putVertex(left, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
         }
 
-        private void putVertex(float x, float y, float red, float green, float blue) {
-            vertexBuffer.put(x).put(y).put(red).put(green).put(blue).put(1.0f);
+        private void putVertex(float x, float y, float centerX, float centerY,
+                float cosine, float sine, float red, float green, float blue, float alpha) {
+            float offsetX = x - centerX;
+            float offsetY = y - centerY;
+            float rotatedX = centerX + offsetX * cosine - offsetY * sine;
+            float rotatedY = centerY + offsetX * sine + offsetY * cosine;
+            vertexBuffer.put(rotatedX).put(rotatedY).put(red).put(green).put(blue).put(alpha);
         }
 
         private static int createProgram(String vertexSource, String fragmentSource) {

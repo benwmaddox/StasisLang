@@ -980,7 +980,7 @@ def main() -> int:
     assert "gamePreview.touchY()" in activity
     assert "gamePreview.touchActive()" in activity
     assert "MotionEvent" in activity
-    assert "RENDER_COMMAND_STRIDE = 7" in activity
+    assert "RENDER_COMMAND_STRIDE = 9" in activity
     assert "frameValues[5]" in activity
     assert "frameValues[base + 6]" in activity
     assert "GLES20.glDrawArrays" in activity
@@ -1090,7 +1090,11 @@ def main() -> int:
     assert "stasis_android_bridge_free_string" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
-    assert "const int frame_len = 62" in native
+    assert "const int frame_len = STASIS_RENDER_FRAME_I32_CAPACITY" in native
+    assert "#define STASIS_RENDER_COMMAND_STRIDE 9" in native
+    assert '"Render.command_schema_version"' in native
+    assert '"Render.command" #index "_rotation_degrees"' in native
+    assert '"Render.command" #index "_alpha"' in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv" not in native
     assert "scan_stasis_files" in native
     assert "analyze_stasis_file" in native
@@ -1158,6 +1162,9 @@ def main() -> int:
     assert "command3_asset" in sample_main
     assert "Render.command3_kind = 2" in sample_main
     assert "Render.command3_asset = -1520461853" in sample_main
+    assert "Render.command_schema_version = 2" in sample_main
+    assert "Render.command3_rotation_degrees" in sample_main
+    assert "Render.command3_alpha = 255" in sample_main
     pong_manifest = read("mobile/android/app/src/main/assets/workshop_sample/assets/manifest.json")
     assert '"id": "ball"' in pong_manifest
     assert '"encoding": "svg"' in pong_manifest
