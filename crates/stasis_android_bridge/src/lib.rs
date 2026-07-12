@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use stasis_assets::{AssetLimits, ResolvedAssetManifest};
+use stasis_assets::{AssetFormat, AssetHandle, AssetLimits, ResolvedAssetManifest};
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_compiler::frontend::workshop::{
@@ -78,6 +78,45 @@ pub fn load_android_workshop_asset_manifest(
 ) -> Result<ResolvedAssetManifest, String> {
     stasis_assets::load_project_asset_manifest(project_root, AssetLimits::default())
         .map_err(|error| error.to_string())
+}
+
+pub fn resolve_android_workshop_sprite_asset(
+    project_root: impl AsRef<Path>,
+    handle: i32,
+) -> Result<serde_json::Value, String> {
+    let handle = AssetHandle::from_i32(handle)
+        .ok_or_else(|| "sprite asset handle must be nonzero".to_string())?;
+    let manifest = load_android_workshop_asset_manifest(project_root)?;
+    let asset = manifest.by_handle(handle).ok_or_else(|| {
+        format!(
+            "sprite asset handle {} is not in the manifest",
+            handle.get()
+        )
+    })?;
+    let (encoding, width, height) = match asset.entry.format {
+        AssetFormat::Sprite {
+            encoding,
+            width,
+            height,
+        } => (format!("{encoding:?}").to_ascii_lowercase(), width, height),
+        AssetFormat::Audio { .. } => {
+            return Err(format!(
+                "asset handle {} identifies audio, not a sprite",
+                handle.get()
+            ));
+        }
+    };
+    Ok(serde_json::json!({
+        "status": "ok",
+        "handle": handle.as_i32(),
+        "id": asset.entry.id,
+        "path": asset.absolute_path,
+        "content_sha256": asset.entry.content_sha256,
+        "byte_length": asset.byte_length,
+        "encoding": encoding,
+        "width": width,
+        "height": height,
+    }))
 }
 
 pub fn run_android_workshop_stasis_tests(
@@ -858,6 +897,36 @@ pub extern "C" fn stasis_android_bridge_run_tick(
         .into_raw()
 }
 
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_resolve_sprite_asset(
+    project_root: *const c_char,
+    handle: i32,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        if project_root.is_null() {
+            return Err("null project root".to_string());
+        }
+        let project_root = CStr::from_ptr(project_root)
+            .to_str()
+            .map_err(|error| format!("project root was not UTF-8: {error}"))?;
+        resolve_android_workshop_sprite_asset(project_root, handle)
+    }));
+    let value = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => serde_json::json!({ "status": "error", "error": error }),
+        Err(_) => serde_json::json!({
+            "status": "error",
+            "error": "panic while resolving Android sprite asset"
+        }),
+    };
+    let message = serde_json::to_string(&value).unwrap_or_else(|_| {
+        "{\"status\":\"error\",\"error\":\"invalid sprite response\"}".to_string()
+    });
+    CString::new(message)
+        .unwrap_or_else(|_| CString::new("{\"status\":\"error\"}").unwrap())
+        .into_raw()
+}
+
 unsafe fn run_tick_from_c(
     project_root: *const c_char,
     entry_file: *const c_char,
@@ -927,6 +996,67 @@ mod tests {
         assert!(resolved.assets.is_empty());
         fs::remove_dir_all(root).ok();
     }
+
+    #[test]
+    fn android_bridge_resolves_sprite_metadata_by_stable_handle() {
+        let root = temp_project("sprite_asset");
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        let pixels = b"representative sprite bytes";
+        fs::write(root.join("assets/hero.png"), pixels).expect("write sprite");
+        let hash = stasis_assets::sha256_bytes(pixels);
+        fs::write(
+            root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
+            format!(r#"{{"schema":"stasis-assets","version":1,"assets":[{{"id":"hero","path":"assets/hero.png","content_sha256":"{hash}","format":{{"kind":"sprite","encoding":"png","width":4,"height":6}},"dependencies":[]}}]}}"#),
+        )
+        .expect("write manifest");
+
+        let manifest = load_android_workshop_asset_manifest(&root).expect("load manifest");
+        let handle = manifest.by_id("hero").expect("hero entry").handle.as_i32();
+        let resolved =
+            resolve_android_workshop_sprite_asset(&root, handle).expect("resolve sprite");
+        assert_eq!(resolved["status"], "ok");
+        assert_eq!(resolved["handle"], handle);
+        assert_eq!(resolved["encoding"], "png");
+        assert_eq!(resolved["width"], 4);
+        assert_eq!(resolved["height"], 6);
+        assert_eq!(resolved["content_sha256"], hash);
+        assert!(resolved["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("hero.png"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_bridge_rejects_missing_sprite_handle() {
+        let root = temp_project("missing_sprite_asset");
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        fs::write(
+            root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
+            r#"{"schema":"stasis-assets","version":1,"assets":[]}"#,
+        )
+        .expect("write manifest");
+
+        let error = resolve_android_workshop_sprite_asset(&root, 7).expect_err("missing handle");
+        assert!(error.contains("is not in the manifest"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bundled_pong_sprite_uses_shared_manifest_handle() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mobile/android/app/src/main/assets/workshop_sample")
+            .canonicalize()
+            .expect("Pong template root");
+        let resolved = resolve_android_workshop_sprite_asset(&root, -1_520_461_853)
+            .expect("resolve bundled ball");
+        assert_eq!(resolved["id"], "ball");
+        assert_eq!(resolved["encoding"], "svg");
+        assert_eq!(resolved["width"], 32);
+        assert_eq!(resolved["height"], 32);
+    }
+
     fn temp_project(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

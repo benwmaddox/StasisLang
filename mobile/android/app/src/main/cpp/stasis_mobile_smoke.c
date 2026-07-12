@@ -24,6 +24,7 @@ typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, con
 typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_values, uintptr_t out_len);
 typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_root, const char *entry_file, const char *path, int value);
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
+typedef char *(*stasis_android_bridge_resolve_sprite_asset_fn)(const char *project_root, int handle);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef struct CompileStats {
     int file_count;
@@ -53,6 +54,7 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_run_tick_frame_fn run_tick_frame;
     stasis_android_bridge_set_i32_global_fn set_i32_global;
     stasis_android_bridge_get_i32_global_fn get_i32_global;
+    stasis_android_bridge_resolve_sprite_asset_fn resolve_sprite_asset;
     stasis_android_bridge_free_string_fn free_string;
     int attempted;
 } RustBridgeApi;
@@ -891,6 +893,8 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_set_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_set_i32_global");
     rust_bridge_api.get_i32_global =
             (stasis_android_bridge_get_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_get_i32_global");
+    rust_bridge_api.resolve_sprite_asset =
+            (stasis_android_bridge_resolve_sprite_asset_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_sprite_asset");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
     if (rust_bridge_api.compile_project == NULL ||
@@ -1054,6 +1058,32 @@ Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activ
     (void)activity_class;
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "native smoke entry loaded");
     return (*env)->NewStringUTF(env, "Stasis Android native smoke loaded");
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeResolveSpriteAsset(
+        JNIEnv *env, jclass activity_class, jstring project_root, jint handle) {
+    (void)activity_class;
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    if (root == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"unable to read project root\"}");
+    }
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->resolve_sprite_asset == NULL || bridge->free_string == NULL) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"shared sprite resolver unavailable\"}");
+    }
+    char *message = bridge->resolve_sprite_asset(root, (int)handle);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"shared sprite resolver returned no result\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
 }
 
 JNIEXPORT jstring JNICALL

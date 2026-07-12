@@ -228,8 +228,8 @@ function render(): void {
     Render.command3_y = GameState.ball_y - 7;
     Render.command3_w = 14;
     Render.command3_h = 14;
-    Render.command3_asset = 1;
-    Render.command3_color = 16032865;
+    Render.command3_asset = -1520461853;
+    Render.command3_color = 16777215;
 
     Render.command4_kind = 1;
     Render.command4_x = (GameState.screen_w / 2) - 1;
