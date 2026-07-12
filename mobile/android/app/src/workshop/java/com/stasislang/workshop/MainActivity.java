@@ -8922,7 +8922,7 @@ public final class MainActivity extends Activity {
         JSONObject payload = new JSONObject();
         payload.put("model", "");
         payload.put("instructions", "");
-        payload.put("input", buildAiOpenAiInput(requestJson, true, true));
+        payload.put("input", buildAiOpenAiInput(requestJson, true, false));
         payload.put("tools", new JSONArray());
         payload.put("tool_choice", "auto");
         payload.put("parallel_tool_calls", false);
@@ -8931,7 +8931,6 @@ public final class MainActivity extends Activity {
         payload.put("stream", true);
         payload.put("include", new JSONArray().put("reasoning.encrypted_content"));
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
-        payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"));
         String serviceTier = WorkshopCodexServiceTier.requestTier(
                 getSharedPreferences(AI_PREFS, MODE_PRIVATE)
                         .getBoolean(AI_PREF_CODEX_FAST_MODE, false));

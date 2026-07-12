@@ -876,11 +876,14 @@ def main() -> int:
     assert "preferred_call" not in activity
     assert 'request.put("stasis_basics", aiStasisBasics())' in activity
     assert '"kind": "auto_finalize_tested_writes"' in host_agent
-    assert 'buildAiOpenAiInput(requestJson, true, true)' in activity
+    assert 'buildAiOpenAiInput(requestJson, true, false)' in activity
     assert 'AI_PREF_CODEX_FAST_MODE = "codex_fast_mode"' in activity
     assert 'WorkshopCodexServiceTier.requestTier' in activity
     assert 'payload.put("service_tier", serviceTier)' in activity
     assert 'appendAiTrace("codex_request_tier"' in activity
+    codex_method = activity[activity.index("private AiApiResponse callCodexResponses"):
+                            activity.index("private boolean migrateBundledPongBallSpeed")]
+    assert 'payload.put("prompt_cache_options"' not in codex_method
     assert "global instance_name: StructType" in activity
     assert "function name(arg_name: Type, other: Type): ReturnType" in activity
     assert "struct TypeName { field_name: Type; ... }" in activity

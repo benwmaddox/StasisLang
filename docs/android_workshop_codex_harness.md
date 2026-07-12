@@ -125,10 +125,12 @@ call. Oversized, missing, empty, or non-string notes fail response validation.
 All calls keep the complete original request as one identical cacheable prefix:
 the user goal, Stasis basics, symbol index, globals, selected source, full tool
 examples, and architecture/game rules. Only cumulative observations, test
-results, and working notes follow the boundary. Direct API and Codex subscription
-requests both send an explicit 30-minute cache breakpoint/options plus the same
-cache key. The private trace records exact cacheable characters, an approximate
-token count, and provider-reported cached tokens. After a batch writes a behavior test, Workshop
+results, and working notes follow the boundary. Direct API requests send an
+explicit 30-minute cache breakpoint/options. The ChatGPT subscription transport
+rejects that API-only field, so Codex subscription requests retain the identical
+full prefix and cache key while using implicit caching. The private trace records
+exact cacheable characters, an approximate token count, and provider-reported
+cached tokens. After a batch writes a behavior test, Workshop
 finishes locally when writes compiled and all runnable tests pass instead of
 requesting a redundant final model response.
 
