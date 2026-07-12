@@ -527,10 +527,13 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
         "cache_layout": "Stable shared context is first. Volatile per-turn tool observations live in turn_state after this object.",
         "stasis_basics": {
             "language": [
-                "Declare functions with function name(params): return_type { ... }.",
+                "Declare typed arguments and returns with function name(arg_name: Type, other: Type): ReturnType { ... }; use void when there is no return value.",
+                "Declare value types with struct TypeName { field_name: Type; ... } and access fields as value.field_name.",
+                "A persistent instance of a struct is normally declared with global instance_name: StructType; for example global state: GameState; then access state.score.",
+                "A direct named global block, global Name { field_name: Type; ... }, is also valid and is accessed as Name.field_name; do not confuse it with a struct type declaration.",
                 "Arithmetic, comparison, and assignment operators are infix.",
                 "Receiver calls value.method(args) are preferred when the first parameter is self: Type; function-form calls remain valid.",
-                "global Name { fields } stores inspectable state as Name.field; struct defines a value type.",
+                "Common types are bool, i32, u8, u16, u32, f32, f64, void, fixed arrays Type[N], and bounded text ascii[N] or utf8[N].",
             ],
             "runtime": [
                 "main initializes state, tick advances deterministic fixed-tick simulation, and render projects current state into render commands.",

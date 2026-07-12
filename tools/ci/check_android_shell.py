@@ -869,6 +869,10 @@ def main() -> int:
     assert "preferredFunctionCall" not in activity
     assert "preferred_call" not in activity
     assert 'request.put("stasis_basics", aiStasisBasics())' in activity
+    assert "global instance_name: StructType" in activity
+    assert "function name(arg_name: Type, other: Type): ReturnType" in activity
+    assert "struct TypeName { field_name: Type; ... }" in activity
+    assert "bounded text ascii[N] or utf8[N]" in activity
     assert "Gameplay progression is tick-based rather than dt-based" in activity
     assert "read_symbol" in activity
     assert "read_file" in activity

@@ -107,8 +107,10 @@ to 256 symbols and 16 KiB, reports truncation, and lets straightforward prompts
 read the likely target directly instead of spending the first turn on
 `list_symbols`. Full source remains opt-in through `read_symbol`.
 
-The same cached section includes compact `stasis_basics` covering function and
-global syntax, receiver-form versus function-form calls, deterministic
+The same cached section includes compact `stasis_basics` covering typed function
+arguments and returns, struct fields, persistent `global instance: StructType`
+state, direct named global blocks, common scalar/array/text types,
+receiver-form versus function-form calls, deterministic
 `main`/`tick`/`render` lifecycle ownership, limited `on_code_swap` use,
 hot-reload layout implications, and real `.test.stasis` test shape. These rules
 replace per-symbol derived call suggestions.
