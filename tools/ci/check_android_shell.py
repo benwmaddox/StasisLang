@@ -30,6 +30,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiObservationMemory.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiToolLoopPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiWorkingNotes.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiOverlayPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiInitialContextPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopConnectivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopBackgroundWorkPolicy.java",
@@ -881,6 +882,9 @@ def main() -> int:
     assert 'WorkshopCodexServiceTier.requestTier' in activity
     assert 'payload.put("service_tier", serviceTier)' in activity
     assert 'appendAiTrace("codex_request_tier"' in activity
+    assert "installAiGameProgressOverlay(root)" in activity
+    assert "WorkshopAiOverlayPolicy.shouldShow" in activity
+    assert 'setContentDescription("AI work status; tap to open Workshop")' in activity
     codex_method = activity[activity.index("private AiApiResponse callCodexResponses"):
                             activity.index("private boolean migrateBundledPongBallSpeed")]
     assert 'payload.put("prompt_cache_options"' not in codex_method

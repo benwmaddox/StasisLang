@@ -140,6 +140,12 @@ model, reasoning effort, tools, and cacheable request prefix. Standard remains
 the default because Fast consumes subscription allowance more quickly. The API
 key fallback does not reuse this subscription Fast setting.
 
+While the Workshop panel is closed, active and pending AI work appears in a
+compact status strip below the performance HUD. It shows queue state, agent
+step, action count, phase, and live elapsed time without taking over the game. Tapping the
+strip opens Workshop; it hides while the panel is open and when no work is
+queued or running.
+
 For host-only API timing, `tools/android_ai_agent_host.py --service-tier
 priority` opts into the API's separately billed Priority processing. This is a
 useful request/cache latency comparison, but it is not billed against ChatGPT

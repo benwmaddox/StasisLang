@@ -188,6 +188,12 @@ public final class MainActivity extends Activity {
     private TextView aiActionPill;
     private TextView aiPhasePill;
     private TextView aiElapsedPill;
+    private HorizontalScrollView aiGameProgressScroller;
+    private TextView aiGameQueuePill;
+    private TextView aiGameStepPill;
+    private TextView aiGameActionPill;
+    private TextView aiGamePhasePill;
+    private TextView aiGameElapsedPill;
     private Button aiCancelButton;
     private LinearLayout aiSettingsBody;
     private LinearLayout commandHistoryBody;
@@ -292,6 +298,8 @@ public final class MainActivity extends Activity {
     private long aiStartedAtNanos;
     private int aiProgressStep;
     private int aiProgressActions;
+    private int aiVisibleQueueCount;
+    private String aiProgressPhase = "idle";
     private SymbolEntry selectedSymbol;
 
     static {
@@ -654,6 +662,7 @@ public final class MainActivity extends Activity {
         }
 
         installGameStatusOverlay(root, true);
+        installAiGameProgressOverlay(root);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(14), dp(12), dp(14), dp(12));
@@ -849,6 +858,42 @@ public final class MainActivity extends Activity {
                 Gravity.TOP | Gravity.START);
         statusParams.setMargins(dp(8), dp(8), dp(68), 0);
         root.addView(gameStatus, statusParams);
+    }
+
+    private void installAiGameProgressOverlay(FrameLayout root) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.LEFT);
+        aiGameQueuePill = createAiProgressPill("AI working");
+        aiGameStepPill = createAiProgressPill("step 0/" + MAX_AI_AGENT_TURNS);
+        aiGameActionPill = createAiProgressPill("actions 0");
+        aiGamePhasePill = createAiProgressPill("idle");
+        aiGameElapsedPill = createAiProgressPill("time 0.0s");
+        row.addView(aiGameQueuePill);
+        row.addView(aiGameStepPill);
+        row.addView(aiGameActionPill);
+        row.addView(aiGamePhasePill);
+        row.addView(aiGameElapsedPill);
+
+        aiGameProgressScroller = new HorizontalScrollView(this);
+        aiGameProgressScroller.setHorizontalScrollBarEnabled(false);
+        aiGameProgressScroller.setBackgroundColor(Color.argb(120, 20, 28, 38));
+        aiGameProgressScroller.setContentDescription("AI work status; tap to open Workshop");
+        aiGameProgressScroller.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (editorPanel != null && editorPanel.getVisibility() != View.VISIBLE) {
+                    toggleEditorPanel();
+                }
+            }
+        });
+        aiGameProgressScroller.addView(row);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.START);
+        params.setMargins(dp(8), dp(48), dp(92), 0);
+        root.addView(aiGameProgressScroller, params);
+        updateAiGameProgressOverlay();
     }
 
     private void installVoiceChangeControls(FrameLayout root) {
@@ -1076,6 +1121,7 @@ public final class MainActivity extends Activity {
             voiceToggle.setVisibility(opening ? View.GONE : View.VISIBLE);
             if (!opening) voiceToggle.bringToFront();
         }
+        updateAiGameProgressOverlay();
     }
 
     private void startGameLoop() {
@@ -1145,6 +1191,7 @@ public final class MainActivity extends Activity {
     private void updateAiProgress(int step, int actions, String phase) {
         aiProgressStep = step;
         aiProgressActions = actions;
+        aiProgressPhase = phase == null ? "" : phase;
         if (aiStepPill != null) {
             aiStepPill.setText("step " + step + "/" + MAX_AI_AGENT_TURNS);
         }
@@ -1157,6 +1204,27 @@ public final class MainActivity extends Activity {
         if (aiElapsedPill != null) {
             aiElapsedPill.setText("time " + currentAiElapsedText());
         }
+        updateAiGameProgressOverlay();
+    }
+
+    private void updateAiGameProgressOverlay() {
+        if (aiGameProgressScroller == null) return;
+        boolean panelOpen = editorPanel != null && editorPanel.getVisibility() == View.VISIBLE;
+        boolean visible = WorkshopAiOverlayPolicy.shouldShow(
+                panelOpen, aiRunActive, aiVisibleQueueCount);
+        aiGameProgressScroller.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (!visible) return;
+        String elapsed = currentAiElapsedText();
+        aiGameQueuePill.setText(WorkshopAiOverlayPolicy.queueLabel(
+                aiRunActive, aiVisibleQueueCount));
+        aiGameStepPill.setText("step " + aiProgressStep + "/" + MAX_AI_AGENT_TURNS);
+        aiGameActionPill.setText("actions " + aiProgressActions);
+        aiGamePhasePill.setText(aiProgressPhase);
+        aiGameElapsedPill.setText("time " + elapsed);
+        aiGameProgressScroller.setContentDescription(
+                WorkshopAiOverlayPolicy.contentDescription(aiRunActive, aiVisibleQueueCount,
+                        aiProgressStep, MAX_AI_AGENT_TURNS, aiProgressActions,
+                        aiProgressPhase, elapsed));
     }
 
     private String currentAiElapsedText() {
@@ -1253,6 +1321,7 @@ public final class MainActivity extends Activity {
         appendExplorationProgress(debugTextBuilder);
         gameStatus.setTextColor(debugColorForBudget(budgetPercent));
         gameStatus.setText(debugTextBuilder.toString());
+        updateAiGameProgressOverlay();
     }
 
     private void appendExplorationProgress(StringBuilder text) {
@@ -2684,15 +2753,16 @@ public final class MainActivity extends Activity {
         aiQueueBody.removeAllViews();
         try {
             List<AndroidAiQueue.Entry> items = AndroidAiQueue.list(this, activeRecoveryProjectId());
-            boolean hasActiveItems = false;
+            int activeItems = 0;
             for (AndroidAiQueue.Entry item : items) {
                 if (AndroidAiQueue.PENDING.equals(item.state)
                         || AndroidAiQueue.IN_PROGRESS.equals(item.state)) {
-                    hasActiveItems = true;
-                    break;
+                    activeItems += 1;
                 }
             }
-            if (!hasActiveItems) {
+            aiVisibleQueueCount = activeItems;
+            updateAiGameProgressOverlay();
+            if (activeItems == 0) {
                 if (aiQueueSection != null) aiQueueSection.setVisibility(View.GONE);
                 return;
             }
@@ -2723,6 +2793,8 @@ public final class MainActivity extends Activity {
                 aiQueueBody.addView(row, fullWidth());
             }
         } catch (Exception error) {
+            aiVisibleQueueCount = 0;
+            updateAiGameProgressOverlay();
             if (aiQueueSection != null) aiQueueSection.setVisibility(View.VISIBLE);
             TextView unavailable = new TextView(this);
             unavailable.setText("AI queue unavailable: " + error.getMessage());
