@@ -11,6 +11,7 @@ public final class WorkshopAiFastPathPolicyTest {
         assertTrue(WorkshopAiFastPathPolicy.isSimpleTuningPrompt("paddles should be double height"));
         assertTrue(WorkshopAiFastPathPolicy.isSimpleTuningPrompt("increase.paddle size"));
         assertTrue(WorkshopAiFastPathPolicy.isSimpleTuningPrompt("make the ball slower"));
+        assertTrue(WorkshopAiFastPathPolicy.isSimpleTuningPrompt("make both paddles 12 pixels wide"));
     }
 
     @Test

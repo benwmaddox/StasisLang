@@ -7,7 +7,8 @@ final class WorkshopAiFastPathPolicy {
     static final int MAX_SOURCE_CHARS = 24 * 1024;
 
     private static final String[] TUNING_TERMS = {
-            "size", "width", "height", "bigger", "smaller", "double", "half",
+            "size", "width", "wide", "wider", "height", "tall", "taller",
+            "bigger", "larger", "smaller", "shorter", "double", "half",
             "increase", "decrease", "faster", "slower", "speed", "color", "position"
     };
     private static final String[] COMPLEX_TERMS = {
