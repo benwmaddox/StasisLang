@@ -27,6 +27,9 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetIdentity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopMoney.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiPricing.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiObservationMemory.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiToolLoopPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiWorkingNotes.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopConnectivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopBackgroundWorkPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkCoordinator.java",
@@ -882,8 +885,18 @@ def main() -> int:
     assert "aiToolSetInputState" in activity
     assert "nativeRunTests" in activity
     assert "test `name`(): bool" in activity
-    assert "The app compiles once after each tool-call batch that contains writes and runs tests after each tool-call batch" in activity
-    assert "Use on_code_swap() for post-hot-swap migration" in activity
+    assert "read-only inspection batches do not rerun tests" in activity
+    assert "Use on_code_swap() only for post-hot-swap migration" in activity
+    assert "MAX_AI_TOOL_CALLS_PER_BATCH = 12" in activity
+    assert "MAX_AI_READ_ONLY_BATCHES = 2" in activity
+    assert "retainedToolObservations" in activity
+    assert "read_only_batch_not_executed" in activity
+    assert "Never reread a target already present" in activity
+    assert 'responseProperties.put("working_notes"' in activity
+    assert 'put("maxLength", WorkshopAiWorkingNotes.MAX_CHARS)' in activity
+    assert 'setStatusText("AI working notes: " + display)' in activity
+    assert 'appendAiTrace("working_notes"' in activity
+    assert "Report decisions and evidence, not private chain-of-thought" in activity
     assert "runtimeStateJson" in activity
     assert "frameValuesToJson" in activity
     assert "aiToolGetDiagnostics" in activity
@@ -941,6 +954,9 @@ def main() -> int:
     assert "AI_PREF_MODEL_DEFAULT_VERSION" in activity
     assert 'DEFAULT_MODEL = "gpt-5.6-sol"' in host_agent
     assert 'DEFAULT_REASONING_EFFORT = "medium"' in host_agent
+    assert "MAX_WORKING_NOTES_CHARS = 2_000" in host_agent
+    assert '"required": ["mode", "working_notes"]' in host_agent
+    assert '"kind": "working_notes"' in host_agent
     assert '"cache_write": 6.25' in host_agent
     assert "prompt_cache_key" in activity
     assert "prompt_cache_breakpoint" in activity

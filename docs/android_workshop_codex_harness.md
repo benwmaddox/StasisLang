@@ -101,6 +101,13 @@ set and its deterministic edit/compile/test loop. The phone-native Codex client
 should adapt those handlers at the tool-call boundary instead of duplicating
 their behavior.
 
+Every model response also carries required, user-visible `working_notes`,
+bounded to 2,000 characters. The note records concise `Intent`, `Observed`,
+`Next`, and `Blocker` facts rather than private chain-of-thought. The latest
+valid note is shown in the Workshop status, written to the private bounded trace,
+and supplied with retained tool observations on the next otherwise stateless
+call. Oversized, missing, empty, or non-string notes fail response validation.
+
 ## Limits
 
 - **Codex subscription:** do not estimate dollars. Display Codex account
