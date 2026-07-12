@@ -576,30 +576,9 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
     }
 
 
-def compact_followup_context(shared: dict[str, Any]) -> dict[str, Any]:
-    protocol = shared.get("protocol", {})
-    project_context = shared.get("project_context", {})
+def build_agent_request(project: Path, prompt: str, turn_state: dict[str, Any]) -> dict[str, Any]:
     return {
-        "cache_layout": "Compact follow-up context; current source and diagnostics are retained in turn_state observations.",
-        "stasis_basics": shared.get("stasis_basics", {}),
-        "protocol": {
-            "response_contract": protocol.get("response_contract", {}),
-            "available_tools": protocol.get("available_tools", []),
-            "stasis_style_rules": protocol.get("stasis_style_rules", {}),
-        },
-        "workflow_rules": shared.get("workflow_rules", {}),
-        "user_request": shared.get("user_request", {}),
-        "project_context": {
-            "selected_symbols": project_context.get("selected_symbols", []),
-            "selected_symbols_are_context_only": True,
-        },
-    }
-
-
-def build_agent_request(project: Path, prompt: str, turn_state: dict[str, Any], compact: bool = False) -> dict[str, Any]:
-    shared = build_shared_context(project, prompt)
-    return {
-        "shared_context": compact_followup_context(shared) if compact else shared,
+        "shared_context": build_shared_context(project, prompt),
         "turn_state": turn_state,
     }
 
@@ -1072,7 +1051,7 @@ def main() -> int:
             if turn >= MAX_TURNS:
                 write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "response_validation_error", "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching shared_context.protocol.response_contract, including bounded working_notes. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."}, working_notes), compact=True)
+            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "response_validation_error", "tool_observations": response_validation_errors, "instruction": "Your previous JSON response shape was invalid. Return exactly one JSON object matching shared_context.protocol.response_contract, including bounded working_notes. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source."}, working_notes))
             trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
             continue
         working_notes = response["working_notes"].strip()
@@ -1091,7 +1070,7 @@ def main() -> int:
             if turn >= MAX_TURNS:
                 write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "direct_edit_test_failure", "tool_observations": observations, "test_observation": final, "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Update working_notes, inspect the exact failure, then fix it using precise tool calls."}, working_notes), compact=True)
+            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "direct_edit_test_failure", "tool_observations": observations, "test_observation": final, "instruction": "Direct edits were applied or rolled back, but the required local behavior test failed. Update working_notes, inspect the exact failure, then fix it using precise tool calls."}, working_notes))
             continue
         if mode != "tool_calls" or not tool_calls:
             final = run_behavior_tests(project)
@@ -1103,7 +1082,7 @@ def main() -> int:
             if turn >= MAX_TURNS:
                 write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 1
-            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "done_or_empty_test_failure", "tool_observations": [], "test_observation": final, "instruction": "The model returned done, but the required local behavior test failed. Update working_notes with the failure and fix it using precise tool calls."}, working_notes), compact=True)
+            request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "done_or_empty_test_failure", "tool_observations": [], "test_observation": final, "instruction": "The model returned done, but the required local behavior test failed. Update working_notes with the failure and fix it using precise tool calls."}, working_notes))
             continue
         observations, last_diagnostics = execute_tool_batch(project, tool_calls, last_diagnostics)
         total_actions += len(tool_calls)
@@ -1118,7 +1097,7 @@ def main() -> int:
                 trace_events.append({"kind": "auto_finalize_tested_writes", "turn": turn})
                 write_trace_file(trace_file, trace_meta, trace_events, 0, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
                 return 0
-        request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "tool_observations", "tool_observations": observations, "instruction": "Use observations and retained working_notes to continue or return mode=done. Update Intent, Observed, Next, and Blocker on the next response. If tests fail, fix the exact required state/checks. Do not repeat identical tool calls."}, working_notes), compact=True)
+        request = build_agent_request(project, args.prompt, retain_working_notes({"phase": "tool_observations", "tool_observations": observations, "instruction": "Use observations and retained working_notes to continue or return mode=done. Update Intent, Observed, Next, and Blocker on the next response. If tests fail, fix the exact required state/checks. Do not repeat identical tool calls."}, working_notes))
         trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
     print(json.dumps({"error": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics}, indent=2))
     trace_events.append({"kind": "tool_call_limit", "actions": total_actions, "last_diagnostics": last_diagnostics})

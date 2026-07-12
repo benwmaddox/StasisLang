@@ -327,7 +327,9 @@ def main() -> int:
     assert "WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult))" in activity
     assert "WorkshopAiCompletionStatus.canFinalizeTestedWrites" in activity
     assert "auto_finalize_tested_writes" in activity
-    assert "compactAiFollowupBase(initialRequestJson)" in activity
+    assert 'followup.put("original_request", new JSONObject(initialRequestJson))' in activity
+    assert 'appendAiTrace("prompt_cache_context"' in activity
+    assert 'put("approx_cacheable_tokens", (cacheableChars + 3) / 4)' in activity
     assert 'response.optBoolean("applied_tool_writes", false)' in activity
     assert "Context & Images" in activity
     assert 'aiPatch.setText("Run")' in activity
@@ -873,8 +875,8 @@ def main() -> int:
     assert "preferredFunctionCall" not in activity
     assert "preferred_call" not in activity
     assert 'request.put("stasis_basics", aiStasisBasics())' in activity
-    assert "def compact_followup_context" in host_agent
     assert '"kind": "auto_finalize_tested_writes"' in host_agent
+    assert 'buildAiOpenAiInput(requestJson, true, true)' in activity
     assert "global instance_name: StructType" in activity
     assert "function name(arg_name: Type, other: Type): ReturnType" in activity
     assert "struct TypeName { field_name: Type; ... }" in activity
