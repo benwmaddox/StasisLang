@@ -37,4 +37,16 @@ public final class WorkshopAiVerificationRunnerTest {
                 policy, true, false, 1, Collections.<String>emptyList(), false);
         assertEquals(WorkshopAiVerificationResult.Status.FAILED, result.status);
     }
+
+    @Test
+    public void independentReviewerFillsExistingCheckSlot() {
+        WorkshopAiVerificationResult preliminary = new WorkshopAiVerificationResult(
+                WorkshopAiVerificationResult.Status.INCONCLUSIVE,
+                WorkshopAiVerificationPolicy.Risk.GAMEPLAY, 4, 5,
+                "independent verification is required", 0L);
+        WorkshopAiVerificationResult verified = WorkshopAiVerificationRunner.completeIndependent(
+                preliminary, WorkshopAiVerificationResult.Status.VERIFIED, "passed", 12L);
+        assertEquals(5, verified.passedChecks);
+        assertEquals(5, verified.totalChecks);
+    }
 }

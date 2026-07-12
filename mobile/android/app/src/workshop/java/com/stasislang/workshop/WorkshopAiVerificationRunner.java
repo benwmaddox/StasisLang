@@ -41,6 +41,15 @@ final class WorkshopAiVerificationRunner {
                 "required local checks passed", started);
     }
 
+    static WorkshopAiVerificationResult completeIndependent(
+            WorkshopAiVerificationResult preliminary,
+            WorkshopAiVerificationResult.Status status, String evidence, long elapsedMs) {
+        int passed = preliminary.passedChecks
+                + (status == WorkshopAiVerificationResult.Status.VERIFIED ? 1 : 0);
+        return new WorkshopAiVerificationResult(status, preliminary.risk, passed,
+                preliminary.totalChecks, evidence, elapsedMs);
+    }
+
     private static WorkshopAiVerificationResult result(WorkshopAiVerificationResult.Status status,
             WorkshopAiVerificationPolicy.Decision policy, int passed, int total, String evidence,
             long startedNanos) {

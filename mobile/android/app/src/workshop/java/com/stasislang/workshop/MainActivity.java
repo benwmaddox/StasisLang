@@ -37,6 +37,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.inputmethod.InputMethodManager;
 import android.util.Base64;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -1223,6 +1224,7 @@ public final class MainActivity extends Activity {
             if (AndroidAiQueue.updatePhase(this, activeRecoveryProjectId(), activeAiQueueEntry.id,
                     WorkshopAiRunPhase.fromWireValue(phase), currentAiElapsedText())) {
                 lastPersistedAiPhase = phase;
+                refreshAiQueue();
             }
         } catch (Exception error) {
             appendAiTraceFields("queue_phase_persist_failed", "phase", phase,
@@ -4377,6 +4379,15 @@ public final class MainActivity extends Activity {
         runAiPatch("text", null);
     }
 
+    private void dismissAiKeyboard() {
+        if (aiPromptEditor == null) return;
+        aiPromptEditor.clearFocus();
+        InputMethodManager keyboard = (InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
+        if (keyboard != null) {
+            keyboard.hideSoftInputFromWindow(aiPromptEditor.getWindowToken(), 0);
+        }
+    }
+
     private void runAiPatch(String queueSource, AndroidAiQueue.Entry queuedEntry) {
         if (audioRecordingActive) {
             setStatusText("Finish or cancel audio recording before running AI");
@@ -4570,6 +4581,7 @@ public final class MainActivity extends Activity {
         aiVerificationSummary = "verify --";
         if (aiVerificationPill != null) aiVerificationPill.setText(aiVerificationSummary);
         if (aiGameVerificationPill != null) aiGameVerificationPill.setText(aiVerificationSummary);
+        dismissAiKeyboard();
         if (!WorkshopLongWorkCoordinator.beginAi(this, "Running queued game change", new Runnable() {
             @Override public void run() { cancelAiRun(); }
         })) {
@@ -5407,7 +5419,7 @@ public final class MainActivity extends Activity {
         try {
             if (session.verifierCallCount >= 2) {
                 return verificationResult(WorkshopAiVerificationResult.Status.INCONCLUSIVE,
-                        policy, preliminary, "independent reviewer reached its two-call limit", startedMs);
+                        preliminary, "independent reviewer reached its two-call limit", startedMs);
             }
             session.verifierCallCount += 1;
             postAiProgress(session.currentStep, session.actionCount, "verifier model");
@@ -5465,14 +5477,14 @@ public final class MainActivity extends Activity {
             if (errors.length() > 0 || !"tool_calls".equals(reviewer.optString("mode", ""))
                     || calls == null || calls.length() != 1) {
                 return verificationResult(WorkshopAiVerificationResult.Status.INCONCLUSIVE,
-                        policy, preliminary, "verifier did not return one valid temporary test", startedMs);
+                        preliminary, "verifier did not return one valid temporary test", startedMs);
             }
             JSONObject call = calls.getJSONObject(0);
             JSONObject args = call.optJSONObject("args");
             if (!"write_test_file".equals(call.optString("tool", "")) || args == null
                     || args.optString("source", "").trim().isEmpty()) {
                 return verificationResult(WorkshopAiVerificationResult.Status.INCONCLUSIVE,
-                        policy, preliminary, "verifier attempted a disallowed action", startedMs);
+                        preliminary, "verifier attempted a disallowed action", startedMs);
             }
             WorkshopAiTemporaryVerification.Result executed = WorkshopAiTemporaryVerification.run(
                     projectRoot(), args.getString("source"), testFile -> {
@@ -5496,14 +5508,14 @@ public final class MainActivity extends Activity {
             return verificationResult(executed.passed
                             ? WorkshopAiVerificationResult.Status.VERIFIED
                             : WorkshopAiVerificationResult.Status.FAILED,
-                    policy, preliminary, executedEvidence, startedMs);
+                    preliminary, executedEvidence, startedMs);
         } catch (Exception error) {
             try {
                 appendAiTrace("verifier_error", new JSONObject().put("error", error.getMessage()));
             } catch (Exception ignored) {
             }
             return verificationResult(WorkshopAiVerificationResult.Status.INCONCLUSIVE,
-                    policy, preliminary, "verifier error: " + error.getMessage(), startedMs);
+                    preliminary, "verifier error: " + error.getMessage(), startedMs);
         }
     }
 
@@ -5515,12 +5527,8 @@ public final class MainActivity extends Activity {
 
     private WorkshopAiVerificationResult verificationResult(
             WorkshopAiVerificationResult.Status status,
-            WorkshopAiVerificationPolicy.Decision policy,
             WorkshopAiVerificationResult preliminary, String evidence, long startedMs) {
-        int total = preliminary.totalChecks + 1;
-        int passed = preliminary.passedChecks
-                + (status == WorkshopAiVerificationResult.Status.VERIFIED ? 1 : 0);
-        return new WorkshopAiVerificationResult(status, policy.risk, passed, total, evidence,
+        return WorkshopAiVerificationRunner.completeIndependent(preliminary, status, evidence,
                 SystemClock.elapsedRealtime() - startedMs);
     }
 
@@ -7035,9 +7043,12 @@ public final class MainActivity extends Activity {
                 compileAttempted = true;
                 String elapsed = currentAiElapsedText();
                 boolean appliedToolWrites = response.optBoolean("applied_tool_writes", false);
-                String completionPhase = appliedToolWrites
-                        ? WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult))
-                        : aiReloadPhase(compileResult);
+                String completionPhase = aiResult.verification != null
+                        && aiResult.verification.canApplyAutomatically()
+                                ? WorkshopAiRunPhase.VERIFIED.wireValue()
+                                : (appliedToolWrites
+                                        ? WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult))
+                                        : aiReloadPhase(compileResult));
                 updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, completionPhase);
                 JSONObject testRun = aiToolRunTests(new AiAgentSession());
                 appendAiTrace("apply_done", new JSONObject().put("summary", response.optString("summary", "no actions")).put("compile", compileResult).put("tests", testRun).put("elapsed", elapsed));
@@ -7089,7 +7100,9 @@ public final class MainActivity extends Activity {
             updateAiProgress(
                     aiResult.finalStep,
                     aiResult.finalActionCount,
-                    WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult)));
+                    aiResult.verification != null && aiResult.verification.canApplyAutomatically()
+                            ? WorkshopAiRunPhase.VERIFIED.wireValue()
+                            : WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult)));
             JSONObject testRun = aiToolRunTests(new AiAgentSession());
             appendAiTrace("apply_edits", new JSONObject().put("summary", response.optString("summary", "updated workspace")).put("compile", compileResult).put("tests", testRun).put("elapsed", elapsed));
             recordAiOutcome(activeAiPrompt, "applied", response.optString("summary", "updated workspace"), aiResult.usageSummary);

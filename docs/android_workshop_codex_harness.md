@@ -194,6 +194,14 @@ restart. Successful write observations are reduced to identity, character
 count, SHA-256, and results before a follow-up call; failed attempts retain
 their complete source for repair.
 
+The first phone-native acceptance run used the shared 20-pixel Pong ball
+request. The generated-test audit passed, the first independent temporary test
+found an incorrect collision edge, one primary repair cycle ran, and the second
+independent test passed. Both temporary files were removed and the transaction
+store was empty after application. Total elapsed time was 147.2 seconds; the
+trace records two verifier calls, one repair cycle, one failed write batch, and
+the final verified result.
+
 Use `tools/run_android_ai_model_comparison.py` to summarize isolated Sol,
 Terra, and Luna runs with actual model time, local tool time, token/cache usage,
 estimated standard API cost, and a model-independent acceptance suite. Keep

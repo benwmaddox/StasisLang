@@ -169,8 +169,22 @@ Implemented on `codex/android-workshop-next`:
 - Trace fields for verification ratio, reviewer calls, repair cycles, failed
   write batches, and restored writes.
 
-Still requires device-level acceptance before the feature is considered fully
-complete: run the shared Pong request through the phone-native Codex transport,
-confirm verifier-test execution and repair in the native bridge, inspect the
-new HUD pills, and measure local verification time on-device. That launch must
-wait for the user's explicit ready signal.
+Device acceptance completed on a Galaxy S21 over wireless ADB:
+
+- The shared Pong request reached the restricted verifier at primary step 5
+  after 12 tool actions.
+- Generated-test audit passed 3/3 checks with observable behavior, five
+  comparisons, and 18 numeric cases.
+- The first temporary verifier test failed, was removed, and returned exact
+  evidence to the primary agent.
+- One repair cycle ran; the second temporary verifier test passed as the fifth
+  native test and was removed.
+- No transaction or temporary verification file remained after application.
+- End-to-end elapsed time was 147.2 seconds; local compile/test work remained a
+  small fraction of the two primary/reviewer model round trips.
+
+The device run exposed and prompted fixes for verification ratio accounting,
+the final `verified` phase label, live queue-row phase refresh, and keyboard
+dismissal when work starts. Process-kill recovery remains covered by the atomic
+transaction unit tests and should be exercised again during broader queue and
+cancellation acceptance.
