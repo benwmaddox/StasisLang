@@ -30,8 +30,6 @@ MAX_TURNS = 15
 MAX_WORKING_NOTES_CHARS = 2_000
 MAX_INITIAL_SYMBOLS = 256
 MAX_INITIAL_SYMBOL_INDEX_CHARS = 16 * 1024
-MAX_FAST_PATH_SYMBOLS = 32
-MAX_FAST_PATH_SOURCE_CHARS = 24 * 1024
 PROMPT_CACHE_KEY = "stasis-android-ai-agent-v2"
 
 
@@ -507,18 +505,6 @@ def response_contract() -> dict[str, Any]:
         },
     }
 
-
-def is_simple_tuning_prompt(prompt: str) -> bool:
-    normalized = prompt.strip().lower()
-    if not normalized or len(normalized) > 160 or "\n" in normalized:
-        return False
-    if any(term in normalized for term in ("add a new", "create a new", "multiplayer", "network", "system", "level editor")):
-        return False
-    return any(term in normalized for term in (
-        "size", "width", "height", "bigger", "smaller", "double", "half",
-        "increase", "decrease", "faster", "slower", "speed", "color", "position",
-    ))
-
 def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
     symbols = parse_symbols(project)
     globals_payload = []
@@ -537,19 +523,6 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
             break
         serialized_chars += separator_chars + candidate_chars
         compact_symbols.append(compact)
-    fast_path_enabled = is_simple_tuning_prompt(prompt)
-    fast_path_symbols: list[dict[str, Any]] = []
-    fast_path_chars = 2
-    if fast_path_enabled:
-        for symbol in symbols:
-            source_symbol = symbol_json(symbol, True)
-            candidate_chars = len(json.dumps(source_symbol, separators=(",", ":")))
-            separator_chars = 0 if not fast_path_symbols else 1
-            if (len(fast_path_symbols) >= MAX_FAST_PATH_SYMBOLS
-                    or fast_path_chars + separator_chars + candidate_chars > MAX_FAST_PATH_SOURCE_CHARS):
-                break
-            fast_path_chars += separator_chars + candidate_chars
-            fast_path_symbols.append(source_symbol)
     return {
         "cache_layout": "Stable shared context is first. Volatile per-turn tool observations live in turn_state after this object.",
         "stasis_basics": {
@@ -596,15 +569,6 @@ def build_shared_context(project: Path, prompt: str) -> dict[str, Any]:
                 "included_count": len(compact_symbols),
                 "available_count": len(symbols),
                 "truncated": len(compact_symbols) < len(symbols),
-            },
-            "fast_path": {
-                "enabled": fast_path_enabled,
-                "reason": "short tuning request" if fast_path_enabled else "standard agent path",
-                "source_symbols": fast_path_symbols,
-                "included_count": len(fast_path_symbols),
-                "available_count": len(symbols),
-                "truncated": fast_path_enabled and len(fast_path_symbols) < len(symbols),
-                "instruction": "Use these bounded current sources to write the complete change and a behavior test in the first response; do not spend a read-only turn when the needed source is present." if fast_path_enabled else "Use the normal inspect-write-test loop.",
             },
             "selected_symbols": [],
             "selected_symbols_are_context_only": True,
@@ -739,7 +703,6 @@ def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
     stable_instruction = (
         "Return only one JSON object matching request.shared_context.protocol.response_contract exactly. "
         "Follow request.shared_context.stasis_basics as the authoritative language/runtime orientation. "
-        "When request.shared_context.project_context.fast_path.enabled is true, use its current bounded source_symbols to write the small tuning change and a behavior test in the first response without redundant reads. "
         "Every response must include working_notes of at most 2000 characters with concise Intent, Observed, Next, and Blocker facts. These are user-visible state notes, not private chain-of-thought. "
         "The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when it already identifies the target. "
         "Use mode=tool_calls to inspect/write with the provided fine-grained symbol, import, and test tools. Do not use read_file; use list_symbols/list_owner_symbols/read_symbol/read_imports/list_tests/read_test_file instead. "
@@ -754,7 +717,7 @@ def build_openai_payload(model: str, request: dict[str, Any]) -> dict[str, Any]:
     schema = response_json_schema()
     return {
         "model": model,
-        "reasoning": {"effort": "low" if shared_context.get("project_context", {}).get("fast_path", {}).get("enabled") else DEFAULT_REASONING_EFFORT},
+        "reasoning": {"effort": DEFAULT_REASONING_EFFORT},
         "prompt_cache_key": PROMPT_CACHE_KEY,
         "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
         "text": {"format": {"type": "json_schema", "name": "stasis_host_ai_response", "strict": False, "schema": schema}},
@@ -782,8 +745,8 @@ def validate_openai_payload(payload: dict[str, Any]) -> list[str]:
         errors.append("prompt_cache_key is required")
     if payload.get("prompt_cache_options") != {"mode": "explicit", "ttl": "30m"}:
         errors.append("prompt_cache_options must use explicit 30m caching")
-    if payload.get("reasoning") not in ({"effort": "medium"}, {"effort": "low"}):
-        errors.append("reasoning effort must be medium or bounded fast-path low")
+    if payload.get("reasoning") != {"effort": "medium"}:
+        errors.append("reasoning effort must be medium")
     input_items = payload.get("input")
     if not isinstance(input_items, list) or len(input_items) != 3:
         errors.append("input must contain stable instruction, stable context, and volatile context messages")

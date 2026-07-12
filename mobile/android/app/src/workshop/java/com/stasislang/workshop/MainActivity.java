@@ -4531,47 +4531,6 @@ public final class MainActivity extends Activity {
                 .put("truncated", symbols.length() < availableCount);
     }
 
-    private static JSONObject aiFastPathContext(String prompt, ProjectSnapshot project,
-            JSONArray imageAttachments) throws Exception {
-        boolean enabled = (imageAttachments == null || imageAttachments.length() == 0)
-                && WorkshopAiFastPathPolicy.isSimpleTuningPrompt(prompt);
-        JSONArray symbols = new JSONArray();
-        int availableCount = 0;
-        int serializedChars = 2;
-        boolean accepting = enabled;
-        if (enabled && project != null) {
-            for (SymbolSection section : project.sections) {
-                for (SymbolGroup group : section.groups) {
-                    for (SymbolEntry symbol : group.symbols) {
-                        if ("test".equals(symbol.kind)) continue;
-                        availableCount += 1;
-                        if (!accepting) continue;
-                        JSONObject source = symbolToJson(symbol, true);
-                        int candidateChars = source.toString().length();
-                        if (!WorkshopAiFastPathPolicy.canAppendSource(
-                                serializedChars, candidateChars, symbols.length())) {
-                            accepting = false;
-                            continue;
-                        }
-                        if (symbols.length() > 0) serializedChars += 1;
-                        serializedChars += candidateChars;
-                        symbols.put(source);
-                    }
-                }
-            }
-        }
-        return new JSONObject()
-                .put("enabled", enabled)
-                .put("reason", enabled ? "short tuning request" : "standard agent path")
-                .put("source_symbols", symbols)
-                .put("included_count", symbols.length())
-                .put("available_count", availableCount)
-                .put("truncated", enabled && symbols.length() < availableCount)
-                .put("instruction", enabled
-                        ? "Use these bounded current sources to write the complete change and a behavior test in the first response; do not spend a read-only turn when the needed source is present."
-                        : "Use the normal inspect-write-test loop.");
-    }
-
     private static JSONObject aiStasisBasics() throws Exception {
         return new JSONObject()
                 .put("language", new JSONArray()
@@ -4660,7 +4619,6 @@ public final class MainActivity extends Activity {
             request.put("architecture_recommendations", architectureRecommendations);
             request.put("project_globals", aiProjectGlobals(project));
             request.put("project_symbol_index", aiProjectSymbolIndex(project));
-            request.put("fast_path", aiFastPathContext(prompt, project, imageAttachments));
             request.put("user_prompt", prompt);
             request.put("selected_symbols", selectedSymbols);
             request.put("selected_symbols_are_context_only", true);
@@ -4951,19 +4909,6 @@ public final class MainActivity extends Activity {
                         .put("status", "not_run_for_read_only_batch");
             }
             appendAiTrace("test_observation", new JSONObject().put("turn", session.currentStep).put("result", testObservation));
-            if (batchHasWrites && WorkshopAiFastPathPolicy.canAutoFinalize(
-                    aiToolCallsContainTestWrite(toolCalls), session.successfulWriteCount,
-                    compileReady, session.latestRunnableTestsPassed())) {
-                JSONObject completed = new JSONObject()
-                        .put("mode", "done")
-                        .put("working_notes", session.workingNotes)
-                        .put("summary", "Applied and tested " + session.successfulWriteCount + " tool write(s)")
-                        .put("reason", "Successful tool writes compiled and all runnable tests passed; skipped a redundant final model call.");
-                appendAiTrace("auto_finalize_tested_writes", completed);
-                return new AiAgentResult(completed.toString(), usage.toJson(model),
-                        useCodex ? usage.subscriptionSummary() : usage.summary(), session.currentStep,
-                        session.actionCount, generatedImages);
-            }
             JSONObject followup = new JSONObject();
             followup.put("original_request", new JSONObject(initialRequestJson));
             followup.put("tool_observations", session.retainedToolObservations());
@@ -5111,14 +5056,6 @@ public final class MainActivity extends Activity {
         for (int index = 0; index < toolCalls.length(); index += 1) {
             JSONObject call = toolCalls.optJSONObject(index);
             if (call != null && isAiWriteTool(call.optString("tool", ""))) return true;
-        }
-        return false;
-    }
-
-    private static boolean aiToolCallsContainTestWrite(JSONArray toolCalls) {
-        for (int index = 0; index < toolCalls.length(); index += 1) {
-            JSONObject call = toolCalls.optJSONObject(index);
-            if (call != null && "write_test_file".equals(call.optString("tool", ""))) return true;
         }
         return false;
     }
@@ -6111,7 +6048,7 @@ public final class MainActivity extends Activity {
                 }
             }
         }
-        String stableInstruction = "Return only one JSON object. Follow the cached stasis_basics as the authoritative language/runtime orientation. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. When fast_path.enabled is true, its source_symbols are current bounded source: write the complete small tuning change and a behavior test in the first response without redundant reads. The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when the index already identifies the target. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; use either the initial index, a compact list tool, or a direct read when possible, not every inspection tool. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
+        String stableInstruction = "Return only one JSON object. Follow the cached stasis_basics as the authoritative language/runtime orientation. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when the index already identifies the target. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; use either the initial index, a compact list tool, or a direct read when possible, not every inspection tool. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
         stableInstruction += " Every response must include working_notes as a concise user-visible state summary of at most 2000 characters using Intent, Observed, Next, and Blocker. Report decisions and evidence, not private chain-of-thought. Update working_notes from the retained prior note and current observations on every call.";
         stableInstruction += " write_symbol creates or replaces a symbol. Before writing, inspect the current target. Follow game_design_rules, prefer_lifecycle_local_state, avoid_global_tick_for_per_entity_progression, and architecture_recommendations. Follow architecture_recommendations. Use command/event-style functions for durable gameplay concepts. Tool errors, validation_error observations, and test_observation failures are not final; correct them before returning mode=done. A failed write batch rolls back the whole batch and returns diagnostics.";
         JSONArray input = new JSONArray()
@@ -6183,8 +6120,7 @@ public final class MainActivity extends Activity {
         if (pricing == null) throw new IOException("AI pricing is unavailable for " + model);
         JSONObject payload = new JSONObject();
         payload.put("model", model);
-        payload.put("reasoning", new JSONObject().put("effort",
-                isFastPathRequest(requestJson) ? "low" : pricing.reasoningEffort));
+        payload.put("reasoning", new JSONObject().put("effort", pricing.reasoningEffort));
         payload.put("max_output_tokens", maxOutputTokens);
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
         if (pricing.explicitCacheBreakpoints) {
@@ -6424,7 +6360,6 @@ public final class MainActivity extends Activity {
         }
         JSONArray globals = stable.optJSONArray("project_globals");
         JSONObject symbolIndex = stable.optJSONObject("project_symbol_index");
-        JSONObject fastPath = stable.optJSONObject("fast_path");
         JSONArray selected = stable.optJSONArray("selected_symbols");
         JSONArray tools = stable.optJSONArray("available_tools");
         return new JSONObject()
@@ -6436,8 +6371,6 @@ public final class MainActivity extends Activity {
                 .put("project_global_count", globals == null ? 0 : globals.length())
                 .put("project_symbol_index_count", symbolIndex == null ? 0 : symbolIndex.optInt("included_count", 0))
                 .put("project_symbol_index_truncated", symbolIndex != null && symbolIndex.optBoolean("truncated", false))
-                .put("fast_path_enabled", fastPath != null && fastPath.optBoolean("enabled", false))
-                .put("fast_path_source_count", fastPath == null ? 0 : fastPath.optInt("included_count", 0))
                 .put("selected_symbol_count", selected == null ? 0 : selected.length())
                 .put("available_tool_count", tools == null ? 0 : tools.length());
     }
@@ -8941,8 +8874,7 @@ public final class MainActivity extends Activity {
         payload.put("tools", new JSONArray());
         payload.put("tool_choice", "auto");
         payload.put("parallel_tool_calls", false);
-        payload.put("reasoning", new JSONObject().put("effort",
-                isFastPathRequest(requestJson) ? "low" : "medium").put("summary", "auto"));
+        payload.put("reasoning", new JSONObject().put("effort", "medium").put("summary", "auto"));
         payload.put("store", false);
         payload.put("stream", true);
         payload.put("include", new JSONArray().put("reasoning.encrypted_content"));
@@ -8961,19 +8893,6 @@ public final class MainActivity extends Activity {
         if (response == null) throw new IOException("Phone-native Codex returned no response object");
         String model = result.optString("model", "codex-default");
         return new AiApiResponse(response.toString(), extractAiUsage(response.toString()), model);
-    }
-
-    private static boolean isFastPathRequest(String requestJson) {
-        try {
-            JSONObject request = new JSONObject(requestJson);
-            JSONObject fastPath = request.optJSONObject("fast_path");
-            if (fastPath != null) return fastPath.optBoolean("enabled", false);
-            JSONObject original = request.optJSONObject("original_request");
-            fastPath = original == null ? null : original.optJSONObject("fast_path");
-            return fastPath != null && fastPath.optBoolean("enabled", false);
-        } catch (Exception ignored) {
-            return false;
-        }
     }
 
     private boolean migrateBundledPongBallSpeed() throws IOException {

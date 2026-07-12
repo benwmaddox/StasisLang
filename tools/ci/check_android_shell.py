@@ -873,9 +873,6 @@ def main() -> int:
     assert "function name(arg_name: Type, other: Type): ReturnType" in activity
     assert "struct TypeName { field_name: Type; ... }" in activity
     assert "bounded text ascii[N] or utf8[N]" in activity
-    assert 'request.put("fast_path", aiFastPathContext(prompt, project, imageAttachments))' in activity
-    assert "auto_finalize_tested_writes" in activity
-    assert 'isFastPathRequest(requestJson) ? "low"' in activity
     assert "Gameplay progression is tick-based rather than dt-based" in activity
     assert "read_symbol" in activity
     assert "read_file" in activity
@@ -957,7 +954,7 @@ def main() -> int:
     assert "aiPrefs.getString(AI_PREF_MODEL" in activity
     assert 'DEFAULT_AI_MODEL = "gpt-5.6-sol"' in activity
     assert 'reasoningSummary.setText("Reasoning: medium")' in activity
-    assert 'isFastPathRequest(requestJson) ? "low" : "medium"' in activity
+    assert 'put("effort", "medium")' in activity
     assert 'GPT-5.6 Sol defaults to medium reasoning' in activity
     assert '"gpt-5.6-terra".equals(configuredModel)' in activity
     assert "AI_PREF_MODEL_DEFAULT_VERSION" in activity
@@ -971,12 +968,12 @@ def main() -> int:
     assert "prompt_cache_breakpoint" in activity
     assert 'content.put("prompt_cache_breakpoint", new JSONObject().put("mode", "explicit"))' in activity
     assert 'payload.put("prompt_cache_options", new JSONObject().put("mode", "explicit").put("ttl", "30m"))' in activity
-    assert 'isFastPathRequest(requestJson) ? "low" : pricing.reasoningEffort' in activity
+    assert 'payload.put("reasoning", new JSONObject().put("effort", pricing.reasoningEffort))' in activity
     assert 'put("type", "prompt_cache_breakpoint")' not in activity
     assert 'payload.put("prompt_cache_retention"' not in activity
     assert '"prompt_cache_options": {"mode": "explicit", "ttl": "30m"}' in host_agent
-    assert '"low" if shared_context.get("project_context", {}).get("fast_path", {}).get("enabled") else DEFAULT_REASONING_EFFORT' in host_agent
-    assert 'payload.get("reasoning") not in ({"effort": "medium"}, {"effort": "low"})' in host_agent
+    assert '"reasoning": {"effort": DEFAULT_REASONING_EFFORT}' in host_agent
+    assert 'payload.get("reasoning") != {"effort": "medium"}' in host_agent
     assert '"prompt_cache_breakpoint": {"mode": "explicit"}' in host_agent
     assert '"type": "prompt_cache_breakpoint"' not in host_agent
     assert '"prompt_cache_retention"' not in host_agent

@@ -115,14 +115,6 @@ receiver-form versus function-form calls, deterministic
 hot-reload layout implications, and real `.test.stasis` test shape. These rules
 replace per-symbol derived call suggestions.
 
-Short tuning prompts (for example size, speed, color, or position changes) use a
-bounded fast path. Up to 32 current non-test symbols and 24 KiB of source are
-included on the first request, reasoning drops from medium to low, and the model
-is instructed to write the change plus a behavior test immediately. Once a write
-batch compiles and all runnable tests pass, Workshop accepts those tested tool
-writes without paying for a redundant final model response. Structural or
-image-guided requests continue through the normal inspect/write/test loop.
-
 Every model response also carries required, user-visible `working_notes`,
 bounded to 2,000 characters. The note records concise `Intent`, `Observed`,
 `Next`, and `Blocker` facts rather than private chain-of-thought. The latest
