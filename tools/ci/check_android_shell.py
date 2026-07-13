@@ -30,6 +30,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiObservationMemory.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiToolLoopPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiWorkingNotes.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiOverlayPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiInitialContextPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopConnectivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopBackgroundWorkPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkCoordinator.java",
@@ -220,8 +222,15 @@ def main() -> int:
     support_bundle = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java")
     crash_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java")
     ai_queue = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java")
+    ai_transaction = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiTransactionStore.java")
+    verification_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiVerificationPolicy.java")
+    verification_runner = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiVerificationRunner.java")
+    temporary_verification = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiTemporaryVerification.java")
+    project_transaction = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiProjectTransaction.java")
     ai_queue_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java")
     host_agent = read("tools/android_ai_agent_host.py")
+    host_comparison = read("tools/run_android_ai_model_comparison.py")
+    host_compile = read("crates/stasis_android_bridge/src/android_workshop_compile.rs")
     assert "System.loadLibrary(\"stasis_mobile_smoke\")" in activity
     assert "protected void onPause()" in activity
     assert "protected void onSaveInstanceState(Bundle outState)" in activity
@@ -288,6 +297,12 @@ def main() -> int:
     assert "Bitmap snapshot()" in paint_view
     assert "private static native String nativeStatus()" in activity
     assert "private static native String nativeCompileProject(String projectRoot)" in activity
+    assert "compile_android_workshop_project" in host_compile
+    assert "run_compile_check(project" in host_agent
+    assert "build_followup_request(shared_context" in host_agent
+    assert "source_file_path(project" in host_agent
+    assert "MAX_TOOL_CALLS_PER_BATCH = 12" in host_agent
+    assert 'DEFAULT_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")' in host_comparison
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
     assert "private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues)" in activity
     assert 'assetRoot = "workshop_sample/"' not in template_catalog
@@ -324,10 +339,17 @@ def main() -> int:
     assert "createAiProgressPill" in activity
     assert "postAiProgress" in activity
     assert "actions " in activity
-    assert "calling AI" in activity
+    assert "WorkshopAiRunPhase.EDITING.wireValue()" in activity
     assert "time 0.0s" in activity
     assert "hot swap=FastReload" in activity
     assert "aiReloadPhase" in activity
+    assert "WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult))" in activity
+    assert "WorkshopAiCompletionStatus.canFinalizeTestedWrites" in activity
+    assert "auto_finalize_tested_writes" in activity
+    assert 'followup.put("original_request", new JSONObject(initialRequestJson))' in activity
+    assert 'appendAiTrace("prompt_cache_context"' in activity
+    assert 'put("approx_cacheable_tokens", (cacheableChars + 3) / 4)' in activity
+    assert 'response.optBoolean("applied_tool_writes", false)' in activity
     assert "Context & Images" in activity
     assert 'aiPatch.setText("Run")' in activity
     assert 'aiCancelButton.setText("Stop")' in activity
@@ -341,6 +363,22 @@ def main() -> int:
     assert "writeSyncedAtomic" not in ai_queue or "getFD().sync()" in ai_queue
     assert "StandardCopyOption.ATOMIC_MOVE" in ai_queue
     assert "recoverInterrupted" in ai_queue
+    assert 'put("phase", phase)' in ai_queue
+    assert "AndroidAiQueue.updatePhase" in activity
+    assert "AndroidAiTransactionStore.save" in activity
+    assert "restoreInterruptedAiTransactions" in activity
+    assert "WorkshopAiProjectTransaction.restore" in activity
+    assert "independent_test_author" in activity
+    assert "verifierCallCount >= 2" in activity
+    assert "verification_repair_requested" in activity
+    assert "generated_test_audit" in activity
+    assert "WorkshopAiObservationCompactor.compactSuccessfulWrite" in activity
+    assert 'ROOT = "workshop_ai_transactions"' in ai_transaction
+    assert "StandardCopyOption.ATOMIC_MOVE" in ai_transaction
+    assert "requiresIndependentReview" in verification_policy
+    assert "independent verification is required" in verification_runner
+    assert "temporary verification test cleanup failed" in temporary_verification
+    assert "failed to remove provisional file" in project_transaction
     assert "cancelPending" in ai_queue
     assert "AiQueuePolicy.canTransition" in ai_queue
     assert "loadPreview" in ai_queue
@@ -373,7 +411,8 @@ def main() -> int:
     assert "updated.length() < MAX_COMMAND_HISTORY" in activity
     assert '"started".equals(prior.optString("status", ""))' in activity
     assert "Retrying last AI request as a new budget-checked run" in activity
-    assert 'recordAiOutcome(activeAiPrompt, "cancelled"' in activity
+    assert '"Cancelled by user; project restored"' in activity
+    assert 'finalTransactionRestoreError.isEmpty() ? "cancelled" : "rollback_failed"' in activity
     assert 'recordAiOutcome(activeAiPrompt, "applied"' in activity
     assert 'recordAiOutcome(activeAiPrompt, "rolled_back"' in activity
     assert "Device monthly AI limit USD" in activity
@@ -773,7 +812,12 @@ def main() -> int:
     assert "compile.setText(\"Compile\")" not in activity
     assert "https://api.openai.com/v1/responses" in activity
     assert "payload.put(\"text\", buildAiResponseTextFormat())" in activity
-    assert "private static final int MAX_AI_AGENT_TURNS = 15" in activity
+    assert "private static final int MAX_AI_AGENT_TURNS = 25" in activity
+    assert '.put("response_model", apiResponse.model)' in activity
+    assert '.put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)' in activity
+    assert '.put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable' in activity
+    assert 'harmless != null && harmless.length() == 0' in activity
+    assert '.put("successful_writes", session.successfulWriteCount)' in activity
     assert "AI_PREF_LAST_USAGE" in activity
     assert "AI_TRACE_LOG" in activity
     assert "appendAiTrace" in activity
@@ -814,7 +858,7 @@ def main() -> int:
     assert "required_args" in activity
     assert "Tool errors, validation_error observations, and test_observation failures are not final" in activity
     assert "recordAiToolResult" in activity
-    assert "tool_call_limit_after_successful_tested_writes" in activity
+    assert "agent_turn_limit_after_successful_tested_writes" in activity
     assert "repeated_tool_calls" in activity
     assert "repeated tools" in activity
     assert "successful_writes" in activity
@@ -869,8 +913,27 @@ def main() -> int:
     assert "lastPassingTestKeys" in activity
     assert "list_symbols" in activity
     assert "list_owner_symbols" in activity
-    assert "preferredFunctionCall" in activity
-    assert "preferred_call" in activity
+    assert "preferredFunctionCall" not in activity
+    assert "preferred_call" not in activity
+    assert 'request.put("stasis_basics", aiStasisBasics())' in activity
+    assert '"kind": "auto_finalize_tested_writes"' in host_agent
+    assert 'buildAiOpenAiInput(requestJson, true, false)' in activity
+    assert 'AI_PREF_CODEX_FAST_MODE = "codex_fast_mode"' in activity
+    assert 'WorkshopCodexServiceTier.requestTier' in activity
+    assert 'payload.put("service_tier", serviceTier)' in activity
+    assert 'appendAiTrace("codex_request_tier"' in activity
+    assert 'payload.put("model", requestedModel.isEmpty() ? DEFAULT_AI_MODEL : requestedModel)' in activity
+    assert "installAiGameProgressOverlay(root)" in activity
+    assert "WorkshopAiOverlayPolicy.shouldShow" in activity
+    assert 'setContentDescription("AI work status; tap to open Workshop")' in activity
+    codex_method = activity[activity.index("private AiApiResponse callCodexResponses"):
+                            activity.index("private boolean migrateBundledPongBallSpeed")]
+    assert 'payload.put("prompt_cache_options"' not in codex_method
+    assert "global instance_name: StructType" in activity
+    assert "function name(arg_name: Type, other: Type): ReturnType" in activity
+    assert "struct TypeName { field_name: Type; ... }" in activity
+    assert "bounded text ascii[N] or utf8[N]" in activity
+    assert "Gameplay progression is tick-based rather than dt-based" in activity
     assert "read_symbol" in activity
     assert "read_file" in activity
     assert "write_symbol" in activity
@@ -894,6 +957,9 @@ def main() -> int:
     assert "Never reread a target already present" in activity
     assert 'responseProperties.put("working_notes"' in activity
     assert 'put("maxLength", WorkshopAiWorkingNotes.MAX_CHARS)' in activity
+    assert 'request.put("project_symbol_index", aiProjectSymbolIndex(project))' in activity
+    assert "WorkshopAiInitialContextPolicy.canAppend" in activity
+    assert "project_symbol_index_count" in activity
     assert 'setStatusText("AI working notes: " + display)' in activity
     assert 'appendAiTrace("working_notes"' in activity
     assert "Report decisions and evidence, not private chain-of-thought" in activity
@@ -917,10 +983,13 @@ def main() -> int:
     assert "durable gameplay concepts" in activity
     assert "spawn_actor" in activity
     assert "Follow architecture_recommendations" in activity
+    assert "rendered rectangles as one contract" in activity
+    assert "just-inside, exact-boundary, and just-outside" in activity
     assert "Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits" in activity
     assert "Tool errors, validation_error observations, and test_observation failures are not final" in activity
     assert "mode=done" in activity
-    assert "AI edit complete" in activity
+    assert 'appliedToolWrites ? "applied" : "complete"' in activity
+    assert 'appliedToolWrites ? "tested tool writes" : "no actions"' in activity
     assert "rolls back the whole batch and returns diagnostics" in activity
     assert "AI edit apply failed and rolled back" in activity
     assert "appendAiFunction" in activity
@@ -966,6 +1035,8 @@ def main() -> int:
     assert 'put("type", "prompt_cache_breakpoint")' not in activity
     assert 'payload.put("prompt_cache_retention"' not in activity
     assert '"prompt_cache_options": {"mode": "explicit", "ttl": "30m"}' in host_agent
+    assert 'parser.add_argument("--service-tier", choices=("standard", "priority")' in host_agent
+    assert 'payload["service_tier"] = "priority"' in host_agent
     assert '"reasoning": {"effort": DEFAULT_REASONING_EFFORT}' in host_agent
     assert 'payload.get("reasoning") != {"effort": "medium"}' in host_agent
     assert '"prompt_cache_breakpoint": {"mode": "explicit"}' in host_agent
@@ -1105,6 +1176,8 @@ def main() -> int:
     assert "stasis_codex_android_cancel_response" in native
     assert "cancel_on_generation_change" in codex_native
     assert "Codex request cancelled" in codex_native
+    assert "select_codex_model" in codex_native
+    assert "Codex model is unavailable" in codex_native
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
     assert "try_rust_bridge_compile" in native

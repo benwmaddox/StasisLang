@@ -5,6 +5,9 @@ issue **#116** (`da0c5e05-fb79-46b8-a0ce-942934d3c8ff`). Use the released
 `MaddoxTasks.exe agent issues` and `agent command` interfaces described by the
 `maddox-tasks` skill; never edit the task database directly.
 
+The implementation and device-acceptance contract for independent AI edit
+verification is in `docs/android_workshop_verification_plan.md`.
+
 ## Implementation
 
 - #117 (`f2e9020e`) - Complete runtime sprite pipeline.

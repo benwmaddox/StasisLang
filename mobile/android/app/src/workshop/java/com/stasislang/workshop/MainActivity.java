@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.Manifest;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
@@ -25,6 +26,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
@@ -35,6 +37,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.inputmethod.InputMethodManager;
 import android.util.Base64;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -97,6 +100,7 @@ public final class MainActivity extends Activity {
     private static final String AI_SETUP_COMPLETE = "ai_setup_complete_v1";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_PROVIDER = "ai_provider";
+    private static final String AI_PREF_CODEX_FAST_MODE = "codex_fast_mode";
     private static final String AI_PROVIDER_CODEX = "codex_on_device";
     private static final String AI_PROVIDER_API = "openai_api";
     private static final String AI_PREF_MODEL = "openai_model";
@@ -128,7 +132,7 @@ public final class MainActivity extends Activity {
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_RENDER_COMMANDS = 8;
-    private static final int MAX_AI_AGENT_TURNS = 15;
+    private static final int MAX_AI_AGENT_TURNS = 25;
     private static final int MAX_AI_TOOL_CALLS_PER_BATCH = 12;
     private static final int MAX_AI_READ_ONLY_BATCHES = 2;
     private static final int MAX_AI_OUTPUT_TOKENS = 8192;
@@ -175,6 +179,7 @@ public final class MainActivity extends Activity {
     private EditText aiApiKeyEditor;
     private Spinner aiProviderSelector;
     private boolean aiProviderSelectionFromTouch;
+    private CheckBox codexFastMode;
     private TextView codexAccountStatus;
     private EditText aiModelEditor;
     private EditText aiMonthlyLimitUsdEditor;
@@ -185,7 +190,15 @@ public final class MainActivity extends Activity {
     private TextView aiStepPill;
     private TextView aiActionPill;
     private TextView aiPhasePill;
+    private TextView aiVerificationPill;
     private TextView aiElapsedPill;
+    private HorizontalScrollView aiGameProgressScroller;
+    private TextView aiGameQueuePill;
+    private TextView aiGameStepPill;
+    private TextView aiGameActionPill;
+    private TextView aiGamePhasePill;
+    private TextView aiGameVerificationPill;
+    private TextView aiGameElapsedPill;
     private Button aiCancelButton;
     private LinearLayout aiSettingsBody;
     private LinearLayout commandHistoryBody;
@@ -290,6 +303,10 @@ public final class MainActivity extends Activity {
     private long aiStartedAtNanos;
     private int aiProgressStep;
     private int aiProgressActions;
+    private int aiVisibleQueueCount;
+    private String aiProgressPhase = "idle";
+    private String lastPersistedAiPhase = "";
+    private String aiVerificationSummary = "verify --";
     private SymbolEntry selectedSymbol;
 
     static {
@@ -654,6 +671,7 @@ public final class MainActivity extends Activity {
         }
 
         installGameStatusOverlay(root, true);
+        installAiGameProgressOverlay(root);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(14), dp(12), dp(14), dp(12));
@@ -849,6 +867,44 @@ public final class MainActivity extends Activity {
                 Gravity.TOP | Gravity.START);
         statusParams.setMargins(dp(8), dp(8), dp(68), 0);
         root.addView(gameStatus, statusParams);
+    }
+
+    private void installAiGameProgressOverlay(FrameLayout root) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.LEFT);
+        aiGameQueuePill = createAiProgressPill("AI working");
+        aiGameStepPill = createAiProgressPill("step 0/" + MAX_AI_AGENT_TURNS);
+        aiGameActionPill = createAiProgressPill("actions 0");
+        aiGamePhasePill = createAiProgressPill("idle");
+        aiGameVerificationPill = createAiProgressPill("verify --");
+        aiGameElapsedPill = createAiProgressPill("time 0.0s");
+        row.addView(aiGameQueuePill);
+        row.addView(aiGameStepPill);
+        row.addView(aiGameActionPill);
+        row.addView(aiGamePhasePill);
+        row.addView(aiGameVerificationPill);
+        row.addView(aiGameElapsedPill);
+
+        aiGameProgressScroller = new HorizontalScrollView(this);
+        aiGameProgressScroller.setHorizontalScrollBarEnabled(false);
+        aiGameProgressScroller.setBackgroundColor(Color.argb(120, 20, 28, 38));
+        aiGameProgressScroller.setContentDescription("AI work status; tap to open Workshop");
+        aiGameProgressScroller.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (editorPanel != null && editorPanel.getVisibility() != View.VISIBLE) {
+                    toggleEditorPanel();
+                }
+            }
+        });
+        aiGameProgressScroller.addView(row);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.START);
+        params.setMargins(dp(8), dp(48), dp(92), 0);
+        root.addView(aiGameProgressScroller, params);
+        updateAiGameProgressOverlay();
     }
 
     private void installVoiceChangeControls(FrameLayout root) {
@@ -1076,6 +1132,7 @@ public final class MainActivity extends Activity {
             voiceToggle.setVisibility(opening ? View.GONE : View.VISIBLE);
             if (!opening) voiceToggle.bringToFront();
         }
+        updateAiGameProgressOverlay();
     }
 
     private void startGameLoop() {
@@ -1145,6 +1202,8 @@ public final class MainActivity extends Activity {
     private void updateAiProgress(int step, int actions, String phase) {
         aiProgressStep = step;
         aiProgressActions = actions;
+        aiProgressPhase = phase == null ? "" : phase;
+        persistActiveAiPhase(aiProgressPhase);
         if (aiStepPill != null) {
             aiStepPill.setText("step " + step + "/" + MAX_AI_AGENT_TURNS);
         }
@@ -1157,6 +1216,43 @@ public final class MainActivity extends Activity {
         if (aiElapsedPill != null) {
             aiElapsedPill.setText("time " + currentAiElapsedText());
         }
+        updateAiGameProgressOverlay();
+    }
+
+    private void persistActiveAiPhase(String phase) {
+        if (activeAiQueueEntry == null || !WorkshopAiRunPhase.isWireValue(phase)
+                || phase.equals(lastPersistedAiPhase)) return;
+        try {
+            if (AndroidAiQueue.updatePhase(this, activeRecoveryProjectId(), activeAiQueueEntry.id,
+                    WorkshopAiRunPhase.fromWireValue(phase), currentAiElapsedText())) {
+                lastPersistedAiPhase = phase;
+                refreshAiQueue();
+            }
+        } catch (Exception error) {
+            appendAiTraceFields("queue_phase_persist_failed", "phase", phase,
+                    "error", error.getMessage(), null, null);
+        }
+    }
+
+    private void updateAiGameProgressOverlay() {
+        if (aiGameProgressScroller == null) return;
+        boolean panelOpen = editorPanel != null && editorPanel.getVisibility() == View.VISIBLE;
+        boolean visible = WorkshopAiOverlayPolicy.shouldShow(
+                panelOpen, aiRunActive, aiVisibleQueueCount);
+        aiGameProgressScroller.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (!visible) return;
+        String elapsed = currentAiElapsedText();
+        aiGameQueuePill.setText(WorkshopAiOverlayPolicy.queueLabel(
+                aiRunActive, aiVisibleQueueCount));
+        aiGameStepPill.setText("step " + aiProgressStep + "/" + MAX_AI_AGENT_TURNS);
+        aiGameActionPill.setText("actions " + aiProgressActions);
+        aiGamePhasePill.setText(aiProgressPhase);
+        aiGameVerificationPill.setText(aiVerificationSummary);
+        aiGameElapsedPill.setText("time " + elapsed);
+        aiGameProgressScroller.setContentDescription(
+                WorkshopAiOverlayPolicy.contentDescription(aiRunActive, aiVisibleQueueCount,
+                        aiProgressStep, MAX_AI_AGENT_TURNS, aiProgressActions,
+                        aiProgressPhase, elapsed));
     }
 
     private String currentAiElapsedText() {
@@ -1253,6 +1349,7 @@ public final class MainActivity extends Activity {
         appendExplorationProgress(debugTextBuilder);
         gameStatus.setTextColor(debugColorForBudget(budgetPercent));
         gameStatus.setText(debugTextBuilder.toString());
+        updateAiGameProgressOverlay();
     }
 
     private void appendExplorationProgress(StringBuilder text) {
@@ -1512,10 +1609,12 @@ public final class MainActivity extends Activity {
         aiStepPill = createAiProgressPill("step 0/" + MAX_AI_AGENT_TURNS);
         aiActionPill = createAiProgressPill("actions 0");
         aiPhasePill = createAiProgressPill("idle");
+        aiVerificationPill = createAiProgressPill("verify --");
         aiElapsedPill = createAiProgressPill("time 0.0s");
         progressRow.addView(aiStepPill);
         progressRow.addView(aiActionPill);
         progressRow.addView(aiPhasePill);
+        progressRow.addView(aiVerificationPill);
         progressRow.addView(aiElapsedPill);
         HorizontalScrollView progressScroller = new HorizontalScrollView(this);
         progressScroller.setHorizontalScrollBarEnabled(false);
@@ -1765,6 +1864,11 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View view) { beginPhoneNativeCodexLogin(); }
         });
         aiSettingsBody.addView(codexSignIn, fullWidth());
+
+        codexFastMode = new CheckBox(this);
+        codexFastMode.setText("Fast Codex responses (about 1.5x speed; uses subscription allowance faster)");
+        codexFastMode.setChecked(aiPrefs.getBoolean(AI_PREF_CODEX_FAST_MODE, false));
+        aiSettingsBody.addView(codexFastMode, fullWidth());
 
         TextView apiFallbackLabel = new TextView(this);
         apiFallbackLabel.setText("Optional API fallback");
@@ -2679,15 +2783,16 @@ public final class MainActivity extends Activity {
         aiQueueBody.removeAllViews();
         try {
             List<AndroidAiQueue.Entry> items = AndroidAiQueue.list(this, activeRecoveryProjectId());
-            boolean hasActiveItems = false;
+            int activeItems = 0;
             for (AndroidAiQueue.Entry item : items) {
                 if (AndroidAiQueue.PENDING.equals(item.state)
                         || AndroidAiQueue.IN_PROGRESS.equals(item.state)) {
-                    hasActiveItems = true;
-                    break;
+                    activeItems += 1;
                 }
             }
-            if (!hasActiveItems) {
+            aiVisibleQueueCount = activeItems;
+            updateAiGameProgressOverlay();
+            if (activeItems == 0) {
                 if (aiQueueSection != null) aiQueueSection.setVisibility(View.GONE);
                 return;
             }
@@ -2701,9 +2806,11 @@ public final class MainActivity extends Activity {
                 TextView label = new TextView(this);
                 String prompt = item.prompt.length() > 72 ? item.prompt.substring(0, 69) + "..." : item.prompt;
                 String detail = item.detail.isEmpty() ? "" : "\n" + item.detail;
-                label.setText(item.state.replace('_', ' ') + " · " + item.source + " · " + prompt + detail);
+                label.setText(item.state.replace('_', ' ') + " · " + item.phase + " · "
+                        + item.source + " · " + prompt + detail);
                 label.setTextColor(Color.rgb(73, 84, 100));
-                label.setContentDescription("AI queue item " + item.state + " from " + item.source + ": " + item.prompt);
+                label.setContentDescription("AI queue item " + item.state + ", phase " + item.phase
+                        + " from " + item.source + ": " + item.prompt);
                 row.addView(label, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
                 if (AndroidAiQueue.PENDING.equals(item.state)) {
                     Button cancel = new Button(this);
@@ -2718,6 +2825,8 @@ public final class MainActivity extends Activity {
                 aiQueueBody.addView(row, fullWidth());
             }
         } catch (Exception error) {
+            aiVisibleQueueCount = 0;
+            updateAiGameProgressOverlay();
             if (aiQueueSection != null) aiQueueSection.setVisibility(View.VISIBLE);
             TextView unavailable = new TextView(this);
             unavailable.setText("AI queue unavailable: " + error.getMessage());
@@ -2745,11 +2854,22 @@ public final class MainActivity extends Activity {
         String terminal = ("complete".equals(outcomeStatus) || "applied".equals(outcomeStatus))
                 ? AndroidAiQueue.COMPLETED
                 : ("cancelled".equals(outcomeStatus) ? AndroidAiQueue.CANCELLED : AndroidAiQueue.FAILED);
+        WorkshopAiRunPhase terminalPhase = AndroidAiQueue.COMPLETED.equals(terminal)
+                ? WorkshopAiRunPhase.VERIFIED
+                : (AndroidAiQueue.CANCELLED.equals(terminal) ? WorkshopAiRunPhase.CANCELLED
+                        : (outcomeStatus.contains("restored") ? WorkshopAiRunPhase.RESTORED
+                                : WorkshopAiRunPhase.FAILED));
         try {
-            AndroidAiQueue.finish(this, item.projectId, item.id, terminal, detail);
+            AndroidAiQueue.finish(this, item.projectId, item.id, terminal, terminalPhase, detail);
         } catch (Exception error) {
             setStatusText("AI queue transition failed: " + error.getMessage());
             return;
+        }
+        try {
+            AndroidAiTransactionStore.clear(this, item.projectId, item.id);
+        } catch (Exception error) {
+            appendAiTraceFields("transaction_cleanup_failed", "item_id", item.id,
+                    "error", error.getMessage(), null, null);
         }
         activeAiQueueEntry = null;
         refreshAiQueue();
@@ -3105,6 +3225,7 @@ public final class MainActivity extends Activity {
 
     private void markInterruptedAiOutcomeIfNeeded() {
         try {
+            restoreInterruptedAiTransactions();
             int recovered = AndroidAiQueue.recoverInterrupted(this, activeRecoveryProjectId());
             if (recovered > 0) refreshAiQueue();
         } catch (Exception error) {
@@ -3117,6 +3238,45 @@ public final class MainActivity extends Activity {
         recordAiOutcome(request, "interrupted",
                 "App stopped before AI completion; Retry Last AI starts a new budget-checked run",
                 "A paid in-flight call may have completed remotely");
+    }
+
+    private void postAiVerificationMetrics(final WorkshopAiVerificationResult result,
+            final int repairs, final int failedBatches, final int restoredWrites) {
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                aiVerificationSummary = "verify " + result.passedChecks + "/" + result.totalChecks
+                        + " r" + repairs + " b" + failedBatches + " w" + restoredWrites;
+                if (aiVerificationPill != null) aiVerificationPill.setText(aiVerificationSummary);
+                if (aiGameVerificationPill != null) {
+                    aiGameVerificationPill.setText(aiVerificationSummary);
+                }
+                updateAiGameProgressOverlay();
+            }
+        });
+    }
+
+    private void restoreInterruptedAiTransactions() throws Exception {
+        String projectId = activeRecoveryProjectId();
+        boolean restored = false;
+        ArrayList<String> restoredItemIds = new ArrayList<>();
+        for (AndroidAiQueue.Entry entry : AndroidAiQueue.list(this, projectId)) {
+            if (!AndroidAiQueue.IN_PROGRESS.equals(entry.state)) continue;
+            WorkshopAiProjectTransaction.Snapshot snapshot = AndroidAiTransactionStore.load(
+                    this, projectId, entry.id);
+            if (snapshot == null) continue;
+            WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);
+            restored = true;
+            restoredItemIds.add(entry.id);
+        }
+        if (!restored) return;
+        String compileResult = nativeCompileProject(projectRootPath());
+        lastCompileResult = compileResult;
+        compileReady = isRunnableCompile(compileResult);
+        compileAttempted = true;
+        if (!compileReady) throw new IOException("restored AI transaction did not compile");
+        for (String itemId : restoredItemIds) {
+            AndroidAiTransactionStore.clear(this, projectId, itemId);
+        }
     }
 
     private void persistPendingDraft() {
@@ -3587,6 +3747,7 @@ public final class MainActivity extends Activity {
         if (aiMonthlyLimitUsdEditor != null) {
             aiMonthlyLimitUsdEditor.setVisibility(codex ? View.GONE : View.VISIBLE);
         }
+        if (codexFastMode != null) codexFastMode.setVisibility(codex ? View.VISIBLE : View.GONE);
         refreshAiBudgetStatus();
         refreshAiAttachmentStatus();
     }
@@ -3950,6 +4111,8 @@ public final class MainActivity extends Activity {
         if (!apiKey.isEmpty() && !saveAiSettings(apiKey, model.isEmpty() ? DEFAULT_AI_MODEL : model)) return;
         getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
                 .putString(AI_PREF_PROVIDER, provider)
+                .putBoolean(AI_PREF_CODEX_FAST_MODE,
+                        codexFastMode != null && codexFastMode.isChecked())
                 .putString(AI_PREF_MONTHLY_LIMIT_USD, monthlyLimitText)
                 .apply();
         refreshAiBudgetStatus();
@@ -4218,6 +4381,15 @@ public final class MainActivity extends Activity {
         runAiPatch("text", null);
     }
 
+    private void dismissAiKeyboard() {
+        if (aiPromptEditor == null) return;
+        aiPromptEditor.clearFocus();
+        InputMethodManager keyboard = (InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
+        if (keyboard != null) {
+            keyboard.hideSoftInputFromWindow(aiPromptEditor.getWindowToken(), 0);
+        }
+    }
+
     private void runAiPatch(String queueSource, AndroidAiQueue.Entry queuedEntry) {
         if (audioRecordingActive) {
             setStatusText("Finish or cancel audio recording before running AI");
@@ -4345,6 +4517,14 @@ public final class MainActivity extends Activity {
         }
         final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
                 requestImageMetadata, requestLogicalSnapshot);
+        final WorkshopAiProjectTransaction.Snapshot aiTransaction;
+        try {
+            aiTransaction = WorkshopAiProjectTransaction.capture(projectRoot());
+        } catch (Exception error) {
+            setStatusText("AI run could not snapshot the project transaction: " + error.getMessage());
+            failQueuedAiPreflight(queuedEntry, "Project transaction snapshot failed");
+            return;
+        }
         final String requestModel = model;
         final String requestApiKey = apiKey;
         try {
@@ -4379,8 +4559,19 @@ public final class MainActivity extends Activity {
                 activeAiQueueEntry = queuedEntry;
             }
             if (activeAiQueueEntry == null) throw new IOException("queued AI request could not be claimed");
+            AndroidAiTransactionStore.save(this, activeAiQueueEntry.projectId,
+                    activeAiQueueEntry.id, aiTransaction);
         } catch (Exception error) {
             setStatusText("AI queue failed: " + error.getMessage());
+            if (activeAiQueueEntry != null) {
+                try {
+                    AndroidAiTransactionStore.clear(this, activeAiQueueEntry.projectId,
+                            activeAiQueueEntry.id);
+                } catch (Exception ignored) {
+                }
+            }
+            failQueuedAiPreflight(activeAiQueueEntry,
+                    "Queue or transaction setup failed: " + error.getMessage());
             refreshAiQueue();
             return;
         }
@@ -4388,6 +4579,11 @@ public final class MainActivity extends Activity {
         activeAiPrompt = prompt;
         aiCancelRequested = false;
         aiRunActive = true;
+        lastPersistedAiPhase = "";
+        aiVerificationSummary = "verify --";
+        if (aiVerificationPill != null) aiVerificationPill.setText(aiVerificationSummary);
+        if (aiGameVerificationPill != null) aiGameVerificationPill.setText(aiVerificationSummary);
+        dismissAiKeyboard();
         if (!WorkshopLongWorkCoordinator.beginAi(this, "Running queued game change", new Runnable() {
             @Override public void run() { cancelAiRun(); }
         })) {
@@ -4410,22 +4606,44 @@ public final class MainActivity extends Activity {
                     activeAiImageAttachments = loadAiImageAttachments(
                             requestImageInfos, requestImageMetadata, requestPreviewPixels);
                     final AiAgentResult aiResult = runAiAgentLoop(
-                            requestApiKey, requestModel, requestJson, requestImageGeneration, useCodex);
+                            requestApiKey, requestModel, requestJson, requestImageGeneration, useCodex,
+                            aiTransaction);
                     throwIfAiCancelled();
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            applyAiCodeResponse(aiResult, symbol);
+                            handleAiVerificationResult(aiResult, symbol);
                         }
                     });
                 } catch (final Exception error) {
+                    String transactionRestoreError = "";
+                    try {
+                        WorkshopAiProjectTransaction.restore(projectRoot(), aiTransaction);
+                        String restoredCompile = nativeCompileProject(projectRootPath());
+                        lastCompileResult = restoredCompile;
+                        compileReady = isRunnableCompile(restoredCompile);
+                        compileAttempted = true;
+                        if (!compileReady) transactionRestoreError = "restored project did not compile";
+                    } catch (Exception restoreError) {
+                        transactionRestoreError = restoreError.getMessage();
+                    }
+                    final String finalTransactionRestoreError = transactionRestoreError;
                     if (aiCancelRequested || error instanceof AiCancelledException) {
                         runOnUiThread(new Runnable() {
                             @Override public void run() {
-                                updateAiProgress(aiProgressStep, aiProgressActions, "cancelled");
+                                updateAiProgress(aiProgressStep, aiProgressActions,
+                                        finalTransactionRestoreError.isEmpty()
+                                                ? WorkshopAiRunPhase.CANCELLED.wireValue()
+                                                : "cancel restore failed");
                                 appendAiTraceFields("cancelled", "elapsed", currentAiElapsedText(), null, null, null, null);
-                                recordAiOutcome(activeAiPrompt, "cancelled", "Cancelled by user", "completed calls retained in budget totals");
-                                setStatusText("AI run cancelled; completed calls remain in usage totals");
+                                recordAiOutcome(activeAiPrompt,
+                                        finalTransactionRestoreError.isEmpty() ? "cancelled" : "rollback_failed",
+                                        finalTransactionRestoreError.isEmpty() ? "Cancelled by user; project restored"
+                                                : "Cancellation restore failed: " + finalTransactionRestoreError,
+                                        "completed calls retained in budget totals");
+                                setStatusText(finalTransactionRestoreError.isEmpty()
+                                        ? "AI run cancelled; project restored; completed calls remain in usage totals"
+                                        : "AI cancellation restore failed: " + finalTransactionRestoreError);
                             }
                         });
                         return;
@@ -4434,10 +4652,19 @@ public final class MainActivity extends Activity {
                         @Override
                         public void run() {
                             String elapsed = currentAiElapsedText();
-                            updateAiProgress(aiProgressStep, aiProgressActions, "failed");
+                            updateAiProgress(aiProgressStep, aiProgressActions,
+                                    finalTransactionRestoreError.isEmpty()
+                                            ? WorkshopAiRunPhase.RESTORED.wireValue()
+                                            : "failure restore failed");
                             appendAiTraceFields("fatal_error", "error", error.getMessage(), "elapsed", elapsed, "trace_path", aiTraceLogPath());
-                            recordAiOutcome(activeAiPrompt, "failed", error.getMessage(), "");
-                            setStatusText("AI edit failed: elapsed=" + elapsed + " - " + error.getMessage() + " - trace=" + aiTraceLogPath());
+                            recordAiOutcome(activeAiPrompt,
+                                    finalTransactionRestoreError.isEmpty() ? "failed_restored" : "rollback_failed",
+                                    error.getMessage(), finalTransactionRestoreError);
+                            setStatusText("AI edit failed"
+                                    + (finalTransactionRestoreError.isEmpty() ? " and project restored"
+                                            : "; restore failed=" + finalTransactionRestoreError)
+                                    + ": elapsed=" + elapsed + " - " + error.getMessage()
+                                    + " - trace=" + aiTraceLogPath());
                         }
                     });
                 } finally {
@@ -4501,6 +4728,59 @@ public final class MainActivity extends Activity {
         return globals;
     }
 
+    private static JSONObject aiProjectSymbolIndex(ProjectSnapshot project) throws Exception {
+        JSONArray symbols = new JSONArray();
+        int availableCount = 0;
+        int serializedChars = 2;
+        boolean accepting = true;
+        if (project != null) {
+            for (SymbolSection section : project.sections) {
+                for (SymbolGroup group : section.groups) {
+                    for (SymbolEntry symbol : group.symbols) {
+                        availableCount += 1;
+                        if (!accepting) continue;
+                        JSONObject compact = symbolToJson(symbol, false);
+                        int candidateChars = compact.toString().length();
+                        if (!WorkshopAiInitialContextPolicy.canAppend(
+                                serializedChars, candidateChars, symbols.length())) {
+                            accepting = false;
+                            continue;
+                        }
+                        if (symbols.length() > 0) serializedChars += 1;
+                        serializedChars += candidateChars;
+                        symbols.put(compact);
+                    }
+                }
+            }
+        }
+        return new JSONObject()
+                .put("symbols", symbols)
+                .put("included_count", symbols.length())
+                .put("available_count", availableCount)
+                .put("truncated", symbols.length() < availableCount);
+    }
+
+    private static JSONObject aiStasisBasics() throws Exception {
+        return new JSONObject()
+                .put("language", new JSONArray()
+                        .put("Declare typed arguments and returns with function name(arg_name: Type, other: Type): ReturnType { ... }; use void when there is no return value.")
+                        .put("Declare value types with struct TypeName { field_name: Type; ... } and access fields as value.field_name.")
+                        .put("A persistent instance of a struct is normally declared with global instance_name: StructType; for example global state: GameState; then access state.score.")
+                        .put("A direct named global block, global Name { field_name: Type; ... }, is also valid and is accessed as Name.field_name; do not confuse it with a struct type declaration.")
+                        .put("Arithmetic, comparison, and assignment operators are infix.")
+                        .put("Receiver calls value.method(args) are preferred when the function's first parameter is self: Type; function-form calls remain valid.")
+                        .put("Common types are bool, i32, u8, u16, u32, f32, f64, void, fixed arrays Type[N], and bounded text ascii[N] or utf8[N]."))
+                .put("runtime", new JSONArray()
+                        .put("main() initializes state, tick() advances deterministic fixed-tick simulation, and render() projects current state into render commands.")
+                        .put("on_code_swap() is only for migration or reinitialization required after a hot swap.")
+                        .put("Gameplay progression is tick-based rather than dt-based."))
+                .put("editing", new JSONArray()
+                        .put("Functions, structs, globals, imports, and tests are the editable units; inspect a symbol before replacing it.")
+                        .put("Function-body and tuning changes can fast reload; struct/global layout changes require reset compatibility handling."))
+                .put("tests", new JSONArray()
+                        .put("Behavior tests use test `name`(): bool and return true or false."));
+    }
+
     private void runNativeTests() {
         try {
             JSONObject result = aiToolRunTests(new AiAgentSession());
@@ -4552,6 +4832,8 @@ public final class MainActivity extends Activity {
                     .put("For multi-symbol behavior changes, inspect the relevant state, lifecycle, update, render, and test paths; for small constant or dimension edits, inspect only the target symbol and its test.")
                     .put("Keep mobile input abstracted through Stasis Input globals and helper functions so logic can move across platforms.")
                     .put("Add or use testable invariants by setting input/state, running ticks, and checking state or render output.")
+                    .put("For geometry changes, treat stored positions and rendered rectangles as one contract: derive centers, half extents, collisions, walls, and offscreen transitions consistently.")
+                    .put("Test geometry and thresholds at just-inside, exact-boundary, and just-outside values through public update/render behavior.")
                     .put("Avoid broad rewrites; make the smallest structural change that gives the feature a clear owner.")
                     .put("Prefer data-oriented clarity over deep abstractions: arrays, IDs, counters, and explicit update loops.")
                     .put("Avoid per-tick allocation/object churn and keep new systems within the visible 60 fps budget.");
@@ -4559,6 +4841,7 @@ public final class MainActivity extends Activity {
             JSONObject request = new JSONObject();
             request.put("cache_layout", "Stable request context is first. Volatile tool observations are sent after the prompt cache breakpoint.");
             request.put("scope", "entire_workspace");
+            request.put("stasis_basics", aiStasisBasics());
             request.put("response_contract", aiResponseContract());
             request.put("available_tools", supportedAiTools());
             request.put("tool_specs", aiToolSpecs());
@@ -4566,6 +4849,7 @@ public final class MainActivity extends Activity {
             request.put("game_design_rules", gameRules);
             request.put("architecture_recommendations", architectureRecommendations);
             request.put("project_globals", aiProjectGlobals(project));
+            request.put("project_symbol_index", aiProjectSymbolIndex(project));
             request.put("user_prompt", prompt);
             request.put("selected_symbols", selectedSymbols);
             request.put("selected_symbols_are_context_only", true);
@@ -4664,6 +4948,12 @@ public final class MainActivity extends Activity {
                 : ("done".equals(mode)
                         ? unsupportedJsonKeys(response, "mode", "working_notes", "summary")
                         : unsupportedJsonKeys(response, "mode", "working_notes", "summary", "edits"));
+        for (int index = unsupported.length() - 1; index >= 0; index -= 1) {
+            String key = unsupported.optString(index, "");
+            JSONArray harmless = ("tool_calls".equals(key) || "edits".equals(key))
+                    ? response.optJSONArray(key) : null;
+            if (harmless != null && harmless.length() == 0) unsupported.remove(index);
+        }
         if (unsupported.length() > 0) {
             errors.put(new JSONObject()
                     .put("kind", "validation_error")
@@ -4724,7 +5014,8 @@ public final class MainActivity extends Activity {
         return errors;
     }
     private AiAgentResult runAiAgentLoop(String apiKey, String model, String initialRequestJson,
-            boolean allowImageGeneration, boolean useCodex) throws Exception {
+            boolean allowImageGeneration, boolean useCodex,
+            WorkshopAiProjectTransaction.Snapshot transaction) throws Exception {
         String currentRequestJson = initialRequestJson;
         AiAgentSession session = new AiAgentSession();
         AiUsageAccumulator usage = new AiUsageAccumulator();
@@ -4737,14 +5028,17 @@ public final class MainActivity extends Activity {
                 throw new IOException("Device monthly AI spending limit reached before agent turn " + (turn + 1));
             }
             session.currentStep = turn + 1;
-            postAiProgress(session.currentStep, session.actionCount, "calling AI");
+            postAiProgress(session.currentStep, session.actionCount,
+                    WorkshopAiRunPhase.EDITING.wireValue());
             appendAiTrace("llm_request", new JSONObject()
                     .put("turn", session.currentStep)
-                    .put("model", model)
+                    .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                    .put("requested_model", model)
                     .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
             double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
             boolean allowImageOnThisTurn = !useCodex && allowImageGeneration && turn == 0;
             AiApiResponse apiResponse;
+            long llmStartedMs = SystemClock.elapsedRealtime();
             if (useCodex) {
                 apiResponse = callCodexResponses(currentRequestJson);
                 usage.addUnpriced(apiResponse.model, apiResponse.usage);
@@ -4768,6 +5062,16 @@ public final class MainActivity extends Activity {
             JSONObject response = new JSONObject(aiJson);
             appendAiTrace("llm_response", new JSONObject()
                     .put("turn", session.currentStep)
+                    .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                    .put("requested_model", model)
+                    .put("response_model", apiResponse.model)
+                    .put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)
+                    .put("usage", apiResponse.usage)
+                    .put("cost_available", !useCodex && usage.lastCallCostAvailable)
+                    .put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable
+                            ? usage.lastCallEstimatedCostUsd : JSONObject.NULL)
+                    .put("cumulative_estimated_cost_usd", useCodex
+                            ? JSONObject.NULL : usage.estimatedCostUsd)
                     .put("summary", summarizeAiResponseForTrace(apiResponse.body, response)));
             appendAiTrace("llm_json", new JSONObject().put("turn", session.currentStep).put("response", response));
             JSONArray responseValidationErrors = validateAiResponseShape(response);
@@ -4798,9 +5102,8 @@ public final class MainActivity extends Activity {
             JSONArray toolCalls = response.optJSONArray("tool_calls");
             if (!"tool_calls".equals(mode) || toolCalls == null || toolCalls.length() == 0) {
                 postAiProgress(session.currentStep, session.actionCount, "finalizing");
-                return new AiAgentResult(aiJson, usage.toJson(model),
-                        useCodex ? usage.subscriptionSummary() : usage.summary(), session.currentStep,
-                        session.actionCount, generatedImages);
+                return finishAiAgentResult(aiJson, usage, apiKey, model, useCodex, session,
+                        generatedImages, transaction, initialRequestJson);
             }
             String currentToolCallBatch = toolCalls.toString();
             if (currentToolCallBatch.equals(previousToolCallBatch)) {
@@ -4821,9 +5124,8 @@ public final class MainActivity extends Activity {
                         .put("last_error", session.lastToolError);
                 appendAiTrace("repeated_tool_calls", repeated);
                 if (session.successfulWriteCount > 0 && compileReady && session.latestRunnableTestsPassed()) {
-                    return new AiAgentResult(repeated.toString(), usage.toJson(model),
-                            useCodex ? usage.subscriptionSummary() : usage.summary(), session.currentStep,
-                            session.actionCount, generatedImages);
+                    return finishAiAgentResult(repeated.toString(), usage, apiKey, model, useCodex,
+                            session, generatedImages, transaction, initialRequestJson);
                 }
                 throw new IOException("AI repeated identical tool calls; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
             }
@@ -4833,6 +5135,7 @@ public final class MainActivity extends Activity {
             boolean batchHasWrites = aiToolCallsContainWrites(toolCalls);
             boolean blockedReadOnlyBatch = !session.toolLoopPolicy.shouldExecute(batchHasWrites);
             JSONArray observations;
+            long toolsStartedMs = SystemClock.elapsedRealtime();
             if (blockedReadOnlyBatch) {
                 observations = new JSONArray().put(new JSONObject()
                         .put("kind", "progress_policy")
@@ -4841,12 +5144,20 @@ public final class MainActivity extends Activity {
                         .put("retained_observation_count", session.observationMemory.size()));
             } else {
                 observations = executeAiToolCalls(toolCalls, session);
-                session.rememberToolObservations(observations);
             }
             session.toolLoopPolicy.recordBatch(batchHasWrites);
             throwIfAiCancelled();
-            appendAiTrace("tool_observations", new JSONObject().put("turn", session.currentStep).put("observations", observations));
+            appendAiTrace("tool_observations", new JSONObject()
+                    .put("turn", session.currentStep)
+                    .put("elapsed_ms", SystemClock.elapsedRealtime() - toolsStartedMs)
+                    .put("requested_call_count", toolCalls.length())
+                    .put("executed", !blockedReadOnlyBatch)
+                    .put("action_count", session.actionCount)
+                    .put("successful_writes", session.successfulWriteCount)
+                    .put("rolled_back_writes", session.rolledBackWriteCount)
+                    .put("observations", observations));
             JSONObject testObservation;
+            long testsStartedMs = SystemClock.elapsedRealtime();
             if (batchHasWrites) {
                 testObservation = runAiTestsAfterBatch(session);
                 session.latestTestObservation = testObservation;
@@ -4855,7 +5166,51 @@ public final class MainActivity extends Activity {
                         .put("kind", "test_run")
                         .put("status", "not_run_for_read_only_batch");
             }
-            appendAiTrace("test_observation", new JSONObject().put("turn", session.currentStep).put("result", testObservation));
+            appendAiTrace("test_observation", new JSONObject()
+                    .put("turn", session.currentStep)
+                    .put("elapsed_ms", SystemClock.elapsedRealtime() - testsStartedMs)
+                    .put("result", testObservation));
+            if (!blockedReadOnlyBatch) {
+                session.rememberToolObservations(observations,
+                        batchHasWrites && testObservation.optBoolean("all_runnable_tests_passed", false));
+            }
+            if (batchHasWrites && WorkshopAiCompletionStatus.canFinalizeTestedWrites(
+                    aiToolCallsContainTestWrite(toolCalls), session.successfulWriteCount,
+                    compileReady, session.latestRunnableTestsPassed())) {
+                JSONObject completed = new JSONObject()
+                        .put("mode", "done")
+                        .put("working_notes", session.workingNotes)
+                        .put("summary", "Applied and tested " + session.successfulWriteCount + " tool write(s)")
+                        .put("applied_tool_writes", true)
+                        .put("reason", "Successful tool writes compiled and all runnable tests passed; skipped a redundant final model call.");
+                appendAiTrace("auto_finalize_tested_writes", completed);
+                AiAgentResult candidate = finishAiAgentResult(completed.toString(), usage, apiKey,
+                        model, useCodex, session, generatedImages, transaction, initialRequestJson);
+                if (candidate.verification.status == WorkshopAiVerificationResult.Status.FAILED
+                        && session.verificationRepairCycles < 2 && turn + 1 < MAX_AI_AGENT_TURNS) {
+                    session.verificationRepairCycles += 1;
+                    postAiProgress(session.currentStep, session.actionCount,
+                            WorkshopAiRunPhase.REPAIRING.wireValue());
+                    appendAiTrace("verification_repair_requested", new JSONObject()
+                            .put("cycle", session.verificationRepairCycles)
+                            .put("evidence", candidate.verification.evidence));
+                    JSONObject verificationFollowup = new JSONObject()
+                            .put("original_request", new JSONObject(initialRequestJson))
+                            .put("tool_observations", session.retainedToolObservations())
+                            .put("verification_observation", new JSONObject()
+                                    .put("status", "failed")
+                                    .put("evidence", candidate.verification.evidence))
+                            .put("working_notes", session.workingNotes)
+                            .put("instruction", "Independent verification failed. Repair the production "
+                                    + "behavior and its permanent tests using the exact verification evidence. "
+                                    + "Do not merely weaken tests. Inspect only missing context, write the fix, "
+                                    + "and rerun tests.");
+                    currentRequestJson = verificationFollowup.toString();
+                    previousToolCallBatch = "";
+                    continue;
+                }
+                return candidate;
+            }
             JSONObject followup = new JSONObject();
             followup.put("original_request", new JSONObject(initialRequestJson));
             followup.put("tool_observations", session.retainedToolObservations());
@@ -4880,18 +5235,17 @@ public final class MainActivity extends Activity {
                     .put("tool_calls", new JSONArray())
                     .put("edits", new JSONArray())
                     .put("expected_reload", reloadKind(lastCompileResult))
-                    .put("reason", "The model reached the tool-call limit after successful write_symbol calls with passing runnable tests; accepted tested tool writes.")
-                    .put("warning", "tool_call_limit_after_successful_tested_writes")
+                    .put("reason", "The model reached the agent turn limit after successful writes with passing runnable tests; accepted tested tool writes.")
+                    .put("warning", "agent_turn_limit_after_successful_tested_writes")
                     .put("successful_writes", session.successfulWriteCount)
                     .put("rolled_back_writes", session.rolledBackWriteCount)
                     .put("last_tool", session.lastToolSummary)
                     .put("last_error", session.lastToolError);
             appendAiTrace("limit_after_successful_tested_writes", synthetic);
-            return new AiAgentResult(synthetic.toString(), usage.toJson(model),
-                    useCodex ? usage.subscriptionSummary() : usage.summary(), MAX_AI_AGENT_TURNS,
-                    session.actionCount, generatedImages);
+            return finishAiAgentResult(synthetic.toString(), usage, apiKey, model, useCodex,
+                    session, generatedImages, transaction, initialRequestJson);
         }
-        throw new IOException("AI agent reached tool-call limit before returning edits; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
+        throw new IOException("AI agent reached turn limit before returning edits; actions=" + session.actionCount + " successful_writes=" + session.successfulWriteCount + " rolled_back_writes=" + session.rolledBackWriteCount + " last_tool=" + session.lastToolSummary + " last_error=" + session.lastToolError);
     }
 
     private JSONArray executeAiToolCalls(JSONArray toolCalls, AiAgentSession session) throws Exception {
@@ -4959,6 +5313,8 @@ public final class MainActivity extends Activity {
             return observations;
         }
 
+        postAiProgress(session.currentStep, session.actionCount,
+                WorkshopAiRunPhase.COMPILING.wireValue());
         String compileResult = nativeCompileProject(projectRootPath());
         lastCompileResult = compileResult;
         compileReady = isRunnableCompile(compileResult);
@@ -4973,7 +5329,10 @@ public final class MainActivity extends Activity {
             compileAttempted = true;
             JSONObject restoredDiagnostics = compileResultToJson(restoredCompile);
             annotateAiBatchWriteResults(observations, "rolled_back", diagnostics, restoredDiagnostics, session);
+            session.failedWriteBatchCount += 1;
             annotatePendingRunTestsBlocked(observations, pendingRunTestObservationIndexes, diagnostics);
+            postAiProgress(session.currentStep, session.actionCount,
+                    WorkshopAiRunPhase.REPAIRING.wireValue());
             return observations;
         }
 
@@ -5003,6 +5362,226 @@ public final class MainActivity extends Activity {
         for (int index = 0; index < toolCalls.length(); index += 1) {
             JSONObject call = toolCalls.optJSONObject(index);
             if (call != null && isAiWriteTool(call.optString("tool", ""))) return true;
+        }
+        return false;
+    }
+
+    private AiAgentResult finishAiAgentResult(String aiJson, AiUsageAccumulator usage, String apiKey,
+            String model, boolean useCodex, AiAgentSession session,
+            List<AiGeneratedImageCandidate> generatedImages,
+            WorkshopAiProjectTransaction.Snapshot transaction, String initialRequestJson) throws Exception {
+        postAiProgress(session.currentStep, session.actionCount,
+                WorkshopAiRunPhase.VERIFYING.wireValue());
+        WorkshopAiVerificationPolicy.Decision policy = WorkshopAiVerificationPolicy.classify(
+                activeAiPrompt, session.changedSymbols);
+        WorkshopAiVerificationResult verification;
+        JSONObject terminalResponse = new JSONObject(aiJson);
+        JSONArray directEdits = terminalResponse.optJSONArray("edits");
+        boolean hasUnappliedDirectEdits = directEdits != null && directEdits.length() > 0;
+        if (session.successfulWriteCount == 0 && !hasUnappliedDirectEdits) {
+            verification = new WorkshopAiVerificationResult(
+                    WorkshopAiVerificationResult.Status.VERIFIED,
+                    WorkshopAiVerificationPolicy.Risk.LOW, 0, 0, "no production writes", 0L);
+        } else {
+            verification = WorkshopAiVerificationRunner.verify(policy, compileReady,
+                    session.latestRunnableTestsPassed(), session.successfulWriteCount,
+                    session.changedTestFiles, false);
+            if (verification.status == WorkshopAiVerificationResult.Status.INCONCLUSIVE
+                    && policy.requiresIndependentReview) {
+                verification = runIndependentAiVerification(apiKey, model, useCodex, usage,
+                        session, policy, initialRequestJson, verification);
+            }
+        }
+        postAiVerificationMetrics(verification, session.verificationRepairCycles,
+                session.failedWriteBatchCount, session.rolledBackWriteCount);
+        appendAiTrace("verification_result", new JSONObject()
+                .put("status", verification.status.name().toLowerCase())
+                .put("risk", verification.risk.name().toLowerCase())
+                .put("passed", verification.passedChecks)
+                .put("total", verification.totalChecks)
+                .put("evidence", verification.evidence)
+                .put("elapsed_ms", verification.elapsedMs)
+                .put("repair_cycles", session.verificationRepairCycles)
+                .put("verifier_calls", session.verifierCallCount)
+                .put("failed_write_batches", session.failedWriteBatchCount)
+                .put("restored_writes", session.rolledBackWriteCount)
+                .put("changed_symbols", new JSONArray(session.changedSymbols))
+                .put("changed_test_files", new JSONArray(session.changedTestFiles)));
+        return new AiAgentResult(aiJson, usage.toJson(model),
+                useCodex ? usage.subscriptionSummary() : usage.summary(), session.currentStep,
+                session.actionCount, generatedImages, verification, transaction,
+                session.verificationRepairCycles);
+    }
+
+    private WorkshopAiVerificationResult runIndependentAiVerification(String apiKey, String model,
+            boolean useCodex, AiUsageAccumulator usage, AiAgentSession session,
+            WorkshopAiVerificationPolicy.Decision policy, String initialRequestJson,
+            WorkshopAiVerificationResult preliminary) {
+        long startedMs = SystemClock.elapsedRealtime();
+        try {
+            if (session.verifierCallCount >= 2) {
+                return verificationResult(WorkshopAiVerificationResult.Status.INCONCLUSIVE,
+                        preliminary, "independent reviewer reached its two-call limit", startedMs);
+            }
+            session.verifierCallCount += 1;
+            postAiProgress(session.currentStep, session.actionCount, "verifier model");
+            JSONObject request = new JSONObject(initialRequestJson);
+            request.put("verification_role", "independent_test_author");
+            request.put("verification_instruction",
+                    "Review the provisional game change independently. Do not edit production source. "
+                    + "Return mode=tool_calls with exactly one write_test_file call containing a temporary "
+                    + ".test.stasis test that challenges observable behavior, including relevant boundary "
+                    + "or transition cases. Do not copy the generated tests. If meaningful verification is "
+                    + "impossible from the supplied evidence, return mode=done and explain why in working_notes.");
+            request.put("changed_symbol_sources", aiVerificationChangedSymbols(session));
+            request.put("generated_test_sources", aiVerificationChangedTests(session));
+            WorkshopAiGeneratedTestAudit.Result generatedAudit =
+                    aiVerificationGeneratedTestAudit(session, policy);
+            request.put("generated_test_audit", new JSONObject()
+                    .put("passed", generatedAudit.passed).put("total", generatedAudit.total)
+                    .put("observable_behavior", generatedAudit.observableBehavior)
+                    .put("boundary_coverage", generatedAudit.boundaryCoverage)
+                    .put("evidence", generatedAudit.evidence));
+            if (policy.requiresLogicalSnapshot) {
+                request.put("logical_render_snapshot", aiToolTakeScreenshot());
+            }
+            request.put("allowed_verifier_tools", new JSONArray().put("write_test_file"));
+            request.put("risk", policy.risk.name().toLowerCase());
+            String reviewerModel = useCodex ? model : "gpt-5.6-sol";
+            appendAiTrace("verifier_request", new JSONObject()
+                    .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                    .put("requested_model", reviewerModel)
+                    .put("reviewer_call", session.verifierCallCount)
+                    .put("risk", policy.risk.name().toLowerCase()));
+            AiApiResponse response;
+            long llmStartedMs = SystemClock.elapsedRealtime();
+            if (useCodex) {
+                response = callCodexResponses(request.toString());
+                usage.addUnpriced(response.model, response.usage);
+            } else {
+                double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(
+                        configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00"), monthlyAiSpendUsd());
+                int maxOutputTokens = maxOutputTokensForBudget(
+                        reviewerModel, request.toString(), remainingUsd, false);
+                response = callOpenAiResponsesApi(apiKey, reviewerModel, request.toString(),
+                        maxOutputTokens, false);
+                usage.add(reviewerModel, response.usage);
+                if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+            }
+            JSONObject reviewer = new JSONObject(extractAiJsonResponse(response.body));
+            appendAiTrace("verifier_response", new JSONObject()
+                    .put("response_model", response.model)
+                    .put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)
+                    .put("usage", response.usage)
+                    .put("response", reviewer));
+            JSONArray errors = validateAiResponseShape(reviewer);
+            JSONArray calls = reviewer.optJSONArray("tool_calls");
+            if (errors.length() > 0 || !"tool_calls".equals(reviewer.optString("mode", ""))
+                    || calls == null || calls.length() != 1) {
+                return verificationResult(WorkshopAiVerificationResult.Status.INCONCLUSIVE,
+                        preliminary, "verifier did not return one valid temporary test", startedMs);
+            }
+            JSONObject call = calls.getJSONObject(0);
+            JSONObject args = call.optJSONObject("args");
+            if (!"write_test_file".equals(call.optString("tool", "")) || args == null
+                    || args.optString("source", "").trim().isEmpty()) {
+                return verificationResult(WorkshopAiVerificationResult.Status.INCONCLUSIVE,
+                        preliminary, "verifier attempted a disallowed action", startedMs);
+            }
+            WorkshopAiTemporaryVerification.Result executed = WorkshopAiTemporaryVerification.run(
+                    projectRoot(), args.getString("source"), testFile -> {
+                        JSONObject testRun = new JSONObject(nativeRunTests(projectRootPath()));
+                        boolean passed = WorkshopAiTemporaryVerification.acceptedRun(
+                                session.latestTestObservation.optInt("passed", 0),
+                                testRun.optInt("passed", 0), testRun.optInt("failed", 0));
+                        testRun.put("minimum_expected_passed",
+                                session.latestTestObservation.optInt("passed", 0) + 1);
+                        return new WorkshopAiTemporaryVerification.Result(passed, testRun.toString());
+                    });
+            appendAiTrace("verifier_test", new JSONObject()
+                    .put("passed", executed.passed)
+                    .put("evidence", executed.evidence)
+                    .put("temporary_test_removed", true));
+            String executedEvidence = executed.passed
+                    ? "independent temporary test passed"
+                    : "independent temporary test failed; test="
+                            + boundedVerificationEvidence(args.getString("source"), 3500)
+                            + "; result=" + boundedVerificationEvidence(executed.evidence, 2000);
+            return verificationResult(executed.passed
+                            ? WorkshopAiVerificationResult.Status.VERIFIED
+                            : WorkshopAiVerificationResult.Status.FAILED,
+                    preliminary, executedEvidence, startedMs);
+        } catch (Exception error) {
+            try {
+                appendAiTrace("verifier_error", new JSONObject().put("error", error.getMessage()));
+            } catch (Exception ignored) {
+            }
+            return verificationResult(WorkshopAiVerificationResult.Status.INCONCLUSIVE,
+                    preliminary, "verifier error: " + error.getMessage(), startedMs);
+        }
+    }
+
+    private static String boundedVerificationEvidence(String value, int maximumCharacters) {
+        String normalized = value == null ? "" : value.replace('\r', ' ').replace('\n', ' ');
+        return normalized.length() <= maximumCharacters
+                ? normalized : normalized.substring(0, maximumCharacters) + "...";
+    }
+
+    private WorkshopAiVerificationResult verificationResult(
+            WorkshopAiVerificationResult.Status status,
+            WorkshopAiVerificationResult preliminary, String evidence, long startedMs) {
+        return WorkshopAiVerificationRunner.completeIndependent(preliminary, status, evidence,
+                SystemClock.elapsedRealtime() - startedMs);
+    }
+
+    private JSONArray aiVerificationChangedSymbols(AiAgentSession session) throws Exception {
+        JSONArray result = new JSONArray();
+        ProjectSnapshot project = session.project();
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (!session.changedSymbols.contains(symbol.name)) continue;
+                    result.put(new JSONObject().put("kind", symbol.kind).put("name", symbol.name)
+                            .put("owner", symbol.owner).put("file", symbol.file)
+                            .put("source", symbol.source));
+                }
+            }
+        }
+        return result;
+    }
+
+    private JSONArray aiVerificationChangedTests(AiAgentSession session) throws Exception {
+        JSONArray result = new JSONArray();
+        for (String relative : session.changedTestFiles) {
+            File file = testFileForAiPath(relative);
+            if (file.isFile()) {
+                result.put(new JSONObject().put("file", relative)
+                        .put("source", readTextFile(file)));
+            }
+        }
+        return result;
+    }
+
+    private WorkshopAiGeneratedTestAudit.Result aiVerificationGeneratedTestAudit(
+            AiAgentSession session, WorkshopAiVerificationPolicy.Decision policy) throws Exception {
+        ArrayList<String> sources = new ArrayList<>();
+        for (String relative : session.changedTestFiles) {
+            File file = testFileForAiPath(relative);
+            if (file.isFile()) sources.add(readTextFile(file));
+        }
+        WorkshopAiGeneratedTestAudit.Result audit = WorkshopAiGeneratedTestAudit.audit(sources, policy);
+        appendAiTrace("generated_test_audit", new JSONObject()
+                .put("passed", audit.passed).put("total", audit.total)
+                .put("observable_behavior", audit.observableBehavior)
+                .put("boundary_coverage", audit.boundaryCoverage)
+                .put("evidence", audit.evidence));
+        return audit;
+    }
+
+    private static boolean aiToolCallsContainTestWrite(JSONArray toolCalls) {
+        for (int index = 0; index < toolCalls.length(); index += 1) {
+            JSONObject call = toolCalls.optJSONObject(index);
+            if (call != null && "write_test_file".equals(call.optString("tool", ""))) return true;
         }
         return false;
     }
@@ -5200,6 +5779,12 @@ public final class MainActivity extends Activity {
             if ("written".equals(status) || "created".equals(status) || "deleted".equals(status)) {
                 session.successfulWriteCount += 1;
                 session.lastToolError = "";
+                if ("write_test_file".equals(tool) || "delete_test_file".equals(tool)) {
+                    if (!file.isEmpty()) session.changedTestFiles.add(file);
+                } else {
+                    String changed = !name.isEmpty() ? name : file;
+                    if (!changed.isEmpty()) session.changedSymbols.add(changed);
+                }
             } else if ("rolled_back".equals(status)) {
                 session.rolledBackWriteCount += 1;
                 JSONObject diagnostics = result.optJSONObject("diagnostics");
@@ -5298,7 +5883,6 @@ public final class MainActivity extends Activity {
                     }
                     JSONObject entry = symbolToJson(symbol, false);
                     if ("function".equals(symbol.kind)) {
-                        entry.put("preferred_call", preferredFunctionCall(symbol));
                         functions.put(entry);
                     } else if ("struct".equals(symbol.kind)) {
                         structs.put(entry);
@@ -5341,6 +5925,8 @@ public final class MainActivity extends Activity {
 
     private JSONObject runAiTestsAfterBatch(AiAgentSession session) throws Exception {
         try {
+            postAiProgress(session.currentStep, session.actionCount,
+                    WorkshopAiRunPhase.GENERATED_TESTS.wireValue());
             return aiToolRunTests(session);
         } catch (Exception error) {
             return new JSONObject()
@@ -5357,7 +5943,7 @@ public final class MainActivity extends Activity {
             files.put(new JSONObject()
                     .put("file", relative)
                     .put("kind", relative.endsWith(".ai_test.json") ? "ai_scenario" : "stasis_test")
-                    .put("runnable_on_android", relative.endsWith(".ai_test.json")));
+                    .put("runnable_on_android", relative.endsWith(".test.stasis")));
         }
         return new JSONObject()
                 .put("kind", "tests")
@@ -5975,53 +6561,6 @@ public final class MainActivity extends Activity {
         return json;
     }
 
-    private static String preferredFunctionCall(SymbolEntry symbol) {
-        if (!"function".equals(symbol.kind)) {
-            return symbol.name;
-        }
-        String first = firstParameter(symbol.signature);
-        if (first != null) {
-            String[] parts = first.split(":", 2);
-            if (parts.length == 2 && "self".equals(parts[0].trim()) && parts[1].trim().equals(symbol.owner)) {
-                return lowerFirst(symbol.owner) + "." + symbol.name + "(" + callArgumentList(symbol.signature, true) + ")";
-            }
-        }
-        return symbol.name + "(" + callArgumentList(symbol.signature, false) + ")";
-    }
-
-    private static String callArgumentList(String signature, boolean skipFirst) {
-        int open = signature.indexOf('(');
-        int close = signature.indexOf(')', open + 1);
-        if (open < 0 || close < 0 || close <= open + 1) {
-            return "";
-        }
-        String parameters = signature.substring(open + 1, close).trim();
-        if (parameters.isEmpty()) {
-            return "";
-        }
-        String[] parts = parameters.split(",");
-        StringBuilder builder = new StringBuilder();
-        for (int index = skipFirst ? 1 : 0; index < parts.length; index += 1) {
-            String parameter = parts[index].trim();
-            int colon = parameter.indexOf(':');
-            String name = colon > 0 ? parameter.substring(0, colon).trim() : parameter;
-            if (name.isEmpty()) {
-                continue;
-            }
-            if (builder.length() > 0) {
-                builder.append(", ");
-            }
-            builder.append(name);
-        }
-        return builder.toString();
-    }
-
-    private static String lowerFirst(String text) {
-        if (text == null || text.isEmpty()) {
-            return "value";
-        }
-        return Character.toLowerCase(text.charAt(0)) + text.substring(1);
-    }
     private static String aiLookupExpectedKind(String kind) {
         if ("replace_struct".equals(kind) || "struct".equals(kind)) {
             return "struct";
@@ -6049,12 +6588,22 @@ public final class MainActivity extends Activity {
                 }
             }
         }
-        String stableInstruction = "Return only one JSON object. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; use either a compact list tool or a direct read when possible, not every inspection tool. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
+        String stableInstruction = "Return only one JSON object. Follow the cached stasis_basics as the authoritative language/runtime orientation. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when the index already identifies the target. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; use either the initial index, a compact list tool, or a direct read when possible, not every inspection tool. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
         stableInstruction += " Every response must include working_notes as a concise user-visible state summary of at most 2000 characters using Intent, Observed, Next, and Blocker. Report decisions and evidence, not private chain-of-thought. Update working_notes from the retained prior note and current observations on every call.";
         stableInstruction += " write_symbol creates or replaces a symbol. Before writing, inspect the current target. Follow game_design_rules, prefer_lifecycle_local_state, avoid_global_tick_for_per_entity_progression, and architecture_recommendations. Follow architecture_recommendations. Use command/event-style functions for durable gameplay concepts. Tool errors, validation_error observations, and test_observation failures are not final; correct them before returning mode=done. A failed write batch rolls back the whole batch and returns diagnostics.";
+        String stableContextText = "Stable request context: " + stableRequest.toString();
+        if (includeImages) {
+            int cacheableChars = stableInstruction.length() + stableContextText.length();
+            appendAiTrace("prompt_cache_context", new JSONObject()
+                    .put("stable_instruction_chars", stableInstruction.length())
+                    .put("stable_context_chars", stableContextText.length())
+                    .put("cacheable_chars", cacheableChars)
+                    .put("approx_cacheable_tokens", (cacheableChars + 3) / 4)
+                    .put("explicit_breakpoint", explicitCacheBreakpoints));
+        }
         JSONArray input = new JSONArray()
                 .put(aiInputMessage("system", stableInstruction, false))
-                .put(aiInputMessage("user", "Stable request context: " + stableRequest.toString(), explicitCacheBreakpoints));
+                .put(aiInputMessage("user", stableContextText, explicitCacheBreakpoints));
         if (includeImages && !activeAiImageAttachments.isEmpty()) {
             input.put(aiImageInputMessage(activeAiImageAttachments));
         }
@@ -6360,6 +6909,7 @@ public final class MainActivity extends Activity {
             }
         }
         JSONArray globals = stable.optJSONArray("project_globals");
+        JSONObject symbolIndex = stable.optJSONObject("project_symbol_index");
         JSONArray selected = stable.optJSONArray("selected_symbols");
         JSONArray tools = stable.optJSONArray("available_tools");
         return new JSONObject()
@@ -6369,6 +6919,8 @@ public final class MainActivity extends Activity {
                 .put("stable_keys", sortedJsonKeys(stable))
                 .put("volatile_keys", sortedJsonKeys(volatileContext))
                 .put("project_global_count", globals == null ? 0 : globals.length())
+                .put("project_symbol_index_count", symbolIndex == null ? 0 : symbolIndex.optInt("included_count", 0))
+                .put("project_symbol_index_truncated", symbolIndex != null && symbolIndex.optBoolean("truncated", false))
                 .put("selected_symbol_count", selected == null ? 0 : selected.length())
                 .put("available_tool_count", tools == null ? 0 : tools.length());
     }
@@ -6498,11 +7050,24 @@ public final class MainActivity extends Activity {
                 compileReady = isRunnableCompile(compileResult);
                 compileAttempted = true;
                 String elapsed = currentAiElapsedText();
-                updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, aiReloadPhase(compileResult));
+                boolean appliedToolWrites = response.optBoolean("applied_tool_writes", false);
+                String completionPhase = aiResult.verification != null
+                        && aiResult.verification.canApplyAutomatically()
+                                ? WorkshopAiRunPhase.VERIFIED.wireValue()
+                                : (appliedToolWrites
+                                        ? WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult))
+                                        : aiReloadPhase(compileResult));
+                updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, completionPhase);
                 JSONObject testRun = aiToolRunTests(new AiAgentSession());
                 appendAiTrace("apply_done", new JSONObject().put("summary", response.optString("summary", "no actions")).put("compile", compileResult).put("tests", testRun).put("elapsed", elapsed));
-                recordAiOutcome(activeAiPrompt, "complete", response.optString("summary", "no actions"), aiResult.usageSummary);
-                setStatusText("AI edit complete: " + response.optString("summary", "no actions") + " - no actions - " + aiReloadSummary(compileResult) + " - " + testSummaryText(testRun) + " - elapsed=" + elapsed + " - " + compileResult + " - " + aiResult.usageSummary + " - trace=" + aiTraceLogPath());
+                recordAiOutcome(activeAiPrompt, appliedToolWrites ? "applied" : "complete",
+                        response.optString("summary", "no actions"), aiResult.usageSummary);
+                String actionSummary = appliedToolWrites ? "tested tool writes" : "no actions";
+                setStatusText("AI edit " + (appliedToolWrites ? "applied" : "complete") + ": "
+                        + response.optString("summary", "no actions") + " - " + actionSummary + " - "
+                        + aiReloadSummary(compileResult) + " - " + testSummaryText(testRun) + " - elapsed="
+                        + elapsed + " - " + compileResult + " - " + aiResult.usageSummary
+                        + " - trace=" + aiTraceLogPath());
                 return;
             }
             ProjectSnapshot project = loadBundledProject();
@@ -6540,7 +7105,12 @@ public final class MainActivity extends Activity {
             }
             refreshChangeSummary(project);
             String elapsed = currentAiElapsedText();
-            updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, aiReloadPhase(compileResult));
+            updateAiProgress(
+                    aiResult.finalStep,
+                    aiResult.finalActionCount,
+                    aiResult.verification != null && aiResult.verification.canApplyAutomatically()
+                            ? WorkshopAiRunPhase.VERIFIED.wireValue()
+                            : WorkshopAiCompletionStatus.afterEdits(aiReloadPhase(compileResult)));
             JSONObject testRun = aiToolRunTests(new AiAgentSession());
             appendAiTrace("apply_edits", new JSONObject().put("summary", response.optString("summary", "updated workspace")).put("compile", compileResult).put("tests", testRun).put("elapsed", elapsed));
             recordAiOutcome(activeAiPrompt, "applied", response.optString("summary", "updated workspace"), aiResult.usageSummary);
@@ -6570,6 +7140,71 @@ public final class MainActivity extends Activity {
             appendAiTraceFields("apply_failed_rolled_back", "error", error.getMessage(), "elapsed", elapsed, null, null);
             recordAiOutcome(activeAiPrompt, "rolled_back", error.getMessage(), aiResult.usageSummary);
             setStatusText("AI edit apply failed and rolled back: elapsed=" + elapsed + " - " + error.getMessage() + " - trace=" + aiTraceLogPath());
+        }
+    }
+
+    private void handleAiVerificationResult(final AiAgentResult aiResult,
+            final SymbolEntry fallbackSymbol) {
+        WorkshopAiVerificationResult verification = aiResult.verification;
+        if (verification == null || verification.canApplyAutomatically()) {
+            updateAiProgress(aiResult.finalStep, aiResult.finalActionCount,
+                    WorkshopAiRunPhase.APPLYING.wireValue());
+            applyAiCodeResponse(aiResult, fallbackSymbol);
+            return;
+        }
+        if (verification.status == WorkshopAiVerificationResult.Status.FAILED) {
+            restoreAiTransaction(aiResult, "verification failed: " + verification.summary());
+            return;
+        }
+        updateAiProgress(aiResult.finalStep, aiResult.finalActionCount,
+                "verify " + verification.passedChecks + "/" + verification.totalChecks);
+        new AlertDialog.Builder(this)
+                .setTitle("AI change needs independent verification")
+                .setMessage(verification.summary()
+                        + "\n\nThe generated tests passed, but they are not independent proof of this "
+                        + verification.risk.name().toLowerCase() + " change.")
+                .setPositiveButton("Apply anyway", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        try {
+                            appendAiTrace("verification_override", new JSONObject()
+                                    .put("status", "applied_with_warning")
+                                    .put("evidence", aiResult.verification.evidence));
+                        } catch (Exception ignored) {
+                        }
+                        updateAiProgress(aiResult.finalStep, aiResult.finalActionCount,
+                                WorkshopAiRunPhase.APPLYING.wireValue());
+                        applyAiCodeResponse(aiResult, fallbackSymbol);
+                    }
+                })
+                .setNegativeButton("Restore", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        restoreAiTransaction(aiResult, "independent verification was not completed");
+                    }
+                })
+                .setCancelable(false)
+                .show();
+    }
+
+    private void restoreAiTransaction(AiAgentResult aiResult, String reason) {
+        try {
+            WorkshopAiProjectTransaction.restore(projectRoot(), aiResult.transaction);
+            String compileResult = nativeCompileProject(projectRootPath());
+            lastCompileResult = compileResult;
+            compileReady = isRunnableCompile(compileResult);
+            compileAttempted = true;
+            ProjectSnapshot restored = loadBundledProject();
+            rebuildSymbolList(restored);
+            refreshChangeSummary(restored);
+            updateAiProgress(aiResult.finalStep, aiResult.finalActionCount,
+                    WorkshopAiRunPhase.RESTORED.wireValue());
+            appendAiTrace("verification_restored", new JSONObject()
+                    .put("reason", reason).put("compile", compileResult));
+            recordAiOutcome(activeAiPrompt, "verification_restored", reason, aiResult.usageSummary);
+            setStatusText("AI change restored: " + reason + " - " + aiReloadSummary(compileResult));
+        } catch (Exception error) {
+            updateAiProgress(aiResult.finalStep, aiResult.finalActionCount, "restore failed");
+            recordAiOutcome(activeAiPrompt, "rollback_failed", error.getMessage(), aiResult.usageSummary);
+            setStatusText("AI verification restore failed: " + error.getMessage());
         }
     }
 
@@ -8863,7 +9498,9 @@ public final class MainActivity extends Activity {
 
     private AiApiResponse callCodexResponses(String requestJson) throws Exception {
         JSONObject payload = new JSONObject();
-        payload.put("model", "");
+        String requestedModel = getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                .getString(AI_PREF_MODEL, DEFAULT_AI_MODEL).trim();
+        payload.put("model", requestedModel.isEmpty() ? DEFAULT_AI_MODEL : requestedModel);
         payload.put("instructions", "");
         payload.put("input", buildAiOpenAiInput(requestJson, true, false));
         payload.put("tools", new JSONArray());
@@ -8874,6 +9511,13 @@ public final class MainActivity extends Activity {
         payload.put("stream", true);
         payload.put("include", new JSONArray().put("reasoning.encrypted_content"));
         payload.put("prompt_cache_key", AI_PROMPT_CACHE_KEY);
+        String serviceTier = WorkshopCodexServiceTier.requestTier(
+                getSharedPreferences(AI_PREFS, MODE_PRIVATE)
+                        .getBoolean(AI_PREF_CODEX_FAST_MODE, false));
+        if (!serviceTier.isEmpty()) payload.put("service_tier", serviceTier);
+        appendAiTrace("codex_request_tier", new JSONObject()
+                .put("mode", serviceTier.isEmpty() ? "standard" : "fast")
+                .put("request_service_tier", serviceTier));
         payload.put("text", buildAiResponseTextFormat());
 
         long generation = nativeCodexBeginResponse();
@@ -9079,9 +9723,15 @@ public final class MainActivity extends Activity {
         final int finalStep;
         final int finalActionCount;
         final List<AiGeneratedImageCandidate> generatedImages;
+        final WorkshopAiVerificationResult verification;
+        final WorkshopAiProjectTransaction.Snapshot transaction;
+        final int verificationRepairCycles;
 
         AiAgentResult(String aiJson, JSONObject usageJson, String usageSummary, int finalStep,
-                int finalActionCount, List<AiGeneratedImageCandidate> generatedImages) {
+                int finalActionCount, List<AiGeneratedImageCandidate> generatedImages,
+                WorkshopAiVerificationResult verification,
+                WorkshopAiProjectTransaction.Snapshot transaction,
+                int verificationRepairCycles) {
             this.aiJson = aiJson;
             this.usageJson = usageJson;
             this.usageSummary = usageSummary;
@@ -9089,6 +9739,9 @@ public final class MainActivity extends Activity {
             this.finalActionCount = finalActionCount;
             this.generatedImages = Collections.unmodifiableList(
                     new ArrayList<AiGeneratedImageCandidate>(generatedImages));
+            this.verification = verification;
+            this.transaction = transaction;
+            this.verificationRepairCycles = verificationRepairCycles;
         }
     }
 
@@ -9232,11 +9885,16 @@ public final class MainActivity extends Activity {
         int actionCount;
         int successfulWriteCount;
         int rolledBackWriteCount;
+        int verificationRepairCycles;
+        int failedWriteBatchCount;
+        int verifierCallCount;
         String lastToolSummary = "none";
         String lastToolError = "";
         String workingNotes = "";
         TreeSet<String> lastPassingTestKeys = new TreeSet<>();
         JSONObject latestTestObservation = new JSONObject();
+        final TreeSet<String> changedSymbols = new TreeSet<>();
+        final TreeSet<String> changedTestFiles = new TreeSet<>();
         final WorkshopAiObservationMemory observationMemory = new WorkshopAiObservationMemory();
         final WorkshopAiToolLoopPolicy toolLoopPolicy =
                 new WorkshopAiToolLoopPolicy(MAX_AI_READ_ONLY_BATCHES);
@@ -9254,14 +9912,19 @@ public final class MainActivity extends Activity {
             return latestTestObservation != null && latestTestObservation.optBoolean("all_runnable_tests_passed", false);
         }
 
-        void rememberToolObservations(JSONArray observations) throws Exception {
+        void rememberToolObservations(JSONArray observations, boolean compactSuccessfulWrites)
+                throws Exception {
             for (int index = 0; index < observations.length(); index += 1) {
                 JSONObject observation = observations.optJSONObject(index);
                 if (observation == null) continue;
+                JSONObject retained = compactSuccessfulWrites && isAiWriteTool(
+                        observation.optString("tool", ""))
+                        ? WorkshopAiObservationCompactor.compactSuccessfulWrite(observation)
+                        : new JSONObject(observation.toString());
                 String tool = observation.optString("tool", "observation");
-                JSONObject args = observation.optJSONObject("args");
+                JSONObject args = retained.optJSONObject("args");
                 String key = tool + "|" + (args == null ? "{}" : args.toString());
-                observationMemory.remember(key, observation.toString());
+                observationMemory.remember(key, retained.toString());
             }
         }
 

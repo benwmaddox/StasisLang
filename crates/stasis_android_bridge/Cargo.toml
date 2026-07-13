@@ -8,6 +8,10 @@ license.workspace = true
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 
+[[bin]]
+name = "android_workshop_compile"
+path = "src/android_workshop_compile.rs"
+
 [dependencies]
 stasis_compiler = { path = "../stasis_compiler" }
 stasis_assets = { path = "../stasis_assets" }

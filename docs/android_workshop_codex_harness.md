@@ -101,12 +101,116 @@ set and its deterministic edit/compile/test loop. The phone-native Codex client
 should adapt those handlers at the tool-call boundary instead of duplicating
 their behavior.
 
+The initial cached request includes a source-free `project_symbol_index` with
+kind, name, owner, file, and signature. It is bounded
+to 256 symbols and 16 KiB, reports truncation, and lets straightforward prompts
+read the likely target directly instead of spending the first turn on
+`list_symbols`. Full source remains opt-in through `read_symbol`.
+
+The same cached section includes compact `stasis_basics` covering typed function
+arguments and returns, struct fields, persistent `global instance: StructType`
+state, direct named global blocks, common scalar/array/text types,
+receiver-form versus function-form calls, deterministic
+`main`/`tick`/`render` lifecycle ownership, limited `on_code_swap` use,
+hot-reload layout implications, and real `.test.stasis` test shape. These rules
+replace per-symbol derived call suggestions.
+
 Every model response also carries required, user-visible `working_notes`,
 bounded to 2,000 characters. The note records concise `Intent`, `Observed`,
 `Next`, and `Blocker` facts rather than private chain-of-thought. The latest
 valid note is shown in the Workshop status, written to the private bounded trace,
 and supplied with retained tool observations on the next otherwise stateless
 call. Oversized, missing, empty, or non-string notes fail response validation.
+
+All calls keep the complete original request as one identical cacheable prefix:
+the user goal, Stasis basics, symbol index, globals, selected source, full tool
+examples, and architecture/game rules. Only cumulative observations, test
+results, and working notes follow the boundary. Direct API requests send an
+explicit 30-minute cache breakpoint/options. The ChatGPT subscription transport
+rejects that API-only field, so Codex subscription requests retain the identical
+full prefix and cache key while using implicit caching. The private trace records
+exact cacheable characters, an approximate token count, and provider-reported
+cached tokens. After a batch writes a behavior test, Workshop
+finishes locally when writes compiled and all runnable tests pass instead of
+requesting a redundant final model response.
+
+AI Settings also offers an opt-in Fast Codex mode for ChatGPT-signed-in calls.
+It requests the model catalog's `priority` service tier while retaining the same
+model, reasoning effort, tools, and cacheable request prefix. Standard remains
+the default because Fast consumes subscription allowance more quickly. The API
+key fallback does not reuse this subscription Fast setting.
+
+The configured GPT-5.6 model applies to both providers. Phone-native Codex
+resolves the requested slug against the signed-in account's visible model
+catalog and rejects an unavailable model rather than silently substituting the
+catalog default.
+
+While the Workshop panel is closed, active and pending AI work appears in a
+compact status strip below the performance HUD. It shows queue state, agent
+step, action count, phase, and live elapsed time without taking over the game. Tapping the
+strip opens Workshop; it hides while the panel is open and when no work is
+queued or running.
+
+For host-only API timing, `tools/android_ai_agent_host.py --service-tier
+priority` opts into the API's separately billed Priority processing. This is a
+useful request/cache latency comparison, but it is not billed against ChatGPT
+subscription Fast-mode allowance and is reported separately.
+
+The host runner compiles the selected `--project-root` through the same
+`compile_android_workshop_project` bridge used by Android before accepting
+writes or final test success. Source and test writes are one atomic batch:
+failed tools, compilation, or changed tests restore every touched file.
+Follow-up requests retain the initial shared-context bytes so the explicit
+cache breakpoint remains stable while only turn state changes. Traces identify
+the requested provider/model, the response model, per-model-call and tool-batch
+elapsed time, and successful versus rolled-back write counts. Host API traces
+and phone-native Codex subscription traces must not be combined as if they were
+the same provider or allowance.
+
+Behavior-test expectations in the shared context are request-generic. They
+require observable coverage and both sides of changed boundaries without
+embedding values from an earlier task. Game geometry guidance also treats
+stored positions, rendered rectangles, half extents, collision bounds, wall
+bounds, and offscreen transitions as one contract on both host and Android.
+
+Both the Android Workshop and host comparison harness allow up to 25 model
+turns per queued AI request. The separate safety cap remains 12 tool calls in
+one model response.
+
+Android Workshop now places a verification gate between tested provisional
+writes and application. Queue phases persist `editing`, `compiling`, `generated
+tests`, `verifying`, `repairing`, and `applying`. Gameplay, structural, and
+visual changes receive a separate restricted reviewer call that may author one
+temporary `.test.stasis` file but cannot write production source. The native
+test total must increase, the temporary file is always removed, and a failed
+review test returns bounded evidence to the primary agent for at most two
+repair cycles. Inconclusive verification requires an explicit Apply Anyway or
+Restore choice.
+
+The project transaction includes all `.stasis` source and test files. It is
+persisted app-private against the active queue item, restored on cancellation
+or failure, and restored before an interrupted queue item is marked failed on
+restart. Successful write observations are reduced to identity, character
+count, SHA-256, and results before a follow-up call; failed attempts retain
+their complete source for repair.
+
+The first phone-native acceptance run used the shared 20-pixel Pong ball
+request. The generated-test audit passed, the first independent temporary test
+found an incorrect collision edge, one primary repair cycle ran, and the second
+independent test passed. Both temporary files were removed and the transaction
+store was empty after application. Total elapsed time was 147.2 seconds; the
+trace records two verifier calls, one repair cycle, one failed write batch, and
+the final verified result.
+
+Use `tools/run_android_ai_model_comparison.py` to summarize isolated Sol,
+Terra, and Luna runs with actual model time, local tool time, token/cache usage,
+estimated standard API cost, and a model-independent acceptance suite. Keep
+each live model invocation as a separate bounded command; use
+`--summarize-only` after all traces exist. The first recorded comparison is in
+`docs/android_ai_model_comparison_2026-07-12.md`. Summary rows include the
+independent pass ratio, tool batches, schema retries, failed write batches,
+restored write counts, and cached-input percentage so a self-authored-test pass
+cannot mask incomplete behavior or retry waste.
 
 ## Limits
 
