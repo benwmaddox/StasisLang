@@ -5,7 +5,7 @@
     {
       "id": "ball",
       "path": "assets/ball.svg",
-      "content_sha256": "70609d72c6242dba12810fb0a8f8a4a61fbe9b22dae4785c72d08055fcbfadfa",
+      "content_sha256": "075baafd6990059e87d662eadac088b339ba713f39ccea9303d59fe6529f880b",
       "format": {
         "kind": "sprite",
         "encoding": "svg",
