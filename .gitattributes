@@ -7,3 +7,5 @@
 *.sh text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.svg text eol=lf
+mobile/android/app/src/main/assets/**/assets/manifest.json text eol=lf
