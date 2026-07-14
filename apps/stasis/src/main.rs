@@ -1392,6 +1392,14 @@ struct MobileAotBundleSummary {
     package_manifest: PathBuf,
 }
 
+fn mobile_engine_entrypoints() -> EngineEntrypoints {
+    EngineEntrypoints {
+        tick: "tick".to_string(),
+        render: "render".to_string(),
+        on_code_swap: None,
+    }
+}
+
 fn write_android_aot_engine_bundle(
     project_dir: &Path,
     entry_file: Option<&Path>,
@@ -1429,7 +1437,7 @@ fn write_mobile_aot_engine_bundle(
     process
         .compile()
         .map_err(|error| format!("failed to compile mobile AOT bundle: {error:?}"))?;
-    let bundle = process.write_engine_bundle(&EngineEntrypoints::runtime_default(), output_dir)?;
+    let bundle = process.write_engine_bundle(&mobile_engine_entrypoints(), output_dir)?;
     let manifest = fs::read_to_string(&bundle.manifest_path).map_err(|error| {
         format!(
             "failed to read mobile AOT manifest {}: {error}",
@@ -2277,6 +2285,47 @@ mod tests {
         assert_eq!(paths, vec!["src/helper.stasis", "src/main.stasis"]);
 
         std::fs::remove_dir_all(&project_dir).ok();
+    }
+
+    #[test]
+    fn mobile_aot_bundle_allows_missing_on_code_swap() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project_dir = std::env::temp_dir().join(format!("stasis_mobile_no_hook_{stamp}"));
+        let src_dir = project_dir.join("src");
+        let asset_dir = project_dir.join("assets");
+        let output_dir = std::env::temp_dir().join(format!("stasis_mobile_no_hook_out_{stamp}"));
+        std::fs::create_dir_all(&src_dir).expect("mkdir src");
+        std::fs::create_dir_all(&asset_dir).expect("mkdir assets");
+        std::fs::write(
+            src_dir.join("main.stasis"),
+            "function main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+        )
+        .expect("write main");
+        std::fs::write(
+            asset_dir.join("manifest.json"),
+            "{\n  \"schema\": \"stasis-assets\",\n  \"version\": 1,\n  \"assets\": []\n}\n",
+        )
+        .expect("write manifest");
+
+        let summary = write_mobile_aot_engine_bundle(
+            MobileAotTarget::IosArm64,
+            &project_dir,
+            Some(Path::new("src/main.stasis")),
+            &output_dir,
+        )
+        .expect("missing on_code_swap should be accepted for mobile");
+        let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
+
+        assert!(header.contains("#define STASIS_AOT_MAIN aot_fn_"));
+        assert!(header.contains("#define STASIS_AOT_TICK aot_fn_"));
+        assert!(header.contains("#define STASIS_AOT_RENDER aot_fn_"));
+        assert!(!header.contains("STASIS_AOT_ON_CODE_SWAP"));
+
+        std::fs::remove_dir_all(&project_dir).ok();
+        std::fs::remove_dir_all(&output_dir).ok();
     }
 
     #[test]
