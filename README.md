@@ -36,6 +36,9 @@ Most users will:
 3. Write `.stasis` tests and run them with `test`.
 4. Later: build production artifacts with AOT (WIP).
 
+Mobile AOT artifacts for Android arm64 and iOS arm64 are documented in
+`docs/mobile_aot_artifacts.md`.
+
 Nightly releases are published from `main`:
 
 - Releases: https://github.com/benwmaddox/StasisLang/releases

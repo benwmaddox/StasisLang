@@ -402,9 +402,10 @@ impl AotProcess {
                     )
                 })?;
             let object_file_name = format!(
-                "{}_{}.obj",
+                "{}_{}.{}",
                 sanitize_file_token(&function.name),
-                artifact.object_index
+                artifact.object_index,
+                object_file_extension(&self.target)
             );
             let object_path = output_dir.join(&object_file_name);
             fs::write(&object_path, bytes).map_err(|error| {
@@ -485,12 +486,11 @@ impl AotProcess {
                     )
                 })?;
 
-            let extension = if cfg!(windows) { "obj" } else { "o" };
             let object_file_name = format!(
                 "{}_{}.{}",
                 sanitize_file_token(&function.name),
                 artifact.object_index,
-                extension
+                object_file_extension(&self.target)
             );
             let object_path = output_dir.join(object_file_name);
             fs::write(&object_path, bytes).map_err(|error| {
@@ -527,6 +527,14 @@ fn compact_active_artifact_storage(artifacts: &mut [AotArtifact], object_bytes: 
         artifact.object_index = next_index;
     }
     *object_bytes = compacted;
+}
+
+fn object_file_extension(target: &stasis_jit::AotTarget) -> &'static str {
+    if matches!(target, stasis_jit::AotTarget::Native) && cfg!(windows) {
+        "obj"
+    } else {
+        "o"
+    }
 }
 
 fn compile_function_to_object_bytes(
@@ -1432,6 +1440,23 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_emits_ios_arm64_macho_objects_when_target_is_configured() {
+        let mut process = AotProcess::new();
+        process.set_target(stasis_jit::AotTarget::ios_arm64_default());
+        process.upsert_file(
+            "sample.stasis",
+            "global State { value: i32; }\nfunction helper(): i32 { return State.value; }\nfunction main(): i32 { State.value = 7; return helper(); }\n",
+        );
+        process.compile().expect("ios aot compile");
+
+        for bytes in &process.object_bytes {
+            let object = File::parse(bytes.as_slice()).expect("parse emitted object");
+            assert_eq!(object.format(), BinaryFormat::MachO);
+            assert_eq!(object.architecture(), Architecture::Aarch64);
+        }
+    }
+
+    #[test]
     fn aot_engine_bundle_writes_manifest_and_required_entrypoints() {
         let mut process = AotProcess::new();
         process.upsert_file(
@@ -1453,6 +1478,15 @@ mod tests {
             bundle.object_paths_by_function.contains_key("tick"),
             true,
             "expected tick object path"
+        );
+        let expected_extension = if cfg!(windows) { "obj" } else { "o" };
+        assert!(
+            bundle
+                .object_paths_by_function
+                .values()
+                .all(|path| path.extension().and_then(|value| value.to_str())
+                    == Some(expected_extension)),
+            "native engine bundle should keep host object suffixes"
         );
         assert_eq!(
             bundle.object_paths_by_function.contains_key("render"),
