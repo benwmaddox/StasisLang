@@ -51,6 +51,7 @@ impl Default for AotCompileConfig {
 pub enum AotTarget {
     Native,
     AndroidArm64 { min_sdk: u32 },
+    IosArm64,
 }
 
 impl AotTarget {
@@ -58,10 +59,15 @@ impl AotTarget {
         Self::AndroidArm64 { min_sdk: 26 }
     }
 
+    pub fn ios_arm64_default() -> Self {
+        Self::IosArm64
+    }
+
     pub fn object_triple(&self) -> Option<&'static str> {
         match self {
             Self::Native => None,
             Self::AndroidArm64 { .. } => Some("aarch64-linux-android"),
+            Self::IosArm64 => Some("aarch64-apple-ios"),
         }
     }
 
@@ -69,6 +75,7 @@ impl AotTarget {
         match self {
             Self::Native => None,
             Self::AndroidArm64 { min_sdk } => Some(format!("aarch64-linux-android{min_sdk}")),
+            Self::IosArm64 => Some("aarch64-apple-ios".to_string()),
         }
     }
 
@@ -806,6 +813,14 @@ echo "fake-shared" > "$OUT"
     fn aot_target_reports_position_independent_code_requirement() {
         assert!(!AotTarget::Native.requires_position_independent_code());
         assert!(AotTarget::android_arm64_default().requires_position_independent_code());
+        assert!(AotTarget::ios_arm64_default().requires_position_independent_code());
+    }
+
+    #[test]
+    fn ios_aot_target_reports_apple_arm64_triple() {
+        let target = AotTarget::ios_arm64_default();
+        assert_eq!(target.object_triple(), Some("aarch64-apple-ios"));
+        assert_eq!(target.clang_target().as_deref(), Some("aarch64-apple-ios"));
     }
 
     #[test]

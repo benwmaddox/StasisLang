@@ -117,6 +117,7 @@ tasks.register('generatePublishedAotBundle', Exec) {
     workingDir repoRootDir
     commandLine 'cargo', 'run', '-p', 'stasis', '--', 'android-aot-bundle',
             '--project-dir', publishedGame.projectDirectory.absolutePath,
+            '--entry-file', publishedGame.entrySource,
             '--out-dir', outputDir.absolutePath
 }
 
