@@ -213,3 +213,4 @@ After the runtime exists under the repo (`runtime/build/...` or `runtime/build_c
 - `docs/spec.md`: canonical language spec
 - `docs/live-compilation-prd.md`: hot swap + product/architecture requirements
 - `docs/build_checklist.md`: execution plan and slice ordering
+- `docs/mobile_packaging_abi.md`: v1 Android/iOS AOT packaging ABI
