@@ -1319,6 +1319,10 @@ fn try_run_mobile_aot_bundle_subcommand() -> Option<i32> {
                 "mobile_aot_symbols_header={}",
                 summary.symbols_header.display()
             );
+            println!(
+                "mobile_aot_bindings_source={}",
+                summary.bindings_source.display()
+            );
             if let Some(cmake_file) = summary.cmake_file.as_ref() {
                 println!("mobile_aot_cmake_file={}", cmake_file.display());
             }
@@ -1378,6 +1382,7 @@ struct AndroidAotBundleSummary {
     bundle_dir: PathBuf,
     object_count: usize,
     symbols_header: PathBuf,
+    bindings_source: PathBuf,
     cmake_file: PathBuf,
     asset_dir: PathBuf,
 }
@@ -1387,6 +1392,7 @@ struct MobileAotBundleSummary {
     bundle_dir: PathBuf,
     object_count: usize,
     symbols_header: PathBuf,
+    bindings_source: PathBuf,
     cmake_file: Option<PathBuf>,
     asset_dir: PathBuf,
     package_manifest: PathBuf,
@@ -1418,6 +1424,7 @@ fn write_android_aot_engine_bundle(
         bundle_dir: summary.bundle_dir,
         object_count: summary.object_count,
         symbols_header: summary.symbols_header,
+        bindings_source: summary.bindings_source,
         cmake_file,
         asset_dir: summary.asset_dir,
     })
@@ -1448,6 +1455,8 @@ fn write_mobile_aot_engine_bundle(
         .map_err(|error| format!("failed to parse mobile AOT manifest: {error}"))?;
     let symbols_header = output_dir.join("published_aot_symbols.h");
     write_mobile_aot_symbols_header(&manifest_json, &symbols_header)?;
+    let bindings_source = output_dir.join("published_aot_bindings.c");
+    write_mobile_aot_bindings_source(&manifest_json, &bindings_source)?;
     let cmake_file = if target == MobileAotTarget::AndroidArm64 {
         let path = output_dir.join("published_aot_objects.cmake");
         write_android_aot_cmake_file(&bundle.object_paths_by_function, &path)?;
@@ -1462,6 +1471,7 @@ fn write_mobile_aot_engine_bundle(
         &asset_dir,
         &bundle.object_paths_by_function,
         &symbols_header,
+        &bindings_source,
         cmake_file.as_deref(),
         output_dir,
     )?;
@@ -1470,6 +1480,7 @@ fn write_mobile_aot_engine_bundle(
         bundle_dir: bundle.output_dir,
         object_count: bundle.object_paths_by_function.len(),
         symbols_header,
+        bindings_source,
         cmake_file,
         asset_dir,
         package_manifest,
@@ -1673,6 +1684,7 @@ fn write_mobile_aot_symbols_header(
     let on_code_swap = mobile_aot_symbol_for(manifest, "on_code_swap").ok();
     let mut out = String::new();
     out.push_str("#pragma once\n\n");
+    out.push_str("extern void stasis_aot_bind_runtime_globals(void);\n");
     for symbol in [&main, &tick, &render] {
         out.push_str(&format!("extern void {symbol}(void);\n"));
     }
@@ -1680,6 +1692,7 @@ fn write_mobile_aot_symbols_header(
         out.push_str(&format!("extern void {symbol}(void);\n"));
     }
     out.push_str("\n");
+    out.push_str("#define STASIS_AOT_BIND_RUNTIME_GLOBALS stasis_aot_bind_runtime_globals\n");
     out.push_str(&format!("#define STASIS_AOT_MAIN {main}\n"));
     out.push_str(&format!("#define STASIS_AOT_TICK {tick}\n"));
     out.push_str(&format!("#define STASIS_AOT_RENDER {render}\n"));
@@ -1700,6 +1713,91 @@ fn write_mobile_aot_symbols_header(
             output_path.display()
         )
     })
+}
+
+fn write_mobile_aot_bindings_source(
+    manifest: &serde_json::Value,
+    output_path: &Path,
+) -> Result<(), String> {
+    let functions = manifest
+        .get("functions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "mobile AOT manifest missing functions array".to_string())?;
+    let literals = manifest
+        .get("string_literals")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "mobile AOT manifest missing string_literals array".to_string())?;
+    let mut out = String::from("#include <stdint.h>\n#include \"stasis_mobile_aot_runtime.h\"\n\n");
+    for function in functions {
+        let symbol = function
+            .get("symbol")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "mobile AOT function missing symbol".to_string())?;
+        out.push_str(&format!("extern void {symbol}(void);\n"));
+    }
+    for literal in literals {
+        let id = literal
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| "mobile AOT string literal missing id".to_string())?;
+        let value = literal
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "mobile AOT string literal missing value".to_string())?;
+        out.push_str(&format!(
+            "static const char stasis_mobile_literal_{}[] = \"{}\";\n",
+            id.unsigned_abs(),
+            escape_mobile_c_string_literal(value)
+        ));
+    }
+    out.push_str("\nvoid stasis_aot_bind_runtime_globals(void) {\n");
+    for function in functions {
+        let symbol = function
+            .get("symbol")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "mobile AOT function missing symbol".to_string())?;
+        let fn_id = symbol
+            .strip_prefix("aot_fn_")
+            .and_then(|value| value.parse::<i32>().ok())
+            .ok_or_else(|| format!("mobile AOT function has invalid symbol '{symbol}'"))?;
+        out.push_str(&format!(
+            "    stasis_jit_register_code_ptr({fn_id}, (int64_t)(uintptr_t)&{symbol});\n"
+        ));
+    }
+    out.push_str("    stasis_jit_clear_string_literal_table();\n");
+    for literal in literals {
+        let id = literal
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| "mobile AOT string literal missing id".to_string())?;
+        out.push_str(&format!(
+            "    stasis_jit_upsert_string_literal({id}, stasis_mobile_literal_{});\n",
+            id.unsigned_abs()
+        ));
+    }
+    out.push_str("}\n");
+    fs::write(output_path, out).map_err(|error| {
+        format!(
+            "failed to write mobile AOT bindings source {}: {error}",
+            output_path.display()
+        )
+    })
+}
+
+fn escape_mobile_c_string_literal(value: &str) -> String {
+    let mut escaped = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'\\' => escaped.push_str("\\\\"),
+            b'"' => escaped.push_str("\\\""),
+            b'\n' => escaped.push_str("\\n"),
+            b'\r' => escaped.push_str("\\r"),
+            b'\t' => escaped.push_str("\\t"),
+            b' '..=b'~' => escaped.push(char::from(byte)),
+            _ => escaped.push_str(&format!("\\{byte:03o}")),
+        }
+    }
+    escaped
 }
 
 fn mobile_aot_symbol_for(
@@ -1724,6 +1822,7 @@ fn write_mobile_aot_package_manifest(
     asset_dir: &Path,
     object_paths_by_function: &std::collections::BTreeMap<String, PathBuf>,
     symbols_header: &Path,
+    bindings_source: &Path,
     cmake_file: Option<&Path>,
     output_dir: &Path,
 ) -> Result<PathBuf, String> {
@@ -1741,6 +1840,7 @@ fn write_mobile_aot_package_manifest(
         "target": target.as_str(),
         "engine_manifest": engine_manifest_path.to_string_lossy().replace('\\', "/"),
         "symbols_header": symbols_header.to_string_lossy().replace('\\', "/"),
+        "bindings_source": bindings_source.to_string_lossy().replace('\\', "/"),
         "asset_root": asset_dir.to_string_lossy().replace('\\', "/"),
         "asset_manifest": asset_dir.join("stasis_game").join(DEFAULT_ASSET_MANIFEST_PATH).to_string_lossy().replace('\\', "/"),
         "objects": objects,
@@ -1838,6 +1938,14 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn mobile_c_string_literal_escaping_is_byte_exact() {
+        assert_eq!(
+            escape_mobile_c_string_literal("a\0b\n\"\\\u{e9}"),
+            "a\\000b\\n\\\"\\\\\\303\\251"
+        );
+    }
 
     fn temp_lookup_root(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -2219,6 +2327,8 @@ mod tests {
 
     #[test]
     fn android_aot_bundle_writes_pong_symbols_header() {
+        use object::{Object, ObjectSymbol};
+
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
@@ -2236,11 +2346,87 @@ mod tests {
 
         assert!(summary.object_count >= 3, "expected lifecycle objects");
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
+        assert!(
+            header
+                .lines()
+                .filter(|line| line.starts_with("extern void aot_fn_") && line.ends_with("(void);"))
+                .count()
+                >= 3,
+            "mobile AOT lifecycle symbols must match StasisMobileEntry void(void) callbacks"
+        );
+        let mobile_runtime_header =
+            fs::read_to_string(repo_root.join("runtime/stasis_mobile_runtime.h"))
+                .expect("read mobile runtime header");
+        assert!(mobile_runtime_header.contains("typedef void (*StasisMobileEntry)(void)"));
+        let bindings =
+            fs::read_to_string(&summary.bindings_source).expect("read mobile AOT bindings source");
+        assert!(bindings.contains("void stasis_aot_bind_runtime_globals(void)"));
+        assert!(bindings.contains("stasis_jit_register_code_ptr(0"));
         assert!(header.contains("#define STASIS_AOT_MAIN aot_fn_"));
+        assert!(header.contains("#define STASIS_AOT_BIND_RUNTIME_GLOBALS"));
         assert!(header.contains("#define STASIS_AOT_TICK aot_fn_"));
         assert!(header.contains("#define STASIS_AOT_RENDER aot_fn_"));
         let cmake = fs::read_to_string(&summary.cmake_file).expect("read cmake file");
         assert!(cmake.contains("set(STASIS_PUBLISHED_AOT_OBJECTS"));
+        assert!(!cmake.contains("published_aot_bindings.c"));
+
+        let mut defined = BTreeSet::new();
+        let mut undefined = BTreeSet::new();
+        for entry in fs::read_dir(&summary.bundle_dir).expect("read bundle directory") {
+            let path = entry.expect("bundle entry").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("o") {
+                continue;
+            }
+            let bytes = fs::read(&path).expect("read AOT object");
+            let object = object::File::parse(bytes.as_slice()).expect("parse AOT object");
+            for symbol in object.symbols() {
+                let Ok(name) = symbol.name() else { continue };
+                if symbol.is_undefined() {
+                    undefined.insert(name.to_string());
+                } else {
+                    defined.insert(name.to_string());
+                }
+            }
+        }
+        let mobile_aot_runtime =
+            fs::read_to_string(repo_root.join("runtime/stasis_mobile_aot_runtime.c"))
+                .expect("read shared mobile AOT runtime");
+        let mobile_aot_header =
+            fs::read_to_string(repo_root.join("runtime/stasis_mobile_aot_runtime.h"))
+                .expect("read shared mobile AOT runtime header");
+        let graphics_runtime = fs::read_to_string(repo_root.join("runtime/stasis_graphics.c"))
+            .expect("read graphics runtime");
+        let missing: Vec<_> = undefined
+            .difference(&defined)
+            .filter(|symbol| {
+                !mobile_aot_runtime.contains(&format!("{symbol}("))
+                    && !mobile_aot_header.contains(&format!("{symbol}("))
+                    && !graphics_runtime.contains(&format!("{symbol}("))
+            })
+            .cloned()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "shared mobile core must provide AOT imports: {missing:?}"
+        );
+        let runtime_exports = fs::read_to_string(
+            repo_root.join("crates/stasis_compiler/src/backend/runtime_exports.rs"),
+        )
+        .expect("read compiler AOT runtime exports");
+        let unsupported_exports: Vec<_> = runtime_exports
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.strip_prefix('"')?.strip_suffix("\","))
+            .filter(|symbol| {
+                !mobile_aot_runtime.contains(&format!("{symbol}("))
+                    && !mobile_aot_header.contains(&format!("{symbol}("))
+                    && !graphics_runtime.contains(&format!("{symbol}("))
+            })
+            .collect();
+        assert!(
+            unsupported_exports.is_empty(),
+            "shared mobile core must cover every compiler AOT import: {unsupported_exports:?}"
+        );
         assert!(summary
             .asset_dir
             .join("stasis_game/assets/manifest.json")

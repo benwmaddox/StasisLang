@@ -22,6 +22,8 @@ Each bundle contains:
   string literal metadata, collection max lengths, and optimization profile.
 - `published_aot_symbols.h`: C macros for `main`, `tick`, `render`, and optional
   `on_code_swap` symbols.
+- `published_aot_bindings.c`: platform-neutral registration for linked function
+  pointers and string literals consumed by the shared mobile runtime core.
 - `mobile_aot_bundle_manifest.json`: package-level target, object, symbol-header,
   engine-manifest, asset-root, and asset-manifest paths for platform shells.
 - `apk_assets/stasis_game/...` for Android assets or `ios_assets/stasis_game/...`
