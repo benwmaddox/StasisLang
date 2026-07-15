@@ -3252,6 +3252,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         if (!g_renderer) {
             SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
             SDL_DestroyWindow(g_window);
+            g_window = NULL;
+            g_use_sdl_renderer = false;
             SDL_Quit();
             return 0;
         }
@@ -4494,6 +4496,19 @@ STASIS_EXPORT int stasis_should_quit(void) {
     return g_should_quit ? 1 : 0;
 }
 
+/* Mobile lifecycle polling remains responsive while no frame is presented. */
+STASIS_EXPORT int stasis_mobile_poll_events(void) {
+    stasis_pump_events();
+    g_events_pumped_this_frame = 0;
+    return g_should_quit ? 1 : 0;
+}
+
+STASIS_EXPORT void stasis_mobile_set_paused(int paused) {
+    if (g_audio_device != 0) {
+        SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0);
+    }
+}
+
 /*
  * Get current window width in pixels
  */
@@ -4602,6 +4617,11 @@ STASIS_EXPORT void stasis_shutdown(void) {
             g_fonts[i].active = false;
         }
     }
+    if (g_renderer) {
+        SDL_DestroyRenderer(g_renderer);
+        g_renderer = NULL;
+    }
+    g_use_sdl_renderer = false;
     if (g_gl_context) {
         SDL_GL_DeleteContext(g_gl_context);
         g_gl_context = NULL;

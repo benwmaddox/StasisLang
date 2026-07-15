@@ -43,6 +43,12 @@ Android builds currently use the SDL_Renderer backend only (no OpenGL 2.1/GLEW p
 Build helper:
 - `runtime/build_android.ps1` (requires `ANDROID_NDK_HOME` and vcpkg via `VCPKG_ROOT` or `C:\vcpkg`)
 
+## Shared mobile core
+
+Android and iOS release shells link the `stasis_mobile_runtime` static target.
+It forces the SDL-only backend and excludes the desktop runner and SDL main
+shim. See `docs/mobile_runtime_core.md` for the lifecycle ABI and CMake setup.
+
 Brickout Revenge debug APK workflow:
 - See `docs/brickout-android-debug-plan.md` and use `android/build_brickout_android_debug.ps1` + `android/install_brickout_android_debug.ps1`.
 

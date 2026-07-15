@@ -2085,8 +2085,22 @@ mod tests {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    const STASIS_GRAPHICS_SOURCE: &str =
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/stasis_graphics.c"));
+    const STASIS_GRAPHICS_SOURCE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_graphics.c"
+    ));
+    const STASIS_MOBILE_RUNTIME_SOURCE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_mobile_runtime.c"
+    ));
+    const STASIS_MOBILE_RUNTIME_HEADER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_mobile_runtime.h"
+    ));
+    const STASIS_RUNTIME_CMAKE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/CMakeLists.txt"
+    ));
 
     fn jit_global_table_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -2120,6 +2134,61 @@ mod tests {
                     "clamp_i32(SPRITE_TABLE_INITIAL_CAPACITY, 1, limit)"
                 ),
             "runtime sprite allocation should clamp the initial growth step to STASIS_GFX_MAX_SPRITES"
+        );
+    }
+
+    #[test]
+    fn mobile_runtime_uses_fixed_entries_and_sdl_only_static_target() {
+        for required in [
+            "typedef void (*StasisMobileEntry)(void)",
+            "StasisMobileEntry bind_runtime_entry",
+            "StasisMobileEntry main_entry",
+            "StasisMobileEntry tick_entry",
+            "StasisMobileEntry render_entry",
+            "STASIS_MOBILE_RUNTIME_ABI_VERSION 1",
+        ] {
+            assert!(
+                STASIS_MOBILE_RUNTIME_HEADER.contains(required),
+                "mobile runtime ABI should contain {required}"
+            );
+        }
+        for required in [
+            "runtime_state.entries.bind_runtime_entry()",
+            "runtime_state.entries.main_entry()",
+            "runtime_state.entries.tick_entry()",
+            "runtime_state.entries.render_entry()",
+            "stasis_should_quit()",
+            "stasis_mobile_poll_events()",
+            "stasis_mobile_set_paused(runtime_state.paused)",
+            "void stasis_mobile_runtime_shutdown(void)",
+        ] {
+            assert!(
+                STASIS_MOBILE_RUNTIME_SOURCE.contains(required),
+                "mobile lifecycle should contain {required}"
+            );
+        }
+        assert!(
+            STASIS_RUNTIME_CMAKE
+                .contains("configure_stasis_target(stasis_mobile_runtime ON TRUE OFF)"),
+            "mobile target should be static, SDL-only, and exclude the SDL desktop main shim"
+        );
+        assert!(
+            !STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_dynload")
+                && !STASIS_MOBILE_RUNTIME_SOURCE.contains("on_code_swap")
+                && !STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_runner"),
+            "mobile runtime must not acquire desktop loader or hot-swap dependencies"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("SDL_DestroyRenderer(g_renderer);")
+                && STASIS_GRAPHICS_SOURCE.contains("g_renderer = NULL;")
+                && STASIS_GRAPHICS_SOURCE.contains("g_window = NULL;"),
+            "mobile lifecycle cleanup should support safe shutdown and initialization retry"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("STASIS_EXPORT int stasis_mobile_poll_events(void)")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0)"),
+            "mobile pause should continue polling events and pause the audio device"
         );
     }
 
