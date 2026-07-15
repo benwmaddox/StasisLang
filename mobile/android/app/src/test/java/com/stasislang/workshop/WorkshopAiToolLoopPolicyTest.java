@@ -21,4 +21,14 @@ public final class WorkshopAiToolLoopPolicyTest {
         policy.recordBatch(true);
         assertFalse(policy.requiresWriteOrDone());
     }
+
+    @Test
+    public void restoresReadOnlyProgressWithoutReplayingAcceptedBatches() {
+        WorkshopAiToolLoopPolicy policy = new WorkshopAiToolLoopPolicy(2);
+        policy.restoreConsecutiveReadOnlyBatches(2);
+
+        assertTrue(policy.requiresWriteOrDone());
+        assertFalse(policy.shouldExecute(false));
+        assertTrue(policy.shouldExecute(true));
+    }
 }

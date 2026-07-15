@@ -36,4 +36,19 @@ public final class WorkshopAiObservationMemoryTest {
         assertTrue(snapshot.get(0).startsWith("target-29:"));
         assertFalse(snapshot.toString().contains("target-0"));
     }
+
+    @Test
+    public void restoresBoundedCheckpointWithoutDuplicatingObservations() {
+        WorkshopAiObservationMemory memory = new WorkshopAiObservationMemory();
+        memory.restoreNewestFirst(List.of(
+                "{\"tool\":\"write_symbol\",\"args\":{\"name\":\"tick\"},\"result\":\"old\"}",
+                "{\"tool\":\"read_symbol\",\"args\":{\"name\":\"render\"}}"));
+        memory.remember("write_symbol|{\"name\":\"tick\"}",
+                "{\"tool\":\"write_symbol\",\"args\":{\"name\":\"tick\"},\"result\":\"current\"}");
+
+        assertEquals(2, memory.size());
+        assertTrue(memory.snapshotNewestFirst().get(0).contains("write_symbol"));
+        assertTrue(memory.snapshotNewestFirst().get(0).contains("current"));
+        assertFalse(memory.snapshotNewestFirst().toString().contains("old"));
+    }
 }

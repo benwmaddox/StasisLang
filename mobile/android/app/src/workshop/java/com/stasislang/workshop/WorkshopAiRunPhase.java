@@ -11,6 +11,7 @@ enum WorkshopAiRunPhase {
     APPLYING("applying"),
     VERIFIED("verified"),
     RESTORED("restored"),
+    CANCELLING("cancelling"),
     CANCELLED("cancelled"),
     FAILED("failed");
 

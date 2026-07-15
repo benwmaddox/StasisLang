@@ -2795,15 +2795,13 @@ public final class MainActivity extends Activity {
             }
             aiVisibleQueueCount = activeItems;
             updateAiGameProgressOverlay();
-            if (activeItems == 0) {
+            if (items.isEmpty()) {
                 if (aiQueueSection != null) aiQueueSection.setVisibility(View.GONE);
                 return;
             }
             if (aiQueueSection != null) aiQueueSection.setVisibility(View.VISIBLE);
             for (int index = 0; index < items.size(); index += 1) {
                 final AndroidAiQueue.Entry item = items.get(index);
-                if (!AndroidAiQueue.PENDING.equals(item.state)
-                        && !AndroidAiQueue.IN_PROGRESS.equals(item.state)) continue;
                 LinearLayout row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
                 TextView label = new TextView(this);
@@ -2823,6 +2821,15 @@ public final class MainActivity extends Activity {
                         @Override public void onClick(View view) { cancelPendingAiItem(item); }
                     });
                     row.addView(cancel, new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+                } else if (AiQueuePolicy.terminal(item.state)) {
+                    Button retry = new Button(this);
+                    retry.setText("Fresh Retry");
+                    retry.setContentDescription("Fresh retry AI request " + item.prompt);
+                    retry.setOnClickListener(new View.OnClickListener() {
+                        @Override public void onClick(View view) { retryTerminalAiItem(item); }
+                    });
+                    row.addView(retry, new LinearLayout.LayoutParams(
                             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
                 }
                 aiQueueBody.addView(row, fullWidth());
@@ -2851,6 +2858,20 @@ public final class MainActivity extends Activity {
         refreshAiQueue();
     }
 
+    private void retryTerminalAiItem(AndroidAiQueue.Entry item) {
+        try {
+            if (!item.projectId.equals(activeRecoveryProjectId())) {
+                throw new IOException("AI queue item belongs to a different project");
+            }
+            AndroidAiQueue.retryTerminal(this, item);
+            setStatusText("Fresh retry queued; project, attachments, provider, and budget will be revalidated");
+            refreshAiQueue();
+            startNextQueuedAiIfIdle();
+        } catch (Exception error) {
+            setStatusText("AI fresh retry failed: " + error.getMessage());
+        }
+    }
+
     private void finishActiveAiQueueItem(String outcomeStatus, String detail) {
         AndroidAiQueue.Entry item = activeAiQueueEntry;
         if (item == null || "started".equals(outcomeStatus)) return;
@@ -2870,6 +2891,7 @@ public final class MainActivity extends Activity {
         }
         try {
             AndroidAiTransactionStore.clear(this, item.projectId, item.id);
+            AndroidAiSessionCheckpointStore.clear(this, item.projectId, item.id);
         } catch (Exception error) {
             appendAiTraceFields("transaction_cleanup_failed", "item_id", item.id,
                     "error", error.getMessage(), null, null);
@@ -2923,6 +2945,12 @@ public final class MainActivity extends Activity {
             AndroidAiQueue.finish(this, entry.projectId, entry.id, AndroidAiQueue.FAILED, detail);
         } catch (Exception ignored) {
             // The visible queue error remains available for recovery on the next app start.
+        }
+        try {
+            AndroidAiSessionCheckpointStore.clear(this, entry.projectId, entry.id);
+            AndroidAiTransactionStore.clear(this, entry.projectId, entry.id);
+        } catch (Exception ignored) {
+            // The terminal queue detail still explains that a fresh retry is required.
         }
         if (activeAiQueueEntry != null && activeAiQueueEntry.id.equals(entry.id)) activeAiQueueEntry = null;
         refreshAiQueue();
@@ -3019,6 +3047,7 @@ public final class MainActivity extends Activity {
         }
         try {
             AndroidAiQueue.clearAll(this);
+            AndroidAiSessionCheckpointStore.clearAll(this);
         } catch (Exception error) {
             setStatusText("AI histories erased but queued work deletion failed: " + error.getMessage());
             return;
@@ -3159,6 +3188,7 @@ public final class MainActivity extends Activity {
             AndroidDraftStore.clear(this, target.id);
             AndroidEditRecoveryStore.clearProject(this, target.id);
             AndroidAiQueue.clearProject(this, target.id);
+            AndroidAiSessionCheckpointStore.clearProject(this, target.id);
             clearDeletedProjectPreferences(target);
             refreshProjectControls();
             setStatusText("Deleted project and scoped private data: " + target.name + "; Bundled Workshop is active");
@@ -3228,8 +3258,9 @@ public final class MainActivity extends Activity {
 
     private void markInterruptedAiOutcomeIfNeeded() {
         try {
-            restoreInterruptedAiTransactions();
-            int recovered = AndroidAiQueue.recoverInterrupted(this, activeRecoveryProjectId());
+            HashSet<String> resumable = restoreInterruptedAiTransactions();
+            int recovered = AndroidAiQueue.recoverInterrupted(
+                    this, activeRecoveryProjectId(), resumable);
             if (recovered > 0) refreshAiQueue();
         } catch (Exception error) {
             setStatusText("AI queue recovery failed: " + error.getMessage());
@@ -3239,8 +3270,8 @@ public final class MainActivity extends Activity {
         if (latest == null || !"started".equals(latest.optString("status", ""))) return;
         String request = latest.optString("request", "");
         recordAiOutcome(request, "interrupted",
-                "App stopped before AI completion; Retry Last AI starts a new budget-checked run",
-                "A paid in-flight call may have completed remotely");
+                "App stopped before AI completion; safe per-item checkpoints resume automatically",
+                "Unsafe checkpoints remain terminal and expose Fresh Retry without replaying an uncertain paid call");
     }
 
     private void postAiVerificationMetrics(final WorkshopAiVerificationResult result,
@@ -3258,28 +3289,58 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void restoreInterruptedAiTransactions() throws Exception {
+    private HashSet<String> restoreInterruptedAiTransactions() throws Exception {
         String projectId = activeRecoveryProjectId();
+        HashSet<String> resumable = new HashSet<>();
         boolean restored = false;
-        ArrayList<String> restoredItemIds = new ArrayList<>();
         for (AndroidAiQueue.Entry entry : AndroidAiQueue.list(this, projectId)) {
             if (!AndroidAiQueue.IN_PROGRESS.equals(entry.state)) continue;
+            AndroidAiSessionCheckpointStore.Checkpoint checkpoint =
+                    AndroidAiSessionCheckpointStore.load(this, projectId, entry.id);
             WorkshopAiProjectTransaction.Snapshot snapshot = AndroidAiTransactionStore.load(
                     this, projectId, entry.id);
-            if (snapshot == null) continue;
-            WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);
-            restored = true;
-            restoredItemIds.add(entry.id);
+            if (WorkshopAiRunPhase.CANCELLING.wireValue().equals(entry.phase)
+                    || (checkpoint != null
+                            && WorkshopAiResumePolicy.CANCEL_REQUESTED.equals(checkpoint.stage))) {
+                if (snapshot != null) {
+                    WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);
+                    restored = true;
+                }
+                AndroidAiSessionCheckpointStore.clear(this, projectId, entry.id);
+                AndroidAiTransactionStore.clear(this, projectId, entry.id);
+                continue;
+            }
+            if (checkpoint != null && (WorkshopAiResumePolicy.READY.equals(checkpoint.stage)
+                    || WorkshopAiResumePolicy.RESPONSE_READY.equals(checkpoint.stage))) {
+                WorkshopAiProjectTransaction.Snapshot current =
+                        WorkshopAiProjectTransaction.capture(projectRoot());
+                boolean projectMatches = WorkshopAiProjectTransaction.fingerprint(current)
+                        .equals(WorkshopAiProjectTransaction.fingerprint(checkpoint.projectSnapshot));
+                if (!projectMatches && WorkshopAiResumePolicy.RESPONSE_READY.equals(checkpoint.stage)) {
+                    WorkshopAiProjectTransaction.restore(projectRoot(), checkpoint.projectSnapshot);
+                    restored = true;
+                    projectMatches = true;
+                }
+                if (projectMatches && snapshot != null) {
+                    resumable.add(entry.id);
+                    continue;
+                }
+            }
+            if (checkpoint == null && snapshot != null) {
+                WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);
+                restored = true;
+            }
+            AndroidAiSessionCheckpointStore.clear(this, projectId, entry.id);
+            AndroidAiTransactionStore.clear(this, projectId, entry.id);
         }
-        if (!restored) return;
-        String compileResult = nativeCompileProject(projectRootPath());
-        lastCompileResult = compileResult;
-        compileReady = isRunnableCompile(compileResult);
-        compileAttempted = true;
-        if (!compileReady) throw new IOException("restored AI transaction did not compile");
-        for (String itemId : restoredItemIds) {
-            AndroidAiTransactionStore.clear(this, projectId, itemId);
+        if (restored) {
+            String compileResult = nativeCompileProject(projectRootPath());
+            lastCompileResult = compileResult;
+            compileReady = isRunnableCompile(compileResult);
+            compileAttempted = true;
+            if (!compileReady) throw new IOException("restored AI checkpoint did not compile");
         }
+        return resumable;
     }
 
     private void persistPendingDraft() {
@@ -4518,14 +4579,40 @@ public final class MainActivity extends Activity {
             failQueuedAiPreflight(queuedEntry, "Image generation reserve exceeded the device monthly AI limit");
             return;
         }
-        final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
+        final String freshRequestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
                 requestImageMetadata, requestLogicalSnapshot);
+        final AndroidAiSessionCheckpointStore.Checkpoint resumeCheckpoint;
+        final String requestJson;
         final WorkshopAiProjectTransaction.Snapshot aiTransaction;
         try {
-            aiTransaction = WorkshopAiProjectTransaction.capture(projectRoot());
+            resumeCheckpoint = queuedEntry == null ? null
+                    : AndroidAiSessionCheckpointStore.load(this, queuedEntry.projectId, queuedEntry.id);
+            if (resumeCheckpoint == null) {
+                requestJson = freshRequestJson;
+                aiTransaction = WorkshopAiProjectTransaction.capture(projectRoot());
+            } else {
+                WorkshopAiProjectTransaction.Snapshot current =
+                        WorkshopAiProjectTransaction.capture(projectRoot());
+                String provider = useCodex ? "codex_subscription" : "openai_api";
+                WorkshopAiResumePolicy.Decision decision = WorkshopAiResumePolicy.decide(
+                        resumeCheckpoint.stage,
+                        WorkshopAiProjectTransaction.fingerprint(current).equals(
+                                WorkshopAiProjectTransaction.fingerprint(resumeCheckpoint.projectSnapshot)),
+                        queuedEntry.requestFingerprint().equals(resumeCheckpoint.attachmentFingerprint),
+                        provider.equals(resumeCheckpoint.provider)
+                                && model.equals(resumeCheckpoint.model),
+                        aiCancelRequested);
+                if (!decision.resumable) throw new IOException(decision.detail);
+                requestJson = resumeCheckpoint.payload.getString("initial_request_json");
+                aiTransaction = AndroidAiTransactionStore.load(
+                        this, queuedEntry.projectId, queuedEntry.id);
+                if (aiTransaction == null) {
+                    throw new IOException("Original project transaction is missing; use Fresh Retry");
+                }
+            }
         } catch (Exception error) {
-            setStatusText("AI run could not snapshot the project transaction: " + error.getMessage());
-            failQueuedAiPreflight(queuedEntry, "Project transaction snapshot failed");
+            setStatusText("AI run could not prepare a safe session: " + error.getMessage());
+            failQueuedAiPreflight(queuedEntry, "Session continuation failed: " + error.getMessage());
             return;
         }
         final String requestModel = model;
@@ -4562,8 +4649,10 @@ public final class MainActivity extends Activity {
                 activeAiQueueEntry = queuedEntry;
             }
             if (activeAiQueueEntry == null) throw new IOException("queued AI request could not be claimed");
-            AndroidAiTransactionStore.save(this, activeAiQueueEntry.projectId,
-                    activeAiQueueEntry.id, aiTransaction);
+            if (resumeCheckpoint == null) {
+                AndroidAiTransactionStore.save(this, activeAiQueueEntry.projectId,
+                        activeAiQueueEntry.id, aiTransaction);
+            }
         } catch (Exception error) {
             setStatusText("AI queue failed: " + error.getMessage());
             if (activeAiQueueEntry != null) {
@@ -4610,7 +4699,7 @@ public final class MainActivity extends Activity {
                             requestImageInfos, requestImageMetadata, requestPreviewPixels);
                     final AiAgentResult aiResult = runAiAgentLoop(
                             requestApiKey, requestModel, requestJson, requestImageGeneration, useCodex,
-                            aiTransaction);
+                            aiTransaction, resumeCheckpoint);
                     throwIfAiCancelled();
                     runOnUiThread(new Runnable() {
                         @Override
@@ -4689,6 +4778,27 @@ public final class MainActivity extends Activity {
             return;
         }
         aiCancelRequested = true;
+        AndroidAiQueue.Entry item = activeAiQueueEntry;
+        if (item != null) {
+            try {
+                AndroidAiQueue.updatePhase(this, item.projectId, item.id,
+                        WorkshopAiRunPhase.CANCELLING,
+                        "Cancellation requested; resume is disabled and the original project will be restored");
+                AndroidAiSessionCheckpointStore.Checkpoint checkpoint =
+                        AndroidAiSessionCheckpointStore.load(this, item.projectId, item.id);
+                if (checkpoint != null) {
+                    AndroidAiSessionCheckpointStore.save(this,
+                            new AndroidAiSessionCheckpointStore.Checkpoint(
+                                    checkpoint.projectId, checkpoint.itemId,
+                                    WorkshopAiResumePolicy.CANCEL_REQUESTED, checkpoint.provider,
+                                    checkpoint.model, checkpoint.attachmentFingerprint,
+                                    checkpoint.payload, checkpoint.projectSnapshot));
+                }
+            } catch (Exception error) {
+                appendAiTraceFields("cancel_checkpoint_failed", "error", error.getMessage(),
+                        "item_id", item.id, null, null);
+            }
+        }
         nativeCodexCancelResponse();
         HttpURLConnection connection = activeAiConnection;
         if (connection != null) connection.disconnect();
@@ -5016,15 +5126,66 @@ public final class MainActivity extends Activity {
         }
         return errors;
     }
+    private JSONObject aiCheckpointPayload(String initialRequestJson, String currentRequestJson,
+            int nextTurn, String pendingResponseJson, String previousToolCallBatch,
+            AiAgentSession session, AiUsageAccumulator usage) throws Exception {
+        return new JSONObject().put("initial_request_json", initialRequestJson)
+                .put("current_request_json", currentRequestJson).put("next_turn", nextTurn)
+                .put("pending_response_json", pendingResponseJson == null ? "" : pendingResponseJson)
+                .put("previous_tool_call_batch", previousToolCallBatch == null ? "" : previousToolCallBatch)
+                .put("session", session.checkpointJson()).put("usage", usage.checkpointJson());
+    }
+
+    private void saveActiveAiCheckpoint(String stage, String model, boolean useCodex,
+            JSONObject payload) throws Exception {
+        AndroidAiQueue.Entry item = activeAiQueueEntry;
+        if (item == null) throw new IOException("active AI queue item is missing");
+        AndroidAiSessionCheckpointStore.save(this,
+                new AndroidAiSessionCheckpointStore.Checkpoint(item.projectId, item.id, stage,
+                        useCodex ? "codex_subscription" : "openai_api", model,
+                        item.requestFingerprint(), payload,
+                        WorkshopAiProjectTransaction.capture(projectRoot())));
+    }
+
+    private void markActiveAiCheckpointProviderInFlight() throws Exception {
+        AndroidAiQueue.Entry item = activeAiQueueEntry;
+        if (item == null) throw new IOException("active AI queue item is missing");
+        AndroidAiSessionCheckpointStore.Checkpoint checkpoint =
+                AndroidAiSessionCheckpointStore.load(this, item.projectId, item.id);
+        if (checkpoint == null) throw new IOException("AI session checkpoint is missing");
+        AndroidAiSessionCheckpointStore.save(this,
+                new AndroidAiSessionCheckpointStore.Checkpoint(item.projectId, item.id,
+                        WorkshopAiResumePolicy.PROVIDER_IN_FLIGHT, checkpoint.provider,
+                        checkpoint.model, checkpoint.attachmentFingerprint,
+                        checkpoint.payload, checkpoint.projectSnapshot));
+    }
+
     private AiAgentResult runAiAgentLoop(String apiKey, String model, String initialRequestJson,
             boolean allowImageGeneration, boolean useCodex,
-            WorkshopAiProjectTransaction.Snapshot transaction) throws Exception {
-        String currentRequestJson = initialRequestJson;
+            WorkshopAiProjectTransaction.Snapshot transaction,
+            AndroidAiSessionCheckpointStore.Checkpoint resumeCheckpoint) throws Exception {
+        JSONObject resumed = resumeCheckpoint == null ? null : resumeCheckpoint.payload;
+        String currentRequestJson = resumed == null ? initialRequestJson
+                : resumed.getString("current_request_json");
         AiAgentSession session = new AiAgentSession();
         AiUsageAccumulator usage = new AiUsageAccumulator();
+        if (resumed != null) {
+            session.restoreCheckpoint(resumed.optJSONObject("session"));
+            usage.restoreCheckpoint(resumed.optJSONObject("usage"));
+        }
         ArrayList<AiGeneratedImageCandidate> generatedImages = new ArrayList<>();
-        String previousToolCallBatch = "";
-        for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
+        String previousToolCallBatch = resumed == null ? ""
+                : resumed.optString("previous_tool_call_batch", "");
+        String pendingResponseJson = resumed == null ? ""
+                : resumed.optString("pending_response_json", "");
+        int firstTurn = resumed == null ? 0 : resumed.optInt("next_turn", 0);
+        String resumedFinalResponse = resumed == null ? ""
+                : resumed.optString("final_response_json", "");
+        if (!resumedFinalResponse.isEmpty()) {
+            return finishAiAgentResult(resumedFinalResponse, usage, apiKey, model, useCodex,
+                    session, generatedImages, transaction, initialRequestJson);
+        }
+        for (int turn = firstTurn; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             throwIfAiCancelled();
             double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
             if (!useCodex && !WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
@@ -5033,49 +5194,67 @@ public final class MainActivity extends Activity {
             session.currentStep = turn + 1;
             postAiProgress(session.currentStep, session.actionCount,
                     WorkshopAiRunPhase.EDITING.wireValue());
-            appendAiTrace("llm_request", new JSONObject()
-                    .put("turn", session.currentStep)
-                    .put("provider", useCodex ? "codex_subscription" : "openai_api")
-                    .put("requested_model", model)
-                    .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
-            double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
-            boolean allowImageOnThisTurn = !useCodex && allowImageGeneration && turn == 0;
-            AiApiResponse apiResponse;
-            long llmStartedMs = SystemClock.elapsedRealtime();
-            if (useCodex) {
-                apiResponse = callCodexResponses(currentRequestJson);
-                usage.addUnpriced(apiResponse.model, apiResponse.usage);
+            String aiJson;
+            JSONObject response;
+            if (!pendingResponseJson.isEmpty()) {
+                aiJson = pendingResponseJson;
+                pendingResponseJson = "";
+                response = new JSONObject(aiJson);
+                appendAiTrace("session_resumed", new JSONObject()
+                        .put("turn", session.currentStep).put("stage", "response_ready")
+                        .put("replayed_provider_call", false));
             } else {
-                int maxOutputTokens = maxOutputTokensForBudget(
-                        model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
-                apiResponse = callOpenAiResponsesApi(
-                        apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
-                usage.add(model, apiResponse.usage);
-                if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+                appendAiTrace("llm_request", new JSONObject()
+                        .put("turn", session.currentStep)
+                        .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                        .put("requested_model", model)
+                        .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
+                saveActiveAiCheckpoint(WorkshopAiResumePolicy.PROVIDER_IN_FLIGHT, model, useCodex,
+                        aiCheckpointPayload(initialRequestJson, currentRequestJson, turn,
+                                "", previousToolCallBatch, session, usage));
+                double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
+                boolean allowImageOnThisTurn = !useCodex && allowImageGeneration && turn == 0;
+                AiApiResponse apiResponse;
+                long llmStartedMs = SystemClock.elapsedRealtime();
+                if (useCodex) {
+                    apiResponse = callCodexResponses(currentRequestJson);
+                    usage.addUnpriced(apiResponse.model, apiResponse.usage);
+                } else {
+                    int maxOutputTokens = maxOutputTokensForBudget(
+                            model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
+                    apiResponse = callOpenAiResponsesApi(
+                            apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
+                    usage.add(model, apiResponse.usage);
+                    if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+                }
+                List<AiGeneratedImageCandidate> callImages = extractAiGeneratedImages(apiResponse.body);
+                if (!callImages.isEmpty()) {
+                    generatedImages.addAll(callImages);
+                    double imageCost = callImages.size() * GPT_IMAGE_2_LOW_1024_USD;
+                    usage.addImageGenerationCost(imageCost, callImages.size());
+                    recordMonthlyAiSpend(imageCost);
+                }
+                throwIfAiCancelled();
+                aiJson = extractAiJsonResponse(apiResponse.body);
+                response = new JSONObject(aiJson);
+                appendAiTrace("llm_response", new JSONObject()
+                        .put("turn", session.currentStep)
+                        .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                        .put("requested_model", model).put("response_model", apiResponse.model)
+                        .put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)
+                        .put("usage", apiResponse.usage)
+                        .put("cost_available", !useCodex && usage.lastCallCostAvailable)
+                        .put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable
+                                ? usage.lastCallEstimatedCostUsd : JSONObject.NULL)
+                        .put("cumulative_estimated_cost_usd", useCodex
+                                ? JSONObject.NULL : usage.estimatedCostUsd)
+                        .put("summary", summarizeAiResponseForTrace(apiResponse.body, response)));
+                if (callImages.isEmpty()) {
+                    saveActiveAiCheckpoint(WorkshopAiResumePolicy.RESPONSE_READY, model, useCodex,
+                            aiCheckpointPayload(initialRequestJson, currentRequestJson, turn,
+                                    aiJson, previousToolCallBatch, session, usage));
+                }
             }
-            List<AiGeneratedImageCandidate> callImages = extractAiGeneratedImages(apiResponse.body);
-            if (!callImages.isEmpty()) {
-                generatedImages.addAll(callImages);
-                double imageCost = callImages.size() * GPT_IMAGE_2_LOW_1024_USD;
-                usage.addImageGenerationCost(imageCost, callImages.size());
-                recordMonthlyAiSpend(imageCost);
-            }
-            throwIfAiCancelled();
-            String aiJson = extractAiJsonResponse(apiResponse.body);
-            JSONObject response = new JSONObject(aiJson);
-            appendAiTrace("llm_response", new JSONObject()
-                    .put("turn", session.currentStep)
-                    .put("provider", useCodex ? "codex_subscription" : "openai_api")
-                    .put("requested_model", model)
-                    .put("response_model", apiResponse.model)
-                    .put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)
-                    .put("usage", apiResponse.usage)
-                    .put("cost_available", !useCodex && usage.lastCallCostAvailable)
-                    .put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable
-                            ? usage.lastCallEstimatedCostUsd : JSONObject.NULL)
-                    .put("cumulative_estimated_cost_usd", useCodex
-                            ? JSONObject.NULL : usage.estimatedCostUsd)
-                    .put("summary", summarizeAiResponseForTrace(apiResponse.body, response)));
             appendAiTrace("llm_json", new JSONObject().put("turn", session.currentStep).put("response", response));
             JSONArray responseValidationErrors = validateAiResponseShape(response);
             if (responseValidationErrors.length() > 0) {
@@ -5093,6 +5272,9 @@ public final class MainActivity extends Activity {
                 }
                 followup.put("instruction", "Your previous JSON response shape was invalid. Return exactly one JSON object matching the stable request response_contract, including nonempty working_notes within 2000 characters. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source.");
                 currentRequestJson = followup.toString();
+                saveActiveAiCheckpoint(WorkshopAiResumePolicy.READY, model, useCodex,
+                        aiCheckpointPayload(initialRequestJson, currentRequestJson, turn + 1,
+                                "", previousToolCallBatch, session, usage));
                 continue;
             }
             session.workingNotes = WorkshopAiWorkingNotes.normalize(
@@ -5187,6 +5369,10 @@ public final class MainActivity extends Activity {
                         .put("applied_tool_writes", true)
                         .put("reason", "Successful tool writes compiled and all runnable tests passed; skipped a redundant final model call.");
                 appendAiTrace("auto_finalize_tested_writes", completed);
+                JSONObject finalPayload = aiCheckpointPayload(initialRequestJson, currentRequestJson,
+                        turn + 1, "", previousToolCallBatch, session, usage);
+                finalPayload.put("final_response_json", completed.toString());
+                saveActiveAiCheckpoint(WorkshopAiResumePolicy.READY, model, useCodex, finalPayload);
                 AiAgentResult candidate = finishAiAgentResult(completed.toString(), usage, apiKey,
                         model, useCodex, session, generatedImages, transaction, initialRequestJson);
                 if (candidate.verification.status == WorkshopAiVerificationResult.Status.FAILED
@@ -5210,6 +5396,9 @@ public final class MainActivity extends Activity {
                                     + "and rerun tests.");
                     currentRequestJson = verificationFollowup.toString();
                     previousToolCallBatch = "";
+                    saveActiveAiCheckpoint(WorkshopAiResumePolicy.READY, model, useCodex,
+                            aiCheckpointPayload(initialRequestJson, currentRequestJson, turn + 1,
+                                    "", previousToolCallBatch, session, usage));
                     continue;
                 }
                 return candidate;
@@ -5227,6 +5416,9 @@ public final class MainActivity extends Activity {
             }
             followup.put("instruction", instruction);
             currentRequestJson = followup.toString();
+            saveActiveAiCheckpoint(WorkshopAiResumePolicy.READY, model, useCodex,
+                    aiCheckpointPayload(initialRequestJson, currentRequestJson, turn + 1,
+                            "", previousToolCallBatch, session, usage));
         }
         postAiProgress(MAX_AI_AGENT_TURNS, session.actionCount, "limit hit");
         if (session.successfulWriteCount > 0 && compileReady && session.latestRunnableTestsPassed()) {
@@ -5458,6 +5650,7 @@ public final class MainActivity extends Activity {
                     .put("risk", policy.risk.name().toLowerCase()));
             AiApiResponse response;
             long llmStartedMs = SystemClock.elapsedRealtime();
+            markActiveAiCheckpointProviderInFlight();
             if (useCodex) {
                 response = callCodexResponses(request.toString());
                 usage.addUnpriced(response.model, response.usage);
@@ -9928,6 +10121,35 @@ public final class MainActivity extends Activity {
             estimatedCostUsd += costUsd;
         }
 
+        JSONObject checkpointJson() throws Exception {
+            return new JSONObject().put("calls", new JSONArray(calls.toString()))
+                    .put("input_tokens", inputTokens).put("cached_input_tokens", cachedInputTokens)
+                    .put("cache_write_input_tokens", cacheWriteInputTokens)
+                    .put("output_tokens", outputTokens).put("estimated_cost_usd", estimatedCostUsd)
+                    .put("image_generation_cost_usd", imageGenerationCostUsd)
+                    .put("generated_image_count", generatedImageCount)
+                    .put("cost_available", costAvailable);
+        }
+
+        void restoreCheckpoint(JSONObject checkpoint) throws Exception {
+            if (checkpoint == null) return;
+            JSONArray restoredCalls = checkpoint.optJSONArray("calls");
+            if (restoredCalls == null || restoredCalls.length() > MAX_AI_AGENT_TURNS + 2) {
+                throw new IllegalArgumentException("AI usage checkpoint call list is invalid");
+            }
+            for (int index = 0; index < restoredCalls.length(); index += 1) {
+                calls.put(new JSONObject(restoredCalls.getJSONObject(index).toString()));
+            }
+            inputTokens = checkpoint.optLong("input_tokens", 0L);
+            cachedInputTokens = checkpoint.optLong("cached_input_tokens", 0L);
+            cacheWriteInputTokens = checkpoint.optLong("cache_write_input_tokens", 0L);
+            outputTokens = checkpoint.optLong("output_tokens", 0L);
+            estimatedCostUsd = checkpoint.optDouble("estimated_cost_usd", 0.0);
+            imageGenerationCostUsd = checkpoint.optDouble("image_generation_cost_usd", 0.0);
+            generatedImageCount = checkpoint.optInt("generated_image_count", 0);
+            costAvailable = checkpoint.optBoolean("cost_available", true);
+        }
+
         JSONObject toJson(String model) throws Exception {
             JSONObject json = new JSONObject();
             json.put("model", model);
@@ -10017,6 +10239,62 @@ public final class MainActivity extends Activity {
 
         void invalidateProject() {
             cachedProject = null;
+        }
+
+        JSONObject checkpointJson() throws Exception {
+            JSONArray observations = new JSONArray();
+            for (String observation : observationMemory.snapshotNewestFirst()) observations.put(observation);
+            return new JSONObject().put("current_step", currentStep).put("action_count", actionCount)
+                    .put("successful_write_count", successfulWriteCount)
+                    .put("rolled_back_write_count", rolledBackWriteCount)
+                    .put("verification_repair_cycles", verificationRepairCycles)
+                    .put("failed_write_batch_count", failedWriteBatchCount)
+                    .put("verifier_call_count", verifierCallCount)
+                    .put("last_tool_summary", lastToolSummary).put("last_tool_error", lastToolError)
+                    .put("working_notes", workingNotes)
+                    .put("last_passing_test_keys", new JSONArray(lastPassingTestKeys))
+                    .put("latest_test_observation", latestTestObservation == null
+                            ? new JSONObject() : new JSONObject(latestTestObservation.toString()))
+                    .put("changed_symbols", new JSONArray(changedSymbols))
+                    .put("changed_test_files", new JSONArray(changedTestFiles))
+                    .put("observations", observations)
+                    .put("read_only_batches", toolLoopPolicy.consecutiveReadOnlyBatches());
+        }
+
+        void restoreCheckpoint(JSONObject checkpoint) throws Exception {
+            if (checkpoint == null) return;
+            currentStep = checkpoint.optInt("current_step", 0);
+            actionCount = checkpoint.optInt("action_count", 0);
+            successfulWriteCount = checkpoint.optInt("successful_write_count", 0);
+            rolledBackWriteCount = checkpoint.optInt("rolled_back_write_count", 0);
+            verificationRepairCycles = checkpoint.optInt("verification_repair_cycles", 0);
+            failedWriteBatchCount = checkpoint.optInt("failed_write_batch_count", 0);
+            verifierCallCount = checkpoint.optInt("verifier_call_count", 0);
+            lastToolSummary = checkpoint.optString("last_tool_summary", "none");
+            lastToolError = checkpoint.optString("last_tool_error", "");
+            workingNotes = WorkshopAiWorkingNotes.normalize(checkpoint.optString("working_notes", ""));
+            restoreStrings(checkpoint.optJSONArray("last_passing_test_keys"), lastPassingTestKeys);
+            JSONObject test = checkpoint.optJSONObject("latest_test_observation");
+            latestTestObservation = test == null ? new JSONObject() : new JSONObject(test.toString());
+            restoreStrings(checkpoint.optJSONArray("changed_symbols"), changedSymbols);
+            restoreStrings(checkpoint.optJSONArray("changed_test_files"), changedTestFiles);
+            JSONArray observations = checkpoint.optJSONArray("observations");
+            ArrayList<String> retained = new ArrayList<>();
+            if (observations != null) for (int index = 0; index < observations.length(); index += 1) {
+                retained.add(observations.getString(index));
+            }
+            observationMemory.restoreNewestFirst(retained);
+            toolLoopPolicy.restoreConsecutiveReadOnlyBatches(
+                    checkpoint.optInt("read_only_batches", 0));
+        }
+
+        private void restoreStrings(JSONArray values, TreeSet<String> target) throws Exception {
+            target.clear();
+            if (values == null || values.length() > 512) {
+                if (values == null) return;
+                throw new IllegalArgumentException("AI session checkpoint list is invalid");
+            }
+            for (int index = 0; index < values.length(); index += 1) target.add(values.getString(index));
         }
     }
     private static final class ProjectSnapshot {
