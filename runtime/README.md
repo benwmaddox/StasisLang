@@ -2,6 +2,11 @@
 
 Native SDL2+OpenGL graphics library for Stasis programs.
 
+Mobile release shells use the shared fixed-AOT lifecycle core documented in
+`../docs/mobile_runtime_core.md`. Android and iOS both link the
+`stasis_mobile_runtime` static target with `STASIS_GRAPHICS_SDL_ONLY=ON`; they
+do not link the desktop dynamic runner.
+
 ## Prerequisites
 
 - CMake 3.16+

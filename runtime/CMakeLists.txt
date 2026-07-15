@@ -1,14 +1,24 @@
 cmake_minimum_required(VERSION 3.16)
 project(stasis_graphics C)
 
-option(STASIS_GRAPHICS_BUILD_SHARED "Build the graphics runtime as a DLL" ON)
+set(STASIS_MOBILE_PLATFORM OFF)
+set(STASIS_DESKTOP_RUNTIME_DEFAULT ON)
+set(STASIS_GRAPHICS_SHARED_DEFAULT ON)
+if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(STASIS_MOBILE_PLATFORM ON)
+    set(STASIS_DESKTOP_RUNTIME_DEFAULT OFF)
+    set(STASIS_GRAPHICS_SHARED_DEFAULT OFF)
+endif()
+
+option(STASIS_GRAPHICS_BUILD_SHARED "Build the graphics runtime as a DLL" ${STASIS_GRAPHICS_SHARED_DEFAULT})
 option(STASIS_GRAPHICS_BUILD_STATIC "Build the graphics runtime as a static library" ON)
-option(STASIS_BUILD_RUNNER "Build the stasis DLL runner executable" ON)
-option(STASIS_BUILD_SYS "Build the sys runtime (file/argv/exec)" ON)
+option(STASIS_BUILD_RUNNER "Build the stasis DLL runner executable" ${STASIS_DESKTOP_RUNTIME_DEFAULT})
+option(STASIS_BUILD_SYS "Build the sys runtime (file/argv/exec)" ${STASIS_DESKTOP_RUNTIME_DEFAULT})
+option(STASIS_BUILD_MOBILE_RUNTIME "Build the fixed-AOT mobile runtime core" ${STASIS_MOBILE_PLATFORM})
 
 # Android and other restricted platforms do not support the OpenGL 2.1 + GLEW path.
 set(STASIS_GRAPHICS_SDL_ONLY_DEFAULT OFF)
-if(ANDROID)
+if(STASIS_MOBILE_PLATFORM)
     set(STASIS_GRAPHICS_SDL_ONLY_DEFAULT ON)
 endif()
 option(STASIS_GRAPHICS_SDL_ONLY "Build SDL_Renderer-only runtime (no OpenGL/GLEW backend)" ${STASIS_GRAPHICS_SDL_ONLY_DEFAULT})
@@ -101,6 +111,22 @@ if(STASIS_GRAPHICS_BUILD_STATIC)
     install(TARGETS stasis_graphics_static
         ARCHIVE DESTINATION lib
     )
+endif()
+
+if(STASIS_BUILD_MOBILE_RUNTIME)
+    if(NOT STASIS_GRAPHICS_BUILD_STATIC)
+        message(FATAL_ERROR "STASIS_BUILD_MOBILE_RUNTIME requires STASIS_GRAPHICS_BUILD_STATIC=ON")
+    endif()
+    if(NOT STASIS_GRAPHICS_SDL_ONLY)
+        message(FATAL_ERROR "The mobile runtime requires STASIS_GRAPHICS_SDL_ONLY=ON")
+    endif()
+
+    add_library(stasis_mobile_runtime STATIC stasis_mobile_runtime.c)
+    target_include_directories(stasis_mobile_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(stasis_mobile_runtime PUBLIC stasis_graphics_static)
+    set_target_properties(stasis_mobile_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
+    install(FILES stasis_mobile_runtime.h DESTINATION include)
 endif()
 
 if(STASIS_BUILD_SYS)

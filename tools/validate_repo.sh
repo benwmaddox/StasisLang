@@ -9,4 +9,7 @@ if [[ -f "$HOME/.cargo/env" ]]; then
 fi
 
 python3 tools/ci/check_stasis_src_layout.py
+cmake -S runtime/tests -B target/mobile-runtime-tests -DCMAKE_BUILD_TYPE=Release
+cmake --build target/mobile-runtime-tests --config Release
+ctest --test-dir target/mobile-runtime-tests -C Release --output-on-failure
 cargo test --workspace --all-targets -- --test-threads=1
