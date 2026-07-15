@@ -101,7 +101,9 @@ fn load_workshop_project_file(
         source: source.clone(),
     });
 
-    for import_path in parse_workshop_import_paths(&source)? {
+    let import_paths = parse_workshop_import_paths(&source)
+        .map_err(|error| format!("{}: {error}", normalized_path.display()))?;
+    for import_path in import_paths {
         let base_dir = normalized_path.parent().unwrap_or(project_root);
         let resolved = normalize_filesystem_path(&base_dir.join(import_path));
         if resolved

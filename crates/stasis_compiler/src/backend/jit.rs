@@ -252,6 +252,10 @@ impl JitProcess {
         &self.artifacts
     }
 
+    pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
+        self.compiler.last_source_diagnostic()
+    }
+
     pub fn activate_runtime_dispatch_table(&self) {
         self.refresh_runtime_dispatch_table();
     }

@@ -105,6 +105,15 @@ pub struct ErrorMetric {
     pub detail_b: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceDiagnostic {
+    pub path: String,
+    pub start: usize,
+    pub end: usize,
+    pub symbol: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone)]
 struct FileState {
     layout_hash: i32,
@@ -167,6 +176,7 @@ pub struct IncrementalCompilerHost {
     last_layout_hash_i32: i32,
     required_reachability_root_hashes: Vec<i32>,
     last_reachable_function_keys: BTreeSet<FunctionKey>,
+    last_source_diagnostic: Option<SourceDiagnostic>,
 }
 
 impl IncrementalCompilerHost {
@@ -177,6 +187,7 @@ impl IncrementalCompilerHost {
             last_layout_hash_i32: 0,
             required_reachability_root_hashes: Vec::new(),
             last_reachable_function_keys: BTreeSet::new(),
+            last_source_diagnostic: None,
         }
     }
 
@@ -194,6 +205,7 @@ impl IncrementalCompilerHost {
         &mut self,
         changed_files: &[PathBuf],
     ) -> Result<IncrementalCompileOutput, String> {
+        self.last_source_diagnostic = None;
         if changed_files.is_empty() {
             return Err("compile request had no changed files".to_string());
         }
@@ -263,7 +275,14 @@ impl IncrementalCompilerHost {
         let mut file_paths = Vec::with_capacity(changed_sources.len());
         let mut functions: Vec<FunctionMetric> = Vec::new();
         let mut errors: Vec<ErrorMetric> = Vec::new();
-        let analyzed_by_path = analyze_sources_in_process_parallel(&changed_sources)?;
+        let analyzed_by_path = match analyze_sources_in_process_parallel(&changed_sources) {
+            Ok(analyzed) => analyzed,
+            Err(diagnostic) => {
+                let message = format!("{}: {}", diagnostic.path, diagnostic.message);
+                self.last_source_diagnostic = Some(diagnostic);
+                return Err(message);
+            }
+        };
         for (path_key, analyzed) in &analyzed_by_path {
             if !analyzed.errors.is_empty() {
                 errors.extend(analyzed.errors.clone());
@@ -436,6 +455,10 @@ impl IncrementalCompilerHost {
     pub fn backend_name(&self) -> &'static str {
         "stasis-orchestrated"
     }
+
+    pub fn last_source_diagnostic(&self) -> Option<&SourceDiagnostic> {
+        self.last_source_diagnostic.as_ref()
+    }
 }
 
 impl Default for IncrementalCompilerHost {
@@ -446,7 +469,7 @@ impl Default for IncrementalCompilerHost {
 
 fn analyze_sources_in_process_parallel(
     changed_sources: &[(String, String)],
-) -> Result<BTreeMap<String, AnalysisResult>, String> {
+) -> Result<BTreeMap<String, AnalysisResult>, SourceDiagnostic> {
     let mut handles = Vec::with_capacity(changed_sources.len());
     for (path_key, source) in changed_sources {
         let path_key = path_key.clone();
@@ -457,15 +480,23 @@ fn analyze_sources_in_process_parallel(
 
     let mut analyzed_by_path = BTreeMap::new();
     for handle in handles {
-        let (path_key, result) = handle
-            .join()
-            .map_err(|_| "analysis worker thread panicked".to_string())?;
-        analyzed_by_path.insert(path_key, result?);
+        let (path_key, result) = handle.join().map_err(|_| SourceDiagnostic {
+            path: String::new(),
+            start: 0,
+            end: 0,
+            symbol: String::new(),
+            message: "analysis worker thread panicked".to_string(),
+        })?;
+        let analyzed = result.map_err(|mut diagnostic| {
+            diagnostic.path = path_key.clone();
+            diagnostic
+        })?;
+        analyzed_by_path.insert(path_key, analyzed);
     }
     Ok(analyzed_by_path)
 }
 
-fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
+fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, SourceDiagnostic> {
     let functions = parse_defined_functions(source)?;
     let mut parsed_functions = Vec::with_capacity(functions.len());
     let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -476,9 +507,16 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, String> {
     let mut main_invalid_count = 0i32;
 
     for function in &functions {
-        let body_text = source
-            .get(function.body_range.clone())
-            .ok_or_else(|| "function body range out of bounds".to_string())?;
+        let body_text =
+            source
+                .get(function.body_range.clone())
+                .ok_or_else(|| SourceDiagnostic {
+                    path: String::new(),
+                    start: function.body_range.start.min(source.len()),
+                    end: function.body_range.end.min(source.len()),
+                    symbol: function.name.clone(),
+                    message: "function body range out of bounds".to_string(),
+                })?;
         let id_hash = hash_identifier(&function.name);
         let sig_hash = hash_signature_i32(
             &function.name,
@@ -652,10 +690,27 @@ enum EvalExpr {
     Call(String, Vec<EvalExpr>),
 }
 
-fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, String> {
+fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, SourceDiagnostic> {
     use crate::frontend::lexer::TokenKind;
 
-    let tokens = crate::frontend::lexer::lex(source)?;
+    let tokens = crate::frontend::lexer::lex(source).map_err(|message| {
+        let start = if message.contains("unterminated string literal") {
+            source.rfind('"').unwrap_or(0)
+        } else {
+            0
+        };
+        SourceDiagnostic {
+            path: String::new(),
+            start,
+            end: source[start..]
+                .chars()
+                .next()
+                .map(|value| start + value.len_utf8())
+                .unwrap_or(start),
+            symbol: String::new(),
+            message,
+        }
+    })?;
     let mut out = Vec::new();
     let mut cursor = 0usize;
     let mut ordinal = 0usize;
@@ -672,13 +727,24 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Stri
                 token.kind == TokenKind::Identifier && source[token.start..token.end] == *"export"
             });
         cursor += 1;
-        cursor = skip_legacy_function_annotations(source, &tokens, cursor)?;
+        cursor = skip_legacy_function_annotations(source, &tokens, cursor)
+            .map_err(|message| source_diagnostic_at(&tokens, cursor, "", message))?;
 
-        let name_token = tokens
-            .get(cursor)
-            .ok_or_else(|| "expected function name after 'function'".to_string())?;
+        let name_token = tokens.get(cursor).ok_or_else(|| {
+            source_diagnostic_at(
+                &tokens,
+                cursor.saturating_sub(1),
+                "",
+                "expected function name after 'function'".to_string(),
+            )
+        })?;
         if name_token.kind != TokenKind::Identifier {
-            return Err("expected function name after 'function'".to_string());
+            return Err(source_diagnostic_at(
+                &tokens,
+                cursor,
+                "",
+                "expected function name after 'function'".to_string(),
+            ));
         }
         let name = source[name_token.start..name_token.end].to_string();
         cursor += 1;
@@ -688,7 +754,8 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Stri
             cursor,
             TokenKind::LParen,
             "expected '(' after function name",
-        )?;
+        )
+        .map_err(|message| source_diagnostic_at(&tokens, cursor, &name, message))?;
         cursor += 1;
 
         let mut params = Vec::new();
@@ -701,20 +768,26 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Stri
                 cursor,
                 TokenKind::Identifier,
                 "expected parameter name",
-            )?;
+            )
+            .map_err(|message| source_diagnostic_at(&tokens, cursor, &name, message))?;
             cursor += 1;
             expect_token_kind(
                 &tokens,
                 cursor,
                 TokenKind::Colon,
                 "expected ':' after parameter name",
-            )?;
+            )
+            .map_err(|message| source_diagnostic_at(&tokens, cursor, &name, message))?;
             cursor += 1;
 
-            let type_start = tokens
-                .get(cursor)
-                .map(|token| token.start)
-                .ok_or_else(|| "missing parameter type".to_string())?;
+            let type_start = tokens.get(cursor).map(|token| token.start).ok_or_else(|| {
+                source_diagnostic_at(
+                    &tokens,
+                    cursor.saturating_sub(1),
+                    &name,
+                    "missing parameter type".to_string(),
+                )
+            })?;
             while tokens.get(cursor).is_some_and(|token| {
                 token.kind != TokenKind::Comma && token.kind != TokenKind::RParen
             }) {
@@ -723,7 +796,14 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Stri
             let type_end = tokens
                 .get(cursor.saturating_sub(1))
                 .map(|token| token.end)
-                .ok_or_else(|| "missing parameter type body".to_string())?;
+                .ok_or_else(|| {
+                    source_diagnostic_at(
+                        &tokens,
+                        cursor,
+                        &name,
+                        "missing parameter type body".to_string(),
+                    )
+                })?;
             params.push(ParsedParamDecl {
                 type_name: source[type_start..type_end].trim().to_string(),
             });
@@ -739,7 +819,8 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Stri
             cursor,
             TokenKind::RParen,
             "expected ')' after parameter list",
-        )?;
+        )
+        .map_err(|message| source_diagnostic_at(&tokens, cursor, &name, message))?;
         cursor += 1;
 
         let mut return_type_name = "void".to_string();
@@ -748,10 +829,14 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Stri
             .is_some_and(|token| token.kind == TokenKind::Colon)
         {
             cursor += 1;
-            let type_start = tokens
-                .get(cursor)
-                .map(|token| token.start)
-                .ok_or_else(|| "missing return type".to_string())?;
+            let type_start = tokens.get(cursor).map(|token| token.start).ok_or_else(|| {
+                source_diagnostic_at(
+                    &tokens,
+                    cursor.saturating_sub(1),
+                    &name,
+                    "missing return type".to_string(),
+                )
+            })?;
             while tokens.get(cursor).is_some_and(|token| {
                 token.kind != TokenKind::LBrace && token.kind != TokenKind::Semicolon
             }) {
@@ -760,7 +845,14 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Stri
             let type_end = tokens
                 .get(cursor.saturating_sub(1))
                 .map(|token| token.end)
-                .ok_or_else(|| "missing return type body".to_string())?;
+                .ok_or_else(|| {
+                    source_diagnostic_at(
+                        &tokens,
+                        cursor,
+                        &name,
+                        "missing return type body".to_string(),
+                    )
+                })?;
             return_type_name = source[type_start..type_end].trim().to_string();
         }
 
@@ -777,7 +869,8 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Stri
             cursor,
             TokenKind::LBrace,
             "expected '{' for function body",
-        )?;
+        )
+        .map_err(|message| source_diagnostic_at(&tokens, cursor, &name, message))?;
         let body_start = tokens[cursor].start;
         cursor += 1;
         let mut depth = 1usize;
@@ -796,7 +889,13 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Stri
             cursor += 1;
         }
         if depth != 0 {
-            return Err(format!("missing closing '}}' for function '{name}'"));
+            return Err(SourceDiagnostic {
+                path: String::new(),
+                start: name_token.start,
+                end: name_token.end,
+                symbol: name.clone(),
+                message: format!("missing closing '}}' for function '{name}'"),
+            });
         }
         let body_end = tokens[cursor].end;
         out.push(ParsedFunctionDecl {
@@ -812,6 +911,30 @@ fn parse_defined_functions(source: &str) -> Result<Vec<ParsedFunctionDecl>, Stri
     }
 
     Ok(out)
+}
+
+fn source_diagnostic_at(
+    tokens: &[crate::frontend::lexer::Token],
+    cursor: usize,
+    symbol: &str,
+    message: String,
+) -> SourceDiagnostic {
+    let token = tokens
+        .get(cursor)
+        .or_else(|| tokens.last())
+        .copied()
+        .unwrap_or(crate::frontend::lexer::Token {
+            kind: crate::frontend::lexer::TokenKind::Eof,
+            start: 0,
+            end: 0,
+        });
+    SourceDiagnostic {
+        path: String::new(),
+        start: token.start,
+        end: token.end,
+        symbol: symbol.to_string(),
+        message,
+    }
 }
 
 fn skip_legacy_function_annotations(
