@@ -41,9 +41,9 @@ final class WorkshopSourceDiagnostic {
     }
 
     static WorkshopSourceDiagnostic fromTestFailure(
-            String file, int line, String symbol, String message) {
+            String file, int line, int column, String symbol, String message) {
         try {
-            return new WorkshopSourceDiagnostic(file, line, 1, line, 1, symbol, message);
+            return new WorkshopSourceDiagnostic(file, line, column, line, column, symbol, message);
         } catch (IllegalArgumentException error) {
             return null;
         }

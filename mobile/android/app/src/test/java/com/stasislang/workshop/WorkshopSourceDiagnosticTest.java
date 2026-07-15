@@ -25,7 +25,17 @@ public final class WorkshopSourceDiagnosticTest {
     public void diagnosticRejectsEscapingOrAbsolutePaths() {
         assertNull(WorkshopSourceDiagnostic.fromCompileResult(
                 "CompileError|diagnostic_file=../outside.stasis|diagnostic_line=1"));
-        assertNull(WorkshopSourceDiagnostic.fromTestFailure("C:/outside.stasis", 1, "bad", ""));
+        assertNull(WorkshopSourceDiagnostic.fromTestFailure("C:/outside.stasis", 1, 1, "bad", ""));
+    }
+
+    @Test
+    public void testFailurePreservesReportedColumn() {
+        WorkshopSourceDiagnostic diagnostic = WorkshopSourceDiagnostic.fromTestFailure(
+                "tests/failing.test.stasis", 4, 12, "failing", "unknown call");
+
+        assertEquals(4, diagnostic.line);
+        assertEquals(12, diagnostic.column);
+        assertEquals(12, diagnostic.endColumn);
     }
 
     @Test

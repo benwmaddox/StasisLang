@@ -8784,6 +8784,7 @@ public final class MainActivity extends Activity {
                 String error = result.optString("error", "");
                 WorkshopSourceDiagnostic diagnostic = WorkshopSourceDiagnostic.fromTestFailure(
                         result.optString("file", ""), result.optInt("line", 0),
+                        result.optInt("column", 1),
                         result.optString("name", ""), error);
                 if (diagnostic != null) applySourceDiagnostic(diagnostic, "Test failure");
                 return;

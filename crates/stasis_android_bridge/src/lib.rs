@@ -177,13 +177,23 @@ pub fn run_android_workshop_stasis_tests(
         if let Err(error) = jit.compile() {
             failed += tests.len();
             let message = format!("{error:?}");
-            let offset = diagnostic_offset(&source, &message);
+            let diagnostic = jit.last_source_diagnostic();
+            let test = diagnostic.and_then(|diagnostic| {
+                tests
+                    .iter()
+                    .find(|test| test.generated_function_name == diagnostic.symbol)
+            });
+            let offset = test
+                .map(|test| test.declaration_range.start)
+                .unwrap_or_else(|| diagnostic_offset(&source, &message));
             let (line, column) = source_line_column(&source, offset);
             results.push(serde_json::json!({
                 "file": relative_path,
                 "line": line,
                 "column": column,
-                "name": diagnostic_symbol(&source, offset, &message),
+                "name": test
+                    .map(|test| test.display_name.clone())
+                    .unwrap_or_else(|| diagnostic_symbol(&source, offset, &message)),
                 "passed": false,
                 "status": "compile_failed",
                 "error": message,
@@ -1695,6 +1705,29 @@ mod tests {
         assert_eq!(result["results"][0]["line"], 3);
         assert_eq!(result["results"][0]["column"], 1);
         assert_eq!(result["results"][0]["name"], "broken test");
+        assert_eq!(result["results"][0]["status"], "compile_failed");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_generated_test_compile_failure_maps_back_to_test_declaration() {
+        let root = temp_project("generated_test_compile_failure_location");
+        fs::create_dir_all(root.join("tests")).expect("create tests");
+        fs::write(
+            root.join("tests/generated_failure.test.stasis"),
+            "\n\ntest `missing helper`(): bool {\n    return missing();\n}\n",
+        )
+        .expect("write failing test");
+
+        let result = run_android_workshop_stasis_tests(&root).expect("run Stasis tests");
+        assert_eq!(result["failed"], 1);
+        assert_eq!(
+            result["results"][0]["file"],
+            "tests/generated_failure.test.stasis"
+        );
+        assert_eq!(result["results"][0]["line"], 3);
+        assert_eq!(result["results"][0]["column"], 1);
+        assert_eq!(result["results"][0]["name"], "missing helper");
         assert_eq!(result["results"][0]["status"], "compile_failed");
         fs::remove_dir_all(root).ok();
     }
