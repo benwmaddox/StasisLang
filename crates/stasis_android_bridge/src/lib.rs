@@ -144,8 +144,24 @@ pub fn run_android_workshop_stasis_tests(
             .replace('\\', "/");
         let source = fs::read_to_string(&path)
             .map_err(|error| format!("failed reading Stasis test {}: {error}", path.display()))?;
-        let (rewritten, tests) = rewrite_top_level_test_declarations(&source)
-            .map_err(|error| format!("failed parsing Stasis test {}: {error}", path.display()))?;
+        let (rewritten, tests) = match rewrite_top_level_test_declarations(&source) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                failed += 1;
+                let offset = diagnostic_offset(&source, &error);
+                let (line, column) = source_line_column(&source, offset);
+                results.push(serde_json::json!({
+                    "file": relative_path,
+                    "line": line,
+                    "column": column,
+                    "name": diagnostic_symbol(&source, offset, &error),
+                    "passed": false,
+                    "status": "compile_failed",
+                    "error": error,
+                }));
+                continue;
+            }
+        };
         if tests.is_empty() {
             continue;
         }
@@ -160,7 +176,18 @@ pub fn run_android_workshop_stasis_tests(
         );
         if let Err(error) = jit.compile() {
             failed += tests.len();
-            results.push(serde_json::json!({"file": relative_path, "status": "compile_failed", "error": format!("{error:?}")}));
+            let message = format!("{error:?}");
+            let offset = diagnostic_offset(&source, &message);
+            let (line, column) = source_line_column(&source, offset);
+            results.push(serde_json::json!({
+                "file": relative_path,
+                "line": line,
+                "column": column,
+                "name": diagnostic_symbol(&source, offset, &message),
+                "passed": false,
+                "status": "compile_failed",
+                "error": message,
+            }));
             continue;
         }
         for test in tests {
@@ -223,7 +250,15 @@ pub fn compile_android_workshop_project(
 
     let mut host = IncrementalCompilerHost::new();
     host.set_required_reachability_roots(&["tick", "render", "on_code_swap"]);
-    let compile = host.compile_changed_files(&changed_files)?;
+    let compile = match host.compile_changed_files(&changed_files) {
+        Ok(compile) => compile,
+        Err(error) => {
+            return Err(host
+                .last_source_diagnostic()
+                .map(|diagnostic| format_compiler_source_diagnostic(project_root, diagnostic))
+                .unwrap_or(error));
+        }
+    };
     let previous = read_previous_android_plan(project_root)?;
     let plan = build_workshop_compile_plan(&files, &compile, previous.as_ref())?;
     let artifacts = render_workshop_artifacts(&plan);
@@ -436,8 +471,12 @@ fn build_runtime_session(
     let mut jit = JitProcess::new();
     jit.set_local_runtime_helper_trampolines(true);
     configure_runtime_jit(&mut jit, project_root, files);
-    jit.compile()
-        .map_err(|error| format!("Android JIT compile failed: {error:?}"))?;
+    if let Err(error) = jit.compile() {
+        return Err(jit
+            .last_source_diagnostic()
+            .map(|diagnostic| format_compiler_source_diagnostic(project_root, diagnostic))
+            .unwrap_or_else(|| format!("Android JIT compile failed: {error:?}")));
+    }
     Ok(AndroidRuntimeSession {
         project_root: project_root.to_path_buf(),
         source_fingerprint,
@@ -479,10 +518,13 @@ fn recompile_runtime_session(
     source_fingerprint: u64,
 ) -> Result<(), String> {
     configure_runtime_jit(&mut session.jit, project_root, files);
-    session
-        .jit
-        .compile()
-        .map_err(|error| format!("Android JIT hot reload failed: {error:?}"))?;
+    if let Err(error) = session.jit.compile() {
+        return Err(session
+            .jit
+            .last_source_diagnostic()
+            .map(|diagnostic| format_compiler_source_diagnostic(project_root, diagnostic))
+            .unwrap_or_else(|| format!("Android JIT hot reload failed: {error:?}")));
+    }
     session.source_fingerprint = source_fingerprint;
     Ok(())
 }
@@ -773,6 +815,114 @@ unsafe fn compile_project_from_c(
         .to_str()
         .map_err(|error| format!("entry file was not UTF-8: {error}"))?;
     compile_android_workshop_project(project_root, entry_file)
+}
+
+fn format_compiler_source_diagnostic(
+    project_root: &Path,
+    diagnostic: &stasis_compiler::SourceDiagnostic,
+) -> String {
+    let path = Path::new(&diagnostic.path);
+    let source = fs::read_to_string(path).unwrap_or_default();
+    let (line, column) = source_line_column(&source, diagnostic.start);
+    let (end_line, end_column) = source_line_column(&source, diagnostic.end);
+    let file = path
+        .strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    format!(
+        "{}: {}|diagnostic_file={}|diagnostic_line={}|diagnostic_column={}|diagnostic_end_line={}|diagnostic_end_column={}|diagnostic_symbol={}|diagnostic_message={}",
+        diagnostic.path,
+        diagnostic.message,
+        percent_encode(&file),
+        line,
+        column,
+        end_line,
+        end_column,
+        percent_encode(&diagnostic.symbol),
+        percent_encode(&diagnostic.message),
+    )
+}
+
+fn diagnostic_offset(source: &str, error: &str) -> usize {
+    if error.contains("unterminated string literal") {
+        return source.rfind('"').unwrap_or(0);
+    }
+    if let Some(name) = error
+        .split("missing closing '}' for function '")
+        .nth(1)
+        .and_then(|value| value.split('\'').next())
+    {
+        if let Some(offset) = source.find(&format!("function {name}")) {
+            return offset;
+        }
+    }
+    if let Some(name) = error
+        .strip_prefix("test '")
+        .and_then(|value| value.split('\'').next())
+    {
+        if let Some(offset) = source.find(&format!("test `{name}`")) {
+            return offset;
+        }
+    }
+    if error.contains("import") {
+        return source.find("import").unwrap_or(0);
+    }
+    if error.contains("function") {
+        return source.find("function").unwrap_or(0);
+    }
+    0
+}
+
+fn diagnostic_symbol(source: &str, offset: usize, error: &str) -> String {
+    if let Some(name) = error
+        .split("missing closing '}' for function '")
+        .nth(1)
+        .and_then(|value| value.split('\'').next())
+    {
+        return name.to_string();
+    }
+    if let Some(name) = error
+        .strip_prefix("test '")
+        .and_then(|value| value.split('\'').next())
+    {
+        return name.to_string();
+    }
+    let prefix = &source[..offset.min(source.len())];
+    for line in prefix.lines().rev() {
+        let trimmed = line.trim_start();
+        for keyword in ["function ", "test "] {
+            if let Some(rest) = trimmed.strip_prefix(keyword) {
+                let rest = rest.trim_start_matches('`');
+                let end = rest
+                    .find(|value: char| value == '`' || value == '(' || value.is_whitespace())
+                    .unwrap_or(rest.len());
+                return rest[..end].to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn source_line_column(source: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(source.len());
+    let prefix = &source[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let line_start = prefix.rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let column = source[line_start..offset].chars().count() + 1;
+    (line, column)
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 #[no_mangle]
@@ -1527,6 +1677,77 @@ mod tests {
         assert_eq!(result["results"][0]["file"], "tests/failing.test.stasis");
         assert_eq!(result["results"][0]["line"], 3);
         assert_eq!(result["results"][0]["name"], "intentional failure");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_test_compile_failure_reports_navigable_file_and_line() {
+        let root = temp_project("test_compile_failure_location");
+        fs::create_dir_all(root.join("tests")).expect("create tests");
+        fs::write(
+            root.join("tests/broken.test.stasis"),
+            "\n\ntest `broken test`(): bool {\n    return true;\n",
+        )
+        .expect("write broken test");
+        let result = run_android_workshop_stasis_tests(&root).expect("run Stasis tests");
+        assert_eq!(result["failed"], 1);
+        assert_eq!(result["results"][0]["file"], "tests/broken.test.stasis");
+        assert_eq!(result["results"][0]["line"], 3);
+        assert_eq!(result["results"][0]["column"], 1);
+        assert_eq!(result["results"][0]["name"], "broken test");
+        assert_eq!(result["results"][0]["status"], "compile_failed");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_compile_failure_reports_imported_file_symbol_and_span() {
+        let root = temp_project("cross_file_compile_diagnostic");
+        fs::create_dir_all(root.join("src/systems")).expect("create systems");
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"systems/broken.stasis\";\nfunction main(): void {}\nfunction tick(): void {}\n",
+        )
+        .expect("write entry");
+        fs::write(
+            root.join("src/systems/broken.stasis"),
+            "\n\nfunction broken(: i32): void {}\n",
+        )
+        .expect("write broken import");
+
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("compile should fail");
+        assert!(error.contains("|diagnostic_file=src/systems/broken.stasis"));
+        assert!(error.contains("|diagnostic_line=3"));
+        assert!(error.contains("|diagnostic_column=17"));
+        assert!(error.contains("|diagnostic_symbol=broken"));
+        assert!(error.contains("|diagnostic_message="));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_backend_failure_reports_imported_function_span() {
+        let root = temp_project("cross_file_backend_diagnostic");
+        fs::create_dir_all(root.join("src/systems")).expect("create systems");
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"systems/broken.stasis\";\nfunction main(): void {}\nfunction tick(): void {}\n",
+        )
+        .expect("write entry");
+        fs::write(
+            root.join("src/systems/broken.stasis"),
+            "\n\nfunction on_code_swap(): void { missing_target(); }\n",
+        )
+        .expect("write imported backend failure");
+
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("compile should fail");
+        assert!(
+            error.contains("unknown%20call%20target%20%27missing_target%27"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("|diagnostic_file=src/systems/broken.stasis"));
+        assert!(error.contains("|diagnostic_line=3"));
+        assert!(error.contains("|diagnostic_symbol=on_code_swap"));
         fs::remove_dir_all(root).ok();
     }
     #[test]

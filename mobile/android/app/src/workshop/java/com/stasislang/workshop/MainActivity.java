@@ -267,6 +267,9 @@ public final class MainActivity extends Activity {
     private String diagnosticFile = "";
     private String diagnosticSymbol = "";
     private int diagnosticLine;
+    private int diagnosticColumn;
+    private int diagnosticEndLine;
+    private int diagnosticEndColumn;
     private AndroidEditRecoveryStore.Entry selectedRecoveryEntry;
     private TextView changeSummary;
     private TextView gameStatus;
@@ -6354,10 +6357,22 @@ public final class MainActivity extends Activity {
 
     private static JSONObject compileResultToJson(String compileResult) throws Exception {
         String result = compileResult == null || compileResult.isEmpty() ? "CompileNotRun" : compileResult;
-        return new JSONObject()
+        JSONObject json = new JSONObject()
                 .put("ok", isRunnableCompile(result))
                 .put("raw", result)
                 .put("kind", result.startsWith("CompileError") ? "compile_error" : "compile_result");
+        WorkshopSourceDiagnostic diagnostic = WorkshopSourceDiagnostic.fromCompileResult(result);
+        if (diagnostic != null) {
+            json.put("diagnostic", new JSONObject()
+                    .put("file", diagnostic.file)
+                    .put("line", diagnostic.line)
+                    .put("column", diagnostic.column)
+                    .put("end_line", diagnostic.endLine)
+                    .put("end_column", diagnostic.endColumn)
+                    .put("symbol", diagnostic.symbol)
+                    .put("message", diagnostic.message));
+        }
+        return json;
     }
     private JSONObject aiToolSetInputState(JSONObject call) throws Exception {
         aiSimTouchX = call.optInt("x", aiSimTouchX);
@@ -7443,16 +7458,20 @@ public final class MainActivity extends Activity {
                 diagnosticFile = "";
                 diagnosticSymbol = "";
                 diagnosticLine = 0;
+                diagnosticColumn = 0;
+                diagnosticEndLine = 0;
+                diagnosticEndColumn = 0;
                 diagnosticStatus.setText("Compile passed - " + reload);
                 setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
             } else {
-                diagnosticFile = editedSymbol.file;
-                diagnosticSymbol = editedSymbol.name;
-                diagnosticLine = 0;
+                WorkshopSourceDiagnostic location = WorkshopSourceDiagnostic.fromCompileResult(compileResult);
+                if (location == null) {
+                    location = new WorkshopSourceDiagnostic(editedSymbol.file, 0, 0, 0, 0,
+                            editedSymbol.name, compileResult);
+                }
+                applySourceDiagnostic(location, "Compile failed");
                 selectedRecoveryEntry = AndroidEditRecoveryStore.record(this, activeRecoveryProjectId(), editedSymbol.file,
-                        editedSymbol.name, beforeFileSource, editedSymbol.sourceFile.source, compileResult);
-                diagnosticStatus.setText("Compile failed\nfile=" + diagnosticFile
-                        + "\nsymbol=" + diagnosticSymbol + "\nreload=" + reload + "\n" + compileResult);
+                        editedSymbol.name, beforeFileSource, editedSymbol.sourceFile.source, compileResult, location);
                 setStatusText("Saved edit failed compile; use Go to Diagnostic or Undo Failed Apply");
             }
         } catch (IOException error) {
@@ -7485,12 +7504,17 @@ public final class MainActivity extends Activity {
                 entry = entries[0];
             }
             selectedRecoveryEntry = entry;
-            diagnosticFile = entry.path;
-            diagnosticSymbol = entry.symbol;
-            diagnosticLine = 0;
+            diagnosticFile = entry.diagnosticPath;
+            diagnosticSymbol = entry.diagnosticSymbol;
+            diagnosticLine = entry.diagnosticLine;
+            diagnosticColumn = entry.diagnosticColumn;
+            diagnosticEndLine = entry.diagnosticEndLine;
+            diagnosticEndColumn = entry.diagnosticEndColumn;
             diagnosticStatus.setText("Recoverable failed apply history: " + entries.length + " entries\nselected="
                     + (selectedIndex + 1) + "/" + entries.length + "\nfile=" + entry.path
-                    + "\nsymbol=" + entry.symbol + "\n" + entry.diagnostic);
+                    + "\ndiagnostic_file=" + entry.diagnosticPath
+                    + (entry.diagnosticLine > 0 ? ":" + entry.diagnosticLine : "")
+                    + "\nsymbol=" + entry.diagnosticSymbol + "\n" + entry.diagnostic);
         } catch (Exception error) {
             diagnosticStatus.setText("Recovery history unavailable: " + error.getMessage());
         }
@@ -8724,9 +8748,12 @@ public final class MainActivity extends Activity {
                     .setItems(labels, new android.content.DialogInterface.OnClickListener() {
                         @Override public void onClick(android.content.DialogInterface dialog, int which) {
                             selectedRecoveryEntry = entries[which];
-                            diagnosticFile = selectedRecoveryEntry.path;
-                            diagnosticSymbol = selectedRecoveryEntry.symbol;
-                            diagnosticLine = 0;
+                            diagnosticFile = selectedRecoveryEntry.diagnosticPath;
+                            diagnosticSymbol = selectedRecoveryEntry.diagnosticSymbol;
+                            diagnosticLine = selectedRecoveryEntry.diagnosticLine;
+                            diagnosticColumn = selectedRecoveryEntry.diagnosticColumn;
+                            diagnosticEndLine = selectedRecoveryEntry.diagnosticEndLine;
+                            diagnosticEndColumn = selectedRecoveryEntry.diagnosticEndColumn;
                             diagnosticStatus.setText("Recovery history selection " + (which + 1) + "/"
                                     + entries.length + "\nfile=" + diagnosticFile + "\nsymbol="
                                     + diagnosticSymbol + "\n" + selectedRecoveryEntry.diagnostic);
@@ -8741,6 +8768,10 @@ public final class MainActivity extends Activity {
     }
 
     private void captureFirstTestFailureDiagnostic(JSONObject testRun) {
+        JSONObject compile = testRun.optJSONObject("compile");
+        WorkshopSourceDiagnostic compileDiagnostic = compile == null ? null
+                : WorkshopSourceDiagnostic.fromCompileResult(compile.optString("raw", ""));
+        if (compileDiagnostic != null) applySourceDiagnostic(compileDiagnostic, "Compile failure");
         JSONArray runs = testRun.optJSONArray("stasis_test_files");
         if (runs == null) return;
         for (int runIndex = 0; runIndex < runs.length(); runIndex += 1) {
@@ -8750,17 +8781,24 @@ public final class MainActivity extends Activity {
             for (int resultIndex = 0; resultIndex < results.length(); resultIndex += 1) {
                 JSONObject result = results.optJSONObject(resultIndex);
                 if (result == null || result.optBoolean("passed", false)) continue;
-                diagnosticFile = result.optString("file", "");
-                diagnosticSymbol = result.optString("name", "");
-                diagnosticLine = result.optInt("line", 0);
                 String error = result.optString("error", "");
-                diagnosticStatus.setText("Test failure\nfile=" + diagnosticFile
-                        + (diagnosticLine > 0 ? "\nline=" + diagnosticLine : "")
-                        + (diagnosticSymbol.isEmpty() ? "" : "\ntest=" + diagnosticSymbol)
-                        + (error.isEmpty() ? "" : "\n" + error));
+                WorkshopSourceDiagnostic diagnostic = WorkshopSourceDiagnostic.fromTestFailure(
+                        result.optString("file", ""), result.optInt("line", 0),
+                        result.optString("name", ""), error);
+                if (diagnostic != null) applySourceDiagnostic(diagnostic, "Test failure");
                 return;
             }
         }
+    }
+
+    private void applySourceDiagnostic(WorkshopSourceDiagnostic diagnostic, String kind) {
+        diagnosticFile = diagnostic.file;
+        diagnosticSymbol = diagnostic.symbol;
+        diagnosticLine = diagnostic.line;
+        diagnosticColumn = diagnostic.column;
+        diagnosticEndLine = diagnostic.endLine;
+        diagnosticEndColumn = diagnostic.endColumn;
+        diagnosticStatus.setText(diagnostic.displayText(kind));
     }
 
     private void goToDiagnosticSource() {
@@ -8769,17 +8807,30 @@ public final class MainActivity extends Activity {
             return;
         }
         ProjectSnapshot project = loadBundledProject();
+        SymbolEntry fileFallback = null;
         for (SymbolSection section : project.sections) {
             for (SymbolGroup group : section.groups) {
                 for (SymbolEntry symbol : group.symbols) {
-                    if (symbol.file.equals(diagnosticFile)
-                            && (diagnosticSymbol.isEmpty() || symbol.name.equals(diagnosticSymbol))) {
+                    if (!symbol.file.equals(diagnosticFile)) continue;
+                    if (fileFallback == null || (diagnosticLine > 0
+                            && symbol.start <= WorkshopSourceDiagnostic.sourceOffset(
+                                    symbol.sourceFile.source, diagnosticLine, diagnosticColumn)
+                            && symbol.end >= WorkshopSourceDiagnostic.sourceOffset(
+                                    symbol.sourceFile.source, diagnosticLine, diagnosticColumn))) {
+                        fileFallback = symbol;
+                    }
+                    if (diagnosticSymbol.isEmpty() || symbol.name.equals(diagnosticSymbol)) {
                         showSymbol(symbol);
                         if (diagnosticLine > 0) {
-                            int absoluteOffset = sourceOffsetForLine(symbol.sourceFile.source, diagnosticLine);
+                            int absoluteOffset = WorkshopSourceDiagnostic.sourceOffset(
+                                    symbol.sourceFile.source, diagnosticLine, diagnosticColumn);
+                            int absoluteEnd = WorkshopSourceDiagnostic.sourceOffset(
+                                    symbol.sourceFile.source, diagnosticEndLine, diagnosticEndColumn);
                             int symbolOffset = Math.max(0,
                                     Math.min(symbol.source.length(), absoluteOffset - symbol.start));
-                            sourceEditor.setSelection(symbolOffset);
+                            int symbolEnd = Math.max(symbolOffset,
+                                    Math.min(symbol.source.length(), absoluteEnd - symbol.start));
+                            sourceEditor.setSelection(symbolOffset, symbolEnd);
                         }
                         manualEditBody.setVisibility(View.VISIBLE);
                         setStatusText("Opened diagnostic source " + diagnosticFile
@@ -8790,19 +8841,43 @@ public final class MainActivity extends Activity {
                 }
             }
         }
-        setStatusText("Diagnostic file is available but its symbol could not be parsed");
-    }
-
-    private static int sourceOffsetForLine(String source, int oneBasedLine) {
-        if (oneBasedLine <= 1) return 0;
-        int line = 1;
-        for (int index = 0; index < source.length(); index += 1) {
-            if (source.charAt(index) == '\n') {
-                line += 1;
-                if (line == oneBasedLine) return index + 1;
-            }
+        if (fileFallback != null) {
+            showSymbol(fileFallback);
+            int absoluteOffset = WorkshopSourceDiagnostic.sourceOffset(
+                    fileFallback.sourceFile.source, diagnosticLine, diagnosticColumn);
+            int absoluteEnd = WorkshopSourceDiagnostic.sourceOffset(
+                    fileFallback.sourceFile.source, diagnosticEndLine, diagnosticEndColumn);
+            int start = Math.max(0,
+                    Math.min(fileFallback.source.length(), absoluteOffset - fileFallback.start));
+            int end = Math.max(start,
+                    Math.min(fileFallback.source.length(), absoluteEnd - fileFallback.start));
+            sourceEditor.setSelection(start, end);
+            manualEditBody.setVisibility(View.VISIBLE);
+            setStatusText("Opened diagnostic file " + diagnosticFile
+                    + (diagnosticLine > 0 ? ":" + diagnosticLine : ""));
+            return;
         }
-        return source.length();
+        for (SourceFile file : project.files) {
+            if (!file.path.equals(diagnosticFile)) continue;
+            int absoluteOffset = WorkshopSourceDiagnostic.sourceOffset(
+                    file.source, diagnosticLine, diagnosticColumn);
+            int absoluteEnd = WorkshopSourceDiagnostic.sourceOffset(
+                    file.source, diagnosticEndLine, diagnosticEndColumn);
+            int lineStart = absoluteOffset;
+            while (lineStart > 0 && file.source.charAt(lineStart - 1) != '\n') lineStart -= 1;
+            SymbolEntry diagnosticFileEntry = new SymbolEntry("diagnostic",
+                    diagnosticSymbol.isEmpty() ? file.diskFile.getName() : diagnosticSymbol,
+                    "Diagnostics", "", file, file.path, file.source.substring(lineStart),
+                    lineStart, file.source.length());
+            showSymbol(diagnosticFileEntry);
+            sourceEditor.setSelection(Math.max(0, absoluteOffset - lineStart),
+                    Math.max(absoluteOffset - lineStart, absoluteEnd - lineStart));
+            manualEditBody.setVisibility(View.VISIBLE);
+            setStatusText("Opened diagnostic file " + diagnosticFile
+                    + (diagnosticLine > 0 ? ":" + diagnosticLine : ""));
+            return;
+        }
+        setStatusText("Diagnostic file is available but its symbol could not be parsed");
     }
 
     private void undoSelectedFailedApply() {
@@ -8830,6 +8905,9 @@ public final class MainActivity extends Activity {
             diagnosticFile = entry.path;
             diagnosticSymbol = entry.symbol;
             diagnosticLine = 0;
+            diagnosticColumn = 0;
+            diagnosticEndLine = 0;
+            diagnosticEndColumn = 0;
             goToDiagnosticSource();
             refreshChangeSummary(restored);
             String compileResult = nativeCompileProject(projectRootPath());
