@@ -1745,10 +1745,9 @@ fn write_mobile_aot_bindings_source(
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "mobile AOT string literal missing value".to_string())?;
         out.push_str(&format!(
-            "static const char stasis_mobile_literal_{}[] = {};\n",
+            "static const char stasis_mobile_literal_{}[] = \"{}\";\n",
             id.unsigned_abs(),
-            serde_json::to_string(value)
-                .map_err(|error| format!("failed to encode mobile string literal: {error}"))?
+            escape_mobile_c_string_literal(value)
         ));
     }
     out.push_str("\nvoid stasis_aot_bind_runtime_globals(void) {\n");
@@ -1783,6 +1782,22 @@ fn write_mobile_aot_bindings_source(
             output_path.display()
         )
     })
+}
+
+fn escape_mobile_c_string_literal(value: &str) -> String {
+    let mut escaped = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'\\' => escaped.push_str("\\\\"),
+            b'"' => escaped.push_str("\\\""),
+            b'\n' => escaped.push_str("\\n"),
+            b'\r' => escaped.push_str("\\r"),
+            b'\t' => escaped.push_str("\\t"),
+            b' '..=b'~' => escaped.push(char::from(byte)),
+            _ => escaped.push_str(&format!("\\{byte:03o}")),
+        }
+    }
+    escaped
 }
 
 fn mobile_aot_symbol_for(
@@ -1923,6 +1938,14 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn mobile_c_string_literal_escaping_is_byte_exact() {
+        assert_eq!(
+            escape_mobile_c_string_literal("a\0b\n\"\\\u{e9}"),
+            "a\\000b\\n\\\"\\\\\\303\\251"
+        );
+    }
 
     fn temp_lookup_root(name: &str) -> PathBuf {
         let stamp = SystemTime::now()

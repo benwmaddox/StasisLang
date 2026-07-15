@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Keep lifecycle checks active in Release builds where NDEBUG removes assert. */
 #undef assert
@@ -28,6 +29,7 @@ static int begin_frame_calls;
 static int end_frame_calls;
 static int host_frame_calls;
 static int host_request_calls;
+static int32_t host_request_sequences[8];
 static int gfx_submit_calls;
 static int shutdown_calls;
 
@@ -75,6 +77,7 @@ void stasis_host_bulk_apply_requests(
     const int32_t *height
 ) {
     assert(seq != NULL && flags != NULL && width != NULL && height != NULL);
+    if (host_request_calls < 8) host_request_sequences[host_request_calls] = *seq;
     host_request_calls += 1;
 }
 
@@ -109,8 +112,14 @@ int stasis_load_font(const char *path, int size) { return path ? size : 0; }
 float stasis_measure_text(int font, const char *text) { return text ? (float)font : 0.0f; }
 void stasis_sleep_ms(int ms) { (void)ms; }
 
+static int32_t hash_path(const char *path);
+
 static void game_main(void) {
     main_calls += 1;
+    stasis_jit_global_i32_store(hash_path("host_req_seq"), 1);
+    stasis_jit_global_i32_store(hash_path("host_req_flags"), 1);
+    stasis_jit_global_i32_store(hash_path("host_req_window_w_px"), 960);
+    stasis_jit_global_i32_store(hash_path("host_req_window_h_px"), 540);
 }
 
 static void bind_runtime(void) {
@@ -160,6 +169,7 @@ static void reset_fakes(void) {
     end_frame_calls = 0;
     host_frame_calls = 0;
     host_request_calls = 0;
+    memset(host_request_sequences, 0, sizeof(host_request_sequences));
     gfx_submit_calls = 0;
     shutdown_calls = 0;
 }
@@ -186,13 +196,16 @@ static void test_runs_mobile_lifecycle(void) {
     assert(init_window_calls == 1);
     assert(bind_runtime_calls == 1);
     assert(main_calls == 1);
+    assert(host_request_calls == 2);
+    assert(host_request_sequences[0] == 0);
+    assert(host_request_sequences[1] == 1);
 
     assert(stasis_mobile_runtime_step() == 0);
     assert(should_quit_calls == 1);
     assert(tick_calls == 1);
     assert(render_calls == 1);
     assert(host_frame_calls == 1);
-    assert(host_request_calls == 1);
+    assert(host_request_calls == 3);
     assert(gfx_submit_calls == 1);
     assert(begin_frame_calls == 1);
     assert(end_frame_calls == 1);

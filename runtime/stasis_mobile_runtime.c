@@ -104,7 +104,19 @@ int32_t stasis_mobile_runtime_initialize(
     runtime_state.paused = 0;
     runtime_state.entries.bind_runtime_entry();
     bind_host_globals();
+    stasis_host_bulk_apply_requests(
+        &host_req_seq,
+        &host_req_flags,
+        &host_req_window_w_px,
+        &host_req_window_h_px
+    );
     runtime_state.entries.main_entry();
+    stasis_host_bulk_apply_requests(
+        &host_req_seq,
+        &host_req_flags,
+        &host_req_window_w_px,
+        &host_req_window_h_px
+    );
     return STASIS_MOBILE_RUNTIME_OK;
 }
 
