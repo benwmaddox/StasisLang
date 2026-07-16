@@ -1089,25 +1089,21 @@ fn print_live_response(response: &LiveResponse, json_lines: bool) -> Result<(), 
 fn format_live_response(response: &LiveResponse) -> String {
     if !response.ok {
         return format!(
-            "error @ tick {}: {}",
-            response.tick,
+            "error: {}",
             response.error.as_deref().unwrap_or("unknown live error")
         );
     }
     let data = response.data.as_ref().unwrap_or(&Value::Null);
     match response.kind.as_str() {
         "help" => format_live_help(data),
-        "status" => format_live_status(data, response.tick),
-        "paused" => format!("paused @ tick {}", response.tick),
-        "resumed" => format!("running @ tick {}", response.tick),
+        "status" => format_live_status(data),
+        "paused" => "paused".to_string(),
+        "resumed" => "running".to_string(),
         "step_scheduled" => format!(
-            "step scheduled: {} tick(s) after tick {}",
-            data.get("ticks").and_then(Value::as_u64).unwrap_or(0),
-            data.get("after_tick")
-                .and_then(Value::as_u64)
-                .unwrap_or(response.tick)
+            "step scheduled: {} tick(s)",
+            data.get("ticks").and_then(Value::as_u64).unwrap_or(0)
         ),
-        "quitting" => format!("session closed @ tick {}", response.tick),
+        "quitting" => "session closed".to_string(),
         "cancellation_requested" => format!(
             "cancel requested for #{}{}",
             data.get("request_id").and_then(Value::as_u64).unwrap_or(0),
@@ -1125,29 +1121,25 @@ fn format_live_response(response: &LiveResponse) -> String {
         "symbol" => format_live_symbol(data),
         "completion" => format_live_completion(data),
         "inspection" => format!(
-            "{}: {} = {} @ tick {}",
+            "{}: {} = {}",
             string_field(data, "path", "value"),
             string_field(data, "static_type", "unknown"),
-            scalar_text(data.get("value").unwrap_or(&Value::Null)),
-            response.tick
+            scalar_text(data.get("value").unwrap_or(&Value::Null))
         ),
         "print" => format!(
-            "{} = {} @ tick {}",
+            "{} = {}",
             string_field(data, "static_type", "value"),
-            scalar_text(data.get("value").unwrap_or(&Value::Null)),
-            response.tick
+            scalar_text(data.get("value").unwrap_or(&Value::Null))
         ),
         "watch_added" => format!(
-            "watching {} = {} @ tick {}",
+            "watching {} = {}",
             string_field(data, "path", "value"),
-            scalar_text(data.get("value").unwrap_or(&Value::Null)),
-            response.tick
+            scalar_text(data.get("value").unwrap_or(&Value::Null))
         ),
         "watch" => format!(
-            "{} -> {} @ tick {}",
+            "{} -> {}",
             string_field(data, "path", "value"),
-            scalar_text(data.get("value").unwrap_or(&Value::Null)),
-            response.tick
+            scalar_text(data.get("value").unwrap_or(&Value::Null))
         ),
         "watch_removed" => format_live_watch_removed(data),
         "watch_backpressure" => format!(
@@ -1156,10 +1148,10 @@ fn format_live_response(response: &LiveResponse) -> String {
                 .and_then(Value::as_u64)
                 .unwrap_or(0)
         ),
-        "mutation_preview" => format_live_mutation(data, "preview", response.tick),
-        "mutation_committed" => format_live_mutation(data, "set", response.tick),
-        "transaction_preview" => format_live_transaction(data, "preview", response.tick),
-        "transaction_committed" => format_live_transaction(data, "committed", response.tick),
+        "mutation_preview" => format_live_mutation(data, "preview"),
+        "mutation_committed" => format_live_mutation(data, "set"),
+        "transaction_preview" => format_live_transaction(data, "preview"),
+        "transaction_committed" => format_live_transaction(data, "committed"),
         "cell_saved" => format!(
             "saved scratch cell '{}'",
             string_field(data, "name", "unnamed")
@@ -1173,29 +1165,22 @@ fn format_live_response(response: &LiveResponse) -> String {
             "preparing edit #{}...",
             data.get("request_id").and_then(Value::as_u64).unwrap_or(0)
         ),
-        "edit_preview" => format!(
-            "preview ready: {} @ tick {}",
-            format_live_plan(data),
-            response.tick
-        ),
+        "edit_preview" => format!("preview ready: {}", format_live_plan(data)),
         "edit_applied" => format!(
-            "applied: {} (tests {}) @ tick {}",
+            "applied: {} (tests {})",
             format_live_plan(data),
-            string_field(data, "tests", "unknown"),
-            response.tick
+            string_field(data, "tests", "unknown")
         ),
         "edit_undone" => format!(
-            "undo complete (tests {}) @ tick {}",
-            string_field(data, "tests", "unknown"),
-            response.tick
+            "undo complete (tests {})",
+            string_field(data, "tests", "unknown")
         ),
         "edit_redone" => format!(
-            "redo complete (tests {}) @ tick {}",
-            string_field(data, "tests", "unknown"),
-            response.tick
+            "redo complete (tests {})",
+            string_field(data, "tests", "unknown")
         ),
         "changes" => format_live_changes(data),
-        kind => format!("{kind} @ tick {}", response.tick),
+        kind => kind.to_string(),
     }
 }
 
@@ -1235,7 +1220,7 @@ fn format_live_help(data: &Value) -> String {
     lines.join("\n")
 }
 
-fn format_live_status(data: &Value, tick: u64) -> String {
+fn format_live_status(data: &Value) -> String {
     let state = if data.get("paused").and_then(Value::as_bool).unwrap_or(false) {
         "paused"
     } else {
@@ -1261,7 +1246,7 @@ fn format_live_status(data: &Value, tick: u64) -> String {
                 .join(", ")
         })
         .unwrap_or_default();
-    let mut line = format!("{state} @ tick {tick} | edits {cursor}/{history}");
+    let mut line = format!("{state} | edits {cursor}/{history}");
     if !watches.is_empty() {
         line.push_str(&format!(" | watches {watches}"));
     }
@@ -1343,9 +1328,9 @@ fn format_live_watch_removed(data: &Value) -> String {
     }
 }
 
-fn format_live_mutation(data: &Value, action: &str, tick: u64) -> String {
+fn format_live_mutation(data: &Value, action: &str) -> String {
     format!(
-        "{action} {}: {} -> {} ({}) @ tick {tick}",
+        "{action} {}: {} -> {} ({})",
         string_field(data, "path", "value"),
         scalar_text(data.get("old").unwrap_or(&Value::Null)),
         scalar_text(data.get("new").unwrap_or(&Value::Null)),
@@ -1353,12 +1338,12 @@ fn format_live_mutation(data: &Value, action: &str, tick: u64) -> String {
     )
 }
 
-fn format_live_transaction(data: &Value, action: &str, tick: u64) -> String {
+fn format_live_transaction(data: &Value, action: &str) -> String {
     let transaction = data.get("result").unwrap_or(data);
     let name = data.get("name").and_then(Value::as_str);
     let mut lines = vec![match name {
-        Some(name) => format!("scratch '{name}' {action} @ tick {tick}:"),
-        None => format!("transaction {action} @ tick {tick}:"),
+        Some(name) => format!("scratch '{name}' {action}:"),
+        None => format!("transaction {action}:"),
     }];
     if let Some(mutations) = transaction.get("mutations").and_then(Value::as_array) {
         for mutation in mutations {
@@ -1383,13 +1368,7 @@ fn format_live_cells(data: &Value) -> String {
     }
     cells
         .iter()
-        .map(|cell| {
-            let name = string_field(cell, "name", "unnamed");
-            match cell.get("last_tick").and_then(Value::as_u64) {
-                Some(tick) => format!("{name} (last run @ tick {tick})"),
-                None => name.to_string(),
-            }
-        })
+        .map(|cell| string_field(cell, "name", "unnamed").to_string())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -2635,10 +2614,7 @@ mod tests {
                 "value": {"type": "i32", "value": 12}
             }),
         );
-        assert_eq!(
-            format_live_response(&response),
-            "player.score: i32 = 12 @ tick 42"
-        );
+        assert_eq!(format_live_response(&response), "player.score: i32 = 12");
     }
 
     #[test]
@@ -2666,7 +2642,7 @@ mod tests {
         let output = format_live_response(&response);
         assert_eq!(
             output,
-            "applied: tick; 1 file(s), FastReload (tests passed) @ tick 43"
+            "applied: tick; 1 file(s), FastReload (tests passed)"
         );
         assert!(!output.contains("source"));
         assert!(!output.contains("receipt"));
@@ -2695,7 +2671,7 @@ mod tests {
         );
         assert_eq!(
             format_live_response(&response),
-            "scratch 'lift_ball' preview @ tick 44:\n  ball_y: 300.0 -> 180.0 (f32)"
+            "scratch 'lift_ball' preview:\n  ball_y: 300.0 -> 180.0 (f32)"
         );
     }
 
@@ -2707,12 +2683,12 @@ mod tests {
             "future_response",
             json!({"large": {"nested": [1, 2, 3]}}),
         );
-        assert_eq!(format_live_response(&response), "future_response @ tick 45");
+        assert_eq!(format_live_response(&response), "future_response");
 
         let failure = LiveResponse::failure(11, 46, "layout change rejected");
         assert_eq!(
             format_live_response(&failure),
-            "error @ tick 46: layout change rejected"
+            "error: layout change rejected"
         );
     }
 

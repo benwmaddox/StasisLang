@@ -1055,6 +1055,7 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
         .map(|line| serde_json::from_str::<Value>(line).expect("live response JSON"))
         .collect::<Vec<_>>();
     assert!(responses.iter().all(|response| response["ok"] == true));
+    assert!(responses.iter().all(|response| response["tick"].is_u64()));
     let inspected = responses
         .iter()
         .filter(|response| response["kind"] == "inspection")
@@ -1119,10 +1120,11 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
         String::from_utf8_lossy(&human.stderr)
     );
     let human_stdout = String::from_utf8_lossy(&human.stdout);
-    assert!(human_stdout.contains("paused @ tick"));
+    assert!(human_stdout.contains("paused"));
     assert!(human_stdout.contains("score: i32 ="));
     assert!(human_stdout.contains("edits 0/0"));
-    assert!(human_stdout.contains("session closed @ tick"));
+    assert!(human_stdout.contains("session closed"));
+    assert!(!human_stdout.contains("@ tick"));
     assert!(!human_stdout.contains("[live tick"));
     assert!(!human_stdout.contains("{\"path\""));
 

@@ -8,8 +8,8 @@ edit and receipt contracts, but intentionally keeps its own mobile interaction m
 
 The default terminal is a human workspace view, not a protocol dump. It prints concise scalar,
 symbol, edit, scratch, status, and diagnostic lines; large semantic plans are summarized by changed
-symbols/files and reload class. Add `--live-json` only for clients that need complete schema-v1
-response envelopes.
+symbols/files and reload class. Routine human responses omit protocol request and tick metadata. Add
+`--live-json` only for clients that need complete schema-v1 response envelopes.
 
 The project must provide the graphical lifecycle entry points `main`, `tick`, and `render`.
 `on_code_swap` is optional. This mode is local-only and does not open a network listener.
