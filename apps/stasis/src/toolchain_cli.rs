@@ -1074,20 +1074,379 @@ fn print_live_response(response: &LiveResponse, json_lines: bool) -> Result<(), 
                 .map_err(|error| format!("failed serializing live response: {error}"))?
         );
     } else if response.ok {
-        println!(
-            "[live tick {}] {} {}",
-            response.tick,
-            response.kind,
-            response.data.as_ref().unwrap_or(&Value::Null)
-        );
+        println!("{}", format_live_response(response));
     } else {
-        eprintln!(
-            "[live tick {}] error: {}",
+        eprintln!("{}", format_live_response(response));
+    }
+    Ok(())
+}
+
+fn format_live_response(response: &LiveResponse) -> String {
+    if !response.ok {
+        return format!(
+            "error @ tick {}: {}",
             response.tick,
             response.error.as_deref().unwrap_or("unknown live error")
         );
     }
-    Ok(())
+    let data = response.data.as_ref().unwrap_or(&Value::Null);
+    match response.kind.as_str() {
+        "help" => format_live_help(data),
+        "status" => format_live_status(data, response.tick),
+        "paused" => format!("paused @ tick {}", response.tick),
+        "resumed" => format!("running @ tick {}", response.tick),
+        "step_scheduled" => format!(
+            "step scheduled: {} tick(s) after tick {}",
+            data.get("ticks").and_then(Value::as_u64).unwrap_or(0),
+            data.get("after_tick")
+                .and_then(Value::as_u64)
+                .unwrap_or(response.tick)
+        ),
+        "quitting" => format!("session closed @ tick {}", response.tick),
+        "cancellation_requested" => format!(
+            "cancel requested for #{}{}",
+            data.get("request_id").and_then(Value::as_u64).unwrap_or(0),
+            if data
+                .get("background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                " (background edit)"
+            } else {
+                ""
+            }
+        ),
+        "symbols" => format_live_symbols(data),
+        "symbol" => format_live_symbol(data),
+        "completion" => format_live_completion(data),
+        "inspection" => format!(
+            "{}: {} = {} @ tick {}",
+            string_field(data, "path", "value"),
+            string_field(data, "static_type", "unknown"),
+            scalar_text(data.get("value").unwrap_or(&Value::Null)),
+            response.tick
+        ),
+        "print" => format!(
+            "{} = {} @ tick {}",
+            string_field(data, "static_type", "value"),
+            scalar_text(data.get("value").unwrap_or(&Value::Null)),
+            response.tick
+        ),
+        "watch_added" => format!(
+            "watching {} = {} @ tick {}",
+            string_field(data, "path", "value"),
+            scalar_text(data.get("value").unwrap_or(&Value::Null)),
+            response.tick
+        ),
+        "watch" => format!(
+            "{} -> {} @ tick {}",
+            string_field(data, "path", "value"),
+            scalar_text(data.get("value").unwrap_or(&Value::Null)),
+            response.tick
+        ),
+        "watch_removed" => format_live_watch_removed(data),
+        "watch_backpressure" => format!(
+            "watch output dropped {} event(s)",
+            data.get("dropped_events")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ),
+        "mutation_preview" => format_live_mutation(data, "preview", response.tick),
+        "mutation_committed" => format_live_mutation(data, "set", response.tick),
+        "transaction_preview" => format_live_transaction(data, "preview", response.tick),
+        "transaction_committed" => format_live_transaction(data, "committed", response.tick),
+        "cell_saved" => format!(
+            "saved scratch cell '{}'",
+            string_field(data, "name", "unnamed")
+        ),
+        "cells" => format_live_cells(data),
+        "cells_cleared" => match data.get("name").and_then(Value::as_str) {
+            Some(name) => format!("cleared scratch cell '{name}'"),
+            None => "cleared all scratch cells".to_string(),
+        },
+        "edit_preparing" => format!(
+            "preparing edit #{}...",
+            data.get("request_id").and_then(Value::as_u64).unwrap_or(0)
+        ),
+        "edit_preview" => format!(
+            "preview ready: {} @ tick {}",
+            format_live_plan(data),
+            response.tick
+        ),
+        "edit_applied" => format!(
+            "applied: {} (tests {}) @ tick {}",
+            format_live_plan(data),
+            string_field(data, "tests", "unknown"),
+            response.tick
+        ),
+        "edit_undone" => format!(
+            "undo complete (tests {}) @ tick {}",
+            string_field(data, "tests", "unknown"),
+            response.tick
+        ),
+        "edit_redone" => format!(
+            "redo complete (tests {}) @ tick {}",
+            string_field(data, "tests", "unknown"),
+            response.tick
+        ),
+        "changes" => format_live_changes(data),
+        kind => format!("{kind} @ tick {}", response.tick),
+    }
+}
+
+fn string_field<'a>(data: &'a Value, name: &str, fallback: &'a str) -> &'a str {
+    data.get(name).and_then(Value::as_str).unwrap_or(fallback)
+}
+
+fn scalar_text(value: &Value) -> String {
+    let value = value.get("value").unwrap_or(value);
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        _ => "<structured value>".to_string(),
+    }
+}
+
+fn format_live_help(data: &Value) -> String {
+    let commands = data
+        .get("commands")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut lines = vec!["Commands:".to_string()];
+    for group in commands.chunks(3) {
+        lines.push(format!(
+            "  {}",
+            group
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("  ")
+        ));
+    }
+    lines.push("Multiline: :end to submit; :abort or Ctrl-C to cancel.".to_string());
+    lines.join("\n")
+}
+
+fn format_live_status(data: &Value, tick: u64) -> String {
+    let state = if data.get("paused").and_then(Value::as_bool).unwrap_or(false) {
+        "paused"
+    } else {
+        "running"
+    };
+    let cursor = data
+        .get("history_cursor")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let history = data
+        .get("history_length")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let watches = string_array(data.get("watches"));
+    let cells = data
+        .get("scratch_cells")
+        .and_then(Value::as_array)
+        .map(|cells| {
+            cells
+                .iter()
+                .filter_map(|cell| cell.get("name").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let mut line = format!("{state} @ tick {tick} | edits {cursor}/{history}");
+    if !watches.is_empty() {
+        line.push_str(&format!(" | watches {watches}"));
+    }
+    if !cells.is_empty() {
+        line.push_str(&format!(" | cells {cells}"));
+    }
+    if let Some(request) = data.get("preparing_request_id").and_then(Value::as_u64) {
+        line.push_str(&format!(" | preparing #{request}"));
+    }
+    line
+}
+
+fn string_array(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
+}
+
+fn format_live_symbols(data: &Value) -> String {
+    let total = data.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let page = data.get("page").and_then(Value::as_u64).unwrap_or(0);
+    let mut lines = vec![format!("{total} symbol(s), page {page}:")];
+    if let Some(items) = data.get("items").and_then(Value::as_array) {
+        for item in items {
+            lines.push(format!(
+                "  {}  [{}]",
+                string_field(item, "signature", string_field(item, "name", "unnamed")),
+                string_field(item, "file", "unknown file")
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn format_live_symbol(data: &Value) -> String {
+    let header = format!(
+        "{}  [{}]",
+        string_field(data, "signature", string_field(data, "name", "unnamed")),
+        string_field(data, "file", "unknown file")
+    );
+    match data.get("source").and_then(Value::as_str) {
+        Some(source) => format!("{header}\n{}", source.trim()),
+        None => header,
+    }
+}
+
+fn format_live_completion(data: &Value) -> String {
+    let mut lines = Vec::new();
+    if let Some(items) = data.get("items").and_then(Value::as_array) {
+        for item in items {
+            lines.push(format!(
+                "{}  {}  {}",
+                string_field(item, "text", ""),
+                string_field(item, "kind", ""),
+                string_field(item, "detail", "")
+            ));
+        }
+    }
+    if lines.is_empty() {
+        "no completions".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn format_live_watch_removed(data: &Value) -> String {
+    let watches = string_array(data.get("watches"));
+    if watches.is_empty() {
+        "no active watches".to_string()
+    } else {
+        format!("active watches: {watches}")
+    }
+}
+
+fn format_live_mutation(data: &Value, action: &str, tick: u64) -> String {
+    format!(
+        "{action} {}: {} -> {} ({}) @ tick {tick}",
+        string_field(data, "path", "value"),
+        scalar_text(data.get("old").unwrap_or(&Value::Null)),
+        scalar_text(data.get("new").unwrap_or(&Value::Null)),
+        string_field(data, "static_type", "unknown")
+    )
+}
+
+fn format_live_transaction(data: &Value, action: &str, tick: u64) -> String {
+    let transaction = data.get("result").unwrap_or(data);
+    let name = data.get("name").and_then(Value::as_str);
+    let mut lines = vec![match name {
+        Some(name) => format!("scratch '{name}' {action} @ tick {tick}:"),
+        None => format!("transaction {action} @ tick {tick}:"),
+    }];
+    if let Some(mutations) = transaction.get("mutations").and_then(Value::as_array) {
+        for mutation in mutations {
+            lines.push(format!(
+                "  {}: {} -> {} ({})",
+                string_field(mutation, "path", "value"),
+                scalar_text(mutation.get("old").unwrap_or(&Value::Null)),
+                scalar_text(mutation.get("new").unwrap_or(&Value::Null)),
+                string_field(mutation, "static_type", "unknown")
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn format_live_cells(data: &Value) -> String {
+    let Some(cells) = data.get("cells").and_then(Value::as_array) else {
+        return "no scratch cells".to_string();
+    };
+    if cells.is_empty() {
+        return "no scratch cells".to_string();
+    }
+    cells
+        .iter()
+        .map(|cell| {
+            let name = string_field(cell, "name", "unnamed");
+            match cell.get("last_tick").and_then(Value::as_u64) {
+                Some(tick) => format!("{name} (last run @ tick {tick})"),
+                None => name.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_live_plan(data: &Value) -> String {
+    let plan = data.get("plan").unwrap_or(data);
+    let file_count = plan
+        .get("changed_files")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let symbols = plan
+        .pointer("/reload/changed_symbols")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("name").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let reload = plan
+        .pointer("/reload/expected_reload")
+        .and_then(Value::as_str)
+        .unwrap_or("reload unknown");
+    if symbols.is_empty() {
+        format!("{file_count} file(s), {reload}")
+    } else {
+        format!("{symbols}; {file_count} file(s), {reload}")
+    }
+}
+
+fn format_live_changes(data: &Value) -> String {
+    let cursor = data.get("cursor").and_then(Value::as_u64).unwrap_or(0);
+    let Some(entries) = data.get("entries").and_then(Value::as_array) else {
+        return "no semantic edit history".to_string();
+    };
+    if entries.is_empty() {
+        return "no semantic edit history".to_string();
+    }
+    let mut lines = vec![format!(
+        "edit history ({cursor}/{} applied):",
+        entries.len()
+    )];
+    for entry in entries {
+        let index = entry.get("index").and_then(Value::as_u64).unwrap_or(0);
+        let marker = if entry
+            .get("applied")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "*"
+        } else {
+            " "
+        };
+        let files = entry
+            .get("changed_files")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        lines.push(format!(" {marker} #{index}: {files} file(s)"));
+    }
+    lines.join("\n")
 }
 
 fn build_workspace(
@@ -2257,6 +2616,109 @@ mod tests {
         assert_eq!(start, 6);
         assert_eq!(matches[0].replacement, "tick");
         assert!(matches[0].display.contains("tick(): i32"));
+    }
+
+    #[test]
+    fn human_live_output_formats_scalars_without_json_envelopes() {
+        let response = LiveResponse::success(
+            7,
+            42,
+            "inspection",
+            json!({
+                "path": "player.score",
+                "static_type": "i32",
+                "value": {"type": "i32", "value": 12}
+            }),
+        );
+        assert_eq!(
+            format_live_response(&response),
+            "player.score: i32 = 12 @ tick 42"
+        );
+    }
+
+    #[test]
+    fn human_live_output_summarizes_plans_without_source_or_receipt_json() {
+        let response = LiveResponse::success(
+            8,
+            43,
+            "edit_applied",
+            json!({
+                "plan": {
+                    "changed_files": [{
+                        "file": "src/main.stasis",
+                        "before_source": "old source",
+                        "after_source": "very long new source"
+                    }],
+                    "reload": {
+                        "changed_symbols": [{"name": "tick"}],
+                        "expected_reload": "FastReload"
+                    }
+                },
+                "receipt": "build/live-edits/receipt.json",
+                "tests": "passed"
+            }),
+        );
+        let output = format_live_response(&response);
+        assert_eq!(
+            output,
+            "applied: tick; 1 file(s), FastReload (tests passed) @ tick 43"
+        );
+        assert!(!output.contains("source"));
+        assert!(!output.contains("receipt"));
+        assert!(!output.contains('{'));
+    }
+
+    #[test]
+    fn human_live_output_formats_scratch_transactions_as_mutation_lines() {
+        let response = LiveResponse::success(
+            9,
+            44,
+            "transaction_preview",
+            json!({
+                "name": "lift_ball",
+                "persistent": false,
+                "result": {
+                    "preview": true,
+                    "mutations": [{
+                        "path": "ball_y",
+                        "static_type": "f32",
+                        "old": {"type": "f32", "value": 300.0},
+                        "new": {"type": "f32", "value": 180.0}
+                    }]
+                }
+            }),
+        );
+        assert_eq!(
+            format_live_response(&response),
+            "scratch 'lift_ball' preview @ tick 44:\n  ball_y: 300.0 -> 180.0 (f32)"
+        );
+    }
+
+    #[test]
+    fn human_live_output_never_uses_raw_json_as_an_unknown_fallback() {
+        let response = LiveResponse::success(
+            10,
+            45,
+            "future_response",
+            json!({"large": {"nested": [1, 2, 3]}}),
+        );
+        assert_eq!(format_live_response(&response), "future_response @ tick 45");
+
+        let failure = LiveResponse::failure(11, 46, "layout change rejected");
+        assert_eq!(
+            format_live_response(&failure),
+            "error @ tick 46: layout change rejected"
+        );
+    }
+
+    #[test]
+    fn human_live_output_reports_watch_backpressure_count() {
+        let response =
+            LiveResponse::success(12, 47, "watch_backpressure", json!({"dropped_events": 9}));
+        assert_eq!(
+            format_live_response(&response),
+            "watch output dropped 9 event(s)"
+        );
     }
     use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -6,6 +6,11 @@ input enters the bounded `stasis_runner::live` protocol queue and every request 
 committed at a normalized between-tick boundary. Android Workshop shares compiler-owned semantic
 edit and receipt contracts, but intentionally keeps its own mobile interaction model.
 
+The default terminal is a human workspace view, not a protocol dump. It prints concise scalar,
+symbol, edit, scratch, status, and diagnostic lines; large semantic plans are summarized by changed
+symbols/files and reload class. Add `--live-json` only for clients that need complete schema-v1
+response envelopes.
+
 The project must provide the graphical lifecycle entry points `main`, `tick`, and `render`.
 `on_code_swap` is optional. This mode is local-only and does not open a network listener.
 
@@ -118,6 +123,9 @@ watch notifications are followed by a `watch_backpressure` count. Queue length, 
 and response bytes, multiline/cell size, symbol/completion pages, transaction assignments, and
 runtime snapshot bytes are bounded; overload is reported as backpressure, rejection, or explicit
 truncation.
+
+`--live-json` changes only presentation. The normal terminal and JSON-lines clients use the same
+request queue, compiler indexes, edit plans, tick boundaries, and response objects.
 
 Run a repeatable session without Cargo or repository-only tools:
 

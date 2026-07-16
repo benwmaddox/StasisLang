@@ -75,8 +75,9 @@ runnable `main()` and a real `.test.stasis` test.
 - `run --interactive`: keep the graphical runner and tick loop alive while a desktop terminal uses
   the runner's versioned LiveSession protocol for background-prepared code-aware symbol edits and
   typed between-tick inspection or mutation. The terminal includes history, compiler-backed Tab
-  completion, paging, and multiline cancellation. Use `--live-json` for response envelopes or
-  `--live-script PATH` for a deterministic command script. See
+  completion, paging, multiline cancellation, and concise command-specific output. Use
+  `--live-json` for complete schema-v1 response envelopes or `--live-script PATH` for a
+  deterministic command script. See
   [Interactive live workspace](live_cli_workspace.md).
 - `build --mode dev`: compile through JIT and write `build/dev-build.json` as a deterministic
   receipt.

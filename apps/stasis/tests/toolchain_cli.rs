@@ -1096,6 +1096,35 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
         .filter(|line| line.starts_with('{'))
         .map(|line| serde_json::from_str::<Value>(line).expect("failed live response JSON"))
         .any(|response| response["ok"] == false));
+
+    fs::write(
+        project.join("human-live.commands"),
+        ":pause\n:inspect score\n:status\n:quit\n",
+    )
+    .expect("write human live script");
+    let human = stasis(
+        &[
+            "run",
+            "--interactive",
+            "--live-script",
+            "human-live.commands",
+        ],
+        &project,
+    );
+    assert_eq!(
+        human.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&human.stdout),
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(human_stdout.contains("paused @ tick"));
+    assert!(human_stdout.contains("score: i32 ="));
+    assert!(human_stdout.contains("edits 0/0"));
+    assert!(human_stdout.contains("session closed @ tick"));
+    assert!(!human_stdout.contains("[live tick"));
+    assert!(!human_stdout.contains("{\"path\""));
     fs::remove_dir_all(parent).ok();
 }
 
