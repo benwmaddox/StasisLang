@@ -3326,7 +3326,7 @@ public final class MainActivity extends Activity {
                     continue;
                 }
             }
-            if (checkpoint == null && snapshot != null) {
+            if (snapshot != null) {
                 WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);
                 restored = true;
             }

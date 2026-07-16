@@ -398,6 +398,8 @@ def main() -> int:
     assert "retryTerminalAiItem" in activity
     assert "AndroidAiSessionCheckpointStore.save" in activity
     assert "WorkshopAiResumePolicy.PROVIDER_IN_FLIGHT" in activity
+    assert "if (checkpoint == null && snapshot != null)" not in activity
+    assert "if (snapshot != null) {\n                WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);" in activity
     assert 'put("usage", usage.checkpointJson())' in activity
     assert 'ROOT = "workshop_ai_sessions"' in ai_checkpoint
     assert "MAX_BYTES = 8 * 1024 * 1024" in ai_checkpoint
