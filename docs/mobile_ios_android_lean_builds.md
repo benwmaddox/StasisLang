@@ -22,6 +22,8 @@ The lean mobile plan is:
 
 If we do that, Android and iOS become mostly packaging work around the existing AOT backend rather than a second runtime architecture.
 
+The concrete v1 mobile packaging ABI is defined in `docs/mobile_packaging_abi.md`.
+
 ## What The Repo Already Has
 
 Useful existing pieces:
@@ -195,10 +197,12 @@ Needed:
 
 - A supported AOT output mode that emits mobile-linkable object files or a static library, not only desktop-oriented final images.
 - A stable exported entry ABI for mobile app shells.
+- Generated entrypoint, link, and asset metadata matching `docs/mobile_packaging_abi.md`.
 
 Target outcome:
 
 - Android and iOS both consume the same compiled game core.
+- Platform shells do not guess exported symbols or asset locations.
 
 ### P1: add a shared mobile runtime mode
 
