@@ -73,11 +73,9 @@ Required outputs:
 - `stasis_mobile_abi.json`, a versioned metadata file described below
 - packaged assets under the platform bundle root described below
 
-The current Android AOT bundle helper already writes generated symbol and link
-metadata for Android packaging, but it does not yet satisfy this full contract:
-mobile v1 must also carry the `main` entrypoint and the versioned ABI metadata
-below. Follow-up mobile tasks should converge Android and iOS on this contract
-instead of adding platform-specific symbol discovery.
+The shared mobile AOT helper writes the fixed entry symbols, link inputs, and
+asset metadata consumed by both generated platform shells. Neither shell
+discovers symbols independently.
 
 ### Metadata Schema
 
@@ -177,5 +175,6 @@ Follow-up tasks should use this note as their contract boundary:
 - AOT emission work should produce the linkable outputs and metadata above.
 - Android shell work should consume those outputs for one `arm64-v8a` app.
 - iOS shell work should consume the same outputs for one `arm64` app.
-- The eventual `package-mobile` command should be a thin orchestration layer
-  around this contract.
+- `package-mobile` is the thin orchestration layer around this contract; it
+  copies the AOT bundle into a Gradle or Xcode shell without adding another
+  compiler or runtime path.

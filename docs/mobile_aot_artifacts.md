@@ -32,3 +32,6 @@ Each bundle contains:
 The older `android-aot-bundle` command remains as an Android compatibility
 wrapper and writes `published_aot_objects.cmake` for the Android shell. Android
 published builds pass the descriptor-owned `entrySource` as `--entry-file`.
+
+Ordinary users should use `stasis package-mobile`; the raw bundle subcommands
+are compiler/shell integration seams. See `docs/mobile_packaging.md`.

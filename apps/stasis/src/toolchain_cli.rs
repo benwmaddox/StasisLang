@@ -22,8 +22,22 @@ use std::process::Command;
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
 const COMMANDS: &[&str] = &[
-    "new", "init", "fmt", "check", "test", "run", "build", "package", "inspect", "replay",
-    "verify", "version", "env", "symbol", "help",
+    "new",
+    "init",
+    "fmt",
+    "check",
+    "test",
+    "run",
+    "build",
+    "package",
+    "package-mobile",
+    "inspect",
+    "replay",
+    "verify",
+    "version",
+    "env",
+    "symbol",
+    "help",
 ];
 
 #[derive(Debug, Parser)]
@@ -100,6 +114,15 @@ enum ToolchainCommand {
     Package {
         #[arg(long, value_enum, default_value_t = PackageTarget::Desktop)]
         target: PackageTarget,
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+    /// Assemble a release-only Android or iOS app project around one AOT game.
+    PackageMobile {
+        #[arg(long, value_enum)]
+        target: MobilePackageTarget,
+        #[arg(long, value_name = "PATH")]
+        entry: Option<PathBuf>,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
     },
@@ -264,6 +287,21 @@ enum PackageTarget {
     Desktop,
     AndroidArm64,
     IosArm64,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum MobilePackageTarget {
+    AndroidArm64,
+    IosArm64,
+}
+
+impl MobilePackageTarget {
+    fn package_target(self) -> PackageTarget {
+        match self {
+            Self::AndroidArm64 => PackageTarget::AndroidArm64,
+            Self::IosArm64 => PackageTarget::IosArm64,
+        }
+    }
 }
 
 impl PackageTarget {
@@ -438,6 +476,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Run { .. } => "run",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
+        ToolchainCommand::PackageMobile { .. } => "package-mobile",
         ToolchainCommand::Inspect => "inspect",
         ToolchainCommand::Replay => "replay",
         ToolchainCommand::Verify => "verify",
@@ -503,6 +542,24 @@ fn execute(
                 ToolchainCommand::Package { target, out } => {
                     validate_optional_workspace_path(&workspace, "package output", out.as_deref())?;
                     package_workspace(&workspace, target, out.as_deref())
+                }
+                ToolchainCommand::PackageMobile { target, entry, out } => {
+                    validate_optional_workspace_path(
+                        &workspace,
+                        "mobile entry",
+                        entry.as_deref(),
+                    )?;
+                    validate_optional_workspace_path(
+                        &workspace,
+                        "package output",
+                        out.as_deref(),
+                    )?;
+                    package_mobile_command(
+                        &workspace,
+                        target,
+                        entry.as_deref(),
+                        out.as_deref(),
+                    )
                 }
                 ToolchainCommand::Inspect => inspect_workspace(&workspace),
                 ToolchainCommand::Symbol { command } => symbol_workspace(&workspace, command),
@@ -838,7 +895,12 @@ fn package_workspace(
         ));
     }
     if !matches!(target, PackageTarget::Desktop) {
-        return package_mobile_workspace(workspace, target, &package_root);
+        return package_mobile_workspace(
+            workspace,
+            target,
+            Path::new(&workspace.manifest.entry),
+            &package_root,
+        );
     }
     let staging_name = format!(
         ".{}.staging",
@@ -903,14 +965,56 @@ fn package_workspace(
     ))
 }
 
+fn package_mobile_command(
+    workspace: &Workspace,
+    target: MobilePackageTarget,
+    entry: Option<&Path>,
+    output: Option<&Path>,
+) -> Result<CommandResult, String> {
+    let target = target.package_target();
+    let entry = entry.unwrap_or_else(|| Path::new(&workspace.manifest.entry));
+    let package_root = output
+        .map(|path| workspace.root.join(path))
+        .unwrap_or_else(|| {
+            workspace.root.join("dist").join(format!(
+                "{}-{}",
+                workspace.manifest.name,
+                target.as_str()
+            ))
+        });
+    validate_workspace_destination(workspace, "package output", &package_root)?;
+    package_mobile_workspace(workspace, target, entry, &package_root)
+}
+
 fn package_mobile_workspace(
     workspace: &Workspace,
     target: PackageTarget,
+    entry: &Path,
     package_root: &Path,
 ) -> Result<CommandResult, String> {
-    fs::create_dir_all(package_root)
-        .map_err(|error| format!("failed to create {}: {error}", package_root.display()))?;
+    if package_root.exists() {
+        return Err(format!(
+            "package output already exists: {}",
+            package_root.display()
+        ));
+    }
+    let staging_root = package_root.with_file_name(format!(
+        ".{}.staging",
+        package_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("stasis-mobile")
+    ));
+    if staging_root.exists() {
+        return Err(format!(
+            "package staging output already exists: {}",
+            staging_root.display()
+        ));
+    }
+    fs::create_dir_all(&staging_root)
+        .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let child_result = (|| -> Result<(), String> {
+        let aot_root = staging_root.join("aot");
         let executable = env::current_exe()
             .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
         let child = Command::new(executable)
@@ -920,9 +1024,9 @@ fn package_mobile_workspace(
             .arg("--project-dir")
             .arg(&workspace.root)
             .arg("--entry-file")
-            .arg(&workspace.manifest.entry)
+            .arg(entry)
             .arg("--out-dir")
-            .arg(package_root)
+            .arg(&aot_root)
             .output()
             .map_err(|error| format!("failed to launch mobile AOT packaging: {error}"))?;
         if !child.status.success() {
@@ -933,16 +1037,203 @@ fn package_mobile_workspace(
                 String::from_utf8_lossy(&child.stderr).trim()
             ));
         }
+        assemble_mobile_shell(workspace, target, &aot_root, &staging_root)?;
         Ok(())
     })();
     if let Err(error) = child_result {
-        let _ = fs::remove_dir_all(package_root);
+        let _ = fs::remove_dir_all(&staging_root);
         return Err(error);
     }
+    fs::rename(&staging_root, package_root).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging_root);
+        format!(
+            "failed to publish mobile package {}: {error}",
+            package_root.display()
+        )
+    })?;
     Ok(CommandResult::success(
         format!("packaged {} at {}", target.as_str(), package_root.display()),
-        json!({"target": target.as_str(), "output": display_path(package_root)}),
+        json!({
+            "target": target.as_str(),
+            "output": display_path(package_root),
+            "entry": display_path(entry),
+            "project": match target {
+                PackageTarget::AndroidArm64 => "android",
+                PackageTarget::IosArm64 => "ios/StasisMobile.xcodeproj",
+                PackageTarget::Desktop => unreachable!(),
+            },
+        }),
     ))
+}
+
+fn assemble_mobile_shell(
+    workspace: &Workspace,
+    target: PackageTarget,
+    aot_root: &Path,
+    staging_root: &Path,
+) -> Result<(), String> {
+    let mobile_assets = bundled_mobile_assets_dir()?;
+    let runtime = bundled_mobile_runtime_dir()?;
+    let platform = match target {
+        PackageTarget::AndroidArm64 => "android",
+        PackageTarget::IosArm64 => "ios",
+        PackageTarget::Desktop => return Err("desktop is not a mobile package target".to_string()),
+    };
+    let common_destination = staging_root.join("common");
+    let platform_destination = staging_root.join(platform);
+    copy_required_dir(&mobile_assets.join("common"), &common_destination)?;
+    copy_required_dir(&mobile_assets.join(platform), &platform_destination)?;
+    copy_mobile_runtime(&runtime, &staging_root.join("runtime"))?;
+
+    let asset_source = match target {
+        PackageTarget::AndroidArm64 => aot_root.join("apk_assets/stasis_game"),
+        PackageTarget::IosArm64 => aot_root.join("ios_assets/stasis_game"),
+        PackageTarget::Desktop => unreachable!(),
+    };
+    let asset_destination = match target {
+        PackageTarget::AndroidArm64 => staging_root.join("android/app/src/main/assets/stasis_game"),
+        PackageTarget::IosArm64 => staging_root.join("ios/StasisMobile/stasis_game"),
+        PackageTarget::Desktop => unreachable!(),
+    };
+    let package_id = mobile_package_id(&workspace.manifest.name);
+    let jni_package = package_id.replace('.', "_");
+    let replacements = [
+        ("@STASIS_APP_NAME@", workspace.manifest.name.as_str()),
+        ("@STASIS_PACKAGE_ID@", package_id.as_str()),
+        ("@STASIS_JNI_PACKAGE@", jni_package.as_str()),
+    ];
+    replace_shell_tokens(&common_destination, &replacements)?;
+    replace_shell_tokens(&platform_destination, &replacements)?;
+    copy_required_dir(&asset_source, &asset_destination)?;
+    if !asset_destination.join("assets/manifest.json").is_file() {
+        return Err(format!(
+            "mobile AOT bundle is missing asset manifest: {}",
+            asset_destination.join("assets/manifest.json").display()
+        ));
+    }
+    if matches!(target, PackageTarget::IosArm64) {
+        write_ios_object_config(aot_root, &staging_root.join("ios/StasisMobile.xcconfig"))?;
+    }
+    fs::write(
+        staging_root.join("stasis_mobile_package.json"),
+        serde_json::to_string_pretty(&json!({
+            "schema": "stasis.mobile_package.v1",
+            "target": target.as_str(),
+            "name": workspace.manifest.name,
+            "aot_manifest": "aot/mobile_aot_bundle_manifest.json",
+            "assets": match target {
+                PackageTarget::AndroidArm64 => "android/app/src/main/assets/stasis_game",
+                PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game",
+                PackageTarget::Desktop => unreachable!(),
+            },
+        }))
+        .map_err(|error| format!("failed to encode mobile package manifest: {error}"))?
+            + "\n",
+    )
+    .map_err(|error| format!("failed to write mobile package manifest: {error}"))?;
+    Ok(())
+}
+
+fn mobile_package_id(project_name: &str) -> String {
+    let mut component = "game".to_string();
+    for byte in project_name.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            component.push((byte as char).to_ascii_lowercase());
+        } else {
+            component.push_str(&format!("x{byte:02x}"));
+        }
+    }
+    format!("com.stasislang.{component}")
+}
+
+fn copy_required_dir(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.is_dir() {
+        return Err(format!(
+            "required directory is missing: {}",
+            source.display()
+        ));
+    }
+    copy_dir_if_exists(source, destination)
+}
+
+fn copy_mobile_runtime(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
+    for name in [
+        "CMakeLists.txt",
+        "nanosvg.h",
+        "nanosvgrast.h",
+        "stasis_graphics.c",
+        "stasis_mobile_aot_runtime.c",
+        "stasis_mobile_aot_runtime.h",
+        "stasis_mobile_runtime.c",
+        "stasis_mobile_runtime.h",
+        "stb_truetype.h",
+    ] {
+        copy_file(&source.join(name), &destination.join(name))?;
+    }
+    Ok(())
+}
+
+fn replace_shell_tokens(root: &Path, replacements: &[(&str, &str)]) -> Result<(), String> {
+    for entry in
+        fs::read_dir(root).map_err(|error| format!("failed to read {}: {error}", root.display()))?
+    {
+        let path = entry
+            .map_err(|error| format!("failed to read {} entry: {error}", root.display()))?
+            .path();
+        if path.is_dir() {
+            replace_shell_tokens(&path, replacements)?;
+            continue;
+        }
+        let Ok(mut source) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let original = source.clone();
+        for (token, value) in replacements {
+            source = source.replace(token, value);
+        }
+        if source != original {
+            fs::write(&path, source)
+                .map_err(|error| format!("failed to update {}: {error}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn write_ios_object_config(aot_root: &Path, output: &Path) -> Result<(), String> {
+    let mut objects = Vec::new();
+    for entry in fs::read_dir(aot_root)
+        .map_err(|error| format!("failed to read {}: {error}", aot_root.display()))?
+    {
+        let path = entry
+            .map_err(|error| format!("failed to read {} entry: {error}", aot_root.display()))?
+            .path();
+        if path.extension().and_then(|value| value.to_str()) == Some("o") {
+            objects.push(path);
+        }
+    }
+    objects.sort();
+    if objects.is_empty() {
+        return Err("mobile AOT bundle did not emit any object files".to_string());
+    }
+    let object_flags = objects
+        .iter()
+        .map(|path| {
+            format!(
+                "$(PROJECT_DIR)/../aot/{}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    fs::write(
+        output,
+        format!(
+            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited) STASIS_GRAPHICS_SDL_ONLY=1\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL2.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL2_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL2.xcframework/ios-arm64/SDL2.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL2_image.xcframework/ios-arm64/SDL2_image.framework/Headers\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL2 -framework SDL2_image {object_flags}\n"
+        ),
+    )
+    .map_err(|error| format!("failed to write {}: {error}", output.display()))
 }
 
 impl SymbolSelectorArgs {
@@ -1481,6 +1772,33 @@ fn bundled_stdlib_dir() -> Result<PathBuf, String> {
     )
 }
 
+fn bundled_mobile_assets_dir() -> Result<PathBuf, String> {
+    bundled_toolchain_directory("mobile/shells", "mobile shell templates")
+}
+
+fn bundled_mobile_runtime_dir() -> Result<PathBuf, String> {
+    bundled_toolchain_directory("runtime", "mobile runtime sources")
+}
+
+fn bundled_toolchain_directory(relative: &str, label: &str) -> Result<PathBuf, String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+    let executable_dir = executable.parent().unwrap_or(Path::new("."));
+    let source_tree = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for candidate in [
+        executable_dir.join(relative),
+        executable_dir.join("..").join(relative),
+        source_tree.join(relative),
+    ] {
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "installed toolchain is missing {relative} ({label}); reinstall the complete release archive"
+    ))
+}
+
 fn collect_stasis_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     if !root.exists() {
         return Ok(());
@@ -1705,6 +2023,135 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn package_mobile_cli_accepts_entry_override() {
+        let parsed = ToolchainCli::try_parse_from([
+            "stasis",
+            "--workspace",
+            "demo",
+            "package-mobile",
+            "--target",
+            "ios-arm64",
+            "--entry",
+            "src/mobile.stasis",
+            "--out",
+            "dist/ios",
+        ])
+        .expect("parse package-mobile flags");
+        assert!(matches!(
+            parsed.command,
+            ToolchainCommand::PackageMobile {
+                target: MobilePackageTarget::IosArm64,
+                entry: Some(ref entry),
+                out: Some(ref out),
+            } if entry == Path::new("src/mobile.stasis") && out == Path::new("dist/ios")
+        ));
+    }
+
+    #[test]
+    fn mobile_package_ids_are_valid_for_java_and_apple() {
+        assert_eq!(
+            mobile_package_id("mobile_game"),
+            "com.stasislang.gamemobilex5fgame"
+        );
+        assert_eq!(
+            mobile_package_id("123-game"),
+            "com.stasislang.game123x2dgame"
+        );
+        for name in ["mobile_game", "123-game"] {
+            let package_id = mobile_package_id(name);
+            let component = package_id.rsplit('.').next().expect("package component");
+            assert!(component
+                .chars()
+                .next()
+                .is_some_and(|value| value.is_ascii_alphabetic()));
+            assert!(component.chars().all(|value| value.is_ascii_alphanumeric()));
+        }
+    }
+
+    #[test]
+    fn mobile_shells_are_platform_projects_over_one_shared_runtime() {
+        let root = temp_dir("mobile_shells");
+        let aot = root.join("aot");
+        fs::create_dir_all(aot.join("apk_assets/stasis_game/assets"))
+            .expect("create Android AOT assets");
+        fs::create_dir_all(aot.join("ios_assets/stasis_game/assets"))
+            .expect("create iOS AOT assets");
+        fs::write(aot.join("game.o"), b"object").expect("write object");
+        fs::write(
+            aot.join("apk_assets/stasis_game/assets/manifest.json"),
+            "{\"schema\":\"stasis-assets\",\"version\":1,\"assets\":[]}",
+        )
+        .expect("write Android asset manifest");
+        fs::write(
+            aot.join("apk_assets/stasis_game/assets/token.txt"),
+            "@STASIS_APP_NAME@ @STASIS_PACKAGE_ID@",
+        )
+        .expect("write Android token asset");
+        fs::write(
+            aot.join("ios_assets/stasis_game/assets/manifest.json"),
+            "{\"schema\":\"stasis-assets\",\"version\":1,\"assets\":[]}",
+        )
+        .expect("write iOS asset manifest");
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest: ProjectManifest::new("mobile_smoke".to_string()),
+        };
+
+        let android = root.join("android-package");
+        fs::create_dir_all(&android).expect("create Android staging");
+        assemble_mobile_shell(&workspace, PackageTarget::AndroidArm64, &aot, &android)
+            .expect("assemble Android shell");
+        let android_cmake =
+            fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
+                .expect("read Android CMake");
+        assert!(android_cmake.contains("stasis_mobile_runtime"));
+        assert!(android_cmake.contains("STASIS_AOT_OBJECTS"));
+        assert!(!android_cmake.contains("stasis_dynload"));
+        assert!(android
+            .join("android/app/src/main/assets/stasis_game/assets/manifest.json")
+            .is_file());
+        assert_eq!(
+            fs::read_to_string(
+                android.join("android/app/src/main/assets/stasis_game/assets/token.txt")
+            )
+            .expect("read packaged token asset"),
+            "@STASIS_APP_NAME@ @STASIS_PACKAGE_ID@"
+        );
+        let java = fs::read_to_string(
+            android.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
+        )
+        .expect("read Android activity");
+        assert!(java.contains(".stasis_game.staging"));
+        let jni =
+            fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
+                .expect("read Android asset bridge");
+        assert!(
+            jni.contains("Java_com_stasislang_gamemobilex5fsmoke_MainActivity_nativeSetAssetRoot")
+        );
+        assert!(!jni.contains("@STASIS_"));
+
+        let ios = root.join("ios-package");
+        fs::create_dir_all(&ios).expect("create iOS staging");
+        assemble_mobile_shell(&workspace, PackageTarget::IosArm64, &aot, &ios)
+            .expect("assemble iOS shell");
+        let project = fs::read_to_string(ios.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
+            .expect("read Xcode project");
+        let config =
+            fs::read_to_string(ios.join("ios/StasisMobile.xcconfig")).expect("read Xcode config");
+        assert!(project.contains("stasis_mobile_runtime.c in Sources"));
+        assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
+        assert!(config.contains("STASIS_GRAPHICS_SDL_ONLY=1"));
+        assert!(config.contains("@executable_path/Frameworks"));
+        assert!(project.contains("Embed SDL frameworks"));
+        assert!(ios
+            .join("ios/StasisMobile/stasis_game/assets/manifest.json")
+            .is_file());
+        assert!(!project.contains("@STASIS_"));
+
+        remove_temp(&root);
     }
 
     #[test]
