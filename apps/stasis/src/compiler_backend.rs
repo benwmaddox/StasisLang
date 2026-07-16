@@ -207,6 +207,10 @@ impl IncrementalCompilerBackend {
     pub fn new_self_host_aot_cli(aot_artifact_root: PathBuf) -> Self {
         let mut backend = Self::new();
         backend.aot_artifact_root = aot_artifact_root;
+        if cfg!(windows) && backend.aot_link_config.linker_path.is_none() {
+            backend.aot_link_config.linker_path = resolve_installed_lld_link()
+                .or_else(|| ensure_rust_lld_link_wrapper(&backend.aot_artifact_root));
+        }
         backend.enable_aot_link_step = false;
         backend
     }
@@ -2069,19 +2073,31 @@ fn resolve_latest_existing_path(candidates: Vec<PathBuf>) -> Option<PathBuf> {
 }
 
 fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
+    let installed_name = if cfg!(windows) {
+        "stasis_dynload.dll.lib"
+    } else {
+        "libstasis_dynload.a"
+    };
+    if let Some(installed) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(installed_name)))
+        .filter(|path| path.is_file())
+    {
+        return Some(installed);
+    }
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| self_host_repo_root().join("target"));
     let mut candidates: Vec<PathBuf> = Vec::new();
-    let static_lib_names: &[&str] = if cfg!(windows) {
-        &["stasis_dynload.lib"]
+    let link_lib_names: &[&str] = if cfg!(windows) {
+        &["stasis_dynload.dll.lib"]
     } else {
         &["libstasis_dynload.a", "stasis_dynload.a"]
     };
 
     for profile in ["debug", "release"] {
         let base = target_dir.join(profile);
-        for name in static_lib_names {
+        for name in link_lib_names {
             let direct = base.join(name);
             if direct.exists() {
                 candidates.push(direct);
@@ -2098,7 +2114,7 @@ fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
                 continue;
             };
             if cfg!(windows) {
-                if name.starts_with("stasis_dynload-") && name.ends_with(".lib") {
+                if name.starts_with("stasis_dynload-") && name.ends_with(".dll.lib") {
                     candidates.push(path);
                 }
             } else if (name.starts_with("libstasis_dynload-")
@@ -2149,7 +2165,7 @@ fn runtime_bridge_object_extension(target: &stasis_jit::AotTarget) -> &'static s
     }
 }
 
-fn should_link_stasis_dynload_staticlib(target: &stasis_jit::AotTarget) -> bool {
+fn should_link_stasis_dynload(target: &stasis_jit::AotTarget) -> bool {
     matches!(target, stasis_jit::AotTarget::Native)
 }
 
@@ -2157,48 +2173,115 @@ fn default_runtime_bridge_compiler(target: &stasis_jit::AotTarget) -> PathBuf {
     if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
         PathBuf::from("clang")
     } else if cfg!(windows) {
-        PathBuf::from("clang-cl.exe")
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join("clang-cl.exe")))
+            .filter(|path| path.is_file())
+            .or_else(resolve_host_clang_cl)
+            .unwrap_or_else(|| PathBuf::from("clang-cl.exe"))
     } else {
         PathBuf::from("cc")
     }
 }
 
-fn ensure_stasis_dynload_staticlib() -> Result<PathBuf, String> {
+#[cfg(windows)]
+fn resolve_host_clang_cl() -> Option<PathBuf> {
+    ["BuildTools", "Enterprise", "Community", "Professional"]
+        .into_iter()
+        .map(|edition| {
+            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\2022")
+                .join(edition)
+                .join("VC/Tools/Llvm/x64/bin/clang-cl.exe")
+        })
+        .find(|path| path.is_file())
+}
+
+#[cfg(not(windows))]
+fn resolve_host_clang_cl() -> Option<PathBuf> {
+    None
+}
+
+fn ensure_stasis_dynload_link_library() -> Result<PathBuf, String> {
+    if let Some(existing) = resolve_stasis_dynload_lib() {
+        return Ok(existing);
+    }
     let repo_root = self_host_repo_root();
     let mut command = std::process::Command::new("cargo");
-    command.arg("rustc").arg("-p").arg("stasis_dynload");
+    if cfg!(windows) {
+        command.arg("build").arg("-p").arg("stasis_dynload");
+    } else {
+        command.arg("rustc").arg("-p").arg("stasis_dynload");
+    }
     if !cfg!(debug_assertions) {
         command.arg("--release");
     }
-    command
-        .arg("--")
-        .arg("--crate-type")
-        .arg("staticlib")
-        .current_dir(&repo_root);
+    if !cfg!(windows) {
+        command.arg("--").arg("--crate-type").arg("staticlib");
+    }
+    command.current_dir(&repo_root);
     if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
         command.env("CARGO_TARGET_DIR", target_dir);
     }
 
     let output = command.output().map_err(|error| {
-        format!("failed to spawn cargo rustc -p stasis_dynload --crate-type staticlib: {error}")
+        format!("failed to spawn Cargo for the stasis_dynload link library: {error}")
     })?;
     if !output.status.success() {
         return Err(format!(
-            "failed to build stasis_dynload staticlib\nstdout:\n{}\nstderr:\n{}",
+            "failed to build stasis_dynload link library\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
 
     resolve_stasis_dynload_lib().ok_or_else(|| {
-        "stasis_dynload staticlib build reported success but no static library was found"
-            .to_string()
+        "stasis_dynload build reported success but no link library was found".to_string()
     })
+}
+
+#[cfg(windows)]
+fn stage_stasis_dynload_runtime(link_library: &Path, output: &Path) -> Result<(), String> {
+    let file_name = link_library
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "invalid stasis_dynload link library {}",
+                link_library.display()
+            )
+        })?;
+    let dll_name = file_name
+        .strip_suffix(".lib")
+        .ok_or_else(|| format!("expected a .lib import library, got {file_name}"))?;
+    let dll = link_library.with_file_name(dll_name);
+    if !dll.is_file() {
+        return Err(format!(
+            "stasis_dynload runtime DLL is missing: {}",
+            dll.display()
+        ));
+    }
+    let destination = output
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(dll_name);
+    copy_file_creating_parent(&dll, &destination)
+}
+
+#[cfg(not(windows))]
+fn stage_stasis_dynload_runtime(_link_library: &Path, _output: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
     let runner_name = runtime_runner_file_name();
-    resolve_latest_existing_path(vec![
+    let mut candidates = Vec::new();
+    if let Some(installed) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(runner_name)))
+    {
+        candidates.push(installed);
+    }
+    candidates.extend([
         repo_root.join(runner_name),
         repo_root.join("build").join(runner_name),
         repo_root
@@ -2212,12 +2295,19 @@ fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
             .join("build")
             .join("bin")
             .join(runner_name),
-    ])
+    ]);
+    resolve_latest_existing_path(candidates)
 }
 
 fn resolve_runtime_graphics_path(repo_root: &Path) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     for name in runtime_graphics_file_names() {
+        if let Some(installed) = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join(name)))
+        {
+            candidates.push(installed);
+        }
         candidates.push(repo_root.join(name));
         candidates.push(repo_root.join("build").join(name));
         candidates.push(
@@ -2281,8 +2371,14 @@ fn resolve_rust_lld_exe() -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
+fn resolve_installed_lld_link() -> Option<PathBuf> {
+    let path = std::env::current_exe().ok()?.parent()?.join("lld-link.exe");
+    path.is_file().then_some(path)
+}
+
 fn ensure_rust_lld_link_wrapper(artifact_root: &Path) -> Option<PathBuf> {
     let rust_lld = resolve_rust_lld_exe()?;
+    std::fs::create_dir_all(artifact_root).ok()?;
     let wrapper_path = artifact_root.join("rust-lld-link.cmd");
     let script = format!(
         "@echo off\r\n\"{}\" -flavor link %*\r\n",
@@ -2830,7 +2926,16 @@ fn build_engine_bundle_runtime_bridge_source(
     let host_req_window_h_px_hash = crate::hash_global_path("host_req_window_h_px");
 
     let mut source = String::new();
-    source.push_str("#include <stdint.h>\n");
+    source.push_str(
+        "#if defined(_WIN32)\n\
+typedef signed int int32_t;\n\
+typedef signed long long int64_t;\n\
+typedef unsigned char uint8_t;\n\
+typedef unsigned long long uintptr_t;\n\
+#else\n\
+#include <stdint.h>\n\
+#endif\n",
+    );
     source.push_str(
         "#if defined(_WIN32)\n\
 #define STASIS_EXPORT __declspec(dllexport)\n\
@@ -3029,6 +3134,9 @@ fn emit_engine_bundle_runtime_bridge_object(
             .arg("/c")
             .arg("/O2")
             .arg("/TC")
+            .arg("/Zl")
+            .arg("/GS-")
+            .arg("/X")
             .arg(format!("/Fo{}", object_path.display()))
             .arg(&source_path);
     } else {
@@ -3191,15 +3299,17 @@ fn package_engine_bundle_release(
 
     let mut link_config = backend.aot_link_config.clone();
     link_config.target = backend.aot_compile_config.target.clone();
-    if should_link_stasis_dynload_staticlib(&link_config.target) {
-        let dynload_lib = ensure_stasis_dynload_staticlib()?;
+    let mut dynload_link_library = None;
+    if should_link_stasis_dynload(&link_config.target) {
+        let dynload_lib = ensure_stasis_dynload_link_library()?;
         if !link_config
             .runtime_lib_paths
             .iter()
             .any(|path| path == &dynload_lib)
         {
-            link_config.runtime_lib_paths.push(dynload_lib);
+            link_config.runtime_lib_paths.push(dynload_lib.clone());
         }
+        dynload_link_library = Some(dynload_lib);
     }
     if cfg!(windows) {
         if let Some(wrapper) = ensure_rust_lld_link_wrapper(&backend.aot_artifact_root) {
@@ -3253,6 +3363,9 @@ fn package_engine_bundle_release(
         } else {
             return Err(initial_error);
         }
+    }
+    if let Some(link_library) = dynload_link_library.as_deref() {
+        stage_stasis_dynload_runtime(link_library, &linked_library_path)?;
     }
 
     let (runner_src, graphics_src) = ensure_runtime_release_artifacts()?;
@@ -3352,7 +3465,7 @@ fn aot_call_conv() -> &'static str {
 mod tests {
     use super::*;
     #[cfg(windows)]
-    use object::Object;
+    use object::{Object, ObjectSection};
     #[cfg(windows)]
     use stasis_compiler::IncrementalCompilerHost;
     #[cfg(windows)]
@@ -3415,9 +3528,57 @@ mod tests {
         assert!(source.contains("STASIS_EXPORT void stasis_on_input(int type, int a, int b)"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_runtime_bridge_object_has_no_default_library_directives() {
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::Native,
+            &[],
+            &["aot_fn_1".to_string()],
+            &[PackagedFunctionAlias {
+                alias: "main",
+                target_symbol: "aot_fn_1".to_string(),
+                returns_i32: true,
+            }],
+            &[],
+        )
+        .expect("build bridge source");
+        assert!(source.contains("typedef signed int int32_t;"));
+        assert!(!source.starts_with("#include <stdint.h>"));
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_bridge_directives_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source_path = temp_root.join("bridge.c");
+        let object_path = temp_root.join("bridge.obj");
+        fs::write(&source_path, source).expect("write bridge source");
+        let compiler = default_runtime_bridge_compiler(&stasis_jit::AotTarget::Native);
+        let output = Command::new(compiler)
+            .args(["/nologo", "/c", "/O2", "/TC", "/Zl", "/GS-", "/X"])
+            .arg(format!("/Fo{}", object_path.display()))
+            .arg(&source_path)
+            .output()
+            .expect("compile bridge object");
+        assert!(
+            output.status.success(),
+            "bridge compile failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = fs::read(&object_path).expect("read bridge object");
+        let object = object::File::parse(&*bytes).expect("parse bridge object");
+        if let Some(section) = object.section_by_name(".drectve") {
+            let directives = String::from_utf8_lossy(section.data().expect("read directives"));
+            assert!(!directives.to_ascii_uppercase().contains("DEFAULTLIB"));
+        }
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
     #[test]
     fn android_engine_bundle_skips_host_dynload_staticlib() {
-        assert!(!should_link_stasis_dynload_staticlib(
+        assert!(!should_link_stasis_dynload(
             &stasis_jit::AotTarget::android_arm64_default()
         ));
     }
@@ -7771,12 +7932,17 @@ fn run_self_host_aot_cli_with_backend_and_options(
             .values()
             .map(|(_, path)| path.clone())
             .collect();
-        link_objects_to_executable(
-            &object_paths,
-            output_exe,
-            &entry_symbol,
-            &backend.aot_link_config,
-        )?;
+        let mut link_config = backend.aot_link_config.clone();
+        let mut dynload_link_library = None;
+        if should_link_stasis_dynload(&link_config.target) {
+            let link_library = ensure_stasis_dynload_link_library()?;
+            link_config.runtime_lib_paths.push(link_library.clone());
+            dynload_link_library = Some(link_library);
+        }
+        link_objects_to_executable(&object_paths, output_exe, &entry_symbol, &link_config)?;
+        if let Some(link_library) = dynload_link_library.as_deref() {
+            stage_stasis_dynload_runtime(link_library, output_exe)?;
+        }
         maybe_sign_output_executable(output_exe)?;
         let object_bundle_path =
             write_object_bundle_manifest(&compile.output_dir, &entry_symbol, &object_paths)?;
