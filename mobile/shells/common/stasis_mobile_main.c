@@ -44,6 +44,11 @@ int SDL_main(int argc, char **argv) {
         status = stasis_mobile_runtime_step();
         SDL_Delay(1);
     }
+    int32_t game_result = stasis_mobile_runtime_last_entry_result();
     stasis_mobile_runtime_shutdown();
+    if (game_result != 0) {
+        SDL_Log("Stasis game entry requested stop with code %d", game_result);
+        return game_result;
+    }
     return status == STASIS_MOBILE_RUNTIME_STOP_REQUESTED ? 0 : status;
 }

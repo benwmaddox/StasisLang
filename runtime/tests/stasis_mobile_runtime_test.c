@@ -25,6 +25,9 @@ static int bind_runtime_calls;
 static int main_calls;
 static int tick_calls;
 static int render_calls;
+static int32_t main_result;
+static int32_t tick_result;
+static int32_t render_result;
 static int begin_frame_calls;
 static int end_frame_calls;
 static int host_frame_calls;
@@ -114,24 +117,27 @@ void stasis_sleep_ms(int ms) { (void)ms; }
 
 static int32_t hash_path(const char *path);
 
-static void game_main(void) {
+static int32_t game_main(void) {
     main_calls += 1;
     stasis_jit_global_i32_store(hash_path("host_req_seq"), 1);
     stasis_jit_global_i32_store(hash_path("host_req_flags"), 1);
     stasis_jit_global_i32_store(hash_path("host_req_window_w_px"), 960);
     stasis_jit_global_i32_store(hash_path("host_req_window_h_px"), 540);
+    return main_result;
 }
 
 static void bind_runtime(void) {
     bind_runtime_calls += 1;
 }
 
-static void game_tick(void) {
+static int32_t game_tick(void) {
     tick_calls += 1;
+    return tick_result;
 }
 
-static void game_render(void) {
+static int32_t game_render(void) {
     render_calls += 1;
+    return render_result;
 }
 
 static StasisMobileRuntimeConfig config(void) {
@@ -165,6 +171,9 @@ static void reset_fakes(void) {
     main_calls = 0;
     tick_calls = 0;
     render_calls = 0;
+    main_result = 0;
+    tick_result = 0;
+    render_result = 0;
     begin_frame_calls = 0;
     end_frame_calls = 0;
     host_frame_calls = 0;
@@ -268,6 +277,38 @@ static void test_reports_graphics_initialization_failure(void) {
     stasis_mobile_runtime_shutdown();
 }
 
+static void test_stops_on_nonzero_game_entry_results(void) {
+    StasisMobileRuntimeConfig valid_config = config();
+    StasisMobileGameEntries valid_entries = entries();
+
+    main_result = 7;
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
+        STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(stasis_mobile_runtime_last_entry_result() == 7);
+    assert(tick_calls == 0 && render_calls == 0);
+    stasis_mobile_runtime_shutdown();
+
+    reset_fakes();
+    tick_result = 8;
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
+        STASIS_MOBILE_RUNTIME_OK);
+    assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(stasis_mobile_runtime_last_entry_result() == 8);
+    assert(tick_calls == 1 && render_calls == 0);
+    assert(begin_frame_calls == 0 && end_frame_calls == 0 && gfx_submit_calls == 0);
+    stasis_mobile_runtime_shutdown();
+
+    reset_fakes();
+    render_result = 9;
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
+        STASIS_MOBILE_RUNTIME_OK);
+    assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(stasis_mobile_runtime_last_entry_result() == 9);
+    assert(tick_calls == 1 && render_calls == 1);
+    assert(begin_frame_calls == 1 && end_frame_calls == 1 && gfx_submit_calls == 0);
+    stasis_mobile_runtime_shutdown();
+}
+
 int main(void) {
     reset_fakes();
     test_rejects_invalid_configuration();
@@ -276,6 +317,8 @@ int main(void) {
     test_rejects_duplicate_initialization();
     reset_fakes();
     test_reports_graphics_initialization_failure();
+    reset_fakes();
+    test_stops_on_nonzero_game_entry_results();
     puts("stasis_mobile_runtime_test: ok");
     return 0;
 }

@@ -2110,6 +2110,12 @@ mod tests {
         assert!(android_cmake.contains("stasis_mobile_runtime"));
         assert!(android_cmake.contains("STASIS_AOT_OBJECTS"));
         assert!(!android_cmake.contains("stasis_dynload"));
+        let mobile_main = fs::read_to_string(android.join("common/stasis_mobile_main.c"))
+            .expect("read shared mobile main");
+        assert!(mobile_main.contains("stasis_mobile_runtime_last_entry_result"));
+        let runtime_header = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.h"))
+            .expect("read shared mobile runtime header");
+        assert!(runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
         assert!(android
             .join("android/app/src/main/assets/stasis_game/assets/manifest.json")
             .is_file());

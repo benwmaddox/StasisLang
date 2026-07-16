@@ -453,10 +453,32 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
             .join(output)
             .join("stasis_mobile_package.json")
             .is_file());
-        assert!(project
+        let aot_manifest_path = project
             .join(output)
-            .join("aot/mobile_aot_bundle_manifest.json")
-            .is_file());
+            .join("aot/mobile_aot_bundle_manifest.json");
+        assert!(aot_manifest_path.is_file());
+        let aot_manifest: Value = serde_json::from_str(
+            &fs::read_to_string(&aot_manifest_path).expect("read mobile AOT manifest"),
+        )
+        .expect("parse mobile AOT manifest");
+        for field in [
+            "engine_manifest",
+            "symbols_header",
+            "bindings_source",
+            "asset_root",
+            "asset_manifest",
+        ] {
+            let path = aot_manifest[field].as_str().expect("manifest path");
+            assert!(!Path::new(path).is_absolute(), "{field} must be relative");
+            assert!(!path.contains(".staging"), "{field} must survive publish");
+        }
+        assert!(aot_manifest["objects"]
+            .as_array()
+            .expect("manifest objects")
+            .iter()
+            .all(|entry| entry["path"].as_str().is_some_and(|path| {
+                !Path::new(path).is_absolute() && !path.contains(".staging")
+            })));
     }
     assert!(project
         .join("android/android/app/src/main/cpp/CMakeLists.txt")

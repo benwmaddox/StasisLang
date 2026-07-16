@@ -18,13 +18,14 @@ enum StasisMobileRuntimeResult {
     STASIS_MOBILE_RUNTIME_GRAPHICS_UNAVAILABLE = -4
 };
 
-typedef void (*StasisMobileEntry)(void);
+typedef void (*StasisMobileBindEntry)(void);
+typedef int32_t (*StasisMobileI32Entry)(void);
 
 typedef struct StasisMobileGameEntries {
-    StasisMobileEntry bind_runtime_entry;
-    StasisMobileEntry main_entry;
-    StasisMobileEntry tick_entry;
-    StasisMobileEntry render_entry;
+    StasisMobileBindEntry bind_runtime_entry;
+    StasisMobileI32Entry main_entry;
+    StasisMobileI32Entry tick_entry;
+    StasisMobileI32Entry render_entry;
 } StasisMobileGameEntries;
 
 typedef struct StasisMobileRuntimeConfig {
@@ -45,6 +46,8 @@ int32_t stasis_mobile_runtime_step(void);
 /* Paused runtimes remain initialized but do not tick or render. */
 void stasis_mobile_runtime_set_paused(int32_t paused);
 int32_t stasis_mobile_runtime_is_initialized(void);
+/* Exact non-zero main/tick/render result; read before shutdown resets state. */
+int32_t stasis_mobile_runtime_last_entry_result(void);
 
 /* Releases graphics and audio state. Safe to call more than once. */
 void stasis_mobile_runtime_shutdown(void);
