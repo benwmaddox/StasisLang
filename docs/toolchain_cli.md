@@ -30,6 +30,7 @@ stasis check
 stasis test
 stasis run --headless
 stasis run --watch
+stasis run --interactive
 stasis build --mode dev
 stasis build --mode release
 stasis package --target desktop
@@ -71,6 +72,12 @@ runnable `main()` and a real `.test.stasis` test.
   `i32` result is the process exit code. Headless execution is the default.
 - `run --watch`: launch the existing graphical runner and hot-swap pipeline for game projects.
   Because it is an unbounded graphical session, watch mode rejects `--json` and `--headless`.
+- `run --interactive`: keep the graphical runner and tick loop alive while a desktop terminal uses
+  the runner's versioned LiveSession protocol for background-prepared code-aware symbol edits and
+  typed between-tick inspection or mutation. The terminal includes history, compiler-backed Tab
+  completion, paging, and multiline cancellation. Use `--live-json` for response envelopes or
+  `--live-script PATH` for a deterministic command script. See
+  [Interactive live workspace](live_cli_workspace.md).
 - `build --mode dev`: compile through JIT and write `build/dev-build.json` as a deterministic
   receipt.
 - `build --mode release`: use the shared Cranelift AOT pipeline and write the native executable to

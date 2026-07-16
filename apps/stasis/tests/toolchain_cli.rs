@@ -1004,6 +1004,101 @@ fn semantic_symbol_cli_reapplies_edit_when_revert_tests_fail() {
     fs::remove_dir_all(parent).ok();
 }
 
+#[cfg(windows)]
+#[test]
+fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
+    let parent = temp_dir("interactive_live");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    fs::write(
+        project.join("src/main.stasis"),
+        "global score: i32;\nglobal swaps: i32;\nfunction main(): i32 { score = 1; swaps = 0; return 0; }\nfunction tick(): i32 { score += 1; return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { swaps += 1; return; }\n",
+    )
+    .expect("write live project");
+    fs::write(
+        project.join("tests/main.test.stasis"),
+        "test `live edit remains valid`(): bool { return 1 == 1; }\n",
+    )
+    .expect("write live test");
+    fs::write(
+        project.join("live.commands"),
+        ":pause\n:update function tick src/main.stasis\nfunction tick(): i32 { score += 4; return 0; }\n:end\n:inspect swaps\n:set score 10\n:step 1\n:inspect score\n:undo\n:inspect swaps\n:step 1\n:inspect score\n:quit\n",
+    )
+    .expect("write live script");
+
+    let output = stasis(
+        &[
+            "run",
+            "--interactive",
+            "--live-script",
+            "live.commands",
+            "--live-json",
+        ],
+        &project,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str::<Value>(line).expect("live response JSON"))
+        .collect::<Vec<_>>();
+    assert!(responses.iter().all(|response| response["ok"] == true));
+    let inspected = responses
+        .iter()
+        .filter(|response| response["kind"] == "inspection")
+        .map(|response| {
+            response["data"]["value"]["value"]
+                .as_i64()
+                .expect("i32 value")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inspected, vec![1, 14, 2, 15]);
+    assert!(fs::read_to_string(project.join("src/main.stasis"))
+        .expect("final source")
+        .contains("score += 1"));
+
+    fs::write(
+        project.join("failed-live.commands"),
+        ":pause\n:inspect missing_global\n:quit\n",
+    )
+    .expect("write failing live script");
+    let failed = stasis(
+        &[
+            "run",
+            "--interactive",
+            "--live-script",
+            "failed-live.commands",
+            "--live-json",
+        ],
+        &project,
+    );
+    assert_eq!(
+        failed.status.code(),
+        Some(1),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&failed.stdout),
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&failed.stdout)
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str::<Value>(line).expect("failed live response JSON"))
+        .any(|response| response["ok"] == false));
+    fs::remove_dir_all(parent).ok();
+}
+
 fn walk_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];

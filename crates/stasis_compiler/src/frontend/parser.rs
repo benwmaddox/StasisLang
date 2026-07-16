@@ -815,7 +815,7 @@ fn parse_extern_symbol_annotation(
     Ok(Some(symbol))
 }
 
-fn parse_string_literal_text(literal_text: &str) -> Result<String, String> {
+pub(crate) fn parse_string_literal_text(literal_text: &str) -> Result<String, String> {
     let bytes = literal_text.as_bytes();
     if bytes.len() < 2 || bytes[0] != b'"' || *bytes.last().unwrap_or(&0) != b'"' {
         return Err(format!("invalid string literal token '{}'", literal_text));

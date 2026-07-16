@@ -1,9 +1,15 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use rustyline::completion::{Completer, Pair};
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::Validator;
+use rustyline::{Context, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stasis::{
-    run_jit_tests_in_directory_with_session, run_play_in_process,
-    run_self_host_aot_cli_with_options, StasisTestRunSession,
+    run_jit_tests_in_directory_with_session, run_live_in_process, run_play_in_process,
+    run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
 };
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::workshop::{
@@ -13,11 +19,18 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
     WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
+use stasis_runner::live::{
+    live_session, CompletionItem, LiveCommand, LiveRequest, LiveResponse, TerminalBuffer,
+    TerminalInput,
+};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::io::{self, BufRead};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
@@ -102,6 +115,15 @@ enum ToolchainCommand {
         /// Explicitly select the headless runtime (currently the default).
         #[arg(long)]
         headless: bool,
+        /// Keep the graphical game running while accepting live workspace commands.
+        #[arg(long, conflicts_with_all = ["watch", "headless"])]
+        interactive: bool,
+        /// Read interactive commands from a deterministic script instead of stdin.
+        #[arg(long, value_name = "PATH", requires = "interactive")]
+        live_script: Option<PathBuf>,
+        /// Emit versioned live response envelopes as JSON lines.
+        #[arg(long, requires = "interactive")]
+        live_json: bool,
     },
     /// Build the project for development or as a release executable.
     Build {
@@ -524,8 +546,20 @@ fn execute(
                 ToolchainCommand::Run {
                     watch,
                     headless,
+                    interactive,
+                    live_script,
+                    live_json,
                 } => {
-                    if watch && json_output {
+                    if interactive && json_output {
+                        Err("--json cannot be combined with --interactive; use --live-json for the response stream".to_string())
+                    } else if interactive {
+                        validate_optional_workspace_path(
+                            &workspace,
+                            "live script",
+                            live_script.as_deref(),
+                        )?;
+                        run_workspace_live(&workspace, live_script.as_deref(), live_json)
+                    } else if watch && json_output {
                         Err("--json cannot be combined with --watch; watch mode is an unbounded event stream".to_string())
                     } else if watch && headless {
                         Err("--headless cannot be combined with --watch; watch mode uses the graphical hot-swap runner".to_string())
@@ -807,6 +841,253 @@ fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
         "graphical watch session ended",
         json!({"backend": "jit", "headless": false, "watch": true}),
     ))
+}
+
+fn run_workspace_live(
+    workspace: &Workspace,
+    script: Option<&Path>,
+    json_lines: bool,
+) -> Result<CommandResult, String> {
+    let entry = workspace.root.join(&workspace.manifest.entry);
+    let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
+    let script = script.map(|path| workspace.root.join(path));
+    let terminal = thread::spawn(move || run_live_terminal(client, script.as_deref(), json_lines));
+    let config = LiveRunConfig::new(
+        workspace.root.clone(),
+        PathBuf::from(&workspace.manifest.entry),
+        PathBuf::from(&workspace.manifest.output),
+    );
+    let run_result =
+        run_live_in_process(&entry, Some(&workspace.root), 16_000, None, server, config);
+    if !terminal.is_finished() {
+        return match run_result {
+            Ok(()) => Err("live runner ended before the terminal session completed".to_string()),
+            Err(error) => Err(error),
+        };
+    }
+    let terminal_result = terminal
+        .join()
+        .map_err(|_| "live terminal thread panicked".to_string())?;
+    run_result?;
+    terminal_result?;
+    Ok(CommandResult::success(
+        "interactive live session ended",
+        json!({"backend": "jit", "headless": false, "interactive": true}),
+    ))
+}
+
+struct LiveLineHelper {
+    items: Vec<CompletionItem>,
+}
+
+impl Helper for LiveLineHelper {}
+impl Highlighter for LiveLineHelper {}
+impl Validator for LiveLineHelper {}
+impl Hinter for LiveLineHelper {
+    type Hint = String;
+}
+
+impl Completer for LiveLineHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        position: usize,
+        _context: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let mut position = position.min(line.len());
+        while !line.is_char_boundary(position) {
+            position -= 1;
+        }
+        let start = line[..position]
+            .rfind(|character: char| {
+                character.is_whitespace() || character == '(' || character == ','
+            })
+            .map_or(0, |index| index + 1);
+        let prefix = &line[start..position];
+        let candidates = self
+            .items
+            .iter()
+            .filter(|item| item.text.starts_with(prefix))
+            .map(|item| Pair {
+                display: format!("{}  {}", item.text, item.detail),
+                replacement: item.text.clone(),
+            })
+            .collect();
+        Ok((start, candidates))
+    }
+}
+
+fn run_live_terminal(
+    client: stasis_runner::live::LiveSessionClient,
+    script: Option<&Path>,
+    json_lines: bool,
+) -> Result<(), String> {
+    let result = run_live_terminal_inner(&client, script, json_lines);
+    if result.is_err() {
+        let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
+    }
+    result
+}
+
+fn run_live_terminal_inner(
+    client: &stasis_runner::live::LiveSessionClient,
+    script: Option<&Path>,
+    json_lines: bool,
+) -> Result<(), String> {
+    let mut terminal = TerminalBuffer::new();
+    let mut saw_quit = false;
+    let mut script_failure = None;
+    if let Some(script) = script {
+        let file = fs::File::open(script)
+            .map_err(|error| format!("failed to open live script {}: {error}", script.display()))?;
+        for line in io::BufReader::new(file).lines() {
+            let line = line.map_err(|error| format!("failed reading live script: {error}"))?;
+            if let TerminalInput::Request(request) = terminal.feed_line(&line)? {
+                saw_quit |= matches!(&request.command, LiveCommand::Quit);
+                let request_id = request.request_id;
+                if !submit_and_print_live_response(client, request, json_lines, true)?
+                    && script_failure.is_none()
+                {
+                    script_failure = Some(format!("live request {request_id} failed"));
+                }
+            }
+        }
+    } else {
+        println!("Stasis live workspace (:help, :quit, Tab completion, Ctrl-C cancels multiline)");
+        let mut editor = Editor::<LiveLineHelper, DefaultHistory>::new()
+            .map_err(|error| format!("failed initializing live line editor: {error}"))?;
+        editor.set_helper(Some(LiveLineHelper { items: Vec::new() }));
+        let mut prompt = "stasis> ";
+        let mut completion_request_id = 1u64 << 63;
+        loop {
+            if let Ok(items) = fetch_live_completions(client, completion_request_id, json_lines) {
+                if let Some(helper) = editor.helper_mut() {
+                    helper.items = items;
+                }
+            }
+            completion_request_id = completion_request_id.saturating_add(1);
+            let line = match editor.readline(prompt) {
+                Ok(line) => line,
+                Err(rustyline::error::ReadlineError::Interrupted) => {
+                    if terminal.cancel_pending() {
+                        println!("multiline command canceled");
+                        prompt = "stasis> ";
+                    }
+                    continue;
+                }
+                Err(rustyline::error::ReadlineError::Eof) => break,
+                Err(error) => return Err(format!("failed reading live terminal: {error}")),
+            };
+            let _ = editor.add_history_entry(line.as_str());
+            match terminal.feed_line(&line)? {
+                TerminalInput::Continue { prompt: next } => {
+                    prompt = next;
+                    continue;
+                }
+                TerminalInput::Request(request) => {
+                    prompt = "stasis> ";
+                    saw_quit |= matches!(&request.command, LiveCommand::Quit);
+                    submit_and_print_live_response(client, request, json_lines, false)?;
+                    if saw_quit {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if !saw_quit {
+        submit_and_print_live_response(
+            client,
+            LiveRequest::new(u64::MAX, LiveCommand::Quit),
+            json_lines,
+            true,
+        )?;
+    }
+    match script_failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn fetch_live_completions(
+    client: &stasis_runner::live::LiveSessionClient,
+    request_id: u64,
+    json_lines: bool,
+) -> Result<Vec<CompletionItem>, String> {
+    client.submit(LiveRequest::new(
+        request_id,
+        LiveCommand::Complete {
+            buffer: String::new(),
+            cursor: 0,
+            limit: 256,
+        },
+    ))?;
+    loop {
+        let response = client.receive_timeout(Duration::from_secs(5))?;
+        if response.request_id != request_id {
+            print_live_response(&response, json_lines)?;
+            continue;
+        }
+        if !response.ok {
+            return Err(response
+                .error
+                .unwrap_or_else(|| "live completion failed".to_string()));
+        }
+        return serde_json::from_value(
+            response
+                .data
+                .and_then(|data| data.get("items").cloned())
+                .unwrap_or_else(|| json!([])),
+        )
+        .map_err(|error| format!("invalid live completion response: {error}"));
+    }
+}
+
+fn submit_and_print_live_response(
+    client: &stasis_runner::live::LiveSessionClient,
+    request: LiveRequest,
+    json_lines: bool,
+    wait_for_preparation: bool,
+) -> Result<bool, String> {
+    let request_id = request.request_id;
+    client.submit(request)?;
+    loop {
+        let response = client.receive_timeout(Duration::from_secs(300))?;
+        let request_succeeded = response.ok;
+        print_live_response(&response, json_lines)?;
+        if response.request_id == request_id {
+            if wait_for_preparation && response.kind == "edit_preparing" {
+                continue;
+            }
+            return Ok(request_succeeded);
+        }
+    }
+}
+
+fn print_live_response(response: &LiveResponse, json_lines: bool) -> Result<(), String> {
+    if json_lines {
+        println!(
+            "{}",
+            serde_json::to_string(response)
+                .map_err(|error| format!("failed serializing live response: {error}"))?
+        );
+    } else if response.ok {
+        println!(
+            "[live tick {}] {} {}",
+            response.tick,
+            response.kind,
+            response.data.as_ref().unwrap_or(&Value::Null)
+        );
+    } else {
+        eprintln!(
+            "[live tick {}] error: {}",
+            response.tick,
+            response.error.as_deref().unwrap_or("unknown live error")
+        );
+    }
+    Ok(())
 }
 
 fn build_workspace(
@@ -1958,6 +2239,25 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_line_helper_completes_current_token_with_compiler_detail() {
+        let helper = LiveLineHelper {
+            items: vec![CompletionItem {
+                text: "tick".into(),
+                kind: "function".into(),
+                detail: "tick(): i32".into(),
+            }],
+        };
+        let history = DefaultHistory::new();
+        let context = Context::new(&history);
+        let (start, matches) = helper
+            .complete(":read ti", 8, &context)
+            .expect("completion");
+        assert_eq!(start, 6);
+        assert_eq!(matches[0].replacement, "tick");
+        assert!(matches[0].display.contains("tick(): i32"));
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);

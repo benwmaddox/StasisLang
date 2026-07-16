@@ -4,6 +4,7 @@
 mod compiler_backend;
 mod events;
 mod host_set_registry;
+mod live_workspace;
 mod runtime_exec;
 mod stasis_test_runner;
 mod watch;
@@ -12,6 +13,7 @@ mod window_config;
 pub use compiler_backend::run_self_host_aot_cli;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use events::RunnerEvent;
+pub use live_workspace::LiveRunConfig;
 pub use stasis_test_runner::{
     run_jit_tests_in_directory, run_jit_tests_in_directory_with_session, StasisTestRunSession,
     StasisTestRunSummary,
@@ -19,6 +21,7 @@ pub use stasis_test_runner::{
 pub use window_config::WindowConfig;
 
 use compiler_backend::IncrementalCompilerBackend;
+use live_workspace::LiveWorkspace;
 use runtime_exec::RuntimeLauncher;
 use serde::Deserialize;
 use serde_json::Value;
@@ -523,6 +526,46 @@ pub fn run_play_in_process(
     tick_sleep_micros: u64,
     max_ticks: Option<u64>,
 ) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        tick_sleep_micros,
+        max_ticks,
+        None,
+    )
+}
+
+pub fn run_live_in_process(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    server: stasis_runner::live::LiveSessionServer,
+    config: LiveRunConfig,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        None,
+        None,
+        tick_sleep_micros,
+        max_ticks,
+        Some((server, config)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_play_in_process_inner(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    live: Option<(stasis_runner::live::LiveSessionServer, LiveRunConfig)>,
+) -> Result<(), String> {
     if !cfg!(windows) {
         return Err("in-process play runner currently supports Windows only".to_string());
     }
@@ -666,14 +709,35 @@ pub fn run_play_in_process(
 
     let mut tick_code_ptr = package.tick_code_ptr;
     let mut render_code_ptr = package.render_code_ptr;
+    let mut live = live
+        .map(|(server, config)| LiveWorkspace::new(server, config, &jit))
+        .transpose()?;
 
     let mut ticks_executed: u64 = 0;
     loop {
+        if let Some(live) = live.as_mut() {
+            live.process_boundary(
+                ticks_executed,
+                &mut jit,
+                &mut tick_code_ptr,
+                &mut render_code_ptr,
+            );
+            if live.should_quit() {
+                break;
+            }
+        }
         // Drain file events and recompile at tick boundaries (all-or-nothing).
         let mut needs_recompile = false;
         let mut ignored_changes: u32 = 0;
         let mut triggered_paths: Vec<String> = Vec::new();
         for event in watcher.drain_stasis_changes() {
+            if live
+                .as_mut()
+                .is_some_and(|workspace| workspace.consumes_self_write(&event.path))
+            {
+                ignored_changes = ignored_changes.saturating_add(1);
+                continue;
+            }
             let submit = should_submit_watch_event(
                 &event,
                 Some(&root_path),
@@ -750,6 +814,9 @@ pub fn run_play_in_process(
                                 // Commit the swap (all-or-nothing).
                                 tick_code_ptr = candidate_tick_code_ptr;
                                 render_code_ptr = candidate_render_code_ptr;
+                                if let Some(live) = live.as_mut() {
+                                    live.refresh_after_external_edit(&jit);
+                                }
                                 println!(
                                     "[swap] swapped ok total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms hook={hook_ms}ms deps={deps_ms}ms)"
                                 );
@@ -785,9 +852,12 @@ pub fn run_play_in_process(
             &host_req_window_h_px,
         )?;
 
-        let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
-        if tick_rc != 0 {
-            break;
+        let run_tick = live.as_ref().is_none_or(LiveWorkspace::should_run_tick);
+        if run_tick {
+            let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
+            if tick_rc != 0 {
+                break;
+            }
         }
         let render_rc = stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?;
         if render_rc != 0 {
@@ -802,7 +872,15 @@ pub fn run_play_in_process(
             }
         }
 
-        ticks_executed = ticks_executed.saturating_add(1);
+        if let Some(live) = live.as_mut() {
+            if run_tick {
+                ticks_executed = ticks_executed.saturating_add(1);
+                live.after_tick();
+            }
+            live.publish_watches(ticks_executed, &jit);
+        } else {
+            ticks_executed = ticks_executed.saturating_add(1);
+        }
         if let Some(limit) = max_ticks {
             if ticks_executed >= limit {
                 break;

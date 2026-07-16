@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_char;
 use std::io::Write;
@@ -588,7 +589,60 @@ pub fn clear_jit_string_literal_table() {
     guard.clear();
 }
 
+pub fn begin_jit_string_literal_staging() -> Result<(), String> {
+    JIT_STRING_LITERAL_STAGE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return Err("JIT string literal staging is already active on this thread".to_string());
+        }
+        *slot = Some(JitStringLiteralStage::default());
+        Ok(())
+    })
+}
+
+pub fn finish_jit_string_literal_staging() -> Result<HashMap<i32, String>, String> {
+    JIT_STRING_LITERAL_STAGE.with(|slot| {
+        let stage = slot
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| "JIT string literal staging is not active".to_string())?;
+        if let Some(error) = stage.collision {
+            Err(error)
+        } else {
+            Ok(stage.literals)
+        }
+    })
+}
+
+pub fn replace_jit_string_literal_table(literals: &HashMap<i32, String>) {
+    let table = jit_string_literal_table();
+    let mut guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    guard.clear();
+    guard.extend(literals.iter().map(|(id, value)| (*id, value.clone())));
+}
+
 pub fn upsert_jit_string_literal(id: i32, value: &str) {
+    let staged = JIT_STRING_LITERAL_STAGE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(stage) = slot.as_mut() else {
+            return false;
+        };
+        if let Some(previous) = stage.literals.get(&id) {
+            if previous != value && stage.collision.is_none() {
+                stage.collision = Some(format!(
+                    "JIT string literal hash collision for id {id}: '{previous}' vs '{value}'"
+                ));
+            }
+        } else {
+            stage.literals.insert(id, value.to_string());
+        }
+        true
+    });
+    if staged {
+        return;
+    }
     let table = jit_string_literal_table();
     let mut guard = table
         .lock()
@@ -723,7 +777,257 @@ pub fn clear_registered_global_memory() {
         .clear();
 }
 
+#[derive(Debug, Clone)]
+pub struct JitRuntimeStateSnapshot {
+    i32_globals: JitI32GlobalMap,
+    f32_globals: JitF32GlobalMap,
+    f64_globals: JitF64GlobalMap,
+    i32_array_globals: JitI32ArrayGlobalMap,
+    f32_array_globals: JitF32ArrayGlobalMap,
+    f64_array_globals: JitF64ArrayGlobalMap,
+    i32_ptrs: Vec<(usize, i32)>,
+    f32_ptrs: Vec<(usize, f32)>,
+    f64_ptrs: Vec<(usize, f64)>,
+    i32_arrays: Vec<(usize, Vec<i32>)>,
+    f32_arrays: Vec<(usize, Vec<f32>)>,
+    f64_arrays: Vec<(usize, Vec<f64>)>,
+    u8_arrays: Vec<(usize, Vec<u8>)>,
+}
+
+pub fn snapshot_jit_runtime_state() -> JitRuntimeStateSnapshot {
+    snapshot_jit_runtime_state_bounded(usize::MAX)
+        .expect("unbounded JIT runtime snapshot cannot exceed usize")
+}
+
+pub fn snapshot_jit_runtime_state_bounded(
+    max_bytes: usize,
+) -> Result<JitRuntimeStateSnapshot, String> {
+    let snapshot_bytes = runtime_snapshot_bytes()?;
+    if snapshot_bytes > max_bytes {
+        return Err(format!(
+            "live runtime snapshot requires {snapshot_bytes} bytes; limit is {max_bytes} bytes"
+        ));
+    }
+    Ok(JitRuntimeStateSnapshot {
+        i32_globals: jit_i32_global_table()
+            .lock()
+            .expect("jit i32 global table mutex poisoned")
+            .clone(),
+        f32_globals: jit_f32_global_table()
+            .lock()
+            .expect("jit f32 global table mutex poisoned")
+            .clone(),
+        f64_globals: jit_f64_global_table()
+            .lock()
+            .expect("jit f64 global table mutex poisoned")
+            .clone(),
+        i32_array_globals: jit_i32_array_global_table()
+            .lock()
+            .expect("jit i32 array global table mutex poisoned")
+            .clone(),
+        f32_array_globals: jit_f32_array_global_table()
+            .lock()
+            .expect("jit f32 array global table mutex poisoned")
+            .clone(),
+        f64_array_globals: jit_f64_array_global_table()
+            .lock()
+            .expect("jit f64 array global table mutex poisoned")
+            .clone(),
+        i32_ptrs: snapshot_registered_ptrs(registered_i32_ptrs()),
+        f32_ptrs: snapshot_registered_ptrs(registered_f32_ptrs()),
+        f64_ptrs: snapshot_registered_ptrs(registered_f64_ptrs()),
+        i32_arrays: snapshot_registered_arrays(registered_i32_arrays()),
+        f32_arrays: snapshot_registered_arrays(registered_f32_arrays()),
+        f64_arrays: snapshot_registered_arrays(registered_f64_arrays()),
+        u8_arrays: snapshot_registered_arrays(registered_u8_arrays()),
+    })
+}
+
+fn runtime_snapshot_bytes() -> Result<usize, String> {
+    let mut bytes = 0usize;
+    let mut add = |count: usize, item_bytes: usize| -> Result<(), String> {
+        bytes = bytes
+            .checked_add(
+                count
+                    .checked_mul(item_bytes)
+                    .ok_or_else(|| "live runtime snapshot size overflow".to_string())?,
+            )
+            .ok_or_else(|| "live runtime snapshot size overflow".to_string())?;
+        Ok(())
+    };
+    add(
+        jit_i32_global_table()
+            .lock()
+            .expect("jit i32 global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<(i32, i32)>(),
+    )?;
+    add(
+        jit_f32_global_table()
+            .lock()
+            .expect("jit f32 global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<(i32, f32)>(),
+    )?;
+    add(
+        jit_f64_global_table()
+            .lock()
+            .expect("jit f64 global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<(i32, f64)>(),
+    )?;
+    add(
+        jit_i32_array_global_table()
+            .lock()
+            .expect("jit i32 array global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<((i32, i32, i32), i32)>(),
+    )?;
+    add(
+        jit_f32_array_global_table()
+            .lock()
+            .expect("jit f32 array global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<((i32, i32, i32), f32)>(),
+    )?;
+    add(
+        jit_f64_array_global_table()
+            .lock()
+            .expect("jit f64 array global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<((i32, i32, i32), f64)>(),
+    )?;
+    add_registered_ptr_bytes(&mut add, registered_i32_ptrs(), std::mem::size_of::<i32>())?;
+    add_registered_ptr_bytes(&mut add, registered_f32_ptrs(), std::mem::size_of::<f32>())?;
+    add_registered_ptr_bytes(&mut add, registered_f64_ptrs(), std::mem::size_of::<f64>())?;
+    add_registered_array_bytes(
+        &mut add,
+        registered_i32_arrays(),
+        std::mem::size_of::<i32>(),
+    )?;
+    add_registered_array_bytes(
+        &mut add,
+        registered_f32_arrays(),
+        std::mem::size_of::<f32>(),
+    )?;
+    add_registered_array_bytes(
+        &mut add,
+        registered_f64_arrays(),
+        std::mem::size_of::<f64>(),
+    )?;
+    add_registered_array_bytes(&mut add, registered_u8_arrays(), std::mem::size_of::<u8>())?;
+    Ok(bytes)
+}
+
+fn add_registered_ptr_bytes(
+    add: &mut impl FnMut(usize, usize) -> Result<(), String>,
+    table: &Mutex<HashMap<i32, usize>>,
+    item_bytes: usize,
+) -> Result<(), String> {
+    add(
+        table
+            .lock()
+            .expect("registered global pointer table mutex poisoned")
+            .len(),
+        item_bytes,
+    )
+}
+
+fn add_registered_array_bytes(
+    add: &mut impl FnMut(usize, usize) -> Result<(), String>,
+    table: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+    item_bytes: usize,
+) -> Result<(), String> {
+    let elements = table
+        .lock()
+        .expect("registered global array table mutex poisoned")
+        .values()
+        .try_fold(0usize, |total, (_, len)| {
+            total
+                .checked_add(*len)
+                .ok_or_else(|| "live runtime snapshot size overflow".to_string())
+        })?;
+    add(elements, item_bytes)
+}
+
+pub fn restore_jit_runtime_state(snapshot: &JitRuntimeStateSnapshot) {
+    *jit_i32_global_table()
+        .lock()
+        .expect("jit i32 global table mutex poisoned") = snapshot.i32_globals.clone();
+    *jit_f32_global_table()
+        .lock()
+        .expect("jit f32 global table mutex poisoned") = snapshot.f32_globals.clone();
+    *jit_f64_global_table()
+        .lock()
+        .expect("jit f64 global table mutex poisoned") = snapshot.f64_globals.clone();
+    *jit_i32_array_global_table()
+        .lock()
+        .expect("jit i32 array global table mutex poisoned") = snapshot.i32_array_globals.clone();
+    *jit_f32_array_global_table()
+        .lock()
+        .expect("jit f32 array global table mutex poisoned") = snapshot.f32_array_globals.clone();
+    *jit_f64_array_global_table()
+        .lock()
+        .expect("jit f64 array global table mutex poisoned") = snapshot.f64_array_globals.clone();
+    restore_registered_ptrs(&snapshot.i32_ptrs);
+    restore_registered_ptrs(&snapshot.f32_ptrs);
+    restore_registered_ptrs(&snapshot.f64_ptrs);
+    restore_registered_arrays(&snapshot.i32_arrays);
+    restore_registered_arrays(&snapshot.f32_arrays);
+    restore_registered_arrays(&snapshot.f64_arrays);
+    restore_registered_arrays(&snapshot.u8_arrays);
+}
+
+fn snapshot_registered_ptrs<T: Copy>(table: &Mutex<HashMap<i32, usize>>) -> Vec<(usize, T)> {
+    table
+        .lock()
+        .expect("registered global pointer table mutex poisoned")
+        .values()
+        .copied()
+        .map(|address| {
+            // Registered pointers remain host-owned and stable for the in-process runtime.
+            let value = unsafe { *(address as *const T) };
+            (address, value)
+        })
+        .collect()
+}
+
+fn restore_registered_ptrs<T: Copy>(values: &[(usize, T)]) {
+    for (address, value) in values {
+        // Restoration runs at a main-thread tick boundary while the registered owner is alive.
+        unsafe { *(*address as *mut T) = *value };
+    }
+}
+
+fn snapshot_registered_arrays<T: Copy>(
+    table: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+) -> Vec<(usize, Vec<T>)> {
+    table
+        .lock()
+        .expect("registered global array table mutex poisoned")
+        .values()
+        .copied()
+        .map(|(address, len)| {
+            // Registered array memory remains valid until the in-process runner unregisters it.
+            let values = unsafe { std::slice::from_raw_parts(address as *const T, len) }.to_vec();
+            (address, values)
+        })
+        .collect()
+}
+
+fn restore_registered_arrays<T: Copy>(arrays: &[(usize, Vec<T>)]) {
+    for (address, values) in arrays {
+        // Restoration is serialized with guest execution at the between-tick boundary.
+        unsafe {
+            std::slice::from_raw_parts_mut(*address as *mut T, values.len()).copy_from_slice(values)
+        };
+    }
+}
+
 pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_i32_ptrs();
     let mut guard = table
         .lock()
@@ -732,6 +1036,9 @@ pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
 }
 
 pub fn register_global_f32_ptr(path_hash: i32, ptr: *mut f32) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_f32_ptrs();
     let mut guard = table
         .lock()
@@ -740,6 +1047,9 @@ pub fn register_global_f32_ptr(path_hash: i32, ptr: *mut f32) {
 }
 
 pub fn register_global_f64_ptr(path_hash: i32, ptr: *mut f64) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_f64_ptrs();
     let mut guard = table
         .lock()
@@ -748,6 +1058,9 @@ pub fn register_global_f64_ptr(path_hash: i32, ptr: *mut f64) {
 }
 
 pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mut i32, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_i32_arrays();
     let mut guard = table
         .lock()
@@ -756,6 +1069,9 @@ pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mu
 }
 
 pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mut f32, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_f32_arrays();
     let mut guard = table
         .lock()
@@ -764,6 +1080,9 @@ pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mu
 }
 
 pub fn register_global_f64_array(collection_hash: i32, field_hash: i32, ptr: *mut f64, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_f64_arrays();
     let mut guard = table
         .lock()
@@ -772,6 +1091,9 @@ pub fn register_global_f64_array(collection_hash: i32, field_hash: i32, ptr: *mu
 }
 
 pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut u8, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_u8_arrays();
     let mut guard = table
         .lock()
@@ -2599,6 +2921,16 @@ type JitF32ArrayGlobalMap = std::collections::HashMap<(i32, i32, i32), f32>;
 type JitF64ArrayGlobalMap = std::collections::HashMap<(i32, i32, i32), f64>;
 type JitStringLiteralMap = std::collections::HashMap<i32, String>;
 
+#[derive(Default)]
+struct JitStringLiteralStage {
+    literals: JitStringLiteralMap,
+    collision: Option<String>,
+}
+
+thread_local! {
+    static JIT_STRING_LITERAL_STAGE: RefCell<Option<JitStringLiteralStage>> = const { RefCell::new(None) };
+}
+
 fn jit_i32_dispatch_table() -> &'static Mutex<JitDispatchMap> {
     static TABLE: OnceLock<Mutex<JitDispatchMap>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
@@ -2736,6 +3068,44 @@ mod tests {
     }
 
     #[test]
+    fn runtime_state_snapshot_restores_registered_and_fallback_memory() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_f32_global_table();
+        clear_jit_f64_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_f32_array_global_table();
+        clear_jit_f64_array_global_table();
+
+        register_global_i32_ptr(1, std::ptr::null_mut());
+        register_global_u8_array(2, 0, std::ptr::null_mut(), 4);
+        let mut scalar = 7i32;
+        let mut bytes = vec![1u8, 2, 3, 4];
+        register_global_i32_ptr(10, &mut scalar);
+        register_global_u8_array(20, 0, bytes.as_mut_ptr(), bytes.len());
+        stasis_jit_global_i32_store(30, 9);
+        stasis_jit_global_f32_array_store(40, 2, 0, 1.5);
+        assert!(snapshot_jit_runtime_state_bounded(1)
+            .expect_err("snapshot should be bounded")
+            .contains("limit"));
+        let snapshot = snapshot_jit_runtime_state();
+
+        scalar = 70;
+        bytes.copy_from_slice(&[9, 9, 9, 9]);
+        stasis_jit_global_i32_store(30, 90);
+        stasis_jit_global_i32_store(31, 100);
+        stasis_jit_global_f32_array_store(40, 2, 0, 8.5);
+        restore_jit_runtime_state(&snapshot);
+
+        assert_eq!(scalar, 7);
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+        assert_eq!(stasis_jit_global_i32_load(30), 9);
+        assert_eq!(stasis_jit_global_i32_load(31), 0);
+        assert_eq!(stasis_jit_global_f32_array_load(40, 2, 0), 1.5);
+    }
+
+    #[test]
     fn jit_text_arg_bytes_reads_string_literals() {
         let _lock = test_lock();
         clear_registered_global_memory();
@@ -2746,6 +3116,31 @@ mod tests {
         upsert_jit_string_literal(1234, "hello");
 
         assert_eq!(jit_text_arg_bytes(1234), Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn staged_string_literals_do_not_mutate_live_table_before_publish() {
+        let _lock = test_lock();
+        clear_jit_string_literal_table();
+        upsert_jit_string_literal(1, "live");
+
+        begin_jit_string_literal_staging().expect("begin staging");
+        upsert_jit_string_literal(2, "candidate");
+        assert_eq!(jit_string_literal_value(1).as_deref(), Some("live"));
+        assert_eq!(jit_string_literal_value(2), None);
+        let staged = finish_jit_string_literal_staging().expect("finish staging");
+
+        replace_jit_string_literal_table(&staged);
+        assert_eq!(jit_string_literal_value(1), None);
+        assert_eq!(jit_string_literal_value(2).as_deref(), Some("candidate"));
+
+        begin_jit_string_literal_staging().expect("begin collision staging");
+        upsert_jit_string_literal(3, "first");
+        upsert_jit_string_literal(3, "second");
+        assert!(finish_jit_string_literal_staging()
+            .expect_err("hash collision")
+            .contains("collision"));
+        assert_eq!(jit_string_literal_value(3), None);
     }
 
     #[test]
