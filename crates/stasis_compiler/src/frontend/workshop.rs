@@ -639,10 +639,19 @@ fn parse_simple_top_level_symbols(source: &str) -> Result<Vec<ParsedSimpleSymbol
                 let (name, signature, end_index) = match kind {
                     WorkshopSymbolKind::Global => {
                         let name_token = expect_token(&tokens, cursor + 1, TokenKind::Identifier)?;
-                        let open = find_next_token(&tokens, cursor + 2, TokenKind::LBrace)?;
-                        let close = find_matching_rbrace(&tokens, open + 1, 1)?;
                         let name = token_text(source, name_token).to_string();
-                        (name.clone(), format!("global {name}"), close)
+                        if tokens
+                            .get(cursor + 2)
+                            .is_some_and(|token| token.kind == TokenKind::LBrace)
+                        {
+                            let open = cursor + 2;
+                            let close = find_matching_rbrace(&tokens, open + 1, 1)?;
+                            (name.clone(), format!("global {name}"), close)
+                        } else {
+                            let end = find_next_token(&tokens, cursor + 2, TokenKind::Semicolon)?;
+                            let signature = source[token.start..tokens[end].end].trim().to_string();
+                            (name, signature, end)
+                        }
                     }
                     WorkshopSymbolKind::Constant => {
                         let name_token = expect_token(&tokens, cursor + 1, TokenKind::Identifier)?;
@@ -3588,7 +3597,7 @@ mod workshop_compile_plan_tests {
 
     #[test]
     fn source_items_use_rust_parser_owned_sections_and_comment_boundaries() {
-        let source = "import \"math.stasis\";\n\nconst SPEED: i32 = 2;\nglobal State { score: i32; }\n\n// Player state.\n// Kept with the struct.\nstruct Player { x: i32; }\n\n// Unrelated note.\n\n// Advances the player.\nfunction update(self: Player): void {\n    self.x += SPEED;\n}\n\nfunction main(): i32 { return State.score; }\n";
+        let source = "import \"math.stasis\";\n\nconst SPEED: i32 = 2;\nglobal score: i32;\nglobal State { score: i32; }\n\n// Player state.\n// Kept with the struct.\nstruct Player { x: i32; }\n\n// Unrelated note.\n\n// Advances the player.\nfunction update(self: Player): void {\n    self.x += SPEED;\n}\n\nfunction main(): i32 { return State.score; }\n";
         let files = vec![WorkshopSourceFile {
             path: "src/main.stasis".to_string(),
             source: source.to_string(),
@@ -3605,7 +3614,9 @@ mod workshop_compile_plan_tests {
             .find(|item| item.kind == WorkshopSourceItemKind::Globals)
             .expect("globals item");
         assert!(globals.source.contains("const SPEED"));
+        assert!(globals.source.contains("global score: i32;"));
         assert!(globals.source.contains("global State"));
+        assert!(!globals.source.contains("function update"));
         let player = items
             .iter()
             .find(|item| item.kind == WorkshopSourceItemKind::Struct && item.name == "Player")
