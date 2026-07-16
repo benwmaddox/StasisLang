@@ -318,6 +318,9 @@ public final class MainActivity extends Activity {
 
     private static native String nativeStatus();
     private static native String nativeCompileProject(String projectRoot);
+    private static native String nativeSourceItems(String projectRoot);
+    private static native String nativeSemanticEdit(String projectRoot, String requestJson,
+                                                    boolean dryRun, boolean validate, boolean runTests);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
@@ -5457,6 +5460,8 @@ public final class MainActivity extends Activity {
         }
 
         Map<String, String> batchOriginalSources = batchHasWrites ? snapshotProjectSources(session.project()) : null;
+        boolean batchWriteFailed = false;
+        String batchWriteError = "";
         throwIfAiCancelled();
         session.deferBatchCompile = batchHasWrites;
         try {
@@ -5480,6 +5485,10 @@ public final class MainActivity extends Activity {
                     observation.put("error", session.lastToolError);
                     observation.put("validation", validationError);
                     observations.put(observation);
+                    if (batchHasWrites && isAiWriteTool(tool)) {
+                        batchWriteFailed = true;
+                        batchWriteError = session.lastToolError;
+                    }
                     continue;
                 }
                 if (batchHasWrites && "run_tests".equals(tool)) {
@@ -5497,6 +5506,10 @@ public final class MainActivity extends Activity {
                 } catch (Exception error) {
                     session.lastToolError = error.getMessage();
                     observation.put("error", error.getMessage());
+                    if (batchHasWrites && isAiWriteTool(tool)) {
+                        batchWriteFailed = true;
+                        batchWriteError = error.getMessage();
+                    }
                 }
                 observations.put(observation);
             }
@@ -5505,6 +5518,23 @@ public final class MainActivity extends Activity {
         }
 
         if (!batchHasWrites) {
+            return observations;
+        }
+
+        if (batchWriteFailed) {
+            restoreProjectSources(batchOriginalSources);
+            session.invalidateProject();
+            String restoredCompile = nativeCompileProject(projectRootPath());
+            lastCompileResult = restoredCompile;
+            compileReady = isRunnableCompile(restoredCompile);
+            compileAttempted = true;
+            JSONObject diagnostics = new JSONObject()
+                    .put("status", "batch_edit_failed")
+                    .put("error", batchWriteError);
+            JSONObject restoredDiagnostics = compileResultToJson(restoredCompile);
+            annotateAiBatchWriteResults(observations, "rolled_back", diagnostics, restoredDiagnostics, session);
+            session.failedWriteBatchCount += 1;
+            annotatePendingRunTestsBlocked(observations, pendingRunTestObservationIndexes, diagnostics);
             return observations;
         }
 
@@ -5794,7 +5824,8 @@ public final class MainActivity extends Activity {
                 continue;
             }
             String status = result.optString("status", "");
-            if (!"written".equals(status) && !"created".equals(status)) {
+            if (!"written".equals(status) && !"created".equals(status)
+                    && !"deleted".equals(status)) {
                 continue;
             }
             result.put("diagnostics", diagnostics);
@@ -6374,66 +6405,35 @@ public final class MainActivity extends Activity {
     }
     private JSONObject aiToolDeleteSymbol(AiAgentSession session, JSONObject call) throws Exception {
         ProjectSnapshot project = session.project();
-        Map<String, String> originalSources = snapshotProjectSources(project);
         String kind = call.optString("kind", "");
         SymbolEntry target = kind.isEmpty()
                 ? findAnySymbolForAiLookup(project, call, selectedSymbol)
                 : findSymbolForAiEdit(project, aiLookupExpectedKind(kind), call, selectedSymbol);
-        try {
-            String before = target.sourceFile.source.substring(0, target.start).replaceFirst("\\s+$", "");
-            String after = target.sourceFile.source.substring(target.end).replaceFirst("^\\s+", "");
-            String updatedSource = before.isEmpty() ? after : after.isEmpty() ? before + "\n" : before + "\n\n" + after;
-            target.sourceFile.source = updatedSource;
-            writeTextFile(target.sourceFile.diskFile, updatedSource);
-            session.invalidateProject();
-
-            if (session.deferBatchCompile) {
-                return new JSONObject()
-                        .put("file", target.file)
-                        .put("kind", target.kind)
-                        .put("name", target.name)
-                        .put("owner", target.owner)
-                        .put("status", "deleted")
-                        .put("diagnostics", new JSONObject().put("status", "pending_batch_compile"));
-            }
-
-            String compileResult = nativeCompileProject(projectRootPath());
-            lastCompileResult = compileResult;
-            compileReady = isRunnableCompile(compileResult);
-            compileAttempted = true;
-            JSONObject diagnostics = compileResultToJson(compileResult);
-            if (!compileReady) {
-                restoreProjectSources(originalSources);
-                session.invalidateProject();
-                String restoredCompile = nativeCompileProject(projectRootPath());
-                lastCompileResult = restoredCompile;
-                compileReady = isRunnableCompile(restoredCompile);
-                compileAttempted = true;
-                return new JSONObject()
-                        .put("file", target.file)
-                        .put("kind", target.kind)
-                        .put("name", target.name)
-                        .put("owner", target.owner)
-                        .put("status", "rolled_back")
-                        .put("diagnostics", diagnostics)
-                        .put("restored_diagnostics", compileResultToJson(restoredCompile));
-            }
-            return new JSONObject()
-                    .put("file", target.file)
-                    .put("kind", target.kind)
-                    .put("name", target.name)
-                    .put("owner", target.owner)
-                    .put("status", "deleted")
-                    .put("diagnostics", diagnostics);
-        } catch (Exception error) {
-            restoreProjectSources(originalSources);
-            session.invalidateProject();
-            throw error;
+        String semanticKind = semanticItemKind(target.kind);
+        String semanticName = target.name;
+        String newSource = null;
+        String operation = "delete";
+        JSONObject rustItem;
+        if ("globals".equals(semanticKind)) {
+            rustItem = rustSourceItem(target.file, "globals", "globals", "");
+        } else {
+            rustItem = rustSourceItem(target.file, semanticKind, semanticName, target.signature);
         }
+        JSONObject result = runRustSemanticEdit(operation, semanticKind, semanticName,
+                target.file, rustItem.optString("owner"), rustItem.optString("signature"),
+                rustItem.optString("source_hash"),
+                newSource, !session.deferBatchCompile);
+        session.invalidateProject();
+        return new JSONObject()
+                .put("file", target.file)
+                .put("kind", target.kind)
+                .put("name", target.name)
+                .put("owner", target.owner)
+                .put("status", "deleted")
+                .put("diagnostics", result);
     }
     private JSONObject aiToolWriteSymbol(AiAgentSession session, JSONObject call) throws Exception {
         ProjectSnapshot project = session.project();
-        Map<String, String> originalSources = snapshotProjectSources(project);
         String kind = call.optString("kind", "replace_function");
         String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
         String editKind = "struct".equals(expectedKind) ? "replace_struct" : "replace_function";
@@ -6441,57 +6441,80 @@ public final class MainActivity extends Activity {
         if (newSource.isEmpty()) {
             throw new IOException("No value for new_source");
         }
-        boolean existed = findSymbolForAiEditOrNull(project, expectedKind, call, selectedSymbol) != null;
-        try {
-            SymbolEntry target = resolveAiEditTarget(project, editKind, expectedKind, call, selectedSymbol, newSource);
-            validateAiReplacementSource(editKind, target.name, newSource);
-            persistSelectedEdit(target, newSource);
-            session.invalidateProject();
+        SymbolEntry existing = findSymbolForAiEditOrNull(project, expectedKind, call, selectedSymbol);
+        String name = call.optString("name", existing == null ? "" : existing.name).trim();
+        String file = call.optString("file", existing == null ? "" : existing.file).trim();
+        if (name.isEmpty() || file.isEmpty()) throw new IOException("write_symbol requires file and name");
+        validateAiReplacementSource(editKind, name, newSource);
+        JSONObject rustItem = existing == null ? null : rustSourceItem(file, expectedKind, name,
+                existing == null ? "" : existing.signature);
+        JSONObject result = runRustSemanticEdit(existing == null ? "add" : "update",
+                expectedKind, name, file, rustItem == null ? "" : rustItem.optString("owner"),
+                rustItem == null ? "" : rustItem.optString("signature"),
+                rustItem == null ? "" : rustItem.optString("source_hash"),
+                newSource, !session.deferBatchCompile);
+        session.invalidateProject();
+        return new JSONObject()
+                .put("file", file)
+                .put("kind", expectedKind)
+                .put("name", name)
+                .put("owner", existing == null ? call.optString("owner", "") : existing.owner)
+                .put("status", existing == null ? "created" : "written")
+                .put("diagnostics", result);
+    }
 
-            if (session.deferBatchCompile) {
-                return new JSONObject()
-                        .put("file", target.file)
-                        .put("kind", target.kind)
-                        .put("name", target.name)
-                        .put("owner", target.owner)
-                        .put("status", existed ? "written" : "created")
-                        .put("diagnostics", new JSONObject().put("status", "pending_batch_compile"));
-            }
+    private static String semanticItemKind(String androidKind) {
+        if ("global".equals(androidKind)) return "globals";
+        if ("struct".equals(androidKind)) return "struct";
+        if ("test".equals(androidKind)) return "test";
+        return "function";
+    }
 
-            String compileResult = nativeCompileProject(projectRootPath());
-            lastCompileResult = compileResult;
-            compileReady = isRunnableCompile(compileResult);
-            compileAttempted = true;
-            JSONObject diagnostics = compileResultToJson(compileResult);
-            if (!compileReady) {
-                restoreProjectSources(originalSources);
-                session.invalidateProject();
-                String restoredCompile = nativeCompileProject(projectRootPath());
-                lastCompileResult = restoredCompile;
-                compileReady = isRunnableCompile(restoredCompile);
-                compileAttempted = true;
-                return new JSONObject()
-                        .put("file", target.file)
-                        .put("kind", target.kind)
-                        .put("name", target.name)
-                        .put("owner", target.owner)
-                        .put("status", "rolled_back")
-                        .put("diagnostics", diagnostics)
-                        .put("restored_diagnostics", compileResultToJson(restoredCompile));
-            }
-
-            return new JSONObject()
-                    .put("file", target.file)
-                    .put("kind", target.kind)
-                    .put("name", target.name)
-                    .put("owner", target.owner)
-                    .put("status", existed ? "written" : "created")
-                    .put("diagnostics", diagnostics);
-        } catch (Exception error) {
-            restoreProjectSources(originalSources);
-            session.invalidateProject();
-            throw error;
+    private JSONObject rustSourceItem(String file, String kind, String name,
+                                      String signature) throws Exception {
+        JSONObject response = new JSONObject(nativeSourceItems(projectRootPath()));
+        if ("error".equals(response.optString("status"))) {
+            throw new IOException(response.optString("error", "Rust source item indexing failed"));
         }
+        JSONArray items = response.getJSONArray("items");
+        JSONObject match = null;
+        for (int index = 0; index < items.length(); index += 1) {
+            JSONObject item = items.getJSONObject(index);
+            if (file.equals(item.optString("file")) && kind.equals(item.optString("kind"))
+                    && name.equals(item.optString("name"))
+                    && (signature == null || signature.isEmpty()
+                    || signature.equals(item.optString("signature")))) {
+                if (match != null) throw new IOException(
+                        "Rust source item is ambiguous: " + kind + " " + file + " " + name);
+                match = item;
+            }
+        }
+        if (match != null) return match;
+        throw new IOException("Rust source item not found: " + kind + " " + file + " " + name);
+    }
+
+    private JSONObject runRustSemanticEdit(String operation, String kind, String name, String file,
+                                             String owner, String signature, String expectedSourceHash,
+                                             String newSource, boolean validate) throws Exception {
+        JSONObject target = new JSONObject().put("kind", kind).put("name", name).put("file", file);
+        if (owner != null && !owner.isEmpty()) target.put("owner", owner);
+        if (signature != null && !signature.isEmpty()) target.put("signature", signature);
+        JSONObject edit = new JSONObject().put("operation", operation).put("target", target);
+        if (newSource != null) edit.put("new_source", newSource);
+        if (expectedSourceHash != null && !expectedSourceHash.isEmpty()) {
+            edit.put("expected_source_hash", expectedSourceHash);
+        }
+        JSONObject request = new JSONObject().put("schema_version", 1)
+                .put("edits", new JSONArray().put(edit));
+        JSONObject result = new JSONObject(nativeSemanticEdit(
+                projectRootPath(), request.toString(), false, validate, false));
+        if ("error".equals(result.optString("status"))) {
+            throw new IOException(result.optString("error", "Rust semantic edit failed"));
+        }
+        lastCompileResult = validate ? "CompilePlanned: semantic_edit=RustValidated" : lastCompileResult;
+        compileReady = validate || compileReady;
+        compileAttempted = validate || compileAttempted;
+        return result;
     }
 
     private JSONObject writeSymbolTransaction(AiAgentSession session, SymbolEntry target, String newSource) throws Exception {

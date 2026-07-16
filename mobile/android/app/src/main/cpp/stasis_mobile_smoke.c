@@ -30,6 +30,8 @@ typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root,
 typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_root, const char *entry_file, const char *path, int value);
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
 typedef char *(*stasis_android_bridge_resolve_sprite_asset_fn)(const char *project_root, int handle);
+typedef char *(*stasis_android_bridge_source_items_fn)(const char *project_root, const char *entry_file);
+typedef char *(*stasis_android_bridge_semantic_edit_fn)(const char *project_root, const char *entry_file, const char *request_json, int dry_run, int validate, int run_tests);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
 typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
@@ -66,6 +68,8 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_set_i32_global_fn set_i32_global;
     stasis_android_bridge_get_i32_global_fn get_i32_global;
     stasis_android_bridge_resolve_sprite_asset_fn resolve_sprite_asset;
+    stasis_android_bridge_source_items_fn source_items;
+    stasis_android_bridge_semantic_edit_fn semantic_edit;
     stasis_android_bridge_free_string_fn free_string;
     int attempted;
 } RustBridgeApi;
@@ -943,6 +947,10 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_get_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_get_i32_global");
     rust_bridge_api.resolve_sprite_asset =
             (stasis_android_bridge_resolve_sprite_asset_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_sprite_asset");
+    rust_bridge_api.source_items =
+            (stasis_android_bridge_source_items_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_source_items");
+    rust_bridge_api.semantic_edit =
+            (stasis_android_bridge_semantic_edit_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_semantic_edit");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
     if (rust_bridge_api.compile_project == NULL ||
@@ -1360,6 +1368,57 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
     return (*env)->NewStringUTF(env, message);
 #endif
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeSourceItems(
+        JNIEnv *env, jclass activity_class, jstring project_root) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->source_items == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Rust source item bridge unavailable\"}");
+    }
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    if (root == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"unable to read project root\"}");
+    }
+    char *result = bridge->source_items(root, "src/main.stasis");
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (result == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"source item bridge returned null\"}");
+    }
+    jstring response = (*env)->NewStringUTF(env, result);
+    bridge->free_string(result);
+    return response;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeSemanticEdit(
+        JNIEnv *env, jclass activity_class, jstring project_root, jstring request_json,
+        jboolean dry_run, jboolean validate, jboolean run_tests) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->semantic_edit == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Rust semantic edit bridge unavailable\"}");
+    }
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    const char *request = (*env)->GetStringUTFChars(env, request_json, NULL);
+    if (root == NULL || request == NULL) {
+        if (root != NULL) (*env)->ReleaseStringUTFChars(env, project_root, root);
+        if (request != NULL) (*env)->ReleaseStringUTFChars(env, request_json, request);
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"unable to read semantic edit input\"}");
+    }
+    char *result = bridge->semantic_edit(
+            root, "src/main.stasis", request,
+            dry_run ? 1 : 0, validate ? 1 : 0, run_tests ? 1 : 0);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    (*env)->ReleaseStringUTFChars(env, request_json, request);
+    if (result == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"semantic edit bridge returned null\"}");
+    }
+    jstring response = (*env)->NewStringUTF(env, result);
+    bridge->free_string(result);
+    return response;
 }
 JNIEXPORT jint JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jintArray frame_values) {

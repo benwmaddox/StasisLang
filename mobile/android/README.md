@@ -14,6 +14,8 @@ Current scope:
 - Keeps timing/budget diagnostics visible over the game; Exploration additionally shows keepsake progress and its current tap/find/complete lesson without covering the voice shortcut.
 - Seeds bundled `.stasis` files into app-private storage when missing and preserves edits across app launches.
 - Lets a selected symbol display and edit its source from the app-private `.stasis` file.
+- Routes AI symbol writes/deletes through the shared Rust semantic-edit protocol used by the
+  desktop `stasis symbol` CLI; see `docs/semantic_edit_protocol.md`.
 - Saves selected symbol edits back to the app-private `.stasis` file, reparses the project so later edits use fresh symbol spans, and reports `FastReload` versus `ResetRequired` expectations.
 - Provides a dev-first AI edit panel whose primary provider is phone-native Codex with ChatGPT device-code sign-in. The existing OpenAI Responses API harness remains an explicit API-key fallback with `gpt-5.6-sol` and medium reasoning.
 - Codex sign-in copies the one-time device code before opening the official verification page, survives repeated browser/app switching with one resumable poll, keeps a selectable copy and explicit completion status in-app, retries transient polling network failures, and clears the matching clipboard value after success.
