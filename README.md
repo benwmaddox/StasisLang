@@ -34,13 +34,14 @@ Most users will:
 1. Install one release archive and put its `stasis` executable on `PATH`.
 2. Run `stasis new my_game`, then work from the project root or any subdirectory.
 3. Use `stasis fmt`, `stasis check`, `stasis test`, and `stasis run` during development.
-4. Use `stasis build --mode release` or `stasis package --target desktop` to ship.
+4. Use `stasis build --mode release`, `stasis package --target desktop`, or
+   `stasis package-mobile --target android-arm64|ios-arm64` to ship.
 
 The integrated CLI, `stasis.json` workspace contract, JSON output, offline behavior, and
 installation layout are documented in `docs/toolchain_cli.md`.
 
-Mobile AOT artifacts for Android arm64 and iOS arm64 are documented in
-`docs/mobile_aot_artifacts.md`.
+Lean Android/iOS app packaging is documented in `docs/mobile_packaging.md`;
+the lower-level AOT artifact contract is in `docs/mobile_aot_artifacts.md`.
 
 Nightly releases are published from `main`:
 
@@ -53,7 +54,7 @@ Windows release zip layout:
 - `stasis_graphics.dll` at the archive root
 - `lld-link.exe`, `clang-cl.exe`, `stasis_dynload.dll`, and `stasis_dynload.dll.lib` for offline AOT builds
 - `stasis_runner.exe` and `stasis_graphics.dll` for packaged desktop games
-- `src/` and `samples/` at the archive root
+- `src/`, `samples/`, `mobile/shells/`, and `runtime/` at the archive root
 
 That keeps the common Windows command simple:
 
@@ -222,3 +223,4 @@ After the runtime exists under the repo (`runtime/build/...` or `runtime/build_c
 - `docs/live-compilation-prd.md`: hot swap + product/architecture requirements
 - `docs/build_checklist.md`: execution plan and slice ordering
 - `docs/mobile_packaging_abi.md`: v1 Android/iOS AOT packaging ABI
+- `docs/mobile_packaging.md`: one-command lean Android/iOS app packaging

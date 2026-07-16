@@ -2140,11 +2140,13 @@ mod tests {
     #[test]
     fn mobile_runtime_uses_fixed_entries_and_sdl_only_static_target() {
         for required in [
-            "typedef void (*StasisMobileEntry)(void)",
-            "StasisMobileEntry bind_runtime_entry",
-            "StasisMobileEntry main_entry",
-            "StasisMobileEntry tick_entry",
-            "StasisMobileEntry render_entry",
+            "typedef void (*StasisMobileBindEntry)(void)",
+            "typedef int32_t (*StasisMobileI32Entry)(void)",
+            "StasisMobileBindEntry bind_runtime_entry",
+            "StasisMobileI32Entry main_entry",
+            "StasisMobileI32Entry tick_entry",
+            "StasisMobileI32Entry render_entry",
+            "stasis_mobile_runtime_last_entry_result(void)",
             "STASIS_MOBILE_RUNTIME_ABI_VERSION 1",
         ] {
             assert!(
@@ -2157,6 +2159,7 @@ mod tests {
             "runtime_state.entries.main_entry()",
             "runtime_state.entries.tick_entry()",
             "runtime_state.entries.render_entry()",
+            "runtime_state.last_entry_result != 0",
             "stasis_should_quit()",
             "stasis_mobile_poll_events()",
             "stasis_mobile_set_paused(runtime_state.paused)",

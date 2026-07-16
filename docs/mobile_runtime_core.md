@@ -29,8 +29,10 @@ while (status == STASIS_MOBILE_RUNTIME_OK) {
 stasis_mobile_runtime_shutdown();
 ```
 
-The generated AOT symbol header declares each entry as `void(void)` and is the
-source of the actual symbol names. The generated `published_aot_bindings.c`
+The generated AOT symbol header declares `main`, `tick`, and `render` as
+`int32_t(void)` and is the source of the actual symbol names. The runtime turns
+any non-zero entry result into a stop request and retains the exact result for
+the platform shell to log or return. The generated `published_aot_bindings.c`
 registers linked function pointers and string literals with the shared AOT
 state/dispatch layer; shells compile it as an ordinary source file and do not
 discover symbols dynamically.

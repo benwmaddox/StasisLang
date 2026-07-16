@@ -84,6 +84,12 @@ jobs:
           cp LICENSE "${out}/"
           cp -R src "${out}/"
           cp -R samples "${out}/"
+          mkdir -p "${out}/mobile"
+          cp -R mobile/shells "${out}/mobile/"
+          mkdir -p "${out}/runtime"
+          cp runtime/CMakeLists.txt runtime/nanosvg.h runtime/nanosvgrast.h runtime/stasis_graphics.c runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stb_truetype.h "${out}/runtime/"
+          mkdir -p "${out}/docs"
+          cp docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md "${out}/docs/"
           tar -C dist -czf "dist/stasis-release-${{ runner.os }}.tar.gz" "stasis-release-${{ runner.os }}"
 
       - name: Assemble bundle (windows)
@@ -114,6 +120,12 @@ jobs:
           Copy-Item THIRD_PARTY_NOTICES.md "$out/" -Force
           Copy-Item src "$out/" -Recurse -Force
           Copy-Item samples "$out/" -Recurse -Force
+          New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null
+          Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
+          New-Item -ItemType Directory -Force -Path "$out/runtime" | Out-Null
+          @('CMakeLists.txt', 'nanosvg.h', 'nanosvgrast.h', 'stasis_graphics.c', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
+          New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
+          Copy-Item docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md "$out/docs/" -Force
           Compress-Archive -Path "$out/*" -DestinationPath "dist/stasis-release-${{ runner.os }}.zip" -Force
 
       - name: Smoke test bundled graphics runtime (windows)
@@ -136,9 +148,15 @@ jobs:
             "function tick(): i32 { return 0; }",
             "function render(): i32 { return 0; }"
           )
+          New-Item -ItemType Directory -Force -Path "cli-smoke/assets" | Out-Null
+          Set-Content -Path "cli-smoke/assets/manifest.json" -Encoding ASCII -Value '{"schema":"stasis-assets","version":1,"assets":[]}'
           .\stasis.exe --workspace cli-smoke package --target desktop
           if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package runner missing" }
           if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.dll")) { throw "game package library missing" }
+          .\stasis.exe --workspace cli-smoke package-mobile --target android-arm64 --out dist/android
+          .\stasis.exe --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios
+          if (-not (Test-Path "cli-smoke/dist/android/android/app/src/main/cpp/CMakeLists.txt")) { throw "Android mobile shell missing" }
+          if (-not (Test-Path "cli-smoke/dist/ios/ios/StasisMobile.xcodeproj/project.pbxproj")) { throw "iOS mobile shell missing" }
           Pop-Location
 
       - name: Smoke test bundled CLI (unix)

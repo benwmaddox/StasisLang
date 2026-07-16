@@ -33,6 +33,8 @@ stasis run --watch
 stasis build --mode dev
 stasis build --mode release
 stasis package --target desktop
+stasis package-mobile --target android-arm64
+stasis package-mobile --target ios-arm64
 ```
 
 `stasis init --name brick_game .` initializes an existing directory. The built-in template copies
@@ -75,7 +77,9 @@ runnable `main()` and a real `.test.stasis` test.
   `build/`.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
   assets, and graphics runtime when present.
-- `package --target android-arm64|ios-arm64`: delegate to the shared mobile AOT bundle pipeline.
+- `package-mobile --target android-arm64|ios-arm64 [--entry PATH]`: atomically assemble the
+  shared AOT output, SDL-only runtime, bundled assets, and thin Gradle or Xcode app shell.
+- `package --target android-arm64|ios-arm64`: compatibility spelling that uses the manifest entry.
 - `inspect`, `version`, and `env`: report workspace, installation, cache, and output locations.
 
 `replay` and `verify` intentionally return deterministic unsupported diagnostics until the replay

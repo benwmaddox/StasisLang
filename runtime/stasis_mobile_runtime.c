@@ -39,6 +39,7 @@ typedef struct StasisMobileRuntimeState {
     StasisMobileGameEntries entries;
     int initialized;
     int paused;
+    int32_t last_entry_result;
 } StasisMobileRuntimeState;
 
 static StasisMobileRuntimeState runtime_state;
@@ -110,13 +111,16 @@ int32_t stasis_mobile_runtime_initialize(
         &host_req_window_w_px,
         &host_req_window_h_px
     );
-    runtime_state.entries.main_entry();
+    runtime_state.last_entry_result = runtime_state.entries.main_entry();
     stasis_host_bulk_apply_requests(
         &host_req_seq,
         &host_req_flags,
         &host_req_window_w_px,
         &host_req_window_h_px
     );
+    if (runtime_state.last_entry_result != 0) {
+        return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
+    }
     return STASIS_MOBILE_RUNTIME_OK;
 }
 
@@ -140,9 +144,16 @@ int32_t stasis_mobile_runtime_step(void) {
         &host_req_window_w_px,
         &host_req_window_h_px
     );
-    runtime_state.entries.tick_entry();
+    runtime_state.last_entry_result = runtime_state.entries.tick_entry();
+    if (runtime_state.last_entry_result != 0) {
+        return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
+    }
     stasis_begin_frame();
-    runtime_state.entries.render_entry();
+    runtime_state.last_entry_result = runtime_state.entries.render_entry();
+    if (runtime_state.last_entry_result != 0) {
+        stasis_end_frame();
+        return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
+    }
     stasis_gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
     stasis_end_frame();
     return STASIS_MOBILE_RUNTIME_OK;
@@ -157,6 +168,10 @@ void stasis_mobile_runtime_set_paused(int32_t paused) {
 
 int32_t stasis_mobile_runtime_is_initialized(void) {
     return runtime_state.initialized;
+}
+
+int32_t stasis_mobile_runtime_last_entry_result(void) {
+    return runtime_state.last_entry_result;
 }
 
 void stasis_mobile_runtime_shutdown(void) {

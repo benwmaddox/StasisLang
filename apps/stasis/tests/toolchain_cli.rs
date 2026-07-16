@@ -411,6 +411,114 @@ fn semantic_symbol_cli_previews_applies_runs_and_reverts() {
 }
 
 #[test]
+fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
+    let parent = temp_dir("mobile_package");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("mobile_game");
+    let created = stasis(&["new", "mobile_game", "--dir", "mobile_game"], &parent);
+    assert_eq!(created.status.code(), Some(0));
+    fs::write(
+        project.join("src/main.stasis"),
+        "function main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+    )
+    .expect("write mobile entry");
+    fs::create_dir_all(project.join("assets")).expect("create assets");
+    fs::write(
+        project.join("assets/manifest.json"),
+        "{\n  \"schema\": \"stasis-assets\",\n  \"version\": 1,\n  \"assets\": []\n}\n",
+    )
+    .expect("write asset manifest");
+
+    for (target, output) in [("android-arm64", "android"), ("ios-arm64", "ios")] {
+        let packaged = stasis(
+            &[
+                "package-mobile",
+                "--target",
+                target,
+                "--entry",
+                "src/main.stasis",
+                "--out",
+                output,
+            ],
+            &project,
+        );
+        assert_eq!(
+            packaged.status.code(),
+            Some(0),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&packaged.stdout),
+            String::from_utf8_lossy(&packaged.stderr)
+        );
+        assert!(project
+            .join(output)
+            .join("stasis_mobile_package.json")
+            .is_file());
+        let aot_manifest_path = project
+            .join(output)
+            .join("aot/mobile_aot_bundle_manifest.json");
+        assert!(aot_manifest_path.is_file());
+        let aot_manifest: Value = serde_json::from_str(
+            &fs::read_to_string(&aot_manifest_path).expect("read mobile AOT manifest"),
+        )
+        .expect("parse mobile AOT manifest");
+        for field in [
+            "engine_manifest",
+            "symbols_header",
+            "bindings_source",
+            "asset_root",
+            "asset_manifest",
+        ] {
+            let path = aot_manifest[field].as_str().expect("manifest path");
+            assert!(!Path::new(path).is_absolute(), "{field} must be relative");
+            assert!(!path.contains(".staging"), "{field} must survive publish");
+        }
+        assert!(aot_manifest["objects"]
+            .as_array()
+            .expect("manifest objects")
+            .iter()
+            .all(|entry| entry["path"].as_str().is_some_and(|path| {
+                !Path::new(path).is_absolute() && !path.contains(".staging")
+            })));
+    }
+    assert!(project
+        .join("android/android/app/src/main/cpp/CMakeLists.txt")
+        .is_file());
+    assert!(project
+        .join("android/android/app/src/main/assets/stasis_game/assets/manifest.json")
+        .is_file());
+    assert!(project
+        .join("ios/ios/StasisMobile.xcodeproj/project.pbxproj")
+        .is_file());
+    assert!(project
+        .join("ios/ios/StasisMobile/stasis_game/assets/manifest.json")
+        .is_file());
+    assert!(!walk_files(&project.join("android"))
+        .iter()
+        .any(|path| path.extension().and_then(|value| value.to_str()) == Some("stasis")));
+    assert!(!walk_files(&project.join("ios"))
+        .iter()
+        .any(|path| path.extension().and_then(|value| value.to_str()) == Some("stasis")));
+
+    fs::write(project.join("src/main.stasis"), "function main(: i32 {\n")
+        .expect("write invalid mobile entry");
+    let failed = stasis(
+        &[
+            "package-mobile",
+            "--target",
+            "android-arm64",
+            "--out",
+            "broken",
+        ],
+        &project,
+    );
+    assert_eq!(failed.status.code(), Some(1));
+    assert!(!project.join("broken").exists());
+    assert!(!project.join(".broken.staging").exists());
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
 fn semantic_symbol_cli_supports_inline_crud_and_stale_guards() {
     let parent = temp_dir("semantic_inline");
     fs::create_dir_all(&parent).expect("create temp parent");
@@ -894,4 +1002,20 @@ fn semantic_symbol_cli_reapplies_edit_when_revert_tests_fail() {
         accepted_source
     );
     fs::remove_dir_all(parent).ok();
+}
+
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).expect("read directory") {
+            let path = entry.expect("read entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
 }
