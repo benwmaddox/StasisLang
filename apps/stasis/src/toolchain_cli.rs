@@ -139,8 +139,15 @@ enum SymbolCommand {
     Add {
         #[command(flatten)]
         target: RequiredSymbolTargetArgs,
-        #[arg(long, value_name = "PATH")]
-        source_file: PathBuf,
+        #[arg(
+            long,
+            value_name = "SOURCE",
+            conflicts_with = "source_file",
+            required_unless_present = "source_file"
+        )]
+        source: Option<String>,
+        #[arg(long, value_name = "PATH", conflicts_with = "source")]
+        source_file: Option<PathBuf>,
         #[command(flatten)]
         options: SymbolEditOptions,
     },
@@ -148,8 +155,15 @@ enum SymbolCommand {
     Update {
         #[command(flatten)]
         target: SymbolSelectorArgs,
-        #[arg(long, value_name = "PATH")]
-        source_file: PathBuf,
+        #[arg(
+            long,
+            value_name = "SOURCE",
+            conflicts_with = "source_file",
+            required_unless_present = "source_file"
+        )]
+        source: Option<String>,
+        #[arg(long, value_name = "PATH", conflicts_with = "source")]
+        source_file: Option<PathBuf>,
         #[arg(long)]
         expected_source_hash: Option<String>,
         #[command(flatten)]
@@ -971,9 +985,9 @@ fn symbol_workspace(
             let mut items = workshop_source_items(&editable_files)?;
             items.retain(|item| {
                 kind.is_none_or(|kind| item.kind == kind.into())
-                    && file
-                        .as_deref()
-                        .is_none_or(|file| item.file.replace('\\', "/") == file.replace('\\', "/"))
+                    && file.as_deref().is_none_or(|file| {
+                        normalize_symbol_file(&item.file) == normalize_symbol_file(file)
+                    })
                     && owner
                         .as_deref()
                         .is_none_or(|owner| item.owner.as_deref() == Some(owner))
@@ -1033,10 +1047,11 @@ fn symbol_workspace(
         }
         SymbolCommand::Add {
             target,
+            source,
             source_file,
             options,
         } => {
-            let source = read_workspace_input(workspace, "symbol source", &source_file)?;
+            let source = read_symbol_source(workspace, source, source_file)?;
             let batch = WorkshopSemanticEditBatch {
                 schema_version: 1,
                 edits: vec![WorkshopSemanticEdit {
@@ -1050,11 +1065,12 @@ fn symbol_workspace(
         }
         SymbolCommand::Update {
             target,
+            source,
             source_file,
             expected_source_hash,
             options,
         } => {
-            let source = read_workspace_input(workspace, "symbol source", &source_file)?;
+            let source = read_symbol_source(workspace, source, source_file)?;
             let batch = WorkshopSemanticEditBatch {
                 schema_version: 1,
                 edits: vec![WorkshopSemanticEdit {
@@ -1093,6 +1109,23 @@ fn symbol_workspace(
             dry_run,
             no_tests,
         } => revert_symbol_plan(workspace, &receipt, dry_run, no_tests),
+    }
+}
+
+fn normalize_symbol_file(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
+fn read_symbol_source(
+    workspace: &Workspace,
+    source: Option<String>,
+    source_file: Option<PathBuf>,
+) -> Result<String, String> {
+    match (source, source_file) {
+        (Some(source), None) => Ok(source),
+        (None, Some(path)) => read_workspace_input(workspace, "symbol source", &path),
+        (Some(_), Some(_)) => Err("use only one of --source or --source-file".to_string()),
+        (None, None) => Err("symbol add/update requires --source or --source-file".to_string()),
     }
 }
 
@@ -1269,6 +1302,12 @@ fn revert_symbol_plan(
     let source = read_workspace_input(workspace, "semantic edit receipt", receipt)?;
     let plan = serde_json::from_str::<WorkshopSemanticEditPlan>(&source)
         .map_err(|error| format!("invalid semantic edit receipt: {error}"))?;
+    if plan.schema_version != 1 {
+        return Err(format!(
+            "unsupported semantic edit receipt schema version {}",
+            plan.schema_version
+        ));
+    }
     let current =
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let mut restored = current.clone();

@@ -320,17 +320,24 @@ pub fn execute_android_workshop_semantic_edit(
             ));
         }
     };
-    let receipt = write_android_semantic_receipt(project_root, &plan).map_err(|error| {
-        let rollback = write_workshop_semantic_plan(project_root, &plan, true);
-        match rollback {
-            Ok(()) => format!("failed writing semantic edit receipt; edit rolled back: {error}"),
-            Err(rollback) => {
+    let receipt = match write_android_semantic_receipt(project_root, &plan) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            write_workshop_semantic_plan(project_root, &plan, true).map_err(|rollback| {
                 format!(
                     "failed writing semantic edit receipt: {error}; rollback failed: {rollback}"
                 )
-            }
+            })?;
+            compile_android_workshop_project(project_root, entry_file).map_err(|restore| {
+                format!(
+                    "failed writing semantic edit receipt: {error}; restored compile failed: {restore}"
+                )
+            })?;
+            return Err(format!(
+                "failed writing semantic edit receipt; sources and runtime rolled back: {error}"
+            ));
         }
-    })?;
+    };
     Ok(serde_json::json!({
         "schema_version": 1,
         "status": "applied",
@@ -1381,6 +1388,16 @@ mod tests {
         });
     }
 
+    fn ffi_json(ptr: *mut c_char) -> serde_json::Value {
+        assert!(!ptr.is_null());
+        let source = unsafe { CStr::from_ptr(ptr) }
+            .to_str()
+            .expect("FFI JSON UTF-8")
+            .to_string();
+        stasis_android_bridge_free_string(ptr);
+        serde_json::from_str(&source).expect("valid FFI JSON")
+    }
+
     fn default_tick_input() -> AndroidBridgeTickInput {
         AndroidBridgeTickInput {
             touch_x: 80,
@@ -2090,6 +2107,85 @@ function render(): void { Render.command_count = 1; Render.command0_kind = 1; Re
     }
 
     #[test]
+    fn c_semantic_bridge_returns_versioned_json_for_success_and_errors() {
+        let root = temp_project("semantic_ffi");
+        let original = "function main(): i32 { return 1; }\n";
+        fs::write(root.join("src/main.stasis"), original).expect("write source");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+
+        let null_paths = ffi_json(stasis_android_bridge_source_items(
+            std::ptr::null(),
+            entry_c.as_ptr(),
+        ));
+        assert_eq!(null_paths["schema_version"], 1);
+        assert_eq!(null_paths["status"], "error");
+        assert!(null_paths["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("null project root"));
+
+        let items = ffi_json(stasis_android_bridge_source_items(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+        ));
+        assert_eq!(items["schema_version"], 1);
+        assert!(items["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["name"] == "main"));
+
+        let invalid_request = CString::new("not json").expect("invalid request cstr");
+        let invalid = ffi_json(stasis_android_bridge_semantic_edit(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            invalid_request.as_ptr(),
+            1,
+            1,
+            0,
+        ));
+        assert_eq!(invalid["schema_version"], 1);
+        assert_eq!(invalid["status"], "error");
+        assert!(invalid["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid semantic edit request"));
+
+        let request = CString::new(
+            serde_json::json!({
+                "schema_version": 1,
+                "edits": [{
+                    "operation": "update",
+                    "target": {
+                        "kind": "function",
+                        "file": "src/main.stasis",
+                        "name": "main"
+                    },
+                    "new_source": "function main(): i32 { return 2; }"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("request cstr");
+        let preview = ffi_json(stasis_android_bridge_semantic_edit(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            request.as_ptr(),
+            1,
+            1,
+            0,
+        ));
+        assert_eq!(preview["schema_version"], 1);
+        assert_eq!(preview["status"], "preview");
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).expect("preview source"),
+            original
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn android_and_cli_share_rust_semantic_edit_contract() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
@@ -2223,5 +2319,119 @@ function render(): void { Render.command_count = 1; Render.command0_kind = 1; Re
         assert!(source.contains("self: Player): i32 { return 7;"));
         assert!(source.contains("self: Enemy): i32 { return 2;"));
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn android_receipt_failure_restores_sources_and_live_runtime() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("semantic_receipt_rollback");
+        let entry = Path::new("src/main.stasis");
+        let original = "global State { value: i32; }\nfunction main(): void { State.value = 0; }\nfunction tick(): void { State.value += 1; }\n";
+        fs::write(root.join(entry), original).expect("write source");
+        compile_android_workshop_project(&root, entry).expect("initial compile");
+        fs::create_dir_all(root.join("build")).expect("create build");
+        fs::write(root.join("build/semantic-edits"), "block receipt directory")
+            .expect("block receipt directory");
+        let items = android_workshop_source_items(&root, entry).expect("source items");
+        let tick = items["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .find(|item| item["kind"] == "function" && item["name"] == "tick")
+            .expect("tick item");
+        let batch = WorkshopSemanticEditBatch {
+            schema_version: 1,
+            edits: vec![WorkshopSemanticEdit {
+                operation: WorkshopSemanticEditOperation::Update,
+                target: WorkshopSymbolSelector {
+                    name: "tick".to_string(),
+                    kind: Some(WorkshopSourceItemKind::Function),
+                    file: Some("src/main.stasis".to_string()),
+                    owner: None,
+                    signature: Some(tick["signature"].as_str().expect("signature").to_string()),
+                },
+                new_source: Some("function tick(): void { State.value += 10; }".to_string()),
+                expected_source_hash: Some(
+                    tick["source_hash"]
+                        .as_str()
+                        .expect("source hash")
+                        .to_string(),
+                ),
+            }],
+        };
+        let error =
+            execute_android_workshop_semantic_edit(&root, entry, &batch, false, true, false)
+                .expect_err("receipt should fail");
+        assert!(error.contains("receipt"));
+        assert_eq!(
+            fs::read_to_string(root.join(entry)).expect("restored source"),
+            original
+        );
+        run_android_workshop_tick(&root, entry, default_tick_input()).expect("restored tick");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "State.value").expect("restored value"),
+            1
+        );
+        clear_runtime_session_for_test();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn android_test_failure_restores_sources_and_live_runtime() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("semantic_test_rollback");
+        let entry = Path::new("src/main.stasis");
+        let original = "global State { value: i32; }\nfunction main(): void { State.value = 0; }\nfunction tick(): void { State.value += 1; }\n";
+        fs::write(root.join(entry), original).expect("write source");
+        fs::create_dir_all(root.join("tests")).expect("create tests");
+        fs::write(
+            root.join("tests/failing.test.stasis"),
+            "test `reject edit`(): bool { return false; }\n",
+        )
+        .expect("write failing test");
+        compile_android_workshop_project(&root, entry).expect("initial compile");
+        let items = android_workshop_source_items(&root, entry).expect("source items");
+        let tick = items["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .find(|item| item["kind"] == "function" && item["name"] == "tick")
+            .expect("tick item");
+        let batch = WorkshopSemanticEditBatch {
+            schema_version: 1,
+            edits: vec![WorkshopSemanticEdit {
+                operation: WorkshopSemanticEditOperation::Update,
+                target: WorkshopSymbolSelector {
+                    name: "tick".to_string(),
+                    kind: Some(WorkshopSourceItemKind::Function),
+                    file: Some("src/main.stasis".to_string()),
+                    owner: None,
+                    signature: Some(tick["signature"].as_str().expect("signature").to_string()),
+                },
+                new_source: Some("function tick(): void { State.value += 10; }".to_string()),
+                expected_source_hash: Some(
+                    tick["source_hash"]
+                        .as_str()
+                        .expect("source hash")
+                        .to_string(),
+                ),
+            }],
+        };
+        let error = execute_android_workshop_semantic_edit(&root, entry, &batch, false, true, true)
+            .expect_err("tests should reject edit");
+        assert!(error.contains("validation failed"));
+        assert_eq!(
+            fs::read_to_string(root.join(entry)).expect("restored source"),
+            original
+        );
+        run_android_workshop_tick(&root, entry, default_tick_input()).expect("restored tick");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "State.value").expect("restored value"),
+            1
+        );
+        clear_runtime_session_for_test();
+        fs::remove_dir_all(root).ok();
     }
 }

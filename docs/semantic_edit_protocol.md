@@ -72,8 +72,8 @@ restoring the recorded source.
 stasis symbol list [--kind KIND] [--file FILE] [--owner OWNER]
 stasis symbol find NAME [--kind KIND] [--file FILE] [--owner OWNER] [--signature SIGNATURE]
 stasis symbol read NAME [selection options]
-stasis symbol add NAME --kind KIND --file FILE --source-file PATH [--dry-run] [--no-tests]
-stasis symbol update NAME [selection options] --source-file PATH [--expected-source-hash HASH] [--dry-run] [--no-tests]
+stasis symbol add NAME --kind KIND --file FILE (--source SOURCE | --source-file PATH) [--dry-run] [--no-tests]
+stasis symbol update NAME [selection options] (--source SOURCE | --source-file PATH) [--expected-source-hash HASH] [--dry-run] [--no-tests]
 stasis symbol delete NAME [selection options] [--expected-source-hash HASH] [--dry-run] [--no-tests]
 stasis symbol apply --request PATH [--dry-run] [--no-tests]
 stasis symbol revert --receipt PATH [--dry-run] [--no-tests]
@@ -81,6 +81,8 @@ stasis symbol revert --receipt PATH [--dry-run] [--no-tests]
 
 `KIND` is `imports`, `globals`, `struct`, `function`, or `test`. `--json` returns the same typed
 items, selectors, edit plan, hashes, reload classification, and receipt contract used by Android.
+`--source` accepts the complete replacement definition inline and is the preferred scripted path;
+`--source-file` remains available for large definitions. Exactly one is required for add/update.
 
 Symbol commands deliberately have no legacy-project fallback. They require the versioned
 `stasis.json` workspace contract; run `stasis init` in an older source tree before editing it.

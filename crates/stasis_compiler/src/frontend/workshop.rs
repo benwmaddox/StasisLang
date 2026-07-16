@@ -1641,10 +1641,158 @@ fn prune_unused_workshop_imports(
 }
 
 fn source_identifiers(source: &str) -> Result<BTreeSet<String>, String> {
-    Ok(lex(source)?
-        .into_iter()
-        .filter(|token| matches!(token.kind, TokenKind::Identifier | TokenKind::FunctionKw))
-        .map(|token| token_text(source, token).to_string())
+    let tokens = lex(source)?;
+    let mut declarations = BTreeSet::new();
+    let mut scope_stack = Vec::new();
+    let mut scope_at = vec![None; tokens.len()];
+    let mut scope_ends = BTreeMap::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind == TokenKind::LBrace {
+            scope_stack.push(index);
+        }
+        scope_at[index] = scope_stack.last().copied();
+        if token.kind == TokenKind::RBrace {
+            if let Some(start) = scope_stack.pop() {
+                scope_ends.insert(start, index);
+            }
+        }
+    }
+    let mut local_bindings = Vec::new();
+    for (function_index, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::FunctionKw {
+            continue;
+        }
+        let Some(open_paren) = tokens[function_index + 1..]
+            .iter()
+            .position(|token| token.kind == TokenKind::LParen)
+            .map(|offset| function_index + 1 + offset)
+        else {
+            continue;
+        };
+        let mut paren_depth = 0usize;
+        let mut close_paren = None;
+        for (index, token) in tokens.iter().enumerate().skip(open_paren) {
+            match token.kind {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => {
+                    paren_depth = paren_depth.saturating_sub(1);
+                    if paren_depth == 0 {
+                        close_paren = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close_paren) = close_paren else {
+            continue;
+        };
+        let Some(body_start) = tokens[close_paren + 1..]
+            .iter()
+            .take_while(|token| token.kind != TokenKind::Semicolon)
+            .position(|token| token.kind == TokenKind::LBrace)
+            .map(|offset| close_paren + 1 + offset)
+        else {
+            continue;
+        };
+        let Some(body_end) = scope_ends.get(&body_start).copied() else {
+            continue;
+        };
+        for index in open_paren + 1..close_paren {
+            if tokens[index].kind == TokenKind::Identifier
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|next| next.kind == TokenKind::Colon)
+            {
+                local_bindings.push((
+                    token_text(source, tokens[index]).to_string(),
+                    body_start,
+                    body_end,
+                ));
+            }
+        }
+    }
+    let mut brace_depth = 0usize;
+    let mut pending_enum = false;
+    let mut enum_depth = None;
+    for (index, token) in tokens.iter().copied().enumerate() {
+        if token.kind == TokenKind::Identifier && token_text(source, token) == "enum" {
+            pending_enum = true;
+        } else if token.kind == TokenKind::LBrace {
+            brace_depth += 1;
+            if pending_enum {
+                enum_depth = Some(brace_depth);
+                pending_enum = false;
+            }
+        } else if token.kind == TokenKind::RBrace {
+            if enum_depth == Some(brace_depth) {
+                enum_depth = None;
+            }
+            brace_depth = brace_depth.saturating_sub(1);
+        }
+        if token.kind != TokenKind::Identifier {
+            continue;
+        }
+        let previous = index.checked_sub(1).and_then(|index| tokens.get(index));
+        let next = tokens.get(index + 1);
+        let follows_declaration_keyword = previous.is_some_and(|previous| {
+            previous.kind == TokenKind::FunctionKw
+                || (previous.kind == TokenKind::Identifier
+                    && matches!(
+                        token_text(source, *previous),
+                        "struct" | "global" | "const" | "let" | "enum"
+                    ))
+        });
+        let is_enum_variant = enum_depth == Some(brace_depth)
+            && previous.is_some_and(|previous| {
+                matches!(previous.kind, TokenKind::LBrace | TokenKind::Comma)
+            });
+        if follows_declaration_keyword
+            || next.is_some_and(|next| next.kind == TokenKind::Colon)
+            || is_enum_variant
+        {
+            declarations.insert(index);
+        }
+        if previous.is_some_and(|previous| {
+            previous.kind == TokenKind::Identifier && token_text(source, *previous) == "let"
+        }) {
+            if let Some(scope_start) = scope_at[index] {
+                if let Some(scope_end) = scope_ends.get(&scope_start) {
+                    local_bindings.push((
+                        token_text(source, token).to_string(),
+                        index,
+                        *scope_end,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(tokens
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, token)| token.kind == TokenKind::Identifier)
+        .filter_map(|(index, token)| {
+            if declarations.contains(&index) {
+                return None;
+            }
+            let name = token_text(source, token);
+            if local_bindings.iter().any(|(binding, start, end)| {
+                binding == name && index >= *start && index <= *end
+            }) {
+                return None;
+            }
+            let previous_is_dot = index.checked_sub(1).is_some_and(|index| {
+                tokens[index].kind == TokenKind::Other && token_text(source, tokens[index]) == "."
+            });
+            let next_is_call = tokens
+                .get(index + 1)
+                .is_some_and(|next| next.kind == TokenKind::LParen);
+            if previous_is_dot && !next_is_call {
+                return None;
+            }
+            Some(name.to_string())
+        })
         .collect())
 }
 
@@ -1853,6 +2001,15 @@ pub fn write_workshop_semantic_plan(
     plan: &WorkshopSemanticEditPlan,
     restore: bool,
 ) -> Result<(), String> {
+    write_workshop_semantic_plan_with(project_root, plan, restore, atomic_write)
+}
+
+fn write_workshop_semantic_plan_with(
+    project_root: &Path,
+    plan: &WorkshopSemanticEditPlan,
+    restore: bool,
+    mut write: impl FnMut(&Path, &str) -> Result<(), String>,
+) -> Result<(), String> {
     for change in &plan.changed_files {
         let relative = Path::new(&change.file);
         if !safe_relative_path(relative) {
@@ -1885,7 +2042,8 @@ pub fn write_workshop_semantic_plan(
         } else {
             &change.after_source
         };
-        if let Err(error) = atomic_write(&path, source) {
+        if let Err(error) = write(&path, source) {
+            let mut rollback_errors = Vec::new();
             for completed in written.into_iter().rev() {
                 let prior = plan
                     .changed_files
@@ -1897,9 +2055,16 @@ pub fn write_workshop_semantic_plan(
                 } else {
                     &prior.before_source
                 };
-                let _ = atomic_write(&project_root.join(&completed), rollback_source);
+                if let Err(rollback) = write(&project_root.join(&completed), rollback_source) {
+                    rollback_errors.push(format!("{completed}: {rollback}"));
+                }
             }
-            return Err(format!("failed writing {}: {error}", path.display()));
+            let rollback = if rollback_errors.is_empty() {
+                String::new()
+            } else {
+                format!("; rollback incomplete: {}", rollback_errors.join("; "))
+            };
+            return Err(format!("failed writing {}: {error}{rollback}", path.display()));
         }
         written.push(change.file.clone());
     }
@@ -3490,6 +3655,33 @@ mod workshop_compile_plan_tests {
         path
     }
 
+    fn semantic_selector(
+        name: &str,
+        kind: WorkshopSourceItemKind,
+        file: &str,
+    ) -> WorkshopSymbolSelector {
+        WorkshopSymbolSelector {
+            name: name.to_string(),
+            kind: Some(kind),
+            file: Some(file.to_string()),
+            owner: None,
+            signature: None,
+        }
+    }
+
+    fn semantic_edit(
+        operation: WorkshopSemanticEditOperation,
+        target: WorkshopSymbolSelector,
+        new_source: Option<&str>,
+    ) -> WorkshopSemanticEdit {
+        WorkshopSemanticEdit {
+            operation,
+            target,
+            new_source: new_source.map(str::to_string),
+            expected_source_hash: None,
+        }
+    }
+
     #[test]
     fn workshop_compile_plan_uses_incremental_compiler_metrics() {
         let root = temp_project("initial");
@@ -3744,6 +3936,47 @@ mod workshop_compile_plan_tests {
     }
 
     #[test]
+    fn semantic_import_pruning_distinguishes_fields_from_receiver_calls() {
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: "import \"unused.stasis\";\nimport \"mixed.stasis\";\nimport \"combat.stasis\";\nenum Phase { Ready = 1 }\nstruct Player { value: i32; }\nglobal State { player: Player; }\nfunction main(): i32 { let value: i32 = 1; State.player.damage(1); return value; }\nfunction parameter(amount: i32): i32 { return amount; }\nfunction shadow(): i32 { let helper: i32 = 3; return helper; }\nfunction imported_call(): i32 { return helper(); }\n"
+                    .to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/unused.stasis".to_string(),
+                source: "function value(): i32 { return 9; }\nfunction amount(): i32 { return 7; }\nfunction Ready(): i32 { return 10; }\n"
+                    .to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/mixed.stasis".to_string(),
+                source: "function helper(): i32 { return 8; }\n".to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/combat.stasis".to_string(),
+                source: "function damage(self: Player, amount: i32): void {}\n".to_string(),
+            },
+        ];
+        let batch = WorkshopSemanticEditBatch {
+            schema_version: 1,
+            edits: vec![semantic_edit(
+                WorkshopSemanticEditOperation::Update,
+                semantic_selector("main", WorkshopSourceItemKind::Function, "src/main.stasis"),
+                Some("function main(): i32 { let value: i32 = 2; State.player.damage(2); return value; }"),
+            )],
+        };
+        let (after, _) = plan_workshop_semantic_edits(&files, &batch).expect("update main");
+        let source = &after
+            .iter()
+            .find(|file| file.path == "src/main.stasis")
+            .expect("main")
+            .source;
+        assert!(!source.contains("unused.stasis"));
+        assert!(source.contains("mixed.stasis"));
+        assert!(source.contains("combat.stasis"));
+    }
+
+    #[test]
     fn semantic_global_delete_removes_only_the_parser_selected_declaration() {
         let files = vec![WorkshopSourceFile {
             path: "src/main.stasis".to_string(),
@@ -3817,5 +4050,341 @@ mod workshop_compile_plan_tests {
             .expect_err("stale apply")
             .contains("expected current hash"));
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn semantic_item_hash_ignores_formatting_outside_the_item() {
+        let first = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "function main(): i32 { return tick(); }\n\n// Stable tick.\nfunction tick(): i32 { return 1; }\n"
+                .to_string(),
+        }];
+        let second = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "function main(): i32 {\n    return tick();\n}\n\n\n// Stable tick.\nfunction tick(): i32 { return 1; }\n\n"
+                .to_string(),
+        }];
+        let tick = |files: &[WorkshopSourceFile]| {
+            workshop_source_items(files)
+                .expect("items")
+                .into_iter()
+                .find(|item| item.kind == WorkshopSourceItemKind::Function && item.name == "tick")
+                .expect("tick")
+        };
+        let first_tick = tick(&first);
+        let second_tick = tick(&second);
+        assert_eq!(first_tick.source, second_tick.source);
+        assert_eq!(first_tick.source_hash, second_tick.source_hash);
+        assert_ne!(
+            workshop_source_hash(&first[0].source),
+            workshop_source_hash(&second[0].source)
+        );
+    }
+
+    #[test]
+    fn semantic_batch_reindexes_shifted_items_between_edits() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "function first(): i32 { return 1; }\nfunction second(): i32 { return 2; }\n"
+                .to_string(),
+        }];
+        let items = workshop_source_items(&files).expect("items");
+        let item_hash = |name: &str| {
+            items
+                .iter()
+                .find(|item| item.kind == WorkshopSourceItemKind::Function && item.name == name)
+                .expect("function item")
+                .source_hash
+                .clone()
+        };
+        let mut first = semantic_edit(
+            WorkshopSemanticEditOperation::Update,
+            semantic_selector("first", WorkshopSourceItemKind::Function, "src/main.stasis"),
+            Some("function first(): i32 {\n    return 11;\n}"),
+        );
+        first.expected_source_hash = Some(item_hash("first"));
+        let mut second = semantic_edit(
+            WorkshopSemanticEditOperation::Update,
+            semantic_selector(
+                "second",
+                WorkshopSourceItemKind::Function,
+                "src/main.stasis",
+            ),
+            Some("function second(): i32 { return 22; }"),
+        );
+        second.expected_source_hash = Some(item_hash("second"));
+        let (after, plan) = plan_workshop_semantic_edits(
+            &files,
+            &WorkshopSemanticEditBatch {
+                schema_version: 1,
+                edits: vec![first, second],
+            },
+        )
+        .expect("plan shifted edits");
+        assert!(after[0].source.contains("return 11;"));
+        assert!(after[0].source.contains("return 22;"));
+        assert_eq!(plan.changed_files.len(), 1);
+        assert_eq!(plan.edits.len(), 2);
+    }
+
+    #[test]
+    fn semantic_multi_file_preflight_prevents_partial_writes() {
+        let root = temp_project("semantic_preflight");
+        let first_path = write_project_file(
+            &root,
+            "src/first.stasis",
+            "function first(): i32 { return 1; }\n",
+        );
+        let second_path = write_project_file(
+            &root,
+            "src/second.stasis",
+            "function second(): i32 { return 2; }\n",
+        );
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/first.stasis".to_string(),
+                source: fs::read_to_string(&first_path).expect("first source"),
+            },
+            WorkshopSourceFile {
+                path: "src/second.stasis".to_string(),
+                source: fs::read_to_string(&second_path).expect("second source"),
+            },
+        ];
+        let (_, plan) = plan_workshop_semantic_edits(
+            &files,
+            &WorkshopSemanticEditBatch {
+                schema_version: 1,
+                edits: vec![
+                    semantic_edit(
+                        WorkshopSemanticEditOperation::Update,
+                        semantic_selector(
+                            "first",
+                            WorkshopSourceItemKind::Function,
+                            "src/first.stasis",
+                        ),
+                        Some("function first(): i32 { return 11; }"),
+                    ),
+                    semantic_edit(
+                        WorkshopSemanticEditOperation::Update,
+                        semantic_selector(
+                            "second",
+                            WorkshopSourceItemKind::Function,
+                            "src/second.stasis",
+                        ),
+                        Some("function second(): i32 { return 22; }"),
+                    ),
+                ],
+            },
+        )
+        .expect("multi-file plan");
+        fs::write(&second_path, "function second(): i32 { return 3; }\n")
+            .expect("make second stale");
+        assert!(write_workshop_semantic_plan(&root, &plan, false)
+            .expect_err("stale plan")
+            .contains("expected current hash"));
+        assert_eq!(
+            fs::read_to_string(&first_path).expect("unchanged first"),
+            "function first(): i32 { return 1; }\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn semantic_multi_file_write_reports_incomplete_rollback() {
+        let root = temp_project("semantic_rollback_failure");
+        write_project_file(
+            &root,
+            "src/first.stasis",
+            "function first(): i32 { return 1; }\n",
+        );
+        write_project_file(
+            &root,
+            "src/second.stasis",
+            "function second(): i32 { return 2; }\n",
+        );
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/first.stasis".to_string(),
+                source: "function first(): i32 { return 1; }\n".to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/second.stasis".to_string(),
+                source: "function second(): i32 { return 2; }\n".to_string(),
+            },
+        ];
+        let (_, plan) = plan_workshop_semantic_edits(
+            &files,
+            &WorkshopSemanticEditBatch {
+                schema_version: 1,
+                edits: vec![
+                    semantic_edit(
+                        WorkshopSemanticEditOperation::Update,
+                        semantic_selector(
+                            "first",
+                            WorkshopSourceItemKind::Function,
+                            "src/first.stasis",
+                        ),
+                        Some("function first(): i32 { return 11; }"),
+                    ),
+                    semantic_edit(
+                        WorkshopSemanticEditOperation::Update,
+                        semantic_selector(
+                            "second",
+                            WorkshopSourceItemKind::Function,
+                            "src/second.stasis",
+                        ),
+                        Some("function second(): i32 { return 22; }"),
+                    ),
+                ],
+            },
+        )
+        .expect("plan");
+        let mut writes = 0;
+        let error = write_workshop_semantic_plan_with(&root, &plan, false, |_, _| {
+            writes += 1;
+            match writes {
+                1 => Ok(()),
+                2 => Err("injected write failure".to_string()),
+                _ => Err("injected rollback failure".to_string()),
+            }
+        })
+        .expect_err("write and rollback fail");
+        assert!(error.contains("injected write failure"));
+        assert!(error.contains("rollback incomplete"));
+        assert!(error.contains("src/first.stasis: injected rollback failure"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn semantic_receipts_are_deterministic_and_reject_unsafe_directories() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "function main(): i32 { return 1; }\n".to_string(),
+        }];
+        let (_, plan) = plan_workshop_semantic_edits(
+            &files,
+            &WorkshopSemanticEditBatch {
+                schema_version: 1,
+                edits: vec![semantic_edit(
+                    WorkshopSemanticEditOperation::Update,
+                    semantic_selector("main", WorkshopSourceItemKind::Function, "src/main.stasis"),
+                    Some("function main(): i32 { return 2; }"),
+                )],
+            },
+        )
+        .expect("plan");
+        let root = temp_project("semantic_deterministic_receipt");
+        let first =
+            write_workshop_semantic_receipt(&root, Path::new("build/semantic-edits"), &plan)
+                .expect("first receipt");
+        let first_source = fs::read_to_string(root.join(&first)).expect("first receipt source");
+        let second =
+            write_workshop_semantic_receipt(&root, Path::new("build/semantic-edits"), &plan)
+                .expect("second receipt");
+        assert_eq!(first, second);
+        assert_eq!(
+            first_source,
+            fs::read_to_string(root.join(&second)).expect("second receipt source")
+        );
+        assert_eq!(workshop_source_hash("source").len(), 64);
+        assert!(
+            write_workshop_semantic_receipt(&root, Path::new("../outside"), &plan)
+                .expect_err("unsafe receipt directory")
+                .contains("unsafe semantic receipt directory")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn semantic_delete_preserves_crlf_neighbor_boundaries() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "// Remove me.\r\nfunction removed(): i32 { return 1; }\r\n// Keep me.\r\nfunction kept(): i32 { return 2; }\r\n"
+                .to_string(),
+        }];
+        let removed = workshop_source_items(&files)
+            .expect("items")
+            .into_iter()
+            .find(|item| item.kind == WorkshopSourceItemKind::Function && item.name == "removed")
+            .expect("removed item");
+        assert!(removed.source.ends_with("}\r\n"));
+        let (after, _) = plan_workshop_semantic_edits(
+            &files,
+            &WorkshopSemanticEditBatch {
+                schema_version: 1,
+                edits: vec![semantic_edit(
+                    WorkshopSemanticEditOperation::Delete,
+                    semantic_selector(
+                        "removed",
+                        WorkshopSourceItemKind::Function,
+                        "src/main.stasis",
+                    ),
+                    None,
+                )],
+            },
+        )
+        .expect("delete CRLF item");
+        assert_eq!(
+            after[0].source,
+            "// Keep me.\r\nfunction kept(): i32 { return 2; }\r\n"
+        );
+    }
+
+    #[test]
+    fn semantic_batch_adds_each_item_kind_without_span_overlap() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "function main(): i32 { return helper(); }\n".to_string(),
+        }];
+        let edits = vec![
+            semantic_edit(
+                WorkshopSemanticEditOperation::Add,
+                semantic_selector(
+                    "imports",
+                    WorkshopSourceItemKind::Imports,
+                    "src/main.stasis",
+                ),
+                Some("import \"external.stasis\";"),
+            ),
+            semantic_edit(
+                WorkshopSemanticEditOperation::Add,
+                semantic_selector(
+                    "globals",
+                    WorkshopSourceItemKind::Globals,
+                    "src/main.stasis",
+                ),
+                Some("const LIMIT: i32 = 3;"),
+            ),
+            semantic_edit(
+                WorkshopSemanticEditOperation::Add,
+                semantic_selector("Config", WorkshopSourceItemKind::Struct, "src/main.stasis"),
+                Some("// Configuration.\nstruct Config { value: i32; }"),
+            ),
+            semantic_edit(
+                WorkshopSemanticEditOperation::Add,
+                semantic_selector(
+                    "helper",
+                    WorkshopSourceItemKind::Function,
+                    "src/main.stasis",
+                ),
+                Some("// Helper.\nfunction helper(): i32 { return LIMIT; }"),
+            ),
+        ];
+        let (after, plan) = plan_workshop_semantic_edits(
+            &files,
+            &WorkshopSemanticEditBatch {
+                schema_version: 1,
+                edits,
+            },
+        )
+        .expect("add mixed items");
+        let source = &after[0].source;
+        assert!(source.starts_with("import \"external.stasis\";\nconst LIMIT: i32 = 3;\n"));
+        assert_eq!(source.matches("struct Config").count(), 1);
+        assert_eq!(source.matches("function helper").count(), 1);
+        assert_eq!(plan.edits.len(), 4);
+        let items = workshop_source_items(&after).expect("re-index added items");
+        assert!(items.iter().any(|item| item.name == "Config"));
+        assert!(items.iter().any(|item| item.name == "helper"));
     }
 }

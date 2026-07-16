@@ -409,3 +409,489 @@ fn semantic_symbol_cli_previews_applies_runs_and_reverts() {
 
     fs::remove_dir_all(&parent).ok();
 }
+
+#[test]
+fn semantic_symbol_cli_supports_inline_crud_and_stale_guards() {
+    let parent = temp_dir("semantic_inline");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    let created = stasis(&["new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(created.status.code(), Some(0));
+
+    let added = stasis(
+        &[
+            "--json",
+            "symbol",
+            "add",
+            "helper",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+            "--source",
+            "// Inline helper.\nfunction helper(): i32 { return 4; }",
+        ],
+        &project,
+    );
+    assert_eq!(
+        added.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let found = stasis(
+        &["--json", "symbol", "find", "helper", "--kind", "function"],
+        &project,
+    );
+    assert_eq!(found.status.code(), Some(0));
+    assert_eq!(
+        json_stdout(&found)["result"]["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let normalized_list = stasis(
+        &[
+            "--json",
+            "symbol",
+            "list",
+            "--kind",
+            "function",
+            "--file",
+            ".\\src\\main.stasis",
+        ],
+        &project,
+    );
+    assert_eq!(normalized_list.status.code(), Some(0));
+    assert!(json_stdout(&normalized_list)["result"]["items"]
+        .as_array()
+        .expect("normalized items")
+        .iter()
+        .any(|item| item["name"] == "helper"));
+
+    let read = stasis(
+        &[
+            "--json",
+            "symbol",
+            "read",
+            "helper",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+        ],
+        &project,
+    );
+    assert_eq!(read.status.code(), Some(0));
+    let read_json = json_stdout(&read);
+    assert!(read_json["result"]["item"]["source"]
+        .as_str()
+        .unwrap()
+        .starts_with("// Inline helper."));
+    let original_hash = read_json["result"]["item"]["source_hash"]
+        .as_str()
+        .expect("source hash")
+        .to_string();
+
+    let preview = stasis(
+        &[
+            "--json",
+            "symbol",
+            "update",
+            "helper",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+            "--source",
+            "function helper(): i32 {\n    return 5;\n}",
+            "--expected-source-hash",
+            &original_hash,
+            "--dry-run",
+        ],
+        &project,
+    );
+    assert_eq!(preview.status.code(), Some(0));
+    assert_eq!(json_stdout(&preview)["result"]["status"], "preview");
+    assert!(fs::read_to_string(project.join("src/main.stasis"))
+        .expect("preview source")
+        .contains("return 4;"));
+
+    fs::create_dir_all(project.join("edits")).expect("create edits");
+    fs::write(
+        project.join("edits/helper.stasis"),
+        "function helper(): i32 { return 6; }\n",
+    )
+    .expect("write helper source");
+    let conflicting_inputs = stasis(
+        &[
+            "--json",
+            "symbol",
+            "update",
+            "helper",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+            "--source",
+            "function helper(): i32 { return 5; }",
+            "--source-file",
+            "edits/helper.stasis",
+        ],
+        &project,
+    );
+    assert_eq!(conflicting_inputs.status.code(), Some(2));
+    assert_eq!(json_stderr(&conflicting_inputs)["code"], "usage_error");
+
+    let stale = stasis(
+        &[
+            "--json",
+            "symbol",
+            "update",
+            "helper",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+            "--source",
+            "function helper(): i32 { return 5; }",
+            "--expected-source-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ],
+        &project,
+    );
+    assert_eq!(stale.status.code(), Some(1));
+    assert!(json_stderr(&stale)["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("stale semantic edit target"));
+
+    let updated = stasis(
+        &[
+            "--json",
+            "symbol",
+            "update",
+            "helper",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+            "--source",
+            "function helper(): i32 { return 5; }",
+            "--expected-source-hash",
+            &original_hash,
+        ],
+        &project,
+    );
+    assert_eq!(updated.status.code(), Some(0));
+
+    let updated_read = stasis(
+        &["--json", "symbol", "read", "helper", "--kind", "function"],
+        &project,
+    );
+    let updated_json = json_stdout(&updated_read);
+    let updated_hash = updated_json["result"]["item"]["source_hash"]
+        .as_str()
+        .expect("updated hash")
+        .to_string();
+    assert!(updated_json["result"]["item"]["source"]
+        .as_str()
+        .unwrap()
+        .contains("return 5;"));
+
+    let deleted = stasis(
+        &[
+            "--json",
+            "symbol",
+            "delete",
+            "helper",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+            "--expected-source-hash",
+            &updated_hash,
+        ],
+        &project,
+    );
+    assert_eq!(deleted.status.code(), Some(0));
+    let delete_receipt = json_stdout(&deleted)["result"]["receipt"]
+        .as_str()
+        .expect("delete receipt")
+        .to_string();
+    assert!(!fs::read_to_string(project.join("src/main.stasis"))
+        .expect("deleted source")
+        .contains("function helper"));
+
+    let mut future_receipt: Value = serde_json::from_str(
+        &fs::read_to_string(project.join(&delete_receipt)).expect("read delete receipt"),
+    )
+    .expect("parse delete receipt");
+    future_receipt["schema_version"] = Value::from(2);
+    let future_receipt_path = project.join("future-receipt.json");
+    fs::write(
+        &future_receipt_path,
+        serde_json::to_string(&future_receipt).expect("serialize future receipt"),
+    )
+    .expect("write future receipt");
+    let unsupported = stasis(
+        &[
+            "--json",
+            "symbol",
+            "revert",
+            "--receipt",
+            "future-receipt.json",
+        ],
+        &project,
+    );
+    assert_eq!(unsupported.status.code(), Some(1));
+    assert!(json_stderr(&unsupported)["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("unsupported semantic edit receipt schema version 2"));
+    assert!(!fs::read_to_string(project.join("src/main.stasis"))
+        .expect("source after unsupported receipt")
+        .contains("function helper"));
+
+    let reverted = stasis(
+        &["--json", "symbol", "revert", "--receipt", &delete_receipt],
+        &project,
+    );
+    assert_eq!(reverted.status.code(), Some(0));
+    assert!(fs::read_to_string(project.join("src/main.stasis"))
+        .expect("reverted source")
+        .contains("return 5;"));
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
+fn semantic_symbol_cli_batch_apply_is_atomic_and_revertible() {
+    let parent = temp_dir("semantic_batch");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    let original_main = "import \"helper.stasis\";\nfunction main(): i32 { return helper(); }\n";
+    let original_helper = "function helper(): i32 { return 1; }\n";
+    fs::write(project.join("src/main.stasis"), original_main).expect("write main");
+    fs::write(project.join("src/helper.stasis"), original_helper).expect("write helper");
+    fs::create_dir_all(project.join("edits")).expect("create edits");
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "edits": [
+            {
+                "operation": "update",
+                "target": {
+                    "kind": "function",
+                    "file": "src/main.stasis",
+                    "name": "main"
+                },
+                "new_source": "// Batch main.\nfunction main(): i32 { return helper(); }"
+            },
+            {
+                "operation": "update",
+                "target": {
+                    "kind": "function",
+                    "file": "src/helper.stasis",
+                    "name": "helper"
+                },
+                "new_source": "function helper(): i32 { return 2; }"
+            }
+        ]
+    });
+    fs::write(
+        project.join("edits/batch.json"),
+        serde_json::to_vec_pretty(&request).expect("serialize request"),
+    )
+    .expect("write request");
+
+    let preview = stasis(
+        &[
+            "--json",
+            "symbol",
+            "apply",
+            "--request",
+            "edits/batch.json",
+            "--dry-run",
+            "--no-tests",
+        ],
+        &project,
+    );
+    assert_eq!(preview.status.code(), Some(0));
+    let preview_json = json_stdout(&preview);
+    assert_eq!(preview_json["result"]["status"], "preview");
+    assert_eq!(
+        preview_json["result"]["plan"]["changed_files"]
+            .as_array()
+            .expect("changed files")
+            .len(),
+        2
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/main.stasis")).expect("preview main"),
+        original_main
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/helper.stasis")).expect("preview helper"),
+        original_helper
+    );
+
+    let applied = stasis(
+        &[
+            "--json",
+            "symbol",
+            "apply",
+            "--request",
+            "edits/batch.json",
+            "--no-tests",
+        ],
+        &project,
+    );
+    assert_eq!(applied.status.code(), Some(0));
+    let receipt = json_stdout(&applied)["result"]["receipt"]
+        .as_str()
+        .expect("receipt")
+        .to_string();
+    assert!(fs::read_to_string(project.join("src/main.stasis"))
+        .expect("applied main")
+        .starts_with("import \"helper.stasis\";\n// Batch main."));
+    assert!(fs::read_to_string(project.join("src/helper.stasis"))
+        .expect("applied helper")
+        .contains("return 2;"));
+
+    let reverted = stasis(
+        &[
+            "--json",
+            "symbol",
+            "revert",
+            "--receipt",
+            &receipt,
+            "--no-tests",
+        ],
+        &project,
+    );
+    assert_eq!(reverted.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(project.join("src/main.stasis")).expect("reverted main"),
+        original_main
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/helper.stasis")).expect("reverted helper"),
+        original_helper
+    );
+
+    let invalid_request = serde_json::json!({
+        "schema_version": 1,
+        "edits": [
+            {
+                "operation": "update",
+                "target": {"kind": "function", "file": "src/main.stasis", "name": "main"},
+                "new_source": "function main(): i32 { return 9; }"
+            },
+            {
+                "operation": "update",
+                "target": {"kind": "function", "file": "src/helper.stasis", "name": "missing"},
+                "new_source": "function missing(): i32 { return 9; }"
+            }
+        ]
+    });
+    fs::write(
+        project.join("edits/invalid-batch.json"),
+        serde_json::to_vec_pretty(&invalid_request).expect("serialize invalid request"),
+    )
+    .expect("write invalid request");
+    let invalid = stasis(
+        &[
+            "--json",
+            "symbol",
+            "apply",
+            "--request",
+            "edits/invalid-batch.json",
+            "--no-tests",
+        ],
+        &project,
+    );
+    assert_eq!(invalid.status.code(), Some(1));
+    assert_eq!(
+        fs::read_to_string(project.join("src/main.stasis")).expect("atomic main"),
+        original_main
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/helper.stasis")).expect("atomic helper"),
+        original_helper
+    );
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
+fn semantic_symbol_cli_reapplies_edit_when_revert_tests_fail() {
+    let parent = temp_dir("semantic_revert_failure");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    let rejected_source = "function main(): i32 { return 1; }\n";
+    let accepted_source = "function main(): i32 { return 0; }\n";
+    fs::write(project.join("src/main.stasis"), rejected_source).expect("write rejected source");
+    fs::write(
+        project.join("tests/main.test.stasis"),
+        "import \"../src/main.stasis\";\ntest `main remains zero`(): bool { return main() == 0; }\n",
+    )
+    .expect("write behavioral test");
+
+    let applied = stasis(
+        &[
+            "--json",
+            "symbol",
+            "update",
+            "main",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+            "--source",
+            "function main(): i32 { return 0; }",
+        ],
+        &project,
+    );
+    assert_eq!(
+        applied.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let receipt = json_stdout(&applied)["result"]["receipt"]
+        .as_str()
+        .expect("receipt")
+        .to_string();
+    assert_eq!(
+        fs::read_to_string(project.join("src/main.stasis")).expect("accepted source"),
+        accepted_source
+    );
+
+    let reverted = stasis(
+        &["--json", "symbol", "revert", "--receipt", &receipt],
+        &project,
+    );
+    assert_eq!(reverted.status.code(), Some(1));
+    assert!(json_stderr(&reverted)["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("edited sources were reapplied"));
+    assert_eq!(
+        fs::read_to_string(project.join("src/main.stasis")).expect("reapplied source"),
+        accepted_source
+    );
+    fs::remove_dir_all(parent).ok();
+}
