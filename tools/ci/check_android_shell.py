@@ -41,6 +41,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopRestartLoopPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiSessionCheckpointStore.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiResumePolicy.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/PublishedSpriteCatalog.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
@@ -223,6 +225,8 @@ def main() -> int:
     crash_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java")
     ai_queue = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java")
     ai_transaction = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiTransactionStore.java")
+    ai_checkpoint = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiSessionCheckpointStore.java")
+    ai_resume_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiResumePolicy.java")
     verification_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiVerificationPolicy.java")
     verification_runner = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiVerificationRunner.java")
     temporary_verification = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiTemporaryVerification.java")
@@ -363,6 +367,7 @@ def main() -> int:
     assert "writeSyncedAtomic" not in ai_queue or "getFD().sync()" in ai_queue
     assert "StandardCopyOption.ATOMIC_MOVE" in ai_queue
     assert "recoverInterrupted" in ai_queue
+    assert "retryTerminal" in ai_queue
     assert 'put("phase", phase)' in ai_queue
     assert "AndroidAiQueue.updatePhase" in activity
     assert "AndroidAiTransactionStore.save" in activity
@@ -389,8 +394,18 @@ def main() -> int:
     assert "pruneOrphanPreviews" in ai_queue
     assert "removeOldestTerminal" in ai_queue
     assert "AiQueuePolicy.terminal(state)" in ai_queue
-    assert "!AndroidAiQueue.PENDING.equals(item.state)" in activity
-    assert "&& !AndroidAiQueue.IN_PROGRESS.equals(item.state)" in activity
+    assert 'retry.setText("Fresh Retry")' in activity
+    assert "retryTerminalAiItem" in activity
+    assert "AndroidAiSessionCheckpointStore.save" in activity
+    assert "WorkshopAiResumePolicy.PROVIDER_IN_FLIGHT" in activity
+    assert "if (checkpoint == null && snapshot != null)" not in activity
+    assert "if (snapshot != null) {\n                WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);" in activity
+    assert 'put("usage", usage.checkpointJson())' in activity
+    assert 'ROOT = "workshop_ai_sessions"' in ai_checkpoint
+    assert "MAX_BYTES = 8 * 1024 * 1024" in ai_checkpoint
+    assert "StandardCopyOption.ATOMIC_MOVE" in ai_checkpoint
+    assert "paid provider call may have completed" in ai_resume_policy
+    assert "will not be replayed" in ai_resume_policy
     assert "encodeBitmapPng" in activity
     assert "queuedEntry.previewFile" in activity
     assert "nextPendingIndex" in ai_queue_policy
@@ -783,10 +798,10 @@ def main() -> int:
     assert "Manual Symbols and Source" in activity
     assert "Go to Diagnostic" in activity
     assert "captureFirstTestFailureDiagnostic" in activity
-    assert "sourceOffsetForLine" in activity
-    assert 'diagnosticStatus.setText("Test failure' in activity
+    assert "WorkshopSourceDiagnostic.sourceOffset" in activity
+    assert 'applySourceDiagnostic(diagnostic, "Test failure")' in activity
     assert 'result.optInt("line", 0)' in activity
-    assert "sourceEditor.setSelection(symbolOffset)" in activity
+    assert "sourceEditor.setSelection(symbolOffset, symbolEnd)" in activity
     assert "Undo Failed Apply" in activity
     assert "Recovery History" in activity
     assert "Failed Apply History" in activity

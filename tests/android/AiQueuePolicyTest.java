@@ -23,8 +23,14 @@ public final class AiQueuePolicyTest {
         require(AiQueuePolicy.nextPendingIndex("gamma",
                 new String[] { "alpha" }, new String[] { "pending" }) == -1,
                 "another project is never claimed");
-        require("failed".equals(AiQueuePolicy.recoveredState("in_progress")), "interrupted item fails explicitly");
-        require("pending".equals(AiQueuePolicy.recoveredState("pending")), "pending item survives recovery");
+        require("failed".equals(AiQueuePolicy.recoveredState("in_progress", false)),
+                "unsafe interrupted item fails explicitly");
+        require("pending".equals(AiQueuePolicy.recoveredState("in_progress", true)),
+                "safe interrupted item resumes through FIFO");
+        require("pending".equals(AiQueuePolicy.recoveredState("pending", false)),
+                "pending item survives recovery");
+        require(AiQueuePolicy.retryNeedsNewPreview(true), "terminal preview retry requires new consent");
+        require(!AiQueuePolicy.retryNeedsNewPreview(false), "non-preview terminal item can retry");
         System.out.println("android AI queue policy ok");
     }
 

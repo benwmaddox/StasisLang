@@ -15,6 +15,7 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 final class AndroidAiQueue {
@@ -152,6 +153,30 @@ final class AndroidAiQueue {
                 WorkshopAiRunPhase.CANCELLED, "Cancelled before execution");
     }
 
+    static synchronized Entry retryTerminal(Context context, Entry terminal) throws Exception {
+        if (terminal == null || !AiQueuePolicy.terminal(terminal.state)) {
+            throw new IllegalArgumentException("only a terminal AI queue item can be retried");
+        }
+        if (AiQueuePolicy.retryNeedsNewPreview(!terminal.previewFile.isEmpty())) {
+            throw new IllegalStateException("Fresh Retry requires a new preview because the original consented pixels were deleted at terminal cleanup");
+        }
+        Entry retried = enqueue(context, terminal.projectId, terminal.source, terminal.prompt,
+                terminal.imageAttachments, terminal.logicalSnapshot, terminal.imageGeneration,
+                null, 0, 0);
+        JSONObject document = loadDocument(context, terminal.projectId);
+        JSONArray items = document.getJSONArray("items");
+        for (int index = 0; index < items.length(); index += 1) {
+            Entry item = Entry.fromJson(items.getJSONObject(index), terminal.projectId);
+            if (!retried.id.equals(item.id)) continue;
+            retried = item.withPhase(WorkshopAiRunPhase.QUEUED.wireValue(),
+                    "Fresh retry of " + terminal.id + "; project, attachments, provider, and budget will be revalidated");
+            items.put(index, retried.toJson());
+            writeDocument(context, terminal.projectId, document);
+            return retried;
+        }
+        throw new IllegalStateException("fresh retry could not be recorded");
+    }
+
     static synchronized boolean finish(Context context, String projectId, String itemId,
             String terminalState, String detail) throws Exception {
         WorkshopAiRunPhase phase = COMPLETED.equals(terminalState) ? WorkshopAiRunPhase.VERIFIED
@@ -189,16 +214,20 @@ final class AndroidAiQueue {
         return false;
     }
 
-    static synchronized int recoverInterrupted(Context context, String projectId) throws Exception {
+    static synchronized int recoverInterrupted(Context context, String projectId,
+            Set<String> resumableItemIds) throws Exception {
         JSONObject document = loadDocument(context, projectId);
         JSONArray items = document.getJSONArray("items");
         int recovered = 0;
         for (int index = 0; index < items.length(); index += 1) {
             Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
-            String recoveredState = AiQueuePolicy.recoveredState(entry.state);
+            String recoveredState = AiQueuePolicy.recoveredState(entry.state,
+                    resumableItemIds != null && resumableItemIds.contains(entry.id));
             if (entry.state.equals(recoveredState)) continue;
-            items.put(index, entry.withState(recoveredState,
-                    "Interrupted before the compile/test boundary completed; submit again to retry").toJson());
+            String detail = PENDING.equals(recoveredState)
+                    ? "Interrupted session has a safe checkpoint and will resume without replaying completed calls or tool batches"
+                    : "Continuation is unsafe; use Fresh Retry to start a new budget-checked run";
+            items.put(index, entry.withState(recoveredState, detail).toJson());
             recovered += 1;
         }
         if (recovered > 0) {
@@ -235,12 +264,20 @@ final class AndroidAiQueue {
         }
         File[] files = file.getParentFile().listFiles();
         if (files != null) for (File candidate : files) {
-            if (candidate.isFile() && candidate.getName().startsWith(projectId + "-")
-                    && (candidate.getName().endsWith(".png") || candidate.getName().endsWith(".png.tmp"))
+            if (candidate.isFile() && projectPreviewName(candidate.getName(), projectId)
                     && !candidate.delete() && candidate.exists()) {
                 throw new IllegalStateException("project AI preview queue erase failed");
             }
         }
+    }
+
+    private static boolean projectPreviewName(String name, String projectId) {
+        String prefix = projectId + "-";
+        String suffix = name.endsWith(".png.tmp") ? ".png.tmp"
+                : (name.endsWith(".png") ? ".png" : "");
+        if (suffix.isEmpty() || name.length() != prefix.length() + 36 + suffix.length()) return false;
+        return name.startsWith(prefix)
+                && name.substring(prefix.length(), prefix.length() + 36).matches("[0-9a-f-]{36}");
     }
 
     private static boolean transition(Context context, String projectId, String itemId,
@@ -474,11 +511,12 @@ final class AndroidAiQueue {
         }
 
         Entry withState(String nextState, String nextDetail) {
-            String nextPhase = IN_PROGRESS.equals(nextState)
-                    ? WorkshopAiRunPhase.PREPARING.wireValue()
+            String nextPhase = PENDING.equals(nextState)
+                    ? WorkshopAiRunPhase.QUEUED.wireValue()
+                    : (IN_PROGRESS.equals(nextState) ? WorkshopAiRunPhase.PREPARING.wireValue()
                     : (COMPLETED.equals(nextState) ? WorkshopAiRunPhase.VERIFIED.wireValue()
                             : (CANCELLED.equals(nextState) ? WorkshopAiRunPhase.CANCELLED.wireValue()
-                                    : WorkshopAiRunPhase.FAILED.wireValue()));
+                                    : WorkshopAiRunPhase.FAILED.wireValue())));
             return new Entry(id, projectId, source, prompt, createdAtMs, nextState, nextPhase, imageAttachments,
                     logicalSnapshot, imageGeneration, nextDetail == null ? "" : nextDetail,
                     previewFile, previewWidth, previewHeight, previewBytes, previewSha256);
@@ -543,6 +581,18 @@ final class AndroidAiQueue {
                             : new JSONObject(json.getJSONObject("logical_snapshot").toString()),
                     json.optBoolean("image_generation", false), json.optString("detail", ""),
                     previewFile, previewWidth, previewHeight, previewBytes, previewSha256);
+        }
+
+        String requestFingerprint() throws Exception {
+            JSONObject request = new JSONObject().put("project_id", projectId)
+                    .put("source", source).put("prompt", prompt)
+                    .put("image_attachments", new JSONArray(imageAttachments.toString()))
+                    .put("image_generation", imageGeneration)
+                    .put("preview_sha256", previewSha256);
+            if (logicalSnapshot != null) {
+                request.put("logical_snapshot", new JSONObject(logicalSnapshot.toString()));
+            }
+            return sha256(request.toString().getBytes(StandardCharsets.UTF_8));
         }
 
         private static String defaultPhaseForState(String state) {
