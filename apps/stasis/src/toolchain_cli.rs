@@ -1,9 +1,15 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use rustyline::completion::{Completer, Pair};
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::Validator;
+use rustyline::{Context, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stasis::{
-    run_jit_tests_in_directory_with_session, run_play_in_process,
-    run_self_host_aot_cli_with_options, StasisTestRunSession,
+    run_jit_tests_in_directory_with_session, run_live_in_process, run_play_in_process,
+    run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
 };
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::workshop::{
@@ -13,11 +19,18 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
     WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
+use stasis_runner::live::{
+    live_session, CompletionItem, LiveCommand, LiveRequest, LiveResponse, TerminalBuffer,
+    TerminalInput,
+};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::io::{self, BufRead};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
@@ -102,6 +115,15 @@ enum ToolchainCommand {
         /// Explicitly select the headless runtime (currently the default).
         #[arg(long)]
         headless: bool,
+        /// Keep the graphical game running while accepting live workspace commands.
+        #[arg(long, conflicts_with_all = ["watch", "headless"])]
+        interactive: bool,
+        /// Read interactive commands from a deterministic script instead of stdin.
+        #[arg(long, value_name = "PATH", requires = "interactive")]
+        live_script: Option<PathBuf>,
+        /// Emit versioned live response envelopes as JSON lines.
+        #[arg(long, requires = "interactive")]
+        live_json: bool,
     },
     /// Build the project for development or as a release executable.
     Build {
@@ -524,8 +546,20 @@ fn execute(
                 ToolchainCommand::Run {
                     watch,
                     headless,
+                    interactive,
+                    live_script,
+                    live_json,
                 } => {
-                    if watch && json_output {
+                    if interactive && json_output {
+                        Err("--json cannot be combined with --interactive; use --live-json for the response stream".to_string())
+                    } else if interactive {
+                        validate_optional_workspace_path(
+                            &workspace,
+                            "live script",
+                            live_script.as_deref(),
+                        )?;
+                        run_workspace_live(&workspace, live_script.as_deref(), live_json)
+                    } else if watch && json_output {
                         Err("--json cannot be combined with --watch; watch mode is an unbounded event stream".to_string())
                     } else if watch && headless {
                         Err("--headless cannot be combined with --watch; watch mode uses the graphical hot-swap runner".to_string())
@@ -807,6 +841,596 @@ fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
         "graphical watch session ended",
         json!({"backend": "jit", "headless": false, "watch": true}),
     ))
+}
+
+fn run_workspace_live(
+    workspace: &Workspace,
+    script: Option<&Path>,
+    json_lines: bool,
+) -> Result<CommandResult, String> {
+    let entry = workspace.root.join(&workspace.manifest.entry);
+    let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
+    let script = script.map(|path| workspace.root.join(path));
+    let terminal = thread::spawn(move || run_live_terminal(client, script.as_deref(), json_lines));
+    let config = LiveRunConfig::new(
+        workspace.root.clone(),
+        PathBuf::from(&workspace.manifest.entry),
+        PathBuf::from(&workspace.manifest.output),
+    );
+    let run_result =
+        run_live_in_process(&entry, Some(&workspace.root), 16_000, None, server, config);
+    if !terminal.is_finished() {
+        return match run_result {
+            Ok(()) => Err("live runner ended before the terminal session completed".to_string()),
+            Err(error) => Err(error),
+        };
+    }
+    let terminal_result = terminal
+        .join()
+        .map_err(|_| "live terminal thread panicked".to_string())?;
+    run_result?;
+    terminal_result?;
+    Ok(CommandResult::success(
+        "interactive live session ended",
+        json!({"backend": "jit", "headless": false, "interactive": true}),
+    ))
+}
+
+struct LiveLineHelper {
+    items: Vec<CompletionItem>,
+}
+
+impl Helper for LiveLineHelper {}
+impl Highlighter for LiveLineHelper {}
+impl Validator for LiveLineHelper {}
+impl Hinter for LiveLineHelper {
+    type Hint = String;
+}
+
+impl Completer for LiveLineHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        position: usize,
+        _context: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let mut position = position.min(line.len());
+        while !line.is_char_boundary(position) {
+            position -= 1;
+        }
+        let start = line[..position]
+            .rfind(|character: char| {
+                character.is_whitespace() || character == '(' || character == ','
+            })
+            .map_or(0, |index| index + 1);
+        let prefix = &line[start..position];
+        let candidates = self
+            .items
+            .iter()
+            .filter(|item| item.text.starts_with(prefix))
+            .map(|item| Pair {
+                display: format!("{}  {}", item.text, item.detail),
+                replacement: item.text.clone(),
+            })
+            .collect();
+        Ok((start, candidates))
+    }
+}
+
+fn run_live_terminal(
+    client: stasis_runner::live::LiveSessionClient,
+    script: Option<&Path>,
+    json_lines: bool,
+) -> Result<(), String> {
+    let result = run_live_terminal_inner(&client, script, json_lines);
+    if result.is_err() {
+        let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
+    }
+    result
+}
+
+fn run_live_terminal_inner(
+    client: &stasis_runner::live::LiveSessionClient,
+    script: Option<&Path>,
+    json_lines: bool,
+) -> Result<(), String> {
+    let mut terminal = TerminalBuffer::new();
+    let mut saw_quit = false;
+    let mut script_failure = None;
+    if let Some(script) = script {
+        let file = fs::File::open(script)
+            .map_err(|error| format!("failed to open live script {}: {error}", script.display()))?;
+        for line in io::BufReader::new(file).lines() {
+            let line = line.map_err(|error| format!("failed reading live script: {error}"))?;
+            if let TerminalInput::Request(request) = terminal.feed_line(&line)? {
+                saw_quit |= matches!(&request.command, LiveCommand::Quit);
+                let request_id = request.request_id;
+                if !submit_and_print_live_response(client, request, json_lines, true)?
+                    && script_failure.is_none()
+                {
+                    script_failure = Some(format!("live request {request_id} failed"));
+                }
+            }
+        }
+        if terminal.cancel_pending() {
+            return Err(
+                "live script ended with unfinished multiline input; add :end or :abort".to_string(),
+            );
+        }
+    } else {
+        println!("Stasis live workspace (:help, :quit, Tab completion, Ctrl-C cancels multiline)");
+        let mut editor = Editor::<LiveLineHelper, DefaultHistory>::new()
+            .map_err(|error| format!("failed initializing live line editor: {error}"))?;
+        editor.set_helper(Some(LiveLineHelper { items: Vec::new() }));
+        let mut prompt = "stasis> ";
+        let mut completion_request_id = 1u64 << 63;
+        loop {
+            if let Ok(items) = fetch_live_completions(client, completion_request_id, json_lines) {
+                if let Some(helper) = editor.helper_mut() {
+                    helper.items = items;
+                }
+            }
+            completion_request_id = completion_request_id.saturating_add(1);
+            let line = match editor.readline(prompt) {
+                Ok(line) => line,
+                Err(rustyline::error::ReadlineError::Interrupted) => {
+                    if terminal.cancel_pending() {
+                        println!("multiline command canceled");
+                        prompt = "stasis> ";
+                    }
+                    continue;
+                }
+                Err(rustyline::error::ReadlineError::Eof) => break,
+                Err(error) => return Err(format!("failed reading live terminal: {error}")),
+            };
+            let _ = editor.add_history_entry(line.as_str());
+            match terminal.feed_line(&line)? {
+                TerminalInput::Continue { prompt: next } => {
+                    prompt = next;
+                    continue;
+                }
+                TerminalInput::Request(request) => {
+                    prompt = "stasis> ";
+                    saw_quit |= matches!(&request.command, LiveCommand::Quit);
+                    submit_and_print_live_response(client, request, json_lines, false)?;
+                    if saw_quit {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if !saw_quit {
+        submit_and_print_live_response(
+            client,
+            LiveRequest::new(u64::MAX, LiveCommand::Quit),
+            json_lines,
+            true,
+        )?;
+    }
+    match script_failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn fetch_live_completions(
+    client: &stasis_runner::live::LiveSessionClient,
+    request_id: u64,
+    json_lines: bool,
+) -> Result<Vec<CompletionItem>, String> {
+    client.submit(LiveRequest::new(
+        request_id,
+        LiveCommand::Complete {
+            buffer: String::new(),
+            cursor: 0,
+            limit: 256,
+        },
+    ))?;
+    loop {
+        let response = client.receive_timeout(Duration::from_secs(5))?;
+        if response.request_id != request_id {
+            print_live_response(&response, json_lines)?;
+            continue;
+        }
+        if !response.ok {
+            return Err(response
+                .error
+                .unwrap_or_else(|| "live completion failed".to_string()));
+        }
+        return serde_json::from_value(
+            response
+                .data
+                .and_then(|data| data.get("items").cloned())
+                .unwrap_or_else(|| json!([])),
+        )
+        .map_err(|error| format!("invalid live completion response: {error}"));
+    }
+}
+
+fn submit_and_print_live_response(
+    client: &stasis_runner::live::LiveSessionClient,
+    request: LiveRequest,
+    json_lines: bool,
+    wait_for_preparation: bool,
+) -> Result<bool, String> {
+    let request_id = request.request_id;
+    client.submit(request)?;
+    loop {
+        let response = client.receive_timeout(Duration::from_secs(300))?;
+        let request_succeeded = response.ok;
+        print_live_response(&response, json_lines)?;
+        if response.request_id == request_id {
+            if wait_for_preparation && response.kind == "edit_preparing" {
+                continue;
+            }
+            return Ok(request_succeeded);
+        }
+    }
+}
+
+fn print_live_response(response: &LiveResponse, json_lines: bool) -> Result<(), String> {
+    if json_lines {
+        println!(
+            "{}",
+            serde_json::to_string(response)
+                .map_err(|error| format!("failed serializing live response: {error}"))?
+        );
+    } else if response.ok {
+        println!("{}", format_live_response(response));
+    } else {
+        eprintln!("{}", format_live_response(response));
+    }
+    Ok(())
+}
+
+fn format_live_response(response: &LiveResponse) -> String {
+    if !response.ok {
+        return format!(
+            "error: {}",
+            response.error.as_deref().unwrap_or("unknown live error")
+        );
+    }
+    let data = response.data.as_ref().unwrap_or(&Value::Null);
+    match response.kind.as_str() {
+        "help" => format_live_help(data),
+        "status" => format_live_status(data),
+        "paused" => "paused".to_string(),
+        "resumed" => "running".to_string(),
+        "step_scheduled" => format!(
+            "step scheduled: {} tick(s)",
+            data.get("ticks").and_then(Value::as_u64).unwrap_or(0)
+        ),
+        "quitting" => "session closed".to_string(),
+        "cancellation_requested" => format!(
+            "cancel requested for #{}{}",
+            data.get("request_id").and_then(Value::as_u64).unwrap_or(0),
+            if data
+                .get("background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                " (background edit)"
+            } else {
+                ""
+            }
+        ),
+        "symbols" => format_live_symbols(data),
+        "symbol" => format_live_symbol(data),
+        "completion" => format_live_completion(data),
+        "inspection" => format!(
+            "{}: {} = {}",
+            string_field(data, "path", "value"),
+            string_field(data, "static_type", "unknown"),
+            scalar_text(data.get("value").unwrap_or(&Value::Null))
+        ),
+        "print" => format!(
+            "{} = {}",
+            string_field(data, "static_type", "value"),
+            scalar_text(data.get("value").unwrap_or(&Value::Null))
+        ),
+        "watch_added" => format!(
+            "watching {} = {}",
+            string_field(data, "path", "value"),
+            scalar_text(data.get("value").unwrap_or(&Value::Null))
+        ),
+        "watch" => format!(
+            "{} -> {}",
+            string_field(data, "path", "value"),
+            scalar_text(data.get("value").unwrap_or(&Value::Null))
+        ),
+        "watch_removed" => format_live_watch_removed(data),
+        "watch_backpressure" => format!(
+            "watch output dropped {} event(s)",
+            data.get("dropped_events")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ),
+        "mutation_preview" => format_live_mutation(data, "preview"),
+        "mutation_committed" => format_live_mutation(data, "set"),
+        "transaction_preview" => format_live_transaction(data, "preview"),
+        "transaction_committed" => format_live_transaction(data, "committed"),
+        "cell_saved" => format!(
+            "saved scratch cell '{}'",
+            string_field(data, "name", "unnamed")
+        ),
+        "cells" => format_live_cells(data),
+        "cells_cleared" => match data.get("name").and_then(Value::as_str) {
+            Some(name) => format!("cleared scratch cell '{name}'"),
+            None => "cleared all scratch cells".to_string(),
+        },
+        "edit_preparing" => format!(
+            "preparing edit #{}...",
+            data.get("request_id").and_then(Value::as_u64).unwrap_or(0)
+        ),
+        "edit_preview" => format!("preview ready: {}", format_live_plan(data)),
+        "edit_applied" => format!(
+            "applied: {} (tests {})",
+            format_live_plan(data),
+            string_field(data, "tests", "unknown")
+        ),
+        "edit_undone" => format!(
+            "undo complete (tests {})",
+            string_field(data, "tests", "unknown")
+        ),
+        "edit_redone" => format!(
+            "redo complete (tests {})",
+            string_field(data, "tests", "unknown")
+        ),
+        "changes" => format_live_changes(data),
+        kind => kind.to_string(),
+    }
+}
+
+fn string_field<'a>(data: &'a Value, name: &str, fallback: &'a str) -> &'a str {
+    data.get(name).and_then(Value::as_str).unwrap_or(fallback)
+}
+
+fn scalar_text(value: &Value) -> String {
+    let value = value.get("value").unwrap_or(value);
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        _ => "<structured value>".to_string(),
+    }
+}
+
+fn format_live_help(data: &Value) -> String {
+    let commands = data
+        .get("commands")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut lines = vec!["Commands:".to_string()];
+    for group in commands.chunks(3) {
+        lines.push(format!(
+            "  {}",
+            group
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("  ")
+        ));
+    }
+    lines.push("Multiline: :end to submit; :abort or Ctrl-C to cancel.".to_string());
+    lines.join("\n")
+}
+
+fn format_live_status(data: &Value) -> String {
+    let state = if data.get("paused").and_then(Value::as_bool).unwrap_or(false) {
+        "paused"
+    } else {
+        "running"
+    };
+    let cursor = data
+        .get("history_cursor")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let history = data
+        .get("history_length")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let watches = string_array(data.get("watches"));
+    let cells = data
+        .get("scratch_cells")
+        .and_then(Value::as_array)
+        .map(|cells| {
+            cells
+                .iter()
+                .filter_map(|cell| cell.get("name").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let mut line = format!("{state} | edits {cursor}/{history}");
+    if !watches.is_empty() {
+        line.push_str(&format!(" | watches {watches}"));
+    }
+    if !cells.is_empty() {
+        line.push_str(&format!(" | cells {cells}"));
+    }
+    if let Some(request) = data.get("preparing_request_id").and_then(Value::as_u64) {
+        line.push_str(&format!(" | preparing #{request}"));
+    }
+    line
+}
+
+fn string_array(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
+}
+
+fn format_live_symbols(data: &Value) -> String {
+    let total = data.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let page = data.get("page").and_then(Value::as_u64).unwrap_or(0);
+    let mut lines = vec![format!("{total} symbol(s), page {page}:")];
+    if let Some(items) = data.get("items").and_then(Value::as_array) {
+        for item in items {
+            lines.push(format!(
+                "  {}  [{}]",
+                string_field(item, "signature", string_field(item, "name", "unnamed")),
+                string_field(item, "file", "unknown file")
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn format_live_symbol(data: &Value) -> String {
+    let header = format!(
+        "{}  [{}]",
+        string_field(data, "signature", string_field(data, "name", "unnamed")),
+        string_field(data, "file", "unknown file")
+    );
+    match data.get("source").and_then(Value::as_str) {
+        Some(source) => format!("{header}\n{}", source.trim()),
+        None => header,
+    }
+}
+
+fn format_live_completion(data: &Value) -> String {
+    let mut lines = Vec::new();
+    if let Some(items) = data.get("items").and_then(Value::as_array) {
+        for item in items {
+            lines.push(format!(
+                "{}  {}  {}",
+                string_field(item, "text", ""),
+                string_field(item, "kind", ""),
+                string_field(item, "detail", "")
+            ));
+        }
+    }
+    if lines.is_empty() {
+        "no completions".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn format_live_watch_removed(data: &Value) -> String {
+    let watches = string_array(data.get("watches"));
+    if watches.is_empty() {
+        "no active watches".to_string()
+    } else {
+        format!("active watches: {watches}")
+    }
+}
+
+fn format_live_mutation(data: &Value, action: &str) -> String {
+    format!(
+        "{action} {}: {} -> {} ({})",
+        string_field(data, "path", "value"),
+        scalar_text(data.get("old").unwrap_or(&Value::Null)),
+        scalar_text(data.get("new").unwrap_or(&Value::Null)),
+        string_field(data, "static_type", "unknown")
+    )
+}
+
+fn format_live_transaction(data: &Value, action: &str) -> String {
+    let transaction = data.get("result").unwrap_or(data);
+    let name = data.get("name").and_then(Value::as_str);
+    let mut lines = vec![match name {
+        Some(name) => format!("scratch '{name}' {action}:"),
+        None => format!("transaction {action}:"),
+    }];
+    if let Some(mutations) = transaction.get("mutations").and_then(Value::as_array) {
+        for mutation in mutations {
+            lines.push(format!(
+                "  {}: {} -> {} ({})",
+                string_field(mutation, "path", "value"),
+                scalar_text(mutation.get("old").unwrap_or(&Value::Null)),
+                scalar_text(mutation.get("new").unwrap_or(&Value::Null)),
+                string_field(mutation, "static_type", "unknown")
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn format_live_cells(data: &Value) -> String {
+    let Some(cells) = data.get("cells").and_then(Value::as_array) else {
+        return "no scratch cells".to_string();
+    };
+    if cells.is_empty() {
+        return "no scratch cells".to_string();
+    }
+    cells
+        .iter()
+        .map(|cell| string_field(cell, "name", "unnamed").to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_live_plan(data: &Value) -> String {
+    let plan = data.get("plan").unwrap_or(data);
+    let file_count = plan
+        .get("changed_files")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let symbols = plan
+        .pointer("/reload/changed_symbols")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("name").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let reload = plan
+        .pointer("/reload/expected_reload")
+        .and_then(Value::as_str)
+        .unwrap_or("reload unknown");
+    if symbols.is_empty() {
+        format!("{file_count} file(s), {reload}")
+    } else {
+        format!("{symbols}; {file_count} file(s), {reload}")
+    }
+}
+
+fn format_live_changes(data: &Value) -> String {
+    let cursor = data.get("cursor").and_then(Value::as_u64).unwrap_or(0);
+    let Some(entries) = data.get("entries").and_then(Value::as_array) else {
+        return "no semantic edit history".to_string();
+    };
+    if entries.is_empty() {
+        return "no semantic edit history".to_string();
+    }
+    let mut lines = vec![format!(
+        "edit history ({cursor}/{} applied):",
+        entries.len()
+    )];
+    for entry in entries {
+        let index = entry.get("index").and_then(Value::as_u64).unwrap_or(0);
+        let marker = if entry
+            .get("applied")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "*"
+        } else {
+            " "
+        };
+        let files = entry
+            .get("changed_files")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        lines.push(format!(" {marker} #{index}: {files} file(s)"));
+    }
+    lines.join("\n")
 }
 
 fn build_workspace(
@@ -1958,6 +2582,125 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_line_helper_completes_current_token_with_compiler_detail() {
+        let helper = LiveLineHelper {
+            items: vec![CompletionItem {
+                text: "tick".into(),
+                kind: "function".into(),
+                detail: "tick(): i32".into(),
+            }],
+        };
+        let history = DefaultHistory::new();
+        let context = Context::new(&history);
+        let (start, matches) = helper
+            .complete(":read ti", 8, &context)
+            .expect("completion");
+        assert_eq!(start, 6);
+        assert_eq!(matches[0].replacement, "tick");
+        assert!(matches[0].display.contains("tick(): i32"));
+    }
+
+    #[test]
+    fn human_live_output_formats_scalars_without_json_envelopes() {
+        let response = LiveResponse::success(
+            7,
+            42,
+            "inspection",
+            json!({
+                "path": "player.score",
+                "static_type": "i32",
+                "value": {"type": "i32", "value": 12}
+            }),
+        );
+        assert_eq!(format_live_response(&response), "player.score: i32 = 12");
+    }
+
+    #[test]
+    fn human_live_output_summarizes_plans_without_source_or_receipt_json() {
+        let response = LiveResponse::success(
+            8,
+            43,
+            "edit_applied",
+            json!({
+                "plan": {
+                    "changed_files": [{
+                        "file": "src/main.stasis",
+                        "before_source": "old source",
+                        "after_source": "very long new source"
+                    }],
+                    "reload": {
+                        "changed_symbols": [{"name": "tick"}],
+                        "expected_reload": "FastReload"
+                    }
+                },
+                "receipt": "build/live-edits/receipt.json",
+                "tests": "passed"
+            }),
+        );
+        let output = format_live_response(&response);
+        assert_eq!(
+            output,
+            "applied: tick; 1 file(s), FastReload (tests passed)"
+        );
+        assert!(!output.contains("source"));
+        assert!(!output.contains("receipt"));
+        assert!(!output.contains('{'));
+    }
+
+    #[test]
+    fn human_live_output_formats_scratch_transactions_as_mutation_lines() {
+        let response = LiveResponse::success(
+            9,
+            44,
+            "transaction_preview",
+            json!({
+                "name": "lift_ball",
+                "persistent": false,
+                "result": {
+                    "preview": true,
+                    "mutations": [{
+                        "path": "ball_y",
+                        "static_type": "f32",
+                        "old": {"type": "f32", "value": 300.0},
+                        "new": {"type": "f32", "value": 180.0}
+                    }]
+                }
+            }),
+        );
+        assert_eq!(
+            format_live_response(&response),
+            "scratch 'lift_ball' preview:\n  ball_y: 300.0 -> 180.0 (f32)"
+        );
+    }
+
+    #[test]
+    fn human_live_output_never_uses_raw_json_as_an_unknown_fallback() {
+        let response = LiveResponse::success(
+            10,
+            45,
+            "future_response",
+            json!({"large": {"nested": [1, 2, 3]}}),
+        );
+        assert_eq!(format_live_response(&response), "future_response");
+
+        let failure = LiveResponse::failure(11, 46, "layout change rejected");
+        assert_eq!(
+            format_live_response(&failure),
+            "error: layout change rejected"
+        );
+    }
+
+    #[test]
+    fn human_live_output_reports_watch_backpressure_count() {
+        let response =
+            LiveResponse::success(12, 47, "watch_backpressure", json!({"dropped_events": 9}));
+        assert_eq!(
+            format_live_response(&response),
+            "watch output dropped 9 event(s)"
+        );
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);

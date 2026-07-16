@@ -2,8 +2,10 @@ use crate::backend::emit::RuntimeHelperLinkage;
 use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::indexer::hash_text;
+use crate::frontend::lexer::{lex, TokenKind};
+use crate::frontend::parser::parse_string_literal_text;
 use crate::frontend::types::{
-    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_I32, TYPE_ID_VOID,
+    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_VOID,
 };
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::settings::{self, Configurable};
@@ -14,6 +16,26 @@ use std::path::Path;
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::SystemTime;
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum JitScalarValue {
+    I32(i32),
+    F32(f32),
+    F64(f64),
+    Bool(bool),
+}
+
+impl JitScalarValue {
+    pub fn type_name(self) -> &'static str {
+        match self {
+            Self::I32(_) => "i32",
+            Self::F32(_) => "f32",
+            Self::F64(_) => "f64",
+            Self::Bool(_) => "bool",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitArtifact {
@@ -35,6 +57,7 @@ pub struct JitProcess {
     source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
     import_parse_cache: BTreeMap<String, ImportParseCacheEntry>,
     compile_analysis_cache: Option<CompileAnalysisCache>,
+    staged_string_literals: HashMap<i32, String>,
     required_emit_roots: Vec<String>,
     local_runtime_helper_trampolines: bool,
     #[cfg(test)]
@@ -79,6 +102,7 @@ impl JitProcess {
             source_disk_probe_cache: BTreeMap::new(),
             import_parse_cache: BTreeMap::new(),
             compile_analysis_cache: None,
+            staged_string_literals: HashMap::new(),
             required_emit_roots: Vec::new(),
             local_runtime_helper_trampolines: false,
             #[cfg(test)]
@@ -136,7 +160,30 @@ impl JitProcess {
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
-        stasis_dynload::clear_jit_string_literal_table();
+        let report = self.compile_staged()?;
+        self.activate_staged_runtime()
+            .map_err(crate::compiler::CompileError::Backend)?;
+        Ok(report)
+    }
+
+    pub fn compile_staged(&mut self) -> CompileResult<CompileReport> {
+        stasis_dynload::begin_jit_string_literal_staging()
+            .map_err(crate::compiler::CompileError::Backend)?;
+        let result = self.compile_internal();
+        let literals = stasis_dynload::finish_jit_string_literal_staging()
+            .map_err(crate::compiler::CompileError::Backend);
+        match result {
+            Err(error) => Err(error),
+            Ok(report) => {
+                literals?;
+                self.staged_string_literals = collect_current_string_literals(&self.compiler)
+                    .map_err(crate::compiler::CompileError::Backend)?;
+                Ok(report)
+            }
+        }
+    }
+
+    fn compile_internal(&mut self) -> CompileResult<CompileReport> {
         self.load_import_graph_sources()
             .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
@@ -185,8 +232,6 @@ impl JitProcess {
                 "jit compile analysis cache missing after refresh".to_string(),
             )
         })?;
-        seed_fixed_collection_max_length_headers(&analysis.global_path_types, &analysis_type_table)
-            .map_err(crate::compiler::CompileError::Backend)?;
         let emit_function_ids = select_emit_function_ids(
             self.compiler.functions(),
             self.artifacts(),
@@ -244,7 +289,6 @@ impl JitProcess {
             .retain(|artifact| reachable.contains(&artifact.function_id));
         let report = CompileReport { index, emit };
         self.rebuild_artifact_index();
-        self.refresh_runtime_dispatch_table();
         Ok(report)
     }
 
@@ -257,7 +301,22 @@ impl JitProcess {
     }
 
     pub fn activate_runtime_dispatch_table(&self) {
+        stasis_dynload::replace_jit_string_literal_table(&self.staged_string_literals);
         self.refresh_runtime_dispatch_table();
+    }
+
+    pub fn activate_staged_runtime(&self) -> Result<(), String> {
+        let analysis = self
+            .compile_analysis_cache
+            .as_ref()
+            .ok_or_else(|| "cannot activate an uncompiled JIT process".to_string())?;
+        seed_fixed_collection_max_length_headers(
+            &analysis.global_path_types,
+            self.compiler.types(),
+        )?;
+        stasis_dynload::replace_jit_string_literal_table(&self.staged_string_literals);
+        self.refresh_runtime_dispatch_table();
+        Ok(())
     }
 
     pub fn artifact_slot_for_function_name(&self, name: &str) -> Option<u32> {
@@ -323,6 +382,93 @@ impl JitProcess {
         self.compile_analysis_cache
             .as_ref()
             .is_some_and(|analysis| analysis.global_path_types.contains_key(path))
+    }
+
+    pub fn global_scalar_paths(&self) -> Vec<(String, &'static str)> {
+        let Some(analysis) = self.compile_analysis_cache.as_ref() else {
+            return Vec::new();
+        };
+        analysis
+            .global_path_types
+            .iter()
+            .filter_map(|(path, type_id)| {
+                scalar_type_name(*type_id).map(|type_name| (path.clone(), type_name))
+            })
+            .collect()
+    }
+
+    pub fn read_global_scalar(&self, path: &str) -> Result<JitScalarValue, String> {
+        let type_id = self.global_path_type(path)?;
+        let path_hash = hash_global_path(path);
+        match type_id {
+            TYPE_ID_I32 => Ok(JitScalarValue::I32(
+                stasis_dynload::stasis_jit_global_i32_load(path_hash),
+            )),
+            TYPE_ID_F32 => Ok(JitScalarValue::F32(
+                stasis_dynload::stasis_jit_global_f32_load(path_hash),
+            )),
+            TYPE_ID_F64 => Ok(JitScalarValue::F64(
+                stasis_dynload::stasis_jit_global_f64_load(path_hash),
+            )),
+            TYPE_ID_BOOL => Ok(JitScalarValue::Bool(
+                stasis_dynload::stasis_jit_global_i32_load(path_hash) != 0,
+            )),
+            _ => Err(format!("global path '{path}' is not a supported scalar")),
+        }
+    }
+
+    pub fn write_global_scalar(&self, path: &str, value: JitScalarValue) -> Result<(), String> {
+        let type_id = self.global_path_type(path)?;
+        let path_hash = hash_global_path(path);
+        match (type_id, value) {
+            (TYPE_ID_I32, JitScalarValue::I32(value)) => {
+                stasis_dynload::stasis_jit_global_i32_store(path_hash, value)
+            }
+            (TYPE_ID_F32, JitScalarValue::F32(value)) => {
+                stasis_dynload::stasis_jit_global_f32_store(path_hash, value)
+            }
+            (TYPE_ID_F64, JitScalarValue::F64(value)) => {
+                stasis_dynload::stasis_jit_global_f64_store(path_hash, value)
+            }
+            (TYPE_ID_BOOL, JitScalarValue::Bool(value)) => {
+                stasis_dynload::stasis_jit_global_i32_store(path_hash, i32::from(value))
+            }
+            (_, value) => {
+                return Err(format!(
+                    "global path '{path}' does not accept {}",
+                    value.type_name()
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    pub fn snapshot_global_scalars(&self) -> Vec<(String, JitScalarValue)> {
+        self.global_scalar_paths()
+            .into_iter()
+            .filter_map(|(path, _)| {
+                self.read_global_scalar(&path)
+                    .ok()
+                    .map(|value| (path, value))
+            })
+            .collect()
+    }
+
+    pub fn restore_global_scalars(
+        &self,
+        snapshot: &[(String, JitScalarValue)],
+    ) -> Result<(), String> {
+        for (path, value) in snapshot {
+            self.write_global_scalar(path, *value)?;
+        }
+        Ok(())
+    }
+
+    fn global_path_type(&self, path: &str) -> Result<u16, String> {
+        self.compile_analysis_cache
+            .as_ref()
+            .and_then(|analysis| analysis.global_path_types.get(path).copied())
+            .ok_or_else(|| format!("global path '{path}' was not found in compiler metadata"))
     }
 
     pub fn write_i32_global_path(&self, path: &str, value: i32) {
@@ -637,6 +783,39 @@ impl JitProcess {
         );
         import_paths
     }
+}
+
+fn scalar_type_name(type_id: u16) -> Option<&'static str> {
+    match type_id {
+        TYPE_ID_I32 => Some("i32"),
+        TYPE_ID_F32 => Some("f32"),
+        TYPE_ID_F64 => Some("f64"),
+        TYPE_ID_BOOL => Some("bool"),
+        _ => None,
+    }
+}
+
+fn collect_current_string_literals(compiler: &Compiler) -> Result<HashMap<i32, String>, String> {
+    let mut literals = HashMap::new();
+    for file in compiler.files() {
+        for token in lex(&file.content)? {
+            if token.kind != TokenKind::StringLiteral {
+                continue;
+            }
+            let value = parse_string_literal_text(&file.content[token.start..token.end])?;
+            let id = crate::backend::emit::hash_string_literal(&value);
+            if let Some(previous) = literals.get(&id) {
+                if previous != &value {
+                    return Err(format!(
+                        "JIT string literal hash collision for id {id}: '{previous}' vs '{value}'"
+                    ));
+                }
+            } else {
+                literals.insert(id, value);
+            }
+        }
+    }
+    Ok(literals)
 }
 
 impl Default for JitProcess {
@@ -1399,6 +1578,46 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_exposes_typed_scalar_state_for_live_transactions() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global score: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ready: bool;\nfunction main(): i32 { score = 4; ratio = 1.5; precise = 2.25; ready = true; return 0; }\n",
+        );
+        process.compile().expect("compile");
+        process.execute_i32_noarg_by_name("main").expect("main");
+
+        let paths = process.global_scalar_paths();
+        assert!(paths.contains(&("score".to_string(), "i32")));
+        assert!(paths.contains(&("ratio".to_string(), "f32")));
+        assert!(paths.contains(&("precise".to_string(), "f64")));
+        assert!(paths.contains(&("ready".to_string(), "bool")));
+        assert_eq!(
+            process.read_global_scalar("score"),
+            Ok(JitScalarValue::I32(4))
+        );
+
+        let snapshot = process.snapshot_global_scalars();
+        process
+            .write_global_scalar("score", JitScalarValue::I32(99))
+            .expect("write score");
+        assert_eq!(
+            process.read_global_scalar("score"),
+            Ok(JitScalarValue::I32(99))
+        );
+        process.restore_global_scalars(&snapshot).expect("restore");
+        assert_eq!(
+            process.read_global_scalar("score"),
+            Ok(JitScalarValue::I32(4))
+        );
+        assert!(process
+            .write_global_scalar("score", JitScalarValue::Bool(true))
+            .expect_err("type mismatch")
+            .contains("does not accept bool"));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_call_expression_statement() {
         let mut process = JitProcess::new();
         process.upsert_file(
@@ -1455,6 +1674,41 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 1);
+    }
+
+    #[test]
+    fn jit_process_stages_string_literals_until_runtime_activation() {
+        let mut process = JitProcess::new();
+        let live_id = crate::backend::emit::hash_string_literal("live");
+        let candidate_id = crate::backend::emit::hash_string_literal("candidate");
+        stasis_dynload::upsert_jit_string_literal(live_id, "live");
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { print_string(\"candidate\"); return 0; }\n",
+        );
+
+        process.compile_staged().expect("staged compile");
+        assert_eq!(
+            stasis_dynload::jit_string_literal_value(live_id).as_deref(),
+            Some("live")
+        );
+        assert_eq!(stasis_dynload::jit_string_literal_value(candidate_id), None);
+
+        process
+            .activate_staged_runtime()
+            .expect("runtime activation");
+        assert_eq!(stasis_dynload::jit_string_literal_value(live_id), None);
+        assert_eq!(
+            stasis_dynload::jit_string_literal_value(candidate_id).as_deref(),
+            Some("candidate")
+        );
+
+        process.upsert_file("sample.stasis", "function main(): i32 { return 1; }\n");
+        process.compile_staged().expect("replacement compile");
+        process
+            .activate_staged_runtime()
+            .expect("replacement activation");
+        assert_eq!(stasis_dynload::jit_string_literal_value(candidate_id), None);
     }
 
     #[cfg(windows)]
