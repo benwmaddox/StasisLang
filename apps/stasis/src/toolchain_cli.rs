@@ -954,6 +954,11 @@ fn run_live_terminal_inner(
                 }
             }
         }
+        if terminal.cancel_pending() {
+            return Err(
+                "live script ended with unfinished multiline input; add :end or :abort".to_string(),
+            );
+        }
     } else {
         println!("Stasis live workspace (:help, :quit, Tab completion, Ctrl-C cancels multiline)");
         let mut editor = Editor::<LiveLineHelper, DefaultHistory>::new()

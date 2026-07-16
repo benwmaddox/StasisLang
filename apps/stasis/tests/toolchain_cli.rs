@@ -1125,6 +1125,30 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     assert!(human_stdout.contains("session closed @ tick"));
     assert!(!human_stdout.contains("[live tick"));
     assert!(!human_stdout.contains("{\"path\""));
+
+    fs::write(
+        project.join("unfinished-live.commands"),
+        ":update function tick src/main.stasis\nfunction tick(): i32 { score += 9; return 0; }\n",
+    )
+    .expect("write unfinished live script");
+    let unfinished = stasis(
+        &[
+            "run",
+            "--interactive",
+            "--live-script",
+            "unfinished-live.commands",
+        ],
+        &project,
+    );
+    assert_eq!(
+        unfinished.status.code(),
+        Some(1),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&unfinished.stdout),
+        String::from_utf8_lossy(&unfinished.stderr)
+    );
+    assert!(String::from_utf8_lossy(&unfinished.stderr)
+        .contains("live script ended with unfinished multiline input"));
     fs::remove_dir_all(parent).ok();
 }
 

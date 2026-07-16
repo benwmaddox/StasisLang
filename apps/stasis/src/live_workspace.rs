@@ -4,10 +4,11 @@ use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
 use stasis_compiler::frontend::workshop::{
     find_workshop_symbols, load_workshop_edit_workspace, plan_workshop_semantic_edits,
-    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
-    write_workshop_semantic_receipt, ExpectedReload, WorkshopSemanticEdit,
-    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
-    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    workshop_reachable_files, workshop_source_hash, workshop_source_items,
+    write_workshop_semantic_plan, write_workshop_semantic_receipt, ExpectedReload,
+    WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
+    WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind,
+    WorkshopSymbolSelector,
 };
 use stasis_runner::live::{
     CompletionIndex, CompletionItem, LiveCommand, LiveEditOperation, LiveRequest, LiveResponse,
@@ -1111,6 +1112,7 @@ fn compile_candidate(
     config: &LiveRunConfig,
     files: &[WorkshopSourceFile],
 ) -> Result<(JitProcess, JitEnginePackage), String> {
+    let runtime_files = workshop_reachable_files(files, &config.entry)?;
     let mut candidate = JitProcess::new();
     candidate.set_required_emit_roots(&[
         "main".to_string(),
@@ -1118,9 +1120,9 @@ fn compile_candidate(
         "render".to_string(),
         "on_code_swap".to_string(),
     ]);
-    for file in files {
+    for file in runtime_files {
         let path = config.project_root.join(&file.path);
-        candidate.upsert_file(path.to_string_lossy().to_string(), file.source.clone());
+        candidate.upsert_file(path.to_string_lossy().to_string(), file.source);
     }
     candidate
         .compile_staged()
@@ -1776,6 +1778,29 @@ mod tests {
             MAX_STAGED_TEST_OUTPUT_BYTES + 1
         );
         assert!(overflow.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn live_runtime_candidate_excludes_test_only_symbols() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "global score: i32;\nfunction helper(): i32 { return 7; }\nfunction main(): i32 { score = 0; return 0; }\nfunction tick(): i32 { score = helper(); return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("main source");
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            "function helper(): i32 { return 99; }\ntest `helper stays isolated`(): bool { return helper() == 99; }\n",
+        )
+        .expect("test-only helper");
+
+        let files = load_workshop_edit_workspace(&root, &config.entry).expect("workspace files");
+        let (jit, package) = compile_candidate(&config, &files).expect("runtime candidate");
+        jit.activate_staged_runtime().expect("activate candidate");
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        stasis_dynload::invoke_noarg_i32(package.tick_code_ptr as usize).expect("tick");
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(7)));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
