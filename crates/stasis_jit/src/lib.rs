@@ -271,6 +271,7 @@ pub fn link_objects_to_dynamic_library(
     if uses_msvc_linker_syntax(config) {
         args.push("/NOLOGO".to_string());
         args.push("/DLL".to_string());
+        args.push("/NOENTRY".to_string());
         args.push(format!("/OUT:{}", output_library.display()));
         for symbol in export_symbols {
             args.push(format!("/EXPORT:{symbol}"));
@@ -279,30 +280,6 @@ pub fn link_objects_to_dynamic_library(
         for lib_path in &windows_lib_paths {
             args.push(format!("/LIBPATH:{}", lib_path.display()));
         }
-        if let Some(kernel32) = resolve_kernel32_lib_path(&windows_lib_paths) {
-            args.push(kernel32.display().to_string());
-        } else {
-            args.push("kernel32.lib".to_string());
-        }
-        // When linking against Rust `staticlib` runtime shims (e.g. `stasis_dynload.lib`),
-        // lld-link does not automatically pull in the CRT/system libraries that those objects
-        // depend on. Add the common MSVC + Windows SDK libraries so AOT bundles link cleanly.
-        args.push("ucrt.lib".to_string());
-        args.push("vcruntime.lib".to_string());
-        args.push("msvcrt.lib".to_string());
-        args.push("legacy_stdio_definitions.lib".to_string());
-        args.push("advapi32.lib".to_string());
-        args.push("bcrypt.lib".to_string());
-        args.push("dbghelp.lib".to_string());
-        args.push("ntdll.lib".to_string());
-        args.push("ole32.lib".to_string());
-        args.push("oleaut32.lib".to_string());
-        args.push("psapi.lib".to_string());
-        args.push("secur32.lib".to_string());
-        args.push("shell32.lib".to_string());
-        args.push("user32.lib".to_string());
-        args.push("userenv.lib".to_string());
-        args.push("ws2_32.lib".to_string());
     } else {
         args.push("-shared".to_string());
         args.push("-o".to_string());
@@ -366,11 +343,6 @@ pub fn link_objects_to_executable(
         for lib_path in &windows_lib_paths {
             args.push(format!("/LIBPATH:{}", lib_path.display()));
         }
-        if let Some(kernel32) = resolve_kernel32_lib_path(&windows_lib_paths) {
-            args.push(kernel32.display().to_string());
-        } else {
-            args.push("kernel32.lib".to_string());
-        }
     } else {
         args.push("-o".to_string());
         args.push(output_executable.display().to_string());
@@ -420,104 +392,12 @@ fn uses_msvc_linker_syntax(config: &AotLinkConfig) -> bool {
 
 #[cfg(windows)]
 fn resolve_windows_link_lib_paths() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-
-    if let Ok(lib_env) = std::env::var("LIB") {
-        for raw in lib_env.split(';') {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let path = PathBuf::from(trimmed);
-            if path.exists() && !out.contains(&path) {
-                out.push(path);
-            }
-        }
-    }
-
-    if let Ok(vc_tools) = std::env::var("VCToolsInstallDir") {
-        let vc_lib = PathBuf::from(vc_tools).join("lib").join("x64");
-        if vc_lib.exists() && !out.contains(&vc_lib) {
-            out.push(vc_lib);
-        }
-    }
-
-    let msvc_roots = [
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
-        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
-    ];
-    for root in msvc_roots {
-        if let Some(version_dir) = latest_child_dir(Path::new(root)) {
-            let vc_lib = version_dir.join("lib").join("x64");
-            if vc_lib.exists() && !out.contains(&vc_lib) {
-                out.push(vc_lib);
-            }
-        }
-    }
-
-    let windows_kits_roots = [
-        r"C:\Program Files (x86)\Windows Kits\10\Lib",
-        r"C:\Program Files\Windows Kits\10\Lib",
-    ];
-    for root in windows_kits_roots {
-        if let Some(version_dir) = latest_child_dir(Path::new(root)) {
-            let um = version_dir.join("um").join("x64");
-            if um.exists() && !out.contains(&um) {
-                out.push(um);
-            }
-            let ucrt = version_dir.join("ucrt").join("x64");
-            if ucrt.exists() && !out.contains(&ucrt) {
-                out.push(ucrt);
-            }
-        }
-    }
-
-    out
+    Vec::new()
 }
 
 #[cfg(not(windows))]
 fn resolve_windows_link_lib_paths() -> Vec<PathBuf> {
     Vec::new()
-}
-
-#[cfg(windows)]
-fn resolve_kernel32_lib_path(lib_paths: &[PathBuf]) -> Option<PathBuf> {
-    for lib_path in lib_paths {
-        let candidate = lib_path.join("kernel32.lib");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-#[cfg(not(windows))]
-fn resolve_kernel32_lib_path(_lib_paths: &[PathBuf]) -> Option<PathBuf> {
-    None
-}
-
-#[cfg(windows)]
-fn latest_child_dir(root: &Path) -> Option<PathBuf> {
-    let entries = fs::read_dir(root).ok()?;
-    let mut dirs: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| entry.path())
-        .collect();
-    dirs.sort_by(|a, b| {
-        let an = a
-            .file_name()
-            .map(|value| value.to_string_lossy())
-            .unwrap_or_default();
-        let bn = b
-            .file_name()
-            .map(|value| value.to_string_lossy())
-            .unwrap_or_default();
-        bn.cmp(&an)
-    });
-    dirs.into_iter().next()
 }
 
 fn run_link_command(command: &mut Command, mode: &str, linker: &Path) -> Result<(), String> {

@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
+mod toolchain_cli;
+
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, File};
@@ -2641,6 +2643,10 @@ mod tests {
 
 fn main() {
     maybe_cleanup_stale_stasis_cache();
+
+    if let Some(exit) = toolchain_cli::try_run() {
+        std::process::exit(exit);
+    }
 
     if let Some(exit) = try_run_probe_graphics_runtime_subcommand() {
         std::process::exit(exit);

@@ -1,0 +1,1225 @@
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use stasis::{
+    run_jit_tests_in_directory_with_session, run_play_in_process,
+    run_self_host_aot_cli_with_options, StasisTestRunSession,
+};
+use stasis_compiler::backend::jit::JitProcess;
+use std::env;
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+
+const MANIFEST_NAME: &str = "stasis.json";
+const MANIFEST_VERSION: u32 = 1;
+const COMMANDS: &[&str] = &[
+    "new", "init", "fmt", "check", "test", "run", "build", "package", "inspect", "replay",
+    "verify", "version", "env", "help",
+];
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "stasis",
+    version,
+    about = "The batteries-included Stasis toolchain",
+    long_about = "Create, format, check, test, run, build, inspect, and package Stasis projects without invoking Cargo."
+)]
+struct ToolchainCli {
+    #[arg(
+        long,
+        global = true,
+        help = "Emit one deterministic JSON result object"
+    )]
+    json: bool,
+
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        help = "Use this project or project directory"
+    )]
+    workspace: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: ToolchainCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ToolchainCommand {
+    /// Create a project in a new directory.
+    New {
+        name: String,
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
+    },
+    /// Initialize a project in an existing directory.
+    Init {
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Format project source files deterministically.
+    Fmt {
+        #[arg(long)]
+        check: bool,
+    },
+    /// Parse, analyze, and JIT-compile the project without running it.
+    Check,
+    /// Run project tests in one isolated JIT session.
+    Test {
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
+    /// JIT-compile and run main() in the headless toolchain runtime.
+    Run {
+        /// Recompile and rerun when project .stasis files change.
+        #[arg(long)]
+        watch: bool,
+        /// Explicitly select the headless runtime (currently the default).
+        #[arg(long)]
+        headless: bool,
+    },
+    /// Build the project for development or as a release executable.
+    Build {
+        #[arg(long, value_enum, default_value_t = BuildMode::Release)]
+        mode: BuildMode,
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+    /// Assemble a distributable desktop or mobile directory.
+    Package {
+        #[arg(long, value_enum, default_value_t = PackageTarget::Desktop)]
+        target: PackageTarget,
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+    /// Report deterministic workspace and output layout information.
+    Inspect,
+    /// Replay support is reserved until the replay runtime lands.
+    Replay,
+    /// Replay verification is reserved until the replay runtime lands.
+    Verify,
+    /// Print the installed toolchain version.
+    Version,
+    /// Print toolchain, workspace, cache, and offline capability information.
+    Env,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BuildMode {
+    Dev,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PackageTarget {
+    Desktop,
+    AndroidArm64,
+    IosArm64,
+}
+
+impl PackageTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::AndroidArm64 => "android-arm64",
+            Self::IosArm64 => "ios-arm64",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ProjectManifest {
+    manifest_version: u32,
+    name: String,
+    entry: String,
+    tests: String,
+    output: String,
+}
+
+impl ProjectManifest {
+    fn new(name: String) -> Self {
+        Self {
+            manifest_version: MANIFEST_VERSION,
+            name,
+            entry: "src/main.stasis".to_string(),
+            tests: "tests".to_string(),
+            output: "build".to_string(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.manifest_version != MANIFEST_VERSION {
+            return Err(format!(
+                "unsupported manifest_version {}; expected {}",
+                self.manifest_version, MANIFEST_VERSION
+            ));
+        }
+        validate_project_name(&self.name)?;
+        for (field, value) in [
+            ("entry", self.entry.as_str()),
+            ("tests", self.tests.as_str()),
+            ("output", self.output.as_str()),
+        ] {
+            validate_relative_path(field, Path::new(value))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Workspace {
+    root: PathBuf,
+    manifest: ProjectManifest,
+}
+
+#[derive(Debug)]
+struct CommandResult {
+    code: i32,
+    human: String,
+    data: Value,
+}
+
+impl CommandResult {
+    fn success(human: impl Into<String>, data: Value) -> Self {
+        Self {
+            code: 0,
+            human: human.into(),
+            data,
+        }
+    }
+}
+
+pub(super) fn try_run() -> Option<i32> {
+    let args: Vec<OsString> = env::args_os().collect();
+    if !is_toolchain_invocation(&args) {
+        return None;
+    }
+    let wants_json = args.iter().any(|arg| arg == "--json");
+    let wants_version = args.iter().any(|arg| arg == "--version" || arg == "-V");
+    let parsed = match ToolchainCli::try_parse_from(args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let exit_code = error.exit_code();
+            if wants_json {
+                if exit_code == 0 {
+                    if wants_version {
+                        println!(
+                            "{}",
+                            json!({
+                                "ok": true,
+                                "command": "version",
+                                "result": {"version": env!("CARGO_PKG_VERSION")},
+                            })
+                        );
+                    } else {
+                        println!("{}", json!({"ok": true, "commands": COMMANDS}));
+                    }
+                } else {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "ok": false,
+                            "code": "usage_error",
+                            "message": error.to_string(),
+                        })
+                    );
+                }
+            } else {
+                let _ = error.print();
+            }
+            return Some(exit_code);
+        }
+    };
+    let command_name = command_name(&parsed.command);
+    match execute(parsed.command, parsed.workspace, parsed.json) {
+        Ok(result) => {
+            if parsed.json {
+                println!(
+                    "{}",
+                    json!({
+                        "ok": true,
+                        "command": command_name,
+                        "result": result.data,
+                    })
+                );
+            } else if !result.human.is_empty() {
+                println!("{}", result.human);
+            }
+            Some(result.code)
+        }
+        Err(message) => {
+            if parsed.json {
+                eprintln!(
+                    "{}",
+                    json!({
+                        "ok": false,
+                        "command": command_name,
+                        "code": "command_failed",
+                        "message": message,
+                    })
+                );
+            } else {
+                eprintln!("stasis {command_name}: {message}");
+            }
+            Some(1)
+        }
+    }
+}
+
+fn is_toolchain_invocation(args: &[OsString]) -> bool {
+    let Some(first) = args.get(1).and_then(|arg| arg.to_str()) else {
+        return true;
+    };
+    first == "--help"
+        || first == "-h"
+        || first == "--version"
+        || first == "-V"
+        || first == "--json"
+        || first == "--workspace"
+        || COMMANDS.contains(&first)
+}
+
+fn command_name(command: &ToolchainCommand) -> &'static str {
+    match command {
+        ToolchainCommand::New { .. } => "new",
+        ToolchainCommand::Init { .. } => "init",
+        ToolchainCommand::Fmt { .. } => "fmt",
+        ToolchainCommand::Check => "check",
+        ToolchainCommand::Test { .. } => "test",
+        ToolchainCommand::Run { .. } => "run",
+        ToolchainCommand::Build { .. } => "build",
+        ToolchainCommand::Package { .. } => "package",
+        ToolchainCommand::Inspect => "inspect",
+        ToolchainCommand::Replay => "replay",
+        ToolchainCommand::Verify => "verify",
+        ToolchainCommand::Version => "version",
+        ToolchainCommand::Env => "env",
+    }
+}
+
+fn execute(
+    command: ToolchainCommand,
+    workspace_arg: Option<PathBuf>,
+    json_output: bool,
+) -> Result<CommandResult, String> {
+    match command {
+        ToolchainCommand::New { name, dir } => create_project(dir.unwrap_or_else(|| PathBuf::from(&name)), name),
+        ToolchainCommand::Init { dir, name } => {
+            let root = absolute_path(&dir)?;
+            let inferred = root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("stasis_game")
+                .to_string();
+            create_project(root, name.unwrap_or(inferred))
+        }
+        ToolchainCommand::Version => Ok(version_result()),
+        ToolchainCommand::Env => env_result(workspace_arg.as_deref()),
+        ToolchainCommand::Replay => Err(
+            "replay is unavailable in toolchain 0.1; no replay runtime contract is implemented"
+                .to_string(),
+        ),
+        ToolchainCommand::Verify => Err(
+            "verify is unavailable in toolchain 0.1; no replay verification contract is implemented"
+                .to_string(),
+        ),
+        other => {
+            let workspace = load_workspace(workspace_arg.as_deref())?;
+            match other {
+                ToolchainCommand::Fmt { check } => format_workspace(&workspace, check),
+                ToolchainCommand::Check => check_workspace(&workspace),
+                ToolchainCommand::Test { path } => {
+                    validate_optional_workspace_path(&workspace, "test path", path.as_deref())?;
+                    test_workspace(&workspace, path.as_deref())
+                }
+                ToolchainCommand::Run {
+                    watch,
+                    headless,
+                } => {
+                    if watch && json_output {
+                        Err("--json cannot be combined with --watch; watch mode is an unbounded event stream".to_string())
+                    } else if watch && headless {
+                        Err("--headless cannot be combined with --watch; watch mode uses the graphical hot-swap runner".to_string())
+                    } else if watch {
+                        run_workspace_watch(&workspace)
+                    } else {
+                        run_workspace(&workspace, headless)
+                    }
+                }
+                ToolchainCommand::Build { mode, out } => {
+                    validate_optional_workspace_path(&workspace, "build output", out.as_deref())?;
+                    build_workspace(&workspace, mode, out.as_deref())
+                }
+                ToolchainCommand::Package { target, out } => {
+                    validate_optional_workspace_path(&workspace, "package output", out.as_deref())?;
+                    package_workspace(&workspace, target, out.as_deref())
+                }
+                ToolchainCommand::Inspect => inspect_workspace(&workspace),
+                _ => Err("unsupported command routing".to_string()),
+            }
+        }
+    }
+}
+
+fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
+    validate_project_name(&name)?;
+    let root = absolute_path(&path)?;
+    let bundled_stdlib = bundled_stdlib_dir()?;
+    let manifest_path = root.join(MANIFEST_NAME);
+    let reserved_paths = [
+        manifest_path.clone(),
+        root.join("src/main.stasis"),
+        root.join("tests/main.test.stasis"),
+        root.join("stdlib"),
+    ];
+    for reserved in &reserved_paths {
+        if reserved.exists() {
+            return Err(format!("refusing to overwrite {}", reserved.display()));
+        }
+    }
+    fs::create_dir_all(root.join("src"))
+        .map_err(|error| format!("failed to create {}: {error}", root.display()))?;
+    fs::create_dir_all(root.join("tests"))
+        .map_err(|error| format!("failed to create tests directory: {error}"))?;
+    let manifest = ProjectManifest::new(name.clone());
+    write_manifest(&manifest_path, &manifest)?;
+    copy_dir_if_exists(&bundled_stdlib, &root.join("stdlib"))?;
+    write_new_file(
+        &root.join("src/main.stasis"),
+        "import \"../stdlib/stdlib.stasis\";\n\nfunction main(): i32 {\n    return 0;\n}\n",
+    )?;
+    write_new_file(
+        &root.join("tests/main.test.stasis"),
+        "test `new project is ready`(): bool {\n    return 1 == 1;\n}\n",
+    )?;
+    Ok(CommandResult::success(
+        format!("created {} at {}", name, root.display()),
+        json!({"name": name, "root": display_path(&root), "manifest": MANIFEST_NAME}),
+    ))
+}
+
+fn write_new_file(path: &Path, contents: &str) -> Result<(), String> {
+    if path.exists() {
+        return Err(format!("refusing to overwrite {}", path.display()));
+    }
+    fs::write(path, contents)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+fn write_manifest(path: &Path, manifest: &ProjectManifest) -> Result<(), String> {
+    let mut contents = serde_json::to_string_pretty(manifest)
+        .map_err(|error| format!("failed to serialize manifest: {error}"))?;
+    contents.push('\n');
+    fs::write(path, contents)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+fn load_workspace(explicit: Option<&Path>) -> Result<Workspace, String> {
+    if let Some(path) = explicit {
+        let absolute = absolute_path(path)?;
+        if !absolute.exists() {
+            return Err(format!(
+                "workspace path does not exist: {}",
+                absolute.display()
+            ));
+        }
+    }
+    let start = explicit.map(absolute_path).transpose()?.unwrap_or(
+        env::current_dir().map_err(|error| format!("failed to read current directory: {error}"))?,
+    );
+    let start_dir = if start.is_file() {
+        start.parent().unwrap_or(&start).to_path_buf()
+    } else {
+        start
+    };
+    let root = find_workspace_root(&start_dir).ok_or_else(|| {
+        format!(
+            "no {MANIFEST_NAME} found from {}; run 'stasis init' first",
+            start_dir.display()
+        )
+    })?;
+    let bytes = fs::read(root.join(MANIFEST_NAME))
+        .map_err(|error| format!("failed to read {MANIFEST_NAME}: {error}"))?;
+    let manifest: ProjectManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
+    manifest.validate()?;
+    Ok(Workspace { root, manifest })
+}
+
+fn find_workspace_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(MANIFEST_NAME).is_file() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn format_workspace(workspace: &Workspace, check: bool) -> Result<CommandResult, String> {
+    let mut files = Vec::new();
+    let source_root = workspace.root.join("src");
+    let test_root = workspace.root.join(&workspace.manifest.tests);
+    validate_workspace_destination(workspace, "source directory", &source_root)?;
+    validate_workspace_destination(workspace, "test directory", &test_root)?;
+    collect_stasis_files(&source_root, &mut files)?;
+    collect_stasis_files(&test_root, &mut files)?;
+    files.sort();
+    files.dedup();
+    let mut changed = Vec::new();
+    for file in files {
+        let original = fs::read_to_string(&file)
+            .map_err(|error| format!("failed to read {}: {error}", file.display()))?;
+        let formatted = format_source(&original);
+        if original != formatted {
+            changed.push(relative_display(&workspace.root, &file));
+            if !check {
+                fs::write(&file, formatted)
+                    .map_err(|error| format!("failed to write {}: {error}", file.display()))?;
+            }
+        }
+    }
+    if check && !changed.is_empty() {
+        return Err(format!("formatting required: {}", changed.join(", ")));
+    }
+    Ok(CommandResult::success(
+        if changed.is_empty() {
+            "all Stasis files are formatted".to_string()
+        } else {
+            format!("formatted {} file(s)", changed.len())
+        },
+        json!({"changed": changed, "check": check}),
+    ))
+}
+
+fn format_source(source: &str) -> String {
+    let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines: Vec<&str> = normalized.lines().collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    let mut output = lines
+        .iter()
+        .map(|line| line.trim_end_matches([' ', '\t']))
+        .collect::<Vec<_>>()
+        .join("\n");
+    output.push('\n');
+    output
+}
+
+fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
+    let jit = compile_workspace_jit(workspace)?;
+    Ok(CommandResult::success(
+        format!("checked {}", workspace.manifest.name),
+        json!({
+            "name": workspace.manifest.name,
+            "entry": workspace.manifest.entry,
+            "functions_emitted": jit.artifacts().len(),
+        }),
+    ))
+}
+
+fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
+    let entry = workspace.root.join(&workspace.manifest.entry);
+    validate_workspace_destination(workspace, "entry", &entry)?;
+    let source = fs::read_to_string(&entry)
+        .map_err(|error| format!("failed to read entry {}: {error}", entry.display()))?;
+    let mut jit = JitProcess::new();
+    jit.set_required_emit_roots(&["main".to_string()]);
+    jit.upsert_file(display_path(&entry), source.clone());
+    jit.compile().map_err(|error| {
+        if let Some(diagnostic) = jit.last_source_diagnostic() {
+            let (line, column) = line_column(&source, diagnostic.start);
+            format!(
+                "{}:{}:{}: {}",
+                diagnostic.path, line, column, diagnostic.message
+            )
+        } else {
+            format!("{error:?}")
+        }
+    })?;
+    Ok(jit)
+}
+
+fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandResult, String> {
+    let directory = path
+        .map(|value| workspace.root.join(value))
+        .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
+    validate_workspace_destination(workspace, "test directory", &directory)?;
+    let mut session = StasisTestRunSession::new();
+    let summary = run_jit_tests_in_directory_with_session(&directory, &mut session)?;
+    let data = json!({
+        "files_discovered": summary.files_discovered,
+        "files_with_tests": summary.files_with_tests,
+        "tests_discovered": summary.tests_discovered,
+        "tests_run": summary.tests_run,
+        "tests_passed": summary.tests_passed,
+        "tests_failed": summary.tests_failed,
+        "failures": summary.failures,
+    });
+    if summary.tests_failed > 0 {
+        return Err(format!(
+            "{} test(s) failed: {}",
+            summary.tests_failed,
+            summary.failures.join(" | ")
+        ));
+    }
+    Ok(CommandResult::success(
+        format!(
+            "{} test(s) passed in {} file(s)",
+            summary.tests_passed, summary.files_with_tests
+        ),
+        data,
+    ))
+}
+
+fn run_workspace(workspace: &Workspace, _headless: bool) -> Result<CommandResult, String> {
+    let jit = compile_workspace_jit(workspace)?;
+    let guest_exit = match jit.execute_i32_noarg_by_name("main") {
+        Ok(value) => value,
+        Err(error) if error.contains("not i32-returning") => {
+            jit.execute_void_noarg_by_name("main")?;
+            0
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(CommandResult {
+        code: guest_exit,
+        human: format!("program exited with code {guest_exit}"),
+        data: json!({"exit_code": guest_exit, "backend": "jit", "headless": true}),
+    })
+}
+
+fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
+    let entry = workspace.root.join(&workspace.manifest.entry);
+    run_play_in_process(&entry, Some(&workspace.root), None, None, 16_000, None)?;
+    Ok(CommandResult::success(
+        "graphical watch session ended",
+        json!({"backend": "jit", "headless": false, "watch": true}),
+    ))
+}
+
+fn build_workspace(
+    workspace: &Workspace,
+    mode: BuildMode,
+    output: Option<&Path>,
+) -> Result<CommandResult, String> {
+    match mode {
+        BuildMode::Dev => {
+            let jit = compile_workspace_jit(workspace)?;
+            let receipt = output
+                .map(|path| workspace.root.join(path))
+                .unwrap_or_else(|| {
+                    workspace
+                        .root
+                        .join(&workspace.manifest.output)
+                        .join("dev-build.json")
+                });
+            validate_workspace_destination(workspace, "build output", &receipt)?;
+            if let Some(parent) = receipt.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+            }
+            let data = json!({
+                "backend": "jit",
+                "entry": workspace.manifest.entry,
+                "functions_emitted": jit.artifacts().len(),
+            });
+            let mut contents = serde_json::to_string_pretty(&data)
+                .map_err(|error| format!("failed to serialize dev build receipt: {error}"))?;
+            contents.push('\n');
+            fs::write(&receipt, contents)
+                .map_err(|error| format!("failed to write {}: {error}", receipt.display()))?;
+            Ok(CommandResult::success(
+                format!("built JIT development image: {}", receipt.display()),
+                json!({"backend": "jit", "receipt": display_path(&receipt)}),
+            ))
+        }
+        BuildMode::Release => {
+            let output = output
+                .map(|path| workspace.root.join(path))
+                .unwrap_or_else(|| default_release_output(workspace));
+            validate_workspace_destination(workspace, "build output", &output)?;
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+            }
+            let summary = run_self_host_aot_cli_with_options(
+                &workspace.root,
+                &output,
+                None,
+                Some(Path::new(&workspace.manifest.entry)),
+            )?;
+            Ok(CommandResult::success(
+                format!("built release executable: {}", output.display()),
+                json!({
+                    "backend": "aot",
+                    "output": display_path(&output),
+                    "source_files": summary.source_file_count,
+                    "entry_symbol": summary.entry_symbol,
+                }),
+            ))
+        }
+    }
+}
+
+fn package_workspace(
+    workspace: &Workspace,
+    target: PackageTarget,
+    output: Option<&Path>,
+) -> Result<CommandResult, String> {
+    let package_root = output
+        .map(|path| workspace.root.join(path))
+        .unwrap_or_else(|| {
+            workspace.root.join("dist").join(format!(
+                "{}-{}",
+                workspace.manifest.name,
+                target.as_str()
+            ))
+        });
+    validate_workspace_destination(workspace, "package output", &package_root)?;
+    if package_root.exists() {
+        return Err(format!(
+            "package output already exists: {}",
+            package_root.display()
+        ));
+    }
+    if !matches!(target, PackageTarget::Desktop) {
+        return package_mobile_workspace(workspace, target, &package_root);
+    }
+    let staging_name = format!(
+        ".{}.staging",
+        package_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("stasis-package")
+    );
+    let staging_root = package_root.with_file_name(staging_name);
+    if staging_root.exists() {
+        return Err(format!(
+            "package staging output already exists: {}",
+            staging_root.display()
+        ));
+    }
+    fs::create_dir_all(&staging_root)
+        .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
+    let assembled = (|| -> Result<(), String> {
+        let executable = staging_root.join(executable_name(&workspace.manifest.name));
+        build_workspace(workspace, BuildMode::Release, Some(&executable))?;
+        let summary = executable.with_file_name(format!(
+            "{}.summary.json",
+            executable.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        if summary.exists() {
+            fs::remove_file(&summary).map_err(|error| {
+                format!(
+                    "failed to remove package build receipt {}: {error}",
+                    summary.display()
+                )
+            })?;
+        }
+        copy_file(
+            &workspace.root.join(MANIFEST_NAME),
+            &staging_root.join(MANIFEST_NAME),
+        )?;
+        let assets = workspace.root.join("assets");
+        validate_workspace_destination(workspace, "assets directory", &assets)?;
+        copy_dir_if_exists(&assets, &staging_root.join("assets"))?;
+        if let Some(runtime) = installed_runtime_library() {
+            copy_file(
+                &runtime,
+                &staging_root.join(runtime.file_name().unwrap_or_default()),
+            )?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = assembled {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(error);
+    }
+    fs::rename(&staging_root, &package_root).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging_root);
+        format!(
+            "failed to publish package {}: {error}",
+            package_root.display()
+        )
+    })?;
+    Ok(CommandResult::success(
+        format!("packaged {} at {}", target.as_str(), package_root.display()),
+        json!({"target": target.as_str(), "output": display_path(&package_root)}),
+    ))
+}
+
+fn package_mobile_workspace(
+    workspace: &Workspace,
+    target: PackageTarget,
+    package_root: &Path,
+) -> Result<CommandResult, String> {
+    fs::create_dir_all(package_root)
+        .map_err(|error| format!("failed to create {}: {error}", package_root.display()))?;
+    let child_result = (|| -> Result<(), String> {
+        let executable = env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+        let child = Command::new(executable)
+            .arg("mobile-aot-bundle")
+            .arg("--target")
+            .arg(target.as_str())
+            .arg("--project-dir")
+            .arg(&workspace.root)
+            .arg("--entry-file")
+            .arg(&workspace.manifest.entry)
+            .arg("--out-dir")
+            .arg(package_root)
+            .output()
+            .map_err(|error| format!("failed to launch mobile AOT packaging: {error}"))?;
+        if !child.status.success() {
+            return Err(format!(
+                "mobile AOT packaging failed with exit code {}: stdout={} stderr={}",
+                child.status.code().unwrap_or(1),
+                String::from_utf8_lossy(&child.stdout).trim(),
+                String::from_utf8_lossy(&child.stderr).trim()
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(error) = child_result {
+        let _ = fs::remove_dir_all(package_root);
+        return Err(error);
+    }
+    Ok(CommandResult::success(
+        format!("packaged {} at {}", target.as_str(), package_root.display()),
+        json!({"target": target.as_str(), "output": display_path(package_root)}),
+    ))
+}
+
+fn inspect_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
+    let entry = workspace.root.join(&workspace.manifest.entry);
+    let tests = workspace.root.join(&workspace.manifest.tests);
+    let output = workspace.root.join(&workspace.manifest.output);
+    Ok(CommandResult::success(
+        format!(
+            "workspace={} entry={} tests={} output={}",
+            workspace.root.display(),
+            entry.display(),
+            tests.display(),
+            output.display()
+        ),
+        json!({
+            "name": workspace.manifest.name,
+            "root": display_path(&workspace.root),
+            "entry": display_path(&entry),
+            "tests": display_path(&tests),
+            "output": display_path(&output),
+            "manifest_version": workspace.manifest.manifest_version,
+        }),
+    ))
+}
+
+fn env_result(explicit: Option<&Path>) -> Result<CommandResult, String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+    let workspace = if explicit.is_some() {
+        Some(load_workspace(explicit)?)
+    } else {
+        load_workspace(None).ok()
+    };
+    let cache = workspace
+        .as_ref()
+        .map(|value| value.root.join(".stasis_cache"));
+    let data = json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "executable": display_path(&executable),
+        "toolchain_root": display_path(executable.parent().unwrap_or(Path::new("."))),
+        "workspace": workspace.as_ref().map(|value| display_path(&value.root)),
+        "cache": cache.as_ref().map(|value| display_path(value)),
+        "offline_core_workflows": true,
+        "manifest": MANIFEST_NAME,
+    });
+    Ok(CommandResult::success(
+        format!(
+            "stasis={} executable={} workspace={}",
+            env!("CARGO_PKG_VERSION"),
+            executable.display(),
+            workspace
+                .as_ref()
+                .map(|value| value.root.display().to_string())
+                .unwrap_or_else(|| "none".to_string())
+        ),
+        data,
+    ))
+}
+
+fn version_result() -> CommandResult {
+    CommandResult::success(
+        format!("stasis {}", env!("CARGO_PKG_VERSION")),
+        json!({"version": env!("CARGO_PKG_VERSION")}),
+    )
+}
+
+fn default_release_output(workspace: &Workspace) -> PathBuf {
+    workspace
+        .root
+        .join(&workspace.manifest.output)
+        .join(executable_name(&workspace.manifest.name))
+}
+
+fn executable_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+fn installed_runtime_library() -> Option<PathBuf> {
+    let executable = env::current_exe().ok()?;
+    let directory = executable.parent()?;
+    let name = if cfg!(windows) {
+        "stasis_graphics.dll"
+    } else if cfg!(target_os = "macos") {
+        "libstasis_graphics.dylib"
+    } else {
+        "libstasis_graphics.so"
+    };
+    let path = directory.join(name);
+    path.is_file().then_some(path)
+}
+
+fn bundled_stdlib_dir() -> Result<PathBuf, String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+    let executable_dir = executable.parent().unwrap_or(Path::new("."));
+    let source_tree = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/stdlib");
+    for candidate in [
+        executable_dir.join("src/stdlib"),
+        executable_dir.join("../src/stdlib"),
+        source_tree,
+    ] {
+        if candidate.join("stdlib.stasis").is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(
+        "installed toolchain is missing src/stdlib; reinstall the complete release archive"
+            .to_string(),
+    )
+}
+
+fn collect_stasis_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut entries: Vec<_> = fs::read_dir(root)
+        .map_err(|error| format!("failed to read {}: {error}", root.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to enumerate {}: {error}", root.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect {}: {error}", entry.path().display()))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_stasis_files(&entry.path(), files)?;
+        } else if entry.path().extension().and_then(|value| value.to_str()) == Some("stasis") {
+            files.push(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn copy_dir_if_exists(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
+    let mut entries: Vec<_> = fs::read_dir(source)
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to enumerate {}: {error}", source.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect {}: {error}", entry.path().display()))?;
+        let target = destination.join(entry.file_name());
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            copy_dir_if_exists(&entry.path(), &target)?;
+        } else {
+            copy_file(&entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_file(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::copy(source, destination).map(|_| ()).map_err(|error| {
+        format!(
+            "failed to copy {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })
+}
+
+fn validate_project_name(name: &str) -> Result<(), String> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err("project name must be 1-64 ASCII letters, digits, '-' or '_'".to_string())
+    }
+}
+
+fn validate_relative_path(field: &str, path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(format!("{field} must be a non-empty project-relative path"));
+    }
+    Ok(())
+}
+
+fn validate_optional_workspace_path(
+    workspace: &Workspace,
+    field: &str,
+    path: Option<&Path>,
+) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    validate_relative_path(field, path)?;
+    validate_workspace_destination(workspace, field, &workspace.root.join(path))
+}
+
+fn validate_workspace_destination(
+    workspace: &Workspace,
+    field: &str,
+    candidate: &Path,
+) -> Result<(), String> {
+    let root = workspace
+        .root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve workspace root: {error}"))?;
+    let mut ancestor = candidate;
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| format!("failed to resolve {field}"))?;
+    }
+    let resolved = ancestor
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve {field}: {error}"))?;
+    if !resolved.starts_with(&root) {
+        return Err(format!("{field} resolves outside the workspace"));
+    }
+    Ok(())
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        env::current_dir()
+            .map(|current| current.join(path))
+            .map_err(|error| format!("failed to read current directory: {error}"))
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn relative_display(root: &Path, path: &Path) -> String {
+    display_path(path.strip_prefix(root).unwrap_or(path))
+}
+
+fn line_column(source: &str, offset: usize) -> (usize, usize) {
+    let mut bounded = offset.min(source.len());
+    while !source.is_char_boundary(bounded) {
+        bounded -= 1;
+    }
+    let prefix = &source[..bounded];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = prefix
+        .rsplit_once('\n')
+        .map(|(_, tail)| tail.chars().count() + 1)
+        .unwrap_or_else(|| prefix.chars().count() + 1);
+    (line, column)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+
+    fn temp_dir(name: &str) -> PathBuf {
+        env::temp_dir().join(format!(
+            "stasis_toolchain_cli_{name}_{}_{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::SeqCst)
+        ))
+    }
+
+    fn remove_temp(path: &Path) {
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn workspace_discovery_works_from_nested_directories() {
+        let root = temp_dir("discovery");
+        create_project(root.clone(), "demo".to_string()).expect("create project");
+        let nested = root.join("src/nested");
+        fs::create_dir_all(&nested).expect("create nested");
+        assert_eq!(find_workspace_root(&nested), Some(root.clone()));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn source_formatter_is_deterministic() {
+        let source = "function main(): i32 {  \r\n    return 0;\t\r\n}\r\n\r\n";
+        let expected = "function main(): i32 {\n    return 0;\n}\n";
+        assert_eq!(format_source(source), expected);
+        assert_eq!(format_source(expected), expected);
+    }
+
+    #[test]
+    fn generated_project_checks_tests_and_runs_through_jit() {
+        let root = temp_dir("smoke");
+        create_project(root.clone(), "smoke".to_string()).expect("create project");
+        let workspace = load_workspace(Some(&root)).expect("load workspace");
+        check_workspace(&workspace).expect("check project");
+        test_workspace(&workspace, None).expect("test project");
+        let run = run_workspace(&workspace, true).expect("run project");
+        assert_eq!(run.code, 0);
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn run_accepts_headless_and_watch_modes() {
+        let parsed = ToolchainCli::try_parse_from([
+            "stasis",
+            "--workspace",
+            "demo",
+            "run",
+            "--headless",
+            "--watch",
+        ])
+        .expect("parse run flags");
+        assert!(matches!(
+            parsed.command,
+            ToolchainCommand::Run {
+                watch: true,
+                headless: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn manifest_rejects_paths_that_escape_the_project() {
+        let manifest = ProjectManifest {
+            output: "../outside".to_string(),
+            ..ProjectManifest::new("demo".to_string())
+        };
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn init_preflights_reserved_paths_without_partial_writes() {
+        let root = temp_dir("preflight");
+        fs::create_dir_all(root.join("src")).expect("create source directory");
+        fs::write(root.join("src/main.stasis"), "user source\n").expect("write user source");
+
+        let error = create_project(root.clone(), "demo".to_string()).expect_err("reject conflict");
+        assert!(error.contains("refusing to overwrite"));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).expect("read user source"),
+            "user source\n"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn cli_output_paths_cannot_escape_the_workspace() {
+        let root = temp_dir("output_path");
+        create_project(root.clone(), "demo".to_string()).expect("create project");
+        let workspace = load_workspace(Some(&root)).expect("load workspace");
+        assert!(validate_optional_workspace_path(
+            &workspace,
+            "build output",
+            Some(Path::new("../outside"))
+        )
+        .is_err());
+        assert!(validate_optional_workspace_path(
+            &workspace,
+            "build output",
+            Some(Path::new("build/game"))
+        )
+        .is_ok());
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn failed_package_does_not_publish_or_leave_staging_output() {
+        let root = temp_dir("package_failure");
+        create_project(root.clone(), "demo".to_string()).expect("create project");
+        fs::write(root.join("src/main.stasis"), "function main(: i32 {\n")
+            .expect("write invalid source");
+        let workspace = load_workspace(Some(&root)).expect("load workspace");
+
+        assert!(package_workspace(
+            &workspace,
+            PackageTarget::Desktop,
+            Some(Path::new("dist/out"))
+        )
+        .is_err());
+        assert!(!root.join("dist/out").exists());
+        assert!(!root.join("dist/.out.staging").exists());
+        remove_temp(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_manifest_output_rejects_symlink_escape() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = temp_dir("symlink_output");
+        let outside = temp_dir("symlink_outside");
+        create_project(root.clone(), "demo".to_string()).expect("create project");
+        fs::create_dir_all(&outside).expect("create outside directory");
+        if symlink_dir(&outside, root.join("build")).is_err() {
+            remove_temp(&root);
+            remove_temp(&outside);
+            return;
+        }
+        let workspace = load_workspace(Some(&root)).expect("load workspace");
+        assert!(build_workspace(&workspace, BuildMode::Dev, None)
+            .expect_err("reject escaped default output")
+            .contains("outside the workspace"));
+        remove_temp(&root);
+        remove_temp(&outside);
+    }
+}

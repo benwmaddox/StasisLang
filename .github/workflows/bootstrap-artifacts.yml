@@ -33,6 +33,14 @@ jobs:
       - name: Build stasis (release)
         run: cargo build -p stasis --release
 
+      - name: Build native AOT bridge (unix)
+        if: runner.os != 'Windows'
+        run: cargo rustc -p stasis_dynload --release -- --crate-type staticlib
+
+      - name: Build native AOT bridge (windows)
+        if: runner.os == 'Windows'
+        run: cargo build -p stasis_dynload --release
+
       - name: Build stasis_graphics runtime (windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -58,10 +66,10 @@ jobs:
             -DVCPKG_TARGET_TRIPLET="$triplet" `
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
-            -DSTASIS_BUILD_RUNNER=OFF `
+            -DSTASIS_BUILD_RUNNER=ON `
             -DSTASIS_BUILD_SYS=OFF
 
-          cmake --build $buildDir --config Release --target stasis_graphics
+          cmake --build $buildDir --config Release --target stasis_graphics stasis_runner
 
       - name: Assemble bundle (unix)
         if: runner.os != 'Windows'
@@ -71,6 +79,7 @@ jobs:
           out="dist/stasis-release-${{ runner.os }}"
           mkdir -p "${out}/bin"
           cp "target/release/stasis" "${out}/bin/"
+          cp "target/release/libstasis_dynload.a" "${out}/bin/"
           cp README.md "${out}/"
           cp LICENSE "${out}/"
           cp -R src "${out}/"
@@ -84,10 +93,25 @@ jobs:
           $out = "dist/stasis-release-${{ runner.os }}"
           New-Item -ItemType Directory -Force -Path "$out/bin" | Out-Null
           Copy-Item "target/release/stasis.exe" "$out/" -Force
+          Copy-Item "target/release/stasis_dynload.dll" "$out/" -Force
+          Copy-Item "target/release/stasis_dynload.dll.lib" "$out/" -Force
+          $rustLld = Join-Path (rustc --print sysroot) "lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
+          Copy-Item $rustLld "$out/lld-link.exe" -Force
+          $clangCl = (Get-Command clang-cl.exe -ErrorAction Stop).Source
+          Copy-Item $clangCl "$out/clang-cl.exe" -Force
+          $rustCopyright = Join-Path (rustc --print sysroot) "share/doc/rust/COPYRIGHT.html"
+          Copy-Item $rustCopyright "$out/RUST-LLVM-COPYRIGHT.html" -Force
+          $vsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
+          $vsRoot = & $vsWhere -latest -property installationPath
+          $vsNotice = Get-ChildItem (Join-Path $vsRoot "Licenses") -Recurse -Filter "ThirdPartyNotices.txt" | Select-Object -First 1
+          if (-not $vsNotice) { throw "Visual Studio LLVM third-party notices not found" }
+          Copy-Item $vsNotice.FullName "$out/LLVM-THIRD-PARTY-NOTICES.txt" -Force
           # Keep the runtime DLL beside stasis.exe so `stasis.exe play ...` works from the archive root.
           Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/" -Force
+          Copy-Item "runtime/build_ci/bin/Release/stasis_runner.exe" "$out/" -Force
           Copy-Item README.md "$out/" -Force
           Copy-Item LICENSE "$out/" -Force
+          Copy-Item THIRD_PARTY_NOTICES.md "$out/" -Force
           Copy-Item src "$out/" -Recurse -Force
           Copy-Item samples "$out/" -Recurse -Force
           Compress-Archive -Path "$out/*" -DestinationPath "dist/stasis-release-${{ runner.os }}.zip" -Force
@@ -98,9 +122,36 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
+          Remove-Item Env:LIB -ErrorAction SilentlyContinue
+          Remove-Item Env:CC -ErrorAction SilentlyContinue
           Push-Location "dist/stasis-release-${{ runner.os }}"
           .\stasis.exe probe-graphics-runtime
+          .\stasis.exe new ci_smoke --dir cli-smoke
+          .\stasis.exe --workspace cli-smoke check
+          .\stasis.exe --workspace cli-smoke test
+          .\stasis.exe --workspace cli-smoke build --mode release
+          .\cli-smoke\build\ci_smoke.exe
+          Set-Content -Path "cli-smoke/src/main.stasis" -Encoding ASCII -Value @(
+            "function main(): i32 { return 0; }",
+            "function tick(): i32 { return 0; }",
+            "function render(): i32 { return 0; }"
+          )
+          .\stasis.exe --workspace cli-smoke package --target desktop
+          if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package runner missing" }
+          if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.dll")) { throw "game package library missing" }
           Pop-Location
+
+      - name: Smoke test bundled CLI (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "dist/stasis-release-${{ runner.os }}"
+          ./bin/stasis new ci_smoke --dir cli-smoke
+          ./bin/stasis --workspace cli-smoke check
+          ./bin/stasis --workspace cli-smoke test
+          ./bin/stasis --workspace cli-smoke build --mode release
+          ./cli-smoke/build/ci_smoke
 
       - name: Upload artifact (unix)
         if: runner.os != 'Windows'

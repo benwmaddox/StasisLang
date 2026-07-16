@@ -9,6 +9,7 @@ stasis_runner = { path = "../../crates/stasis_runner" }
 stasis_jit = { path = "../../crates/stasis_jit" }
 stasis_compiler = { path = "../../crates/stasis_compiler" }
 notify.workspace = true
+clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

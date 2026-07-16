@@ -31,10 +31,13 @@ Direct influences:
 
 Most users will:
 
-1. Write a `.stasis` game with `main()`, `tick()`, `render()`.
-2. Run it in dev with `play` (watch + hot swap).
-3. Write `.stasis` tests and run them with `test`.
-4. Later: build production artifacts with AOT (WIP).
+1. Install one release archive and put its `stasis` executable on `PATH`.
+2. Run `stasis new my_game`, then work from the project root or any subdirectory.
+3. Use `stasis fmt`, `stasis check`, `stasis test`, and `stasis run` during development.
+4. Use `stasis build --mode release` or `stasis package --target desktop` to ship.
+
+The integrated CLI, `stasis.json` workspace contract, JSON output, offline behavior, and
+installation layout are documented in `docs/toolchain_cli.md`.
 
 Mobile AOT artifacts for Android arm64 and iOS arm64 are documented in
 `docs/mobile_aot_artifacts.md`.
@@ -48,6 +51,8 @@ Windows release zip layout:
 
 - `stasis.exe` at the archive root
 - `stasis_graphics.dll` at the archive root
+- `lld-link.exe`, `clang-cl.exe`, `stasis_dynload.dll`, and `stasis_dynload.dll.lib` for offline AOT builds
+- `stasis_runner.exe` and `stasis_graphics.dll` for packaged desktop games
 - `src/` and `samples/` at the archive root
 
 That keeps the common Windows command simple:
