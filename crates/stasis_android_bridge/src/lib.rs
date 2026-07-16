@@ -10,8 +10,16 @@ use stasis_assets::{AssetFormat, AssetHandle, AssetLimits, ResolvedAssetManifest
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_compiler::frontend::workshop::{
-    build_workshop_compile_plan, load_workshop_project, render_workshop_artifacts,
-    WorkshopCompilePlan, WorkshopReload, WorkshopSourceFile,
+    build_workshop_compile_plan, load_workshop_edit_workspace, load_workshop_project,
+    plan_workshop_semantic_edits, render_workshop_artifacts, workshop_reachable_files,
+    workshop_source_items, write_workshop_semantic_plan, write_workshop_semantic_receipt,
+    WorkshopCompilePlan, WorkshopReload, WorkshopSemanticEditBatch, WorkshopSemanticEditPlan,
+    WorkshopSourceFile,
+};
+#[cfg(test)]
+use stasis_compiler::frontend::workshop::{
+    WorkshopSemanticEdit, WorkshopSemanticEditOperation, WorkshopSourceItemKind,
+    WorkshopSymbolSelector,
 };
 use stasis_compiler::IncrementalCompilerHost;
 
@@ -224,6 +232,120 @@ pub fn run_android_workshop_stasis_tests(
     Ok(
         serde_json::json!({"kind": "stasis_test_run", "passed": passed, "failed": failed, "all_passed": failed == 0 && passed > 0, "results": results}),
     )
+}
+
+pub fn android_workshop_source_items(
+    project_root: impl AsRef<Path>,
+    entry_file: impl AsRef<Path>,
+) -> Result<serde_json::Value, String> {
+    let files = load_workshop_edit_workspace(project_root.as_ref(), entry_file.as_ref())?;
+    let editable = files
+        .into_iter()
+        .filter(|file| {
+            let path = file.path.replace('\\', "/");
+            path.starts_with("src/") || path.starts_with("tests/")
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "items": workshop_source_items(&editable)?,
+    }))
+}
+
+pub fn execute_android_workshop_semantic_edit(
+    project_root: impl AsRef<Path>,
+    entry_file: impl AsRef<Path>,
+    batch: &WorkshopSemanticEditBatch,
+    dry_run: bool,
+    validate: bool,
+    run_tests: bool,
+) -> Result<serde_json::Value, String> {
+    let project_root = project_root.as_ref();
+    let entry_file = entry_file.as_ref();
+    let files = load_workshop_edit_workspace(project_root, entry_file)?;
+    let (after, plan) = plan_workshop_semantic_edits(&files, batch)?;
+    let reachable = workshop_reachable_files(&after, entry_file)?;
+    let source_fingerprint = fingerprint_workshop_sources(&reachable);
+    build_runtime_session(project_root, &reachable, source_fingerprint)?;
+    if dry_run {
+        return Ok(serde_json::json!({
+            "schema_version": 1,
+            "status": "preview",
+            "validated": true,
+            "plan": plan,
+        }));
+    }
+
+    write_workshop_semantic_plan(project_root, &plan, false)?;
+    if !validate {
+        return Ok(serde_json::json!({
+            "schema_version": 1,
+            "status": "applied",
+            "validation": "pending_batch_compile",
+            "plan": plan,
+        }));
+    }
+
+    let validation = (|| {
+        let compile = compile_android_workshop_project(project_root, entry_file)?;
+        if run_tests {
+            let tests = run_android_workshop_stasis_tests(project_root)?;
+            if tests["all_passed"] != true {
+                return Err(format!("Stasis tests failed: {tests}"));
+            }
+            Ok(serde_json::json!({
+                "compiler": "passed",
+                "reload": compile.reload,
+                "tests": tests,
+            }))
+        } else {
+            Ok(serde_json::json!({
+                "compiler": "passed",
+                "reload": compile.reload,
+                "tests": "skipped",
+            }))
+        }
+    })();
+    let validation = match validation {
+        Ok(value) => value,
+        Err(error) => {
+            write_workshop_semantic_plan(project_root, &plan, true).map_err(|rollback| {
+                format!("semantic edit failed: {error}; rollback failed: {rollback}")
+            })?;
+            compile_android_workshop_project(project_root, entry_file).map_err(|restore| {
+                format!("semantic edit failed: {error}; restored compile failed: {restore}")
+            })?;
+            return Err(format!(
+                "semantic edit validation failed and sources were rolled back: {error}"
+            ));
+        }
+    };
+    let receipt = write_android_semantic_receipt(project_root, &plan).map_err(|error| {
+        let rollback = write_workshop_semantic_plan(project_root, &plan, true);
+        match rollback {
+            Ok(()) => format!("failed writing semantic edit receipt; edit rolled back: {error}"),
+            Err(rollback) => {
+                format!(
+                    "failed writing semantic edit receipt: {error}; rollback failed: {rollback}"
+                )
+            }
+        }
+    })?;
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "status": "applied",
+        "validation": validation,
+        "receipt": receipt,
+        "plan": plan,
+    }))
+}
+
+fn write_android_semantic_receipt(
+    project_root: &Path,
+    plan: &WorkshopSemanticEditPlan,
+) -> Result<String, String> {
+    write_workshop_semantic_receipt(project_root, Path::new("build/semantic-edits"), plan)
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
 }
 
 fn collect_stasis_test_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -548,10 +670,12 @@ fn configure_runtime_jit(jit: &mut JitProcess, project_root: &Path, files: &[Wor
     ]);
     for file in files {
         let disk_path = project_root.join(&file.path);
-        jit.upsert_file(
-            disk_path.to_string_lossy().replace('\\', "/"),
-            file.source.clone(),
-        );
+        let compiler_path = disk_path
+            .canonicalize()
+            .unwrap_or(disk_path)
+            .to_string_lossy()
+            .to_string();
+        jit.upsert_file(compiler_path, file.source.clone());
     }
 }
 
@@ -811,6 +935,90 @@ pub extern "C" fn stasis_android_bridge_run_tests(project_root: *const c_char) -
     CString::new(message).unwrap().into_raw()
 }
 
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_source_items(
+    project_root: *const c_char,
+    entry_file: *const c_char,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let (project_root, entry_file) = semantic_bridge_paths(project_root, entry_file)?;
+        android_workshop_source_items(&project_root, &entry_file)
+    }));
+    semantic_bridge_json_result(result, "source item indexing")
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_semantic_edit(
+    project_root: *const c_char,
+    entry_file: *const c_char,
+    request_json: *const c_char,
+    dry_run: i32,
+    validate: i32,
+    run_tests: i32,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let (project_root, entry_file) = semantic_bridge_paths(project_root, entry_file)?;
+        if request_json.is_null() {
+            return Err("null semantic edit request".to_string());
+        }
+        let request_json = CStr::from_ptr(request_json)
+            .to_str()
+            .map_err(|error| format!("semantic edit request was not UTF-8: {error}"))?;
+        let batch = serde_json::from_str::<WorkshopSemanticEditBatch>(request_json)
+            .map_err(|error| format!("invalid semantic edit request: {error}"))?;
+        execute_android_workshop_semantic_edit(
+            &project_root,
+            &entry_file,
+            &batch,
+            dry_run != 0,
+            validate != 0,
+            run_tests != 0,
+        )
+    }));
+    semantic_bridge_json_result(result, "semantic edit")
+}
+
+unsafe fn semantic_bridge_paths(
+    project_root: *const c_char,
+    entry_file: *const c_char,
+) -> Result<(String, String), String> {
+    if project_root.is_null() || entry_file.is_null() {
+        return Err("null project root or entry file".to_string());
+    }
+    let project_root = CStr::from_ptr(project_root)
+        .to_str()
+        .map_err(|error| format!("project root was not UTF-8: {error}"))?;
+    let entry_file = CStr::from_ptr(entry_file)
+        .to_str()
+        .map_err(|error| format!("entry file was not UTF-8: {error}"))?;
+    Ok((project_root.to_string(), entry_file.to_string()))
+}
+
+fn semantic_bridge_json_result(
+    result: Result<Result<serde_json::Value, String>, Box<dyn std::any::Any + Send>>,
+    operation: &str,
+) -> *mut c_char {
+    let value = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "error": error,
+        }),
+        Err(_) => serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "error": format!("panic during Android {operation}"),
+        }),
+    };
+    let message = serde_json::to_string(&value).unwrap_or_else(|_| {
+        "{\"status\":\"error\",\"error\":\"serialization failed\"}".to_string()
+    });
+    CString::new(message)
+        .unwrap_or_else(|_| CString::new("{\"status\":\"error\"}").unwrap())
+        .into_raw()
+}
+
 unsafe fn compile_project_from_c(
     project_root: *const c_char,
     entry_file: *const c_char,
@@ -832,11 +1040,15 @@ fn format_compiler_source_diagnostic(
     diagnostic: &stasis_compiler::SourceDiagnostic,
 ) -> String {
     let path = Path::new(&diagnostic.path);
+    let canonical_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
     let source = fs::read_to_string(path).unwrap_or_default();
     let (line, column) = source_line_column(&source, diagnostic.start);
     let (end_line, end_column) = source_line_column(&source, diagnostic.end);
     let file = path
         .strip_prefix(project_root)
+        .or_else(|_| path.strip_prefix(&canonical_root))
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
@@ -1874,6 +2086,142 @@ function render(): void { Render.command_count = 1; Render.command0_kind = 1; Re
         stasis_android_bridge_free_string(ptr);
         assert!(message.contains("CompilePlanned"));
         assert!(message.contains("functions="));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn android_and_cli_share_rust_semantic_edit_contract() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("semantic_edit");
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"old.stasis\";\nfunction main(): i32 { return tick(); }\nfunction tick(): i32 { return old_value(); }\n",
+        )
+        .expect("write main");
+        fs::write(
+            root.join("src/old.stasis"),
+            "function old_value(): i32 { return 1; }\n",
+        )
+        .expect("write old");
+        fs::write(
+            root.join("src/new.stasis"),
+            "function new_value(): i32 { return 9; }\n",
+        )
+        .expect("write new");
+        let batch = WorkshopSemanticEditBatch {
+            schema_version: 1,
+            edits: vec![WorkshopSemanticEdit {
+                operation: WorkshopSemanticEditOperation::Update,
+                target: WorkshopSymbolSelector {
+                    name: "tick".to_string(),
+                    kind: Some(WorkshopSourceItemKind::Function),
+                    file: Some("src/main.stasis".to_string()),
+                    owner: None,
+                    signature: None,
+                },
+                new_source: Some(
+                    "function tick(): i32 { import \"new.stasis\"; return new_value(); }"
+                        .to_string(),
+                ),
+                expected_source_hash: None,
+            }],
+        };
+        let preview = execute_android_workshop_semantic_edit(
+            &root,
+            Path::new("src/main.stasis"),
+            &batch,
+            true,
+            true,
+            false,
+        )
+        .expect("preview");
+        assert_eq!(preview["status"], "preview");
+        assert!(fs::read_to_string(root.join("src/main.stasis"))
+            .expect("preview source")
+            .contains("old_value"));
+
+        let applied = execute_android_workshop_semantic_edit(
+            &root,
+            Path::new("src/main.stasis"),
+            &batch,
+            false,
+            true,
+            false,
+        )
+        .expect("apply");
+        assert_eq!(applied["status"], "applied");
+        let source = fs::read_to_string(root.join("src/main.stasis")).expect("applied source");
+        assert!(source.starts_with("import \"new.stasis\";\n"));
+        assert!(!source.contains("old.stasis"));
+        assert!(source.contains("return new_value();"));
+        assert!(root
+            .join(applied["receipt"].as_str().expect("receipt"))
+            .is_file());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn android_semantic_items_use_rust_owner_and_signature_identity() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("semantic_identity");
+        fs::write(
+            root.join("src/main.stasis"),
+            "struct Player { value: i32; }\nstruct Enemy { value: i32; }\nfunction main(): i32 { return 0; }\nfunction tick(): void {}\nfunction adjust(self: Player): i32 { return 1; }\nfunction adjust(self: Enemy): i32 { return 2; }\n",
+        )
+        .expect("write overloads");
+        let response = android_workshop_source_items(&root, Path::new("src/main.stasis"))
+            .expect("source items");
+        let items = response["items"].as_array().expect("items array");
+        let tick = items
+            .iter()
+            .find(|item| item["kind"] == "function" && item["name"] == "tick")
+            .expect("tick item");
+        assert!(tick.get("owner").is_none());
+        let player_adjust = items
+            .iter()
+            .find(|item| {
+                item["kind"] == "function" && item["name"] == "adjust" && item["owner"] == "Player"
+            })
+            .expect("Player adjust item");
+        let batch = WorkshopSemanticEditBatch {
+            schema_version: 1,
+            edits: vec![WorkshopSemanticEdit {
+                operation: WorkshopSemanticEditOperation::Update,
+                target: WorkshopSymbolSelector {
+                    name: "adjust".to_string(),
+                    kind: Some(WorkshopSourceItemKind::Function),
+                    file: Some("src/main.stasis".to_string()),
+                    owner: Some("Player".to_string()),
+                    signature: Some(
+                        player_adjust["signature"]
+                            .as_str()
+                            .expect("signature")
+                            .to_string(),
+                    ),
+                },
+                new_source: Some("function adjust(self: Player): i32 { return 7; }".to_string()),
+                expected_source_hash: Some(
+                    player_adjust["source_hash"]
+                        .as_str()
+                        .expect("source hash")
+                        .to_string(),
+                ),
+            }],
+        };
+        execute_android_workshop_semantic_edit(
+            &root,
+            Path::new("src/main.stasis"),
+            &batch,
+            false,
+            true,
+            false,
+        )
+        .expect("update one overload");
+        let source = fs::read_to_string(root.join("src/main.stasis")).expect("updated source");
+        assert!(source.contains("self: Player): i32 { return 7;"));
+        assert!(source.contains("self: Enemy): i32 { return 2;"));
         fs::remove_dir_all(&root).ok();
     }
 }

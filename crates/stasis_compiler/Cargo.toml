@@ -18,6 +18,9 @@ target-lexicon.workspace = true
 stasis_jit = { path = "../stasis_jit" }
 stasis_dynload = { path = "../stasis_dynload" }
 serde.workspace = true
+serde_json.workspace = true
+atomic-write-file.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 object = "0.36"

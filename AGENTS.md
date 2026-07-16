@@ -138,3 +138,7 @@
 - Good: adding host-required roots as explicit hashes injected into `.stasis` kept ownership clear and avoided parser/keyword surface expansion.
 - Bad: host compiler API had no compile-options channel, so root wiring currently rides through harness generation rather than a structured config object.
 - Adjustment: introduce a small explicit compile-config object in Rust host next, so required roots and future compile flags are passed through one typed path.
+- Current reflection (2026-07-16, semantic-edit protocol slice):
+- Good: one Rust parser-owned edit plan gave CLI and Android identical identity, import, validation, hash, and rollback behavior without duplicating scanners.
+- Bad: the first pass missed same-line declaration boundaries, import-only lifecycle roots, and the mismatch between Android display owners and Rust semantic owners.
+- Adjustment: semantic-edit slices must test non-textual reachability roots, multiple declarations on one line, cross-surface identity translation, and every failure point after source mutation but before receipt publication.

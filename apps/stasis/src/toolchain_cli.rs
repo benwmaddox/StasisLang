@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stasis::{
@@ -6,6 +6,13 @@ use stasis::{
     run_self_host_aot_cli_with_options, StasisTestRunSession,
 };
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::frontend::workshop::{
+    find_workshop_symbols, load_workshop_edit_workspace, plan_workshop_semantic_edits,
+    workshop_reachable_files, workshop_source_hash, workshop_source_items,
+    write_workshop_semantic_plan, write_workshop_semantic_receipt, WorkshopSemanticEdit,
+    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
+    WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
+};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -16,7 +23,7 @@ const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
 const COMMANDS: &[&str] = &[
     "new", "init", "fmt", "check", "test", "run", "build", "package", "inspect", "replay",
-    "verify", "version", "env", "help",
+    "verify", "version", "env", "symbol", "help",
 ];
 
 #[derive(Debug, Parser)]
@@ -106,6 +113,130 @@ enum ToolchainCommand {
     Version,
     /// Print toolchain, workspace, cache, and offline capability information.
     Env,
+    /// Find and transactionally edit compiler-owned semantic symbols.
+    Symbol {
+        #[command(subcommand)]
+        command: SymbolCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SymbolCommand {
+    /// List symbols in deterministic source order.
+    List {
+        #[arg(long, value_enum)]
+        kind: Option<SymbolKindArg>,
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Find symbol metadata without returning its source.
+    Find(SymbolSelectorArgs),
+    /// Read one unambiguous symbol and its source.
+    Read(SymbolSelectorArgs),
+    /// Add one declaration to an existing imported file.
+    Add {
+        #[command(flatten)]
+        target: RequiredSymbolTargetArgs,
+        #[arg(long, value_name = "PATH")]
+        source_file: PathBuf,
+        #[command(flatten)]
+        options: SymbolEditOptions,
+    },
+    /// Replace one existing declaration.
+    Update {
+        #[command(flatten)]
+        target: SymbolSelectorArgs,
+        #[arg(long, value_name = "PATH")]
+        source_file: PathBuf,
+        #[arg(long)]
+        expected_source_hash: Option<String>,
+        #[command(flatten)]
+        options: SymbolEditOptions,
+    },
+    /// Delete one existing declaration.
+    Delete {
+        #[command(flatten)]
+        target: SymbolSelectorArgs,
+        #[arg(long)]
+        expected_source_hash: Option<String>,
+        #[command(flatten)]
+        options: SymbolEditOptions,
+    },
+    /// Preview or apply a shared semantic-edit request JSON file.
+    Apply {
+        #[arg(long, value_name = "PATH")]
+        request: PathBuf,
+        #[command(flatten)]
+        options: SymbolEditOptions,
+    },
+    /// Revert a previously applied semantic-edit receipt.
+    Revert {
+        #[arg(long, value_name = "PATH")]
+        receipt: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        no_tests: bool,
+    },
+}
+
+#[derive(Debug, Clone, Args)]
+struct SymbolSelectorArgs {
+    name: String,
+    #[arg(long, value_enum)]
+    kind: Option<SymbolKindArg>,
+    #[arg(long)]
+    file: Option<String>,
+    #[arg(long)]
+    owner: Option<String>,
+    #[arg(long)]
+    signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct RequiredSymbolTargetArgs {
+    name: String,
+    #[arg(long, value_enum)]
+    kind: SymbolKindArg,
+    #[arg(long)]
+    file: String,
+    #[arg(long)]
+    owner: Option<String>,
+    #[arg(long)]
+    signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct SymbolEditOptions {
+    /// Validate and report the edit without writing files.
+    #[arg(long)]
+    dry_run: bool,
+    /// Skip project tests after compiler validation.
+    #[arg(long)]
+    no_tests: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SymbolKindArg {
+    Imports,
+    Globals,
+    Struct,
+    Function,
+    Test,
+}
+
+impl From<SymbolKindArg> for WorkshopSourceItemKind {
+    fn from(value: SymbolKindArg) -> Self {
+        match value {
+            SymbolKindArg::Imports => Self::Imports,
+            SymbolKindArg::Globals => Self::Globals,
+            SymbolKindArg::Struct => Self::Struct,
+            SymbolKindArg::Function => Self::Function,
+            SymbolKindArg::Test => Self::Test,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -298,6 +429,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Verify => "verify",
         ToolchainCommand::Version => "version",
         ToolchainCommand::Env => "env",
+        ToolchainCommand::Symbol { .. } => "symbol",
     }
 }
 
@@ -359,6 +491,7 @@ fn execute(
                     package_workspace(&workspace, target, out.as_deref())
                 }
                 ToolchainCommand::Inspect => inspect_workspace(&workspace),
+                ToolchainCommand::Symbol { command } => symbol_workspace(&workspace, command),
                 _ => Err("unsupported command routing".to_string()),
             }
         }
@@ -796,6 +929,404 @@ fn package_mobile_workspace(
         format!("packaged {} at {}", target.as_str(), package_root.display()),
         json!({"target": target.as_str(), "output": display_path(package_root)}),
     ))
+}
+
+impl SymbolSelectorArgs {
+    fn selector(&self) -> WorkshopSymbolSelector {
+        WorkshopSymbolSelector {
+            name: self.name.clone(),
+            kind: self.kind.map(Into::into),
+            file: self.file.clone(),
+            owner: self.owner.clone(),
+            signature: self.signature.clone(),
+        }
+    }
+}
+
+impl RequiredSymbolTargetArgs {
+    fn selector(&self) -> WorkshopSymbolSelector {
+        WorkshopSymbolSelector {
+            name: self.name.clone(),
+            kind: Some(self.kind.into()),
+            file: Some(self.file.clone()),
+            owner: self.owner.clone(),
+            signature: self.signature.clone(),
+        }
+    }
+}
+
+fn symbol_workspace(
+    workspace: &Workspace,
+    command: SymbolCommand,
+) -> Result<CommandResult, String> {
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let editable_files = files
+        .iter()
+        .filter(|file| is_editable_workshop_path(&file.path))
+        .cloned()
+        .collect::<Vec<_>>();
+    match command {
+        SymbolCommand::List { kind, file, owner } => {
+            let mut items = workshop_source_items(&editable_files)?;
+            items.retain(|item| {
+                kind.is_none_or(|kind| item.kind == kind.into())
+                    && file
+                        .as_deref()
+                        .is_none_or(|file| item.file.replace('\\', "/") == file.replace('\\', "/"))
+                    && owner
+                        .as_deref()
+                        .is_none_or(|owner| item.owner.as_deref() == Some(owner))
+            });
+            let human = items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{:?}\t{}\t{}\t{}",
+                        item.kind,
+                        item.file,
+                        item.owner.as_deref().unwrap_or(""),
+                        item.name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(CommandResult::success(
+                human,
+                json!({"schema_version": 1, "items": items}),
+            ))
+        }
+        SymbolCommand::Find(args) => {
+            let items = find_workshop_symbols(&editable_files, &args.selector())?;
+            let metadata = items
+                .iter()
+                .map(|item| {
+                    json!({
+                        "kind": item.kind,
+                        "name": item.name,
+                        "owner": item.owner,
+                        "file": item.file,
+                        "signature": item.signature,
+                        "source_hash": item.source_hash,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(CommandResult::success(
+                format!("found {} item(s)", metadata.len()),
+                json!({"schema_version": 1, "matches": metadata}),
+            ))
+        }
+        SymbolCommand::Read(args) => {
+            let selector = args.selector();
+            let mut items = find_workshop_symbols(&editable_files, &selector)?;
+            if items.len() != 1 {
+                return Err(format!(
+                    "symbol read requires exactly one match; found {}",
+                    items.len()
+                ));
+            }
+            let item = items.remove(0);
+            Ok(CommandResult::success(
+                item.source.clone(),
+                json!({"schema_version": 1, "item": item}),
+            ))
+        }
+        SymbolCommand::Add {
+            target,
+            source_file,
+            options,
+        } => {
+            let source = read_workspace_input(workspace, "symbol source", &source_file)?;
+            let batch = WorkshopSemanticEditBatch {
+                schema_version: 1,
+                edits: vec![WorkshopSemanticEdit {
+                    operation: WorkshopSemanticEditOperation::Add,
+                    target: target.selector(),
+                    new_source: Some(source),
+                    expected_source_hash: None,
+                }],
+            };
+            apply_symbol_batch(workspace, &files, batch, options)
+        }
+        SymbolCommand::Update {
+            target,
+            source_file,
+            expected_source_hash,
+            options,
+        } => {
+            let source = read_workspace_input(workspace, "symbol source", &source_file)?;
+            let batch = WorkshopSemanticEditBatch {
+                schema_version: 1,
+                edits: vec![WorkshopSemanticEdit {
+                    operation: WorkshopSemanticEditOperation::Update,
+                    target: target.selector(),
+                    new_source: Some(source),
+                    expected_source_hash,
+                }],
+            };
+            apply_symbol_batch(workspace, &files, batch, options)
+        }
+        SymbolCommand::Delete {
+            target,
+            expected_source_hash,
+            options,
+        } => {
+            let batch = WorkshopSemanticEditBatch {
+                schema_version: 1,
+                edits: vec![WorkshopSemanticEdit {
+                    operation: WorkshopSemanticEditOperation::Delete,
+                    target: target.selector(),
+                    new_source: None,
+                    expected_source_hash,
+                }],
+            };
+            apply_symbol_batch(workspace, &files, batch, options)
+        }
+        SymbolCommand::Apply { request, options } => {
+            let source = read_workspace_input(workspace, "semantic edit request", &request)?;
+            let batch = serde_json::from_str::<WorkshopSemanticEditBatch>(&source)
+                .map_err(|error| format!("invalid semantic edit request: {error}"))?;
+            apply_symbol_batch(workspace, &files, batch, options)
+        }
+        SymbolCommand::Revert {
+            receipt,
+            dry_run,
+            no_tests,
+        } => revert_symbol_plan(workspace, &receipt, dry_run, no_tests),
+    }
+}
+
+fn apply_symbol_batch(
+    workspace: &Workspace,
+    files: &[WorkshopSourceFile],
+    mut batch: WorkshopSemanticEditBatch,
+    options: SymbolEditOptions,
+) -> Result<CommandResult, String> {
+    normalize_cli_semantic_batch(files, &mut batch)?;
+    let (after, plan) = plan_workshop_semantic_edits(files, &batch)?;
+    validate_semantic_files(workspace, &after)?;
+    if options.dry_run {
+        return Ok(CommandResult::success(
+            format!(
+                "preview: {} file(s) would change; {:?}",
+                plan.changed_files.len(),
+                plan.reload.expected_reload
+            ),
+            json!({
+                "status": "preview",
+                "validated": true,
+                "tests": "not_run_for_preview",
+                "plan": plan,
+            }),
+        ));
+    }
+
+    write_workshop_semantic_plan(&workspace.root, &plan, false)?;
+    let validation = if options.no_tests {
+        Ok(json!({"compiler": "passed", "tests": "skipped"}))
+    } else {
+        test_workspace(workspace, None).map(
+            |result| json!({"compiler": "passed", "tests": "passed", "test_result": result.data}),
+        )
+    };
+    let validation = match validation {
+        Ok(validation) => validation,
+        Err(error) => {
+            write_workshop_semantic_plan(&workspace.root, &plan, true).map_err(|rollback| {
+                format!(
+                    "semantic edit validation failed: {error}; rollback also failed: {rollback}"
+                )
+            })?;
+            let restored = load_workshop_edit_workspace(
+                &workspace.root,
+                Path::new(&workspace.manifest.entry),
+            )?;
+            validate_semantic_files(workspace, &restored)?;
+            return Err(format!(
+                "semantic edit validation failed and all source changes were rolled back: {error}"
+            ));
+        }
+    };
+    let receipt = match write_symbol_receipt(workspace, &plan) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            write_workshop_semantic_plan(&workspace.root, &plan, true).map_err(|rollback| {
+                format!("semantic receipt failed: {error}; rollback also failed: {rollback}")
+            })?;
+            let restored = load_workshop_edit_workspace(
+                &workspace.root,
+                Path::new(&workspace.manifest.entry),
+            )?;
+            validate_semantic_files(workspace, &restored)?;
+            return Err(format!(
+                "semantic receipt failed and all source changes were rolled back: {error}"
+            ));
+        }
+    };
+    Ok(CommandResult::success(
+        format!(
+            "applied {} semantic edit(s); receipt {}",
+            plan.edits.len(),
+            receipt.display()
+        ),
+        json!({
+            "status": "applied",
+            "plan": plan,
+            "validation": validation,
+            "receipt": relative_display(&workspace.root, &receipt),
+        }),
+    ))
+}
+
+fn normalize_cli_semantic_batch(
+    files: &[WorkshopSourceFile],
+    batch: &mut WorkshopSemanticEditBatch,
+) -> Result<(), String> {
+    let editable = files
+        .iter()
+        .filter(|file| is_editable_workshop_path(&file.path))
+        .cloned()
+        .collect::<Vec<_>>();
+    for edit in &mut batch.edits {
+        if let Some(file) = edit.target.file.as_deref() {
+            if !is_editable_workshop_path(file) {
+                return Err(format!(
+                    "semantic edits are limited to project src/ and tests/ files: {file}"
+                ));
+            }
+            continue;
+        }
+        if edit.operation == WorkshopSemanticEditOperation::Add {
+            return Err("semantic add requires target.file".to_string());
+        }
+        let matches = find_workshop_symbols(&editable, &edit.target)?;
+        if matches.len() != 1 {
+            return Err(format!(
+                "semantic edit requires one editable target; found {}",
+                matches.len()
+            ));
+        }
+        edit.target.file = Some(matches[0].file.clone());
+    }
+    Ok(())
+}
+
+fn validate_semantic_files(
+    workspace: &Workspace,
+    files: &[WorkshopSourceFile],
+) -> Result<(), String> {
+    let files = workshop_reachable_files(files, Path::new(&workspace.manifest.entry))?;
+    let mut jit = JitProcess::new();
+    jit.set_local_runtime_helper_trampolines(true);
+    jit.set_required_emit_roots(&[
+        "main".to_string(),
+        "tick".to_string(),
+        "render".to_string(),
+        "on_code_swap".to_string(),
+    ]);
+    for file in &files {
+        let path = workspace.root.join(&file.path);
+        let compiler_path = path
+            .canonicalize()
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        jit.upsert_file(compiler_path, file.source.clone());
+    }
+    jit.compile().map_err(|error| {
+        jit.last_source_diagnostic()
+            .map(|diagnostic| {
+                format!(
+                    "{}:{}-{}: {}",
+                    diagnostic.path, diagnostic.start, diagnostic.end, diagnostic.message
+                )
+            })
+            .unwrap_or_else(|| format!("{error:?}"))
+    })?;
+    Ok(())
+}
+
+fn write_symbol_receipt(
+    workspace: &Workspace,
+    plan: &WorkshopSemanticEditPlan,
+) -> Result<PathBuf, String> {
+    let relative_directory = Path::new(&workspace.manifest.output).join("semantic-edits");
+    let receipt = workspace
+        .root
+        .join(&relative_directory)
+        .join("receipt.json");
+    validate_workspace_destination(workspace, "semantic edit receipt", &receipt)?;
+    write_workshop_semantic_receipt(&workspace.root, &relative_directory, plan)
+        .map(|relative| workspace.root.join(relative))
+}
+
+fn revert_symbol_plan(
+    workspace: &Workspace,
+    receipt: &Path,
+    dry_run: bool,
+    no_tests: bool,
+) -> Result<CommandResult, String> {
+    let source = read_workspace_input(workspace, "semantic edit receipt", receipt)?;
+    let plan = serde_json::from_str::<WorkshopSemanticEditPlan>(&source)
+        .map_err(|error| format!("invalid semantic edit receipt: {error}"))?;
+    let current =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let mut restored = current.clone();
+    for change in &plan.changed_files {
+        let file = restored
+            .iter_mut()
+            .find(|file| file.path == change.file)
+            .ok_or_else(|| format!("receipt file is no longer imported: {}", change.file))?;
+        if workshop_source_hash(&file.source) != change.after_hash {
+            return Err(format!(
+                "refusing revert because {} changed after the recorded edit",
+                change.file
+            ));
+        }
+        file.source = change.before_source.clone();
+    }
+    validate_semantic_files(workspace, &restored)?;
+    if dry_run {
+        return Ok(CommandResult::success(
+            format!(
+                "preview: {} file(s) would be restored",
+                plan.changed_files.len()
+            ),
+            json!({"status": "revert_preview", "validated": true, "plan": plan}),
+        ));
+    }
+    write_workshop_semantic_plan(&workspace.root, &plan, true)?;
+    if !no_tests {
+        if let Err(error) = test_workspace(workspace, None) {
+            write_workshop_semantic_plan(&workspace.root, &plan, false).map_err(|rollback| {
+                format!("revert tests failed: {error}; reapply also failed: {rollback}")
+            })?;
+            return Err(format!(
+                "revert tests failed and the edited sources were reapplied: {error}"
+            ));
+        }
+    }
+    Ok(CommandResult::success(
+        format!("reverted {} file(s)", plan.changed_files.len()),
+        json!({
+            "status": "reverted",
+            "changed_files": plan.changed_files.iter().map(|change| &change.file).collect::<Vec<_>>(),
+            "compiler": "passed",
+            "tests": if no_tests { "skipped" } else { "passed" },
+        }),
+    ))
+}
+
+fn read_workspace_input(workspace: &Workspace, field: &str, path: &Path) -> Result<String, String> {
+    validate_optional_workspace_path(workspace, field, Some(path))?;
+    let absolute = workspace.root.join(path);
+    fs::read_to_string(&absolute)
+        .map_err(|error| format!("failed to read {}: {error}", absolute.display()))
+}
+
+fn is_editable_workshop_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.starts_with("src/") || normalized.starts_with("tests/")
 }
 
 fn inspect_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
