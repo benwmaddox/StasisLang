@@ -485,6 +485,10 @@ impl LiveTui {
                 edit.discard_confirm = false;
             }
         }
+        self.active_buffer_for_render_mut()
+    }
+
+    fn active_buffer_for_render_mut(&mut self) -> &mut EditBuffer {
         self.command_bar
             .as_mut()
             .unwrap_or_else(|| self.input.buffer_mut())
@@ -1321,7 +1325,7 @@ impl LiveTui {
         let cursor = draw_editor(
             &mut regions[1],
             layout.editor,
-            self.active_buffer_mut(),
+            self.active_buffer_for_render_mut(),
             ghost,
             command_bar,
             definition,
@@ -2348,6 +2352,33 @@ mod tests {
             &app.input,
             InputMode::Definition(edit) if edit.discard_confirm
         ));
+    }
+
+    #[test]
+    fn rendering_buffer_access_preserves_discard_confirmation() {
+        let (client, _server) = stasis_runner::live::live_session(8);
+        let mut app = LiveTui::new(client);
+        app.input = InputMode::Definition(EditSession {
+            id: 1,
+            target: LiveSymbolTarget {
+                name: "tick".to_string(),
+                kind: Some("function".to_string()),
+                file: Some("src/main.stasis".to_string()),
+                owner: None,
+                signature: Some("tick(): i32".to_string()),
+            },
+            expected_source_hash: workshop_source_hash("accepted"),
+            accepted_source: "accepted".to_string(),
+            source_start: 0,
+            buffer: EditBuffer::from_text("dirty".to_string()),
+            discard_confirm: false,
+        });
+
+        app.close_definition();
+        let _ = app.active_buffer_for_render_mut();
+        app.close_definition();
+
+        assert!(matches!(app.input, InputMode::Prompt(_)));
     }
 
     #[test]
