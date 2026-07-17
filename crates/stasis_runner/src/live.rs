@@ -514,7 +514,8 @@ fn rank_indexed_completion_items(
     let bounded_limit = limit.min(256);
     let mut unscoped_match_count = 0usize;
     let mut best = Vec::<(CompletionRank<'_>, &CompletionItem)>::with_capacity(bounded_limit);
-    let mut scoped_matches = BTreeMap::<(&str, &str), (CompletionRank<'_>, &CompletionItem)>::new();
+    let mut scoped_matches =
+        BTreeMap::<(&str, &str, Option<&str>), (CompletionRank<'_>, &CompletionItem)>::new();
     for indexed in items {
         let Some(scope_distance) = completion_scope_distance(&indexed.item, context) else {
             continue;
@@ -537,7 +538,13 @@ fn rank_indexed_completion_items(
             detail: &indexed.item.detail,
         };
         if indexed.item.scope.is_some() {
-            let key = (indexed.item.text.as_str(), indexed.item.kind.as_str());
+            let overload_detail =
+                (indexed.item.kind == "method").then_some(indexed.item.detail.as_str());
+            let key = (
+                indexed.item.text.as_str(),
+                indexed.item.kind.as_str(),
+                overload_detail,
+            );
             match scoped_matches.get_mut(&key) {
                 Some(best) if rank < best.0 => *best = (rank, &indexed.item),
                 Some(_) => {}
@@ -1506,6 +1513,40 @@ mod tests {
         assert_eq!(result.items[0].detail, "inner");
         assert_eq!(result.items[1].text, "valid");
         assert!(!result.truncated);
+    }
+
+    #[test]
+    fn completion_query_preserves_scoped_method_overloads() {
+        let method = |detail: &str| CompletionItem {
+            text: "hero.damage".into(),
+            kind: "method".into(),
+            detail: detail.into(),
+            type_name: Some("i32".into()),
+            source: Some("src/main.stasis".into()),
+            scope: Some(CompletionScope {
+                owner: "tick".into(),
+                file: "src/main.stasis".into(),
+                owner_signature: Some("tick(): i32".into()),
+                owner_end: Some(100),
+                visible_from: 10,
+                visible_to: 100,
+            }),
+        };
+        let mut index = CompletionIndex::default();
+        index.replace([
+            method("damage(hero: Player, amount: i32): i32"),
+            method("damage(hero: Player, amount: f32): i32"),
+        ]);
+        let context = CompletionContext {
+            owner: Some("tick".into()),
+            file: Some("src/main.stasis".into()),
+            owner_signature: Some("tick(): i32".into()),
+            source_offset: None,
+            expected_type: None,
+        };
+        let result = index.query_with_context("hrodam", 6, 10, &context);
+        assert_eq!(result.items.len(), 2);
+        assert_ne!(result.items[0].detail, result.items[1].detail);
     }
 
     #[test]

@@ -97,6 +97,7 @@ pub fn parse_typed_local_bindings(source: &str) -> Result<Vec<ParsedLocalBinding
     let mut bindings = Vec::new();
     for function in parse_top_level_functions(source)? {
         let scope_ranges = lexical_scope_ranges(&tokens, function.body_range.clone());
+        let loop_ranges = for_scope_ranges(source, &tokens, function.body_range.clone());
         let mut cursor = tokens.partition_point(|token| token.start < function.body_range.start);
         while let Some(token) = tokens.get(cursor).copied() {
             if token.start >= function.body_range.end || token.kind == TokenKind::Eof {
@@ -119,6 +120,7 @@ pub fn parse_typed_local_bindings(source: &str) -> Result<Vec<ParsedLocalBinding
             let (type_name, next) = parse_type_name(source, &tokens, cursor + 3)?;
             let scope_end = scope_ranges
                 .iter()
+                .chain(loop_ranges.iter())
                 .filter(|range| range.start <= token.start && token.end <= range.end)
                 .min_by_key(|range| range.end.saturating_sub(range.start))
                 .map(|range| range.end)
@@ -185,6 +187,69 @@ fn lexical_scope_ranges(tokens: &[Token], body_range: Range<usize>) -> Vec<Range
         }
     }
     ranges
+}
+
+fn for_scope_ranges(source: &str, tokens: &[Token], body_range: Range<usize>) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut cursor = tokens.partition_point(|token| token.start < body_range.start);
+    while let Some(token) = tokens.get(cursor).copied() {
+        if token.start >= body_range.end || token.kind == TokenKind::Eof {
+            break;
+        }
+        if token.kind == TokenKind::Identifier && token_text(source, token) == "for" {
+            let Some(header_open) = tokens
+                .get(cursor + 1)
+                .filter(|token| token.kind == TokenKind::LParen)
+            else {
+                cursor += 1;
+                continue;
+            };
+            let Some(header_close_index) =
+                matching_token_index(tokens, cursor + 1, TokenKind::LParen, TokenKind::RParen)
+            else {
+                cursor += 1;
+                continue;
+            };
+            let Some(body_open_index) = tokens
+                .get(header_close_index + 1)
+                .filter(|token| token.kind == TokenKind::LBrace)
+                .map(|_| header_close_index + 1)
+            else {
+                cursor += 1;
+                continue;
+            };
+            if let Some(body_close_index) = matching_token_index(
+                tokens,
+                body_open_index,
+                TokenKind::LBrace,
+                TokenKind::RBrace,
+            ) {
+                ranges.push(header_open.start..tokens[body_close_index].end);
+            }
+        }
+        cursor += 1;
+    }
+    ranges
+}
+
+fn matching_token_index(
+    tokens: &[Token],
+    open_index: usize,
+    open_kind: TokenKind,
+    close_kind: TokenKind,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open_index) {
+        if token.kind == open_kind {
+            depth = depth.saturating_add(1);
+        } else if token.kind == close_kind {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1267,6 +1332,28 @@ function reset(): void {
             .find(|binding| binding.name == "damage")
             .expect("nested binding");
         assert!(damage.visibility_range.end < source.find("return speed").expect("return"));
+    }
+
+    #[test]
+    fn typed_for_initializer_is_visible_only_through_loop_body() {
+        let source = r#"
+function tick(): i32 {
+    for (let index: i32 = 0; index < 2; index += 1) {
+        let inside: i32 = index;
+    }
+    let after: i32 = 3;
+    return after;
+}
+"#;
+        let bindings = parse_typed_local_bindings(source).expect("typed locals");
+        let after_start = source.find("let after").expect("after binding");
+        for name in ["index", "inside"] {
+            let binding = bindings
+                .iter()
+                .find(|binding| binding.name == name)
+                .expect("loop binding");
+            assert!(binding.visibility_range.end < after_start);
+        }
     }
 
     #[test]
