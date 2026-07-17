@@ -1344,7 +1344,14 @@ fn run_live_terminal_inner(
                 }
             }
             let _ = editor.add_history_entry(line.as_str());
-            match terminal.feed_line(&line)? {
+            let input = match terminal.feed_line(&line) {
+                Ok(input) => input,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    continue;
+                }
+            };
+            match input {
                 TerminalInput::Continue { prompt: next } => {
                     prompt = next;
                     continue;
@@ -3042,6 +3049,22 @@ mod tests {
             palette_query_input("let next: i32 = he", 16, 18, "hero.hp"),
             ("let next: i32 = hero.hp".to_string(), 23)
         );
+    }
+
+    #[test]
+    fn invalid_interactive_command_does_not_poison_terminal_buffer() {
+        let mut terminal = TerminalBuffer::new();
+        assert_eq!(
+            terminal.feed_line("view render"),
+            Err("unknown live command 'view'; use :help".to_string())
+        );
+        let TerminalInput::Request(request) = terminal
+            .feed_line(":status")
+            .expect("valid command after invalid input")
+        else {
+            panic!("expected status request")
+        };
+        assert_eq!(request.command, LiveCommand::Status);
     }
 
     #[test]
