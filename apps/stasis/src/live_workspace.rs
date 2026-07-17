@@ -14,8 +14,7 @@ use stasis_compiler::frontend::workshop::{
 use stasis_runner::live::{
     CompletionContext, CompletionIndex, CompletionItem, CompletionQuery, CompletionScope,
     LiveCommand, LiveEditOperation, LiveRequest, LiveResponse, LiveResponseSendError,
-    LiveSessionServer, LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_TRACKS, MAX_LIVE_TRACK_TICKS,
-    MAX_LIVE_WATCHES,
+    LiveSessionServer, LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_WATCHES,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
@@ -32,14 +31,6 @@ const MAX_LIVE_STATE_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LIVE_TRANSACTION_ASSIGNMENTS: usize = 64;
 const MAX_STAGED_TEST_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_STAGED_TEST_DIAGNOSTIC_BYTES: usize = 4096;
-const TRACK_PROGRESS_INTERVAL: usize = 10;
-
-struct LiveTrack {
-    total_ticks: u32,
-    samples: Vec<JitScalarValue>,
-    dropped_updates: u64,
-}
-
 #[derive(Debug, Clone)]
 pub struct LiveRunConfig {
     pub project_root: PathBuf,
@@ -145,7 +136,6 @@ pub(crate) struct LiveWorkspace {
     completion_snapshot: Arc<CompletionSnapshot>,
     scratch: ScratchWorkspace,
     watches: BTreeMap<String, Option<JitScalarValue>>,
-    tracks: BTreeMap<String, LiveTrack>,
     pending_plan: Option<WorkshopSemanticEditPlan>,
     pending_requests: VecDeque<LiveRequest>,
     pending_responses: VecDeque<LiveResponse>,
@@ -192,7 +182,6 @@ impl LiveWorkspace {
             completion_snapshot: Arc::new(CompletionSnapshot::default()),
             scratch: ScratchWorkspace::default(),
             watches: BTreeMap::new(),
-            tracks: BTreeMap::new(),
             pending_plan: None,
             pending_requests: VecDeque::new(),
             pending_responses: VecDeque::new(),
@@ -379,7 +368,6 @@ impl LiveWorkspace {
     }
 
     pub(crate) fn publish_watches(&mut self, tick: u64, jit: &JitProcess) {
-        self.publish_tracks(tick, jit);
         if self.dropped_watch_events > 0 {
             let dropped = self.dropped_watch_events;
             match self.server.respond(LiveResponse::success(
@@ -424,82 +412,6 @@ impl LiveWorkspace {
         }
     }
 
-    fn publish_tracks(&mut self, tick: u64, jit: &JitProcess) {
-        let paths = self.tracks.keys().cloned().collect::<Vec<_>>();
-        for path in paths {
-            let value = match jit.read_global_scalar(&path) {
-                Ok(value) => value,
-                Err(error) => {
-                    self.tracks.remove(&path);
-                    let _ = self.server.respond(LiveResponse::success(
-                        0,
-                        tick,
-                        "track_failed",
-                        json!({"path": path, "error": error}),
-                    ));
-                    continue;
-                }
-            };
-            let Some(track) = self.tracks.get_mut(&path) else {
-                continue;
-            };
-            if track.samples.len() < track.total_ticks as usize {
-                track.samples.push(value);
-            }
-            let complete = track.samples.len() == track.total_ticks as usize;
-            if !complete && track.samples.len() % TRACK_PROGRESS_INTERVAL != 0 {
-                continue;
-            }
-            let kind = if complete {
-                "track_complete"
-            } else {
-                "track_progress"
-            };
-            let samples = if complete {
-                track.samples.clone()
-            } else {
-                track
-                    .samples
-                    .iter()
-                    .rev()
-                    .take(32)
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect()
-            };
-            let response = LiveResponse::success(
-                0,
-                tick,
-                kind,
-                json!({
-                    "path": path,
-                    "sample_count": track.samples.len(),
-                    "total_ticks": track.total_ticks,
-                    "latest": value,
-                    "samples": samples,
-                    "dropped_updates": track.dropped_updates,
-                }),
-            );
-            match self.server.respond(response) {
-                Ok(()) if complete => {
-                    self.tracks.remove(&path);
-                }
-                Ok(()) => {}
-                Err(LiveResponseSendError::Full(_)) => {
-                    if let Some(track) = self.tracks.get_mut(&path) {
-                        track.dropped_updates = track.dropped_updates.saturating_add(1);
-                    }
-                }
-                Err(LiveResponseSendError::Disconnected) => {
-                    self.quit = true;
-                    return;
-                }
-            }
-        }
-    }
-
     fn handle_request(
         &mut self,
         request: LiveRequest,
@@ -518,7 +430,6 @@ impl LiveWorkspace {
                     "history_length": self.history.len(),
                     "history_cursor": self.history_cursor,
                     "watches": self.watches.keys().collect::<Vec<_>>(),
-                    "tracks": self.tracks.keys().collect::<Vec<_>>(),
                     "scratch_cells": self.scratch.list(),
                     "dropped_watch_events": self.dropped_watch_events,
                     "preparing_request_id": self.edit_preparation.as_ref().map(|job| job.request_id),
@@ -685,42 +596,6 @@ impl LiveWorkspace {
                 Ok((
                     "watch_added",
                     json!({"path": path, "value": value, "tick": tick}),
-                ))
-            }
-            LiveCommand::Track { path, ticks } => {
-                if ticks == 0 || ticks > MAX_LIVE_TRACK_TICKS {
-                    return Err(format!(
-                        "track duration must be 1..={MAX_LIVE_TRACK_TICKS} ticks"
-                    ));
-                }
-                let value = jit.read_global_scalar(&path)?;
-                if !self.tracks.contains_key(&path) && self.tracks.len() >= MAX_LIVE_TRACKS {
-                    return Err(format!(
-                        "live tracking is limited to {MAX_LIVE_TRACKS} paths"
-                    ));
-                }
-                self.tracks.insert(
-                    path.clone(),
-                    LiveTrack {
-                        total_ticks: ticks,
-                        samples: Vec::with_capacity(ticks as usize),
-                        dropped_updates: 0,
-                    },
-                );
-                Ok((
-                    "track_started",
-                    json!({"path": path, "ticks": ticks, "value": value}),
-                ))
-            }
-            LiveCommand::Untrack { path } => {
-                if let Some(path) = path {
-                    self.tracks.remove(&path);
-                } else {
-                    self.tracks.clear();
-                }
-                Ok((
-                    "track_removed",
-                    json!({"tracks": self.tracks.keys().collect::<Vec<_>>()}),
                 ))
             }
             LiveCommand::Unwatch { path } => {
@@ -1797,7 +1672,7 @@ fn help_data() -> Value {
             ":add KIND NAME FILE ... :end", ":update KIND NAME [FILE] ... :end",
             ":delete KIND NAME [FILE]", ":preview", ":apply", ":changes", ":undo", ":redo",
             ":inspect [PATH]", ":watch PATH", ":unwatch [PATH]",
-            ":track PATH [ticks]", ":untrack [PATH]", ":set PATH VALUE",
+            ":set PATH VALUE",
             ":print VALUE_OR_PATH", ":do ... :end", ":cell put|run|list|clear"
         ],
         "multiline_terminator": ":end",
@@ -1833,8 +1708,6 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":inspect",
         ":watch",
         ":unwatch",
-        ":track",
-        ":untrack",
         ":set",
         ":print",
         ":do",
@@ -2409,53 +2282,6 @@ mod tests {
         assert!(workspace.should_run_tick());
         workspace.after_tick();
         assert!(!workspace.should_run_tick());
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn per_tick_track_keeps_unchanged_samples_and_completes_exactly() {
-        let (root, config) = project();
-        let (mut jit, package) = compile(&config);
-        jit.execute_i32_noarg_by_name("main").expect("main");
-        let (client, server) = stasis_runner::live::live_session(32);
-        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
-        let mut tick_ptr = package.tick_code_ptr;
-        let mut render_ptr = package.render_code_ptr;
-        let started = run_request(
-            &client,
-            &mut workspace,
-            &mut jit,
-            &mut tick_ptr,
-            &mut render_ptr,
-            LiveRequest::new(
-                44,
-                LiveCommand::Track {
-                    path: "score".into(),
-                    ticks: 3,
-                },
-            ),
-        );
-        assert!(started.ok, "{:?}", started.error);
-
-        jit.write_global_scalar("score", JitScalarValue::I32(5))
-            .expect("set score");
-        workspace.publish_watches(10, &jit);
-        workspace.publish_watches(11, &jit);
-        jit.write_global_scalar("score", JitScalarValue::I32(8))
-            .expect("set score");
-        workspace.publish_watches(12, &jit);
-
-        let complete = client
-            .receive_timeout(std::time::Duration::from_secs(1))
-            .expect("track complete");
-        assert_eq!(complete.kind, "track_complete");
-        assert_eq!(complete.tick, 12);
-        let data = complete.data.expect("track data");
-        assert_eq!(data["sample_count"], 3);
-        assert_eq!(data["samples"][0]["value"], 5);
-        assert_eq!(data["samples"][1]["value"], 5);
-        assert_eq!(data["samples"][2]["value"], 8);
-        assert!(workspace.tracks.is_empty());
         fs::remove_dir_all(root).ok();
     }
 

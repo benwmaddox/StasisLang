@@ -404,6 +404,9 @@ pub(crate) fn are_assignment_types_compatible(
     if target_type == expression_type {
         return true;
     }
+    if target_type == TYPE_ID_BOOL || expression_type == TYPE_ID_BOOL {
+        return false;
+    }
     is_i32_abi_compatible_type(target_type, type_table)
         && is_i32_abi_compatible_type(expression_type, type_table)
 }
@@ -2470,7 +2473,9 @@ pub(crate) fn parse_let_statement(
             })?;
             let expression = if let Some(expression_text) = initializer {
                 parse_value_expression(expression_text)?
-            } else if resolved_type_id == TYPE_ID_I32 || resolved_type_id == TYPE_ID_BOOL {
+            } else if resolved_type_id == TYPE_ID_BOOL {
+                SimpleExpr::Bool(false)
+            } else if resolved_type_id == TYPE_ID_I32 {
                 SimpleExpr::Int(0)
             } else {
                 SimpleExpr::Float(0.0)
@@ -4772,9 +4777,14 @@ pub(crate) fn emit_simple_statements(
                         binding.type_id,
                         type_table,
                     ) {
+                        let expected = type_table
+                            .type_info(declared_type_id)
+                            .map_or_else(|| declared_type_id.to_string(), |info| info.name.clone());
+                        let found = type_table
+                            .type_info(binding.type_id)
+                            .map_or_else(|| binding.type_id.to_string(), |info| info.name.clone());
                         return Err(format!(
-                            "let binding '{}' expected type {} expression but found {}",
-                            name, declared_type_id, binding.type_id
+                            "let binding '{name}' expected {expected} expression but found {found}"
                         ));
                     }
                     declared_type_id
@@ -5704,9 +5714,15 @@ pub(crate) fn emit_simple_statements(
                     binding.type_id,
                     type_table,
                 ) {
+                    let expected = type_table.type_info(expected_return_type).map_or_else(
+                        || expected_return_type.to_string(),
+                        |info| info.name.clone(),
+                    );
+                    let found = type_table
+                        .type_info(binding.type_id)
+                        .map_or_else(|| binding.type_id.to_string(), |info| info.name.clone());
                     return Err(format!(
-                        "return expression expected type {} but found {}",
-                        expected_return_type, binding.type_id
+                        "return expression expected {expected} but found {found}"
                     ));
                 }
                 builder.ins().return_(&[binding.value]);
