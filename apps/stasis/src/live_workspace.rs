@@ -4,15 +4,15 @@ use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
 use stasis_compiler::frontend::workshop::{
     find_workshop_symbols, load_workshop_edit_workspace, plan_workshop_semantic_edits,
-    workshop_reachable_files, workshop_source_hash, workshop_source_items,
-    write_workshop_semantic_plan, write_workshop_semantic_receipt, ExpectedReload,
-    WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
-    WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind,
-    WorkshopSymbolSelector,
+    workshop_completion_items, workshop_reachable_files, workshop_source_hash,
+    workshop_source_items, write_workshop_semantic_plan, write_workshop_semantic_receipt,
+    ExpectedReload, WorkshopCompletionItem, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
+    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
+    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_runner::live::{
-    CompletionIndex, CompletionItem, LiveCommand, LiveEditOperation, LiveRequest, LiveResponse,
-    LiveResponseSendError, LiveSessionServer, LiveSymbolTarget, ScratchWorkspace,
+    CompletionIndex, CompletionItem, CompletionScope, LiveCommand, LiveEditOperation, LiveRequest,
+    LiveResponse, LiveResponseSendError, LiveSessionServer, LiveSymbolTarget, ScratchWorkspace,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -71,6 +71,7 @@ struct PreparedEdit {
     candidate: JitProcess,
     package: JitEnginePackage,
     source_items: Vec<WorkshopSourceItem>,
+    completion_items: Vec<WorkshopCompletionItem>,
     input_hashes: BTreeMap<String, String>,
 }
 
@@ -115,6 +116,7 @@ pub(crate) struct LiveWorkspace {
     history_cursor: usize,
     completion: CompletionIndex,
     source_items: Vec<WorkshopSourceItem>,
+    completion_items: Vec<WorkshopCompletionItem>,
     scratch: ScratchWorkspace,
     watches: BTreeMap<String, Option<JitScalarValue>>,
     pending_plan: Option<WorkshopSemanticEditPlan>,
@@ -152,6 +154,7 @@ impl LiveWorkspace {
             history_cursor: 0,
             completion: CompletionIndex::default(),
             source_items: Vec::new(),
+            completion_items: Vec::new(),
             scratch: ScratchWorkspace::default(),
             watches: BTreeMap::new(),
             pending_plan: None,
@@ -452,9 +455,27 @@ impl LiveWorkspace {
                 buffer,
                 cursor,
                 limit,
+                context,
             } => Ok((
                 "completion",
-                json!({"items": self.completion.complete(&buffer, cursor, limit)}),
+                json!(self
+                    .completion
+                    .query_with_context(&buffer, cursor, limit, &context)),
+            )),
+            LiveCommand::Palette {
+                query,
+                page,
+                limit,
+                context,
+            } => Ok((
+                "palette",
+                json!(paged_completion_query(
+                    &self.completion,
+                    &query,
+                    page,
+                    limit,
+                    &context,
+                )),
             )),
             LiveCommand::Edit {
                 operation,
@@ -845,6 +866,7 @@ impl LiveWorkspace {
         let plan = prepared.plan.clone();
         let action = prepared.action.clone();
         let source_items = prepared.source_items;
+        let completion_items = prepared.completion_items;
         let tests = if prepared.tests_ran {
             "passed"
         } else {
@@ -852,6 +874,7 @@ impl LiveWorkspace {
         };
         *jit = prepared.candidate;
         self.source_items = source_items;
+        self.completion_items = completion_items;
         self.remember_plan_hashes(&plan, prepared.restore);
         let (kind, data) = match action {
             PreparedAction::ApplyNew => {
@@ -927,16 +950,27 @@ impl LiveWorkspace {
     fn refresh_completion(&mut self, jit: &JitProcess) -> Result<(), String> {
         let files = self.load_files()?;
         self.source_items = workshop_source_items(&files)?;
+        self.completion_items = workshop_completion_items(&files)?;
         self.rebuild_completion(jit);
         Ok(())
     }
 
     fn rebuild_completion(&mut self, jit: &JitProcess) {
         let mut items = live_command_completions();
-        items.extend(self.source_items.iter().map(|item| CompletionItem {
-            text: item.name.clone(),
-            kind: format!("{:?}", item.kind).to_ascii_lowercase(),
-            detail: item.signature.clone(),
+        items.extend(self.completion_items.iter().map(|item| CompletionItem {
+            text: item.text.clone(),
+            kind: item.kind.clone(),
+            detail: item.detail.clone(),
+            type_name: item.type_name.clone(),
+            source: Some(item.file.clone()),
+            scope: item.scope.as_ref().map(|scope| CompletionScope {
+                owner: scope.owner.clone(),
+                file: scope.file.clone(),
+                owner_signature: scope.owner_signature.clone(),
+                owner_end: scope.owner_end,
+                visible_from: scope.visible_from,
+                visible_to: scope.visible_to,
+            }),
         }));
         items.extend(
             jit.global_scalar_paths()
@@ -945,15 +979,36 @@ impl LiveWorkspace {
                     text: path,
                     kind: "state_path".to_string(),
                     detail: type_name.to_string(),
+                    type_name: Some(type_name.to_string()),
+                    source: Some("runtime state".to_string()),
+                    scope: None,
                 }),
         );
         items.extend(self.scratch.list().into_iter().map(|cell| CompletionItem {
             text: cell.name,
             kind: "scratch_cell".to_string(),
             detail: "session-only scratch cell".to_string(),
+            type_name: None,
+            source: Some("scratch workspace".to_string()),
+            scope: None,
         }));
         self.completion.replace(items);
     }
+}
+
+fn paged_completion_query(
+    index: &CompletionIndex,
+    query: &str,
+    page: u32,
+    limit: usize,
+    context: &stasis_runner::live::CompletionContext,
+) -> stasis_runner::live::CompletionQuery {
+    let start = (page as usize).saturating_mul(limit);
+    let requested = start.saturating_add(limit).min(256);
+    let mut result = index.query_with_context(query, query.len(), requested, context);
+    result.page = page;
+    result.items = result.items.into_iter().skip(start).take(limit).collect();
+    result
 }
 
 fn validate_edit_input_size(input: &EditPreparationInput) -> Result<(), String> {
@@ -1055,6 +1110,7 @@ fn prepare_edit(
     }
     check_preparation_canceled(canceled)?;
     let source_items = workshop_source_items(&candidate_files)?;
+    let completion_items = workshop_completion_items(&candidate_files)?;
     Ok(PreparedEdit {
         request_id,
         plan,
@@ -1064,6 +1120,7 @@ fn prepare_edit(
         candidate,
         package,
         source_items,
+        completion_items,
         input_hashes,
     })
 }
@@ -1379,7 +1436,8 @@ fn help_data() -> Value {
         "commands": [
             ":help", ":status", ":pause", ":resume", ":step [ticks]", ":cancel REQUEST_ID", ":quit",
             ":symbols [query] [--page N --limit N]",
-            ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]", ":complete BUFFER",
+            ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
+            ":complete BUFFER", ":palette [QUERY]",
             ":add KIND NAME FILE ... :end", ":update KIND NAME [FILE] ... :end",
             ":delete KIND NAME [FILE]", ":preview", ":apply", ":changes", ":undo", ":redo",
             ":inspect PATH", ":watch PATH", ":unwatch [PATH]", ":set PATH VALUE",
@@ -1387,7 +1445,7 @@ fn help_data() -> Value {
         ],
         "multiline_terminator": ":end",
         "multiline_cancel": ":abort or Ctrl-C",
-        "line_editor": "session history and compiler-backed Tab completion",
+        "line_editor": "session history; Ctrl-P opens the compiler-backed palette; Tab completes",
         "durability": "semantic edits persist through code-aware receipts; scratch cells do not persist unless explicitly promoted",
     })
 }
@@ -1405,6 +1463,7 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":find",
         ":read",
         ":complete",
+        ":palette",
         ":add",
         ":update",
         ":delete",
@@ -1426,6 +1485,9 @@ fn live_command_completions() -> Vec<CompletionItem> {
         text: text.to_string(),
         kind: "command".to_string(),
         detail: "live command".to_string(),
+        type_name: None,
+        source: Some("interactive workspace".to_string()),
+        scope: None,
     })
     .collect()
 }
@@ -2033,7 +2095,10 @@ mod tests {
                 LiveCommand::Edit {
                     operation: LiveEditOperation::Add,
                     target: target.clone(),
-                    source: Some("function helper(): i32 { return 7; }".into()),
+                    source: Some(
+                        "function helper(value: i32): i32 { let local: i32 = value; return local; }"
+                            .into(),
+                    ),
                     expected_source_hash: None,
                     preview: false,
                     run_tests: false,
@@ -2044,6 +2109,19 @@ mod tests {
         assert_eq!(
             workspace.completion.complete(":read hel", 9, 10)[0].text,
             "helper"
+        );
+        let helper_context = stasis_runner::live::CompletionContext {
+            owner: Some("helper".into()),
+            file: Some("src/main.stasis".into()),
+            ..stasis_runner::live::CompletionContext::default()
+        };
+        assert_eq!(
+            workspace
+                .completion
+                .query_with_context("lcl", 3, 10, &helper_context)
+                .items[0]
+                .text,
+            "local"
         );
         assert!(workspace.consumes_self_write(&root.join("src/main.stasis")));
 
@@ -2058,7 +2136,10 @@ mod tests {
                 LiveCommand::Edit {
                     operation: LiveEditOperation::Update,
                     target: target.clone(),
-                    source: Some("function helper(): i32 { return 8; }".into()),
+                    source: Some(
+                        "function helper(value: i32): i32 { let local: i32 = value; return 8; }"
+                            .into(),
+                    ),
                     expected_source_hash: Some("stale".into()),
                     preview: false,
                     run_tests: false,
@@ -2068,7 +2149,7 @@ mod tests {
         assert!(!stale.ok);
         assert!(fs::read_to_string(root.join("src/main.stasis"))
             .expect("source")
-            .contains("return 7"));
+            .contains("return local"));
 
         let files = load_workshop_edit_workspace(&root, &config.entry).expect("files");
         let helper = find_workshop_symbols(&files, &selector(&target).expect("selector"))
@@ -2093,10 +2174,92 @@ mod tests {
             ),
         );
         assert!(deleted.ok, "{:?}", deleted.error);
-        assert!(workspace.completion.complete(":read hel", 9, 10).is_empty());
+        assert!(workspace
+            .completion
+            .complete(":read hel", 9, 10)
+            .iter()
+            .all(|item| item.text != "helper"));
+        assert!(workspace
+            .completion
+            .query_with_context("lcl", 3, 10, &helper_context)
+            .items
+            .iter()
+            .all(|item| item.text != "local"));
         assert!(!fs::read_to_string(root.join("src/main.stasis"))
             .expect("source")
             .contains("function helper"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn large_palette_query_stays_bounded_and_completes_in_one_graphics_boundary() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut items = (0..10_000)
+            .map(|index| CompletionItem {
+                text: format!("generated_{index:05}"),
+                kind: "function".into(),
+                detail: format!("generated_{index:05}(): i32"),
+                type_name: Some("i32".into()),
+                source: Some("src/generated.stasis".into()),
+                scope: None,
+            })
+            .collect::<Vec<_>>();
+        items.push(CompletionItem {
+            text: "late_graphics_target".into(),
+            kind: "function".into(),
+            detail: "late_graphics_target(): i32".into(),
+            type_name: Some("i32".into()),
+            source: Some("src/late.stasis".into()),
+            scope: None,
+        });
+        workspace.completion.replace(items);
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                13,
+                LiveCommand::Palette {
+                    query: "lgt".into(),
+                    page: 0,
+                    limit: 8,
+                    context: stasis_runner::live::CompletionContext::default(),
+                },
+            ),
+        );
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.tick, 1);
+        assert_eq!(
+            response.data.expect("palette")["items"][0]["text"],
+            "late_graphics_target"
+        );
+        let page = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                14,
+                LiveCommand::Palette {
+                    query: "generated".into(),
+                    page: 2,
+                    limit: 8,
+                    context: stasis_runner::live::CompletionContext::default(),
+                },
+            ),
+        );
+        assert_eq!(
+            page.data.expect("page")["items"][0]["text"],
+            "generated_00016"
+        );
         fs::remove_dir_all(root).ok();
     }
 

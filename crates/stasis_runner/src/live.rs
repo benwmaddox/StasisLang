@@ -94,6 +94,18 @@ pub enum LiveCommand {
         cursor: usize,
         #[serde(default = "default_completion_limit")]
         limit: usize,
+        #[serde(default)]
+        context: CompletionContext,
+    },
+    Palette {
+        #[serde(default)]
+        query: String,
+        #[serde(default)]
+        page: u32,
+        #[serde(default = "default_completion_limit")]
+        limit: usize,
+        #[serde(default)]
+        context: CompletionContext,
     },
     Edit {
         operation: LiveEditOperation,
@@ -354,11 +366,58 @@ pub struct CompletionItem {
     pub text: String,
     pub kind: String,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<CompletionScope>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionScope {
+    pub owner: String,
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_end: Option<usize>,
+    pub visible_from: usize,
+    pub visible_to: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionQuery {
+    pub replacement_start: usize,
+    pub replacement_end: usize,
+    pub page: u32,
+    pub truncated: bool,
+    pub items: Vec<CompletionItem>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct CompletionIndex {
-    items: BTreeMap<(String, String, String), CompletionItem>,
+    items: Vec<IndexedCompletionItem>,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedCompletionItem {
+    normalized_text: String,
+    item: CompletionItem,
 }
 
 impl CompletionIndex {
@@ -366,42 +425,317 @@ impl CompletionIndex {
     where
         I: IntoIterator<Item = CompletionItem>,
     {
-        self.items.clear();
-        for item in items {
-            self.items.insert(
-                (item.text.clone(), item.kind.clone(), item.detail.clone()),
+        let mut items = items.into_iter().collect::<Vec<_>>();
+        items.sort_by(|left, right| completion_item_key(left).cmp(&completion_item_key(right)));
+        items.dedup();
+        self.items = items
+            .into_iter()
+            .map(|item| IndexedCompletionItem {
+                normalized_text: item.text.to_ascii_lowercase(),
                 item,
-            );
-        }
+            })
+            .collect();
     }
 
     pub fn complete(&self, buffer: &str, cursor: usize, limit: usize) -> Vec<CompletionItem> {
-        let mut cursor = cursor.min(buffer.len());
-        while !buffer.is_char_boundary(cursor) {
-            cursor -= 1;
+        self.query(buffer, cursor, limit).items
+    }
+
+    pub fn query(&self, buffer: &str, cursor: usize, limit: usize) -> CompletionQuery {
+        self.query_with_context(buffer, cursor, limit, &CompletionContext::default())
+    }
+
+    pub fn query_with_context(
+        &self,
+        buffer: &str,
+        cursor: usize,
+        limit: usize,
+        context: &CompletionContext,
+    ) -> CompletionQuery {
+        rank_indexed_completion_items(&self.items, buffer, cursor, limit, context)
+    }
+}
+
+pub fn rank_completion_items(
+    items: &[CompletionItem],
+    buffer: &str,
+    cursor: usize,
+    limit: usize,
+) -> CompletionQuery {
+    rank_completion_items_with_context(items, buffer, cursor, limit, &CompletionContext::default())
+}
+
+pub fn rank_completion_items_with_context(
+    items: &[CompletionItem],
+    buffer: &str,
+    cursor: usize,
+    limit: usize,
+    context: &CompletionContext,
+) -> CompletionQuery {
+    let indexed = items
+        .iter()
+        .cloned()
+        .map(|item| IndexedCompletionItem {
+            normalized_text: item.text.to_ascii_lowercase(),
+            item,
+        })
+        .collect::<Vec<_>>();
+    rank_indexed_completion_items(&indexed, buffer, cursor, limit, context)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CompletionRank<'a> {
+    match_class: u8,
+    scope_distance: usize,
+    expected_type: u8,
+    kind: u8,
+    gaps: usize,
+    first: usize,
+    text_len: usize,
+    text: &'a str,
+    item_kind: &'a str,
+    detail: &'a str,
+}
+
+fn rank_indexed_completion_items(
+    items: &[IndexedCompletionItem],
+    buffer: &str,
+    cursor: usize,
+    limit: usize,
+    context: &CompletionContext,
+) -> CompletionQuery {
+    let mut cursor = cursor.min(buffer.len());
+    while !buffer.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let replacement_start = completion_replacement_start(buffer, cursor);
+    let query = &buffer[replacement_start..cursor];
+    let normalized_query = query.to_ascii_lowercase();
+    let bounded_limit = limit.min(256);
+    let mut unscoped_match_count = 0usize;
+    let mut best = Vec::<(CompletionRank<'_>, &CompletionItem)>::with_capacity(bounded_limit);
+    let mut scoped_matches =
+        BTreeMap::<(&str, &str, Option<&str>), (CompletionRank<'_>, &CompletionItem)>::new();
+    for indexed in items {
+        let Some(scope_distance) = completion_scope_distance(&indexed.item, context) else {
+            continue;
+        };
+        let Some((match_class, gaps, first)) =
+            fuzzy_completion_score(&indexed.normalized_text, &normalized_query)
+        else {
+            continue;
+        };
+        let rank = CompletionRank {
+            match_class,
+            scope_distance,
+            expected_type: completion_expected_type_priority(&indexed.item, context),
+            kind: completion_kind_priority(&indexed.item.kind, query),
+            gaps,
+            first,
+            text_len: indexed.item.text.len(),
+            text: &indexed.item.text,
+            item_kind: &indexed.item.kind,
+            detail: &indexed.item.detail,
+        };
+        if indexed.item.scope.is_some() {
+            let overload_detail =
+                (indexed.item.kind == "method").then_some(indexed.item.detail.as_str());
+            let key = (
+                indexed.item.text.as_str(),
+                indexed.item.kind.as_str(),
+                overload_detail,
+            );
+            match scoped_matches.get_mut(&key) {
+                Some(best) if rank < best.0 => *best = (rank, &indexed.item),
+                Some(_) => {}
+                None => {
+                    scoped_matches.insert(key, (rank, &indexed.item));
+                }
+            }
+        } else {
+            unscoped_match_count = unscoped_match_count.saturating_add(1);
+            retain_bounded_completion(&mut best, (rank, &indexed.item), bounded_limit);
         }
-        let prefix = buffer[..cursor]
-            .rsplit(|character: char| {
-                character.is_whitespace() || character == '(' || character == ','
-            })
-            .next()
-            .unwrap_or("");
-        let mut matches = self
-            .items
-            .values()
-            .filter(|item| item.text.starts_with(prefix))
-            .cloned()
-            .collect::<Vec<_>>();
-        matches.sort_by_key(|item| {
+    }
+    let total_matches = unscoped_match_count.saturating_add(scoped_matches.len());
+    for candidate in scoped_matches.into_values() {
+        retain_bounded_completion(&mut best, candidate, bounded_limit);
+    }
+    best.sort_by_key(|(rank, _)| *rank);
+    let items = best.into_iter().map(|(_, item)| item.clone()).collect();
+    CompletionQuery {
+        replacement_start,
+        replacement_end: cursor,
+        page: 0,
+        truncated: total_matches > bounded_limit,
+        items,
+    }
+}
+
+fn retain_bounded_completion<'a>(
+    best: &mut Vec<(CompletionRank<'a>, &'a CompletionItem)>,
+    candidate: (CompletionRank<'a>, &'a CompletionItem),
+    limit: usize,
+) {
+    if limit == 0 {
+        return;
+    }
+    if best.len() < limit {
+        best.push(candidate);
+        return;
+    }
+    let (worst_index, worst) = best
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, (rank, _))| *rank)
+        .expect("bounded completion set is not empty");
+    if candidate.0 < worst.0 {
+        best[worst_index] = candidate;
+    }
+}
+
+fn completion_item_key(
+    item: &CompletionItem,
+) -> (
+    &str,
+    &str,
+    &str,
+    Option<&str>,
+    Option<&str>,
+    Option<(&str, &str, Option<&str>, Option<usize>, usize, usize)>,
+) {
+    (
+        &item.text,
+        &item.kind,
+        &item.detail,
+        item.type_name.as_deref(),
+        item.source.as_deref(),
+        item.scope.as_ref().map(|scope| {
             (
-                item.text != prefix,
-                item.text.len().saturating_sub(prefix.len()),
-                item.text.clone(),
-                item.kind.clone(),
+                scope.owner.as_str(),
+                scope.file.as_str(),
+                scope.owner_signature.as_deref(),
+                scope.owner_end,
+                scope.visible_from,
+                scope.visible_to,
             )
-        });
-        matches.truncate(limit.min(256));
-        matches
+        }),
+    )
+}
+
+fn completion_replacement_start(buffer: &str, cursor: usize) -> usize {
+    buffer[..cursor]
+        .char_indices()
+        .rev()
+        .find(|(index, character)| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '(' | ')'
+                        | '['
+                        | ']'
+                        | ','
+                        | ';'
+                        | '{'
+                        | '}'
+                        | '='
+                        | '+'
+                        | '-'
+                        | '*'
+                        | '/'
+                        | '%'
+                        | '<'
+                        | '>'
+                        | '!'
+                )
+                || (*character == ':' && *index > 0)
+        })
+        .map_or(0, |(index, character)| index + character.len_utf8())
+}
+
+fn fuzzy_completion_score(text: &str, query: &str) -> Option<(u8, usize, usize)> {
+    if text == query {
+        return Some((0, 0, 0));
+    }
+    if text.starts_with(&query) {
+        return Some((1, 0, text.len().saturating_sub(query.len())));
+    }
+    if let Some(start) = text.find(&query) {
+        return Some((2, start, text.len().saturating_sub(query.len())));
+    }
+    let mut text_indices = text.char_indices();
+    let mut first = None;
+    let mut previous = None;
+    let mut gaps = 0usize;
+    for needle in query.chars() {
+        let (index, _) = text_indices.find(|(_, candidate)| *candidate == needle)?;
+        first.get_or_insert(index);
+        if let Some(previous) = previous {
+            gaps += index.saturating_sub(previous + 1);
+        }
+        previous = Some(index);
+    }
+    Some((3, gaps, first.unwrap_or(0)))
+}
+
+fn completion_scope_distance(item: &CompletionItem, context: &CompletionContext) -> Option<usize> {
+    let Some(scope) = item.scope.as_ref() else {
+        return Some(usize::MAX);
+    };
+    if context.owner.as_deref() != Some(scope.owner.as_str()) {
+        return None;
+    }
+    if context
+        .file
+        .as_deref()
+        .is_some_and(|file| file != scope.file)
+    {
+        return None;
+    }
+    if context
+        .owner_signature
+        .as_deref()
+        .is_some_and(|signature| scope.owner_signature.as_deref() != Some(signature))
+    {
+        return None;
+    }
+    let offset = context.source_offset.or(scope.owner_end)?;
+    if offset < scope.visible_from || offset > scope.visible_to {
+        return None;
+    }
+    Some(usize::MAX.saturating_sub(scope.visible_from))
+}
+
+fn completion_expected_type_priority(item: &CompletionItem, context: &CompletionContext) -> u8 {
+    match context.expected_type.as_deref() {
+        Some(expected) if item.type_name.as_deref() == Some(expected) => 0,
+        Some(_) => 1,
+        None => 0,
+    }
+}
+
+fn completion_kind_priority(kind: &str, query: &str) -> u8 {
+    if query.starts_with(':') {
+        return u8::from(kind != "command");
+    }
+    if query.contains('.') {
+        return match kind {
+            "field" | "state_path" => 0,
+            "method" => 1,
+            _ => 2,
+        };
+    }
+    match kind {
+        "local" => 0,
+        "parameter" => 1,
+        "field" => 2,
+        "method" => 3,
+        "function" => 4,
+        "global" | "constant" | "state_path" => 5,
+        "struct" | "enum" | "enum_variant" => 6,
+        "scratch_cell" => 7,
+        "command" => 8,
+        _ => 9,
     }
 }
 
@@ -609,6 +943,23 @@ impl TerminalBuffer {
     pub fn cancel_pending(&mut self) -> bool {
         self.pending.take().is_some()
     }
+
+    pub fn completion_context(&self) -> CompletionContext {
+        let Some(PendingMultiline {
+            command: PendingCommand::Edit { target, .. },
+            ..
+        }) = self.pending.as_ref()
+        else {
+            return CompletionContext::default();
+        };
+        CompletionContext {
+            owner: Some(target.name.clone()),
+            file: target.file.clone(),
+            owner_signature: target.signature.clone(),
+            source_offset: None,
+            expected_type: None,
+        }
+    }
 }
 
 enum ParsedTerminalCommand {
@@ -666,8 +1017,35 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
                 cursor: buffer.len(),
                 buffer,
                 limit: 32,
+                context: CompletionContext::default(),
             })
         }
+        ":palette" => ready(LiveCommand::Palette {
+            query: args
+                .get(1)
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .unwrap_or_default(),
+            page: terminal_selector_value(&args, "--page")
+                .map(|value| parse_u32("page", &value))
+                .transpose()?
+                .unwrap_or(0),
+            limit: terminal_selector_value(&args, "--limit")
+                .map(|value| parse_u32("limit", &value))
+                .transpose()?
+                .map(|value| value as usize)
+                .unwrap_or_else(default_completion_limit),
+            context: CompletionContext {
+                owner: terminal_selector_value(&args, "--owner"),
+                file: terminal_selector_value(&args, "--file"),
+                owner_signature: terminal_selector_value(&args, "--signature"),
+                source_offset: terminal_selector_value(&args, "--offset")
+                    .map(|value| parse_u32("offset", &value))
+                    .transpose()?
+                    .map(|value| value as usize),
+                expected_type: terminal_selector_value(&args, "--expected-type"),
+            },
+        }),
         ":preview" => ready(LiveCommand::Preview),
         ":apply" => ready(LiveCommand::Apply { run_tests: true }),
         ":changes" => ready(LiveCommand::Changes),
@@ -907,26 +1285,41 @@ mod tests {
                 text: "tick".into(),
                 kind: "function".into(),
                 detail: "tick(): i32".into(),
+                type_name: None,
+                source: None,
+                scope: None,
             },
             CompletionItem {
                 text: "tick".into(),
                 kind: "function".into(),
                 detail: "tick(): i32".into(),
+                type_name: None,
+                source: None,
+                scope: None,
             },
             CompletionItem {
                 text: "tick".into(),
                 kind: "function".into(),
                 detail: "tick(value: i32): i32".into(),
+                type_name: None,
+                source: None,
+                scope: None,
             },
             CompletionItem {
                 text: "ticker".into(),
                 kind: "global".into(),
                 detail: "i32".into(),
+                type_name: None,
+                source: None,
+                scope: None,
             },
             CompletionItem {
                 text: "title".into(),
                 kind: "global".into(),
                 detail: "utf8[32]".into(),
+                type_name: None,
+                source: None,
+                scope: None,
             },
         ]);
         let result = index.complete(":read tick", 10, 10);
@@ -935,6 +1328,321 @@ mod tests {
         assert_eq!(result[1].text, "tick");
         assert_eq!(result[2].text, "ticker");
         assert_eq!(index.complete("éti", 1, 10).len(), 4);
+    }
+
+    #[test]
+    fn completion_query_fuzzy_ranks_context_and_reports_replacement_range() {
+        let mut index = CompletionIndex::default();
+        index.replace([
+            CompletionItem {
+                text: "hero.hp".into(),
+                kind: "field".into(),
+                detail: "i32 via local hero: Player".into(),
+                type_name: Some("i32".into()),
+                source: None,
+                scope: None,
+            },
+            CompletionItem {
+                text: "hero.damage".into(),
+                kind: "method".into(),
+                detail: "damage(player: Player, amount: i32): i32".into(),
+                type_name: Some("i32".into()),
+                source: None,
+                scope: None,
+            },
+            CompletionItem {
+                text: ":help".into(),
+                kind: "command".into(),
+                detail: "live command".into(),
+                type_name: None,
+                source: None,
+                scope: None,
+            },
+        ]);
+        let member = index.query("call(hrohp", 10, 10);
+        assert_eq!(member.replacement_start, 5);
+        assert_eq!(member.replacement_end, 10);
+        assert_eq!(member.items[0].text, "hero.hp");
+        assert!(!member.truncated);
+
+        let commands = index.query(":h", 2, 1);
+        assert_eq!(commands.items[0].text, ":help");
+        assert!(!commands.truncated);
+
+        let bounded = index.query("hero.", 5, 1);
+        assert_eq!(bounded.items.len(), 1);
+        assert!(bounded.truncated);
+    }
+
+    #[test]
+    fn completion_query_filters_scopes_shadowing_and_expected_types() {
+        let scoped =
+            |detail: &str, owner: &str, from: usize, to: usize, owner_end: usize| CompletionItem {
+                text: "value".into(),
+                kind: "local".into(),
+                detail: detail.into(),
+                type_name: Some(if detail == "inner" { "i32" } else { "f32" }.into()),
+                source: Some("src/main.stasis".into()),
+                scope: Some(CompletionScope {
+                    owner: owner.into(),
+                    file: "src/main.stasis".into(),
+                    owner_signature: Some(format!("{owner}(): i32")),
+                    owner_end: Some(owner_end),
+                    visible_from: from,
+                    visible_to: to,
+                }),
+            };
+        let mut index = CompletionIndex::default();
+        index.replace([
+            scoped("outer", "tick", 10, 100, 100),
+            scoped("inner", "tick", 50, 70, 100),
+            scoped("render local", "render", 20, 90, 90),
+        ]);
+        let context = CompletionContext {
+            owner: Some("tick".into()),
+            file: Some("src/main.stasis".into()),
+            owner_signature: None,
+            source_offset: Some(60),
+            expected_type: Some("i32".into()),
+        };
+        let result = index.query_with_context("val", 3, 10, &context);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].detail, "inner");
+
+        let target_end = CompletionContext {
+            owner: Some("tick".into()),
+            file: Some("src/main.stasis".into()),
+            ..CompletionContext::default()
+        };
+        let result = index.query_with_context("val", 3, 10, &target_end);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].detail, "outer");
+
+        let mut nested_only = CompletionIndex::default();
+        nested_only.replace([scoped("inner", "tick", 50, 70, 100)]);
+        assert!(nested_only
+            .query_with_context("val", 3, 10, &target_end)
+            .items
+            .is_empty());
+
+        let render = CompletionContext {
+            owner: Some("render".into()),
+            source_offset: Some(50),
+            ..CompletionContext::default()
+        };
+        assert_eq!(
+            index.query_with_context("val", 3, 10, &render).items[0].detail,
+            "render local"
+        );
+        assert!(index.query("val", 3, 10).items.is_empty());
+    }
+
+    #[test]
+    fn completion_query_uses_signature_to_disambiguate_overload_scope() {
+        let local = |text: &str, signature: &str| CompletionItem {
+            text: text.into(),
+            kind: "local".into(),
+            detail: signature.into(),
+            type_name: Some("i32".into()),
+            source: Some("src/main.stasis".into()),
+            scope: Some(CompletionScope {
+                owner: "update".into(),
+                file: "src/main.stasis".into(),
+                owner_signature: Some(signature.into()),
+                owner_end: Some(100),
+                visible_from: 10,
+                visible_to: 100,
+            }),
+        };
+        let mut index = CompletionIndex::default();
+        index.replace([
+            local("player_value", "update(player: Player): i32"),
+            local("enemy_value", "update(enemy: Enemy): i32"),
+        ]);
+        let context = CompletionContext {
+            owner: Some("update".into()),
+            file: Some("src/main.stasis".into()),
+            owner_signature: Some("update(player: Player): i32".into()),
+            source_offset: None,
+            expected_type: None,
+        };
+        let result = index.query_with_context("value", 5, 10, &context);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].text, "player_value");
+    }
+
+    #[test]
+    fn completion_query_deduplicates_shadowing_before_bounding() {
+        let scoped = |detail: &str, from: usize| CompletionItem {
+            text: "value".into(),
+            kind: "local".into(),
+            detail: detail.into(),
+            type_name: Some("i32".into()),
+            source: Some("src/main.stasis".into()),
+            scope: Some(CompletionScope {
+                owner: "tick".into(),
+                file: "src/main.stasis".into(),
+                owner_signature: Some("tick(): i32".into()),
+                owner_end: Some(100),
+                visible_from: from,
+                visible_to: 100,
+            }),
+        };
+        let mut index = CompletionIndex::default();
+        index.replace([
+            scoped("outer", 10),
+            scoped("inner", 50),
+            CompletionItem {
+                text: "valid".into(),
+                kind: "function".into(),
+                detail: "valid(): i32".into(),
+                type_name: Some("i32".into()),
+                source: None,
+                scope: None,
+            },
+        ]);
+        let context = CompletionContext {
+            owner: Some("tick".into()),
+            file: Some("src/main.stasis".into()),
+            owner_signature: Some("tick(): i32".into()),
+            source_offset: Some(60),
+            expected_type: None,
+        };
+        let result = index.query_with_context("va", 2, 2, &context);
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.items[0].detail, "inner");
+        assert_eq!(result.items[1].text, "valid");
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn completion_query_preserves_scoped_method_overloads() {
+        let method = |detail: &str| CompletionItem {
+            text: "hero.damage".into(),
+            kind: "method".into(),
+            detail: detail.into(),
+            type_name: Some("i32".into()),
+            source: Some("src/main.stasis".into()),
+            scope: Some(CompletionScope {
+                owner: "tick".into(),
+                file: "src/main.stasis".into(),
+                owner_signature: Some("tick(): i32".into()),
+                owner_end: Some(100),
+                visible_from: 10,
+                visible_to: 100,
+            }),
+        };
+        let mut index = CompletionIndex::default();
+        index.replace([
+            method("damage(hero: Player, amount: i32): i32"),
+            method("damage(hero: Player, amount: f32): i32"),
+        ]);
+        let context = CompletionContext {
+            owner: Some("tick".into()),
+            file: Some("src/main.stasis".into()),
+            owner_signature: Some("tick(): i32".into()),
+            source_offset: None,
+            expected_type: None,
+        };
+        let result = index.query_with_context("hrodam", 6, 10, &context);
+        assert_eq!(result.items.len(), 2);
+        assert_ne!(result.items[0].detail, result.items[1].detail);
+    }
+
+    #[test]
+    fn completion_query_reaches_late_catalog_items_with_bounded_top_k() {
+        let mut items = (0..10_000)
+            .map(|index| CompletionItem {
+                text: format!("symbol_{index:05}"),
+                kind: "function".into(),
+                detail: format!("symbol_{index:05}(): i32"),
+                type_name: Some("i32".into()),
+                source: Some("src/generated.stasis".into()),
+                scope: None,
+            })
+            .collect::<Vec<_>>();
+        items.push(CompletionItem {
+            text: "very_late_target".into(),
+            kind: "function".into(),
+            detail: "very_late_target(): i32".into(),
+            type_name: Some("i32".into()),
+            source: Some("src/late.stasis".into()),
+            scope: None,
+        });
+        let mut index = CompletionIndex::default();
+        index.replace(items);
+        let target = index.query("vltgt", 5, 8);
+        assert_eq!(target.items[0].text, "very_late_target");
+        let bounded = index.query("symbol", 6, 8);
+        assert_eq!(bounded.items.len(), 8);
+        assert!(bounded.truncated);
+    }
+
+    #[test]
+    fn completion_replacement_starts_after_unspaced_infix_operators() {
+        let mut index = CompletionIndex::default();
+        index.replace([CompletionItem {
+            text: "player".into(),
+            kind: "parameter".into(),
+            detail: "Player".into(),
+            type_name: Some("Player".into()),
+            source: None,
+            scope: None,
+        }]);
+        for buffer in ["score+pla", "x!=pla", "value*pla", "items[pla"] {
+            let result = index.query(buffer, buffer.len(), 4);
+            assert_eq!(result.items[0].text, "player", "{buffer}");
+            assert_eq!(&buffer[result.replacement_start..], "pla", "{buffer}");
+        }
+        assert_eq!(index.query(":hel", 4, 4).replacement_start, 0);
+    }
+
+    #[test]
+    fn terminal_palette_command_preserves_query_text() {
+        let mut terminal = TerminalBuffer::new();
+        let TerminalInput::Request(request) = terminal
+            .feed_line(
+                ":palette hero.hp --page 2 --limit 12 --owner tick --file src/main.stasis --offset 42 --expected-type i32",
+            )
+            .expect("palette command")
+        else {
+            panic!("expected request")
+        };
+        assert_eq!(
+            request.command,
+            LiveCommand::Palette {
+                query: "hero.hp".to_string(),
+                page: 2,
+                limit: 12,
+                context: CompletionContext {
+                    owner: Some("tick".into()),
+                    file: Some("src/main.stasis".into()),
+                    owner_signature: None,
+                    source_offset: Some(42),
+                    expected_type: Some("i32".into()),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_completion_context_tracks_pending_semantic_owner() {
+        let mut terminal = TerminalBuffer::new();
+        terminal
+            .feed_line(":update function tick src/main.stasis")
+            .expect("start update");
+        assert_eq!(
+            terminal.completion_context(),
+            CompletionContext {
+                owner: Some("tick".into()),
+                file: Some("src/main.stasis".into()),
+                owner_signature: None,
+                source_offset: None,
+                expected_type: None,
+            }
+        );
+        assert!(terminal.cancel_pending());
+        assert_eq!(terminal.completion_context(), CompletionContext::default());
     }
 
     #[test]

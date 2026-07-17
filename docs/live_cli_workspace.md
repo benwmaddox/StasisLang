@@ -26,6 +26,7 @@ The project must provide the graphical lifecycle entry points `main`, `tick`, an
 :symbols tick --page 0 --limit 50
 :read tick function --file src/main.stasis --owner Game --signature "tick(): i32"
 :complete ti
+:palette hrohp
 :preview
 :apply
 :inspect score
@@ -49,13 +50,26 @@ function tick(): i32 {
 :end
 ```
 
-The line editor provides session command history and compiler-backed Tab completion. Press
-Ctrl-C or enter `:abort` to discard a multiline buffer without submitting it. Symbol results are
-paged; selectors accept `--file`, `--owner`, and `--signature` for same-name overloads and receiver
-methods.
+The line editor provides session command history and a compiler-backed command palette. Press
+Ctrl-P at any prompt to open the fuzzy-ranked command and symbol list. Type or Backspace to filter;
+use Up/Down or PageUp/PageDown to select; Enter or Tab inserts the highlighted candidate; Esc
+cancels without changing the buffer. Inserted commands still require Enter at the normal prompt,
+so a palette selection never mutates the session by itself. Tab at the normal prompt queries the
+same live index for the current buffer and inserts a unique candidate.
 
-Add, update, delete, read, list, and completion operate on the compiler-owned symbol and type
-indexes. Edits use the same semantic selectors, expected source hashes, import reconciliation,
+The palette includes functions, structs, enum variants, globals, state paths, parameters,
+explicitly typed locals, fields, and receiver-qualified members such as `hero.hp` or
+`hero.damage`. Scoped candidates carry compiler-owned file, semantic-owner, visibility-span, and
+type metadata, so locals from another function or an out-of-scope block are excluded. Each row
+stays concise with kind and type/signature/source context. `:palette QUERY [--page N --limit N]
+[--owner OWNER --file FILE --signature SIGNATURE --offset N --expected-type TYPE]` exposes the same deterministic,
+bounded ranking to scripts and future desktop clients. Press Ctrl-C or enter `:abort` to discard a
+multiline buffer without submitting it. Symbol results are paged; selectors accept `--file`,
+`--owner`, and `--signature` for same-name overloads and receiver methods.
+
+Add, update, delete, read, list, and palette completion operate on compiler-owned symbol, scope,
+and type indexes. Successful edits refresh the palette atomically with the new runtime. Edits use
+the same semantic selectors, expected source hashes, import reconciliation,
 atomic source writes, test gate, and content-addressed receipts as `stasis symbol`. Successful
 edits are parsed, planned, compiled, and tested on a bounded background preparation worker. The
 graphics thread remains responsive and performs only the hash guard, atomic source/receipt write,

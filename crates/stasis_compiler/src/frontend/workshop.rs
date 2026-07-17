@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::frontend::lexer::{lex, Token, TokenKind};
-use crate::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
+use crate::frontend::parser::{
+    parse_top_level_functions, parse_top_level_struct_definitions, parse_top_level_type_layout,
+    parse_typed_local_bindings,
+};
 use crate::IncrementalCompileOutput;
 
 #[derive(
@@ -955,6 +958,32 @@ pub struct WorkshopSourceItem {
     pub source_hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkshopCompletionItem {
+    pub text: String,
+    pub kind: String,
+    pub detail: String,
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<WorkshopCompletionScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkshopCompletionScope {
+    pub owner: String,
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_end: Option<usize>,
+    pub visible_from: usize,
+    pub visible_to: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkshopSemanticEditOperation {
@@ -1091,6 +1120,419 @@ pub fn workshop_source_items(
         (item.file.clone(), order, start, item.name.clone())
     });
     Ok(items)
+}
+
+pub fn workshop_completion_items(
+    files: &[WorkshopSourceFile],
+) -> Result<Vec<WorkshopCompletionItem>, String> {
+    let mut items = Vec::new();
+    let mut struct_fields = BTreeMap::<String, Vec<(String, String)>>::new();
+    let parsed_files = files
+        .iter()
+        .map(|file| {
+            Ok((
+                file,
+                parse_top_level_type_layout(&file.source)?,
+                parse_top_level_functions(&file.source)?,
+                parse_typed_local_bindings(&file.source)?,
+                parse_top_level_struct_definitions(&file.source)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut struct_scopes = BTreeMap::<(String, String), WorkshopCompletionScope>::new();
+    for (file, layout, _, _, ranges) in &parsed_files {
+        for definition in &layout.structs {
+            struct_fields.insert(
+                definition.name.clone(),
+                definition
+                    .fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.type_name.clone()))
+                    .collect(),
+            );
+        }
+        for definition in ranges {
+            struct_scopes.insert(
+                (file.path.clone(), definition.name.clone()),
+                WorkshopCompletionScope {
+                    owner: definition.name.clone(),
+                    file: file.path.clone(),
+                    owner_signature: Some(format!("struct {}", definition.name)),
+                    owner_end: Some(definition.definition_range.end),
+                    visible_from: definition.definition_range.start,
+                    visible_to: definition.definition_range.end,
+                },
+            );
+        }
+    }
+
+    let source_items = workshop_source_items(files)?;
+    let mut methods = BTreeMap::<String, Vec<(String, String, String)>>::new();
+    for item in source_items.iter().filter(|item| {
+        matches!(
+            item.kind,
+            WorkshopSourceItemKind::Struct
+                | WorkshopSourceItemKind::Function
+                | WorkshopSourceItemKind::Test
+        )
+    }) {
+        let kind = format!("{:?}", item.kind).to_ascii_lowercase();
+        items.push(completion_catalog_item(
+            &item.name,
+            &kind,
+            &format!("{} [{}]", item.signature, item.file),
+            &item.file,
+            item.owner.clone(),
+        ));
+        if item.kind == WorkshopSourceItemKind::Function {
+            if let Some(owner) = item
+                .owner
+                .as_ref()
+                .filter(|owner| struct_fields.contains_key(*owner))
+            {
+                methods.entry(owner.clone()).or_default().push((
+                    item.name.clone(),
+                    item.signature.clone(),
+                    item.file.clone(),
+                ));
+            }
+        }
+    }
+
+    let mut typed_bindings = Vec::<WorkshopTypedBinding>::new();
+    for (file, layout, functions, locals, _) in parsed_files {
+        for definition in layout.structs {
+            let struct_scope = struct_scopes
+                .get(&(file.path.clone(), definition.name.clone()))
+                .cloned();
+            for field in definition.fields {
+                items.push(scoped_completion_catalog_item(
+                    &field.name,
+                    "field",
+                    &format!(
+                        "{}.{}: {} [{}]",
+                        definition.name, field.name, field.type_name, file.path
+                    ),
+                    &file.path,
+                    Some(definition.name.clone()),
+                    Some(&field.type_name),
+                    struct_scope
+                        .clone()
+                        .expect("parsed struct has a source range"),
+                ));
+                items.push(typed_completion_catalog_item(
+                    &format!("{}.{}", definition.name, field.name),
+                    "field",
+                    &format!("{} [{}]", field.type_name, file.path),
+                    &file.path,
+                    Some(definition.name.clone()),
+                    &field.type_name,
+                ));
+            }
+        }
+        for definition in layout.enums {
+            items.push(typed_completion_catalog_item(
+                &definition.name,
+                "enum",
+                &format!("enum {} [{}]", definition.name, file.path),
+                &file.path,
+                None,
+                &definition.name,
+            ));
+            for variant in definition.variants {
+                items.push(typed_completion_catalog_item(
+                    &format!("{}.{}", definition.name, variant.name),
+                    "enum_variant",
+                    &format!("{} [{}]", definition.name, file.path),
+                    &file.path,
+                    Some(definition.name.clone()),
+                    &definition.name,
+                ));
+            }
+        }
+        for global in layout.globals {
+            items.push(typed_completion_catalog_item(
+                &global.name,
+                "global",
+                &format!("{} [{}]", global.type_name, file.path),
+                &file.path,
+                None,
+                &global.type_name,
+            ));
+            typed_bindings.push(WorkshopTypedBinding {
+                name: global.name,
+                type_name: global.type_name,
+                kind: "global".to_string(),
+                scope_label: "global".to_string(),
+                file: file.path.clone(),
+                scope: None,
+            });
+        }
+        for block in layout.global_blocks {
+            for field in block.fields {
+                let path = format!("{}.{}", block.name, field.name);
+                items.push(typed_completion_catalog_item(
+                    &path,
+                    "state_path",
+                    &format!("{} [{}]", field.type_name, file.path),
+                    &file.path,
+                    Some(block.name.clone()),
+                    &field.type_name,
+                ));
+                typed_bindings.push(WorkshopTypedBinding {
+                    name: path,
+                    type_name: field.type_name,
+                    kind: "state_path".to_string(),
+                    scope_label: block.name.clone(),
+                    file: file.path.clone(),
+                    scope: None,
+                });
+            }
+        }
+        for constant in layout.constants {
+            items.push(typed_completion_catalog_item(
+                &constant.name,
+                "constant",
+                &format!("{} [{}]", constant.type_name, file.path),
+                &file.path,
+                None,
+                &constant.type_name,
+            ));
+        }
+        let function_scopes = functions
+            .iter()
+            .map(|function| {
+                (
+                    function.body_range.clone(),
+                    format_function_signature(
+                        &function.name,
+                        &function.params,
+                        &function.return_type_name,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        for function in functions {
+            let owner_signature = format_function_signature(
+                &function.name,
+                &function.params,
+                &function.return_type_name,
+            );
+            for parameter in function.params {
+                let scope = WorkshopCompletionScope {
+                    owner: function.name.clone(),
+                    file: file.path.clone(),
+                    owner_signature: Some(owner_signature.clone()),
+                    owner_end: Some(function.body_range.end),
+                    visible_from: function.body_range.start,
+                    visible_to: function.body_range.end,
+                };
+                items.push(scoped_completion_catalog_item(
+                    &parameter.name,
+                    "parameter",
+                    &format!(
+                        "{} in {} [{}]",
+                        parameter.type_name, function.name, file.path
+                    ),
+                    &file.path,
+                    Some(function.name.clone()),
+                    Some(&parameter.type_name),
+                    scope.clone(),
+                ));
+                typed_bindings.push(WorkshopTypedBinding {
+                    name: parameter.name,
+                    type_name: parameter.type_name,
+                    kind: "parameter".to_string(),
+                    scope_label: function.name.clone(),
+                    file: file.path.clone(),
+                    scope: Some(scope),
+                });
+            }
+        }
+        for local in locals {
+            let (owner_range, owner_signature) = function_scopes
+                .iter()
+                .find(|(range, _)| {
+                    range.start <= local.visibility_range.start
+                        && local.visibility_range.start <= range.end
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "typed local {} has no containing function in {}",
+                        local.name, file.path
+                    )
+                })?;
+            let scope = WorkshopCompletionScope {
+                owner: local.function_name.clone(),
+                file: file.path.clone(),
+                owner_signature: Some(owner_signature.clone()),
+                owner_end: Some(owner_range.end),
+                visible_from: local.visibility_range.start,
+                visible_to: local.visibility_range.end,
+            };
+            items.push(scoped_completion_catalog_item(
+                &local.name,
+                "local",
+                &format!(
+                    "{} in {} [{}]",
+                    local.type_name, local.function_name, file.path
+                ),
+                &file.path,
+                Some(local.function_name.clone()),
+                Some(&local.type_name),
+                scope.clone(),
+            ));
+            typed_bindings.push(WorkshopTypedBinding {
+                name: local.name,
+                type_name: local.type_name,
+                kind: "local".to_string(),
+                scope_label: local.function_name,
+                file: file.path.clone(),
+                scope: Some(scope),
+            });
+        }
+    }
+
+    for binding in typed_bindings {
+        if let Some(fields) = struct_fields.get(&binding.type_name) {
+            for (field, field_type) in fields {
+                let text = format!("{}.{field}", binding.name);
+                let detail = format!(
+                    "{field_type} via {} {}: {} in {} [{}]",
+                    binding.kind,
+                    binding.name,
+                    binding.type_name,
+                    binding.scope_label,
+                    binding.file
+                );
+                let item = match binding.scope.clone() {
+                    Some(scope) => scoped_completion_catalog_item(
+                        &text,
+                        "field",
+                        &detail,
+                        &binding.file,
+                        Some(binding.type_name.clone()),
+                        Some(field_type),
+                        scope,
+                    ),
+                    None => typed_completion_catalog_item(
+                        &text,
+                        "field",
+                        &detail,
+                        &binding.file,
+                        Some(binding.type_name.clone()),
+                        field_type,
+                    ),
+                };
+                items.push(item);
+            }
+        }
+        if let Some(owner_methods) = methods.get(&binding.type_name) {
+            for (method, signature, method_file) in owner_methods {
+                let text = format!("{}.{method}", binding.name);
+                let detail = format!(
+                    "{signature} via {} {}: {} [{method_file}]",
+                    binding.kind, binding.name, binding.type_name
+                );
+                let item = match binding.scope.clone() {
+                    Some(scope) => scoped_completion_catalog_item(
+                        &text,
+                        "method",
+                        &detail,
+                        method_file,
+                        Some(binding.type_name.clone()),
+                        None,
+                        scope,
+                    ),
+                    None => completion_catalog_item(
+                        &text,
+                        "method",
+                        &detail,
+                        method_file,
+                        Some(binding.type_name.clone()),
+                    ),
+                };
+                items.push(item);
+            }
+        }
+    }
+
+    items.sort_by_key(|item| {
+        (
+            item.text.clone(),
+            item.kind.clone(),
+            item.detail.clone(),
+            item.file.clone(),
+            item.owner.clone(),
+        )
+    });
+    items.dedup();
+    Ok(items)
+}
+
+fn completion_catalog_item(
+    text: &str,
+    kind: &str,
+    detail: &str,
+    file: &str,
+    owner: Option<String>,
+) -> WorkshopCompletionItem {
+    let truncated = detail.chars().count() > 256;
+    let mut detail = if truncated {
+        detail.chars().take(253).collect::<String>()
+    } else {
+        detail.to_string()
+    };
+    if truncated {
+        detail.push_str("...");
+    }
+    WorkshopCompletionItem {
+        text: text.to_string(),
+        kind: kind.to_string(),
+        detail,
+        file: file.to_string(),
+        owner,
+        type_name: None,
+        scope: None,
+    }
+}
+
+fn typed_completion_catalog_item(
+    text: &str,
+    kind: &str,
+    detail: &str,
+    file: &str,
+    owner: Option<String>,
+    type_name: &str,
+) -> WorkshopCompletionItem {
+    let mut item = completion_catalog_item(text, kind, detail, file, owner);
+    item.type_name = Some(type_name.to_string());
+    item
+}
+
+fn scoped_completion_catalog_item(
+    text: &str,
+    kind: &str,
+    detail: &str,
+    file: &str,
+    owner: Option<String>,
+    type_name: Option<&str>,
+    scope: WorkshopCompletionScope,
+) -> WorkshopCompletionItem {
+    let mut item = completion_catalog_item(text, kind, detail, file, owner);
+    item.type_name = type_name.map(str::to_string);
+    item.scope = Some(scope);
+    item
+}
+
+#[derive(Debug, Clone)]
+struct WorkshopTypedBinding {
+    name: String,
+    type_name: String,
+    kind: String,
+    scope_label: String,
+    file: String,
+    scope: Option<WorkshopCompletionScope>,
 }
 
 fn source_item_from_ranges(
@@ -1758,11 +2200,7 @@ fn source_identifiers(source: &str) -> Result<BTreeSet<String>, String> {
         }) {
             if let Some(scope_start) = scope_at[index] {
                 if let Some(scope_end) = scope_ends.get(&scope_start) {
-                    local_bindings.push((
-                        token_text(source, token).to_string(),
-                        index,
-                        *scope_end,
-                    ));
+                    local_bindings.push((token_text(source, token).to_string(), index, *scope_end));
                 }
             }
         }
@@ -1777,9 +2215,10 @@ fn source_identifiers(source: &str) -> Result<BTreeSet<String>, String> {
                 return None;
             }
             let name = token_text(source, token);
-            if local_bindings.iter().any(|(binding, start, end)| {
-                binding == name && index >= *start && index <= *end
-            }) {
+            if local_bindings
+                .iter()
+                .any(|(binding, start, end)| binding == name && index >= *start && index <= *end)
+            {
                 return None;
             }
             let previous_is_dot = index.checked_sub(1).is_some_and(|index| {
@@ -2064,7 +2503,10 @@ fn write_workshop_semantic_plan_with(
             } else {
                 format!("; rollback incomplete: {}", rollback_errors.join("; "))
             };
-            return Err(format!("failed writing {}: {error}{rollback}", path.display()));
+            return Err(format!(
+                "failed writing {}: {error}{rollback}",
+                path.display()
+            ));
         }
         written.push(change.file.clone());
     }
@@ -3822,6 +4264,66 @@ mod workshop_compile_plan_tests {
         assert!(update.source.starts_with("// Advances the player."));
         assert!(!update.source.contains("Unrelated note"));
         assert!(update.source.ends_with("}\n"));
+    }
+
+    #[test]
+    fn completion_catalog_includes_scoped_bindings_fields_and_receiver_methods() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: r#"
+struct Player { hp: i32; speed: f32; }
+enum Mode { Playing, Paused }
+global state { player: Player; }
+function damage(player: Player, amount: i32): i32 { return player.hp - amount; }
+function tick(): i32 {
+    let hero: Player;
+    hero.hp = 7;
+    return damage(hero, 1);
+}
+"#
+            .to_string(),
+        }];
+        let items = workshop_completion_items(&files).expect("completion catalog");
+        let has = |text: &str, kind: &str| {
+            items
+                .iter()
+                .any(|item| item.text == text && item.kind == kind)
+        };
+        assert!(has("amount", "parameter"));
+        assert!(has("hero", "local"));
+        assert!(has("Player.hp", "field"));
+        assert!(has("player.hp", "field"));
+        assert!(has("player.damage", "method"));
+        assert!(has("hero.hp", "field"));
+        assert!(has("hero.damage", "method"));
+        assert!(has("state.player.hp", "field"));
+        assert!(has("Mode.Paused", "enum_variant"));
+        let hero_hp = items
+            .iter()
+            .find(|item| item.text == "hero.hp")
+            .expect("scoped receiver field");
+        assert_eq!(hero_hp.type_name.as_deref(), Some("i32"));
+        assert_eq!(
+            hero_hp.scope.as_ref().map(|scope| scope.owner.as_str()),
+            Some("tick")
+        );
+        let parameter = items
+            .iter()
+            .find(|item| item.text == "amount" && item.kind == "parameter")
+            .expect("parameter");
+        assert_eq!(
+            parameter.scope.as_ref().map(|scope| scope.owner.as_str()),
+            Some("damage")
+        );
+        assert!(items
+            .iter()
+            .find(|item| item.text == "state.player.hp")
+            .expect("global receiver field")
+            .scope
+            .is_none());
+        assert!(items
+            .iter()
+            .all(|item| item.detail.contains("[src/main.stasis]")));
     }
 
     #[test]
