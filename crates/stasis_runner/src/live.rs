@@ -10,6 +10,9 @@ pub const DEFAULT_LIVE_OUTPUT_BYTES: usize = 64 * 1024;
 pub const MAX_LIVE_REQUEST_BYTES: usize = 512 * 1024;
 pub const MAX_LIVE_MULTILINE_BYTES: usize = 256 * 1024;
 pub const MAX_SCRATCH_CELLS: usize = 64;
+pub const MAX_LIVE_TRACKS: usize = 8;
+pub const MAX_LIVE_TRACK_TICKS: u32 = 600;
+pub const MAX_LIVE_WATCHES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveRequest {
@@ -136,8 +139,21 @@ pub enum LiveCommand {
     Inspect {
         path: String,
     },
+    InspectAll {
+        #[serde(default = "default_inspect_limit")]
+        limit: usize,
+    },
     Watch {
         path: String,
+    },
+    Track {
+        path: String,
+        #[serde(default = "default_track_ticks")]
+        ticks: u32,
+    },
+    Untrack {
+        #[serde(default)]
+        path: Option<String>,
     },
     Unwatch {
         #[serde(default)]
@@ -185,7 +201,15 @@ const fn one_tick() -> u32 {
     1
 }
 
+const fn default_track_ticks() -> u32 {
+    300
+}
+
 const fn default_completion_limit() -> usize {
+    32
+}
+
+const fn default_inspect_limit() -> usize {
     32
 }
 
@@ -333,6 +357,14 @@ impl LiveSessionClient {
             .recv_timeout(timeout)
             .map_err(|error| format!("live-session response unavailable: {error}"))
     }
+
+    pub fn try_receive(&self) -> Result<Option<LiveResponse>, String> {
+        match self.responses.try_recv() {
+            Ok(response) => Ok(Some(response)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err("live session has ended".to_string()),
+        }
+    }
 }
 
 impl LiveSessionServer {
@@ -370,6 +402,8 @@ pub struct CompletionItem {
     pub type_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<LiveSymbolTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<CompletionScope>,
 }
@@ -435,6 +469,23 @@ impl CompletionIndex {
                 item,
             })
             .collect();
+    }
+
+    pub fn extend<I>(&mut self, items: I)
+    where
+        I: IntoIterator<Item = CompletionItem>,
+    {
+        let merged = self
+            .items
+            .iter()
+            .map(|indexed| indexed.item.clone())
+            .chain(items)
+            .collect::<Vec<_>>();
+        self.replace(merged);
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&CompletionItem) -> bool) {
+        self.items.retain(|indexed| keep(&indexed.item));
     }
 
     pub fn complete(&self, buffer: &str, cursor: usize, limit: usize) -> Vec<CompletionItem> {
@@ -1051,11 +1102,25 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         ":changes" => ready(LiveCommand::Changes),
         ":undo" => ready(LiveCommand::Undo { run_tests: true }),
         ":redo" => ready(LiveCommand::Redo { run_tests: true }),
+        ":inspect" if args.len() == 1 => ready(LiveCommand::InspectAll {
+            limit: default_inspect_limit(),
+        }),
         ":inspect" => ready(LiveCommand::Inspect {
             path: required_arg(&args, 1, "state path")?.to_string(),
         }),
         ":watch" => ready(LiveCommand::Watch {
             path: required_arg(&args, 1, "state path")?.to_string(),
+        }),
+        ":track" => ready(LiveCommand::Track {
+            path: required_arg(&args, 1, "state path")?.to_string(),
+            ticks: args
+                .get(2)
+                .map(|value| parse_u32("ticks", value))
+                .transpose()?
+                .unwrap_or_else(default_track_ticks),
+        }),
+        ":untrack" => ready(LiveCommand::Untrack {
+            path: args.get(1).cloned(),
         }),
         ":unwatch" => ready(LiveCommand::Unwatch {
             path: args.get(1).cloned(),
@@ -1287,6 +1352,7 @@ mod tests {
                 detail: "tick(): i32".into(),
                 type_name: None,
                 source: None,
+                selector: None,
                 scope: None,
             },
             CompletionItem {
@@ -1295,6 +1361,7 @@ mod tests {
                 detail: "tick(): i32".into(),
                 type_name: None,
                 source: None,
+                selector: None,
                 scope: None,
             },
             CompletionItem {
@@ -1303,6 +1370,7 @@ mod tests {
                 detail: "tick(value: i32): i32".into(),
                 type_name: None,
                 source: None,
+                selector: None,
                 scope: None,
             },
             CompletionItem {
@@ -1311,6 +1379,7 @@ mod tests {
                 detail: "i32".into(),
                 type_name: None,
                 source: None,
+                selector: None,
                 scope: None,
             },
             CompletionItem {
@@ -1319,6 +1388,7 @@ mod tests {
                 detail: "utf8[32]".into(),
                 type_name: None,
                 source: None,
+                selector: None,
                 scope: None,
             },
         ]);
@@ -1340,6 +1410,7 @@ mod tests {
                 detail: "i32 via local hero: Player".into(),
                 type_name: Some("i32".into()),
                 source: None,
+                selector: None,
                 scope: None,
             },
             CompletionItem {
@@ -1348,6 +1419,7 @@ mod tests {
                 detail: "damage(player: Player, amount: i32): i32".into(),
                 type_name: Some("i32".into()),
                 source: None,
+                selector: None,
                 scope: None,
             },
             CompletionItem {
@@ -1356,6 +1428,7 @@ mod tests {
                 detail: "live command".into(),
                 type_name: None,
                 source: None,
+                selector: None,
                 scope: None,
             },
         ]);
@@ -1383,6 +1456,7 @@ mod tests {
                 detail: detail.into(),
                 type_name: Some(if detail == "inner" { "i32" } else { "f32" }.into()),
                 source: Some("src/main.stasis".into()),
+                selector: None,
                 scope: Some(CompletionScope {
                     owner: owner.into(),
                     file: "src/main.stasis".into(),
@@ -1445,6 +1519,7 @@ mod tests {
             detail: signature.into(),
             type_name: Some("i32".into()),
             source: Some("src/main.stasis".into()),
+            selector: None,
             scope: Some(CompletionScope {
                 owner: "update".into(),
                 file: "src/main.stasis".into(),
@@ -1479,6 +1554,7 @@ mod tests {
             detail: detail.into(),
             type_name: Some("i32".into()),
             source: Some("src/main.stasis".into()),
+            selector: None,
             scope: Some(CompletionScope {
                 owner: "tick".into(),
                 file: "src/main.stasis".into(),
@@ -1498,6 +1574,7 @@ mod tests {
                 detail: "valid(): i32".into(),
                 type_name: Some("i32".into()),
                 source: None,
+                selector: None,
                 scope: None,
             },
         ]);
@@ -1523,6 +1600,7 @@ mod tests {
             detail: detail.into(),
             type_name: Some("i32".into()),
             source: Some("src/main.stasis".into()),
+            selector: None,
             scope: Some(CompletionScope {
                 owner: "tick".into(),
                 file: "src/main.stasis".into(),
@@ -1558,6 +1636,7 @@ mod tests {
                 detail: format!("symbol_{index:05}(): i32"),
                 type_name: Some("i32".into()),
                 source: Some("src/generated.stasis".into()),
+                selector: None,
                 scope: None,
             })
             .collect::<Vec<_>>();
@@ -1567,6 +1646,7 @@ mod tests {
             detail: "very_late_target(): i32".into(),
             type_name: Some("i32".into()),
             source: Some("src/late.stasis".into()),
+            selector: None,
             scope: None,
         });
         let mut index = CompletionIndex::default();
@@ -1587,6 +1667,7 @@ mod tests {
             detail: "Player".into(),
             type_name: Some("Player".into()),
             source: None,
+            selector: None,
             scope: None,
         }]);
         for buffer in ["score+pla", "x!=pla", "value*pla", "items[pla"] {
@@ -1623,6 +1704,46 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn terminal_track_command_defaults_and_accepts_tick_duration() {
+        let mut terminal = TerminalBuffer::new();
+        let TerminalInput::Request(default_request) =
+            terminal.feed_line(":track score").expect("default track")
+        else {
+            panic!("expected request")
+        };
+        assert_eq!(
+            default_request.command,
+            LiveCommand::Track {
+                path: "score".into(),
+                ticks: 300,
+            }
+        );
+        let TerminalInput::Request(explicit_request) = terminal
+            .feed_line(":track score 12")
+            .expect("explicit track")
+        else {
+            panic!("expected request")
+        };
+        assert_eq!(
+            explicit_request.command,
+            LiveCommand::Track {
+                path: "score".into(),
+                ticks: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_bare_inspect_requests_the_default_state_view() {
+        let mut terminal = TerminalBuffer::new();
+        let TerminalInput::Request(request) = terminal.feed_line(":inspect").expect("inspect")
+        else {
+            panic!("expected request")
+        };
+        assert_eq!(request.command, LiveCommand::InspectAll { limit: 32 });
     }
 
     #[test]

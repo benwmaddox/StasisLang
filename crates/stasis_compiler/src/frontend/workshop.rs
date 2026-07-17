@@ -967,6 +967,8 @@ pub struct WorkshopCompletionItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<WorkshopCompletionScope>,
@@ -1177,13 +1179,15 @@ pub fn workshop_completion_items(
         )
     }) {
         let kind = format!("{:?}", item.kind).to_ascii_lowercase();
-        items.push(completion_catalog_item(
+        let mut completion = completion_catalog_item(
             &item.name,
             &kind,
             &format!("{} [{}]", item.signature, item.file),
             &item.file,
             item.owner.clone(),
-        ));
+        );
+        completion.signature = Some(item.signature.clone());
+        items.push(completion);
         if item.kind == WorkshopSourceItemKind::Function {
             if let Some(owner) = item
                 .owner
@@ -1492,6 +1496,7 @@ fn completion_catalog_item(
         detail,
         file: file.to_string(),
         owner,
+        signature: None,
         type_name: None,
         scope: None,
     }

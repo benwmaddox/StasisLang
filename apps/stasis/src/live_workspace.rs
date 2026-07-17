@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess, JitScalarValue};
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
+use stasis_compiler::frontend::lexer::{lex, TokenKind};
 use stasis_compiler::frontend::workshop::{
     find_workshop_symbols, load_workshop_edit_workspace, plan_workshop_semantic_edits,
     workshop_completion_items, workshop_reachable_files, workshop_source_hash,
@@ -11,8 +12,10 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_runner::live::{
-    CompletionIndex, CompletionItem, CompletionScope, LiveCommand, LiveEditOperation, LiveRequest,
-    LiveResponse, LiveResponseSendError, LiveSessionServer, LiveSymbolTarget, ScratchWorkspace,
+    CompletionContext, CompletionIndex, CompletionItem, CompletionQuery, CompletionScope,
+    LiveCommand, LiveEditOperation, LiveRequest, LiveResponse, LiveResponseSendError,
+    LiveSessionServer, LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_TRACKS, MAX_LIVE_TRACK_TICKS,
+    MAX_LIVE_WATCHES,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -29,6 +32,13 @@ const MAX_LIVE_STATE_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LIVE_TRANSACTION_ASSIGNMENTS: usize = 64;
 const MAX_STAGED_TEST_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_STAGED_TEST_DIAGNOSTIC_BYTES: usize = 4096;
+const TRACK_PROGRESS_INTERVAL: usize = 10;
+
+struct LiveTrack {
+    total_ticks: u32,
+    samples: Vec<JitScalarValue>,
+    dropped_updates: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct LiveRunConfig {
@@ -72,6 +82,7 @@ struct PreparedEdit {
     package: JitEnginePackage,
     source_items: Vec<WorkshopSourceItem>,
     completion_items: Vec<WorkshopCompletionItem>,
+    source_files: Vec<WorkshopSourceFile>,
     input_hashes: BTreeMap<String, String>,
 }
 
@@ -80,6 +91,19 @@ struct EditPreparation {
     canceled: Arc<AtomicBool>,
     receiver: mpsc::Receiver<Result<PreparedEdit, String>>,
     worker: Option<std::thread::JoinHandle<()>>,
+}
+
+struct CompletionPreparation {
+    request_id: u64,
+    receiver: mpsc::Receiver<CompletionQuery>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Clone, Default)]
+struct CompletionSnapshot {
+    index: CompletionIndex,
+    source_items: Vec<WorkshopSourceItem>,
+    source_files: Vec<WorkshopSourceFile>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,13 +141,17 @@ pub(crate) struct LiveWorkspace {
     completion: CompletionIndex,
     source_items: Vec<WorkshopSourceItem>,
     completion_items: Vec<WorkshopCompletionItem>,
+    source_files: Vec<WorkshopSourceFile>,
+    completion_snapshot: Arc<CompletionSnapshot>,
     scratch: ScratchWorkspace,
     watches: BTreeMap<String, Option<JitScalarValue>>,
+    tracks: BTreeMap<String, LiveTrack>,
     pending_plan: Option<WorkshopSemanticEditPlan>,
     pending_requests: VecDeque<LiveRequest>,
     pending_responses: VecDeque<LiveResponse>,
     self_write_hashes: BTreeMap<PathBuf, String>,
     edit_preparation: Option<EditPreparation>,
+    completion_preparation: Option<CompletionPreparation>,
     dropped_watch_events: u64,
 }
 
@@ -131,6 +159,11 @@ impl Drop for LiveWorkspace {
     fn drop(&mut self) {
         if let Some(mut preparation) = self.edit_preparation.take() {
             preparation.canceled.store(true, Ordering::Release);
+            if let Some(worker) = preparation.worker.take() {
+                let _ = worker.join();
+            }
+        }
+        if let Some(mut preparation) = self.completion_preparation.take() {
             if let Some(worker) = preparation.worker.take() {
                 let _ = worker.join();
             }
@@ -155,13 +188,17 @@ impl LiveWorkspace {
             completion: CompletionIndex::default(),
             source_items: Vec::new(),
             completion_items: Vec::new(),
+            source_files: Vec::new(),
+            completion_snapshot: Arc::new(CompletionSnapshot::default()),
             scratch: ScratchWorkspace::default(),
             watches: BTreeMap::new(),
+            tracks: BTreeMap::new(),
             pending_plan: None,
             pending_requests: VecDeque::new(),
             pending_responses: VecDeque::new(),
             self_write_hashes: BTreeMap::new(),
             edit_preparation: None,
+            completion_preparation: None,
             dropped_watch_events: 0,
         };
         workspace.refresh_completion(jit)?;
@@ -256,6 +293,9 @@ impl LiveWorkspace {
         {
             self.enqueue_response(response);
         }
+        if let Some(response) = self.finish_completion_preparation(tick) {
+            self.enqueue_response(response);
+        }
         for request in controls {
             let response = match request.command {
                 LiveCommand::Cancel {
@@ -339,6 +379,7 @@ impl LiveWorkspace {
     }
 
     pub(crate) fn publish_watches(&mut self, tick: u64, jit: &JitProcess) {
+        self.publish_tracks(tick, jit);
         if self.dropped_watch_events > 0 {
             let dropped = self.dropped_watch_events;
             match self.server.respond(LiveResponse::success(
@@ -383,6 +424,82 @@ impl LiveWorkspace {
         }
     }
 
+    fn publish_tracks(&mut self, tick: u64, jit: &JitProcess) {
+        let paths = self.tracks.keys().cloned().collect::<Vec<_>>();
+        for path in paths {
+            let value = match jit.read_global_scalar(&path) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.tracks.remove(&path);
+                    let _ = self.server.respond(LiveResponse::success(
+                        0,
+                        tick,
+                        "track_failed",
+                        json!({"path": path, "error": error}),
+                    ));
+                    continue;
+                }
+            };
+            let Some(track) = self.tracks.get_mut(&path) else {
+                continue;
+            };
+            if track.samples.len() < track.total_ticks as usize {
+                track.samples.push(value);
+            }
+            let complete = track.samples.len() == track.total_ticks as usize;
+            if !complete && track.samples.len() % TRACK_PROGRESS_INTERVAL != 0 {
+                continue;
+            }
+            let kind = if complete {
+                "track_complete"
+            } else {
+                "track_progress"
+            };
+            let samples = if complete {
+                track.samples.clone()
+            } else {
+                track
+                    .samples
+                    .iter()
+                    .rev()
+                    .take(32)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect()
+            };
+            let response = LiveResponse::success(
+                0,
+                tick,
+                kind,
+                json!({
+                    "path": path,
+                    "sample_count": track.samples.len(),
+                    "total_ticks": track.total_ticks,
+                    "latest": value,
+                    "samples": samples,
+                    "dropped_updates": track.dropped_updates,
+                }),
+            );
+            match self.server.respond(response) {
+                Ok(()) if complete => {
+                    self.tracks.remove(&path);
+                }
+                Ok(()) => {}
+                Err(LiveResponseSendError::Full(_)) => {
+                    if let Some(track) = self.tracks.get_mut(&path) {
+                        track.dropped_updates = track.dropped_updates.saturating_add(1);
+                    }
+                }
+                Err(LiveResponseSendError::Disconnected) => {
+                    self.quit = true;
+                    return;
+                }
+            }
+        }
+    }
+
     fn handle_request(
         &mut self,
         request: LiveRequest,
@@ -401,6 +518,7 @@ impl LiveWorkspace {
                     "history_length": self.history.len(),
                     "history_cursor": self.history_cursor,
                     "watches": self.watches.keys().collect::<Vec<_>>(),
+                    "tracks": self.tracks.keys().collect::<Vec<_>>(),
                     "scratch_cells": self.scratch.list(),
                     "dropped_watch_events": self.dropped_watch_events,
                     "preparing_request_id": self.edit_preparation.as_ref().map(|job| job.request_id),
@@ -456,12 +574,7 @@ impl LiveWorkspace {
                 cursor,
                 limit,
                 context,
-            } => Ok((
-                "completion",
-                json!(self
-                    .completion
-                    .query_with_context(&buffer, cursor, limit, &context)),
-            )),
+            } => self.start_completion_preparation(request_id, buffer, cursor, limit, context),
             LiveCommand::Palette {
                 query,
                 page,
@@ -560,12 +673,54 @@ impl LiveWorkspace {
                 }
             }
             LiveCommand::Inspect { path } => inspect_scalar(jit, &path),
+            LiveCommand::InspectAll { limit } => inspect_all_scalars(jit, limit),
             LiveCommand::Watch { path } => {
                 let value = jit.read_global_scalar(&path)?;
+                if !self.watches.contains_key(&path) && self.watches.len() >= MAX_LIVE_WATCHES {
+                    return Err(format!(
+                        "live watching is limited to {MAX_LIVE_WATCHES} paths"
+                    ));
+                }
                 self.watches.insert(path.clone(), Some(value));
                 Ok((
                     "watch_added",
                     json!({"path": path, "value": value, "tick": tick}),
+                ))
+            }
+            LiveCommand::Track { path, ticks } => {
+                if ticks == 0 || ticks > MAX_LIVE_TRACK_TICKS {
+                    return Err(format!(
+                        "track duration must be 1..={MAX_LIVE_TRACK_TICKS} ticks"
+                    ));
+                }
+                let value = jit.read_global_scalar(&path)?;
+                if !self.tracks.contains_key(&path) && self.tracks.len() >= MAX_LIVE_TRACKS {
+                    return Err(format!(
+                        "live tracking is limited to {MAX_LIVE_TRACKS} paths"
+                    ));
+                }
+                self.tracks.insert(
+                    path.clone(),
+                    LiveTrack {
+                        total_ticks: ticks,
+                        samples: Vec::with_capacity(ticks as usize),
+                        dropped_updates: 0,
+                    },
+                );
+                Ok((
+                    "track_started",
+                    json!({"path": path, "ticks": ticks, "value": value}),
+                ))
+            }
+            LiveCommand::Untrack { path } => {
+                if let Some(path) = path {
+                    self.tracks.remove(&path);
+                } else {
+                    self.tracks.clear();
+                }
+                Ok((
+                    "track_removed",
+                    json!({"tracks": self.tracks.keys().collect::<Vec<_>>()}),
                 ))
             }
             LiveCommand::Unwatch { path } => {
@@ -757,6 +912,78 @@ impl LiveWorkspace {
         ))
     }
 
+    fn start_completion_preparation(
+        &mut self,
+        request_id: u64,
+        buffer: String,
+        cursor: usize,
+        limit: usize,
+        context: CompletionContext,
+    ) -> Result<(&'static str, Value), String> {
+        if let Some(preparation) = self.completion_preparation.as_ref() {
+            return Err(format!(
+                "live completion request {} is still preparing; retry after it finishes",
+                preparation.request_id
+            ));
+        }
+        let snapshot = Arc::clone(&self.completion_snapshot);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker = std::thread::Builder::new()
+            .name(format!("stasis-live-completion-{request_id}"))
+            .spawn(move || {
+                let query = completion_query_from_snapshot(
+                    snapshot.index.clone(),
+                    &snapshot.source_items,
+                    &snapshot.source_files,
+                    &buffer,
+                    cursor,
+                    limit,
+                    &context,
+                );
+                let _ = sender.send(query);
+            })
+            .map_err(|error| format!("failed starting live completion analysis: {error}"))?;
+        self.completion_preparation = Some(CompletionPreparation {
+            request_id,
+            receiver,
+            worker: Some(worker),
+        });
+        Ok((
+            "completion_preparing",
+            json!({"request_id": request_id, "background": true}),
+        ))
+    }
+
+    fn finish_completion_preparation(&mut self, tick: u64) -> Option<LiveResponse> {
+        let preparation = self.completion_preparation.as_ref()?;
+        let query = match preparation.receiver.try_recv() {
+            Ok(query) => query,
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let request_id = preparation.request_id;
+                self.completion_preparation = None;
+                return Some(LiveResponse::failure(
+                    request_id,
+                    tick,
+                    "live completion analysis worker disconnected",
+                ));
+            }
+        };
+        let mut preparation = self
+            .completion_preparation
+            .take()
+            .expect("completion preparation exists");
+        if let Some(worker) = preparation.worker.take() {
+            let _ = worker.join();
+        }
+        Some(LiveResponse::success(
+            preparation.request_id,
+            tick,
+            "completion",
+            json!(query),
+        ))
+    }
+
     fn finish_edit_preparation(
         &mut self,
         tick: u64,
@@ -867,6 +1094,7 @@ impl LiveWorkspace {
         let action = prepared.action.clone();
         let source_items = prepared.source_items;
         let completion_items = prepared.completion_items;
+        let source_files = prepared.source_files;
         let tests = if prepared.tests_ran {
             "passed"
         } else {
@@ -875,6 +1103,7 @@ impl LiveWorkspace {
         *jit = prepared.candidate;
         self.source_items = source_items;
         self.completion_items = completion_items;
+        self.source_files = source_files;
         self.remember_plan_hashes(&plan, prepared.restore);
         let (kind, data) = match action {
             PreparedAction::ApplyNew => {
@@ -951,27 +1180,14 @@ impl LiveWorkspace {
         let files = self.load_files()?;
         self.source_items = workshop_source_items(&files)?;
         self.completion_items = workshop_completion_items(&files)?;
+        self.source_files = files;
         self.rebuild_completion(jit);
         Ok(())
     }
 
     fn rebuild_completion(&mut self, jit: &JitProcess) {
         let mut items = live_command_completions();
-        items.extend(self.completion_items.iter().map(|item| CompletionItem {
-            text: item.text.clone(),
-            kind: item.kind.clone(),
-            detail: item.detail.clone(),
-            type_name: item.type_name.clone(),
-            source: Some(item.file.clone()),
-            scope: item.scope.as_ref().map(|scope| CompletionScope {
-                owner: scope.owner.clone(),
-                file: scope.file.clone(),
-                owner_signature: scope.owner_signature.clone(),
-                owner_end: scope.owner_end,
-                visible_from: scope.visible_from,
-                visible_to: scope.visible_to,
-            }),
-        }));
+        items.extend(self.completion_items.iter().map(live_completion_item));
         items.extend(
             jit.global_scalar_paths()
                 .into_iter()
@@ -981,6 +1197,7 @@ impl LiveWorkspace {
                     detail: type_name.to_string(),
                     type_name: Some(type_name.to_string()),
                     source: Some("runtime state".to_string()),
+                    selector: None,
                     scope: None,
                 }),
         );
@@ -990,10 +1207,147 @@ impl LiveWorkspace {
             detail: "session-only scratch cell".to_string(),
             type_name: None,
             source: Some("scratch workspace".to_string()),
+            selector: None,
             scope: None,
         }));
         self.completion.replace(items);
+        self.completion_snapshot = Arc::new(CompletionSnapshot {
+            index: self.completion.clone(),
+            source_items: self.source_items.clone(),
+            source_files: self.source_files.clone(),
+        });
     }
+
+    #[cfg(test)]
+    fn completion_query(
+        &self,
+        buffer: &str,
+        cursor: usize,
+        limit: usize,
+        context: &stasis_runner::live::CompletionContext,
+    ) -> stasis_runner::live::CompletionQuery {
+        completion_query_from_snapshot(
+            self.completion.clone(),
+            &self.source_items,
+            &self.source_files,
+            buffer,
+            cursor,
+            limit,
+            context,
+        )
+    }
+}
+
+fn completion_query_from_snapshot(
+    mut index: CompletionIndex,
+    source_items: &[WorkshopSourceItem],
+    source_files: &[WorkshopSourceFile],
+    buffer: &str,
+    cursor: usize,
+    limit: usize,
+    context: &CompletionContext,
+) -> CompletionQuery {
+    if let Some(items) = overlay_completion_items(source_items, source_files, buffer, context) {
+        index.retain(|item| !completion_item_belongs_to_context(item, context));
+        index.extend(items.into_iter().map(|item| live_completion_item(&item)));
+    }
+    index.query_with_context(buffer, cursor, limit, context)
+}
+
+fn overlay_completion_items(
+    source_items: &[WorkshopSourceItem],
+    source_files: &[WorkshopSourceFile],
+    buffer: &str,
+    context: &CompletionContext,
+) -> Option<Vec<WorkshopCompletionItem>> {
+    let file = context.file.as_deref()?;
+    let owner = context.owner.as_deref()?;
+    let item = source_items.iter().find(|item| {
+        item.file == file
+            && item.name == owner
+            && context
+                .owner_signature
+                .as_deref()
+                .is_none_or(|signature| item.signature == signature)
+    })?;
+    let span = item.source_spans.first()?;
+    let mut files = source_files.to_vec();
+    let source_file = files.iter_mut().find(|source| source.path == file)?;
+    let start = span.start as usize;
+    let end = span.end as usize;
+    if start > end || end > source_file.source.len() {
+        return None;
+    }
+    let overlay = balanced_definition(buffer)?;
+    source_file.source.replace_range(start..end, &overlay);
+    let mut items = workshop_completion_items(&files).ok()?;
+    for completion in &mut items {
+        if let Some(scope) = completion
+            .scope
+            .as_mut()
+            .filter(|scope| scope.owner == owner && scope.file == file)
+        {
+            scope.owner_signature = context.owner_signature.clone();
+        }
+    }
+    Some(items)
+}
+
+fn completion_item_belongs_to_context(
+    item: &CompletionItem,
+    context: &stasis_runner::live::CompletionContext,
+) -> bool {
+    let Some(scope) = item.scope.as_ref() else {
+        return false;
+    };
+    scope.owner == context.owner.as_deref().unwrap_or_default()
+        && scope.file == context.file.as_deref().unwrap_or_default()
+        && context
+            .owner_signature
+            .as_deref()
+            .is_none_or(|signature| scope.owner_signature.as_deref() == Some(signature))
+}
+
+fn live_completion_item(item: &WorkshopCompletionItem) -> CompletionItem {
+    CompletionItem {
+        text: item.text.clone(),
+        kind: item.kind.clone(),
+        detail: item.detail.clone(),
+        type_name: item.type_name.clone(),
+        source: Some(item.file.clone()),
+        selector: item.signature.as_ref().map(|signature| LiveSymbolTarget {
+            name: item.text.clone(),
+            kind: Some(item.kind.clone()),
+            file: Some(item.file.clone()),
+            owner: item.owner.clone(),
+            signature: Some(signature.clone()),
+        }),
+        scope: item.scope.as_ref().map(|scope| CompletionScope {
+            owner: scope.owner.clone(),
+            file: scope.file.clone(),
+            owner_signature: scope.owner_signature.clone(),
+            owner_end: scope.owner_end,
+            visible_from: scope.visible_from,
+            visible_to: scope.visible_to,
+        }),
+    }
+}
+
+fn balanced_definition(source: &str) -> Option<String> {
+    let tokens = lex(source).ok()?;
+    let mut depth = 0usize;
+    for token in tokens {
+        match token.kind {
+            TokenKind::LBrace => depth = depth.saturating_add(1),
+            TokenKind::RBrace => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+    }
+    let mut balanced = source.to_string();
+    for _ in 0..depth {
+        balanced.push('}');
+    }
+    Some(balanced)
 }
 
 fn paged_completion_query(
@@ -1121,6 +1475,7 @@ fn prepare_edit(
         package,
         source_items,
         completion_items,
+        source_files: candidate_files,
         input_hashes,
     })
 }
@@ -1437,10 +1792,12 @@ fn help_data() -> Value {
             ":help", ":status", ":pause", ":resume", ":step [ticks]", ":cancel REQUEST_ID", ":quit",
             ":symbols [query] [--page N --limit N]",
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
+            ":edit SYMBOL (interactive TUI)",
             ":complete BUFFER", ":palette [QUERY]",
             ":add KIND NAME FILE ... :end", ":update KIND NAME [FILE] ... :end",
             ":delete KIND NAME [FILE]", ":preview", ":apply", ":changes", ":undo", ":redo",
-            ":inspect PATH", ":watch PATH", ":unwatch [PATH]", ":set PATH VALUE",
+            ":inspect [PATH]", ":watch PATH", ":unwatch [PATH]",
+            ":track PATH [ticks]", ":untrack [PATH]", ":set PATH VALUE",
             ":print VALUE_OR_PATH", ":do ... :end", ":cell put|run|list|clear"
         ],
         "multiline_terminator": ":end",
@@ -1462,6 +1819,7 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":symbols",
         ":find",
         ":read",
+        ":edit",
         ":complete",
         ":palette",
         ":add",
@@ -1475,6 +1833,8 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":inspect",
         ":watch",
         ":unwatch",
+        ":track",
+        ":untrack",
         ":set",
         ":print",
         ":do",
@@ -1487,6 +1847,7 @@ fn live_command_completions() -> Vec<CompletionItem> {
         detail: "live command".to_string(),
         type_name: None,
         source: Some("interactive workspace".to_string()),
+        selector: None,
         scope: None,
     })
     .collect()
@@ -1568,6 +1929,24 @@ fn inspect_scalar(jit: &JitProcess, path: &str) -> Result<(&'static str, Value),
     Ok((
         "inspection",
         json!({"path": path, "static_type": value.type_name(), "value": value}),
+    ))
+}
+
+fn inspect_all_scalars(jit: &JitProcess, limit: usize) -> Result<(&'static str, Value), String> {
+    let paths = jit.global_scalar_paths();
+    let total = paths.len();
+    let limit = limit.clamp(1, 64);
+    let items = paths
+        .into_iter()
+        .take(limit)
+        .map(|(path, static_type)| {
+            let value = jit.read_global_scalar(&path)?;
+            Ok(json!({"path": path, "static_type": static_type, "value": value}))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((
+        "state_inspection",
+        json!({"total": total, "limit": limit, "truncated": total > limit, "items": items}),
     ))
 }
 
@@ -1769,7 +2148,12 @@ mod tests {
         for tick in 1..=500 {
             workspace.process_boundary(tick, jit, tick_ptr, render_ptr);
             if let Ok(response) = client.receive_timeout(std::time::Duration::from_millis(10)) {
-                if response.request_id == request_id && response.kind != "edit_preparing" {
+                if response.request_id == request_id
+                    && !matches!(
+                        response.kind.as_str(),
+                        "edit_preparing" | "completion_preparing"
+                    )
+                {
                     return response;
                 }
             }
@@ -1824,6 +2208,20 @@ mod tests {
         assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(9)));
         assert!(apply_scalar_transaction(&jit, "score = nope;", false).is_err());
         assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(9)));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn default_state_inspection_is_bounded_and_typed() {
+        let (root, config) = project();
+        let (jit, _) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (kind, data) = inspect_all_scalars(&jit, 32).expect("state inspection");
+        assert_eq!(kind, "state_inspection");
+        assert_eq!(data["total"], 1);
+        assert_eq!(data["items"][0]["path"], "score");
+        assert_eq!(data["items"][0]["static_type"], "i32");
+        assert_eq!(data["items"][0]["value"]["value"], 1);
         fs::remove_dir_all(root).ok();
     }
 
@@ -1953,6 +2351,53 @@ mod tests {
         assert!(workspace.should_run_tick());
         workspace.after_tick();
         assert!(!workspace.should_run_tick());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn per_tick_track_keeps_unchanged_samples_and_completes_exactly() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(32);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let started = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                44,
+                LiveCommand::Track {
+                    path: "score".into(),
+                    ticks: 3,
+                },
+            ),
+        );
+        assert!(started.ok, "{:?}", started.error);
+
+        jit.write_global_scalar("score", JitScalarValue::I32(5))
+            .expect("set score");
+        workspace.publish_watches(10, &jit);
+        workspace.publish_watches(11, &jit);
+        jit.write_global_scalar("score", JitScalarValue::I32(8))
+            .expect("set score");
+        workspace.publish_watches(12, &jit);
+
+        let complete = client
+            .receive_timeout(std::time::Duration::from_secs(1))
+            .expect("track complete");
+        assert_eq!(complete.kind, "track_complete");
+        assert_eq!(complete.tick, 12);
+        let data = complete.data.expect("track data");
+        assert_eq!(data["sample_count"], 3);
+        assert_eq!(data["samples"][0]["value"], 5);
+        assert_eq!(data["samples"][1]["value"], 5);
+        assert_eq!(data["samples"][2]["value"], 8);
+        assert!(workspace.tracks.is_empty());
         fs::remove_dir_all(root).ok();
     }
 
@@ -2192,6 +2637,176 @@ mod tests {
     }
 
     #[test]
+    fn dirty_unbalanced_definition_overlay_completes_new_typed_local() {
+        let (root, config) = project();
+        let (jit, _) = compile(&config);
+        let (_, server) = stasis_runner::live::live_session(8);
+        let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let tick = workspace
+            .source_items
+            .iter()
+            .find(|item| item.name == "tick")
+            .expect("tick item");
+        let buffer = "function tick(): i32 {\n    let local_speed: i32 = 2;\n    local_sp";
+        let context = stasis_runner::live::CompletionContext {
+            owner: Some("tick".into()),
+            file: Some(tick.file.clone()),
+            owner_signature: Some(tick.signature.clone()),
+            source_offset: Some(tick.source_spans[0].start as usize + buffer.len()),
+            expected_type: None,
+        };
+        let query = workspace.completion_query(buffer, buffer.len(), 10, &context);
+        assert_eq!(query.items[0].text, "local_speed");
+        assert_eq!(
+            balanced_definition(buffer)
+                .expect("balanced")
+                .matches('}')
+                .count(),
+            1
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn dirty_overlay_removes_deleted_locals_from_the_accepted_catalog() {
+        let (root, config) = project();
+        let path = root.join("src/main.stasis");
+        let source = fs::read_to_string(&path).expect("source").replace(
+            "function tick(): i32 { score += 1; return 0; }",
+            "function tick(): i32 { let stale_local: i32 = 1; score += stale_local; return 0; }",
+        );
+        fs::write(&path, source).expect("write local source");
+        let (jit, _) = compile(&config);
+        let (_, server) = stasis_runner::live::live_session(8);
+        let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let tick = workspace
+            .source_items
+            .iter()
+            .find(|item| item.name == "tick")
+            .expect("tick item");
+        let buffer = "function tick(): i32 {\n    score += 1;\n    stale";
+        let context = CompletionContext {
+            owner: Some("tick".into()),
+            file: Some(tick.file.clone()),
+            owner_signature: Some(tick.signature.clone()),
+            source_offset: Some(tick.source_spans[0].start as usize + buffer.len()),
+            expected_type: None,
+        };
+        let query = workspace.completion_query(buffer, buffer.len(), 10, &context);
+        assert!(query.items.iter().all(|item| item.text != "stale_local"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn dirty_overlay_keeps_scope_identity_when_a_parameter_is_renamed() {
+        let (root, config) = project();
+        let path = root.join("src/main.stasis");
+        let mut source = fs::read_to_string(&path).expect("source");
+        source.push_str("function helper(old_name: i32): i32 { return old_name; }\n");
+        fs::write(&path, source).expect("write helper source");
+        let (jit, _) = compile(&config);
+        let (_, server) = stasis_runner::live::live_session(8);
+        let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let helper = workspace
+            .source_items
+            .iter()
+            .find(|item| item.name == "helper")
+            .expect("helper item");
+        let buffer = "function helper(new_name: i32): i32 { return new_na";
+        let context = CompletionContext {
+            owner: Some("helper".into()),
+            file: Some(helper.file.clone()),
+            owner_signature: Some(helper.signature.clone()),
+            source_offset: Some(helper.source_spans[0].start as usize + buffer.len()),
+            expected_type: None,
+        };
+        let query = workspace.completion_query(buffer, buffer.len(), 10, &context);
+        assert_eq!(query.items[0].text, "new_name");
+        assert!(query.items.iter().all(|item| item.text != "old_name"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn completion_analysis_returns_preparing_before_the_background_result() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let tick = workspace
+            .source_items
+            .iter()
+            .find(|item| item.name == "tick")
+            .expect("tick item");
+        let context = CompletionContext {
+            owner: Some("tick".into()),
+            file: Some(tick.file.clone()),
+            owner_signature: Some(tick.signature.clone()),
+            source_offset: Some(tick.source_spans[0].start as usize),
+            expected_type: None,
+        };
+        let buffer = "function tick(): i32 { sco".to_string();
+        let cursor = buffer.len();
+        client
+            .submit(LiveRequest::new(
+                90,
+                LiveCommand::Complete {
+                    buffer,
+                    cursor,
+                    limit: 10,
+                    context,
+                },
+            ))
+            .expect("submit completion");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        workspace.process_boundary(1, &mut jit, &mut tick_ptr, &mut render_ptr);
+        let preparing = client
+            .receive_timeout(std::time::Duration::from_secs(1))
+            .expect("preparing response");
+        assert_eq!(preparing.kind, "completion_preparing");
+        let final_response = (2..=100)
+            .find_map(|boundary| {
+                workspace.process_boundary(boundary, &mut jit, &mut tick_ptr, &mut render_ptr);
+                client
+                    .receive_timeout(std::time::Duration::from_millis(10))
+                    .ok()
+            })
+            .expect("background completion response");
+        assert_eq!(final_response.kind, "completion");
+        assert!(final_response.ok);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn watch_paths_are_bounded() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        workspace.watches = (0..MAX_LIVE_WATCHES)
+            .map(|index| (format!("placeholder_{index}"), None))
+            .collect();
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                91,
+                LiveCommand::Watch {
+                    path: "score".into(),
+                },
+            ),
+        );
+        assert!(!response.ok);
+        assert!(response.error.expect("watch limit").contains("limited"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn large_palette_query_stays_bounded_and_completes_in_one_graphics_boundary() {
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
@@ -2204,6 +2819,7 @@ mod tests {
                 detail: format!("generated_{index:05}(): i32"),
                 type_name: Some("i32".into()),
                 source: Some("src/generated.stasis".into()),
+                selector: None,
                 scope: None,
             })
             .collect::<Vec<_>>();
@@ -2213,6 +2829,7 @@ mod tests {
             detail: "late_graphics_target(): i32".into(),
             type_name: Some("i32".into()),
             source: Some("src/late.stasis".into()),
+            selector: None,
             scope: None,
         });
         workspace.completion.replace(items);

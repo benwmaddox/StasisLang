@@ -1028,7 +1028,7 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     .expect("write live test");
     fs::write(
         project.join("live.commands"),
-        ":palette hrohp --owner damage --file src/main.stasis\n:palette :pa\n:pause\n:update function tick src/main.stasis\nfunction tick(): i32 { score += 4; return 0; }\n:end\n:inspect swaps\n:set score 10\n:step 1\n:inspect score\n:undo\n:inspect swaps\n:step 1\n:inspect score\n:quit\n",
+        ":palette hrohp --owner damage --file src/main.stasis\n:palette :pa\n:complete sco\n:pause\n:update function tick src/main.stasis\nfunction tick(): i32 { score += 4; return 0; }\n:end\n:inspect swaps\n:set score 10\n:step 1\n:inspect score\n:undo\n:inspect swaps\n:step 1\n:inspect score\n:quit\n",
     )
     .expect("write live script");
 
@@ -1063,6 +1063,14 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     assert_eq!(palettes[0]["data"]["items"][0]["text"], "hero.hp");
     assert_eq!(palettes[0]["data"]["items"][0]["kind"], "field");
     assert_eq!(palettes[1]["data"]["items"][0]["text"], ":pause");
+    assert!(responses
+        .iter()
+        .any(|response| response["kind"] == "completion_preparing"));
+    let completion = responses
+        .iter()
+        .find(|response| response["kind"] == "completion")
+        .expect("background completion result");
+    assert_eq!(completion["data"]["items"][0]["text"], "score");
     let inspected = responses
         .iter()
         .filter(|response| response["kind"] == "inspection")
