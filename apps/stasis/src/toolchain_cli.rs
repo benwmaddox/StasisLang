@@ -1,10 +1,22 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::event::{
+    self, Event as TerminalEvent, KeyCode, KeyEvent as TerminalKeyEvent, KeyEventKind, KeyModifiers,
+};
+use crossterm::execute;
+use crossterm::style::Print;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
-use rustyline::{Context, Editor, Helper};
+use rustyline::{
+    Cmd, CompletionType, ConditionalEventHandler, Config, Context, Editor, Event as LineEvent,
+    EventContext, EventHandler, Helper, KeyEvent as LineKeyEvent, RepeatCount,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use stasis::{
@@ -12,6 +24,7 @@ use stasis::{
     run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
 };
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
     find_workshop_symbols, load_workshop_edit_workspace, plan_workshop_semantic_edits,
     workshop_reachable_files, workshop_source_hash, workshop_source_items,
@@ -20,15 +33,17 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_runner::live::{
-    live_session, CompletionItem, LiveCommand, LiveRequest, LiveResponse, TerminalBuffer,
-    TerminalInput,
+    live_session, CompletionContext, CompletionItem, LiveCommand, LiveRequest, LiveResponse,
+    LiveSessionClient, TerminalBuffer, TerminalInput,
 };
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -877,7 +892,60 @@ fn run_workspace_live(
 }
 
 struct LiveLineHelper {
-    items: Vec<CompletionItem>,
+    client: LiveSessionClient,
+    next_request_id: AtomicU64,
+    context: Mutex<CompletionContext>,
+    deferred_responses: Mutex<Vec<LiveResponse>>,
+}
+
+impl LiveLineHelper {
+    fn new(client: LiveSessionClient) -> Self {
+        Self {
+            client,
+            next_request_id: AtomicU64::new(1u64 << 63),
+            context: Mutex::new(CompletionContext::default()),
+            deferred_responses: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn set_context(&self, context: CompletionContext) {
+        *self.context.lock().expect("completion context lock") = context;
+    }
+
+    fn take_deferred_responses(&self) -> Vec<LiveResponse> {
+        std::mem::take(
+            &mut *self
+                .deferred_responses
+                .lock()
+                .expect("deferred response lock"),
+        )
+    }
+
+    fn query(
+        &self,
+        line: &str,
+        position: usize,
+        limit: usize,
+    ) -> Result<stasis_runner::live::CompletionQuery, String> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let mut context = self
+            .context
+            .lock()
+            .expect("completion context lock")
+            .clone();
+        if context.expected_type.is_none() {
+            context.expected_type = completion_expected_type(line, position).unwrap_or_default();
+        }
+        fetch_live_completion_query(
+            &self.client,
+            request_id,
+            line,
+            position,
+            limit,
+            context,
+            &self.deferred_responses,
+        )
+    }
 }
 
 impl Helper for LiveLineHelper {}
@@ -896,27 +964,295 @@ impl Completer for LiveLineHelper {
         position: usize,
         _context: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let mut position = position.min(line.len());
-        while !line.is_char_boundary(position) {
-            position -= 1;
-        }
-        let start = line[..position]
-            .rfind(|character: char| {
-                character.is_whitespace() || character == '(' || character == ','
-            })
-            .map_or(0, |index| index + 1);
-        let prefix = &line[start..position];
-        let candidates = self
+        let query = self
+            .query(line, position, 64)
+            .map_err(|error| rustyline::error::ReadlineError::Io(io::Error::other(error)))?;
+        let candidates = query
             .items
-            .iter()
-            .filter(|item| item.text.starts_with(prefix))
+            .into_iter()
             .map(|item| Pair {
-                display: format!("{}  {}", item.text, item.detail),
-                replacement: item.text.clone(),
+                display: format_completion_candidate(&item),
+                replacement: item.text,
             })
             .collect();
-        Ok((start, candidates))
+        Ok((query.replacement_start, candidates))
     }
+}
+
+fn format_completion_candidate(item: &CompletionItem) -> String {
+    let mut detail = item.detail.replace(['\r', '\n'], " ");
+    if detail.chars().count() > 48 {
+        detail = detail.chars().take(45).collect::<String>() + "...";
+    }
+    format!("{}  [{}]  {}", item.text, item.kind, detail)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaletteOpen {
+    line: String,
+    cursor: usize,
+}
+
+struct PaletteTrigger {
+    pending: Arc<Mutex<Option<PaletteOpen>>>,
+}
+
+impl ConditionalEventHandler for PaletteTrigger {
+    fn handle(
+        &self,
+        _event: &LineEvent,
+        _repeat: RepeatCount,
+        _positive: bool,
+        context: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        *self.pending.lock().expect("palette trigger lock") = Some(PaletteOpen {
+            line: context.line().to_string(),
+            cursor: context.pos(),
+        });
+        Some(Cmd::AcceptLine)
+    }
+}
+
+const PALETTE_PAGE_SIZE: usize = 8;
+
+struct PaletteState {
+    query: String,
+    items: Vec<CompletionItem>,
+    selected: usize,
+    truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteAction {
+    Cancel,
+    Move(isize),
+    Select,
+    Backspace,
+    Type(char),
+    Ignore,
+}
+
+fn palette_action(key: TerminalKeyEvent) -> PaletteAction {
+    match key.code {
+        KeyCode::Esc => PaletteAction::Cancel,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            PaletteAction::Cancel
+        }
+        KeyCode::Up => PaletteAction::Move(-1),
+        KeyCode::Down => PaletteAction::Move(1),
+        KeyCode::PageUp => PaletteAction::Move(-(PALETTE_PAGE_SIZE as isize)),
+        KeyCode::PageDown => PaletteAction::Move(PALETTE_PAGE_SIZE as isize),
+        KeyCode::Enter | KeyCode::Tab => PaletteAction::Select,
+        KeyCode::Backspace => PaletteAction::Backspace,
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            PaletteAction::Type(character)
+        }
+        _ => PaletteAction::Ignore,
+    }
+}
+
+impl PaletteState {
+    fn replace_results(&mut self, query: stasis_runner::live::CompletionQuery) {
+        self.items = query.items;
+        self.selected = 0;
+        self.truncated = query.truncated;
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        if self.items.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        self.selected = self
+            .selected
+            .saturating_add_signed(delta)
+            .min(self.items.len() - 1);
+    }
+}
+
+struct PaletteTerminalGuard;
+
+impl PaletteTerminalGuard {
+    fn enter() -> Result<Self, String> {
+        enable_raw_mode().map_err(|error| format!("failed enabling palette input: {error}"))?;
+        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, Hide) {
+            let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            return Err(format!("failed opening palette screen: {error}"));
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for PaletteTerminalGuard {
+    fn drop(&mut self) {
+        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    }
+}
+
+fn run_live_palette(
+    helper: &LiveLineHelper,
+    open: PaletteOpen,
+) -> Result<(String, String), String> {
+    let initial = helper.query(&open.line, open.cursor, 64)?;
+    let replacement_start = initial.replacement_start;
+    let replacement_end = initial.replacement_end;
+    let mut state = PaletteState {
+        query: open.line[replacement_start..replacement_end].to_string(),
+        items: initial.items,
+        selected: 0,
+        truncated: initial.truncated,
+    };
+    let _guard = PaletteTerminalGuard::enter()?;
+    loop {
+        render_live_palette(&state)?;
+        let TerminalEvent::Key(key) =
+            event::read().map_err(|error| format!("failed reading palette input: {error}"))?
+        else {
+            continue;
+        };
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            continue;
+        }
+        match palette_action(key) {
+            PaletteAction::Cancel => {
+                return Ok(split_palette_line(&open.line, open.cursor));
+            }
+            PaletteAction::Move(delta) => state.move_selection(delta),
+            PaletteAction::Select => {
+                if let Some(item) = state.items.get(state.selected) {
+                    return Ok(insert_palette_selection(
+                        &open.line,
+                        replacement_start,
+                        replacement_end,
+                        &item.text,
+                    ));
+                }
+            }
+            PaletteAction::Backspace => {
+                state.query.pop();
+                let query = query_live_palette(
+                    helper,
+                    &open.line,
+                    replacement_start,
+                    replacement_end,
+                    &state.query,
+                )?;
+                state.replace_results(query);
+            }
+            PaletteAction::Type(character) => {
+                state.query.push(character);
+                let query = query_live_palette(
+                    helper,
+                    &open.line,
+                    replacement_start,
+                    replacement_end,
+                    &state.query,
+                )?;
+                state.replace_results(query);
+            }
+            PaletteAction::Ignore => {}
+        }
+    }
+}
+
+fn query_live_palette(
+    helper: &LiveLineHelper,
+    line: &str,
+    replacement_start: usize,
+    replacement_end: usize,
+    query: &str,
+) -> Result<stasis_runner::live::CompletionQuery, String> {
+    let (line, cursor) = palette_query_input(line, replacement_start, replacement_end, query);
+    helper.query(&line, cursor, 64)
+}
+
+fn palette_query_input(
+    line: &str,
+    replacement_start: usize,
+    replacement_end: usize,
+    query: &str,
+) -> (String, usize) {
+    let mut line = line.to_string();
+    line.replace_range(replacement_start..replacement_end, query);
+    (line, replacement_start + query.len())
+}
+
+fn split_palette_line(line: &str, cursor: usize) -> (String, String) {
+    (line[..cursor].to_string(), line[cursor..].to_string())
+}
+
+fn insert_palette_selection(
+    line: &str,
+    replacement_start: usize,
+    replacement_end: usize,
+    selection: &str,
+) -> (String, String) {
+    let mut line = line.to_string();
+    line.replace_range(replacement_start..replacement_end, selection);
+    split_palette_line(&line, replacement_start + selection.len())
+}
+
+fn render_live_palette(state: &PaletteState) -> Result<(), String> {
+    let mut stdout = io::stdout();
+    let width = crossterm::terminal::size()
+        .map(|(width, _)| width as usize)
+        .unwrap_or(80)
+        .max(20);
+    execute!(
+        stdout,
+        MoveTo(0, 0),
+        Clear(ClearType::All),
+        Print(terminal_line("Stasis command palette", width)),
+        Print("\r\n"),
+        Print(terminal_line(&format!("> {}", state.query), width)),
+        Print("\r\n\r\n")
+    )
+    .map_err(|error| format!("failed drawing palette: {error}"))?;
+    let page_start = (state.selected / PALETTE_PAGE_SIZE) * PALETTE_PAGE_SIZE;
+    for index in page_start..page_start + PALETTE_PAGE_SIZE {
+        let line = state.items.get(index).map_or_else(String::new, |item| {
+            format!(
+                "{} {}  [{}]  {}",
+                if index == state.selected { ">" } else { " " },
+                item.text,
+                item.kind,
+                item.detail
+            )
+        });
+        execute!(stdout, Print(terminal_line(&line, width)), Print("\r\n"))
+            .map_err(|error| format!("failed drawing palette row: {error}"))?;
+    }
+    let more = if state.truncated {
+        " | more matches; keep typing"
+    } else {
+        ""
+    };
+    execute!(
+        stdout,
+        Print("\r\n"),
+        Print(terminal_line(
+            &format!(
+                "{} match(es){} | arrows/page select | Enter/Tab insert | Esc cancel",
+                state.items.len(),
+                more
+            ),
+            width
+        ))
+    )
+    .map_err(|error| format!("failed drawing palette footer: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("failed flushing palette: {error}"))
+}
+
+fn terminal_line(text: &str, width: usize) -> String {
+    text.chars().take(width.saturating_sub(1)).collect()
 }
 
 fn run_live_terminal(
@@ -960,20 +1296,31 @@ fn run_live_terminal_inner(
             );
         }
     } else {
-        println!("Stasis live workspace (:help, :quit, Tab completion, Ctrl-C cancels multiline)");
-        let mut editor = Editor::<LiveLineHelper, DefaultHistory>::new()
+        println!(
+            "Stasis live workspace (:help, :quit, Ctrl-P palette, Tab completes, Ctrl-C cancels multiline)"
+        );
+        let config = live_editor_config();
+        let mut editor = Editor::<LiveLineHelper, DefaultHistory>::with_config(config)
             .map_err(|error| format!("failed initializing live line editor: {error}"))?;
-        editor.set_helper(Some(LiveLineHelper { items: Vec::new() }));
+        let palette_pending = Arc::new(Mutex::new(None));
+        editor.bind_sequence(
+            live_palette_key(),
+            EventHandler::Conditional(Box::new(PaletteTrigger {
+                pending: Arc::clone(&palette_pending),
+            })),
+        );
+        editor.set_helper(Some(LiveLineHelper::new(client.clone())));
         let mut prompt = "stasis> ";
-        let mut completion_request_id = 1u64 << 63;
+        let mut initial = None::<(String, String)>;
         loop {
-            if let Ok(items) = fetch_live_completions(client, completion_request_id, json_lines) {
-                if let Some(helper) = editor.helper_mut() {
-                    helper.items = items;
-                }
+            if let Some(helper) = editor.helper() {
+                helper.set_context(terminal.completion_context());
             }
-            completion_request_id = completion_request_id.saturating_add(1);
-            let line = match editor.readline(prompt) {
+            let readline = match initial.take() {
+                Some((left, right)) => editor.readline_with_initial(prompt, (&left, &right)),
+                None => editor.readline(prompt),
+            };
+            let line = match readline {
                 Ok(line) => line,
                 Err(rustyline::error::ReadlineError::Interrupted) => {
                     if terminal.cancel_pending() {
@@ -985,6 +1332,17 @@ fn run_live_terminal_inner(
                 Err(rustyline::error::ReadlineError::Eof) => break,
                 Err(error) => return Err(format!("failed reading live terminal: {error}")),
             };
+            let palette_open = palette_pending.lock().expect("palette trigger lock").take();
+            if let Some(open) = palette_open {
+                let helper = editor.helper().expect("live line helper");
+                initial = Some(run_live_palette(helper, open)?);
+                continue;
+            }
+            if let Some(helper) = editor.helper() {
+                for response in helper.take_deferred_responses() {
+                    print_live_response(&response, json_lines)?;
+                }
+            }
             let _ = editor.add_history_entry(line.as_str());
             match terminal.feed_line(&line)? {
                 TerminalInput::Continue { prompt: next } => {
@@ -1016,23 +1374,42 @@ fn run_live_terminal_inner(
     }
 }
 
-fn fetch_live_completions(
-    client: &stasis_runner::live::LiveSessionClient,
+fn live_palette_key() -> LineKeyEvent {
+    LineKeyEvent::ctrl('P')
+}
+
+fn live_editor_config() -> Config {
+    Config::builder()
+        .completion_type(CompletionType::List)
+        .completion_prompt_limit(256)
+        .build()
+}
+
+fn fetch_live_completion_query(
+    client: &LiveSessionClient,
     request_id: u64,
-    json_lines: bool,
-) -> Result<Vec<CompletionItem>, String> {
+    buffer: &str,
+    cursor: usize,
+    limit: usize,
+    context: CompletionContext,
+    deferred_responses: &Mutex<Vec<LiveResponse>>,
+) -> Result<stasis_runner::live::CompletionQuery, String> {
     client.submit(LiveRequest::new(
         request_id,
         LiveCommand::Complete {
-            buffer: String::new(),
-            cursor: 0,
-            limit: 256,
+            buffer: buffer.to_string(),
+            cursor,
+            limit,
+            context,
         },
     ))?;
     loop {
         let response = client.receive_timeout(Duration::from_secs(5))?;
         if response.request_id != request_id {
-            print_live_response(&response, json_lines)?;
+            deferred_responses
+                .lock()
+                .expect("deferred response lock")
+                .push(response);
             continue;
         }
         if !response.ok {
@@ -1040,13 +1417,11 @@ fn fetch_live_completions(
                 .error
                 .unwrap_or_else(|| "live completion failed".to_string()));
         }
-        return serde_json::from_value(
-            response
-                .data
-                .and_then(|data| data.get("items").cloned())
-                .unwrap_or_else(|| json!([])),
-        )
-        .map_err(|error| format!("invalid live completion response: {error}"));
+        if response.truncated {
+            return Err("live completion response exceeded the protocol output bound".to_string());
+        }
+        return serde_json::from_value(response.data.unwrap_or(Value::Null))
+            .map_err(|error| format!("invalid live completion response: {error}"));
     }
 }
 
@@ -1119,7 +1494,10 @@ fn format_live_response(response: &LiveResponse) -> String {
         ),
         "symbols" => format_live_symbols(data),
         "symbol" => format_live_symbol(data),
-        "completion" => format_live_completion(data),
+        "completion" | "palette" if response.truncated => {
+            "completion response exceeded the output bound; narrow the query".to_string()
+        }
+        "completion" | "palette" => format_live_completion(data),
         "inspection" => format!(
             "{}: {} = {}",
             string_field(data, "path", "value"),
@@ -1311,6 +1689,13 @@ fn format_live_completion(data: &Value) -> String {
                 string_field(item, "detail", "")
             ));
         }
+    }
+    if data
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        lines.push("... more matches; keep typing".to_string());
     }
     if lines.is_empty() {
         "no completions".to_string()
@@ -2584,22 +2969,110 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_line_helper_completes_current_token_with_compiler_detail() {
-        let helper = LiveLineHelper {
-            items: vec![CompletionItem {
-                text: "tick".into(),
-                kind: "function".into(),
-                detail: "tick(): i32".into(),
-            }],
+    fn live_palette_formats_compiler_detail_concisely() {
+        let display = format_completion_candidate(&CompletionItem {
+            text: "tick".into(),
+            kind: "function".into(),
+            detail: "tick(): i32".into(),
+            type_name: Some("i32".into()),
+            source: Some("src/main.stasis".into()),
+            scope: None,
+        });
+        assert_eq!(display, "tick  [function]  tick(): i32");
+    }
+
+    #[test]
+    fn live_palette_state_navigates_pages_and_preserves_cancel_buffer() {
+        let mut state = PaletteState {
+            query: "hero".into(),
+            items: (0..20)
+                .map(|index| CompletionItem {
+                    text: format!("hero.field_{index}"),
+                    kind: "field".into(),
+                    detail: "i32".into(),
+                    type_name: Some("i32".into()),
+                    source: Some("src/main.stasis".into()),
+                    scope: None,
+                })
+                .collect(),
+            selected: 0,
+            truncated: false,
         };
-        let history = DefaultHistory::new();
-        let context = Context::new(&history);
-        let (start, matches) = helper
-            .complete(":read ti", 8, &context)
-            .expect("completion");
-        assert_eq!(start, 6);
-        assert_eq!(matches[0].replacement, "tick");
-        assert!(matches[0].display.contains("tick(): i32"));
+        state.move_selection(PALETTE_PAGE_SIZE as isize);
+        assert_eq!(live_palette_key(), LineKeyEvent::ctrl('P'));
+        assert_eq!(live_editor_config().completion_type(), CompletionType::List);
+        assert_eq!(state.selected, PALETTE_PAGE_SIZE);
+        state.move_selection(-1);
+        assert_eq!(state.selected, PALETTE_PAGE_SIZE - 1);
+        assert_eq!(
+            palette_action(TerminalKeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            PaletteAction::Move(PALETTE_PAGE_SIZE as isize)
+        );
+        assert_eq!(
+            palette_action(TerminalKeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE
+            )),
+            PaletteAction::Type('x')
+        );
+        assert_eq!(
+            palette_action(TerminalKeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE
+            )),
+            PaletteAction::Backspace
+        );
+        assert_eq!(
+            palette_action(TerminalKeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            PaletteAction::Select
+        );
+        assert_eq!(
+            palette_action(TerminalKeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            PaletteAction::Cancel
+        );
+        assert_eq!(
+            insert_palette_selection("call(hrohp)", 5, 10, "hero.hp"),
+            ("call(hero.hp".to_string(), ")".to_string())
+        );
+        assert_eq!(
+            split_palette_line("call(hero)", 9),
+            ("call(hero".to_string(), ")".to_string())
+        );
+        assert_eq!(
+            palette_query_input("let next: i32 = he", 16, 18, "hero.hp"),
+            ("let next: i32 = hero.hp".to_string(), 23)
+        );
+    }
+
+    #[test]
+    fn human_palette_output_reports_bounded_truncation() {
+        let response = LiveResponse::success(
+            9,
+            44,
+            "palette",
+            json!({
+                "replacement_start": 0,
+                "replacement_end": 2,
+                "page": 0,
+                "truncated": true,
+                "items": [{"text": "tick", "kind": "function", "detail": "tick(): i32"}]
+            }),
+        );
+        assert_eq!(
+            format_live_response(&response),
+            "tick  function  tick(): i32\n... more matches; keep typing"
+        );
+        let bounded = LiveResponse::success(
+            10,
+            45,
+            "palette",
+            json!({"items": [{"text": "x".repeat(1024), "kind": "function", "detail": "x"}]}),
+        )
+        .bounded(256);
+        assert_eq!(
+            format_live_response(&bounded),
+            "completion response exceeded the output bound; narrow the query"
+        );
     }
 
     #[test]

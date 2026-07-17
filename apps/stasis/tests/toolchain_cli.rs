@@ -1018,7 +1018,7 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     );
     fs::write(
         project.join("src/main.stasis"),
-        "global score: i32;\nglobal swaps: i32;\nfunction main(): i32 { score = 1; swaps = 0; return 0; }\nfunction tick(): i32 { score += 1; return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { swaps += 1; return; }\n",
+        "struct Player { hp: i32; }\nglobal score: i32;\nglobal swaps: i32;\nfunction main(): i32 { score = 1; swaps = 0; return 0; }\nfunction tick(): i32 { score += 1; return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { swaps += 1; return; }\nfunction damage(player: Player, amount: i32): i32 { let hero: Player; return amount; }\n",
     )
     .expect("write live project");
     fs::write(
@@ -1028,7 +1028,7 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     .expect("write live test");
     fs::write(
         project.join("live.commands"),
-        ":pause\n:update function tick src/main.stasis\nfunction tick(): i32 { score += 4; return 0; }\n:end\n:inspect swaps\n:set score 10\n:step 1\n:inspect score\n:undo\n:inspect swaps\n:step 1\n:inspect score\n:quit\n",
+        ":palette hrohp --owner damage --file src/main.stasis\n:palette :pa\n:pause\n:update function tick src/main.stasis\nfunction tick(): i32 { score += 4; return 0; }\n:end\n:inspect swaps\n:set score 10\n:step 1\n:inspect score\n:undo\n:inspect swaps\n:step 1\n:inspect score\n:quit\n",
     )
     .expect("write live script");
 
@@ -1056,6 +1056,13 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
         .collect::<Vec<_>>();
     assert!(responses.iter().all(|response| response["ok"] == true));
     assert!(responses.iter().all(|response| response["tick"].is_u64()));
+    let palettes = responses
+        .iter()
+        .filter(|response| response["kind"] == "palette")
+        .collect::<Vec<_>>();
+    assert_eq!(palettes[0]["data"]["items"][0]["text"], "hero.hp");
+    assert_eq!(palettes[0]["data"]["items"][0]["kind"], "field");
+    assert_eq!(palettes[1]["data"]["items"][0]["text"], ":pause");
     let inspected = responses
         .iter()
         .filter(|response| response["kind"] == "inspection")
@@ -1100,7 +1107,7 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
 
     fs::write(
         project.join("human-live.commands"),
-        ":pause\n:inspect score\n:status\n:quit\n",
+        ":palette hrohp --owner damage --file src/main.stasis\n:pause\n:inspect score\n:status\n:quit\n",
     )
     .expect("write human live script");
     let human = stasis(
@@ -1121,6 +1128,7 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     );
     let human_stdout = String::from_utf8_lossy(&human.stdout);
     assert!(human_stdout.contains("paused"));
+    assert!(human_stdout.contains("hero.hp  field"));
     assert!(human_stdout.contains("score: i32 ="));
     assert!(human_stdout.contains("edits 0/0"));
     assert!(human_stdout.contains("session closed"));

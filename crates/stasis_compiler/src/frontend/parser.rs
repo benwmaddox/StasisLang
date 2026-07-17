@@ -9,6 +9,14 @@ pub struct ParsedParam {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedLocalBinding {
+    pub function_name: String,
+    pub name: String,
+    pub type_name: String,
+    pub visibility_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFunctionSignature {
     pub name: String,
     pub params: Vec<ParsedParam>,
@@ -82,6 +90,101 @@ pub struct ParsedTypeLayout {
     pub globals: Vec<ParsedGlobalDefinition>,
     pub global_blocks: Vec<ParsedGlobalBlockDefinition>,
     pub constants: Vec<ParsedConstDefinition>,
+}
+
+pub fn parse_typed_local_bindings(source: &str) -> Result<Vec<ParsedLocalBinding>, String> {
+    let tokens = lex(source)?;
+    let mut bindings = Vec::new();
+    for function in parse_top_level_functions(source)? {
+        let scope_ranges = lexical_scope_ranges(&tokens, function.body_range.clone());
+        let mut cursor = tokens.partition_point(|token| token.start < function.body_range.start);
+        while let Some(token) = tokens.get(cursor).copied() {
+            if token.start >= function.body_range.end || token.kind == TokenKind::Eof {
+                break;
+            }
+            if token.kind != TokenKind::Identifier || token_text(source, token) != "let" {
+                cursor += 1;
+                continue;
+            }
+            let Some(name) = tokens.get(cursor + 1).copied() else {
+                break;
+            };
+            let Some(colon) = tokens.get(cursor + 2).copied() else {
+                break;
+            };
+            if name.kind != TokenKind::Identifier || colon.kind != TokenKind::Colon {
+                cursor += 1;
+                continue;
+            }
+            let (type_name, next) = parse_type_name(source, &tokens, cursor + 3)?;
+            let scope_end = scope_ranges
+                .iter()
+                .filter(|range| range.start <= token.start && token.end <= range.end)
+                .min_by_key(|range| range.end.saturating_sub(range.start))
+                .map(|range| range.end)
+                .unwrap_or(function.body_range.end);
+            bindings.push(ParsedLocalBinding {
+                function_name: function.name.clone(),
+                name: token_text(source, name).to_string(),
+                type_name,
+                visibility_range: name.end..scope_end,
+            });
+            cursor = next;
+        }
+    }
+    bindings.sort_by_key(|binding| {
+        (
+            binding.function_name.clone(),
+            binding.name.clone(),
+            binding.type_name.clone(),
+            binding.visibility_range.start,
+            binding.visibility_range.end,
+        )
+    });
+    bindings.dedup();
+    Ok(bindings)
+}
+
+pub fn completion_expected_type(source: &str, cursor: usize) -> Result<Option<String>, String> {
+    let cursor = cursor.min(source.len());
+    let tokens = lex(source)?;
+    let Some(colon_index) = tokens
+        .iter()
+        .enumerate()
+        .take_while(|(_, token)| token.start < cursor)
+        .filter(|(_, token)| token.kind == TokenKind::Colon)
+        .map(|(index, _)| index)
+        .last()
+    else {
+        return Ok(None);
+    };
+    let (type_name, next) = parse_type_name(source, &tokens, colon_index + 1)?;
+    let has_assignment = tokens[colon_index + 1..]
+        .iter()
+        .take_while(|token| token.start < cursor)
+        .skip(next.saturating_sub(colon_index + 1))
+        .any(|token| token.kind == TokenKind::Other && token_text(source, *token) == "=");
+    Ok(has_assignment.then_some(type_name))
+}
+
+fn lexical_scope_ranges(tokens: &[Token], body_range: Range<usize>) -> Vec<Range<usize>> {
+    let mut starts = Vec::new();
+    let mut ranges = Vec::new();
+    for token in tokens
+        .iter()
+        .filter(|token| body_range.start <= token.start && token.end <= body_range.end)
+    {
+        match token.kind {
+            TokenKind::LBrace => starts.push(token.start),
+            TokenKind::RBrace => {
+                if let Some(start) = starts.pop() {
+                    ranges.push(start..token.end);
+                }
+            }
+            _ => {}
+        }
+    }
+    ranges
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1127,6 +1230,56 @@ mod tests {
         assert_eq!(parsed[0].return_type_name, "i32");
         assert_eq!(parsed[0].params.len(), 0);
         assert_eq!(&source[parsed[0].body_range.clone()], "{ return 0; }");
+    }
+
+    #[test]
+    fn parses_typed_locals_without_treating_foreach_bindings_as_typed() {
+        let source = r#"
+function move_player(player: Player, delta: f32): f32 {
+    let speed: f32 = delta;
+    foreach (let enemy in state.enemies) {
+        let damage: i32 = 1;
+    }
+    return speed;
+}
+function reset(): void {
+    let player: Player;
+}
+"#;
+        let bindings = parse_typed_local_bindings(source).expect("typed locals");
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|binding| (
+                    binding.function_name.as_str(),
+                    binding.name.as_str(),
+                    binding.type_name.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("move_player", "damage", "i32"),
+                ("move_player", "speed", "f32"),
+                ("reset", "player", "Player"),
+            ]
+        );
+        let damage = bindings
+            .iter()
+            .find(|binding| binding.name == "damage")
+            .expect("nested binding");
+        assert!(damage.visibility_range.end < source.find("return speed").expect("return"));
+    }
+
+    #[test]
+    fn completion_expected_type_uses_typed_binding_before_cursor() {
+        let source = "let next_score: i32 = sco";
+        assert_eq!(
+            completion_expected_type(source, source.len()).expect("expected type"),
+            Some("i32".to_string())
+        );
+        assert_eq!(
+            completion_expected_type(":palette sco", 12).expect("command"),
+            None
+        );
     }
 
     #[test]
