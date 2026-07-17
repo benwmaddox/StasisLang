@@ -142,6 +142,8 @@ pub enum LiveCommand {
     InspectAll {
         #[serde(default = "default_inspect_limit")]
         limit: usize,
+        #[serde(default)]
+        concise: bool,
     },
     Watch {
         path: String,
@@ -1104,6 +1106,7 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         ":redo" => ready(LiveCommand::Redo { run_tests: true }),
         ":inspect" if args.len() == 1 => ready(LiveCommand::InspectAll {
             limit: default_inspect_limit(),
+            concise: false,
         }),
         ":inspect" => ready(LiveCommand::Inspect {
             path: required_arg(&args, 1, "state path")?.to_string(),
@@ -1743,7 +1746,13 @@ mod tests {
         else {
             panic!("expected request")
         };
-        assert_eq!(request.command, LiveCommand::InspectAll { limit: 32 });
+        assert_eq!(
+            request.command,
+            LiveCommand::InspectAll {
+                limit: 32,
+                concise: false,
+            }
+        );
     }
 
     #[test]

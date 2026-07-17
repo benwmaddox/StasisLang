@@ -906,7 +906,10 @@ impl LiveTui {
         self.last_default_inspection = Instant::now();
         if let Err(error) = self.client.submit(LiveRequest::new(
             request_id,
-            LiveCommand::InspectAll { limit: 32 },
+            LiveCommand::InspectAll {
+                limit: 32,
+                concise: true,
+            },
         )) {
             self.pending.remove(&request_id);
             self.status = format!("default inspection delayed by backpressure: {error}");
@@ -1168,6 +1171,9 @@ impl LiveTui {
         };
         self.inspector.title = "Live state (default)".to_string();
         self.inspector.lines = items.iter().map(format_state_item).collect();
+        if self.inspector.lines.is_empty() {
+            self.inspector.lines = vec!["No concise state values; use :inspect PATH.".to_string()];
+        }
         if response
             .data
             .as_ref()
@@ -1407,17 +1413,12 @@ fn edit_target_from_completion(symbol: &str, completion: &CompletionState) -> Li
 
 fn format_state_item(item: &Value) -> String {
     let path = item.get("path").and_then(Value::as_str).unwrap_or("value");
-    let static_type = item
-        .get("static_type")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
     let depth = path.matches('.').count();
     let name = path.rsplit('.').next().unwrap_or(path);
     format!(
-        "{}{}: {} = {}",
+        "{}{} = {}",
         "  ".repeat(depth),
         name,
-        static_type,
         scalar_text(item.get("value").unwrap_or(&Value::Null))
     )
 }
@@ -1910,13 +1911,13 @@ mod tests {
     }
 
     #[test]
-    fn default_state_items_indent_dotted_paths() {
+    fn default_state_items_are_concise_and_indent_dotted_paths() {
         let item = serde_json::json!({
-            "path": "player.position.x",
+            "path": "player.stats.score",
             "static_type": "f32",
             "value": {"type": "f32", "value": 12.5}
         });
-        assert_eq!(format_state_item(&item), "    x: f32 = 12.5");
+        assert_eq!(format_state_item(&item), "    score = 12.5");
     }
 
     #[test]

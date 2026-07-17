@@ -17,7 +17,7 @@ use stasis_runner::live::{
     LiveSessionServer, LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_TRACKS, MAX_LIVE_TRACK_TICKS,
     MAX_LIVE_WATCHES,
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -673,7 +673,7 @@ impl LiveWorkspace {
                 }
             }
             LiveCommand::Inspect { path } => inspect_scalar(jit, &path),
-            LiveCommand::InspectAll { limit } => inspect_all_scalars(jit, limit),
+            LiveCommand::InspectAll { limit, concise } => inspect_all_scalars(jit, limit, concise),
             LiveCommand::Watch { path } => {
                 let value = jit.read_global_scalar(&path)?;
                 if !self.watches.contains_key(&path) && self.watches.len() >= MAX_LIVE_WATCHES {
@@ -1932,8 +1932,20 @@ fn inspect_scalar(jit: &JitProcess, path: &str) -> Result<(&'static str, Value),
     ))
 }
 
-fn inspect_all_scalars(jit: &JitProcess, limit: usize) -> Result<(&'static str, Value), String> {
+fn inspect_all_scalars(
+    jit: &JitProcess,
+    limit: usize,
+    concise: bool,
+) -> Result<(&'static str, Value), String> {
     let paths = jit.global_scalar_paths();
+    let path_names = paths
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<HashSet<_>>();
+    let paths = paths
+        .into_iter()
+        .filter(|(path, _)| !concise || concise_state_path_is_visible(path, &path_names))
+        .collect::<Vec<_>>();
     let total = paths.len();
     let limit = limit.clamp(1, 64);
     let items = paths
@@ -1946,8 +1958,29 @@ fn inspect_all_scalars(jit: &JitProcess, limit: usize) -> Result<(&'static str, 
         .collect::<Result<Vec<_>, String>>()?;
     Ok((
         "state_inspection",
-        json!({"total": total, "limit": limit, "truncated": total > limit, "items": items}),
+        json!({"total": total, "limit": limit, "truncated": total > limit, "concise": concise, "items": items}),
     ))
+}
+
+fn concise_state_path_is_visible(path: &str, all_paths: &HashSet<String>) -> bool {
+    let leaf = path.rsplit('.').next().unwrap_or(path);
+    if leaf == "max_length" {
+        return false;
+    }
+    if leaf == "length" {
+        let parent = path.strip_suffix(".length").unwrap_or_default();
+        if all_paths.contains(format!("{parent}.max_length").as_str()) {
+            return false;
+        }
+    }
+    let is_axis = matches!(leaf, "x" | "y" | "z")
+        || ["_x", "_y", "_z"]
+            .iter()
+            .any(|suffix| leaf.ends_with(suffix));
+    let is_position = path
+        .split('.')
+        .any(|segment| matches!(segment, "position" | "positions"));
+    !is_axis && !is_position
 }
 
 fn print_scalar(jit: &JitProcess, expression: &str) -> Result<(&'static str, Value), String> {
@@ -2216,13 +2249,38 @@ mod tests {
         let (root, config) = project();
         let (jit, _) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
-        let (kind, data) = inspect_all_scalars(&jit, 32).expect("state inspection");
+        let (kind, data) = inspect_all_scalars(&jit, 32, false).expect("state inspection");
         assert_eq!(kind, "state_inspection");
         assert_eq!(data["total"], 1);
         assert_eq!(data["items"][0]["path"], "score");
         assert_eq!(data["items"][0]["static_type"], "i32");
         assert_eq!(data["items"][0]["value"]["value"], 1);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concise_state_paths_hide_positions_and_proven_collection_metadata() {
+        let paths = HashSet::from([
+            "ball_x".to_string(),
+            "ball_y".to_string(),
+            "player.position.x".to_string(),
+            "commands.length".to_string(),
+            "commands.max_length".to_string(),
+            "snake.length".to_string(),
+            "score".to_string(),
+        ]);
+        for path in [
+            "ball_x",
+            "ball_y",
+            "player.position.x",
+            "commands.length",
+            "commands.max_length",
+        ] {
+            assert!(!concise_state_path_is_visible(path, &paths), "{path}");
+        }
+        for path in ["snake.length", "score"] {
+            assert!(concise_state_path_is_visible(path, &paths), "{path}");
+        }
     }
 
     #[test]
