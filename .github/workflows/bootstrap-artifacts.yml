@@ -61,7 +61,15 @@ jobs:
           & (Join-Path $vcpkgRoot "vcpkg.exe") install "sdl2:$triplet" "sdl2-image:$triplet" "glew:$triplet" --recurse
 
           $buildDir = "runtime/build_ci"
-          cmake -S runtime -B $buildDir -G "Visual Studio 17 2022" -A x64 `
+          $cmakeHelp = cmake --help | Out-String
+          if ($cmakeHelp -match "Visual Studio 18 2026") {
+            $generator = "Visual Studio 18 2026"
+          } elseif ($cmakeHelp -match "Visual Studio 17 2022") {
+            $generator = "Visual Studio 17 2022"
+          } else {
+            throw "Supported Visual Studio CMake generator not found."
+          }
+          cmake -S runtime -B $buildDir -G $generator -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET="$triplet" `
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
