@@ -27,6 +27,7 @@ pub struct AotArtifact {
 #[derive(Debug, Default)]
 pub struct AotProcess {
     compiler: Compiler,
+    import_base_dir: Option<PathBuf>,
     optimization_profile: AotOptimizationProfile,
     target: stasis_jit::AotTarget,
     next_object_index: u32,
@@ -54,6 +55,7 @@ impl AotProcess {
     pub fn with_optimization_profile(optimization_profile: AotOptimizationProfile) -> Self {
         Self {
             compiler: Compiler::new(),
+            import_base_dir: None,
             optimization_profile,
             target: stasis_jit::AotTarget::default(),
             next_object_index: 0,
@@ -68,6 +70,11 @@ impl AotProcess {
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
         self.compiler.upsert_file(path, content);
+    }
+
+    pub fn set_import_base_dir(&mut self, path: impl Into<PathBuf>) {
+        let path = path.into();
+        self.import_base_dir = Some(fs::canonicalize(&path).unwrap_or(path));
     }
 
     pub fn set_target(&mut self, target: stasis_jit::AotTarget) {
@@ -212,7 +219,8 @@ impl AotProcess {
             .compiler
             .files()
             .iter()
-            .map(|file| file.path.clone())
+            .map(|file| self.resolve_import_source_path(&file.path))
+            .map(|path| normalize_path_for_compiler_key(&path))
             .collect();
         let mut queue: Vec<String> = self
             .compiler
@@ -233,7 +241,8 @@ impl AotProcess {
             };
             let imports = parse_import_paths(&source);
             for import_path in imports {
-                let resolved = resolve_import_path(&path, &import_path);
+                let resolved =
+                    self.resolve_import_source_path(&resolve_import_path(&path, &import_path));
                 let normalized = normalize_path_for_compiler_key(&resolved);
                 if known_paths.contains(&normalized) {
                     continue;
@@ -251,6 +260,16 @@ impl AotProcess {
         }
 
         Ok(())
+    }
+
+    fn resolve_import_source_path(&self, path: impl AsRef<Path>) -> PathBuf {
+        let path = path.as_ref();
+        if path.is_absolute() {
+            return path.to_path_buf();
+        }
+        self.import_base_dir
+            .as_ref()
+            .map_or_else(|| path.to_path_buf(), |base| base.join(path))
     }
 
     pub fn artifacts(&self) -> &[AotArtifact] {
