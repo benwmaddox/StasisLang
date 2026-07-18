@@ -334,6 +334,7 @@ pub fn link_objects_to_executable(
 
     let linker = resolve_linker_path(config);
     let mut args: Vec<String> = Vec::new();
+    let mut launcher_source = None;
     if uses_msvc_linker_syntax(config) {
         args.push("/NOLOGO".to_string());
         args.push(format!("/OUT:{}", output_executable.display()));
@@ -343,6 +344,22 @@ pub fn link_objects_to_executable(
         for lib_path in &windows_lib_paths {
             args.push(format!("/LIBPATH:{}", lib_path.display()));
         }
+    } else if matches!(config.target, AotTarget::Native) {
+        let source_path = output_executable.with_extension("entry.c");
+        fs::write(
+            &source_path,
+            native_unix_executable_launcher_source(entry_symbol)?,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to write native executable launcher {}: {error}",
+                source_path.display()
+            )
+        })?;
+        args.push("-o".to_string());
+        args.push(output_executable.display().to_string());
+        args.push(source_path.display().to_string());
+        launcher_source = Some(source_path);
     } else {
         args.push("-o".to_string());
         args.push(output_executable.display().to_string());
@@ -357,13 +374,20 @@ pub fn link_objects_to_executable(
     for runtime_lib in &config.runtime_lib_paths {
         args.push(runtime_lib.display().to_string());
     }
+    if matches!(config.target, AotTarget::Native) && !cfg!(windows) {
+        args.push("-lm".to_string());
+    }
 
-    run_link_command_with_args(
+    let link_result = run_link_command_with_args(
         &linker,
         &args,
         "executable link",
         &output_executable.with_extension("link.rsp"),
-    )?;
+    );
+    if let Some(source_path) = launcher_source {
+        let _ = fs::remove_file(source_path);
+    }
+    link_result?;
     if !output_executable.exists() {
         return Err(format!(
             "link step reported success but did not produce {}",
@@ -371,6 +395,19 @@ pub fn link_objects_to_executable(
         ));
     }
     Ok(())
+}
+
+fn native_unix_executable_launcher_source(entry_symbol: &str) -> Result<String, String> {
+    if !entry_symbol.bytes().enumerate().all(|(index, byte)| {
+        byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+    }) {
+        return Err(format!(
+            "native executable entry symbol is not a C identifier: {entry_symbol}"
+        ));
+    }
+    Ok(format!(
+        "#include <stdint.h>\nextern int32_t {entry_symbol}(void);\nint main(void) {{ return (int){entry_symbol}(); }}\n"
+    ))
 }
 
 fn resolve_linker_path(config: &AotLinkConfig) -> PathBuf {
@@ -469,6 +506,21 @@ mod tests {
                 .map(|id| FunctionPatch { fn_id: FnId(id) })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn native_unix_launcher_calls_the_requested_entry_symbol() {
+        let source = native_unix_executable_launcher_source("aot_fn_0")
+            .expect("valid AOT symbol should produce launcher source");
+        assert!(source.contains("extern int32_t aot_fn_0(void);"));
+        assert!(source.contains("return (int)aot_fn_0();"));
+    }
+
+    #[test]
+    fn native_unix_launcher_rejects_non_identifier_entry_symbol() {
+        let error = native_unix_executable_launcher_source("aot_fn_0; injected")
+            .expect_err("invalid C symbol should be rejected");
+        assert!(error.contains("not a C identifier"));
     }
 
     #[test]
