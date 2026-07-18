@@ -110,3 +110,11 @@
 - Good: keeping the lookup output parser-backed made the new command small and let the whole-directory search ignore invalid fixture files cleanly.
 - Bad: the compiler parser exposed function ranges but not struct ranges, so exact struct-definition output needed a small parser extension before the CLI work could stay clean.
 - Adjustment: when a new tooling feature needs source excerpts, expose precise ranges from the shared parser first instead of duplicating extraction logic in the CLI.
+
+## 2026-07-18
+
+- Completed Maddox #121 by adding deterministic TalkBack/keyboard traversal, visible focus treatment, keyboard and accessibility-action Paint editing, contrast-audited colors, configuration-retained Paint state, and compact/medium/expanded layouts that respond to font scale.
+- Verification: `python tools/ci/check_android_shell.py`, `python tools/ci/check_stasis_src_layout.py`, `gradle :app:testWorkshopDebugUnitTest --no-daemon --max-workers=1`, `gradle :app:lintWorkshopDebug --no-daemon --max-workers=1`, `gradle :app:assembleWorkshopDebug --no-daemon --max-workers=1`, `git diff --check`.
+- Good: pure layout/contrast policies made adaptive and accessibility decisions fast to test without an emulator.
+- Bad: the first broad Cargo validation exhausted the host drive and hit a Windows PDB linker limit even though this slice changes only Android Java/resources.
+- Adjustment: keep Android UI slices on the bounded Android/JVM/APK gates first, then attempt the full Cargo gate only with verified workspace capacity.

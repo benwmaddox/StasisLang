@@ -21,6 +21,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAccessibilityPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAdaptiveLayout.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java",
@@ -163,6 +165,7 @@ def main() -> int:
     assert "published.assets.setSrcDirs([publishedAotDir.map { it.dir('apk_assets') }.get().asFile])" in app_gradle
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
+    styles = read("mobile/android/app/src/main/res/values/styles.xml")
     workshop_manifest = read("mobile/android/app/src/workshop/AndroidManifest.xml")
     assert "android.permission.INTERNET" not in manifest
     assert "android.permission.RECORD_AUDIO" in workshop_manifest
@@ -175,7 +178,10 @@ def main() -> int:
     assert "android.intent.action.MAIN" in manifest
     assert "android.intent.category.LAUNCHER" in manifest
     assert 'android:exported="true"' in manifest
+    assert 'android:resizeableActivity="true"' in manifest
     assert 'android:windowSoftInputMode="adjustResize"' in manifest
+    assert '<item name="android:windowLightStatusBar">false</item>' in styles
+    assert '<item name="android:textColorPrimary">#161B22</item>' in styles
 
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
     secret_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java")
@@ -186,6 +192,8 @@ def main() -> int:
     project_format_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java")
     project_archive = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java")
     image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
+    accessibility_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAccessibilityPolicy.java")
+    adaptive_layout = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAdaptiveLayout.java")
     paint_view = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java")
     audio_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java")
     asset_manifest = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java")
@@ -554,11 +562,36 @@ def main() -> int:
     assert "ACCESSIBILITY_LIVE_REGION_POLITE" in activity
     assert "ACCESSIBILITY_LIVE_REGION_ASSERTIVE" in activity
     assert "setAccessibilityHeading(true)" in activity
-    assert "screenWidthDp < 480" in activity
+    assert "chainAccessibilityTraversal" in activity
+    assert "setAccessibilityTraversalAfter" in activity
+    assert "setNextFocusForwardId" in activity
+    assert "setAccessibilityPaneTitle" in activity
+    assert "SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR" in activity
+    assert 'announceForAccessibility("Workshop menu opened")' in activity
+    assert "createFocusableControlBackground" in activity
+    assert "voiceActionRow, layout" in activity
+    assert "configuration.fontScale" in activity
+    assert "MEDIUM_WIDTH_DP = 600" in adaptive_layout
+    assert "EXPANDED_WIDTH_DP = 840" in adaptive_layout
+    assert "LARGE_TEXT_SCALE = 1.3f" in adaptive_layout
+    assert "contrastRatio" in accessibility_policy
     assert "Selected image asset" in activity
     assert "Audio asset " in activity
-    assert "Touch paint canvas" in paint_view
-    assert "setFocusable(true)" in paint_view
+    assert "use arrow keys to move the paint cursor" in paint_view
+    assert "R.id.paint_at_cursor" in paint_view
+    assert "onKeyDown" in paint_view
+    assert "performAccessibilityAction" in paint_view
+    assert "setFocusableInTouchMode(true)" in paint_view
+    assert "isAccessibilityFocused()" in paint_view
+    assert "RetainedPaintSession" in activity
+    assert "onRetainNonConfigurationInstance" in activity
+    assert "Brush size " in activity
+    assert "paint color selected" in activity
+    assert "Canvas width in pixels" in activity
+    assert "Canvas height in pixels" in activity
+    assert 'outState.putBoolean("diagnostics_open"' in activity
+    assert 'outState.putBoolean("context_open"' in activity
+    assert 'outState.putBoolean("more_tools_open"' in activity
     assert "Export Redacted Support Bundle" in activity
     assert "Excludes credentials, source, prompts" in activity
     assert 'intent.setType("application/json")' in activity
