@@ -40,7 +40,7 @@ keeps keyboard focus in the input/editor and makes completion selection contextu
 
 Implemented now are the persistent/adaptive panes, asynchronous coalesced completion, safe Tab and
 ghost insertion, multiline definition editing/apply, text undo/redo, command bar, concise default
-and pinned inspection, bounded per-tick traces, syntax colors, and guaranteed terminal restoration.
+and pinned inspection, syntax colors, and guaranteed terminal restoration.
 Transcript scrollback with unread counts, visible selection styling, matching-delimiter feedback,
 diagnostic-span underlines, and a shared declarative command grammar remain planned polish; this
 slice does not claim them yet.
@@ -79,8 +79,9 @@ second language model.
 
 Enter inserts a newline and applies brace-aware auto-indentation. Ctrl+Enter snapshots the complete
 buffer, validates it, runs the normal test gate, and atomically hot-swaps it. Editing remains
-available while that immutable snapshot is prepared. A successful older snapshot becomes the new
-accepted base without erasing later keystrokes; those later edits remain dirty. Failed validation
+available while that immutable snapshot is prepared. A successful current snapshot closes the
+editor and returns to the prompt. If the user typed after submission, the accepted snapshot becomes
+the new base without erasing those later keystrokes, and the editor stays open with them dirty. Failed validation
 or apply keeps the editor open and reports diagnostics in the status/transcript; structured
 right-pane diagnostics with adaptive height remain planned polish. Stale results never overwrite a
 newer submitted snapshot. `:end` remains a compatibility escape hatch for the script and legacy
@@ -89,9 +90,8 @@ line-input paths.
 `:edit SYMBOL` opens the complete current definition with its semantic selector and expected source
 hash. Overloads are disambiguated in the right pane using owner, file, and signature metadata. The
 user-facing command remains concise; storage-level selectors are generated internally. After a
-successful apply the editor stays open, its accepted source/hash advance to the applied snapshot,
-and the transcript records the swap. Ctrl+W closes an editor, requiring confirmation before a dirty
-buffer is discarded.
+successful clean apply the transcript records the swap and the editor closes. Ctrl+W closes an
+editor manually, requiring confirmation before a dirty buffer is discarded.
 
 A leading `:` in the normal REPL input progressively completes commands and valid arguments at the
 current position. Inside a Stasis definition, `:` always remains language syntax. Ctrl+K opens a
@@ -112,15 +112,9 @@ immutable one-time value to the transcript. Do does not add routine output beyon
 state, but always surfaces failures and diagnostics. The default inspector refreshes visible values
 at a readable UI cadence and does not append each refresh to the transcript.
 
-Inspector nodes can be explicitly tracked for a bounded period. Tracking samples the selected
-values at every normalized between-tick boundary, including unchanged values, and stores them in a
-bounded ring owned by the live session. Duration is expressed canonically in ticks, with an
-approximate wall-time label for convenience; the initial default is 300 ticks and can be changed
-before starting a trace. The inspector shows the latest value, sample progress, min/max or change
-count where meaningful, and a compact trend. Completion, rendering, or a slow terminal must not
-block the game tick. Truncation or dropped samples are visible and never presented as a complete
-trace. Existing change-only watches remain useful for notifications and are not silently redefined
-as per-tick traces.
+The concise default inspector is the primary continuous observation surface. Explicit inspections
+can pin one value, while change-only watches remain available for notifications. Inspector refresh,
+completion, rendering, or a slow terminal must not block the game tick.
 
 Ctrl+Z/Ctrl+Y operate only on the current text buffer. `:undo` and `:redo` remain a separate history
 for accepted source/runtime swaps. The first TUI slice includes basic syntax coloring. Transcript
@@ -151,8 +145,6 @@ fail-fast behavior. Invalid human commands remain nonfatal and return focus to t
 :inspect
 :inspect score
 :watch score
-:track score 300
-:untrack score
 :set score 10
 :print score
 :changes

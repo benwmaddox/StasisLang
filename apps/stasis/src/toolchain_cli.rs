@@ -1040,27 +1040,6 @@ fn format_live_response(response: &LiveResponse) -> String {
             string_field(data, "path", "value"),
             scalar_text(data.get("value").unwrap_or(&Value::Null))
         ),
-        "track_started" => format!(
-            "tracking {} for {} tick(s) (~{} at 60 Hz)",
-            string_field(data, "path", "value"),
-            data.get("ticks").and_then(Value::as_u64).unwrap_or(0),
-            approximate_tick_duration(data.get("ticks").and_then(Value::as_u64).unwrap_or(0))
-        ),
-        "track_progress" => format_live_track(data, false),
-        "track_complete" => format_live_track(data, true),
-        "track_failed" => format!(
-            "track {} failed: {}",
-            string_field(data, "path", "value"),
-            string_field(data, "error", "unknown error")
-        ),
-        "track_removed" => {
-            let tracks = string_array(data.get("tracks"));
-            if tracks.is_empty() {
-                "no active traces".to_string()
-            } else {
-                format!("active traces: {tracks}")
-            }
-        }
         "watch_removed" => format_live_watch_removed(data),
         "watch_backpressure" => format!(
             "watch output dropped {} event(s)",
@@ -1119,76 +1098,6 @@ fn scalar_text(value: &Value) -> String {
     }
 }
 
-fn format_live_track(data: &Value, complete: bool) -> String {
-    let path = string_field(data, "path", "value");
-    let count = data
-        .get("sample_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let total = data.get("total_ticks").and_then(Value::as_u64).unwrap_or(0);
-    let latest = scalar_text(data.get("latest").unwrap_or(&Value::Null));
-    let dropped = data
-        .get("dropped_updates")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let shape = format_track_shape(data.get("samples"));
-    format!(
-        "{}{}: {count}/{total} (~{} at 60 Hz), latest {latest}{}{}",
-        if complete { "trace complete " } else { "" },
-        path,
-        approximate_tick_duration(total),
-        shape,
-        if dropped > 0 {
-            format!(", {dropped} UI update(s) dropped")
-        } else {
-            String::new()
-        }
-    )
-}
-
-fn format_track_shape(samples: Option<&Value>) -> String {
-    let values = samples
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|sample| {
-            let value = sample.get("value").unwrap_or(sample);
-            value
-                .as_f64()
-                .or_else(|| value.as_bool().map(|value| f64::from(u8::from(value))))
-        })
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        return String::new();
-    }
-    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let changes = values
-        .windows(2)
-        .filter(|window| window[0] != window[1])
-        .count();
-    let levels = ['.', ':', '-', '=', '+', '*', '#'];
-    let trend = values
-        .iter()
-        .rev()
-        .take(24)
-        .rev()
-        .map(|value| {
-            if max == min {
-                '-'
-            } else {
-                let normalized = (value - min) / (max - min);
-                levels[(normalized * (levels.len() - 1) as f64).round() as usize]
-            }
-        })
-        .collect::<String>();
-    format!(", range {min:.3}..{max:.3}, {changes} change(s), trend {trend}")
-}
-
-fn approximate_tick_duration(ticks: u64) -> String {
-    format!("{:.1}s", ticks as f64 / 60.0)
-}
-
 fn format_live_help(data: &Value) -> String {
     let commands = data
         .get("commands")
@@ -1225,7 +1134,6 @@ fn format_live_status(data: &Value) -> String {
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let watches = string_array(data.get("watches"));
-    let tracks = string_array(data.get("tracks"));
     let cells = data
         .get("scratch_cells")
         .and_then(Value::as_array)
@@ -1240,9 +1148,6 @@ fn format_live_status(data: &Value) -> String {
     let mut line = format!("{state} | edits {cursor}/{history}");
     if !watches.is_empty() {
         line.push_str(&format!(" | watches {watches}"));
-    }
-    if !tracks.is_empty() {
-        line.push_str(&format!(" | traces {tracks}"));
     }
     if !cells.is_empty() {
         line.push_str(&format!(" | cells {cells}"));

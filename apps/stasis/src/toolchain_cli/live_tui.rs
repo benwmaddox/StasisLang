@@ -93,6 +93,8 @@ struct BufferSnapshot {
 struct EditBuffer {
     text: String,
     cursor: usize,
+    scroll_top: usize,
+    last_rendered_cursor_line: usize,
     selection_anchor: Option<usize>,
     undo: Vec<BufferSnapshot>,
     redo: Vec<BufferSnapshot>,
@@ -324,6 +326,7 @@ fn line_column(text: &str, cursor: usize) -> (usize, usize) {
 }
 
 struct EditSession {
+    id: u64,
     target: LiveSymbolTarget,
     expected_source_hash: String,
     accepted_source: String,
@@ -369,6 +372,9 @@ enum PendingAction {
     ApplyEdit {
         source: String,
         revision: u64,
+        session_id: u64,
+        target: LiveSymbolTarget,
+        submitted_at: Instant,
     },
     DefaultInspect,
     Completion {
@@ -419,6 +425,7 @@ struct LiveTui {
     history_cursor: usize,
     pending: BTreeMap<u64, PendingAction>,
     next_request_id: u64,
+    next_edit_session_id: u64,
     completion_generation: u64,
     completion_in_flight: Option<u64>,
     queued_completion: Option<QueuedCompletion>,
@@ -450,6 +457,7 @@ impl LiveTui {
             history_cursor: 0,
             pending: BTreeMap::new(),
             next_request_id: TUI_REQUEST_START,
+            next_edit_session_id: 0,
             completion_generation: 0,
             completion_in_flight: None,
             queued_completion: None,
@@ -477,6 +485,10 @@ impl LiveTui {
                 edit.discard_confirm = false;
             }
         }
+        self.active_buffer_for_render_mut()
+    }
+
+    fn active_buffer_for_render_mut(&mut self) -> &mut EditBuffer {
         self.command_bar
             .as_mut()
             .unwrap_or_else(|| self.input.buffer_mut())
@@ -750,10 +762,11 @@ impl LiveTui {
     }
 
     fn apply_definition(&mut self) -> Result<(), String> {
-        let (source, revision, target, expected_source_hash) = match &self.input {
+        let (source, revision, session_id, target, expected_source_hash) = match &self.input {
             InputMode::Definition(edit) => (
                 edit.buffer.text.clone(),
                 edit.buffer.revision,
+                edit.id,
                 edit.target.clone(),
                 edit.expected_source_hash.clone(),
             ),
@@ -765,14 +778,22 @@ impl LiveTui {
         let request_id = self.next_request();
         let command = LiveCommand::Edit {
             operation: LiveEditOperation::Update,
-            target,
+            target: target.clone(),
             source: Some(source.clone()),
             expected_source_hash: Some(expected_source_hash),
             preview: false,
             run_tests: true,
         };
-        self.pending
-            .insert(request_id, PendingAction::ApplyEdit { source, revision });
+        self.pending.insert(
+            request_id,
+            PendingAction::ApplyEdit {
+                source,
+                revision,
+                session_id,
+                target,
+                submitted_at: Instant::now(),
+            },
+        );
         if let Err(error) = self.client.submit(LiveRequest::new(request_id, command)) {
             self.pending.remove(&request_id);
             self.status = format!("definition apply could not be queued: {error}");
@@ -939,8 +960,14 @@ impl LiveTui {
             }
             match action {
                 PendingAction::OpenEdit => self.finish_open(response),
-                PendingAction::ApplyEdit { source, revision } => {
-                    self.finish_apply(response, source, revision);
+                PendingAction::ApplyEdit {
+                    source,
+                    revision,
+                    session_id,
+                    target,
+                    submitted_at,
+                } => {
+                    self.finish_apply(response, source, revision, session_id, target, submitted_at);
                 }
                 PendingAction::DefaultInspect => self.finish_default_inspection(response),
                 PendingAction::Completion {
@@ -1028,26 +1055,6 @@ impl LiveTui {
                     self.status = format!("default inspection unavailable: {error}");
                 }
             }
-        }
-        if matches!(
-            response.kind.as_str(),
-            "track_started" | "track_progress" | "track_complete" | "track_failed"
-        ) && response.ok
-        {
-            self.replace_inspector_watch(None);
-            self.inspector.title = response
-                .data
-                .as_ref()
-                .and_then(|data| data.get("path"))
-                .and_then(|value| value.as_str())
-                .unwrap_or("trace")
-                .to_string();
-            self.inspector.lines = vec![format_live_response(&response)];
-            self.inspector.pinned = true;
-            if response.kind == "track_complete" {
-                self.push_transcript(format_live_response(&response));
-            }
-            return;
         }
         self.push_transcript(format_live_response(&response));
     }
@@ -1226,7 +1233,9 @@ impl LiveTui {
             owner: item.owner.clone(),
             signature: Some(item.signature.clone()),
         };
+        self.next_edit_session_id = self.next_edit_session_id.saturating_add(1);
         self.input = InputMode::Definition(EditSession {
+            id: self.next_edit_session_id,
             target,
             expected_source_hash: item.source_hash,
             accepted_source: item.source.clone(),
@@ -1238,24 +1247,54 @@ impl LiveTui {
         self.refresh_completion(false);
     }
 
-    fn finish_apply(&mut self, response: LiveResponse, source: String, revision: u64) {
+    fn finish_apply(
+        &mut self,
+        response: LiveResponse,
+        source: String,
+        revision: u64,
+        session_id: u64,
+        target: LiveSymbolTarget,
+        submitted_at: Instant,
+    ) {
         self.pending.remove(&response.request_id);
         if !response.ok {
-            self.status = "apply failed; buffer remains open".to_string();
-            self.push_transcript(format_live_response(&response));
+            self.status = match &self.input {
+                InputMode::Definition(edit) if edit.id == session_id && edit.target == target => {
+                    "apply failed; buffer remains open".to_string()
+                }
+                _ => format!("apply failed for {}; current editor unchanged", target.name),
+            };
+            self.push_transcript(format_apply_error(&response));
             return;
         }
-        if let InputMode::Definition(edit) = &mut self.input {
+        let mut close_editor = false;
+        let same_editor = matches!(
+            &self.input,
+            InputMode::Definition(edit) if edit.id == session_id && edit.target == target
+        );
+        if same_editor {
+            let InputMode::Definition(edit) = &mut self.input else {
+                unreachable!("same_editor requires a definition");
+            };
             edit.accepted_source = source.clone();
             edit.expected_source_hash = workshop_source_hash(&source);
             edit.discard_confirm = false;
-            self.status = if edit.buffer.revision == revision && edit.buffer.text == source {
-                "snapshot applied; editor is clean".to_string()
+            close_editor = edit.buffer.revision == revision && edit.buffer.text == source;
+            self.status = if close_editor {
+                "snapshot applied; editor closed".to_string()
             } else {
                 "snapshot applied; later edits remain dirty".to_string()
             };
+        } else {
+            self.status = format!(
+                "snapshot applied for {}; current editor unchanged",
+                target.name
+            );
         }
-        self.push_transcript(format_live_response(&response));
+        if close_editor {
+            self.input = InputMode::Prompt(EditBuffer::default());
+        }
+        self.push_transcript(format_apply_confirmation(&response, submitted_at.elapsed()));
         self.refresh_completion(false);
     }
 
@@ -1279,14 +1318,18 @@ impl LiveTui {
         draw_box(&mut regions[0], layout.transcript, "Transcript")?;
         draw_transcript(&mut regions[0], layout.transcript, &self.transcript)?;
         draw_box(&mut regions[1], layout.editor, self.editor_title().as_str())?;
+        let ghost = self.ghost_text();
+        let command_bar = self.command_bar.is_some();
+        let definition = matches!(self.input, InputMode::Definition(_));
+        let prompt = self.prompt;
         let cursor = draw_editor(
             &mut regions[1],
             layout.editor,
-            self.active_buffer(),
-            self.ghost_text(),
-            self.command_bar.is_some(),
-            matches!(self.input, InputMode::Definition(_)),
-            self.prompt,
+            self.active_buffer_for_render_mut(),
+            ghost,
+            command_bar,
+            definition,
+            prompt,
         )?;
         draw_box(&mut regions[2], layout.right, "Completions / inspect")?;
         draw_right_panel(
@@ -1370,6 +1413,34 @@ impl LiveTui {
     fn ghost_text(&self) -> String {
         ghost_suffix(self.active_buffer(), &self.completion).unwrap_or_default()
     }
+}
+
+fn format_apply_confirmation(response: &LiveResponse, elapsed: Duration) -> String {
+    let elapsed_ms = elapsed.as_nanos().saturating_add(999_999) / 1_000_000;
+    let Some(data) = response.data.as_ref() else {
+        return format!(
+            "Hot swapped <= {elapsed_ms} ms | {}",
+            format_live_response(response)
+        );
+    };
+    let tests = data
+        .get("tests")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    format!("Hot swapped <= {elapsed_ms} ms | tests {tests}")
+}
+
+fn format_apply_error(response: &LiveResponse) -> String {
+    let Some(error) = response.error.as_deref() else {
+        return format_live_response(response);
+    };
+    let message = error
+        .lines()
+        .next()
+        .unwrap_or(error)
+        .rsplit_once(": ")
+        .map_or(error, |(_, message)| message);
+    format!("error: {message}")
 }
 
 fn completion_key(item: &CompletionItem) -> (String, String, String) {
@@ -1623,7 +1694,7 @@ fn draw_transcript(
 fn draw_editor(
     stdout: &mut impl Write,
     rect: Rect,
-    buffer: &EditBuffer,
+    buffer: &mut EditBuffer,
     ghost: String,
     command_bar: bool,
     definition: bool,
@@ -1635,7 +1706,7 @@ fn draw_editor(
     let ranges = line_ranges(&buffer.text);
     let (cursor_line, cursor_column) = line_column(&buffer.text, buffer.cursor);
     let visible_rows = rect.height.saturating_sub(2) as usize;
-    let start_line = cursor_line.saturating_sub(visible_rows.saturating_sub(1));
+    let start_line = update_editor_scroll(buffer, cursor_line, ranges.len(), visible_rows);
     let prefix = if definition || command_bar {
         ""
     } else {
@@ -1673,6 +1744,50 @@ fn draw_editor(
     Ok((cursor_x < rect.x + rect.width.saturating_sub(1)
         && cursor_y < rect.y + rect.height.saturating_sub(1))
     .then_some((cursor_x, cursor_y)))
+}
+
+fn update_editor_scroll(
+    buffer: &mut EditBuffer,
+    cursor_line: usize,
+    total_lines: usize,
+    visible_rows: usize,
+) -> usize {
+    if visible_rows == 0 {
+        return 0;
+    }
+    let max_start = total_lines.saturating_sub(visible_rows);
+    buffer.scroll_top = buffer.scroll_top.min(max_start);
+    let margin = (visible_rows / 4)
+        .max(1)
+        .min(visible_rows.saturating_sub(1) / 2);
+
+    if cursor_line < buffer.last_rendered_cursor_line {
+        let upper_trigger = buffer.scroll_top.saturating_add(margin);
+        if cursor_line <= upper_trigger && buffer.scroll_top > 0 {
+            buffer.scroll_top = cursor_line.saturating_sub(margin);
+        }
+    } else if cursor_line > buffer.last_rendered_cursor_line {
+        let lower_trigger = buffer
+            .scroll_top
+            .saturating_add(visible_rows.saturating_sub(1 + margin));
+        if cursor_line >= lower_trigger && buffer.scroll_top < max_start {
+            buffer.scroll_top = cursor_line
+                .saturating_add(1 + margin)
+                .saturating_sub(visible_rows)
+                .min(max_start);
+        }
+    }
+
+    if cursor_line < buffer.scroll_top {
+        buffer.scroll_top = cursor_line;
+    } else if cursor_line >= buffer.scroll_top.saturating_add(visible_rows) {
+        buffer.scroll_top = cursor_line
+            .saturating_add(1)
+            .saturating_sub(visible_rows)
+            .min(max_start);
+    }
+    buffer.last_rendered_cursor_line = cursor_line;
+    buffer.scroll_top
 }
 
 fn draw_syntax_line(
@@ -1846,6 +1961,40 @@ mod tests {
     }
 
     #[test]
+    fn editor_scrolls_down_inside_the_lower_quarter_margin() {
+        let mut buffer =
+            EditBuffer::from_text((0..20).map(|line| format!("line {line}\n")).collect());
+        buffer.set_cursor(0, false);
+        assert_eq!(update_editor_scroll(&mut buffer, 0, 21, 8), 0);
+
+        for line in 1..=6 {
+            buffer.move_vertical(1, false);
+            let cursor_line = line_column(&buffer.text, buffer.cursor).0;
+            update_editor_scroll(&mut buffer, cursor_line, 21, 8);
+            if line < 5 {
+                assert_eq!(buffer.scroll_top, 0);
+            }
+        }
+
+        assert_eq!(buffer.scroll_top, 1);
+    }
+
+    #[test]
+    fn editor_scrolls_up_inside_the_upper_quarter_margin() {
+        let mut buffer =
+            EditBuffer::from_text((0..20).map(|line| format!("line {line}\n")).collect());
+        buffer.scroll_top = 8;
+        let line_ten = line_ranges(&buffer.text)[10].start;
+        buffer.set_cursor(line_ten, false);
+        buffer.last_rendered_cursor_line = 11;
+        assert_eq!(update_editor_scroll(&mut buffer, 10, 21, 8), 8);
+
+        buffer.move_vertical(-1, false);
+        let cursor_line = line_column(&buffer.text, buffer.cursor).0;
+        assert_eq!(update_editor_scroll(&mut buffer, cursor_line, 21, 8), 7);
+    }
+
+    #[test]
     fn completion_requires_whitespace_document_tail() {
         assert!(suffix_is_whitespace("hero.da\n   ", 7));
         assert!(!suffix_is_whitespace("hero.da later", 7));
@@ -1921,6 +2070,209 @@ mod tests {
     }
 
     #[test]
+    fn apply_confirmation_reports_active_confirmation_bound_in_transcript() {
+        let response = LiveResponse::success(
+            8,
+            43,
+            "edit_applied",
+            serde_json::json!({
+                "plan": {
+                    "changed_files": [{"file": "src/main.stasis"}],
+                    "reload": {
+                        "expected_reload": "FastReload",
+                        "changed_symbols": [{"name": "tick"}]
+                    }
+                },
+                "tests": "passed"
+            }),
+        );
+
+        assert_eq!(
+            format_apply_confirmation(&response, Duration::from_millis(18)),
+            "Hot swapped <= 18 ms | tests passed"
+        );
+        assert!(
+            format_apply_confirmation(&response, Duration::from_micros(900))
+                .starts_with("Hot swapped <= 1 ms")
+        );
+        assert!(
+            format_apply_confirmation(&response, Duration::from_micros(18_900))
+                .starts_with("Hot swapped <= 19 ms")
+        );
+    }
+
+    #[test]
+    fn apply_error_omits_the_workspace_path_on_narrow_transcripts() {
+        let response = LiveResponse::failure(
+            8,
+            43,
+            r"C:\workspace\src\main.stasis:4514-4544: unknown identifier 'missing_symbol'",
+        );
+
+        assert_eq!(
+            format_apply_error(&response),
+            "error: unknown identifier 'missing_symbol'"
+        );
+    }
+
+    #[test]
+    fn successful_clean_apply_closes_definition_editor() {
+        let (client, _server) = stasis_runner::live::live_session(8);
+        let mut app = LiveTui::new(client);
+        let target = LiveSymbolTarget {
+            name: "tick".to_string(),
+            kind: Some("function".to_string()),
+            file: Some("src/main.stasis".to_string()),
+            owner: None,
+            signature: Some("tick(): i32".to_string()),
+        };
+        app.input = InputMode::Definition(EditSession {
+            id: 1,
+            target: target.clone(),
+            expected_source_hash: workshop_source_hash("accepted"),
+            accepted_source: "accepted".to_string(),
+            source_start: 0,
+            buffer: EditBuffer::from_text("accepted".to_string()),
+            discard_confirm: false,
+        });
+        let response = LiveResponse::success(
+            8,
+            43,
+            "edit_applied",
+            serde_json::json!({
+                "plan": {
+                    "changed_files": [{"file": "src/main.stasis"}],
+                    "reload": {"expected_reload": "FastReload"}
+                },
+                "tests": "passed"
+            }),
+        );
+
+        app.finish_apply(
+            response,
+            "accepted".to_string(),
+            0,
+            1,
+            target,
+            Instant::now(),
+        );
+
+        assert!(matches!(app.input, InputMode::Prompt(_)));
+        assert_eq!(app.status, "snapshot applied; editor closed");
+    }
+
+    #[test]
+    fn completed_apply_does_not_mutate_a_different_open_definition() {
+        let (client, _server) = stasis_runner::live::live_session(8);
+        let mut app = LiveTui::new(client);
+        let submitted_target = LiveSymbolTarget {
+            name: "tick".to_string(),
+            kind: Some("function".to_string()),
+            file: Some("src/main.stasis".to_string()),
+            owner: None,
+            signature: Some("tick(): i32".to_string()),
+        };
+        let current_target = LiveSymbolTarget {
+            name: "render".to_string(),
+            signature: Some("render(): i32".to_string()),
+            ..submitted_target.clone()
+        };
+        app.input = InputMode::Definition(EditSession {
+            id: 2,
+            target: current_target.clone(),
+            expected_source_hash: workshop_source_hash("render source"),
+            accepted_source: "render source".to_string(),
+            source_start: 0,
+            buffer: EditBuffer::from_text("render source".to_string()),
+            discard_confirm: false,
+        });
+        let response = LiveResponse::success(
+            8,
+            43,
+            "edit_applied",
+            serde_json::json!({
+                "plan": {
+                    "changed_files": [{"file": "src/main.stasis"}],
+                    "reload": {"expected_reload": "FastReload"}
+                },
+                "tests": "passed"
+            }),
+        );
+
+        app.finish_apply(
+            response,
+            "tick source".to_string(),
+            0,
+            1,
+            submitted_target,
+            Instant::now(),
+        );
+
+        let InputMode::Definition(edit) = &app.input else {
+            panic!("current definition must remain open");
+        };
+        assert_eq!(edit.target, current_target);
+        assert_eq!(edit.accepted_source, "render source");
+        assert_eq!(
+            app.status,
+            "snapshot applied for tick; current editor unchanged"
+        );
+    }
+
+    #[test]
+    fn completed_apply_does_not_mutate_a_reopened_same_definition() {
+        let (client, _server) = stasis_runner::live::live_session(8);
+        let mut app = LiveTui::new(client);
+        let target = LiveSymbolTarget {
+            name: "obstacle_enabled".to_string(),
+            kind: Some("function".to_string()),
+            file: Some("src/main.stasis".to_string()),
+            owner: None,
+            signature: Some("obstacle_enabled(): bool".to_string()),
+        };
+        app.input = InputMode::Definition(EditSession {
+            id: 2,
+            target: target.clone(),
+            expected_source_hash: workshop_source_hash("reopened source"),
+            accepted_source: "reopened source".to_string(),
+            source_start: 0,
+            buffer: EditBuffer::from_text("reopened source".to_string()),
+            discard_confirm: false,
+        });
+        let response = LiveResponse::success(
+            8,
+            43,
+            "edit_applied",
+            serde_json::json!({
+                "plan": {
+                    "changed_files": [{"file": "src/main.stasis"}],
+                    "reload": {"expected_reload": "FastReload"}
+                },
+                "tests": "passed"
+            }),
+        );
+
+        app.finish_apply(
+            response,
+            "old submitted source".to_string(),
+            0,
+            1,
+            target,
+            Instant::now(),
+        );
+
+        let InputMode::Definition(edit) = &app.input else {
+            panic!("reopened definition must remain open");
+        };
+        assert_eq!(edit.id, 2);
+        assert_eq!(edit.accepted_source, "reopened source");
+        assert_eq!(
+            app.status,
+            "snapshot applied for obstacle_enabled; current editor unchanged"
+        );
+    }
+
+    #[test]
     fn completion_requests_coalesce_and_stale_results_are_discarded() {
         let (client, server) = stasis_runner::live::live_session(8);
         let mut app = LiveTui::new(client);
@@ -1975,6 +2327,7 @@ mod tests {
         let (client, _server) = stasis_runner::live::live_session(8);
         let mut app = LiveTui::new(client);
         app.input = InputMode::Definition(EditSession {
+            id: 1,
             target: LiveSymbolTarget {
                 name: "tick".to_string(),
                 kind: Some("function".to_string()),
@@ -1999,6 +2352,33 @@ mod tests {
             &app.input,
             InputMode::Definition(edit) if edit.discard_confirm
         ));
+    }
+
+    #[test]
+    fn rendering_buffer_access_preserves_discard_confirmation() {
+        let (client, _server) = stasis_runner::live::live_session(8);
+        let mut app = LiveTui::new(client);
+        app.input = InputMode::Definition(EditSession {
+            id: 1,
+            target: LiveSymbolTarget {
+                name: "tick".to_string(),
+                kind: Some("function".to_string()),
+                file: Some("src/main.stasis".to_string()),
+                owner: None,
+                signature: Some("tick(): i32".to_string()),
+            },
+            expected_source_hash: workshop_source_hash("accepted"),
+            accepted_source: "accepted".to_string(),
+            source_start: 0,
+            buffer: EditBuffer::from_text("dirty".to_string()),
+            discard_confirm: false,
+        });
+
+        app.close_definition();
+        let _ = app.active_buffer_for_render_mut();
+        app.close_definition();
+
+        assert!(matches!(app.input, InputMode::Prompt(_)));
     }
 
     #[test]

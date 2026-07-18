@@ -3163,6 +3163,46 @@ mod tests {
     }
 
     #[test]
+    fn jit_process_rejects_i32_return_from_bool_function() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function enabled(): bool { return 1; }\nfunction main(): i32 { if (enabled()) { return 1; } return 0; }\n",
+        );
+        let error = process.compile().expect_err("expected return type error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("return expression expected bool but found i32"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jit_process_rejects_i32_initializer_for_bool_binding() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let ready: bool = 1; if (ready) { return 1; } return 0; }\n",
+        );
+        let error = process
+            .compile()
+            .expect_err("expected assignment type error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("let binding 'ready' expected bool expression but found i32"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn jit_process_rejects_f32_condition_expression() {
         let mut process = JitProcess::new();
         process.upsert_file(

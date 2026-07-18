@@ -10,8 +10,6 @@ pub const DEFAULT_LIVE_OUTPUT_BYTES: usize = 64 * 1024;
 pub const MAX_LIVE_REQUEST_BYTES: usize = 512 * 1024;
 pub const MAX_LIVE_MULTILINE_BYTES: usize = 256 * 1024;
 pub const MAX_SCRATCH_CELLS: usize = 64;
-pub const MAX_LIVE_TRACKS: usize = 8;
-pub const MAX_LIVE_TRACK_TICKS: u32 = 600;
 pub const MAX_LIVE_WATCHES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,15 +146,6 @@ pub enum LiveCommand {
     Watch {
         path: String,
     },
-    Track {
-        path: String,
-        #[serde(default = "default_track_ticks")]
-        ticks: u32,
-    },
-    Untrack {
-        #[serde(default)]
-        path: Option<String>,
-    },
     Unwatch {
         #[serde(default)]
         path: Option<String>,
@@ -201,10 +190,6 @@ pub enum LiveCommand {
 
 const fn one_tick() -> u32 {
     1
-}
-
-const fn default_track_ticks() -> u32 {
-    300
 }
 
 const fn default_completion_limit() -> usize {
@@ -1114,17 +1099,6 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         ":watch" => ready(LiveCommand::Watch {
             path: required_arg(&args, 1, "state path")?.to_string(),
         }),
-        ":track" => ready(LiveCommand::Track {
-            path: required_arg(&args, 1, "state path")?.to_string(),
-            ticks: args
-                .get(2)
-                .map(|value| parse_u32("ticks", value))
-                .transpose()?
-                .unwrap_or_else(default_track_ticks),
-        }),
-        ":untrack" => ready(LiveCommand::Untrack {
-            path: args.get(1).cloned(),
-        }),
         ":unwatch" => ready(LiveCommand::Unwatch {
             path: args.get(1).cloned(),
         }),
@@ -1705,36 +1679,6 @@ mod tests {
                     source_offset: Some(42),
                     expected_type: Some("i32".into()),
                 },
-            }
-        );
-    }
-
-    #[test]
-    fn terminal_track_command_defaults_and_accepts_tick_duration() {
-        let mut terminal = TerminalBuffer::new();
-        let TerminalInput::Request(default_request) =
-            terminal.feed_line(":track score").expect("default track")
-        else {
-            panic!("expected request")
-        };
-        assert_eq!(
-            default_request.command,
-            LiveCommand::Track {
-                path: "score".into(),
-                ticks: 300,
-            }
-        );
-        let TerminalInput::Request(explicit_request) = terminal
-            .feed_line(":track score 12")
-            .expect("explicit track")
-        else {
-            panic!("expected request")
-        };
-        assert_eq!(
-            explicit_request.command,
-            LiveCommand::Track {
-                path: "score".into(),
-                ticks: 12,
             }
         );
     }
