@@ -9,6 +9,7 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
+import android.content.res.Configuration;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Bitmap;
@@ -16,6 +17,7 @@ import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.net.ConnectivityManager;
@@ -174,6 +176,9 @@ public final class MainActivity extends Activity {
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
     private LinearLayout manualEditBody;
+    private LinearLayout diagnosticBody;
+    private LinearLayout contextBody;
+    private LinearLayout moreToolsBody;
     private EditText sourceEditor;
     private EditText aiPromptEditor;
     private EditText aiApiKeyEditor;
@@ -283,6 +288,10 @@ public final class MainActivity extends Activity {
     private LinearLayout voiceActionRow;
     private TextView voiceStatus;
     private Button voiceRunButton;
+    private WorkshopPaintView activePaintView;
+    private AlertDialog activePaintDialog;
+    private EditText activePaintName;
+    private boolean activePaintSuggestAiAttachment;
     private SpeechRecognizer voiceRecognizer;
     private String voiceTranscript = "";
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
@@ -358,6 +367,11 @@ public final class MainActivity extends Activity {
         Window window = getWindow();
         window.setStatusBarColor(Color.BLACK);
         window.setNavigationBarColor(Color.BLACK);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            View decor = window.getDecorView();
+            decor.setSystemUiVisibility(decor.getSystemUiVisibility()
+                    & ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        }
 
         ProjectSnapshot project = loadBundledProject();
         try {
@@ -371,6 +385,7 @@ public final class MainActivity extends Activity {
         markInterruptedAiOutcomeIfNeeded();
         restoreWorkshopUiState(savedInstanceState);
         restorePendingDraft();
+        restoreRetainedPaintSession();
         gameLoopHandler.post(new Runnable() {
             @Override public void run() { startNextQueuedAiIfIdle(); }
         });
@@ -418,6 +433,9 @@ public final class MainActivity extends Activity {
         outState.putString("voice_transcript", voiceTranscript);
         outState.putBoolean("editor_open", editorPanel != null && editorPanel.getVisibility() == View.VISIBLE);
         outState.putBoolean("manual_open", manualEditBody != null && manualEditBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("diagnostics_open", diagnosticBody != null && diagnosticBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("context_open", contextBody != null && contextBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("more_tools_open", moreToolsBody != null && moreToolsBody.getVisibility() == View.VISIBLE);
         outState.putBoolean("projects_open", projectSettingsBody != null && projectSettingsBody.getVisibility() == View.VISIBLE);
         outState.putBoolean("history_open", commandHistoryBody != null && commandHistoryBody.getVisibility() == View.VISIBLE);
         outState.putBoolean("ai_settings_open", aiSettingsBody != null && aiSettingsBody.getVisibility() == View.VISIBLE);
@@ -435,6 +453,16 @@ public final class MainActivity extends Activity {
             outState.putString("selected_owner", selectedSymbol.owner);
         }
         super.onSaveInstanceState(outState);
+    }
+
+    @Override
+    public Object onRetainNonConfigurationInstance() {
+        if (activePaintView == null || activePaintDialog == null
+                || !activePaintDialog.isShowing()) return null;
+        return new RetainedPaintSession(activePaintView.snapshot(),
+                activePaintName == null ? "painted_image" : activePaintName.getText().toString(),
+                activePaintSuggestAiAttachment, activePaintView.brushColor(),
+                activePaintView.brushSize(), activePaintView.isErasing());
     }
 
     @Override
@@ -658,6 +686,7 @@ public final class MainActivity extends Activity {
     }
 
     private View createWorkshopView(ProjectSnapshot project) {
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(15, 20, 28));
         installSystemInsetGuard(root);
@@ -681,11 +710,12 @@ public final class MainActivity extends Activity {
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(14), dp(12), dp(14), dp(12));
-        content.setBackground(createPanelBackground(Color.rgb(247, 248, 251), Color.rgb(190, 199, 212)));
+        content.setBackground(createPanelBackground(WorkshopAccessibilityPolicy.PANEL_BACKGROUND,
+                Color.rgb(190, 199, 212)));
 
         TextView title = new TextView(this);
         title.setText("Stasis Workshop");
-        title.setTextColor(Color.rgb(22, 27, 34));
+        title.setTextColor(WorkshopAccessibilityPolicy.PRIMARY_TEXT);
         title.setTextSize(20.0f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
@@ -714,7 +744,7 @@ public final class MainActivity extends Activity {
         selectedSourcePanel.setPadding(0, 0, 0, dp(6));
 
         sourceTitle = new TextView(this);
-        sourceTitle.setTextColor(Color.rgb(22, 27, 34));
+        sourceTitle.setTextColor(WorkshopAccessibilityPolicy.PRIMARY_TEXT);
         sourceTitle.setTextSize(15.0f);
         sourceTitle.setTypeface(Typeface.DEFAULT_BOLD);
         sourceTitle.setPadding(0, dp(8), 0, dp(6));
@@ -739,7 +769,7 @@ public final class MainActivity extends Activity {
         manualEditBody.addView(symbolList, fullWidth());
         rebuildSymbolList(project);
         reloadStatus = new TextView(this);
-        reloadStatus.setTextColor(Color.rgb(73, 84, 100));
+        reloadStatus.setTextColor(WorkshopAccessibilityPolicy.SECONDARY_TEXT);
         reloadStatus.setTextSize(13.0f);
         reloadStatus.setPadding(0, dp(8), 0, dp(6));
         reloadStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
@@ -748,7 +778,7 @@ public final class MainActivity extends Activity {
         Button diagnosticToggle = new Button(this);
         diagnosticToggle.setText("Diagnostics & Recovery");
         content.addView(diagnosticToggle, fullWidth());
-        final LinearLayout diagnosticBody = new LinearLayout(this);
+        diagnosticBody = new LinearLayout(this);
         diagnosticBody.setOrientation(LinearLayout.VERTICAL);
         diagnosticBody.setVisibility(View.GONE);
         diagnosticToggle.setOnClickListener(new View.OnClickListener() {
@@ -760,39 +790,35 @@ public final class MainActivity extends Activity {
 
         diagnosticStatus = new TextView(this);
         diagnosticStatus.setTextSize(12.0f);
-        diagnosticStatus.setTextColor(Color.rgb(125, 55, 45));
+        diagnosticStatus.setTextColor(WorkshopAccessibilityPolicy.DIAGNOSTIC_TEXT);
         diagnosticStatus.setTypeface(Typeface.MONOSPACE);
         diagnosticStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE);
         diagnosticBody.addView(diagnosticStatus, fullWidth());
         LinearLayout diagnosticActions = new LinearLayout(this);
-        boolean narrowLayout = getResources().getConfiguration().screenWidthDp < 480;
-        diagnosticActions.setOrientation(narrowLayout ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        configureActionRow(diagnosticActions, layout);
         Button goToDiagnostic = new Button(this);
         goToDiagnostic.setText("Go to Diagnostic");
         goToDiagnostic.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { goToDiagnosticSource(); }
         });
-        diagnosticActions.addView(goToDiagnostic, narrowLayout ? fullWidth()
-                : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        diagnosticActions.addView(goToDiagnostic, actionWidth(layout));
         Button recoveryHistory = new Button(this);
         recoveryHistory.setText("Recovery History");
         recoveryHistory.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { showRecoveryHistory(); }
         });
-        diagnosticActions.addView(recoveryHistory, narrowLayout ? fullWidth()
-                : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        diagnosticActions.addView(recoveryHistory, actionWidth(layout));
         Button undoFailedApply = new Button(this);
         undoFailedApply.setText("Undo Failed Apply");
         undoFailedApply.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { undoSelectedFailedApply(); }
         });
-        diagnosticActions.addView(undoFailedApply, narrowLayout ? fullWidth()
-                : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        diagnosticActions.addView(undoFailedApply, actionWidth(layout));
         diagnosticBody.addView(diagnosticActions, fullWidth());
         refreshRecoveryStatus();
 
         changeSummary = new TextView(this);
-        changeSummary.setTextColor(Color.rgb(73, 84, 100));
+        changeSummary.setTextColor(WorkshopAccessibilityPolicy.SECONDARY_TEXT);
         changeSummary.setTextSize(12.0f);
         changeSummary.setTypeface(Typeface.MONOSPACE);
         changeSummary.setPadding(0, dp(6), 0, dp(6));
@@ -807,12 +833,15 @@ public final class MainActivity extends Activity {
 
         editorPanel = new ScrollView(this);
         editorPanel.setFillViewport(false);
+        editorPanel.setFocusable(true);
+        editorPanel.setFocusableInTouchMode(true);
         editorPanel.setVisibility(View.GONE);
         editorPanel.addView(content);
+        if (Build.VERSION.SDK_INT >= 28) editorPanel.setAccessibilityPaneTitle("Stasis Workshop");
         FrameLayout.LayoutParams editorParams = new FrameLayout.LayoutParams(
+                layout.fullWidthEditor ? FrameLayout.LayoutParams.MATCH_PARENT : dp(layout.editorWidthDp),
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                Gravity.TOP | Gravity.START);
+                Gravity.TOP | Gravity.END);
         editorParams.setMargins(dp(12), dp(64), dp(12), dp(18));
         root.addView(editorPanel, editorParams);
 
@@ -832,21 +861,27 @@ public final class MainActivity extends Activity {
         editorToggle = new Button(this);
         editorToggle.setText("\u2630");
         editorToggle.setTextSize(20.0f);
-        editorToggle.setTextColor(Color.WHITE);
+        editorToggle.setTextColor(WorkshopAccessibilityPolicy.ON_DARK_CONTROL);
         editorToggle.setContentDescription("Open Workshop menu");
-        editorToggle.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
+        editorToggle.setMinWidth(dp(52));
+        editorToggle.setMinHeight(dp(48));
+        editorToggle.setBackground(createFocusableControlBackground());
         editorToggle.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 toggleEditorPanel();
             }
         });
-        FrameLayout.LayoutParams toggleParams = new FrameLayout.LayoutParams(dp(52), dp(48), Gravity.TOP | Gravity.END);
+        FrameLayout.LayoutParams toggleParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.END);
         toggleParams.setMargins(0, dp(8), dp(TOP_CONTROL_END_MARGIN_DP), 0);
         root.addView(editorToggle, toggleParams);
         if (voiceToggle != null) {
             voiceToggle.bringToFront();
         }
+        chainAccessibilityTraversal(editorToggle, editorPanel, gamePreview,
+                aiGameProgressScroller, voiceToggle);
 
         if (!credentialStorageError.isEmpty()) {
             setStatusText("Credential storage error: " + credentialStorageError);
@@ -914,32 +949,38 @@ public final class MainActivity extends Activity {
     }
 
     private void installVoiceChangeControls(FrameLayout root) {
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         voiceToggle = new Button(this);
         voiceToggle.setText("Voice");
         voiceToggle.setContentDescription("Start voice command recording");
-        voiceToggle.setTextColor(Color.WHITE);
-        voiceToggle.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
+        voiceToggle.setTextColor(WorkshopAccessibilityPolicy.ON_DARK_CONTROL);
+        voiceToggle.setMinWidth(dp(74));
+        voiceToggle.setMinHeight(dp(48));
+        voiceToggle.setBackground(createFocusableControlBackground());
         voiceToggle.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 startVoiceChange();
             }
         });
-        FrameLayout.LayoutParams voiceParams = new FrameLayout.LayoutParams(dp(74), dp(48), Gravity.TOP | Gravity.END);
+        FrameLayout.LayoutParams voiceParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.END);
         voiceParams.setMargins(0, dp(VOICE_TOP_MARGIN_DP), dp(TOP_CONTROL_END_MARGIN_DP), 0);
         root.addView(voiceToggle, voiceParams);
 
         voiceActionRow = new LinearLayout(this);
-        voiceActionRow.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(voiceActionRow, layout);
         voiceActionRow.setPadding(dp(8), dp(4), dp(8), dp(4));
-        voiceActionRow.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
+        voiceActionRow.setBackground(createPanelBackground(WorkshopAccessibilityPolicy.DARK_CONTROL,
+                WorkshopAccessibilityPolicy.DARK_CONTROL_BORDER));
         voiceActionRow.setVisibility(View.GONE);
 
         voiceStatus = new TextView(this);
         voiceStatus.setTextColor(Color.WHITE);
         voiceStatus.setTextSize(12.0f);
         voiceStatus.setGravity(Gravity.CENTER_VERTICAL);
-        voiceActionRow.addView(voiceStatus, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        voiceActionRow.addView(voiceStatus, actionWidth(layout));
 
         Button voiceCancel = new Button(this);
         voiceCancel.setText("Cancel");
@@ -949,7 +990,7 @@ public final class MainActivity extends Activity {
                 cancelVoiceChange();
             }
         });
-        voiceActionRow.addView(voiceCancel, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        voiceActionRow.addView(voiceCancel, actionWidth(layout));
 
         voiceRunButton = new Button(this);
         voiceRunButton.setText("Run");
@@ -960,7 +1001,7 @@ public final class MainActivity extends Activity {
                 runVoiceChange();
             }
         });
-        voiceActionRow.addView(voiceRunButton, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        voiceActionRow.addView(voiceRunButton, actionWidth(layout));
 
         FrameLayout.LayoutParams actionParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -1123,13 +1164,28 @@ public final class MainActivity extends Activity {
         }
         boolean opening = editorPanel.getVisibility() != View.VISIBLE;
         editorPanel.setVisibility(opening ? View.VISIBLE : View.GONE);
+        boolean coverPreview = opening && adaptiveLayoutProfile().fullWidthEditor;
+        setPreviewAccessibilityHidden(coverPreview);
+        updateAiGameProgressOverlay();
         if (opening) {
             editorPanel.bringToFront();
+            editorPanel.post(new Runnable() {
+                @Override public void run() {
+                    editorPanel.requestFocus();
+                    if (Build.VERSION.SDK_INT < 28) {
+                        editorPanel.announceForAccessibility("Workshop menu opened");
+                    }
+                }
+            });
         }
         if (editorToggle != null) {
             editorToggle.setText(opening ? "\u00D7" : "\u2630");
             editorToggle.setContentDescription(opening ? "Close Workshop menu" : "Open Workshop menu");
             editorToggle.bringToFront();
+            if (!opening) {
+                editorToggle.requestFocus();
+                editorToggle.announceForAccessibility("Workshop menu closed");
+            }
         }
         if (voiceActionRow != null && voiceActionRow.getVisibility() == View.VISIBLE) {
             voiceActionRow.bringToFront();
@@ -1138,7 +1194,13 @@ public final class MainActivity extends Activity {
             voiceToggle.setVisibility(opening ? View.GONE : View.VISIBLE);
             if (!opening) voiceToggle.bringToFront();
         }
-        updateAiGameProgressOverlay();
+    }
+
+    private void setPreviewAccessibilityHidden(boolean hidden) {
+        int importance = hidden ? View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                : View.IMPORTANT_FOR_ACCESSIBILITY_AUTO;
+        if (gamePreview != null) gamePreview.setImportantForAccessibility(importance);
+        if (gameStatus != null) gameStatus.setImportantForAccessibility(importance);
     }
 
     private void startGameLoop() {
@@ -1494,6 +1556,7 @@ public final class MainActivity extends Activity {
     }
 
     private LinearLayout createAiControls() {
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.VERTICAL);
         controls.setPadding(0, dp(8), 0, 0);
@@ -1510,7 +1573,7 @@ public final class MainActivity extends Activity {
 
         Button contextToggle = new Button(this);
         contextToggle.setText("Context & Images");
-        final LinearLayout contextBody = new LinearLayout(this);
+        contextBody = new LinearLayout(this);
         contextBody.setOrientation(LinearLayout.VERTICAL);
         contextBody.setVisibility(View.GONE);
         contextToggle.setOnClickListener(new View.OnClickListener() {
@@ -1565,7 +1628,7 @@ public final class MainActivity extends Activity {
         contextBody.addView(allowAiImageGeneration, fullWidth());
 
         LinearLayout aiActionRow = new LinearLayout(this);
-        aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(aiActionRow, layout);
         Button aiPatch = new Button(this);
         aiPatch.setText("Run");
         aiPatch.setContentDescription("Queue the requested AI change with current reviewed attachments and budget limits");
@@ -1575,15 +1638,14 @@ public final class MainActivity extends Activity {
                 runAiPatch();
             }
         });
-        aiActionRow.addView(aiPatch, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        aiActionRow.addView(aiPatch, actionWidth(layout));
         Button voiceCommand = new Button(this);
         voiceCommand.setText("Voice");
         voiceCommand.setContentDescription("Speak a game change or command");
         voiceCommand.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { startVoiceChange(); }
         });
-        aiActionRow.addView(voiceCommand, new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        aiActionRow.addView(voiceCommand, actionWidth(layout));
         aiCancelButton = new Button(this);
         aiCancelButton.setText("Stop");
         aiCancelButton.setVisibility(View.GONE);
@@ -1591,8 +1653,7 @@ public final class MainActivity extends Activity {
         aiCancelButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { cancelAiRun(); }
         });
-        aiActionRow.addView(aiCancelButton, new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        aiActionRow.addView(aiCancelButton, actionWidth(layout));
         controls.addView(aiActionRow, fullWidth());
 
         aiQueueSection = new LinearLayout(this);
@@ -1640,7 +1701,7 @@ public final class MainActivity extends Activity {
         Button moreToolsToggle = new Button(this);
         moreToolsToggle.setText("More Tools & Settings");
         controls.addView(moreToolsToggle, fullWidth());
-        final LinearLayout moreToolsBody = new LinearLayout(this);
+        moreToolsBody = new LinearLayout(this);
         moreToolsBody.setOrientation(LinearLayout.VERTICAL);
         moreToolsBody.setVisibility(View.GONE);
         moreToolsToggle.setOnClickListener(new View.OnClickListener() {
@@ -1774,8 +1835,7 @@ public final class MainActivity extends Activity {
         audioRecordingNameEditor.setText("recorded_audio");
         projectSettingsBody.addView(audioRecordingNameEditor, fullWidth());
         LinearLayout recordingActions = new LinearLayout(this);
-        recordingActions.setOrientation(getResources().getConfiguration().screenWidthDp < 480
-                ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        configureActionRow(recordingActions, layout);
         Button startRecording = new Button(this);
         startRecording.setText("Record Audio");
         startRecording.setContentDescription("Start a bounded microphone recording for the active project");
@@ -1792,13 +1852,9 @@ public final class MainActivity extends Activity {
         cancelRecording.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { cancelAudioRecording(true); }
         });
-        LinearLayout.LayoutParams recordingButtonParams = getResources().getConfiguration().screenWidthDp < 480
-                ? fullWidth() : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f);
-        recordingActions.addView(startRecording, recordingButtonParams);
-        recordingActions.addView(saveRecording, getResources().getConfiguration().screenWidthDp < 480
-                ? fullWidth() : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
-        recordingActions.addView(cancelRecording, getResources().getConfiguration().screenWidthDp < 480
-                ? fullWidth() : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        recordingActions.addView(startRecording, actionWidth(layout));
+        recordingActions.addView(saveRecording, actionWidth(layout));
+        recordingActions.addView(cancelRecording, actionWidth(layout));
         projectSettingsBody.addView(recordingActions, fullWidth());
         Button stopAudio = new Button(this);
         stopAudio.setText("Stop Audio Preview");
@@ -3406,6 +3462,9 @@ public final class MainActivity extends Activity {
                 state.getString("selected_owner", ""), state.getString("selected_name", ""));
         if (restoredSymbol != null) showSymbol(restoredSymbol);
         restoreVisibility(manualEditBody, state.getBoolean("manual_open", false));
+        restoreVisibility(diagnosticBody, state.getBoolean("diagnostics_open", false));
+        restoreVisibility(contextBody, state.getBoolean("context_open", false));
+        restoreVisibility(moreToolsBody, state.getBoolean("more_tools_open", false));
         restoreVisibility(projectSettingsBody, state.getBoolean("projects_open", false));
         restoreVisibility(commandHistoryBody, state.getBoolean("history_open", false));
         restoreVisibility(aiSettingsBody, state.getBoolean("ai_settings_open", false));
@@ -8338,20 +8397,35 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    private void restoreRetainedPaintSession() {
+        Object retained = getLastNonConfigurationInstance();
+        if (!(retained instanceof RetainedPaintSession)) return;
+        RetainedPaintSession session = (RetainedPaintSession)retained;
+        try {
+            showPaintEditor(session.bitmap.getWidth(), session.bitmap.getHeight(), session.bitmap,
+                    session.name, session.suggestAiAttachment, session);
+        } finally {
+            if (!session.bitmap.isRecycled()) session.bitmap.recycle();
+        }
+    }
+
     private void requestNewPaintedImage() {
         if (!canModifyImageAssets()) return;
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         final EditText width = new EditText(this);
         width.setHint("Width");
+        width.setContentDescription("Canvas width in pixels");
         width.setInputType(InputType.TYPE_CLASS_NUMBER);
         width.setText("256");
         final EditText height = new EditText(this);
         height.setHint("Height");
+        height.setContentDescription("Canvas height in pixels");
         height.setInputType(InputType.TYPE_CLASS_NUMBER);
         height.setText("256");
         LinearLayout dimensions = new LinearLayout(this);
-        dimensions.setOrientation(LinearLayout.HORIZONTAL);
-        dimensions.addView(width, weightedWidth());
-        dimensions.addView(height, weightedWidth());
+        configureActionRow(dimensions, layout);
+        dimensions.addView(width, actionWidth(layout));
+        dimensions.addView(height, actionWidth(layout));
         new AlertDialog.Builder(this)
                 .setTitle("New Paint Canvas")
                 .setMessage("Canvas dimensions must be 16-1024 pixels.")
@@ -8391,29 +8465,60 @@ public final class MainActivity extends Activity {
 
     private void showPaintEditor(int width, int height, Bitmap initial, String defaultName,
                                  boolean suggestAiAttachment) {
+        showPaintEditor(width, height, initial, defaultName, suggestAiAttachment, null);
+    }
+
+    private void showPaintEditor(int width, int height, Bitmap initial, String defaultName,
+                                 boolean suggestAiAttachment, RetainedPaintSession retained) {
+        final WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         final WorkshopPaintView paint = new WorkshopPaintView(this, width, height, initial);
+        if (retained != null) {
+            paint.setBrushColor(retained.brushColor);
+            paint.setBrushSize(retained.brushSize);
+            paint.setEraser(retained.erasing);
+        }
+        final ArrayList<View> paintTraversal = new ArrayList<>();
+        paintTraversal.add(paint);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(8), dp(8), dp(8), dp(8));
         content.addView(paint, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(360)));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(layout.paintCanvasHeightDp)));
 
         LinearLayout tools = new LinearLayout(this);
-        tools.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(tools, layout);
         Button brush = compactButton("Brush");
         Button eraser = compactButton("Eraser");
         Button undo = compactButton("Undo");
         Button redo = compactButton("Redo");
-        tools.addView(brush, weightedWidth());
-        tools.addView(eraser, weightedWidth());
-        tools.addView(undo, weightedWidth());
-        tools.addView(redo, weightedWidth());
+        brush.setSelected(!paint.isErasing());
+        eraser.setSelected(paint.isErasing());
+        tools.addView(brush, actionWidth(layout));
+        tools.addView(eraser, actionWidth(layout));
+        tools.addView(undo, actionWidth(layout));
+        tools.addView(redo, actionWidth(layout));
+        paintTraversal.add(brush);
+        paintTraversal.add(eraser);
+        paintTraversal.add(undo);
+        paintTraversal.add(redo);
         content.addView(tools, fullWidth());
         brush.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { paint.setEraser(false); setStatusText("Paint tool: brush"); }
+            @Override public void onClick(View view) {
+                paint.setEraser(false);
+                brush.setSelected(true);
+                eraser.setSelected(false);
+                paint.announceForAccessibility("Brush selected");
+                setStatusText("Paint tool: brush");
+            }
         });
         eraser.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { paint.setEraser(true); setStatusText("Paint tool: eraser"); }
+            @Override public void onClick(View view) {
+                paint.setEraser(true);
+                brush.setSelected(false);
+                eraser.setSelected(true);
+                paint.announceForAccessibility("Eraser selected");
+                setStatusText("Paint tool: eraser");
+            }
         });
         undo.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { paint.undo(); }
@@ -8423,43 +8528,68 @@ public final class MainActivity extends Activity {
         });
 
         LinearLayout sizes = new LinearLayout(this);
-        sizes.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(sizes, layout);
+        final ArrayList<Button> sizeChoices = new ArrayList<>();
         for (final int size : new int[] {2, 8, 24, 64}) {
-            Button choice = compactButton(Integer.toString(size) + "px");
+            final Button choice = compactButton(Integer.toString(size) + "px");
+            choice.setSelected(Math.round(paint.brushSize()) == size);
             choice.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View view) { paint.setBrushSize(size); }
+                @Override public void onClick(View view) {
+                    paint.setBrushSize(size);
+                    selectOnly(sizeChoices, choice);
+                    paint.announceForAccessibility("Brush size " + size + " pixels selected");
+                }
             });
-            sizes.addView(choice, weightedWidth());
+            sizes.addView(choice, actionWidth(layout));
+            sizeChoices.add(choice);
+            paintTraversal.add(choice);
         }
         content.addView(sizes, fullWidth());
 
         LinearLayout palette = new LinearLayout(this);
-        palette.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(palette, layout);
         final int[] colors = new int[] {Color.BLACK, Color.WHITE, Color.RED, Color.GREEN, Color.BLUE};
         final String[] colorNames = new String[] {"Black", "White", "Red", "Green", "Blue"};
+        final ArrayList<Button> colorChoices = new ArrayList<>();
         for (int index = 0; index < colors.length; index++) {
             final int color = colors[index];
-            Button choice = compactButton(colorNames[index]);
+            final String colorName = colorNames[index];
+            final Button choice = compactButton(colorName);
+            choice.setSelected(paint.brushColor() == color);
             choice.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View view) { paint.setBrushColor(color); }
+                @Override public void onClick(View view) {
+                    paint.setBrushColor(color);
+                    brush.setSelected(true);
+                    eraser.setSelected(false);
+                    selectOnly(colorChoices, choice);
+                    paint.announceForAccessibility(colorName + " paint color selected");
+                }
             });
-            palette.addView(choice, weightedWidth());
+            palette.addView(choice, actionWidth(layout));
+            colorChoices.add(choice);
+            paintTraversal.add(choice);
         }
         content.addView(palette, fullWidth());
 
         LinearLayout customColor = new LinearLayout(this);
-        customColor.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(customColor, layout);
         final EditText hex = new EditText(this);
         hex.setHint("#RRGGBB or #AARRGGBB");
         hex.setSingleLine(true);
         Button applyColor = compactButton("Set Color");
-        customColor.addView(hex, weightedWidth());
-        customColor.addView(applyColor, weightedWidth());
+        customColor.addView(hex, actionWidth(layout));
+        customColor.addView(applyColor, actionWidth(layout));
+        paintTraversal.add(hex);
+        paintTraversal.add(applyColor);
         content.addView(customColor, fullWidth());
         applyColor.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
                 try {
                     paint.setBrushColor(Color.parseColor(hex.getText().toString().trim()));
+                    brush.setSelected(true);
+                    eraser.setSelected(false);
+                    selectOnly(colorChoices, null);
+                    paint.announceForAccessibility("Custom paint color selected");
                     setStatusText("Paint color applied");
                 } catch (Exception error) {
                     setStatusText("Paint color needs #RRGGBB or #AARRGGBB");
@@ -8468,11 +8598,13 @@ public final class MainActivity extends Activity {
         });
 
         LinearLayout canvasActions = new LinearLayout(this);
-        canvasActions.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(canvasActions, layout);
         Button resize = compactButton("Resize / Crop");
         Button clear = compactButton("Clear");
-        canvasActions.addView(resize, weightedWidth());
-        canvasActions.addView(clear, weightedWidth());
+        canvasActions.addView(resize, actionWidth(layout));
+        canvasActions.addView(clear, actionWidth(layout));
+        paintTraversal.add(resize);
+        paintTraversal.add(clear);
         content.addView(canvasActions, fullWidth());
         resize.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { requestPaintResize(paint); }
@@ -8486,14 +8618,18 @@ public final class MainActivity extends Activity {
         name.setSingleLine(true);
         name.setText(defaultName);
         content.addView(name, fullWidth());
+        paintTraversal.add(name);
         LinearLayout finish = new LinearLayout(this);
-        finish.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(finish, layout);
         Button save = compactButton("Save as PNG");
         Button saveAndAttach = compactButton("Save + Attach to AI");
         Button cancel = compactButton("Cancel");
-        finish.addView(save, weightedWidth());
-        finish.addView(saveAndAttach, weightedWidth());
-        finish.addView(cancel, weightedWidth());
+        finish.addView(save, actionWidth(layout));
+        finish.addView(saveAndAttach, actionWidth(layout));
+        finish.addView(cancel, actionWidth(layout));
+        paintTraversal.add(save);
+        paintTraversal.add(saveAndAttach);
+        paintTraversal.add(cancel);
         content.addView(finish, fullWidth());
 
         ScrollView editorScroll = new ScrollView(this);
@@ -8502,6 +8638,10 @@ public final class MainActivity extends Activity {
                 .setTitle("Mini Paint - " + width + "x" + height)
                 .setView(editorScroll)
                 .create();
+        activePaintView = paint;
+        activePaintDialog = dialog;
+        activePaintName = name;
+        activePaintSuggestAiAttachment = suggestAiAttachment;
         save.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
                 savePaintedImage(paint, name.getText().toString(), dialog, false);
@@ -8520,9 +8660,18 @@ public final class MainActivity extends Activity {
             }
         });
         dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
-            @Override public void onDismiss(android.content.DialogInterface ignored) { paint.dispose(); }
+            @Override public void onDismiss(android.content.DialogInterface ignored) {
+                paint.dispose();
+                if (activePaintDialog == dialog) {
+                    activePaintView = null;
+                    activePaintDialog = null;
+                    activePaintName = null;
+                    activePaintSuggestAiAttachment = false;
+                }
+            }
         });
         dialog.show();
+        chainAccessibilityTraversal(paintTraversal.toArray(new View[paintTraversal.size()]));
     }
 
     private void savePaintedImage(WorkshopPaintView paint, String name, AlertDialog dialog,
@@ -8559,16 +8708,19 @@ public final class MainActivity extends Activity {
     }
 
     private void requestPaintResize(final WorkshopPaintView paint) {
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         final EditText width = new EditText(this);
         width.setInputType(InputType.TYPE_CLASS_NUMBER);
+        width.setContentDescription("Canvas width in pixels");
         width.setText(Integer.toString(paint.canvasWidth()));
         final EditText height = new EditText(this);
         height.setInputType(InputType.TYPE_CLASS_NUMBER);
+        height.setContentDescription("Canvas height in pixels");
         height.setText(Integer.toString(paint.canvasHeight()));
         LinearLayout dimensions = new LinearLayout(this);
-        dimensions.setOrientation(LinearLayout.HORIZONTAL);
-        dimensions.addView(width, weightedWidth());
-        dimensions.addView(height, weightedWidth());
+        configureActionRow(dimensions, layout);
+        dimensions.addView(width, actionWidth(layout));
+        dimensions.addView(height, actionWidth(layout));
         new AlertDialog.Builder(this)
                 .setTitle("Resize / Crop Canvas")
                 .setMessage("Pixels outside the new bottom/right edges are cropped; new space is transparent.")
@@ -8591,7 +8743,8 @@ public final class MainActivity extends Activity {
         Button button = new Button(this);
         button.setText(label);
         button.setAllCaps(false);
-        button.setTextSize(11.0f);
+        button.setTextSize(14.0f);
+        button.setMinHeight(dp(48));
         button.setPadding(dp(2), 0, dp(2), 0);
         return button;
     }
@@ -8636,6 +8789,7 @@ public final class MainActivity extends Activity {
     }
 
     private void reviewAiImageAttachments() {
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         final ArrayList<Bitmap> previews = new ArrayList<>();
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -8649,7 +8803,7 @@ public final class MainActivity extends Activity {
             }
             for (final WorkshopImageAssets.AssetInfo asset : selected) {
                 LinearLayout row = new LinearLayout(this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
+                configureActionRow(row, layout);
                 row.setGravity(Gravity.CENTER_VERTICAL);
                 Bitmap bitmap = WorkshopImageAssets.decodePreview(asset);
                 previews.add(bitmap);
@@ -8663,8 +8817,9 @@ public final class MainActivity extends Activity {
                 label.setText(asset.relativePath + "\n" + asset.width + "x" + asset.height
                         + " - original detail - " + WorkshopAiImageContext.reviewLabel(designSketch));
                 label.setPadding(dp(8), 0, dp(8), 0);
-                row.addView(label, weightedWidth());
+                row.addView(label, actionWidth(layout));
                 Button remove = compactButton("Remove");
+                remove.setMinWidth(dp(88));
                 remove.setOnClickListener(new View.OnClickListener() {
                     @Override public void onClick(View view) {
                         selectedImageAssets.remove(asset.relativePath);
@@ -8674,7 +8829,9 @@ public final class MainActivity extends Activity {
                         row.setVisibility(View.GONE);
                     }
                 });
-                row.addView(remove, new LinearLayout.LayoutParams(dp(88), LinearLayout.LayoutParams.WRAP_CONTENT));
+                row.addView(remove, layout.stackActions ? fullWidth()
+                        : new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT));
                 content.addView(row, fullWidth());
             }
         } catch (Exception error) {
@@ -9987,6 +10144,34 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT);
     }
 
+    private WorkshopAdaptiveLayout.Profile adaptiveLayoutProfile() {
+        Configuration configuration = getResources().getConfiguration();
+        return WorkshopAdaptiveLayout.profile(configuration.screenWidthDp,
+                configuration.screenHeightDp, configuration.fontScale);
+    }
+
+    private static void configureActionRow(LinearLayout row,
+            WorkshopAdaptiveLayout.Profile layout) {
+        row.setOrientation(layout.stackActions ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+    }
+
+    private LinearLayout.LayoutParams actionWidth(WorkshopAdaptiveLayout.Profile layout) {
+        return layout.stackActions ? fullWidth() : weightedWidth();
+    }
+
+    private static void chainAccessibilityTraversal(View... views) {
+        View previous = null;
+        for (View view : views) {
+            if (view == null) continue;
+            if (view.getId() == View.NO_ID) view.setId(View.generateViewId());
+            if (previous != null) {
+                view.setAccessibilityTraversalAfter(previous.getId());
+                previous.setNextFocusForwardId(view.getId());
+            }
+            previous = view;
+        }
+    }
+
     private GradientDrawable createPanelBackground(int fill, int stroke) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(fill);
@@ -9995,8 +10180,47 @@ public final class MainActivity extends Activity {
         return drawable;
     }
 
+    private StateListDrawable createFocusableControlBackground() {
+        GradientDrawable focused = createPanelBackground(
+                WorkshopAccessibilityPolicy.DARK_CONTROL,
+                WorkshopAccessibilityPolicy.FOCUS_BORDER);
+        focused.setStroke(dp(3), WorkshopAccessibilityPolicy.FOCUS_BORDER);
+        GradientDrawable pressed = createPanelBackground(Color.rgb(38, 98, 217),
+                WorkshopAccessibilityPolicy.FOCUS_BORDER);
+        StateListDrawable background = new StateListDrawable();
+        background.addState(new int[] {android.R.attr.state_focused}, focused);
+        background.addState(new int[] {android.R.attr.state_pressed}, pressed);
+        background.addState(new int[] {}, createPanelBackground(
+                WorkshopAccessibilityPolicy.DARK_CONTROL,
+                WorkshopAccessibilityPolicy.DARK_CONTROL_BORDER));
+        return background;
+    }
+
+    private static void selectOnly(List<Button> choices, Button selected) {
+        for (Button choice : choices) choice.setSelected(choice == selected);
+    }
+
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private static final class RetainedPaintSession {
+        final Bitmap bitmap;
+        final String name;
+        final boolean suggestAiAttachment;
+        final int brushColor;
+        final float brushSize;
+        final boolean erasing;
+
+        RetainedPaintSession(Bitmap bitmap, String name, boolean suggestAiAttachment,
+                int brushColor, float brushSize, boolean erasing) {
+            this.bitmap = bitmap;
+            this.name = name;
+            this.suggestAiAttachment = suggestAiAttachment;
+            this.brushColor = brushColor;
+            this.brushSize = brushSize;
+            this.erasing = erasing;
+        }
     }
 
     private static final class AiApiResponse {

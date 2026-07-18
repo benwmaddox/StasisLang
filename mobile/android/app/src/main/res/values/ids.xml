@@ -1,0 +1,7 @@
+<resources>
+    <item name="paint_cursor_left" type="id" />
+    <item name="paint_cursor_right" type="id" />
+    <item name="paint_cursor_up" type="id" />
+    <item name="paint_cursor_down" type="id" />
+    <item name="paint_at_cursor" type="id" />
+</resources>
