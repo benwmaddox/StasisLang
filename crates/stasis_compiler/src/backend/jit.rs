@@ -1026,201 +1026,66 @@ fn new_stasis_jit_builder() -> Result<JITBuilder, String> {
 }
 fn runtime_helper_addresses() -> BTreeMap<String, usize> {
     let mut out = BTreeMap::new();
-    out.insert(
-        "stasis_jit_call_i32_0".to_string(),
-        stasis_dynload::stasis_jit_call_i32_0 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_1".to_string(),
-        stasis_dynload::stasis_jit_call_i32_1 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_2".to_string(),
-        stasis_dynload::stasis_jit_call_i32_2 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_3".to_string(),
-        stasis_dynload::stasis_jit_call_i32_3 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_4".to_string(),
-        stasis_dynload::stasis_jit_call_i32_4 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_5".to_string(),
-        stasis_dynload::stasis_jit_call_i32_5 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_6".to_string(),
-        stasis_dynload::stasis_jit_call_i32_6 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_7".to_string(),
-        stasis_dynload::stasis_jit_call_i32_7 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_8".to_string(),
-        stasis_dynload::stasis_jit_call_i32_8 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_1".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_1 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_2".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_2 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_3".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_3 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_4".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_4 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_5".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_5 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_6".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_6 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_7".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_7 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_8".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_8 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_0".to_string(),
-        stasis_dynload::stasis_jit_call_f32_0 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_1".to_string(),
-        stasis_dynload::stasis_jit_call_f32_1 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_2".to_string(),
-        stasis_dynload::stasis_jit_call_f32_2 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_3".to_string(),
-        stasis_dynload::stasis_jit_call_f32_3 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_4".to_string(),
-        stasis_dynload::stasis_jit_call_f32_4 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_5".to_string(),
-        stasis_dynload::stasis_jit_call_f32_5 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_6".to_string(),
-        stasis_dynload::stasis_jit_call_f32_6 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_7".to_string(),
-        stasis_dynload::stasis_jit_call_f32_7 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_8".to_string(),
-        stasis_dynload::stasis_jit_call_f32_8 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_i32_1".to_string(),
-        stasis_dynload::stasis_jit_call_f32_i32_1 as usize,
-    );
-    out.insert(
-        "stasis_jit_print_i32".to_string(),
-        stasis_dynload::stasis_jit_print_i32 as usize,
-    );
-    out.insert(
-        "stasis_jit_print_string".to_string(),
-        stasis_dynload::stasis_jit_print_string as usize,
-    );
-    out.insert(
-        "stasis_jit_lookup_code_ptr".to_string(),
-        stasis_dynload::stasis_jit_lookup_code_ptr as usize,
-    );
-    out.insert(
-        "stasis_jit_sin_fast".to_string(),
-        stasis_dynload::stasis_jit_sin_fast as usize,
-    );
-    out.insert(
-        "stasis_jit_cos_fast".to_string(),
-        stasis_dynload::stasis_jit_cos_fast as usize,
-    );
-    out.insert(
-        "stasis_jit_global_i32_load".to_string(),
-        stasis_dynload::stasis_jit_global_i32_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_i32_store".to_string(),
-        stasis_dynload::stasis_jit_global_i32_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f32_load".to_string(),
-        stasis_dynload::stasis_jit_global_f32_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f32_store".to_string(),
-        stasis_dynload::stasis_jit_global_f32_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f64_load".to_string(),
-        stasis_dynload::stasis_jit_global_f64_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f64_store".to_string(),
-        stasis_dynload::stasis_jit_global_f64_store as usize,
-    );
-    out.insert(
-        "stasis_jit_collection_i32_load".to_string(),
-        stasis_dynload::stasis_jit_collection_i32_load as usize,
-    );
-    out.insert(
-        "stasis_jit_collection_i32_store".to_string(),
-        stasis_dynload::stasis_jit_collection_i32_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_i32_array_load".to_string(),
-        stasis_dynload::stasis_jit_global_i32_array_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_i32_array_store".to_string(),
-        stasis_dynload::stasis_jit_global_i32_array_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_i32_array_ptr".to_string(),
-        stasis_dynload::stasis_jit_global_i32_array_ptr as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f32_array_load".to_string(),
-        stasis_dynload::stasis_jit_global_f32_array_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f32_array_store".to_string(),
-        stasis_dynload::stasis_jit_global_f32_array_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f32_array_ptr".to_string(),
-        stasis_dynload::stasis_jit_global_f32_array_ptr as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f64_array_load".to_string(),
-        stasis_dynload::stasis_jit_global_f64_array_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f64_array_store".to_string(),
-        stasis_dynload::stasis_jit_global_f64_array_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f64_array_ptr".to_string(),
-        stasis_dynload::stasis_jit_global_f64_array_ptr as usize,
+    macro_rules! insert_helpers {
+        ($($name:ident),+ $(,)?) => {
+            $(
+                out.insert(
+                    stringify!($name).to_string(),
+                    function_address(stasis_dynload::$name as *const ()),
+                );
+            )+
+        };
+    }
+    insert_helpers!(
+        stasis_jit_call_i32_0,
+        stasis_jit_call_i32_1,
+        stasis_jit_call_i32_2,
+        stasis_jit_call_i32_3,
+        stasis_jit_call_i32_4,
+        stasis_jit_call_i32_5,
+        stasis_jit_call_i32_6,
+        stasis_jit_call_i32_7,
+        stasis_jit_call_i32_8,
+        stasis_jit_call_i32_f32_1,
+        stasis_jit_call_i32_f32_2,
+        stasis_jit_call_i32_f32_3,
+        stasis_jit_call_i32_f32_4,
+        stasis_jit_call_i32_f32_5,
+        stasis_jit_call_i32_f32_6,
+        stasis_jit_call_i32_f32_7,
+        stasis_jit_call_i32_f32_8,
+        stasis_jit_call_f32_0,
+        stasis_jit_call_f32_1,
+        stasis_jit_call_f32_2,
+        stasis_jit_call_f32_3,
+        stasis_jit_call_f32_4,
+        stasis_jit_call_f32_5,
+        stasis_jit_call_f32_6,
+        stasis_jit_call_f32_7,
+        stasis_jit_call_f32_8,
+        stasis_jit_call_f32_i32_1,
+        stasis_jit_print_i32,
+        stasis_jit_print_string,
+        stasis_jit_lookup_code_ptr,
+        stasis_jit_sin_fast,
+        stasis_jit_cos_fast,
+        stasis_jit_global_i32_load,
+        stasis_jit_global_i32_store,
+        stasis_jit_global_f32_load,
+        stasis_jit_global_f32_store,
+        stasis_jit_global_f64_load,
+        stasis_jit_global_f64_store,
+        stasis_jit_collection_i32_load,
+        stasis_jit_collection_i32_store,
+        stasis_jit_global_i32_array_load,
+        stasis_jit_global_i32_array_store,
+        stasis_jit_global_i32_array_ptr,
+        stasis_jit_global_f32_array_load,
+        stasis_jit_global_f32_array_store,
+        stasis_jit_global_f32_array_ptr,
+        stasis_jit_global_f64_array_load,
+        stasis_jit_global_f64_array_store,
+        stasis_jit_global_f64_array_ptr,
     );
     out
 }

@@ -1369,6 +1369,10 @@ fn try_run_android_aot_bundle_subcommand() -> Option<i32> {
                 "android_aot_symbols_header={}",
                 summary.symbols_header.display()
             );
+            println!(
+                "android_aot_bindings_source={}",
+                summary.bindings_source.display()
+            );
             println!("android_aot_cmake_file={}", summary.cmake_file.display());
             println!("android_aot_asset_dir={}", summary.asset_dir.display());
             Some(0)
