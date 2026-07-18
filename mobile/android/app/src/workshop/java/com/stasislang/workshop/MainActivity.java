@@ -279,6 +279,9 @@ public final class MainActivity extends Activity {
     private TextView changeSummary;
     private TextView gameStatus;
     private GamePreviewView gamePreview;
+    private boolean previewFocusabilityCaptured;
+    private boolean previewFocusableWhenUncovered;
+    private boolean previewFocusableInTouchModeWhenUncovered;
     private LinearLayout symbolList;
     private File projectRootFile;
     private String projectRootPath;
@@ -1165,7 +1168,7 @@ public final class MainActivity extends Activity {
         boolean opening = editorPanel.getVisibility() != View.VISIBLE;
         editorPanel.setVisibility(opening ? View.VISIBLE : View.GONE);
         boolean coverPreview = opening && adaptiveLayoutProfile().fullWidthEditor;
-        setPreviewAccessibilityHidden(coverPreview);
+        setPreviewCovered(coverPreview);
         updateAiGameProgressOverlay();
         if (opening) {
             editorPanel.bringToFront();
@@ -1196,10 +1199,25 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void setPreviewAccessibilityHidden(boolean hidden) {
-        int importance = hidden ? View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+    private void setPreviewCovered(boolean covered) {
+        int importance = covered ? View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
                 : View.IMPORTANT_FOR_ACCESSIBILITY_AUTO;
-        if (gamePreview != null) gamePreview.setImportantForAccessibility(importance);
+        if (gamePreview != null) {
+            gamePreview.setImportantForAccessibility(importance);
+            if (covered && !previewFocusabilityCaptured) {
+                previewFocusableWhenUncovered = gamePreview.isFocusable();
+                previewFocusableInTouchModeWhenUncovered = gamePreview.isFocusableInTouchMode();
+                previewFocusabilityCaptured = true;
+            }
+            if (covered) {
+                gamePreview.setFocusable(false);
+                gamePreview.setFocusableInTouchMode(false);
+            } else if (previewFocusabilityCaptured) {
+                gamePreview.setFocusable(previewFocusableWhenUncovered);
+                gamePreview.setFocusableInTouchMode(previewFocusableInTouchModeWhenUncovered);
+                previewFocusabilityCaptured = false;
+            }
+        }
         if (gameStatus != null) gameStatus.setImportantForAccessibility(importance);
     }
 

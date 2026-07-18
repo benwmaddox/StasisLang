@@ -569,6 +569,9 @@ def main() -> int:
     assert "SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR" in activity
     assert 'announceForAccessibility("Workshop menu opened")' in activity
     assert "createFocusableControlBackground" in activity
+    assert "setPreviewCovered(coverPreview)" in activity
+    assert "gamePreview.setFocusable(false)" in activity
+    assert "gamePreview.setFocusable(previewFocusableWhenUncovered)" in activity
     assert "voiceActionRow, layout" in activity
     assert "configuration.fontScale" in activity
     assert "MEDIUM_WIDTH_DP = 600" in adaptive_layout
