@@ -425,6 +425,7 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_load_sprite: usize,
     stasis_gfx_release_sprite: usize,
     stasis_gfx_dump_bmp: usize,
+    stasis_gfx_dump_png: Option<usize>,
     stasis_gfx_poll_reload: usize,
     stasis_load_font: usize,
     stasis_measure_text: usize,
@@ -452,6 +453,9 @@ impl StasisGraphicsAssetsApi {
             stasis_gfx_load_sprite: lib.symbol_address("stasis_gfx_load_sprite")?,
             stasis_gfx_release_sprite: lib.symbol_address("stasis_gfx_release_sprite")?,
             stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
+            // PNG capture was added after the original asset ABI. Keep older runtime
+            // DLLs usable for all pre-existing calls and report PNG as unsupported.
+            stasis_gfx_dump_png: lib.symbol_address("stasis_gfx_dump_png").ok(),
             stasis_gfx_poll_reload: lib.symbol_address("stasis_gfx_poll_reload")?,
             stasis_load_font: lib.symbol_address("stasis_load_font")?,
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
@@ -1499,6 +1503,30 @@ pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
         };
         let callback: extern "system" fn(*const c_char) -> i32 =
             unsafe { std::mem::transmute(api.stasis_gfx_dump_bmp) };
+        return callback(path.as_ptr());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path_id;
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_dump_png(path_id: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let Some(address) = api.stasis_gfx_dump_png else {
+            return 0;
+        };
+        let callback: extern "system" fn(*const c_char) -> i32 =
+            unsafe { std::mem::transmute(address) };
         return callback(path.as_ptr());
     }
     #[cfg(not(windows))]

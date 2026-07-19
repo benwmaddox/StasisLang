@@ -88,6 +88,7 @@ static bool g_postfx_applied_this_frame = false;
 static bool g_screenshot_taken = false;
 static char g_screenshot_path[1024] = {0};
 static int g_screenshot_exit_after = 0;
+static int g_screenshot_frame = 1;
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static GLuint g_postfx_program = 0;
 static GLint g_postfx_time_loc = -1;
@@ -2536,7 +2537,139 @@ static int write_bmp_bgra32(const char* path, int w, int h, const uint8_t* bgra,
     return 1;
 }
 
-STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
+static void write_u32_be(uint8_t* out, uint32_t value) {
+    out[0] = (uint8_t)(value >> 24);
+    out[1] = (uint8_t)(value >> 16);
+    out[2] = (uint8_t)(value >> 8);
+    out[3] = (uint8_t)value;
+}
+
+static uint32_t png_crc32_update(uint32_t crc, const uint8_t* data, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; bit++) {
+            uint32_t mask = (uint32_t)(-(int32_t)(crc & 1u));
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
+        }
+    }
+    return crc;
+}
+
+static int write_png_chunk(FILE* f, const char type[4], const uint8_t* data, uint32_t length) {
+    uint8_t size_bytes[4];
+    uint8_t crc_bytes[4];
+    write_u32_be(size_bytes, length);
+    uint32_t crc = png_crc32_update(0xFFFFFFFFu, (const uint8_t*)type, 4);
+    if (length > 0) crc = png_crc32_update(crc, data, length);
+    write_u32_be(crc_bytes, crc ^ 0xFFFFFFFFu);
+    return fwrite(size_bytes, 1, 4, f) == 4 &&
+           fwrite(type, 1, 4, f) == 4 &&
+           (length == 0 || fwrite(data, 1, length, f) == length) &&
+           fwrite(crc_bytes, 1, 4, f) == 4;
+}
+
+static uint32_t png_adler32(const uint8_t* data, size_t length) {
+    uint32_t a = 1;
+    uint32_t b = 0;
+    for (size_t offset = 0; offset < length;) {
+        size_t block = length - offset;
+        if (block > 5552) block = 5552;
+        for (size_t i = 0; i < block; i++) {
+            a += data[offset + i];
+            b += a;
+        }
+        a %= 65521u;
+        b %= 65521u;
+        offset += block;
+    }
+    return (b << 16) | a;
+}
+
+/* Deterministic PNG writer using zlib's uncompressed DEFLATE blocks. */
+static int write_png_bgra32(const char* path, int w, int h, const uint8_t* bgra, int is_bottom_up) {
+    if (!path || !*path || w <= 0 || h <= 0 || !bgra) return 0;
+    if ((size_t)w > (SIZE_MAX - 1u) / 4u) return 0;
+    const size_t pixel_row_bytes = (size_t)w * 4u;
+    const size_t png_row_bytes = pixel_row_bytes + 1u;
+    if ((size_t)h > SIZE_MAX / png_row_bytes) return 0;
+    const size_t raw_size = png_row_bytes * (size_t)h;
+    if (raw_size > UINT32_MAX) return 0;
+
+    uint8_t* raw = (uint8_t*)malloc(raw_size);
+    if (!raw) return 0;
+    for (int y = 0; y < h; y++) {
+        const int source_y = is_bottom_up ? (h - 1 - y) : y;
+        const uint8_t* source = bgra + (size_t)source_y * pixel_row_bytes;
+        uint8_t* target = raw + (size_t)y * png_row_bytes;
+        target[0] = 0;
+        for (int x = 0; x < w; x++) {
+            target[1 + x * 4 + 0] = source[x * 4 + 2];
+            target[1 + x * 4 + 1] = source[x * 4 + 1];
+            target[1 + x * 4 + 2] = source[x * 4 + 0];
+            target[1 + x * 4 + 3] = source[x * 4 + 3];
+        }
+    }
+
+    const size_t block_count = (raw_size + 65534u) / 65535u;
+    if (raw_size > SIZE_MAX - 6u ||
+        block_count > (SIZE_MAX - raw_size - 6u) / 5u) {
+        free(raw);
+        return 0;
+    }
+    const size_t zlib_size = 2u + raw_size + block_count * 5u + 4u;
+    if (zlib_size > UINT32_MAX) {
+        free(raw);
+        return 0;
+    }
+    uint8_t* zlib = (uint8_t*)malloc(zlib_size);
+    if (!zlib) {
+        free(raw);
+        return 0;
+    }
+
+    size_t input_offset = 0;
+    size_t output_offset = 0;
+    zlib[output_offset++] = 0x78;
+    zlib[output_offset++] = 0x01;
+    while (input_offset < raw_size) {
+        size_t remaining = raw_size - input_offset;
+        uint16_t block_length = (uint16_t)(remaining > 65535u ? 65535u : remaining);
+        uint16_t inverse_length = (uint16_t)~block_length;
+        zlib[output_offset++] = remaining <= 65535u ? 1u : 0u;
+        zlib[output_offset++] = (uint8_t)block_length;
+        zlib[output_offset++] = (uint8_t)(block_length >> 8);
+        zlib[output_offset++] = (uint8_t)inverse_length;
+        zlib[output_offset++] = (uint8_t)(inverse_length >> 8);
+        memcpy(zlib + output_offset, raw + input_offset, block_length);
+        output_offset += block_length;
+        input_offset += block_length;
+    }
+    write_u32_be(zlib + output_offset, png_adler32(raw, raw_size));
+    output_offset += 4;
+
+    uint8_t ihdr[13];
+    write_u32_be(ihdr, (uint32_t)w);
+    write_u32_be(ihdr + 4, (uint32_t)h);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    ihdr[10] = 0;
+    ihdr[11] = 0;
+    ihdr[12] = 0;
+    static const uint8_t signature[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+
+    FILE* f = fopen(path, "wb");
+    int ok = f && fwrite(signature, 1, sizeof(signature), f) == sizeof(signature) &&
+             write_png_chunk(f, "IHDR", ihdr, sizeof(ihdr)) &&
+             write_png_chunk(f, "IDAT", zlib, (uint32_t)output_offset) &&
+             write_png_chunk(f, "IEND", NULL, 0);
+    if (f && fclose(f) != 0) ok = 0;
+    if (!ok) remove(path);
+    free(zlib);
+    free(raw);
+    return ok;
+}
+
+static int stasis_gfx_dump_image(const char* path, int png, int render_queued_lines) {
     if (!path || !*path) return 0;
     if (!g_window) return 0;
     if (g_window_width <= 0 || g_window_height <= 0) return 0;
@@ -2561,23 +2694,26 @@ STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
 
     if (g_use_sdl_renderer) {
         if (g_renderer) {
-            /* Match end_frame() behavior so the screenshot includes queued lines. */
-            SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-            SDL_Color color;
-            for (int i = 0; i < g_line_count; i++) {
-                color.r = (Uint8)(g_lines[i].r * 255.0f);
-                color.g = (Uint8)(g_lines[i].g * 255.0f);
-                color.b = (Uint8)(g_lines[i].b * 255.0f);
-                color.a = (Uint8)(g_lines[i].a * 255.0f);
-                SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
-                SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
+            if (render_queued_lines) {
+                /* Direct API calls may happen before end_frame(), so flush pending lines once. */
+                SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+                SDL_Color color;
+                for (int i = 0; i < g_line_count; i++) {
+                    color.r = (Uint8)(g_lines[i].r * 255.0f);
+                    color.g = (Uint8)(g_lines[i].g * 255.0f);
+                    color.b = (Uint8)(g_lines[i].b * 255.0f);
+                    color.a = (Uint8)(g_lines[i].a * 255.0f);
+                    SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
+                    SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
+                }
+                g_line_count = 0;
             }
-            g_line_count = 0;
 
-            /* SDL_RenderReadPixels reads from the current render target. Call before stasis_end_frame(). */
+            /* SDL_RenderReadPixels reads from the current render target before present. */
             int rc = SDL_RenderReadPixels(g_renderer, NULL, SDL_PIXELFORMAT_BGRA32, pixels, w * 4);
             if (rc == 0) {
-                ok = write_bmp_bgra32(out_path, w, h, pixels, 0);
+                ok = png ? write_png_bgra32(out_path, w, h, pixels, 0)
+                         : write_bmp_bgra32(out_path, w, h, pixels, 0);
             }
         }
         free(pixels);
@@ -2603,8 +2739,9 @@ STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
         glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
         GLenum err = glGetError();
         if (err == GL_NO_ERROR) {
-            /* glReadPixels returns bottom-up; BMP header uses top-down (negative height). Flip by writing bottom-up rows and marking as bottom-up. */
-            ok = write_bmp_bgra32(out_path, w, h, pixels, 1);
+            /* glReadPixels returns rows from the bottom of the framebuffer first. */
+            ok = png ? write_png_bgra32(out_path, w, h, pixels, 1)
+                     : write_bmp_bgra32(out_path, w, h, pixels, 1);
         }
         free(pixels);
         return ok;
@@ -2613,6 +2750,32 @@ STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
 
     free(pixels);
     return 0;
+}
+
+STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
+    return stasis_gfx_dump_image(path, 0, 1);
+}
+
+STASIS_EXPORT int stasis_gfx_dump_png(const char* path) {
+    return stasis_gfx_dump_image(path, 1, 1);
+}
+
+static void capture_scheduled_screenshot(void) {
+    if (g_screenshot_taken || g_screenshot_path[0] == 0 ||
+        g_debug_frame_counter + 1 != g_screenshot_frame) {
+        return;
+    }
+    int ok = stasis_gfx_dump_image(
+        g_screenshot_path,
+        ends_with_ci(g_screenshot_path, ".png"),
+        0);
+    if (!ok) {
+        SDL_Log("failed to capture screenshot: %s", g_screenshot_path);
+        if (g_screenshot_exit_after) g_should_quit = true;
+        return;
+    }
+    g_screenshot_taken = true;
+    if (g_screenshot_exit_after) g_should_quit = true;
 }
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -3147,6 +3310,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     /* Optional screenshot automation via environment variables. */
     g_screenshot_taken = false;
     g_screenshot_exit_after = 0;
+    g_screenshot_frame = 1;
+    g_debug_frame_counter = 0;
     g_screenshot_path[0] = 0;
     const char* screenshot = SDL_getenv("STASIS_SCREENSHOT_ONCE");
     if (screenshot && *screenshot) {
@@ -3155,6 +3320,15 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         const char* exit_after = SDL_getenv("STASIS_EXIT_AFTER_SCREENSHOT");
         if (exit_after && exit_after[0] == '1') {
             g_screenshot_exit_after = 1;
+        }
+        const char* screenshot_frame = SDL_getenv("STASIS_SCREENSHOT_FRAME");
+        if (screenshot_frame && *screenshot_frame) {
+            char* end = NULL;
+            long parsed_frame = strtol(screenshot_frame, &end, 10);
+            if (end != screenshot_frame && *end == 0 &&
+                parsed_frame >= 1 && parsed_frame <= INT_MAX) {
+                g_screenshot_frame = (int)parsed_frame;
+            }
         }
     }
 
@@ -3515,14 +3689,8 @@ STASIS_EXPORT void stasis_end_frame(void) {
             SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
         }
 
-        if (!g_screenshot_taken && g_screenshot_path[0] != 0) {
-            /* Capture before present so we read the current render target. */
-            stasis_gfx_dump_bmp(g_screenshot_path);
-            g_screenshot_taken = true;
-            if (g_screenshot_exit_after) {
-                g_should_quit = true;
-            }
-        }
+        /* Capture before present so we read the current render target. */
+        capture_scheduled_screenshot();
         SDL_RenderPresent(g_renderer);
         g_line_count = 0;
     } else {
@@ -3533,14 +3701,8 @@ STASIS_EXPORT void stasis_end_frame(void) {
             render_postfx();
             g_postfx_applied_this_frame = true;
         }
-        if (!g_screenshot_taken && g_screenshot_path[0] != 0) {
-            /* Capture after all draws (including postfx) but before swap. */
-            stasis_gfx_dump_bmp(g_screenshot_path);
-            g_screenshot_taken = true;
-            if (g_screenshot_exit_after) {
-                g_should_quit = true;
-            }
-        }
+        /* Capture after all draws (including postfx) but before swap. */
+        capture_scheduled_screenshot();
         SDL_GL_SwapWindow(g_window);
 #else
         /* STASIS_GRAPHICS_SDL_ONLY should never create a GL context. */

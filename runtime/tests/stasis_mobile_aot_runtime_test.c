@@ -39,6 +39,7 @@ int stasis_gfx_load_sprite(const char *path, int max_w, int max_h) {
 }
 void stasis_gfx_release_sprite(int handle) { (void)handle; }
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }
+int stasis_gfx_dump_png(const char *path) { return path != NULL; }
 int stasis_gfx_cache_text(int font, const char *text) { return font + (text != NULL); }
 int stasis_gfx_poll_reload(int handle) { return handle; }
 float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }
@@ -79,6 +80,7 @@ int main(void) {
     stasis_jit_collection_i32_store(23, 1, sizeof(dynamic_path) - 1);
     CHECK(stasis_jit_gfx_load_sprite(23, 32, 32) == 1);
     CHECK(strcmp(last_sprite_path, "sprite.bmp") == 0);
+    CHECK(stasis_jit_gfx_dump_png(23) == 1);
 
     owned = stasis_jit_global_i32_array_ptr(21, 0, 4);
     CHECK(owned != NULL);

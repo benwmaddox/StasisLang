@@ -111,6 +111,9 @@ struct PlayCliArgs {
     data_bind_struct_meta: Option<PathBuf>,
     tick_sleep_micros: u64,
     ticks: Option<u64>,
+    screenshot: Option<PathBuf>,
+    screenshot_frame: u64,
+    exit_after_screenshot: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,6 +529,10 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     let mut data_bind_struct_meta: Option<PathBuf> = None;
     let mut tick_sleep_micros: u64 = 16000;
     let mut ticks: Option<u64> = None;
+    let mut screenshot: Option<PathBuf> = None;
+    let mut screenshot_frame: u64 = 1;
+    let mut screenshot_frame_explicit = false;
+    let mut exit_after_screenshot = false;
     let mut i: usize = 0;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -584,6 +591,33 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
             i += 2;
             continue;
         }
+        if arg == "--screenshot" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --screenshot".to_string());
+            }
+            screenshot = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
+            continue;
+        }
+        if arg == "--screenshot-frame" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --screenshot-frame".to_string());
+            }
+            screenshot_frame = args[i + 1]
+                .parse::<u64>()
+                .map_err(|error| format!("invalid value for --screenshot-frame: {error}"))?;
+            if screenshot_frame == 0 || screenshot_frame > i32::MAX as u64 {
+                return Err("--screenshot-frame must be between 1 and 2147483647".to_string());
+            }
+            screenshot_frame_explicit = true;
+            i += 2;
+            continue;
+        }
+        if arg == "--exit-after-screenshot" {
+            exit_after_screenshot = true;
+            i += 1;
+            continue;
+        }
         i += 1;
     }
     let Some(watch_file) = watch_file else {
@@ -592,6 +626,15 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
                 .to_string(),
         );
     };
+    if screenshot.is_none() && (screenshot_frame_explicit || exit_after_screenshot) {
+        return Err(
+            "--screenshot-frame and --exit-after-screenshot require --screenshot <path>"
+                .to_string(),
+        );
+    }
+    if screenshot.is_some() && ticks.is_some_and(|count| count < screenshot_frame) {
+        return Err("--ticks must be at least --screenshot-frame when capturing".to_string());
+    }
     Ok(PlayCliArgs {
         watch_file,
         watch_dir,
@@ -599,7 +642,85 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         data_bind_struct_meta,
         tick_sleep_micros,
         ticks,
+        screenshot,
+        screenshot_frame,
+        exit_after_screenshot,
     })
+}
+
+struct PlayScreenshotEnvironment {
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    output_path: Option<PathBuf>,
+}
+
+impl Drop for PlayScreenshotEnvironment {
+    fn drop(&mut self) {
+        for (name, value) in self.previous.drain(..).rev() {
+            if let Some(value) = value {
+                env::set_var(name, value);
+            } else {
+                env::remove_var(name);
+            }
+        }
+    }
+}
+
+fn configure_play_screenshot_environment(
+    parsed: &PlayCliArgs,
+) -> Result<PlayScreenshotEnvironment, String> {
+    let Some(path) = parsed.screenshot.as_ref() else {
+        return Ok(PlayScreenshotEnvironment {
+            previous: Vec::new(),
+            output_path: None,
+        });
+    };
+    let resolved = if path.is_absolute() {
+        path.clone()
+    } else {
+        env::current_dir()
+            .map_err(|error| format!("failed to resolve --screenshot path: {error}"))?
+            .join(path)
+    };
+    let names = [
+        "STASIS_SCREENSHOT_ONCE",
+        "STASIS_SCREENSHOT_FRAME",
+        "STASIS_EXIT_AFTER_SCREENSHOT",
+    ];
+    let parent = resolved
+        .parent()
+        .ok_or_else(|| "--screenshot path has no parent directory".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create screenshot directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    if resolved.exists() {
+        fs::remove_file(&resolved).map_err(|error| {
+            format!(
+                "failed to replace screenshot output {}: {error}",
+                resolved.display()
+            )
+        })?;
+    }
+    let guard = PlayScreenshotEnvironment {
+        previous: names
+            .into_iter()
+            .map(|name| (name, env::var_os(name)))
+            .collect(),
+        output_path: Some(resolved.clone()),
+    };
+    env::set_var("STASIS_SCREENSHOT_ONCE", resolved);
+    env::set_var(
+        "STASIS_SCREENSHOT_FRAME",
+        parsed.screenshot_frame.to_string(),
+    );
+    if parsed.exit_after_screenshot {
+        env::set_var("STASIS_EXIT_AFTER_SCREENSHOT", "1");
+    } else {
+        env::remove_var("STASIS_EXIT_AFTER_SCREENSHOT");
+    }
+    Ok(guard)
 }
 
 fn try_run_play_subcommand() -> Option<i32> {
@@ -616,16 +737,39 @@ fn try_run_play_subcommand() -> Option<i32> {
             return Some(2);
         }
     };
+    let screenshot_environment = match configure_play_screenshot_environment(&parsed) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(2);
+        }
+    };
 
-    match run_play_in_process(
+    let play_result = run_play_in_process(
         &parsed.watch_file,
         parsed.watch_dir.as_deref(),
         parsed.data_bind_json.as_deref(),
         parsed.data_bind_struct_meta.as_deref(),
         parsed.tick_sleep_micros,
         parsed.ticks,
-    ) {
-        Ok(()) => Some(0),
+    );
+    match play_result {
+        Ok(()) => {
+            if let Some(path) = screenshot_environment.output_path.as_ref() {
+                match fs::metadata(path) {
+                    Ok(metadata) if metadata.len() > 0 => {}
+                    Ok(_) => {
+                        eprintln!("screenshot output is empty: {}", path.display());
+                        return Some(1);
+                    }
+                    Err(error) => {
+                        eprintln!("screenshot was not captured at {}: {error}", path.display());
+                        return Some(1);
+                    }
+                }
+            }
+            Some(0)
+        }
         Err(message) => {
             eprintln!("{message}");
             Some(1)
@@ -2036,6 +2180,63 @@ mod tests {
         ];
         let error = parse_play_cli_args(&args).expect_err("parse should fail");
         assert!(error.contains("missing values for --data-bind"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_screenshot_configuration() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--screenshot".to_string(),
+            "artifacts/frame-12.png".to_string(),
+            "--screenshot-frame".to_string(),
+            "12".to_string(),
+            "--exit-after-screenshot".to_string(),
+        ];
+        let parsed = parse_play_cli_args(&args).expect("parse should succeed");
+        assert_eq!(
+            parsed.screenshot,
+            Some(PathBuf::from("artifacts/frame-12.png"))
+        );
+        assert_eq!(parsed.screenshot_frame, 12);
+        assert!(parsed.exit_after_screenshot);
+    }
+
+    #[test]
+    fn parse_play_cli_args_rejects_zero_screenshot_frame() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--screenshot".to_string(),
+            "frame.png".to_string(),
+            "--screenshot-frame".to_string(),
+            "0".to_string(),
+        ];
+        let error = parse_play_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("between 1 and 2147483647"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_requires_screenshot_for_capture_options() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--exit-after-screenshot".to_string(),
+        ];
+        let error = parse_play_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("require --screenshot"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_rejects_ticks_before_screenshot_frame() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--ticks".to_string(),
+            "11".to_string(),
+            "--screenshot".to_string(),
+            "frame.png".to_string(),
+            "--screenshot-frame".to_string(),
+            "12".to_string(),
+        ];
+        let error = parse_play_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("--ticks must be at least --screenshot-frame"));
     }
 
     #[test]

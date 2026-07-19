@@ -83,6 +83,7 @@ int stasis_jit_audio_push_f32_interleaved(int32_t samples, int32_t frames);
 int stasis_jit_gfx_load_sprite(int32_t path, int32_t max_w, int32_t max_h);
 void stasis_jit_gfx_release_sprite(int32_t handle);
 int stasis_jit_gfx_dump_bmp(int32_t path);
+int stasis_jit_gfx_dump_png(int32_t path);
 int stasis_jit_gfx_cache_text(int32_t font, int32_t text);
 int stasis_jit_gfx_poll_reload(int32_t handle);
 float stasis_jit_gfx_measure_text_cached(int32_t handle);

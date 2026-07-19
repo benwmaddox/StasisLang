@@ -894,6 +894,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => {
             function_address(stasis_dynload::stasis_jit_gfx_dump_bmp as *const ())
         }
+        "gfx_dump_png" | "stasis_gfx_dump_png" => {
+            function_address(stasis_dynload::stasis_jit_gfx_dump_png as *const ())
+        }
         "load_font" | "stasis_load_font" => {
             function_address(stasis_dynload::stasis_jit_load_font as *const ())
         }
