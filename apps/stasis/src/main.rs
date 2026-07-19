@@ -21,6 +21,7 @@ use stasis::{
 use stasis_assets::{load_project_asset_manifest, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH};
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
+use stasis_compiler::frontend::lexer::{lex, TokenKind};
 use stasis_compiler::frontend::parser::{
     parse_top_level_functions, parse_top_level_struct_definitions,
 };
@@ -1601,8 +1602,9 @@ fn write_mobile_aot_engine_bundle(
     let mut process = AotProcess::with_optimization_profile(AotOptimizationProfile::SpeedAndSize);
     process.set_import_base_dir(project_dir);
     process.set_target(target.aot_target());
-    for (path, source) in collect_mobile_aot_sources(project_dir, entry_file)? {
-        process.upsert_file(path, source);
+    let sources = collect_mobile_aot_sources(project_dir, entry_file)?;
+    for (path, source) in &sources {
+        process.upsert_file(path.clone(), source.clone());
     }
     process
         .compile()
@@ -1627,7 +1629,7 @@ fn write_mobile_aot_engine_bundle(
     } else {
         None
     };
-    let asset_dir = write_mobile_asset_bundle(target, project_dir, output_dir)?;
+    let asset_dir = write_mobile_asset_bundle(target, project_dir, output_dir, &sources)?;
     let package_manifest = write_mobile_aot_package_manifest(
         target,
         &bundle.manifest_path,
@@ -1654,6 +1656,7 @@ fn write_mobile_asset_bundle(
     target: MobileAotTarget,
     project_dir: &Path,
     output_dir: &Path,
+    sources: &[(String, String)],
 ) -> Result<PathBuf, String> {
     let resolved = load_project_asset_manifest(project_dir, AssetLimits::default())
         .map_err(|error| format!("failed to resolve mobile AOT assets: {error}"))?;
@@ -1672,7 +1675,9 @@ fn write_mobile_asset_bundle(
         .map_err(|error| format!("failed to create mobile AOT manifest directory: {error}"))?;
     fs::copy(&resolved.manifest_path, &manifest_destination)
         .map_err(|error| format!("failed to package mobile AOT asset manifest: {error}"))?;
+    let mut packaged_paths = BTreeSet::new();
     for asset in resolved.assets {
+        packaged_paths.insert(PathBuf::from(&asset.entry.path));
         let destination = game_root.join(&asset.entry.path);
         fs::create_dir_all(destination.parent().expect("asset parent"))
             .map_err(|error| format!("failed to create mobile AOT asset directory: {error}"))?;
@@ -1683,7 +1688,90 @@ fn write_mobile_asset_bundle(
             )
         })?;
     }
+    for (relative_path, source_path) in collect_mobile_source_font_assets(project_dir, sources)? {
+        if !packaged_paths.insert(relative_path.clone()) {
+            continue;
+        }
+        let destination = game_root.join(&relative_path);
+        fs::create_dir_all(destination.parent().expect("font asset parent")).map_err(|error| {
+            format!("failed to create mobile AOT font asset directory: {error}")
+        })?;
+        fs::copy(&source_path, &destination).map_err(|error| {
+            format!(
+                "failed to package mobile AOT font asset {}: {error}",
+                relative_path.display()
+            )
+        })?;
+    }
     Ok(asset_root)
+}
+
+fn collect_mobile_source_font_assets(
+    project_dir: &Path,
+    sources: &[(String, String)],
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let project_root = project_dir.canonicalize().map_err(|error| {
+        format!(
+            "failed to canonicalize mobile font asset project {}: {error}",
+            project_dir.display()
+        )
+    })?;
+    let asset_root = project_root
+        .join("assets")
+        .canonicalize()
+        .map_err(|error| {
+            format!(
+                "failed to canonicalize mobile font asset root {}: {error}",
+                project_root.join("assets").display()
+            )
+        })?;
+    let mut fonts = Vec::new();
+    for (relative_source_path, source) in sources {
+        let source_parent = project_root
+            .join(relative_source_path)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| project_root.clone());
+        for token in lex(source).map_err(|error| {
+            format!("failed to scan mobile font paths in {relative_source_path}: {error}")
+        })? {
+            if token.kind != TokenKind::StringLiteral {
+                continue;
+            }
+            let literal: String =
+                serde_json::from_str(&source[token.start..token.end]).map_err(|error| {
+                    format!("failed to decode string literal in {relative_source_path}: {error}")
+                })?;
+            let extension_is_font = Path::new(&literal)
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| {
+                    value.eq_ignore_ascii_case("ttf") || value.eq_ignore_ascii_case("otf")
+                });
+            if !extension_is_font {
+                continue;
+            }
+            let Ok(absolute_path) = source_parent.join(&literal).canonicalize() else {
+                continue;
+            };
+            if !absolute_path.is_file() || !absolute_path.starts_with(&asset_root) {
+                continue;
+            }
+            let relative_path = absolute_path
+                .strip_prefix(&project_root)
+                .map_err(|_| {
+                    format!(
+                        "mobile font escaped project root: {}",
+                        absolute_path.display()
+                    )
+                })?
+                .to_path_buf();
+            fonts.push((relative_path, absolute_path));
+        }
+    }
+    fonts.sort_by(|left, right| left.0.cmp(&right.0));
+    fonts.dedup_by(|left, right| left.0 == right.0);
+    Ok(fonts)
 }
 
 fn collect_mobile_aot_sources(
@@ -2778,6 +2866,78 @@ mod tests {
         assert_eq!(paths, vec!["src/helper.stasis", "src/main.stasis"]);
 
         std::fs::remove_dir_all(&project_dir).ok();
+    }
+
+    #[test]
+    fn mobile_asset_bundle_copies_only_source_referenced_project_fonts() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_mobile_fonts_{stamp}"));
+        let project_dir = root.join("project");
+        let src_dir = project_dir.join("src");
+        let font_dir = project_dir.join("assets/fonts");
+        let output_dir = root.join("out");
+        std::fs::create_dir_all(&src_dir).expect("mkdir src");
+        std::fs::create_dir_all(&font_dir).expect("mkdir fonts");
+        std::fs::write(
+            project_dir.join("assets/manifest.json"),
+            r#"{
+  "schema": "stasis-assets",
+  "version": 1,
+  "assets": []
+}
+"#,
+        )
+        .expect("write manifest");
+        std::fs::write(font_dir.join("ui.ttf"), b"referenced font").expect("write font");
+        std::fs::write(font_dir.join("unused.ttf"), b"unused font").expect("write font");
+        let sources = vec![(
+            "src/main.stasis".to_string(),
+            r#"function main(): i32 { load_font("../assets/fonts/ui.ttf", 16); return 0; }
+"#
+            .to_string(),
+        )];
+
+        let asset_root = write_mobile_asset_bundle(
+            MobileAotTarget::AndroidArm64,
+            &project_dir,
+            &output_dir,
+            &sources,
+        )
+        .expect("package font asset");
+
+        assert!(asset_root.join("stasis_game/assets/fonts/ui.ttf").is_file());
+        assert!(!asset_root
+            .join("stasis_game/assets/fonts/unused.ttf")
+            .exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mobile_source_font_assets_reject_paths_outside_project_assets() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_mobile_font_escape_{stamp}"));
+        let project_dir = root.join("project");
+        std::fs::create_dir_all(project_dir.join("src")).expect("mkdir src");
+        std::fs::create_dir_all(project_dir.join("assets")).expect("mkdir assets");
+        std::fs::write(root.join("outside.ttf"), b"outside font").expect("write outside");
+        let sources = vec![(
+            "src/main.stasis".to_string(),
+            r#"function main(): i32 { load_font("../../outside.ttf", 16); return 0; }
+"#
+            .to_string(),
+        )];
+
+        let fonts = collect_mobile_source_font_assets(&project_dir, &sources)
+            .expect("scan source font assets");
+
+        assert!(fonts.is_empty());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
