@@ -18,8 +18,10 @@ import android.opengl.GLSurfaceView;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
+import android.media.ToneGenerator;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -99,6 +101,7 @@ public final class MainActivity extends Activity {
     private static final String AI_PREFS = "ai_settings";
     private static final String ONBOARDING_PREFS = "onboarding_settings";
     private static final String ONBOARDING_COMPLETE = "manual_tutorial_seen_v1";
+    private static final String EXPLORATION_LESSON_PREFS = "exploration_lesson_progress";
     private static final String AI_SETUP_COMPLETE = "ai_setup_complete_v1";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_PROVIDER = "ai_provider";
@@ -262,6 +265,8 @@ public final class MainActivity extends Activity {
     private Bitmap pendingPreviewScreenshot;
     private MediaPlayer activeAudioPreview;
     private MediaRecorder activeAudioRecorder;
+    private ToneGenerator explorationTone;
+    private int lastExplorationAudioSerial;
     private File activeAudioRecordingFile;
     private boolean audioRecordingActive;
     private JSONObject pendingPreviewLogicalSnapshot;
@@ -491,6 +496,10 @@ public final class MainActivity extends Activity {
         }
         stopAudioPreview();
         cancelAudioRecording(false);
+        if (explorationTone != null) {
+            explorationTone.release();
+            explorationTone = null;
+        }
         if (gameLoop != null) {
             gameLoopHandler.removeCallbacks(gameLoop);
         }
@@ -1167,6 +1176,7 @@ public final class MainActivity extends Activity {
         }
         boolean opening = editorPanel.getVisibility() != View.VISIBLE;
         editorPanel.setVisibility(opening ? View.VISIBLE : View.GONE);
+        if (opening) recordExplorationLesson(WorkshopExplorationLessonPolicy.OPENED_EDITOR);
         boolean coverPreview = opening && adaptiveLayoutProfile().fullWidthEditor;
         setPreviewCovered(coverPreview);
         updateAiGameProgressOverlay();
@@ -1440,19 +1450,65 @@ public final class MainActivity extends Activity {
 
     private void appendExplorationProgress(StringBuilder text) {
         if (!compileReady || activeProject == null || !"exploration".equals(activeProject.templateId)) return;
+        String tapsResult = nativeGetRuntimeI32(projectRootPath(), "GameState.accepted_tap_count");
         String collectedResult = nativeGetRuntimeI32(projectRootPath(), "GameState.collected_count");
         String totalResult = nativeGetRuntimeI32(projectRootPath(), "GameState.total_collectibles");
         String stageResult = nativeGetRuntimeI32(projectRootPath(), "GameState.tutorial_stage");
+        String audioSerialResult = nativeGetRuntimeI32(projectRootPath(), "ExplorationAudio.event_serial");
+        String audioKindResult = nativeGetRuntimeI32(projectRootPath(), "ExplorationAudio.cue_kind");
         if (collectedResult == null || collectedResult.startsWith("StateError")
                 || totalResult == null || totalResult.startsWith("StateError")
                 || stageResult == null || stageResult.startsWith("StateError")) return;
         int collected = extractIntField(collectedResult, "value", 0);
         int total = extractIntField(totalResult, "value", 0);
         int stage = extractIntField(stageResult, "value", 0);
+        boolean tapCountAvailable = tapsResult != null && !tapsResult.startsWith("StateError");
+        int taps = WorkshopExplorationLessonPolicy.effectiveTapCount(tapCountAvailable,
+                tapCountAvailable ? extractIntField(tapsResult, "value", 0) : 0, stage);
+        int progress = explorationLessonProgress();
+        int observed = WorkshopExplorationLessonPolicy.observeGame(progress, taps, collected);
+        if (observed != progress) saveExplorationLessonProgress(observed);
         text.append('\n').append("keepsakes=").append(collected).append('/').append(total).append("  lesson=");
-        if (stage <= 0) text.append("tap to explore");
-        else if (stage == 1) text.append("find the rest");
-        else text.append("garden complete");
+        text.append(WorkshopExplorationLessonPolicy.prompt(observed));
+        if (stage >= 3) text.append("  garden complete");
+        if (audioSerialResult != null && !audioSerialResult.startsWith("StateError")
+                && audioKindResult != null && !audioKindResult.startsWith("StateError")) {
+            playExplorationCue(extractIntField(audioSerialResult, "value", 0),
+                    extractIntField(audioKindResult, "value", 0));
+        }
+    }
+
+    private String explorationLessonKey() {
+        return activeProject == null ? "legacy" : activeProject.id;
+    }
+
+    private int explorationLessonProgress() {
+        return getSharedPreferences(EXPLORATION_LESSON_PREFS, MODE_PRIVATE)
+                .getInt(explorationLessonKey(), 0);
+    }
+
+    private void saveExplorationLessonProgress(int progress) {
+        getSharedPreferences(EXPLORATION_LESSON_PREFS, MODE_PRIVATE).edit()
+                .putInt(explorationLessonKey(), progress).apply();
+    }
+
+    private void recordExplorationLesson(int event) {
+        if (activeProject == null || !"exploration".equals(activeProject.templateId)) return;
+        int progress = explorationLessonProgress();
+        saveExplorationLessonProgress(WorkshopExplorationLessonPolicy.record(progress, event));
+    }
+
+    private void playExplorationCue(int serial, int kind) {
+        if (serial <= 0 || serial == lastExplorationAudioSerial) return;
+        lastExplorationAudioSerial = serial;
+        try {
+            if (explorationTone == null) explorationTone = new ToneGenerator(AudioManager.STREAM_MUSIC, 45);
+            explorationTone.startTone(kind == 2 ? ToneGenerator.TONE_PROP_ACK
+                    : ToneGenerator.TONE_PROP_BEEP, 110);
+        } catch (RuntimeException error) {
+            if (explorationTone != null) explorationTone.release();
+            explorationTone = null;
+        }
     }
 
     private static int debugColorForBudget(int budgetPercent) {
@@ -2576,6 +2632,7 @@ public final class MainActivity extends Activity {
         try {
             WorkshopProjectRegistry.setActive(this, project);
             activeProject = project;
+            lastExplorationAudioSerial = 0;
             projectRootFile = project.root;
             projectRootPath = project.root.getAbsolutePath();
             clearPendingPreviewCapture();
@@ -4978,6 +5035,9 @@ public final class MainActivity extends Activity {
         try {
             JSONObject result = aiToolRunTests(new AiAgentSession());
             captureFirstTestFailureDiagnostic(result);
+            if (result.optInt("passed", 0) > 0 && result.optInt("failed", 0) == 0) {
+                recordExplorationLesson(WorkshopExplorationLessonPolicy.PASSED_TESTS);
+            }
             setStatusText(testSummaryText(result));
         } catch (Exception error) {
             setStatusText("Tests failed: " + error.getMessage());
@@ -7755,6 +7815,7 @@ public final class MainActivity extends Activity {
                 diagnosticEndLine = 0;
                 diagnosticEndColumn = 0;
                 diagnosticStatus.setText("Compile passed - " + reload);
+                recordExplorationLesson(WorkshopExplorationLessonPolicy.APPLIED_EDIT);
                 setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
             } else {
                 WorkshopSourceDiagnostic location = WorkshopSourceDiagnostic.fromCompileResult(compileResult);

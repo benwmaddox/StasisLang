@@ -1,0 +1,28 @@
+import "../config.stasis";
+import "../components.stasis";
+import "../assets.stasis";
+import "../world_data.stasis";
+import "../input.stasis";
+import "movement.stasis";
+import "collection.stasis";
+import "inventory.stasis";
+import "camera.stasis";
+import "tutorial.stasis";
+import "audio.stasis";
+import "render_extract.stasis";
+
+function exploration_start(): void {
+    exploration_init_world();
+    exploration_audio_init();
+}
+
+function exploration_tick_schedule(): void {
+    GameState.tick_count += 1;
+    exploration_input_target_system();
+    exploration_movement_system();
+    exploration_collection_system();
+    exploration_inventory_system();
+    exploration_camera_follow_system();
+    exploration_tutorial_progress_system();
+    exploration_audio_system();
+}

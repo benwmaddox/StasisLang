@@ -1,1 +1,29 @@
-// Lesson map: exploration_input_target_system converts a press edge into bounded world data in main.stasis.
+function exploration_abs(value: i32): i32 {
+    if (value < 0) { return 0 - value; }
+    return value;
+}
+
+function exploration_max(left: i32, right: i32): i32 {
+    if (left > right) { return left; }
+    return right;
+}
+
+function exploration_clamp(value: i32, minimum: i32, maximum: i32): i32 {
+    if (value < minimum) { return minimum; }
+    if (value > maximum) { return maximum; }
+    return value;
+}
+
+function exploration_input_target_system(): void {
+    if (Input.screen_w > 0) { GameState.screen_w = Input.screen_w; }
+    if (Input.screen_h > 0) { GameState.screen_h = Input.screen_h; }
+    if (Input.touch_active != 0 && GameState.previous_touch_active == 0) {
+        let world_x: i32 = Input.touch_x + GameState.camera_x;
+        let world_y: i32 = Input.touch_y + GameState.camera_y;
+        World.destination_x[0] = exploration_clamp(world_x, 12, WORLD_WIDTH - 12);
+        World.destination_y[0] = exploration_clamp(world_y, HUD_HEIGHT + 12, WORLD_HEIGHT - 12);
+        World.destination_active[0] = 1;
+        GameState.accepted_tap_count += 1;
+    }
+    GameState.previous_touch_active = Input.touch_active;
+}

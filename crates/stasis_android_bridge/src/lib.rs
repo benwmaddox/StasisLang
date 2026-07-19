@@ -1779,11 +1779,13 @@ mod tests {
         assert_eq!(result.render_commands[0].kind, 1);
         assert_eq!(result.render_commands[0].w, 360);
         assert_eq!(result.render_commands[4].kind, 2);
-        assert_eq!(result.render_commands[4].x, 168);
-        assert_eq!(result.render_commands[4].y, 306);
+        assert_eq!(result.render_commands[4].x, 164);
+        assert_eq!(result.render_commands[4].y, 302);
+        assert_eq!(result.render_commands[4].asset, 1_921_230_027);
         assert_eq!(result.render_commands[5].kind, 2);
-        assert_eq!(result.render_commands[5].x, 88);
-        assert_eq!(result.render_commands[5].y, 179);
+        assert_eq!(result.render_commands[5].x, 83);
+        assert_eq!(result.render_commands[5].y, 174);
+        assert_eq!(result.render_commands[5].asset, 476_662_006);
         assert!(result.observed_game_tick_count >= 1);
         clear_runtime_session_for_test();
     }
@@ -1893,7 +1895,7 @@ mod tests {
             .expect("exploration template root");
         let result =
             run_android_workshop_stasis_tests(&root).expect("run exploration Stasis tests");
-        assert_eq!(result["passed"], 7);
+        assert_eq!(result["passed"], 10);
         assert_eq!(result["failed"], 0);
         assert_eq!(result["all_passed"], true);
         assert_eq!(

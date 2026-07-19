@@ -92,12 +92,16 @@ No system owns a private copy of authoritative component data.
 6. `tutorial_progress_system` derives the next instructional message from data.
 7. `render_extract_system` writes a bounded render-command snapshot; rendering itself does not mutate gameplay.
 
-The schedule is visible in `src/main.stasis` and each system lives in one correspondingly named file. All loops use ascending bounded indices. Gameplay never uses wall-clock `dt`, random device state, or unordered containers.
+The schedule is visible in `src/systems/schedule.stasis` and each system lives in one correspondingly named file. `src/main.stasis` is only the Android lifecycle adapter. All loops use ascending bounded indices. Gameplay never uses wall-clock `dt`, random device state, or unordered containers.
 
 ## Project Layout and Teaching Order
 
 ```text
-src/main.stasis                 # lifecycle and visible system schedule
+src/main.stasis                 # Android lifecycle adapter
+src/host.stasis                 # desktop live-play adapter
+src/host_aot.stasis             # desktop AOT entry adapter
+src/host_game.stasis            # shared desktop input/render bridge
+src/host_runtime.stasis         # bounded host frame/command declarations
 src/config.stasis               # capacities, fixed-point values, world bounds
 src/components.stasis           # SoA declarations and entity-kind constants
 src/world_data.stasis           # deterministic starting entities/items
@@ -107,12 +111,14 @@ src/systems/collection.stasis
 src/systems/inventory.stasis
 src/systems/camera.stasis
 src/systems/tutorial.stasis
+src/systems/audio.stasis
 src/systems/render_extract.stasis
+src/systems/schedule.stasis     # visible deterministic system order
 src/assets.stasis               # stable manifest IDs/handles
 tests/*.test.stasis
 assets/manifest.json
-assets/images/*
-assets/audio/*                  # optional later lesson
+assets/*.svg
+qa/*.json                       # deterministic desktop input scripts
 ```
 
 Onboarding reveals the project in layers:
@@ -125,7 +131,7 @@ Onboarding reveals the project in layers:
 
 Pong remains available in the template selector as the smaller example for collision, difficulty curves, tests, and release packaging.
 
-Current implementation note: the first playable keeps executable declarations in `src/main.stasis` because the Workshop JIT and Android AOT paths do not yet agree on project-relative import bases. The planned files above are present as lesson maps, but splitting declarations into them would currently make one host pass while another fails. This is a shared project-import limitation, not a reason to add an Android-only compiler route; the files should become executable modules only after project-relative imports are fixed and tested across host JIT, AOT, and Android.
+Current implementation note: the project now uses executable project-relative imports throughout. Android, desktop live play, and desktop AOT all consume the same gameplay schedule and SoA state. Collection emits a bounded gameplay event; the Workshop turns its serial/kind data into a short platform cue without introducing a per-tick host call in Stasis. The four SVG assets use manifest-derived stable handles on both render paths. Lesson progress is stored per Workshop project and advances through tap, collection, editor, Apply, and Run Tests actions.
 
 ## Required Stasis Tests
 
@@ -145,6 +151,7 @@ Current implementation note: the first playable keeps executable declarations in
 - The same project and `assets/manifest.json` resolve identical handles on host JIT, host AOT, Android Workshop JIT, and a game-specific exploration release when one is intentionally built.
 - Workshop first launch selects the exploration project but also lists Pong without copying one project's mutable state into the other.
 - Touch automation selects several destinations and proves the character and camera move; a pickup changes both world visibility and inventory.
+- The Android bridge acceptance test injects a touch through the packaged template and verifies the emitted player and destination sprite handles/coordinates.
 - Hot reload preserves component state for body-only edits and explains reset-required layout changes.
 - Capacity overflow, missing assets, corrupt manifests, and render-command overflow fail deterministically.
 - The tutorial stays within the 60 Hz frame budget on the minimum supported arm64 device with no per-tick object allocation in the Stasis logic.

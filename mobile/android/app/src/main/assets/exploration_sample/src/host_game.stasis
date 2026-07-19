@@ -1,0 +1,41 @@
+import "systems/schedule.stasis";
+import "host_runtime.stasis";
+
+global ExplorationHostAssets {
+    player: i32; sun: i32; moon: i32; destination: i32;
+}
+
+function exploration_host_load_assets(): void {
+    ExplorationHostAssets.player = gfx_load_sprite("assets/player.svg", 64, 64);
+    ExplorationHostAssets.sun = gfx_load_sprite("assets/sun_keepsake.svg", 48, 48);
+    ExplorationHostAssets.moon = gfx_load_sprite("assets/moon_keepsake.svg", 48, 48);
+    ExplorationHostAssets.destination = gfx_load_sprite("assets/destination.svg", 32, 32);
+}
+
+function exploration_host_draw(): void {
+    exploration_render_extract_system();
+    exploration_host_begin_frame();
+    if (Render.command1_kind == 2) { exploration_host_sprite(ExplorationHostAssets.sun, Render.command1_x, Render.command1_y, Render.command1_w, Render.command1_h, 0, 255); }
+    if (Render.command2_kind == 2) { exploration_host_sprite(ExplorationHostAssets.moon, Render.command2_x, Render.command2_y, Render.command2_w, Render.command2_h, 0, 255); }
+    if (Render.command3_kind == 2) { exploration_host_sprite(ExplorationHostAssets.sun, Render.command3_x, Render.command3_y, Render.command3_w, Render.command3_h, 0, 255); }
+    exploration_host_sprite(ExplorationHostAssets.player, Render.command4_x, Render.command4_y, Render.command4_w, Render.command4_h, Render.command4_rotation_degrees, 255);
+    if (Render.command5_kind == 2) { exploration_host_sprite(ExplorationHostAssets.destination, Render.command5_x, Render.command5_y, Render.command5_w, Render.command5_h, 0, 210); }
+    let sun_bar: i32 = 12 + Render.command6_w;
+    let moon_bar: i32 = 12 + Render.command7_w;
+    exploration_host_line(12, 20, sun_bar, 20, 1.0, 0.78, 0.22);
+    exploration_host_line(12, 40, moon_bar, 40, 0.52, 0.64, 1.0);
+    exploration_host_present();
+}
+
+function exploration_host_start(): void {
+    exploration_host_request_window();
+    exploration_start();
+    exploration_host_load_assets();
+    exploration_host_draw();
+}
+
+function exploration_host_tick(): void {
+    exploration_host_sync_input();
+    exploration_tick_schedule();
+    exploration_host_draw();
+}

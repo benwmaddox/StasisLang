@@ -1,5 +1,34 @@
 {
   "schema": "stasis-assets",
   "version": 1,
-  "assets": []
+  "assets": [
+    {
+      "id": "destination",
+      "path": "assets/destination.svg",
+      "content_sha256": "a67e12ba2c438747d9e9108fc911502d32e8b00683f734d7338bad8653d14434",
+      "format": { "kind": "sprite", "encoding": "svg", "width": 32, "height": 32 },
+      "dependencies": []
+    },
+    {
+      "id": "moon_keepsake",
+      "path": "assets/moon_keepsake.svg",
+      "content_sha256": "d4b7ff763c7d2f132b4eab1a50790c1329d7307f68e3cb27c1fa08c2f9a4c4b3",
+      "format": { "kind": "sprite", "encoding": "svg", "width": 48, "height": 48 },
+      "dependencies": []
+    },
+    {
+      "id": "player",
+      "path": "assets/player.svg",
+      "content_sha256": "b29cf9705a7165ddcd1d2304bf4a308fa3034e05d6fc9fbc9f9533ada4af77b5",
+      "format": { "kind": "sprite", "encoding": "svg", "width": 64, "height": 64 },
+      "dependencies": []
+    },
+    {
+      "id": "sun_keepsake",
+      "path": "assets/sun_keepsake.svg",
+      "content_sha256": "9845521ea59e4c25ce8cd425277f866e3e9e5c93158959373099795c8171f06d",
+      "format": { "kind": "sprite", "encoding": "svg", "width": 48, "height": 48 },
+      "dependencies": []
+    }
+  ]
 }

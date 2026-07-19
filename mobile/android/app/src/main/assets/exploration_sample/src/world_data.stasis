@@ -1,1 +1,38 @@
-// Lesson map: exploration_init_world and deterministic collectible rows live in main.stasis.
+function exploration_spawn_collectible(slot: i32, x: i32, y: i32, kind: i32): bool {
+    if (slot <= PLAYER_SLOT || slot >= MAX_ENTITIES) { return false; }
+    if (kind < 1 || kind > 2) { return false; }
+    if (World.entity_alive[slot] != 0) { return false; }
+    World.entity_alive[slot] = 1; World.entity_kind[slot] = 2;
+    World.position_x[slot] = x; World.position_y[slot] = y;
+    World.collectible_kind[slot] = kind; World.collectible_active[slot] = 1;
+    World.render_layer[slot] = 2;
+    if (kind == 1) { World.sprite_handle[slot] = EXPLORATION_SUN_ASSET; }
+    if (kind == 2) { World.sprite_handle[slot] = EXPLORATION_MOON_ASSET; }
+    return true;
+}
+
+function exploration_init_world(): void {
+    GameState.tick_count = 0; GameState.screen_w = 360; GameState.screen_h = 640;
+    GameState.previous_touch_active = 0; GameState.player_entity_id = 1; GameState.accepted_tap_count = 0;
+    GameState.collected_count = 0; GameState.total_collectibles = 3; GameState.tutorial_stage = 0;
+    GameState.camera_x = 180; GameState.camera_y = 280; GameState.last_collected_entity_id = 0;
+    GameState.collection_event_count = 0;
+    let slot: i32 = 0;
+    for (slot = 0; slot < MAX_ENTITIES; slot = slot + 1) {
+        World.entity_alive[slot] = 0; World.entity_kind[slot] = 0;
+        World.position_x[slot] = 0; World.position_y[slot] = 0;
+        World.destination_active[slot] = 0; World.destination_x[slot] = 0; World.destination_y[slot] = 0;
+        World.move_speed[slot] = 0; World.collectible_kind[slot] = 0; World.collectible_active[slot] = 0;
+        World.sprite_handle[slot] = 0; World.render_layer[slot] = 0;
+    }
+    for (slot = 0; slot < COLLECTION_EVENT_CAPACITY; slot = slot + 1) {
+        GameState.collection_event_entity_id[slot] = 0; GameState.collection_event_kind[slot] = 0;
+    }
+    World.inventory_count[0] = 0; World.inventory_count[1] = 0; World.inventory_count[2] = 0;
+    World.entity_alive[0] = 1; World.entity_kind[0] = 1;
+    World.position_x[0] = 360; World.position_y[0] = 600; World.move_speed[0] = MOVE_SPEED;
+    World.sprite_handle[0] = EXPLORATION_PLAYER_ASSET; World.render_layer[0] = 3;
+    exploration_spawn_collectible(1, 260, 480, 1);
+    exploration_spawn_collectible(2, 540, 400, 2);
+    exploration_spawn_collectible(3, 220, 720, 1);
+}

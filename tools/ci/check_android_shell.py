@@ -63,6 +63,10 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/workshop_sample/assets/ball.svg",
     "mobile/android/app/src/main/assets/workshop_sample/assets/manifest.json",
     "mobile/android/app/src/main/assets/exploration_sample/src/main.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/host.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/host_aot.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/host_game.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/host_runtime.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/config.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/components.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/world_data.stasis",
@@ -70,10 +74,23 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/exploration_sample/src/assets.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/systems/movement.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/systems/collection.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/inventory.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/camera.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/systems/tutorial.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/audio.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/systems/render_extract.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/schedule.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/tests/exploration_gameplay.test.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/assets/manifest.json",
+    "mobile/android/app/src/main/assets/exploration_sample/assets/player.svg",
+    "mobile/android/app/src/main/assets/exploration_sample/assets/sun_keepsake.svg",
+    "mobile/android/app/src/main/assets/exploration_sample/assets/moon_keepsake.svg",
+    "mobile/android/app/src/main/assets/exploration_sample/assets/destination.svg",
+    "mobile/android/app/src/main/assets/exploration_sample/stasis.json",
+    "mobile/android/app/src/main/assets/exploration_sample/qa/first_keepsake.json",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopExplorationLessonPolicy.java",
+    "mobile/android/app/src/test/java/com/stasislang/workshop/WorkshopExplorationLessonPolicyTest.java",
+    "mobile/android/app/src/test/java/com/stasislang/workshop/WorkshopTemplateCatalogTest.java",
     "mobile/android/README.md",
     "tools/android_ai_agent_host.py",
     "tools/ci/check_android_published_apk.py",
@@ -339,7 +356,7 @@ def main() -> int:
     assert "appendExplorationProgress(debugTextBuilder)" in activity
     assert '"GameState.collected_count"' in activity
     assert '"keepsakes="' in activity
-    assert '"garden complete"' in activity
+    assert "garden complete" in activity
     assert "private String projectRootPath" in activity
     assert "nativeCompileProject(projectRootPath())" in activity
     assert "String.format" not in activity
@@ -770,20 +787,32 @@ def main() -> int:
     assert '"exploration_sample/"' in template_catalog
     assert '"Exploration Garden"' in template_catalog
     exploration_main = read("mobile/android/app/src/main/assets/exploration_sample/src/main.stasis")
+    exploration_config = read("mobile/android/app/src/main/assets/exploration_sample/src/config.stasis")
     exploration_components = read("mobile/android/app/src/main/assets/exploration_sample/src/components.stasis")
+    exploration_schedule = read("mobile/android/app/src/main/assets/exploration_sample/src/systems/schedule.stasis")
+    exploration_inventory = read("mobile/android/app/src/main/assets/exploration_sample/src/systems/inventory.stasis")
+    exploration_render = read("mobile/android/app/src/main/assets/exploration_sample/src/systems/render_extract.stasis")
+    exploration_assets = read("mobile/android/app/src/main/assets/exploration_sample/src/assets.stasis")
+    exploration_manifest = read("mobile/android/app/src/main/assets/exploration_sample/assets/manifest.json")
+    exploration_host = read("mobile/android/app/src/main/assets/exploration_sample/src/host_game.stasis")
     exploration_tests = read("mobile/android/app/src/main/assets/exploration_sample/tests/exploration_gameplay.test.stasis")
-    assert "exploration_input_target_system();" in exploration_main
-    assert "exploration_movement_system();" in exploration_main
-    assert "exploration_collection_system();" in exploration_main
-    assert "exploration_camera_follow_system();" in exploration_main
-    assert "Input.touch_x + GameState.camera_x" in exploration_main
-    assert "WORLD_WIDTH: i32 = 720" in exploration_main
+    assert 'import "systems/schedule.stasis";' in exploration_main
+    assert "exploration_input_target_system();" in exploration_schedule
+    assert "exploration_movement_system();" in exploration_schedule
+    assert "exploration_collection_system();" in exploration_schedule
+    assert "exploration_inventory_system();" in exploration_schedule
+    assert "exploration_camera_follow_system();" in exploration_schedule
+    assert "WORLD_WIDTH: i32 = 720" in exploration_config
     assert "test `camera follow is deterministic and bounded`(): bool" in exploration_tests
     assert "test `spawn capacity rejects player occupied and out of range slots`(): bool" in exploration_tests
     assert "test `overlapping collectibles resolve in ascending entity order`(): bool" in exploration_tests
-    assert "last_collected_entity_id" in exploration_main
-    assert "entity_alive: i32[8]" in exploration_main
-    assert "Lesson map:" in exploration_components
+    assert "last_collected_entity_id" in exploration_components
+    assert "entity_alive: i32[8]" in exploration_components
+    assert "exploration_audio_collect(kind);" in exploration_inventory
+    assert "EXPLORATION_PLAYER_ASSET" in exploration_assets
+    assert "World.sprite_handle[0]" in exploration_render
+    assert '"id": "player"' in exploration_manifest
+    assert "exploration_host_sync_input();" in exploration_host
     assert "test `new touch edge sets one clamped destination`(): bool" in exploration_tests
     assert "assert_runtime" not in exploration_tests
     assert '"sample".equals(origin)' in project_registry

@@ -31,6 +31,10 @@ final class WorkshopTemplateCatalog {
             "exploration_sample/",
             new String[] {
                     "src/main.stasis",
+                    "src/host.stasis",
+                    "src/host_aot.stasis",
+                    "src/host_game.stasis",
+                    "src/host_runtime.stasis",
                     "src/config.stasis",
                     "src/components.stasis",
                     "src/world_data.stasis",
@@ -38,11 +42,24 @@ final class WorkshopTemplateCatalog {
                     "src/assets.stasis",
                     "src/systems/movement.stasis",
                     "src/systems/collection.stasis",
+                    "src/systems/inventory.stasis",
+                    "src/systems/camera.stasis",
                     "src/systems/tutorial.stasis",
-                    "src/systems/render_extract.stasis"
+                    "src/systems/audio.stasis",
+                    "src/systems/render_extract.stasis",
+                    "src/systems/schedule.stasis"
             },
             new String[] { "tests/exploration_gameplay.test.stasis" },
-            new String[] { "assets/manifest.json" });
+            new String[] {
+                    "assets/manifest.json",
+                    "assets/player.svg",
+                    "assets/sun_keepsake.svg",
+                    "assets/moon_keepsake.svg",
+                    "assets/destination.svg",
+                    "stasis.json",
+                    "README.md",
+                    "qa/first_keepsake.json"
+            });
 
     private WorkshopTemplateCatalog() {}
 
