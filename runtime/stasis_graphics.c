@@ -3437,17 +3437,27 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     }
 #endif
 
+    int native_request_width = width;
+    int native_request_height = height;
+    Uint32 window_flags = (want_sdl ? 0 : SDL_WINDOW_OPENGL) |
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    SDL_DisplayMode display_mode;
+    if (SDL_GetCurrentDisplayMode(0, &display_mode) == 0 &&
+        display_mode.w > 0 && display_mode.h > 0) {
+        native_request_width = display_mode.w;
+        native_request_height = display_mode.h;
+    }
+    window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+#endif
+
     g_window = SDL_CreateWindow(
         title ? title : "Stasis",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
-        width,
-        height,
-        (want_sdl ? 0 : SDL_WINDOW_OPENGL) |
-            SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
-            | SDL_WINDOW_FULLSCREEN_DESKTOP
-#endif
+        native_request_width,
+        native_request_height,
+        window_flags
     );
 
     if (!g_window) {
@@ -3702,7 +3712,9 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
     g_window_width = width;
     g_window_height = height;
     g_window_resized = true;
+#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
     SDL_SetWindowSize(g_window, width, height);
+#endif
     stasis_sync_display_metrics(0);
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
