@@ -2888,7 +2888,7 @@ mod tests {
             "STASIS_GFX_MAX_SPRITE_DIMENSION",
             "STASIS_GFX_MAX_SPRITE_PIXELS",
             "STASIS_GFX_MAX_SPRITE_FILE_BYTES",
-            "sprite_source_within_limits(path, max_w, max_h)",
+            "sprite_source_within_limits(path, raster_w, raster_h)",
             "sprite_dimensions_exceeded",
             "sprite_pixels_exceeded",
             "sprite_file_too_large",
@@ -2898,6 +2898,19 @@ mod tests {
                 "runtime sprite decode should contain {required}"
             );
         }
+        let scaled_extent = STASIS_GRAPHICS_SOURCE
+            .find("const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);")
+            .expect("scaled sprite extent");
+        let bounds_check = STASIS_GRAPHICS_SOURCE
+            .find("sprite_source_within_limits(path, raster_w, raster_h)")
+            .expect("scaled sprite bounds check");
+        let image_bake = STASIS_GRAPHICS_SOURCE
+            .find("bake_image_to_rgba_sized(path, raster_w, raster_h, &pixels, &w, &h)")
+            .expect("scaled sprite image bake");
+        assert!(
+            scaled_extent < bounds_check && bounds_check < image_bake,
+            "runtime must scale and validate sprite bounds before image allocation"
+        );
     }
 
     #[test]
