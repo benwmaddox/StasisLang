@@ -194,6 +194,7 @@ typedef struct SpriteEntry {
     uint64_t mtime;
     SDL_Texture* sdl_tex;
     int used;
+    int ref_count;       /* callers sharing this raster cache entry */
     int needs_reraster;  /* flag for window resize */
     int reload_pending;  /* set when the asset watcher reloads this sprite */
     uint32_t generation;
@@ -4291,9 +4292,30 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
         SDL_Log("gfx_load_sprite: could not resolve %s", path);
         return 0;
     }
+    const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);
+    const int raster_h = stasis_display_scaled_extent(max_h, g_pixel_scale);
 
-    /* Note: We don't check for existing sprites with same path because
-     * the same SVG might be loaded at different sizes */
+    /* Reuse the device-local raster/GPU texture for the same source and
+     * logical target size. Drawable-density changes mark the entry dirty and
+     * replace its raster before it is returned or drawn, so the effective key
+     * is source + logical extent + current drawable extent. */
+    for (int i = 0; i < g_sprite_capacity; i++) {
+        SpriteEntry* cached = &g_sprites[i];
+        if (!cached->used || !cached->path) continue;
+        if (cached->max_w != max_w || cached->max_h != max_h) continue;
+        if (strcmp(cached->path, resolved) != 0) continue;
+        if (cached->w != raster_w || cached->h != raster_h) {
+            cached->needs_reraster = 1;
+        }
+        if (cached->needs_reraster &&
+            !sprite_build_into_entry_sized(cached, resolved, max_w, max_h)) {
+            return 0;
+        }
+        if (cached->ref_count == INT_MAX) return 0;
+        cached->ref_count++;
+        return sprite_handle_for_slot(i);
+    }
+
     if (!ensure_sprite_table_capacity(1)) {
         SDL_Log("gfx_load_sprite: sprite table allocation failed for %s", resolved);
         return 0;
@@ -4326,6 +4348,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     e->path = stasis_strdup(resolved);
     if (!e->path) return 0;
     e->used = 1;
+    e->ref_count = 1;
     if (!sprite_build_into_entry_sized(e, resolved, max_w, max_h)) {
         free(e->path);
         memset(e, 0, sizeof(*e));
@@ -4405,6 +4428,11 @@ static SpriteEntry* sprite_fallback_get(void) {
 STASIS_EXPORT void stasis_gfx_release_sprite(int handle) {
     SpriteEntry* e = sprite_get(handle);
     if (!e) return;
+
+    if (e->ref_count > 1) {
+        e->ref_count--;
+        return;
+    }
 
     if (g_use_sdl_renderer) {
         if (e->sdl_tex) SDL_DestroyTexture(e->sdl_tex);
