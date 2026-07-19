@@ -1443,6 +1443,7 @@ fn write_mobile_aot_engine_bundle(
     output_dir: &Path,
 ) -> Result<MobileAotBundleSummary, String> {
     let mut process = AotProcess::with_optimization_profile(AotOptimizationProfile::SpeedAndSize);
+    process.set_import_base_dir(project_dir);
     process.set_target(target.aot_target());
     for (path, source) in collect_mobile_aot_sources(project_dir, entry_file)? {
         process.upsert_file(path, source);
@@ -2543,6 +2544,65 @@ mod tests {
         assert_eq!(paths, vec!["src/helper.stasis", "src/main.stasis"]);
 
         std::fs::remove_dir_all(&project_dir).ok();
+    }
+
+    #[test]
+    fn mobile_aot_bundle_deduplicates_cyclic_import_graph() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project_dir = std::env::temp_dir().join(format!("stasis_mobile_imports_{stamp}"));
+        let src_dir = project_dir.join("src");
+        let asset_dir = project_dir.join("assets");
+        let output_dir = std::env::temp_dir().join(format!("stasis_mobile_imports_out_{stamp}"));
+        std::fs::create_dir_all(&src_dir).expect("mkdir src");
+        std::fs::create_dir_all(&asset_dir).expect("mkdir assets");
+        std::fs::write(
+            src_dir.join("main.stasis"),
+            r#"import "window.stasis";
+function main(): i32 { return 0; }
+function tick(): i32 { return 0; }
+function render(): i32 { return window_width(); }
+"#,
+        )
+        .expect("write main");
+        std::fs::write(
+            src_dir.join("window.stasis"),
+            r#"import "frame.stasis";
+function window_width(): i32 { return frame_width(); }
+"#,
+        )
+        .expect("write window");
+        std::fs::write(
+            src_dir.join("frame.stasis"),
+            r#"import "window.stasis";
+function frame_width(): i32 { return 360; }
+"#,
+        )
+        .expect("write frame");
+        std::fs::write(
+            asset_dir.join("manifest.json"),
+            r#"{
+  "schema": "stasis-assets",
+  "version": 1,
+  "assets": []
+}
+"#,
+        )
+        .expect("write manifest");
+
+        let summary = write_mobile_aot_engine_bundle(
+            MobileAotTarget::AndroidArm64,
+            &project_dir,
+            Some(Path::new("src/main.stasis")),
+            &output_dir,
+        )
+        .expect("cyclic imports should compile each canonical file once");
+        assert!(summary.package_manifest.is_file());
+
+        std::fs::remove_dir_all(&project_dir).ok();
+        std::fs::remove_dir_all(&output_dir).ok();
     }
 
     #[test]
