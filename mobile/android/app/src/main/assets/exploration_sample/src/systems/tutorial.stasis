@@ -1,1 +1,6 @@
-// Lesson map: exploration_tutorial_progress_system derives tutorial stage from inventory data in main.stasis.
+function exploration_tutorial_progress_system(): void {
+    GameState.tutorial_stage = 0;
+    if (GameState.accepted_tap_count > 0) { GameState.tutorial_stage = 1; }
+    if (GameState.collected_count > 0) { GameState.tutorial_stage = 2; }
+    if (GameState.collected_count == GameState.total_collectibles) { GameState.tutorial_stage = 3; }
+}

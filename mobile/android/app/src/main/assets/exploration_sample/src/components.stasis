@@ -1,1 +1,32 @@
-// Lesson map: the bounded World structure-of-arrays and singleton GameState live in main.stasis.
+global Input {
+    touch_x: i32; touch_y: i32; touch_active: i32; screen_w: i32; screen_h: i32;
+}
+
+global World {
+    entity_alive: i32[8]; entity_kind: i32[8];
+    position_x: i32[8]; position_y: i32[8];
+    destination_active: i32[8]; destination_x: i32[8]; destination_y: i32[8]; move_speed: i32[8];
+    collectible_kind: i32[8]; collectible_active: i32[8]; inventory_count: i32[3];
+    sprite_handle: i32[8]; render_layer: i32[8];
+}
+
+global GameState {
+    tick_count: i32; screen_w: i32; screen_h: i32; previous_touch_active: i32;
+    player_entity_id: i32; accepted_tap_count: i32;
+    collected_count: i32; total_collectibles: i32; tutorial_stage: i32;
+    camera_x: i32; camera_y: i32; last_collected_entity_id: i32;
+    collection_event_count: i32;
+    collection_event_entity_id: i32[4]; collection_event_kind: i32[4];
+}
+
+global Render {
+    command_schema_version: i32; command_count: i32;
+    command0_kind: i32; command0_x: i32; command0_y: i32; command0_w: i32; command0_h: i32; command0_color: i32; command0_asset: i32; command0_rotation_degrees: i32; command0_alpha: i32; command0_clip_x: i32; command0_clip_y: i32; command0_clip_w: i32; command0_clip_h: i32;
+    command1_kind: i32; command1_x: i32; command1_y: i32; command1_w: i32; command1_h: i32; command1_color: i32; command1_asset: i32; command1_rotation_degrees: i32; command1_alpha: i32; command1_clip_x: i32; command1_clip_y: i32; command1_clip_w: i32; command1_clip_h: i32;
+    command2_kind: i32; command2_x: i32; command2_y: i32; command2_w: i32; command2_h: i32; command2_color: i32; command2_asset: i32; command2_rotation_degrees: i32; command2_alpha: i32; command2_clip_x: i32; command2_clip_y: i32; command2_clip_w: i32; command2_clip_h: i32;
+    command3_kind: i32; command3_x: i32; command3_y: i32; command3_w: i32; command3_h: i32; command3_color: i32; command3_asset: i32; command3_rotation_degrees: i32; command3_alpha: i32; command3_clip_x: i32; command3_clip_y: i32; command3_clip_w: i32; command3_clip_h: i32;
+    command4_kind: i32; command4_x: i32; command4_y: i32; command4_w: i32; command4_h: i32; command4_color: i32; command4_asset: i32; command4_rotation_degrees: i32; command4_alpha: i32; command4_clip_x: i32; command4_clip_y: i32; command4_clip_w: i32; command4_clip_h: i32;
+    command5_kind: i32; command5_x: i32; command5_y: i32; command5_w: i32; command5_h: i32; command5_color: i32; command5_asset: i32; command5_rotation_degrees: i32; command5_alpha: i32; command5_clip_x: i32; command5_clip_y: i32; command5_clip_w: i32; command5_clip_h: i32;
+    command6_kind: i32; command6_x: i32; command6_y: i32; command6_w: i32; command6_h: i32; command6_color: i32; command6_asset: i32; command6_rotation_degrees: i32; command6_alpha: i32; command6_clip_x: i32; command6_clip_y: i32; command6_clip_w: i32; command6_clip_h: i32;
+    command7_kind: i32; command7_x: i32; command7_y: i32; command7_w: i32; command7_h: i32; command7_color: i32; command7_asset: i32; command7_rotation_degrees: i32; command7_alpha: i32; command7_clip_x: i32; command7_clip_y: i32; command7_clip_w: i32; command7_clip_h: i32;
+}

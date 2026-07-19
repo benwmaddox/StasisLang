@@ -1,1 +1,28 @@
-// Lesson map: exploration_movement_system iterates slots ascending in main.stasis.
+function exploration_move_slot(slot: i32): void {
+    let dx: i32 = World.destination_x[slot] - World.position_x[slot];
+    let dy: i32 = World.destination_y[slot] - World.position_y[slot];
+    let span: i32 = exploration_max(exploration_abs(dx), exploration_abs(dy));
+    let speed: i32 = World.move_speed[slot];
+    if (span <= speed) {
+        World.position_x[slot] = World.destination_x[slot];
+        World.position_y[slot] = World.destination_y[slot];
+        World.destination_active[slot] = 0;
+        return;
+    }
+    let step_x: i32 = (dx * speed) / span;
+    let step_y: i32 = (dy * speed) / span;
+    if (step_x == 0 && dx > 0) { step_x = 1; }
+    if (step_x == 0 && dx < 0) { step_x = -1; }
+    if (step_y == 0 && dy > 0) { step_y = 1; }
+    if (step_y == 0 && dy < 0) { step_y = -1; }
+    World.position_x[slot] += step_x; World.position_y[slot] += step_y;
+}
+
+function exploration_movement_system(): void {
+    let slot: i32 = 0;
+    for (slot = 0; slot < MAX_ENTITIES; slot = slot + 1) {
+        if (World.entity_alive[slot] != 0 && World.destination_active[slot] != 0) {
+            exploration_move_slot(slot);
+        }
+    }
+}

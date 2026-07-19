@@ -1,2 +1,9 @@
-// Lesson map: capacities, MOVE_SPEED, PICKUP_RADIUS, and HUD_HEIGHT currently live in main.stasis.
-// They move here when every shared host resolves project-relative imports identically.
+const MAX_ENTITIES: i32 = 8;
+const PLAYER_SLOT: i32 = 0;
+const COLLECTION_EVENT_CAPACITY: i32 = 4;
+const MOVE_SPEED: i32 = 6;
+const PICKUP_RADIUS: i32 = 24;
+const HUD_HEIGHT: i32 = 56;
+const WORLD_WIDTH: i32 = 720;
+const WORLD_HEIGHT: i32 = 960;
+const CAMERA_FOLLOW_STEP: i32 = 4;
