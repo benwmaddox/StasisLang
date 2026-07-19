@@ -1895,7 +1895,7 @@ mod tests {
             .expect("exploration template root");
         let result =
             run_android_workshop_stasis_tests(&root).expect("run exploration Stasis tests");
-        assert_eq!(result["passed"], 9);
+        assert_eq!(result["passed"], 10);
         assert_eq!(result["failed"], 0);
         assert_eq!(result["all_passed"], true);
         assert_eq!(

@@ -16,7 +16,7 @@ global GameState {
     collected_count: i32; total_collectibles: i32; tutorial_stage: i32;
     camera_x: i32; camera_y: i32; last_collected_entity_id: i32;
     collection_event_count: i32;
-    collection_event_entity_id: i32[4]; collection_event_kind: i32[4];
+    collection_event_entity_id: i32[8]; collection_event_kind: i32[8];
 }
 
 global Render {

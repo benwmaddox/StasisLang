@@ -11,6 +11,11 @@ final class WorkshopExplorationLessonPolicy {
 
     private WorkshopExplorationLessonPolicy() {}
 
+    static int effectiveTapCount(boolean tapCountAvailable, int acceptedTapCount, int tutorialStage) {
+        if (tapCountAvailable) return acceptedTapCount;
+        return tutorialStage > 0 ? 1 : 0;
+    }
+
     static int observeGame(int progress, int acceptedTapCount, int collectedCount) {
         int updated = progress;
         if (acceptedTapCount > 0) updated |= TAPPED_DESTINATION;

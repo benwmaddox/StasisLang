@@ -35,4 +35,12 @@ public final class WorkshopExplorationLessonPolicyTest {
     public void unrelatedBitsCannotCorruptProgress() {
         assertEquals(0, WorkshopExplorationLessonPolicy.record(0, 1 << 20));
     }
+
+    @Test
+    public void legacyTutorialStageSuppliesMissingTapProgress() {
+        assertEquals(0, WorkshopExplorationLessonPolicy.effectiveTapCount(false, 0, 0));
+        assertEquals(1, WorkshopExplorationLessonPolicy.effectiveTapCount(false, 0, 1));
+        assertEquals(0, WorkshopExplorationLessonPolicy.effectiveTapCount(true, 0, 3));
+        assertEquals(4, WorkshopExplorationLessonPolicy.effectiveTapCount(true, 4, 0));
+    }
 }

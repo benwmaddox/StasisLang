@@ -92,6 +92,23 @@ test `overlapping collectibles resolve in ascending entity order`(): bool {
     return GameState.collected_count == 2;
 }
 
+test `collection queue covers every collectible slot`(): bool {
+    exploration_start();
+    let slot: i32 = 0;
+    for (slot = 1; slot < MAX_ENTITIES; slot = slot + 1) {
+        if (slot > 3 && !exploration_spawn_collectible(slot, World.position_x[0], World.position_y[0], 1)) {
+            return false;
+        }
+        World.position_x[slot] = World.position_x[0]; World.position_y[slot] = World.position_y[0];
+    }
+    exploration_collection_system(); exploration_inventory_system();
+    if (GameState.collected_count != MAX_ENTITIES - 1) { return false; }
+    for (slot = 1; slot < MAX_ENTITIES; slot = slot + 1) {
+        if (World.collectible_active[slot] != 0) { return false; }
+    }
+    return true;
+}
+
 test `manifest handles flow from world data into render commands`(): bool {
     exploration_start(); render();
     if (World.sprite_handle[0] != EXPLORATION_PLAYER_ASSET) { return false; }

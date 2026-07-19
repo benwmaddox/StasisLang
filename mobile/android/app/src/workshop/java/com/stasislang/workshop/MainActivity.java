@@ -1456,14 +1456,15 @@ public final class MainActivity extends Activity {
         String stageResult = nativeGetRuntimeI32(projectRootPath(), "GameState.tutorial_stage");
         String audioSerialResult = nativeGetRuntimeI32(projectRootPath(), "ExplorationAudio.event_serial");
         String audioKindResult = nativeGetRuntimeI32(projectRootPath(), "ExplorationAudio.cue_kind");
-        if (tapsResult == null || tapsResult.startsWith("StateError")
-                || collectedResult == null || collectedResult.startsWith("StateError")
+        if (collectedResult == null || collectedResult.startsWith("StateError")
                 || totalResult == null || totalResult.startsWith("StateError")
                 || stageResult == null || stageResult.startsWith("StateError")) return;
-        int taps = extractIntField(tapsResult, "value", 0);
         int collected = extractIntField(collectedResult, "value", 0);
         int total = extractIntField(totalResult, "value", 0);
         int stage = extractIntField(stageResult, "value", 0);
+        boolean tapCountAvailable = tapsResult != null && !tapsResult.startsWith("StateError");
+        int taps = WorkshopExplorationLessonPolicy.effectiveTapCount(tapCountAvailable,
+                tapCountAvailable ? extractIntField(tapsResult, "value", 0) : 0, stage);
         int progress = explorationLessonProgress();
         int observed = WorkshopExplorationLessonPolicy.observeGame(progress, taps, collected);
         if (observed != progress) saveExplorationLessonProgress(observed);
