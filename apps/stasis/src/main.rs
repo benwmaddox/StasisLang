@@ -408,8 +408,8 @@ fn lookup_name_matches(name: &str, query_lower: &str) -> bool {
 fn lookup_display_path(path: &Path, root: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
-        .display()
-        .to_string()
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn collect_lookup_matches_in_source(
