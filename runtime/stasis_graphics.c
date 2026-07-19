@@ -3810,8 +3810,40 @@ STASIS_EXPORT void stasis_draw_lines_f32(const float* lines, int line_count) {
  * Command-buffer submission (v1 prototype).
  *
  * Command coordinates are host pixels. Ordering is fixed by the buffer layout:
- * clear -> lines -> sprites -> present.
+ * clear -> lines -> sprites -> text -> present.
  */
+static void flush_lines_before_later_layers(void) {
+    if (g_line_count == 0) return;
+    if (g_use_sdl_renderer) {
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        for (int i = 0; i < g_line_count; i++) {
+            SDL_SetRenderDrawColor(
+                g_renderer,
+                (Uint8)(g_lines[i].r * 255.0f),
+                (Uint8)(g_lines[i].g * 255.0f),
+                (Uint8)(g_lines[i].b * 255.0f),
+                (Uint8)(g_lines[i].a * 255.0f));
+            SDL_RenderDrawLineF(
+                g_renderer,
+                g_lines[i].x1,
+                g_lines[i].y1,
+                g_lines[i].x2,
+                g_lines[i].y2);
+        }
+        g_line_count = 0;
+        return;
+    }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    flush_lines();
+#endif
+}
+
+static void flush_sprites_before_text(void) {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (!g_use_sdl_renderer) flush_sprites();
+#endif
+}
+
 static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
     if (!cmd_i32 || !cmd_f32) return;
 
@@ -3853,6 +3885,10 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
         stasis_draw_lines_f32(cmd_f32 + 4, line_count);
     }
 
+    /* Lines are buffered on both backends. Flush before sprites so later layers
+     * cannot cover text after text has already been drawn. */
+    flush_lines_before_later_layers();
+
     /* sprites: i32 header is 32, then sprite payload */
     if (sprite_count > 0) {
         const int32_t* sprites = cmd_i32 + 32;
@@ -3874,50 +3910,9 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
         }
     }
 
-    /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
-    /* byte_off < 0 encodes cached text run handle (no cmd_u8 access). */
-    if (text_count > 0) {
-        const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
-        const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
-        const int32_t* text_meta = cmd_i32 + text_i32_base;
-
-        for (int i = 0; i < text_count; i++) {
-            const int base_i = i * 3;
-            const int font = text_meta[base_i + 0];
-            const int byte_off = text_meta[base_i + 1];
-            const int byte_len = text_meta[base_i + 2];
-
-            if (font <= 0) continue;
-            if (byte_off < 0) {
-                const int run = -byte_off;
-                const int base_f = text_f32_base + i * 6;
-                const float x = cmd_f32[base_f + 0];
-                const float y = cmd_f32[base_f + 1];
-                const float r = cmd_f32[base_f + 2];
-                const float g = cmd_f32[base_f + 3];
-                const float b = cmd_f32[base_f + 4];
-                const float a = cmd_f32[base_f + 5];
-                stasis_gfx_draw_text_cached(run, x, y, r, g, b, a);
-                continue;
-            }
-            if (!cmd_u8 || text_bytes_used <= 0) continue;
-            if (byte_off >= text_bytes_used) continue;
-            if (byte_len < 0) continue;
-            if (byte_off + byte_len >= text_bytes_used) continue;
-
-            const char* text = (const char*)(cmd_u8 + byte_off);
-
-            const int base_f = text_f32_base + i * 6;
-            const float x = cmd_f32[base_f + 0];
-            const float y = cmd_f32[base_f + 1];
-            const float r = cmd_f32[base_f + 2];
-            const float g = cmd_f32[base_f + 3];
-            const float b = cmd_f32[base_f + 4];
-            const float a = cmd_f32[base_f + 5];
-
-            stasis_draw_text(font, text, x, y, r, g, b, a);
-        }
-    }
+    /* OpenGL sprites are batched. Native text draws immediately, so commit the
+     * sprite batch first to preserve the documented line -> sprite -> text order. */
+    flush_sprites_before_text();
 
     /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
     /* byte_off < 0 encodes cached text run handle (no cmd_u8 access). */
