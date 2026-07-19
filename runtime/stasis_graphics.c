@@ -378,6 +378,17 @@ static void stasis_pump_events(void) {
                 if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                     int new_w, new_h;
                     SDL_GetWindowSize(g_window, &new_w, &new_h);
+#if defined(__ANDROID__)
+                    if (g_renderer) {
+                        int output_w = 0;
+                        int output_h = 0;
+                        if (SDL_GetRendererOutputSize(g_renderer, &output_w, &output_h) == 0 &&
+                            output_w > 0 && output_h > 0) {
+                            new_w = output_w;
+                            new_h = output_h;
+                        }
+                    }
+#endif
 
                     if (new_w != g_window_width || new_h != g_window_height) {
                         g_window_prev_width = g_window_width;
@@ -3349,13 +3360,25 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     }
 #endif
 
+    Uint32 window_flags =
+        (want_sdl ? 0 : SDL_WINDOW_OPENGL) | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+#if defined(__ANDROID__)
+    SDL_DisplayMode display_mode;
+    if (SDL_GetCurrentDisplayMode(0, &display_mode) == 0 &&
+        display_mode.w > 0 && display_mode.h > 0) {
+        width = display_mode.w;
+        height = display_mode.h;
+    }
+    window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+#endif
+
     g_window = SDL_CreateWindow(
         title ? title : "Stasis",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         width,
         height,
-        (want_sdl ? 0 : SDL_WINDOW_OPENGL) | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+        window_flags
     );
 
     if (!g_window) {
@@ -3434,6 +3457,15 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         if (SDL_RenderSetVSync(g_renderer, 1) != 0) {
             SDL_Log("SDL_RenderSetVSync failed: %s", SDL_GetError());
         }
+#if defined(__ANDROID__)
+        int output_width = 0;
+        int output_height = 0;
+        if (SDL_GetRendererOutputSize(g_renderer, &output_width, &output_height) == 0 &&
+            output_width > 0 && output_height > 0) {
+            width = output_width;
+            height = output_height;
+        }
+#endif
         SDL_RenderSetLogicalSize(g_renderer, width, height);
         SDL_RendererInfo info;
         if (SDL_GetRendererInfo(g_renderer, &info) == 0) {
@@ -3602,8 +3634,16 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
         return;
     }
 
+#if defined(__ANDROID__)
+    /* Android owns the native surface size; game requests are desktop window hints. */
+    if (!g_renderer ||
+        SDL_GetRendererOutputSize(g_renderer, &g_window_width, &g_window_height) != 0) {
+        SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
+    }
+#else
     SDL_SetWindowSize(g_window, width, height);
     SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
+#endif
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!g_use_sdl_renderer) {

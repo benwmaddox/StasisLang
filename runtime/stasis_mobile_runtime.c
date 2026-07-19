@@ -9,8 +9,6 @@ int stasis_init_window(int width, int height, const char *title);
 int stasis_should_quit(void);
 int stasis_mobile_poll_events(void);
 void stasis_mobile_set_paused(int paused);
-void stasis_begin_frame(void);
-void stasis_end_frame(void);
 void stasis_host_get_frame(int32_t *out_i32, float *out_f32);
 void stasis_host_bulk_apply_requests(
     const int32_t *seq,
@@ -148,14 +146,12 @@ int32_t stasis_mobile_runtime_step(void) {
     if (runtime_state.last_entry_result != 0) {
         return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
     }
-    stasis_begin_frame();
     runtime_state.last_entry_result = runtime_state.entries.render_entry();
     if (runtime_state.last_entry_result != 0) {
-        stasis_end_frame();
         return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
     }
+    /* Submission owns begin/present according to the guest command-buffer flags. */
     stasis_gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
-    stasis_end_frame();
     return STASIS_MOBILE_RUNTIME_OK;
 }
 
