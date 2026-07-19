@@ -52,7 +52,8 @@ The manifest establishes identity, confinement, and integrity. Decode, upload, p
 
 ## Android sprite policy
 
-- The AOT bundle command resolves and verifies the manifest with `stasis_assets`, then packages only the manifest entries under `assets/stasis_game/`; published APK builds do not copy project source or arbitrary project files.
+- The AOT bundle command resolves and verifies the manifest with `stasis_assets`, then packages its entries under `assets/stasis_game/`; published APK builds do not copy project source or arbitrary project files.
+- As a narrow supplement for the path-based `load_font` API, mobile packaging scans compiled `.stasis` source string literals for `.ttf` and `.otf` paths. It copies only referenced regular font files that resolve beneath the canonical project `assets/` directory, preserving their project-relative path. Missing, unreferenced, and out-of-project fonts are not packaged.
 - Android uses one GL texture per resolved sprite and batches only consecutive commands that share texture and clip state. Atlas layout remains a backend-private desktop optimization, so atlas coordinates never enter the manifest or render-command ABI.
 - Render command schema v3 carries rotation, alpha, and an optional top-left clip rectangle. A non-positive clip width or height disables clipping for backward compatibility; otherwise Android intersects the rectangle with the surface and uses a scissor test without reordering commands.
 - Missing, corrupt, oversized, hash-mismatched, or unsupported packaged sprites render the deterministic magenta checker fallback.
