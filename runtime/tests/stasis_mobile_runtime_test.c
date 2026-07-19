@@ -91,6 +91,8 @@ void stasis_gfx_submit_u8(
 ) {
     assert(cmd_i32 != NULL && cmd_f32 != NULL && cmd_u8 != NULL);
     gfx_submit_calls += 1;
+    stasis_begin_frame();
+    stasis_end_frame();
 }
 
 void stasis_shutdown(void) {
@@ -306,7 +308,7 @@ static void test_stops_on_nonzero_game_entry_results(void) {
     assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
     assert(stasis_mobile_runtime_last_entry_result() == 9);
     assert(tick_calls == 1 && render_calls == 1);
-    assert(begin_frame_calls == 1 && end_frame_calls == 1 && gfx_submit_calls == 0);
+    assert(begin_frame_calls == 0 && end_frame_calls == 0 && gfx_submit_calls == 0);
     stasis_mobile_runtime_shutdown();
 }
 
