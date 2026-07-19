@@ -1670,6 +1670,8 @@ fn write_mobile_asset_bundle(
         })?;
     }
     let game_root = asset_root.join("stasis_game");
+    fs::create_dir_all(game_root.join("src"))
+        .map_err(|error| format!("failed to create mobile AOT source root: {error}"))?;
     let manifest_destination = game_root.join(DEFAULT_ASSET_MANIFEST_PATH);
     fs::create_dir_all(manifest_destination.parent().expect("manifest parent"))
         .map_err(|error| format!("failed to create mobile AOT manifest directory: {error}"))?;

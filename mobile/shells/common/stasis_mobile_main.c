@@ -14,7 +14,7 @@ static int configure_asset_root(void) {
         return -1;
     }
     char path[1024];
-    int written = snprintf(path, sizeof(path), "%sstasis_game", base);
+    int written = snprintf(path, sizeof(path), "%sstasis_game/src", base);
     SDL_free(base);
     if (written < 0 || (size_t)written >= sizeof(path)) {
         return -1;

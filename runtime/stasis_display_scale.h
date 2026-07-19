@@ -29,6 +29,12 @@ static int stasis_display_scaled_extent(int logical_extent, float pixel_scale) {
     return (int)scaled;
 }
 
+static int stasis_display_logical_stroke_samples(float pixel_scale) {
+    if (pixel_scale < 1.0f) pixel_scale = 1.0f;
+    if (pixel_scale > 8.0f) pixel_scale = 8.0f;
+    return (int)ceilf(pixel_scale);
+}
+
 static float stasis_display_native_to_logical(
     float native_value,
     int native_extent,

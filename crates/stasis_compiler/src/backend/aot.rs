@@ -1566,7 +1566,7 @@ mod tests {
         let mut process = AotProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\nextern function gfx_release_sprite(handle: i32): void;\nextern function load_font(path: string, size: i32): i32;\nextern function measure_text(font: i32, text: string): f32;\nfunction @extern(\"stasis_gfx_cache_text\") gfx_cache_text(font: i32, text: string): i32;\nfunction main(): i32 { gfx_release_sprite(0); return 0; }\n",
+            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\nextern function gfx_release_sprite(handle: i32): void;\nextern function load_font(path: string, size: i32): i32;\nextern function measure_text(font: i32, text: string): f32;\nfunction @extern(\"stasis_jit_gfx_cache_text\") gfx_cache_text(font: i32, text: string): i32;\nfunction main(): i32 { gfx_release_sprite(0); return 0; }\n",
         );
         process.compile().expect("compile");
 
@@ -1598,7 +1598,7 @@ mod tests {
         );
         assert_eq!(
             resolved.get("gfx_cache_text").copied(),
-            Some("stasis_gfx_cache_text")
+            Some("stasis_jit_gfx_cache_text")
         );
     }
 

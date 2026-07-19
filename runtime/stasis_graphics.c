@@ -320,6 +320,40 @@ static float stasis_clampf(float v, float minv, float maxv) {
     return v;
 }
 
+/* SDL's line primitive keeps a one-device-pixel width even when a logical
+ * render size scales coordinates up. Draw parallel device-pixel samples so a
+ * one-unit logical stroke stays solid on high-density surfaces. */
+static void stasis_sdl_draw_logical_line(float x1, float y1, float x2, float y2) {
+    if (!g_renderer) return;
+    const int samples = stasis_display_logical_stroke_samples(g_pixel_scale);
+    if (samples <= 1) {
+        SDL_RenderDrawLineF(g_renderer, x1, y1, x2, y2);
+        return;
+    }
+
+    const float dx = x2 - x1;
+    const float dy = y2 - y1;
+    const float length = sqrtf(dx * dx + dy * dy);
+    if (length <= 0.0001f) {
+        SDL_FRect point = { x1 - 0.5f, y1 - 0.5f, 1.0f, 1.0f };
+        SDL_RenderFillRectF(g_renderer, &point);
+        return;
+    }
+
+    const float step_x = (-dy / length) / g_pixel_scale;
+    const float step_y = (dx / length) / g_pixel_scale;
+    const float first = -0.5f * (float)(samples - 1);
+    for (int i = 0; i < samples; i++) {
+        const float offset = first + (float)i;
+        SDL_RenderDrawLineF(
+            g_renderer,
+            x1 + step_x * offset,
+            y1 + step_y * offset,
+            x2 + step_x * offset,
+            y2 + step_y * offset);
+    }
+}
+
 static void stasis_update_pointer_norm(int idx) {
     if (!stasis_input_valid_index(idx)) return;
 
@@ -2784,7 +2818,7 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
                     color.b = (Uint8)(g_lines[i].b * 255.0f);
                     color.a = (Uint8)(g_lines[i].a * 255.0f);
                     SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
-                    SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
+                    stasis_sdl_draw_logical_line(g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
                 }
                 g_line_count = 0;
             }
@@ -3371,7 +3405,9 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         return 1;
     }
 
+#if !defined(__ANDROID__)
     SDL_LogSetOutputFunction(stasis_sdl_log_output, NULL);
+#endif
     SDL_LogSetAllPriority(SDL_LOG_PRIORITY_INFO);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -3787,7 +3823,7 @@ STASIS_EXPORT void stasis_end_frame(void) {
             color.b = (Uint8)(g_lines[i].b * 255.0f);
             color.a = (Uint8)(g_lines[i].a * 255.0f);
             SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
-            SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
+            stasis_sdl_draw_logical_line(g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
         }
 
         /* Capture before present so we read the current render target. */
@@ -3924,8 +3960,7 @@ static void flush_lines_before_later_layers(void) {
                 (Uint8)(g_lines[i].g * 255.0f),
                 (Uint8)(g_lines[i].b * 255.0f),
                 (Uint8)(g_lines[i].a * 255.0f));
-            SDL_RenderDrawLineF(
-                g_renderer,
+            stasis_sdl_draw_logical_line(
                 g_lines[i].x1,
                 g_lines[i].y1,
                 g_lines[i].x2,

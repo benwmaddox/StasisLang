@@ -21,6 +21,7 @@ static void test_phone_scale_uses_uniform_letterbox_factor(void) {
     CHECK(stasis_display_scaled_extent(96, scale) == 288);
     CHECK(stasis_display_scaled_extent(128, scale) == 384);
     CHECK(stasis_display_font_atlas_extent(scale) == 1024);
+    CHECK(stasis_display_logical_stroke_samples(scale) == 3);
 }
 
 static void test_native_coordinates_map_to_logical_space(void) {
@@ -33,6 +34,7 @@ static void test_low_resolution_never_downsamples_asset_bakes(void) {
     CHECK(close_enough(scale, 1.0f));
     CHECK(stasis_display_scaled_extent(96, scale) == 96);
     CHECK(stasis_display_font_atlas_extent(scale) == 512);
+    CHECK(stasis_display_logical_stroke_samples(scale) == 1);
 }
 
 static void test_extreme_density_is_bounded(void) {
@@ -40,6 +42,11 @@ static void test_extreme_density_is_bounded(void) {
     CHECK(close_enough(scale, 8.0f));
     CHECK(stasis_display_scaled_extent(10000, scale) == 65536);
     CHECK(stasis_display_font_atlas_extent(scale) == 2048);
+    CHECK(stasis_display_logical_stroke_samples(scale) == 8);
+}
+
+static void test_fractional_density_covers_a_full_logical_stroke(void) {
+    CHECK(stasis_display_logical_stroke_samples(2.625f) == 3);
 }
 
 int main(void) {
@@ -47,5 +54,6 @@ int main(void) {
     test_native_coordinates_map_to_logical_space();
     test_low_resolution_never_downsamples_asset_bakes();
     test_extreme_density_is_bounded();
+    test_fractional_density_covers_a_full_logical_stroke();
     return 0;
 }

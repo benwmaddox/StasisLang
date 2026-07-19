@@ -2810,6 +2810,8 @@ mod tests {
         )
         .expect("read Android activity");
         assert!(java.contains(".stasis_game.staging"));
+        assert!(java.contains("new File(root, \"src\")"));
+        assert!(mobile_main.contains("stasis_game/src"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
                 .expect("read Android asset bridge");
