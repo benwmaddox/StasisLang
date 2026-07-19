@@ -156,6 +156,15 @@ endif()
 if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     enable_testing()
     add_executable(
+        stasis_display_scale_test
+        tests/stasis_display_scale_test.c
+    )
+    target_include_directories(stasis_display_scale_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(NOT WIN32)
+        target_link_libraries(stasis_display_scale_test PRIVATE m)
+    endif()
+    add_test(NAME stasis_display_scale_contract COMMAND stasis_display_scale_test)
+    add_executable(
         stasis_mobile_runtime_test
         tests/stasis_mobile_runtime_test.c
         stasis_mobile_runtime.c

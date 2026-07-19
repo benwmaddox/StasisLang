@@ -16,6 +16,22 @@ and post-effects and before the frame is presented. A `.png` suffix selects PNG;
 other suffixes use BMP. PNG bytes are deterministic for identical framebuffer
 pixels, though pixels can vary across backends, drivers, and platforms.
 
+## High-density displays
+
+`init_window(width, height, title)` defines the game's logical coordinate space.
+Stasis keeps that space stable when a mobile or high-DPI desktop surface has a
+larger drawable framebuffer. SDL maps logical drawing commands to the drawable,
+while pointer positions and safe viewports are converted back to logical pixels.
+
+SVG sources remain packaged as SVG files. On the device, sized SVG and raster
+assets are baked at the drawable-to-logical pixel scale. Rasterized GPU entries
+are shared in memory by source path and logical target size; a density change
+replaces their device raster while preserving the game-facing sprite handle.
+TrueType atlases use the same scale, but text measurement and glyph placement
+remain in logical pixels. A drawable-density change invalidates the affected
+sprite and font caches so they are rebuilt before their next draw. Framebuffer
+captures use the drawable resolution.
+
 ## Prerequisites
 
 - CMake 3.16+

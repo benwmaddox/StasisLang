@@ -39,6 +39,16 @@ From the generated `android/` directory run `gradle :app:assembleDebug` or
 shared runtime, links the generated AOT objects, and packages
 `assets/stasis_game`. No vcpkg installation is used.
 
+The SDL shell preserves the logical dimensions requested by the game while
+rendering into the device's native drawable surface. Original SVG files remain
+in the packaged assets and are rasterized locally for the ratio between the
+game's logical resolution and the device drawable. The shared runtime caches
+those GPU rasters by source and logical target size, scales TrueType atlases for
+the same drawable density, maps touch input back to logical coordinates, and
+refreshes density-dependent caches after surface-size changes. Games should
+author layout in logical coordinates rather than applying Android density
+multipliers themselves.
+
 ## iOS arm64
 
 On macOS install Xcode and obtain device-capable `SDL2.xcframework` and

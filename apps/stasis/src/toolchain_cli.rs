@@ -1693,6 +1693,7 @@ fn copy_mobile_runtime(source: &Path, destination: &Path) -> Result<(), String> 
         "CMakeLists.txt",
         "nanosvg.h",
         "nanosvgrast.h",
+        "stasis_display_scale.h",
         "stasis_graphics.c",
         "stasis_mobile_aot_runtime.c",
         "stasis_mobile_aot_runtime.h",
@@ -2793,6 +2794,7 @@ mod tests {
         let runtime_header = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.h"))
             .expect("read shared mobile runtime header");
         assert!(runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
+        assert!(android.join("runtime/stasis_display_scale.h").is_file());
         assert!(android
             .join("android/app/src/main/assets/stasis_game/assets/manifest.json")
             .is_file());
@@ -2827,6 +2829,7 @@ mod tests {
         assert!(project.contains("stasis_mobile_runtime.c in Sources"));
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
         assert!(config.contains("STASIS_GRAPHICS_SDL_ONLY=1"));
+        assert!(ios.join("runtime/stasis_display_scale.h").is_file());
         assert!(config.contains("@executable_path/Frameworks"));
         assert!(project.contains("Embed SDL frameworks"));
         assert!(ios
