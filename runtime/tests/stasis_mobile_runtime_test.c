@@ -108,6 +108,7 @@ int stasis_audio_push_f32_interleaved(const float *samples, int frames) { return
 int stasis_gfx_load_sprite(const char *path, int max_w, int max_h) { return path && max_w && max_h; }
 void stasis_gfx_release_sprite(int handle) { (void)handle; }
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }
+int stasis_gfx_dump_png(const char *path) { return path != NULL; }
 int stasis_gfx_cache_text(int font, const char *text) { return font + (text != NULL); }
 int stasis_gfx_poll_reload(int handle) { return handle; }
 float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }

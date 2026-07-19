@@ -2,6 +2,20 @@
 
 Native SDL2+OpenGL graphics library for Stasis programs.
 
+## Framebuffer capture
+
+`stasis_gfx_dump_png(path)` writes the current framebuffer as an RGBA PNG and
+returns `1` on success or `0` on failure. `stasis_gfx_dump_bmp(path)` provides
+the existing BMP equivalent. Relative runtime paths resolve through the asset
+root; callers that need a specific output location should pass an absolute path.
+
+For automated captures, set `STASIS_SCREENSHOT_ONCE` to an output path and
+optionally set the 1-based `STASIS_SCREENSHOT_FRAME` and
+`STASIS_EXIT_AFTER_SCREENSHOT=1`. Scheduled capture occurs after queued drawing
+and post-effects and before the frame is presented. A `.png` suffix selects PNG;
+other suffixes use BMP. PNG bytes are deterministic for identical framebuffer
+pixels, though pixels can vary across backends, drivers, and platforms.
+
 ## Prerequisites
 
 - CMake 3.16+

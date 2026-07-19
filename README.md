@@ -156,6 +156,24 @@ Notes:
 - `play` is currently Windows-focused (graphics runtime integration).
 - If `--watch-dir` is omitted, `play` watches the entry file's parent directory by default.
 - You can cap runtime for smoke testing with `--ticks N`.
+- Capture the rendered framebuffer with `--screenshot artifacts\frame.png`. PNG is
+  selected by the `.png` extension; other extensions preserve the existing BMP output.
+  `--screenshot-frame N` selects a 1-based frame (default `1`). The capture happens
+  after queued drawing and post-effects, immediately before present. PNG bytes are
+  deterministic for identical input pixels, but rasterization can differ between
+  graphics backends, drivers, and platforms.
+- The CLI creates missing parent directories and replaces an existing output file.
+  With `--exit-after-screenshot`, a write failure also stops the game and returns a
+  nonzero exit code instead of leaving screenshot automation running indefinitely.
+
+For example:
+
+```powershell
+cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis --screenshot artifacts\frame-12.png --screenshot-frame 12 --exit-after-screenshot
+```
+
+The equivalent runtime environment variables are `STASIS_SCREENSHOT_ONCE`,
+`STASIS_SCREENSHOT_FRAME`, and `STASIS_EXIT_AFTER_SCREENSHOT=1`.
 
 ## Tests (In Stasis, Run via JIT)
 

@@ -23,6 +23,7 @@ int stasis_audio_push_f32_interleaved(const float *samples, int frames);
 int stasis_gfx_load_sprite(const char *path, int max_w, int max_h);
 void stasis_gfx_release_sprite(int handle);
 int stasis_gfx_dump_bmp(const char *path);
+int stasis_gfx_dump_png(const char *path);
 int stasis_gfx_cache_text(int font, const char *text);
 int stasis_gfx_poll_reload(int handle);
 float stasis_gfx_measure_text_cached(int handle);
@@ -360,6 +361,12 @@ void stasis_jit_gfx_release_sprite(int32_t handle) { stasis_gfx_release_sprite(h
 int stasis_jit_gfx_dump_bmp(int32_t path) {
     char *value = resolve_text(path);
     int result = value == NULL ? 0 : stasis_gfx_dump_bmp(value);
+    free(value);
+    return result;
+}
+int stasis_jit_gfx_dump_png(int32_t path) {
+    char *value = resolve_text(path);
+    int result = value == NULL ? 0 : stasis_gfx_dump_png(value);
     free(value);
     return result;
 }
