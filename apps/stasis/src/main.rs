@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use stasis::{
-    run_jit_tests_in_directory_with_session, run_play_in_process,
+    run_jit_tests_in_directory_with_session, run_play_in_process_with_input_script,
     run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
     RunnerConfig, StasisTestRunSession,
 };
@@ -109,6 +109,7 @@ struct PlayCliArgs {
     watch_dir: Option<PathBuf>,
     data_bind_json: Option<PathBuf>,
     data_bind_struct_meta: Option<PathBuf>,
+    input_script: Option<PathBuf>,
     tick_sleep_micros: u64,
     ticks: Option<u64>,
     screenshot: Option<PathBuf>,
@@ -527,6 +528,7 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
     let mut watch_dir: Option<PathBuf> = None;
     let mut data_bind_json: Option<PathBuf> = None;
     let mut data_bind_struct_meta: Option<PathBuf> = None;
+    let mut input_script: Option<PathBuf> = None;
     let mut tick_sleep_micros: u64 = 16000;
     let mut ticks: Option<u64> = None;
     let mut screenshot: Option<PathBuf> = None;
@@ -567,6 +569,14 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
             data_bind_json = Some(PathBuf::from(args[i + 1].clone()));
             data_bind_struct_meta = Some(PathBuf::from(args[i + 2].clone()));
             i += 3;
+            continue;
+        }
+        if arg == "--input-script" {
+            if i + 1 >= args.len() {
+                return Err("missing value for --input-script".to_string());
+            }
+            input_script = Some(PathBuf::from(args[i + 1].clone()));
+            i += 2;
             continue;
         }
         if arg == "--ticks" {
@@ -640,6 +650,7 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         watch_dir,
         data_bind_json,
         data_bind_struct_meta,
+        input_script,
         tick_sleep_micros,
         ticks,
         screenshot,
@@ -745,11 +756,12 @@ fn try_run_play_subcommand() -> Option<i32> {
         }
     };
 
-    let play_result = run_play_in_process(
+    let play_result = run_play_in_process_with_input_script(
         &parsed.watch_file,
         parsed.watch_dir.as_deref(),
         parsed.data_bind_json.as_deref(),
         parsed.data_bind_struct_meta.as_deref(),
+        parsed.input_script.as_deref(),
         parsed.tick_sleep_micros,
         parsed.ticks,
     );
@@ -2180,6 +2192,27 @@ mod tests {
         ];
         let error = parse_play_cli_args(&args).expect_err("parse should fail");
         assert!(error.contains("missing values for --data-bind"));
+    }
+
+    #[test]
+    fn parse_play_cli_args_accepts_input_script() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--input-script".to_string(),
+            "qa/taps.json".to_string(),
+        ];
+        let parsed = parse_play_cli_args(&args).expect("parse should succeed");
+        assert_eq!(parsed.input_script, Some(PathBuf::from("qa/taps.json")));
+    }
+
+    #[test]
+    fn parse_play_cli_args_rejects_missing_input_script_path() {
+        let args = vec![
+            "samples/brickout_revenge/brickout_revenge_v1.stasis".to_string(),
+            "--input-script".to_string(),
+        ];
+        let error = parse_play_cli_args(&args).expect_err("parse should fail");
+        assert!(error.contains("missing value for --input-script"));
     }
 
     #[test]

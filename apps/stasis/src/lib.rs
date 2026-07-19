@@ -37,6 +37,7 @@ use stasis_runner::swap::contracts::{
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -518,6 +519,282 @@ fn resolve_play_watch_dir(watch_file: &Path, watch_dir: Option<&Path>) -> PathBu
     PathBuf::from(".")
 }
 
+const PLAY_INPUT_MAX_FRAMES: usize = 10_000;
+const PLAY_INPUT_MAX_POINTERS: usize = 8;
+const PLAY_INPUT_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const HOST_I_POINTER_COUNT: usize = 7;
+const HOST_I_DROPPED_POINTERS: usize = 8;
+const HOST_I_WINDOW_W_PX: usize = 1;
+const HOST_I_WINDOW_H_PX: usize = 2;
+const HOST_I_VIEWPORT_W_PX: usize = 5;
+const HOST_I_VIEWPORT_H_PX: usize = 6;
+const HOST_I_POINTER_BASE: usize = 544;
+const HOST_I_POINTER_STRIDE: usize = 4;
+const HOST_F_POINTER_STRIDE: usize = 6;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayInputScriptDocument {
+    version: u32,
+    frames: Vec<PlayInputFrame>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayInputFrame {
+    frame: u64,
+    pointers: Vec<PlayInputPointer>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayInputPointer {
+    id: i32,
+    is_down: bool,
+    went_down: bool,
+    went_up: bool,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug)]
+struct PlayInputTimeline {
+    frames: Vec<PlayInputFrame>,
+    next_frame: usize,
+    pointers: Vec<PlayInputPointer>,
+}
+
+fn validate_play_input_script(
+    document: PlayInputScriptDocument,
+) -> Result<PlayInputTimeline, String> {
+    if document.version != 1 {
+        return Err(format!(
+            "unsupported input-script version {} (expected 1)",
+            document.version
+        ));
+    }
+    if document.frames.len() > PLAY_INPUT_MAX_FRAMES {
+        return Err(format!(
+            "input-script has too many frames (maximum {PLAY_INPUT_MAX_FRAMES})"
+        ));
+    }
+    let mut previous_frame = 0u64;
+    for frame in &document.frames {
+        if frame.frame == 0 || frame.frame > i32::MAX as u64 {
+            return Err("input-script frame must be between 1 and 2147483647".to_string());
+        }
+        if frame.frame <= previous_frame {
+            return Err("input-script frames must be strictly increasing".to_string());
+        }
+        previous_frame = frame.frame;
+        if frame.pointers.len() > PLAY_INPUT_MAX_POINTERS {
+            return Err(format!(
+                "input-script frame {} has too many pointers (maximum {PLAY_INPUT_MAX_POINTERS})",
+                frame.frame
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        for pointer in &frame.pointers {
+            if pointer.id < 0 {
+                return Err(format!(
+                    "input-script frame {} pointer id must be non-negative",
+                    frame.frame
+                ));
+            }
+            if !ids.insert(pointer.id) {
+                return Err(format!(
+                    "input-script frame {} contains duplicate pointer id {}",
+                    frame.frame, pointer.id
+                ));
+            }
+            if !pointer.x.is_finite()
+                || !pointer.y.is_finite()
+                || pointer.x < 0.0
+                || pointer.y < 0.0
+            {
+                return Err(format!(
+                    "input-script frame {} pointer coordinates must be finite and non-negative",
+                    frame.frame
+                ));
+            }
+            if pointer.went_down && pointer.went_up {
+                return Err(format!(
+                    "input-script frame {} pointer cannot go down and up together",
+                    frame.frame
+                ));
+            }
+            if pointer.went_down && !pointer.is_down {
+                return Err(format!(
+                    "input-script frame {} wentDown requires isDown=true",
+                    frame.frame
+                ));
+            }
+            if pointer.went_up && pointer.is_down {
+                return Err(format!(
+                    "input-script frame {} wentUp requires isDown=false",
+                    frame.frame
+                ));
+            }
+        }
+    }
+    Ok(PlayInputTimeline {
+        frames: document.frames,
+        next_frame: 0,
+        pointers: Vec::new(),
+    })
+}
+
+fn load_play_input_script(path: &Path, launch_dir: &Path) -> Result<PlayInputTimeline, String> {
+    let resolved = resolve_play_sidecar_path(path, launch_dir);
+    let metadata = fs::metadata(&resolved).map_err(|error| {
+        format!(
+            "failed to inspect input-script {}: {error}",
+            resolved.display()
+        )
+    })?;
+    validate_play_input_script_size(metadata.len())?;
+    let file = fs::File::open(&resolved).map_err(|error| {
+        format!(
+            "failed to open input-script {}: {error}",
+            resolved.display()
+        )
+    })?;
+    let mut source = String::with_capacity(metadata.len() as usize);
+    file.take(PLAY_INPUT_MAX_FILE_BYTES + 1)
+        .read_to_string(&mut source)
+        .map_err(|error| {
+            format!(
+                "failed to read input-script {}: {error}",
+                resolved.display()
+            )
+        })?;
+    validate_play_input_script_size(source.len() as u64)?;
+    let document: PlayInputScriptDocument = serde_json::from_str(&source).map_err(|error| {
+        format!(
+            "failed to parse input-script {}: {error}",
+            resolved.display()
+        )
+    })?;
+    validate_play_input_script(document)
+}
+
+fn validate_play_input_script_size(byte_len: u64) -> Result<(), String> {
+    if byte_len > PLAY_INPUT_MAX_FILE_BYTES {
+        return Err(format!(
+            "input-script is too large ({byte_len} bytes; maximum {PLAY_INPUT_MAX_FILE_BYTES})"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_play_input_script_ticks(
+    max_ticks: Option<u64>,
+    timeline: &PlayInputTimeline,
+) -> Result<(), String> {
+    if let Some(limit) = max_ticks {
+        if timeline
+            .frames
+            .last()
+            .is_some_and(|frame| frame.frame > limit)
+        {
+            return Err("max_ticks must reach the final input-script frame".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn apply_play_input_frame(
+    timeline: &mut PlayInputTimeline,
+    frame: u64,
+    host_i32: &mut [i32],
+    host_f32: &mut [f32],
+) -> Result<(), String> {
+    if host_i32.len() < HOST_I_POINTER_BASE + PLAY_INPUT_MAX_POINTERS * HOST_I_POINTER_STRIDE
+        || host_f32.len() < PLAY_INPUT_MAX_POINTERS * HOST_F_POINTER_STRIDE
+    {
+        return Err("host frame buffers are too small for input-script pointers".to_string());
+    }
+    // The graphics runtime pumps its first event snapshot while servicing the
+    // first host frame, after the viewport fields have already been copied.
+    // On that one Windows frame, the window dimensions are the exact viewport.
+    let mut viewport_w = host_i32[HOST_I_VIEWPORT_W_PX];
+    let mut viewport_h = host_i32[HOST_I_VIEWPORT_H_PX];
+    if viewport_w <= 0 {
+        viewport_w = host_i32[HOST_I_WINDOW_W_PX];
+    }
+    if viewport_h <= 0 {
+        viewport_h = host_i32[HOST_I_WINDOW_H_PX];
+    }
+    if viewport_w <= 0 || viewport_h <= 0 {
+        return Err("input-script requires positive host viewport dimensions".to_string());
+    }
+
+    let previous = timeline.pointers.clone();
+    let scripted = timeline
+        .frames
+        .get(timeline.next_frame)
+        .is_some_and(|event| event.frame == frame);
+    if scripted {
+        timeline.pointers = timeline.frames[timeline.next_frame].pointers.clone();
+        timeline.next_frame += 1;
+    } else {
+        for pointer in &mut timeline.pointers {
+            pointer.went_down = false;
+            pointer.went_up = false;
+        }
+    }
+
+    host_i32[HOST_I_POINTER_COUNT] = timeline.pointers.len() as i32;
+    host_i32[HOST_I_DROPPED_POINTERS] = 0;
+    for slot in 0..PLAY_INPUT_MAX_POINTERS {
+        let i32_base = HOST_I_POINTER_BASE + slot * HOST_I_POINTER_STRIDE;
+        let f32_base = slot * HOST_F_POINTER_STRIDE;
+        for value in &mut host_i32[i32_base..i32_base + HOST_I_POINTER_STRIDE] {
+            *value = 0;
+        }
+        for value in &mut host_f32[f32_base..f32_base + HOST_F_POINTER_STRIDE] {
+            *value = 0.0;
+        }
+    }
+    for (slot, pointer) in timeline.pointers.iter().enumerate() {
+        if pointer.x > viewport_w as f32 || pointer.y > viewport_h as f32 {
+            return Err(format!(
+                "input-script frame {frame} pointer {} is outside the {}x{} viewport",
+                pointer.id, viewport_w, viewport_h
+            ));
+        }
+        let prior = previous.iter().find(|candidate| candidate.id == pointer.id);
+        let dx = prior.map_or(0.0, |value| pointer.x - value.x);
+        let dy = prior.map_or(0.0, |value| pointer.y - value.y);
+        let i32_base = HOST_I_POINTER_BASE + slot * HOST_I_POINTER_STRIDE;
+        let f32_base = slot * HOST_F_POINTER_STRIDE;
+        host_i32[i32_base] = pointer.id;
+        host_i32[i32_base + 1] = i32::from(pointer.is_down);
+        host_i32[i32_base + 2] = i32::from(pointer.went_down);
+        host_i32[i32_base + 3] = i32::from(pointer.went_up);
+        host_f32[f32_base] = pointer.x;
+        host_f32[f32_base + 1] = pointer.y;
+        host_f32[f32_base + 2] = dx;
+        host_f32[f32_base + 3] = dy;
+        host_f32[f32_base + 4] = (pointer.x / viewport_w as f32).clamp(0.0, 1.0);
+        host_f32[f32_base + 5] = (pointer.y / viewport_h as f32).clamp(0.0, 1.0);
+    }
+    Ok(())
+}
+
+fn run_guest_main_with_initial_host_requests(
+    initialize_requests: impl FnOnce() -> Result<(), String>,
+    run_main: impl FnOnce() -> Result<i32, String>,
+    apply_requests: impl FnOnce() -> Result<(), String>,
+) -> Result<i32, String> {
+    initialize_requests()?;
+    let result = run_main()?;
+    if result == 0 {
+        apply_requests()?;
+    }
+    Ok(result)
+}
+
 pub fn run_play_in_process(
     watch_file: &Path,
     watch_dir: Option<&Path>,
@@ -531,6 +808,28 @@ pub fn run_play_in_process(
         watch_dir,
         data_bind_json,
         data_bind_struct_meta,
+        None,
+        tick_sleep_micros,
+        max_ticks,
+        None,
+    )
+}
+
+pub fn run_play_in_process_with_input_script(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
         tick_sleep_micros,
         max_ticks,
         None,
@@ -550,6 +849,7 @@ pub fn run_live_in_process(
         watch_dir,
         None,
         None,
+        None,
         tick_sleep_micros,
         max_ticks,
         Some((server, config)),
@@ -562,6 +862,7 @@ fn run_play_in_process_inner(
     watch_dir: Option<&Path>,
     data_bind_json: Option<&Path>,
     data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
     tick_sleep_micros: u64,
     max_ticks: Option<u64>,
     live: Option<(stasis_runner::live::LiveSessionServer, LiveRunConfig)>,
@@ -579,6 +880,12 @@ fn run_play_in_process_inner(
         data_bind_json,
         data_bind_struct_meta,
     )?;
+    let mut input_timeline = input_script
+        .map(|path| load_play_input_script(path, &launch_dir))
+        .transpose()?;
+    if let Some(timeline) = input_timeline.as_ref() {
+        validate_play_input_script_ticks(max_ticks, timeline)?;
+    }
 
     // Make relative asset paths (e.g. "assets/ball.svg") resolve against the game directory.
     // Use the watch dir so dev workflows stay consistent across `stasis.exe` launch locations.
@@ -687,21 +994,26 @@ fn run_play_in_process_inner(
         .build_engine_package(&EngineEntrypoints::runtime_default())
         .map_err(|error| format!("failed to build engine package: {error}"))?;
 
-    // Run guest startup once.
-    let main_rc = jit
-        .execute_i32_noarg_by_name("main")
-        .map_err(|error| format!("guest main() failed: {error}"))?;
+    // Establish the request sequence baseline before guest startup. Otherwise the
+    // runtime's first apply call treats main()'s request as its baseline and drops it.
+    let main_rc = run_guest_main_with_initial_host_requests(
+        || gfx.host_bulk_init(&host_req_seq),
+        || {
+            jit.execute_i32_noarg_by_name("main")
+                .map_err(|error| format!("guest main() failed: {error}"))
+        },
+        || {
+            gfx.host_bulk_apply_requests(
+                &host_req_seq,
+                &host_req_flags,
+                &host_req_window_w_px,
+                &host_req_window_h_px,
+            )
+        },
+    )?;
     if main_rc != 0 {
         return Err(format!("guest main() returned non-zero status {main_rc}"));
     }
-
-    // Apply any initial window requests emitted during guest main().
-    gfx.host_bulk_apply_requests(
-        &host_req_seq,
-        &host_req_flags,
-        &host_req_window_w_px,
-        &host_req_window_h_px,
-    )?;
 
     if max_ticks == Some(0) {
         return Ok(());
@@ -844,6 +1156,14 @@ fn run_play_in_process_inner(
         gfx.host_get_frame(&mut host_i32, &mut host_f32)?;
         if host_i32.get(9).copied().unwrap_or(0) != 0 {
             break;
+        }
+        if let Some(timeline) = input_timeline.as_mut() {
+            apply_play_input_frame(
+                timeline,
+                ticks_executed.saturating_add(1),
+                &mut host_i32,
+                &mut host_f32,
+            )?;
         }
         gfx.host_bulk_apply_requests(
             &host_req_seq,
@@ -2202,6 +2522,277 @@ mod tests {
         } else {
             std::env::remove_var(key);
         }
+    }
+
+    fn input_pointer(
+        id: i32,
+        is_down: bool,
+        went_down: bool,
+        went_up: bool,
+        x: f32,
+        y: f32,
+    ) -> PlayInputPointer {
+        PlayInputPointer {
+            id,
+            is_down,
+            went_down,
+            went_up,
+            x,
+            y,
+        }
+    }
+
+    #[test]
+    fn initial_host_request_baseline_precedes_guest_main_and_apply() {
+        use std::cell::{Cell, RefCell};
+
+        let sequence = Cell::new(0);
+        let baseline = Cell::new(-1);
+        let phases = RefCell::new(Vec::new());
+        let result = run_guest_main_with_initial_host_requests(
+            || {
+                phases.borrow_mut().push("init");
+                baseline.set(sequence.get());
+                Ok(())
+            },
+            || {
+                phases.borrow_mut().push("main");
+                sequence.set(1);
+                Ok(0)
+            },
+            || {
+                phases.borrow_mut().push("apply");
+                assert_eq!(baseline.get(), 0);
+                assert_eq!(sequence.get(), 1);
+                Ok(())
+            },
+        )
+        .expect("startup should succeed");
+
+        assert_eq!(result, 0);
+        assert_eq!(&*phases.borrow(), &["init", "main", "apply"]);
+    }
+
+    #[test]
+    fn input_script_validates_order_pointer_bounds_and_transitions() {
+        let out_of_order = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![
+                PlayInputFrame {
+                    frame: 2,
+                    pointers: vec![],
+                },
+                PlayInputFrame {
+                    frame: 1,
+                    pointers: vec![],
+                },
+            ],
+        };
+        assert!(validate_play_input_script(out_of_order)
+            .expect_err("order should fail")
+            .contains("strictly increasing"));
+
+        let invalid_transition = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 1,
+                pointers: vec![input_pointer(0, false, true, false, 1.0, 1.0)],
+            }],
+        };
+        assert!(validate_play_input_script(invalid_transition)
+            .expect_err("transition should fail")
+            .contains("wentDown requires isDown=true"));
+    }
+
+    #[test]
+    fn input_script_parses_documented_camel_case_json() {
+        let source = r#"{
+            "version": 1,
+            "frames": [
+                {"frame": 1, "pointers": [
+                    {"id": 3, "isDown": true, "wentDown": true, "wentUp": false, "x": 90, "y": 60}
+                ]},
+                {"frame": 2, "pointers": [
+                    {"id": 3, "isDown": false, "wentDown": false, "wentUp": true, "x": 90, "y": 60}
+                ]}
+            ]
+        }"#;
+        let document: PlayInputScriptDocument =
+            serde_json::from_str(source).expect("documented JSON should parse");
+        let timeline = validate_play_input_script(document).expect("document should validate");
+        assert_eq!(timeline.frames.len(), 2);
+        assert!(timeline.frames[0].pointers[0].is_down);
+        assert!(timeline.frames[1].pointers[0].went_up);
+
+        let unknown = r#"{"version": 1, "frames": [], "extra": true}"#;
+        assert!(serde_json::from_str::<PlayInputScriptDocument>(unknown).is_err());
+    }
+
+    #[test]
+    fn input_script_rejects_resource_and_pointer_bounds() {
+        assert!(validate_play_input_script_size(PLAY_INPUT_MAX_FILE_BYTES).is_ok());
+        assert!(
+            validate_play_input_script_size(PLAY_INPUT_MAX_FILE_BYTES + 1)
+                .expect_err("oversized script should fail")
+                .contains("too large")
+        );
+
+        let too_many_frames = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![
+                PlayInputFrame {
+                    frame: 1,
+                    pointers: vec![],
+                };
+                PLAY_INPUT_MAX_FRAMES + 1
+            ],
+        };
+        assert!(validate_play_input_script(too_many_frames)
+            .expect_err("frame bound should fail")
+            .contains("too many frames"));
+
+        let too_many_pointers = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 1,
+                pointers: (0..=PLAY_INPUT_MAX_POINTERS)
+                    .map(|id| input_pointer(id as i32, false, false, false, 1.0, 1.0))
+                    .collect(),
+            }],
+        };
+        assert!(validate_play_input_script(too_many_pointers)
+            .expect_err("pointer bound should fail")
+            .contains("too many pointers"));
+    }
+
+    #[test]
+    fn input_script_rejects_duplicate_ids_bad_coordinates_and_short_tick_limits() {
+        let unsupported = PlayInputScriptDocument {
+            version: 2,
+            frames: vec![],
+        };
+        assert!(validate_play_input_script(unsupported)
+            .expect_err("version should fail")
+            .contains("unsupported input-script version"));
+
+        for (name, pointers, expected) in [
+            (
+                "duplicate",
+                vec![
+                    input_pointer(2, false, false, false, 1.0, 1.0),
+                    input_pointer(2, false, false, false, 2.0, 2.0),
+                ],
+                "duplicate pointer id",
+            ),
+            (
+                "negative id",
+                vec![input_pointer(-1, false, false, false, 1.0, 1.0)],
+                "id must be non-negative",
+            ),
+            (
+                "negative",
+                vec![input_pointer(2, false, false, false, -1.0, 1.0)],
+                "finite and non-negative",
+            ),
+            (
+                "nonfinite",
+                vec![input_pointer(2, false, false, false, f32::NAN, 1.0)],
+                "finite and non-negative",
+            ),
+        ] {
+            let document = PlayInputScriptDocument {
+                version: 1,
+                frames: vec![PlayInputFrame { frame: 3, pointers }],
+            };
+            let error = validate_play_input_script(document).expect_err(name);
+            assert!(error.contains(expected), "{name}: {error}");
+        }
+
+        let timeline = validate_play_input_script(PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 3,
+                pointers: vec![],
+            }],
+        })
+        .expect("timeline should validate");
+        assert!(validate_play_input_script_ticks(Some(2), &timeline)
+            .expect_err("short max_ticks should fail")
+            .contains("max_ticks"));
+    }
+
+    #[test]
+    fn input_script_rejects_pointer_outside_current_viewport() {
+        let document = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 1,
+                pointers: vec![input_pointer(0, false, false, false, 181.0, 60.0)],
+            }],
+        };
+        let mut timeline = validate_play_input_script(document).expect("valid static bounds");
+        let mut host_i32 = vec![0; 768];
+        let mut host_f32 = vec![0.0; 64];
+        host_i32[HOST_I_VIEWPORT_W_PX] = 180;
+        host_i32[HOST_I_VIEWPORT_H_PX] = 120;
+        assert!(
+            apply_play_input_frame(&mut timeline, 1, &mut host_i32, &mut host_f32)
+                .expect_err("viewport bound should fail")
+                .contains("outside the 180x120 viewport")
+        );
+    }
+
+    #[test]
+    fn input_script_uses_window_dimensions_before_first_viewport_snapshot() {
+        let document = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 1,
+                pointers: vec![input_pointer(0, true, true, false, 180.0, 360.0)],
+            }],
+        };
+        let mut timeline = validate_play_input_script(document).expect("valid script");
+        let mut host_i32 = vec![0; 768];
+        let mut host_f32 = vec![0.0; 64];
+        host_i32[HOST_I_WINDOW_W_PX] = 360;
+        host_i32[HOST_I_WINDOW_H_PX] = 720;
+
+        apply_play_input_frame(&mut timeline, 1, &mut host_i32, &mut host_f32)
+            .expect("window fallback should accept first-frame input");
+        assert_eq!(host_f32[4], 0.5);
+        assert_eq!(host_f32[5], 0.5);
+    }
+
+    #[test]
+    fn input_script_overrides_host_pointer_and_clears_edge_flags() {
+        let document = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 1,
+                pointers: vec![input_pointer(7, true, true, false, 90.0, 60.0)],
+            }],
+        };
+        let mut timeline = validate_play_input_script(document).expect("valid script");
+        let mut host_i32 = vec![99; 768];
+        let mut host_f32 = vec![99.0; 64];
+        host_i32[HOST_I_VIEWPORT_W_PX] = 180;
+        host_i32[HOST_I_VIEWPORT_H_PX] = 120;
+
+        apply_play_input_frame(&mut timeline, 1, &mut host_i32, &mut host_f32).expect("frame one");
+        assert_eq!(host_i32[HOST_I_POINTER_COUNT], 1);
+        assert_eq!(host_i32[HOST_I_POINTER_BASE], 7);
+        assert_eq!(host_i32[HOST_I_POINTER_BASE + 1], 1);
+        assert_eq!(host_i32[HOST_I_POINTER_BASE + 2], 1);
+        assert_eq!(host_f32[4], 0.5);
+        assert_eq!(host_f32[5], 0.5);
+
+        apply_play_input_frame(&mut timeline, 2, &mut host_i32, &mut host_f32)
+            .expect("unscripted frame");
+        assert_eq!(host_i32[HOST_I_POINTER_BASE + 1], 1);
+        assert_eq!(host_i32[HOST_I_POINTER_BASE + 2], 0);
+        assert_eq!(host_i32[HOST_I_POINTER_BASE + 3], 0);
+        assert_eq!(host_f32[2], 0.0);
+        assert_eq!(host_f32[3], 0.0);
     }
 
     #[test]

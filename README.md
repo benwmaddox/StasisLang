@@ -156,6 +156,11 @@ Notes:
 - `play` is currently Windows-focused (graphics runtime integration).
 - If `--watch-dir` is omitted, `play` watches the entry file's parent directory by default.
 - You can cap runtime for smoke testing with `--ticks N`.
+- Drive deterministic pointer snapshots with `--input-script path\to\input.json`.
+  Script frames are 1-based and are applied after the host snapshot and before the
+  guest tick. While a script is active, physical pointer input is ignored; pointer
+  positions and button state carry forward, while `wentDown`/`wentUp` clear on the
+  next unscripted frame.
 - Capture the rendered framebuffer with `--screenshot artifacts\frame.png`. PNG is
   selected by the `.png` extension; other extensions preserve the existing BMP output.
   `--screenshot-frame N` selects a 1-based frame (default `1`). The capture happens
@@ -174,6 +179,31 @@ cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_
 
 The equivalent runtime environment variables are `STASIS_SCREENSHOT_ONCE`,
 `STASIS_SCREENSHOT_FRAME`, and `STASIS_EXIT_AFTER_SCREENSHOT=1`.
+
+Input scripts use a bounded versioned JSON format. Frames must be strictly increasing,
+each frame contains the complete active pointer list, coordinates are viewport pixels,
+and at most eight pointers are allowed. Files larger than 16 MiB are rejected before
+parsing. Use an empty `pointers` list to release and remove every active pointer:
+
+```json
+{
+  "version": 1,
+  "frames": [
+    {
+      "frame": 1,
+      "pointers": [
+        { "id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 266, "y": 660 }
+      ]
+    },
+    {
+      "frame": 2,
+      "pointers": [
+        { "id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 266, "y": 660 }
+      ]
+    }
+  ]
+}
+```
 
 ## Tests (In Stasis, Run via JIT)
 

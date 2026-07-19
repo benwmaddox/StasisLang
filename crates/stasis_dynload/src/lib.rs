@@ -240,6 +240,8 @@ pub struct StasisGraphicsApi {
     #[cfg(windows)]
     stasis_host_get_frame: usize,
     #[cfg(windows)]
+    stasis_host_bulk_init: usize,
+    #[cfg(windows)]
     stasis_host_bulk_apply_requests: usize,
     #[cfg(windows)]
     stasis_gfx_submit_u8: usize,
@@ -277,6 +279,7 @@ impl StasisGraphicsApi {
             let lib = Library::load(path)?;
             let stasis_init_window = lib.symbol_address("stasis_init_window")?;
             let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
+            let stasis_host_bulk_init = lib.symbol_address("stasis_host_bulk_init")?;
             let stasis_host_bulk_apply_requests =
                 lib.symbol_address("stasis_host_bulk_apply_requests")?;
             let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
@@ -285,6 +288,7 @@ impl StasisGraphicsApi {
                 _lib: lib,
                 stasis_init_window,
                 stasis_host_get_frame,
+                stasis_host_bulk_init,
                 stasis_host_bulk_apply_requests,
                 stasis_gfx_submit_u8,
                 stasis_sleep_ms,
@@ -337,6 +341,24 @@ impl StasisGraphicsApi {
             let _ = out_f32;
             Err(
                 "stasis_graphics host_get_frame is only supported on windows in stasis_dynload"
+                    .to_string(),
+            )
+        }
+    }
+
+    pub fn host_bulk_init(&self, host_req_seq: &i32) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*const i32) =
+                unsafe { std::mem::transmute(self.stasis_host_bulk_init) };
+            callback(host_req_seq as *const i32);
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = host_req_seq;
+            Err(
+                "stasis_graphics host_bulk_init is only supported on windows in stasis_dynload"
                     .to_string(),
             )
         }
