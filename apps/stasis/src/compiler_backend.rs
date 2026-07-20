@@ -2605,6 +2605,22 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
             } else {
                 None
             };
+            if let Some(root) = data_root.as_ref() {
+                let paths: Vec<String> = meta
+                    .fields
+                    .iter()
+                    .map(|field| field.json_path.clone())
+                    .collect();
+                crate::validate_binding_source_paths(root, &paths).map_err(|error| {
+                    format!(
+                        "data file {} does not match target metadata: {error}",
+                        data_path
+                            .as_ref()
+                            .expect("data root requires data path")
+                            .display()
+                    )
+                })?;
+            }
             for field in meta.fields {
                 let field_name = match field.name {
                     Some(name) if !name.is_empty() => name,

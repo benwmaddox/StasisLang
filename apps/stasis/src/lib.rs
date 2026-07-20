@@ -337,6 +337,18 @@ pub(crate) fn parse_flat_csv_binding(
     source: &str,
     fields: &[CsvBindingField],
 ) -> Result<Value, String> {
+    let mut metadata_paths = BTreeSet::new();
+    for field in fields {
+        if field.path.is_empty() || field.path.contains('.') {
+            return Err(format!(
+                "CSV metadata path {} must name one flat column",
+                field.path
+            ));
+        }
+        if !metadata_paths.insert(field.path.as_str()) {
+            return Err(format!("duplicate CSV metadata path {}", field.path));
+        }
+    }
     let records = parse_csv_records(source)?;
     let Some(headers) = records.first() else {
         return Err("CSV data requires a header row".to_string());
@@ -359,6 +371,11 @@ pub(crate) fn parse_flat_csv_binding(
                 "CSV header {header} cannot contain nested path separators"
             ));
         }
+        if !metadata_paths.contains(header) {
+            return Err(format!(
+                "CSV column {header} does not exist in target metadata"
+            ));
+        }
         if header_indices.insert(header.to_string(), index).is_some() {
             return Err(format!("duplicate CSV header {header}"));
         }
@@ -377,12 +394,6 @@ pub(crate) fn parse_flat_csv_binding(
     let data_rows = &records[1..];
     let mut object = serde_json::Map::new();
     for field in fields {
-        if field.path.is_empty() || field.path.contains('.') {
-            return Err(format!(
-                "CSV metadata path {} must name one flat column",
-                field.path
-            ));
-        }
         let column = header_indices
             .get(&field.path)
             .copied()
@@ -530,6 +541,73 @@ fn json_value_by_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
         current = current.get(segment)?;
     }
     Some(current)
+}
+
+fn validate_play_binding_source(root: &Value, metadata: &PlayStructMetadata) -> Result<(), String> {
+    let paths: Vec<String> = metadata
+        .fields
+        .iter()
+        .map(|field| field.json_path.clone())
+        .collect();
+    validate_binding_source_paths(root, &paths)
+}
+
+pub(crate) fn validate_binding_source_paths(root: &Value, paths: &[String]) -> Result<(), String> {
+    let mut field_paths = BTreeSet::new();
+    for path in paths {
+        if path.is_empty() {
+            return Err("binding metadata paths must not be empty".to_string());
+        }
+        if !field_paths.insert(path.as_str()) {
+            return Err(format!("duplicate binding metadata path {path}"));
+        }
+        if json_value_by_path(root, path).is_none() {
+            return Err(format!("binding source is missing target property {path}"));
+        }
+    }
+
+    fn walk(value: &Value, path: &str, field_paths: &BTreeSet<&str>) -> Result<(), String> {
+        let Value::Object(properties) = value else {
+            return Ok(());
+        };
+        for (name, child) in properties {
+            let child_path = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}.{name}")
+            };
+            let exact = field_paths.contains(child_path.as_str());
+            let prefix = field_paths
+                .iter()
+                .any(|field| field.starts_with(&format!("{child_path}.")));
+            if !exact && !prefix {
+                return Err(format!(
+                    "binding source property {child_path} does not exist in target metadata"
+                ));
+            }
+            if prefix {
+                walk(child, &child_path, field_paths)?;
+            }
+        }
+        Ok(())
+    }
+
+    walk(root, "", &field_paths)
+}
+
+fn validate_play_binding_targets(
+    metadata: &PlayStructMetadata,
+    jit: &JitProcess,
+) -> Result<(), String> {
+    for field in &metadata.fields {
+        let full_path = format!("{}.{}", metadata.global_name, field.json_path);
+        if !jit.has_global_path(&full_path) {
+            return Err(format!(
+                "binding target property {full_path} does not exist in compiled globals"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn truncate_utf8_to_capacity(value: &str, max_bytes: usize) -> (Vec<u8>, i32) {
@@ -711,7 +789,10 @@ fn apply_play_data_binding_value(
     Ok(())
 }
 
-fn load_and_apply_play_data_bindings(paths: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+fn load_and_apply_play_data_bindings(
+    paths: &[(PathBuf, PathBuf)],
+    jit: Option<&JitProcess>,
+) -> Result<(), String> {
     let mut loaded = Vec::new();
     for (data_path, meta_path) in paths {
         let meta_source = fs::read_to_string(meta_path).map_err(|error| {
@@ -758,6 +839,12 @@ fn load_and_apply_play_data_bindings(paths: &[(PathBuf, PathBuf)]) -> Result<(),
                 "unsupported struct-meta version {}; expected 1",
                 metadata.version
             ));
+        }
+    }
+    for (data_root, metadata) in &loaded {
+        validate_play_binding_source(data_root, metadata)?;
+        if let Some(jit) = jit {
+            validate_play_binding_targets(metadata, jit)?;
         }
     }
     for (json_root, metadata) in loaded {
@@ -1274,7 +1361,7 @@ fn run_play_in_process_inner(
     let _ = jit
         .compile()
         .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
-    load_and_apply_play_data_bindings(&data_binding_paths)?;
+    load_and_apply_play_data_bindings(&data_binding_paths, Some(&jit))?;
     let package = jit
         .build_engine_package(&EngineEntrypoints::runtime_default())
         .map_err(|error| format!("failed to build engine package: {error}"))?;
@@ -1362,7 +1449,7 @@ fn run_play_in_process_inner(
             }
         }
         if needs_data_reload {
-            match load_and_apply_play_data_bindings(&data_binding_paths) {
+            match load_and_apply_play_data_bindings(&data_binding_paths, Some(&jit)) {
                 Ok(()) => println!("[data] rebound {} file(s)", data_binding_paths.len()),
                 Err(error) => println!("[data] reload rejected: {error}"),
             }
@@ -3469,6 +3556,63 @@ mod tests {
     }
 
     #[test]
+    fn parse_flat_csv_binding_rejects_columns_missing_from_target_metadata() {
+        let error = parse_flat_csv_binding(
+            "hp,typo\n70,99\n",
+            &[CsvBindingField {
+                path: "hp".to_string(),
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        )
+        .expect_err("extra CSV columns should fail");
+        assert!(error.contains("column typo does not exist in target metadata"));
+    }
+
+    #[test]
+    fn validate_play_binding_source_requires_an_exact_property_set() {
+        let metadata = PlayStructMetadata {
+            version: 1,
+            global_name: "state".to_string(),
+            fields: vec![PlayStructFieldMetadata {
+                json_path: "config.width".to_string(),
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        };
+        validate_play_binding_source(&serde_json::json!({"config": {"width": 800}}), &metadata)
+            .expect("exact JSON properties should pass");
+
+        let extra = validate_play_binding_source(
+            &serde_json::json!({"config": {"width": 800, "widht": 600}}),
+            &metadata,
+        )
+        .expect_err("extra JSON properties should fail");
+        assert!(extra.contains("config.widht does not exist in target metadata"));
+
+        let missing = validate_play_binding_source(&serde_json::json!({"config": {}}), &metadata)
+            .expect_err("missing JSON properties should fail");
+        assert!(missing.contains("missing target property config.width"));
+    }
+
+    #[test]
+    fn validate_play_binding_targets_rejects_missing_compiled_global() {
+        let jit = JitProcess::new();
+        let metadata = PlayStructMetadata {
+            version: 1,
+            global_name: "state".to_string(),
+            fields: vec![PlayStructFieldMetadata {
+                json_path: "typo".to_string(),
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        };
+        let error = validate_play_binding_targets(&metadata, &jit)
+            .expect_err("missing runtime targets should fail");
+        assert!(error.contains("state.typo does not exist in compiled globals"));
+    }
+
+    #[test]
     fn load_play_data_bindings_applies_columnar_csv_arrays() {
         let _global_lock = jit_global_table_lock()
             .lock()
@@ -3498,7 +3642,7 @@ mod tests {
         )
         .expect("write metadata");
 
-        load_and_apply_play_data_bindings(&[(data_path, meta_path)])
+        load_and_apply_play_data_bindings(&[(data_path, meta_path)], None)
             .expect("CSV binding should apply");
         assert_eq!(hp, [70, 110, 85]);
 
@@ -3540,10 +3684,10 @@ mod tests {
         )
         .expect("write second metadata");
 
-        let error = load_and_apply_play_data_bindings(&[
-            (first_json, first_meta),
-            (second_json, second_meta),
-        ])
+        let error = load_and_apply_play_data_bindings(
+            &[(first_json, first_meta), (second_json, second_meta)],
+            None,
+        )
         .expect_err("invalid set should be rejected");
         assert!(error.contains("failed to parse data JSON"));
         assert_eq!(

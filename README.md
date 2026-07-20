@@ -74,6 +74,12 @@ rows supply primitive arrays with one value per row. Quoted fields, escaped
 quotes, commas, CRLF, and embedded newlines are supported. A JSON and CSV file
 cannot share the same stem because their metadata mapping would be ambiguous.
 
+Binding is schema-strict in both directions. Every JSON property or CSV column
+must exist in the metadata, every metadata path must exist in the data file, and
+development binding fails if the resulting global path is absent from the
+compiled program. Misspellings never create fallback globals or disappear
+silently.
+
 While `stasis play` is running, changes to either file are validated and rebound
 between ticks. An invalid edit is rejected without partially applying the set.
 For AOT output, the same files are staged with the package and their values are
