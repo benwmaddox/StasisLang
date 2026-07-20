@@ -2557,15 +2557,51 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
             let data_name = name
                 .strip_suffix(".struct-meta.json")
                 .expect("metadata suffix checked");
-            let data_path = path.with_file_name(format!("{data_name}.json"));
-            let data_root = if data_path.is_file() {
+            let json_path = path.with_file_name(format!("{data_name}.json"));
+            let csv_path = path.with_file_name(format!("{data_name}.csv"));
+            if json_path.is_file() && csv_path.is_file() {
+                return Err(format!(
+                    "data files {} and {} cannot share metadata {}",
+                    json_path.display(),
+                    csv_path.display(),
+                    path.display()
+                ));
+            }
+            let data_path = if json_path.is_file() {
+                Some(json_path)
+            } else if csv_path.is_file() {
+                Some(csv_path)
+            } else {
+                None
+            };
+            let data_root = if let Some(data_path) = data_path.as_ref() {
                 let data_text = std::fs::read_to_string(&data_path)
                     .map_err(|error| format!("failed to read {}: {error}", data_path.display()))?;
-                Some(
-                    serde_json::from_str::<serde_json::Value>(&data_text).map_err(|error| {
-                        format!("failed to parse {}: {error}", data_path.display())
-                    })?,
-                )
+                if data_path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"))
+                {
+                    let fields: Vec<crate::CsvBindingField> = meta
+                        .fields
+                        .iter()
+                        .map(|field| crate::CsvBindingField {
+                            path: field.json_path.clone(),
+                            type_name: field.field_type.clone(),
+                            array_count: field.array_count,
+                        })
+                        .collect();
+                    Some(
+                        crate::parse_flat_csv_binding(&data_text, &fields).map_err(|error| {
+                            format!("failed to parse {}: {error}", data_path.display())
+                        })?,
+                    )
+                } else {
+                    Some(
+                        serde_json::from_str::<serde_json::Value>(&data_text).map_err(|error| {
+                            format!("failed to parse {}: {error}", data_path.display())
+                        })?,
+                    )
+                }
             } else {
                 None
             };
@@ -2594,7 +2630,10 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
                 if data_root.is_some() && initial_value.is_none() {
                     return Err(format!(
                         "data file {} is missing metadata path {}",
-                        data_path.display(),
+                        data_path
+                            .as_ref()
+                            .expect("data root requires data path")
+                            .display(),
                         field.json_path
                     ));
                 }
@@ -2632,7 +2671,7 @@ fn is_bundleable_asset_extension(path: &Path) -> bool {
     };
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "json" | "svg" | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+        "json" | "csv" | "svg" | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
     )
 }
 
@@ -3770,11 +3809,28 @@ mod tests {
             }"#,
         )
         .expect("write metadata");
+        fs::write(
+            data_dir.join("enemy.csv"),
+            "cadence,damage\n90,9\n60,6\n120,18\n",
+        )
+        .expect("write CSV data");
+        fs::write(
+            data_dir.join("enemy.struct-meta.json"),
+            r#"{
+                "globalName":"enemy",
+                "fields":[
+                    {"jsonPath":"cadence","size":12,"type":"i32","arrayCount":3},
+                    {"jsonPath":"damage","size":12,"type":"i32","arrayCount":3}
+                ]
+            }"#,
+        )
+        .expect("write CSV metadata");
 
         let support = stage_entry_support_files(&project_dir, Some(&entry_file), &output_dir)
             .expect("stage project data");
         assert!(output_dir.join("data").join("balance.json").is_file());
-        assert_eq!(support.runtime_fields.len(), 2);
+        assert!(output_dir.join("data").join("enemy.csv").is_file());
+        assert_eq!(support.runtime_fields.len(), 4);
 
         let source = build_engine_bundle_runtime_bridge_source(
             &stasis_jit::AotTarget::Native,
@@ -3786,6 +3842,8 @@ mod tests {
         .expect("build embedded data bridge");
         assert!(source.contains("int32_t balance__hp[3] = {70, 110, 85};"));
         assert!(source.contains("int32_t balance__enabled = 1;"));
+        assert!(source.contains("int32_t enemy__cadence[3] = {90, 60, 120};"));
+        assert!(source.contains("int32_t enemy__damage[3] = {9, 6, 18};"));
 
         let _ = fs::remove_dir_all(&temp_root);
     }

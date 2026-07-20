@@ -206,7 +206,8 @@ Examples:
 ### First-Class Project Data
 
 - Editable runtime data lives under the project-level `data/` directory.
-- Every JSON file has a same-name `.struct-meta.json` mapping and is discovered automatically; ordinary development does not require binding flags or project-specific loader code.
+- Every JSON or CSV file has a same-name `.struct-meta.json` mapping and is discovered automatically; ordinary development does not require binding flags or project-specific loader code.
+- JSON may map nested properties. CSV mappings are flat and bind columns to scalar fields or primitive arrays.
 - Development watches both files and applies a validated set between ticks. Rejected edits preserve the last accepted runtime data.
 - Production AOT packages stage the same data and compile its accepted values into the runtime bridge, so startup never depends on loose development files.
 - The JIT and AOT paths use the same global names, field types, array bounds, and JSON-path mapping.

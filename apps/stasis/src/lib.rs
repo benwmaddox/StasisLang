@@ -232,6 +232,191 @@ struct PlayStructFieldMetadata {
     array_count: i32,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CsvBindingField {
+    pub(crate) path: String,
+    pub(crate) type_name: String,
+    pub(crate) array_count: usize,
+}
+
+fn parse_csv_records(source: &str) -> Result<Vec<Vec<String>>, String> {
+    let mut records = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut chars = source.chars().peekable();
+    let mut in_quotes = false;
+    let mut closed_quote = false;
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                    closed_quote = true;
+                }
+            } else {
+                field.push(ch);
+            }
+            continue;
+        }
+        if closed_quote && !matches!(ch, ',' | '\r' | '\n') {
+            return Err("unexpected character after closing quote".to_string());
+        }
+        match ch {
+            '"' if field.is_empty() && !closed_quote => in_quotes = true,
+            '"' => return Err("quote must begin a CSV field".to_string()),
+            ',' => {
+                row.push(std::mem::take(&mut field));
+                closed_quote = false;
+            }
+            '\n' => {
+                row.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut row));
+                closed_quote = false;
+            }
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                row.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut row));
+                closed_quote = false;
+            }
+            _ => field.push(ch),
+        }
+    }
+    if in_quotes {
+        return Err("unterminated quoted CSV field".to_string());
+    }
+    if !field.is_empty() || !row.is_empty() || closed_quote {
+        row.push(field);
+        records.push(row);
+    }
+    Ok(records)
+}
+
+fn parse_csv_cell(value: &str, field: &CsvBindingField) -> Result<Value, String> {
+    let trimmed = value.trim();
+    match field.type_name.as_str() {
+        "string" => Ok(Value::String(value.to_string())),
+        "bool" => match trimmed.to_ascii_lowercase().as_str() {
+            "true" | "1" => Ok(Value::Bool(true)),
+            "false" | "0" => Ok(Value::Bool(false)),
+            _ => Err(format!(
+                "field {} requires true, false, 1, or 0",
+                field.path
+            )),
+        },
+        "u8" | "u16" | "u32" | "i32" => {
+            let number = trimmed
+                .parse::<i64>()
+                .map_err(|error| format!("field {} requires an integer: {error}", field.path))?;
+            i32::try_from(number)
+                .map_err(|_| format!("field {} is outside i32 range", field.path))?;
+            Ok(Value::Number(number.into()))
+        }
+        "f32" | "f64" => {
+            let number = trimmed
+                .parse::<f64>()
+                .map_err(|error| format!("field {} requires a number: {error}", field.path))?;
+            let number = serde_json::Number::from_f64(number)
+                .ok_or_else(|| format!("field {} must be finite", field.path))?;
+            Ok(Value::Number(number))
+        }
+        other => Err(format!(
+            "field {} has unsupported CSV type {other}",
+            field.path
+        )),
+    }
+}
+
+pub(crate) fn parse_flat_csv_binding(
+    source: &str,
+    fields: &[CsvBindingField],
+) -> Result<Value, String> {
+    let records = parse_csv_records(source)?;
+    let Some(headers) = records.first() else {
+        return Err("CSV data requires a header row".to_string());
+    };
+    if records.len() == 1 {
+        return Err("CSV data requires at least one data row".to_string());
+    }
+    let mut header_indices = BTreeMap::new();
+    for (index, header) in headers.iter().enumerate() {
+        let header = if index == 0 {
+            header.strip_prefix('\u{feff}').unwrap_or(header)
+        } else {
+            header
+        };
+        if header.is_empty() {
+            return Err("CSV headers must not be empty".to_string());
+        }
+        if header.contains('.') {
+            return Err(format!(
+                "CSV header {header} cannot contain nested path separators"
+            ));
+        }
+        if header_indices.insert(header.to_string(), index).is_some() {
+            return Err(format!("duplicate CSV header {header}"));
+        }
+    }
+    for (row_index, row) in records.iter().enumerate().skip(1) {
+        if row.len() != headers.len() {
+            return Err(format!(
+                "CSV row {} has {} columns; expected {}",
+                row_index + 1,
+                row.len(),
+                headers.len()
+            ));
+        }
+    }
+
+    let data_rows = &records[1..];
+    let mut object = serde_json::Map::new();
+    for field in fields {
+        if field.path.is_empty() || field.path.contains('.') {
+            return Err(format!(
+                "CSV metadata path {} must name one flat column",
+                field.path
+            ));
+        }
+        let column = header_indices
+            .get(&field.path)
+            .copied()
+            .ok_or_else(|| format!("CSV is missing metadata column {}", field.path))?;
+        let is_array = field.type_name != "string" && field.array_count > 1;
+        let value = if is_array {
+            if data_rows.len() != field.array_count {
+                return Err(format!(
+                    "CSV column {} requires {} rows, found {}",
+                    field.path,
+                    field.array_count,
+                    data_rows.len()
+                ));
+            }
+            Value::Array(
+                data_rows
+                    .iter()
+                    .map(|row| parse_csv_cell(&row[column], field))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else {
+            if data_rows.len() != 1 {
+                return Err(format!(
+                    "scalar CSV column {} requires exactly one data row",
+                    field.path
+                ));
+            }
+            parse_csv_cell(&data_rows[0][column], field)?
+        };
+        object.insert(field.path.clone(), value);
+    }
+    Ok(Value::Object(object))
+}
+
 fn resolve_play_sidecar_path(path: &Path, launch_dir: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
@@ -257,7 +442,7 @@ fn resolve_play_data_binding_paths(
     }
 
     fn discover_pairs(data_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
-        fn collect_json_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+        fn collect_data_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
             for entry in fs::read_dir(dir).map_err(|error| {
                 format!("failed to read data directory {}: {error}", dir.display())
             })? {
@@ -266,11 +451,11 @@ fn resolve_play_data_binding_paths(
                 })?;
                 let path = entry.path();
                 if path.is_dir() {
-                    collect_json_paths(&path, out)?;
+                    collect_data_paths(&path, out)?;
                 } else if path.is_file()
-                    && path
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                    && path.extension().is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("csv")
+                    })
                     && !path
                         .file_name()
                         .and_then(|name| name.to_str())
@@ -285,24 +470,33 @@ fn resolve_play_data_binding_paths(
         if !data_dir.is_dir() {
             return Ok(Vec::new());
         }
-        let mut json_paths = Vec::new();
-        collect_json_paths(data_dir, &mut json_paths)?;
-        json_paths.sort();
+        let mut data_paths = Vec::new();
+        collect_data_paths(data_dir, &mut data_paths)?;
+        data_paths.sort();
         let mut out = Vec::new();
-        for json_path in json_paths {
-            let stem = json_path
+        let mut metadata_owners = BTreeMap::new();
+        for data_path in data_paths {
+            let stem = data_path
                 .file_stem()
                 .and_then(|value| value.to_str())
-                .ok_or_else(|| format!("invalid data file name {}", json_path.display()))?;
-            let meta_path = data_dir.join(format!("{stem}.struct-meta.json"));
+                .ok_or_else(|| format!("invalid data file name {}", data_path.display()))?;
+            let meta_path = data_path.with_file_name(format!("{stem}.struct-meta.json"));
             if !meta_path.is_file() {
                 return Err(format!(
                     "data file {} requires matching metadata {}",
-                    json_path.display(),
+                    data_path.display(),
                     meta_path.display()
                 ));
             }
-            out.push((json_path, meta_path));
+            if let Some(owner) = metadata_owners.insert(meta_path.clone(), data_path.clone()) {
+                return Err(format!(
+                    "data files {} and {} cannot share metadata {}",
+                    owner.display(),
+                    data_path.display(),
+                    meta_path.display()
+                ));
+            }
+            out.push((data_path, meta_path));
         }
         Ok(out)
     }
@@ -519,19 +713,7 @@ fn apply_play_data_binding_value(
 
 fn load_and_apply_play_data_bindings(paths: &[(PathBuf, PathBuf)]) -> Result<(), String> {
     let mut loaded = Vec::new();
-    for (json_path, meta_path) in paths {
-        let json_source = fs::read_to_string(json_path).map_err(|error| {
-            format!(
-                "failed to read data-bind json {}: {error}",
-                json_path.display()
-            )
-        })?;
-        let json_root: Value = serde_json::from_str(&json_source).map_err(|error| {
-            format!(
-                "failed to parse data-bind json {}: {error}",
-                json_path.display()
-            )
-        })?;
+    for (data_path, meta_path) in paths {
         let meta_source = fs::read_to_string(meta_path).map_err(|error| {
             format!(
                 "failed to read data-bind struct-meta {}: {error}",
@@ -544,7 +726,31 @@ fn load_and_apply_play_data_bindings(paths: &[(PathBuf, PathBuf)]) -> Result<(),
                 meta_path.display()
             )
         })?;
-        loaded.push((json_root, metadata));
+        let data_source = fs::read_to_string(data_path).map_err(|error| {
+            format!("failed to read data file {}: {error}", data_path.display())
+        })?;
+        let is_csv = data_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"));
+        let data_root = if is_csv {
+            let fields: Vec<CsvBindingField> = metadata
+                .fields
+                .iter()
+                .map(|field| CsvBindingField {
+                    path: field.json_path.clone(),
+                    type_name: field.type_name.clone(),
+                    array_count: usize::try_from(field.array_count.max(0)).unwrap_or(0),
+                })
+                .collect();
+            parse_flat_csv_binding(&data_source, &fields).map_err(|error| {
+                format!("failed to parse data CSV {}: {error}", data_path.display())
+            })?
+        } else {
+            serde_json::from_str(&data_source).map_err(|error| {
+                format!("failed to parse data JSON {}: {error}", data_path.display())
+            })?
+        };
+        loaded.push((data_root, metadata));
     }
     for (_, metadata) in &loaded {
         if metadata.version != 1 {
@@ -3204,6 +3410,104 @@ mod tests {
     }
 
     #[test]
+    fn parse_flat_csv_binding_supports_scalar_and_columnar_data() {
+        let scalar = parse_flat_csv_binding(
+            "enabled,label\r\ntrue,\"Fast, tough\"\r\n",
+            &[
+                CsvBindingField {
+                    path: "enabled".to_string(),
+                    type_name: "bool".to_string(),
+                    array_count: 1,
+                },
+                CsvBindingField {
+                    path: "label".to_string(),
+                    type_name: "string".to_string(),
+                    array_count: 32,
+                },
+            ],
+        )
+        .expect("scalar CSV should parse");
+        assert_eq!(
+            scalar,
+            serde_json::json!({"enabled": true, "label": "Fast, tough"})
+        );
+
+        let arrays = parse_flat_csv_binding(
+            "hp,speed\n70,1.5\n110,2.25\n85,3\n",
+            &[
+                CsvBindingField {
+                    path: "hp".to_string(),
+                    type_name: "i32".to_string(),
+                    array_count: 3,
+                },
+                CsvBindingField {
+                    path: "speed".to_string(),
+                    type_name: "f32".to_string(),
+                    array_count: 3,
+                },
+            ],
+        )
+        .expect("columnar CSV should parse");
+        assert_eq!(
+            arrays,
+            serde_json::json!({"hp": [70, 110, 85], "speed": [1.5, 2.25, 3.0]})
+        );
+    }
+
+    #[test]
+    fn parse_flat_csv_binding_rejects_nested_metadata_paths() {
+        let error = parse_flat_csv_binding(
+            "screen_width\n800\n",
+            &[CsvBindingField {
+                path: "config.screen_width".to_string(),
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        )
+        .expect_err("nested CSV metadata should fail");
+        assert!(error.contains("flat column"));
+    }
+
+    #[test]
+    fn load_play_data_bindings_applies_columnar_csv_arrays() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let mut hp = [0i32; 3];
+        stasis_dynload::register_global_i32_array(
+            hash_global_path("state.hp"),
+            0,
+            hp.as_mut_ptr(),
+            hp.len(),
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_csv_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let data_path = temp_root.join("balance.csv");
+        let meta_path = temp_root.join("balance.struct-meta.json");
+        fs::write(&data_path, "hp\n70\n110\n85\n").expect("write CSV");
+        fs::write(
+            &meta_path,
+            r#"{"version":1,"globalName":"state","fields":[{"jsonPath":"hp","type":"i32","arrayCount":3}]}"#,
+        )
+        .expect("write metadata");
+
+        load_and_apply_play_data_bindings(&[(data_path, meta_path)])
+            .expect("CSV binding should apply");
+        assert_eq!(hp, [70, 110, 85]);
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
     fn load_play_data_bindings_rejects_set_before_mutating_runtime() {
         let _global_lock = jit_global_table_lock()
             .lock()
@@ -3241,7 +3545,7 @@ mod tests {
             (second_json, second_meta),
         ])
         .expect_err("invalid set should be rejected");
-        assert!(error.contains("failed to parse data-bind json"));
+        assert!(error.contains("failed to parse data JSON"));
         assert_eq!(
             value, 5,
             "the earlier valid file must not be partially applied"
@@ -3298,6 +3602,11 @@ mod tests {
             fs::write(data_dir.join(format!("{stem}.struct-meta.json")), "{}\n")
                 .expect("write metadata");
         }
+        let nested_data_dir = data_dir.join("tables");
+        fs::create_dir_all(&nested_data_dir).expect("create nested data dir");
+        fs::write(nested_data_dir.join("tuning.csv"), "hp\n70\n").expect("write CSV");
+        fs::write(nested_data_dir.join("tuning.struct-meta.json"), "{}\n")
+            .expect("write CSV metadata");
 
         let resolved = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
             .expect("project data discovery should succeed");
@@ -3312,6 +3621,10 @@ mod tests {
                 (
                     data_dir.join("pieces.json"),
                     data_dir.join("pieces.struct-meta.json")
+                ),
+                (
+                    nested_data_dir.join("tuning.csv"),
+                    nested_data_dir.join("tuning.struct-meta.json")
                 )
             ]
         );
@@ -3336,6 +3649,28 @@ mod tests {
         let error = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
             .expect_err("partial sidecars should fail");
         assert!(error.contains("requires matching metadata"));
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn resolve_play_data_binding_paths_rejects_json_csv_stem_collision() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_collision_{stamp}"));
+        let data_dir = temp_root.join("data");
+        let watch_file = temp_root.join("main.stasis");
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        fs::write(&watch_file, "function main(): i32 { return 0; }\n").expect("write entry");
+        fs::write(data_dir.join("balance.json"), "{}\n").expect("write JSON");
+        fs::write(data_dir.join("balance.csv"), "hp\n70\n").expect("write CSV");
+        fs::write(data_dir.join("balance.struct-meta.json"), "{}\n").expect("write metadata");
+
+        let error = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
+            .expect_err("shared JSON/CSV metadata should fail");
+        assert!(error.contains("cannot share metadata"));
 
         let _ = fs::remove_dir_all(&temp_root);
     }

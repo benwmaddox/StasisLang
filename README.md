@@ -64,15 +64,21 @@ That keeps the common Windows command simple:
 
 ## Project Data
 
-Put editable runtime data in the project-level `data/` directory. Every
-`data/<name>.json` file with a matching `data/<name>.struct-meta.json` mapping is
-bound automatically; normal development commands do not need `--data-bind`.
+Put editable runtime data in the project-level `data/` directory. Every JSON or
+CSV file with a matching `<name>.struct-meta.json` mapping is bound
+automatically; normal development commands do not need `--data-bind`.
+
+JSON supports nested metadata paths. CSV is deliberately flat: headers map to
+metadata paths without dots, one row supplies scalar/string fields, and multiple
+rows supply primitive arrays with one value per row. Quoted fields, escaped
+quotes, commas, CRLF, and embedded newlines are supported. A JSON and CSV file
+cannot share the same stem because their metadata mapping would be ambiguous.
 
 While `stasis play` is running, changes to either file are validated and rebound
 between ticks. An invalid edit is rejected without partially applying the set.
 For AOT output, the same files are staged with the package and their values are
 compiled into the runtime bridge, so mobile and desktop builds start with the
-data even when no loose development JSON is available.
+data even when no loose development data file is available.
 
 The older entry-specific `<entry-name>/data/` layout remains supported for
 existing projects. `--data-bind` is reserved for intentionally overriding the
