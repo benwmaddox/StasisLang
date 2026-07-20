@@ -36,6 +36,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiInitialContextPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopConnectivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopBackgroundWorkPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopGitHubSyncPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopGitHubApi.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkCoordinator.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkService.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
@@ -202,6 +204,12 @@ def main() -> int:
 
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
     secret_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java")
+    github_sync_policy = read(
+        "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopGitHubSyncPolicy.java"
+    )
+    github_api = read(
+        "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopGitHubApi.java"
+    )
     recovery_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java")
     draft_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java")
     project_registry = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java")
@@ -694,20 +702,33 @@ def main() -> int:
     assert "Save GitHub Sync Settings" in activity
     assert "Sync GitHub Now" in activity
     assert "queueGitHubSync" in activity
-    assert "uploadGitHubFile" in activity
+    assert "applyFileChange" in github_api
+    assert "WorkshopGitHubSyncPolicy.backupPlan" in activity
+    assert 'writeJson("DELETE"' in github_api
+    assert "changedTextFiles" in github_sync_policy
+    assert "priorRemoteState" in github_sync_policy
+    assert "Automatically back up validated project changes" in activity
+    assert "automaticSchedule" in activity
+    assert "automatic backup deferred by battery saver" in activity
+    assert "automatic backup waiting for a usable network" in activity
+    assert "validateTarget" in github_api
+    assert "GITHUB_PREF_VALIDATED_TARGET" in activity
+    assert "githubTargetValidated" in activity
+    assert "authenticated target ready" in activity
+    assert "changed remotely since the last backup" in github_sync_policy
     assert "GitHub sync: queued" in activity
-    assert "GitHub sync error:" in activity
+    assert "postGitHubOperationFailure" in activity
     assert "Review GitHub Changes" in activity
     assert "Create / Update Pull Request" in activity
     assert "reviewedGitHubChangeFingerprint" in activity
-    assert 'MessageDigest.getInstance("SHA-256")' in activity
-    assert "GITHUB_NETWORK_TIMEOUT_MS" in activity
+    assert 'MessageDigest.getInstance("SHA-256")' in github_sync_policy
+    assert "NETWORK_TIMEOUT_MS" in github_api
     assert "GitHub pull request: review current changes first" in activity
-    assert "ensureGitHubReviewBranch" in activity
+    assert "ensureReviewBranch" in github_api
     assert "stasis-workshop-" in activity
-    assert "createOrFindGitHubPullRequest" in activity
-    assert 'githubApiUrl(repository, "/git/refs")' in activity
-    assert 'githubApiUrl(repository, "/pulls")' in activity
+    assert "createOrFindPullRequest" in github_api
+    assert 'apiUrl("/git/refs")' in github_api
+    assert 'apiUrl("/pulls"' in github_api
     assert "GitHub pull request: ready " in activity
     assert "AndroidSecretStore.readAndMigrate" in activity
     assert "AndroidSecretStore.write" in activity
@@ -726,7 +747,7 @@ def main() -> int:
     assert "Executors.newSingleThreadExecutor()" in activity
     assert "githubSyncExecutor.submit" in activity
     assert "githubSyncExecutor.shutdownNow()" in activity
-    assert "githubOperationActive" in activity
+    assert "isGitHubOperationActive" in activity
     assert "beginGitHubOperation" in activity
     assert "another operation is already queued or running" in activity
     assert "GITHUB_PREF_OPERATION_STATE" in activity
@@ -735,6 +756,11 @@ def main() -> int:
     assert "Retry GitHub Operation" in activity
     assert "persistGitHubOperationState" in activity
     assert '"interrupted", "app stopped before completion"' in activity
+    assert "continues in background" in activity
+    assert '"waiting_network".equals(state)' in activity
+    assert "resumeGitHubAfterNetworkChange" in activity
+    assert "registerPowerMonitoring" in activity
+    assert "ACTION_POWER_SAVE_MODE_CHANGED" in activity
     assert '"sync".equals(operation)' in activity
     assert '"pull_request".equals(operation)' in activity
     assert "WorkshopProjectRegistry.initialize(this," in activity

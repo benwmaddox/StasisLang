@@ -5,8 +5,11 @@ import android.app.AlertDialog;
 import android.Manifest;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.content.res.Configuration;
@@ -27,9 +30,11 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
+import android.os.BatteryManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
@@ -70,7 +75,6 @@ import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -128,6 +132,10 @@ public final class MainActivity extends Activity {
     private static final String GITHUB_PREF_OPERATION_STATE = "github_operation_state";
     private static final String GITHUB_PREF_OPERATION_DETAIL = "github_operation_detail";
     private static final String GITHUB_PREF_REVIEW_FINGERPRINT = "github_review_fingerprint";
+    private static final String GITHUB_PREF_AUTO_SYNC = "github_auto_sync";
+    private static final String GITHUB_PREF_REMOTE_STATE = "github_remote_state";
+    private static final String GITHUB_PREF_LAST_SYNC_FINGERPRINT = "github_last_sync_fingerprint";
+    private static final String GITHUB_PREF_VALIDATED_TARGET = "github_validated_target_v1";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
     private static final String DEFAULT_AI_MODEL = "gpt-5.6-sol";
     private static final int DEFAULT_AI_MODEL_VERSION = 2;
@@ -146,7 +154,7 @@ public final class MainActivity extends Activity {
     private static final int MAX_AI_GENERATED_BASE64_CHARS = ((8 * 1024 * 1024 + 2) / 3) * 4 + 16;
     private static final long MAX_PREVIEW_CAPTURE_PIXELS = 8_000_000L;
     private static final int MAX_COMMAND_HISTORY = 20;
-    private static final int GITHUB_NETWORK_TIMEOUT_MS = 15_000;
+    private static final long GITHUB_AUTO_SYNC_DEBOUNCE_MS = 2_000L;
     private static final int MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024;
     private static final int TOP_CONTROL_END_MARGIN_DP = 10;
     private static final int VOICE_TOP_MARGIN_DP = 64;
@@ -219,6 +227,7 @@ public final class MainActivity extends Activity {
     private EditText githubTokenEditor;
     private EditText githubRepositoryEditor;
     private EditText githubBranchEditor;
+    private CheckBox githubAutoSync;
     private TextView githubSyncStatus;
     private LinearLayout projectSettingsBody;
     private EditText newProjectNameEditor;
@@ -238,7 +247,6 @@ public final class MainActivity extends Activity {
     private String projectRegistryError = "";
     private String reviewedGitHubChangeFingerprint = "";
     private String credentialStorageError = "";
-    private volatile boolean githubOperationActive;
     private volatile boolean projectIoActive;
     private volatile boolean aiRunActive;
     private volatile boolean activityDestroyed;
@@ -259,6 +267,8 @@ public final class MainActivity extends Activity {
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
     private boolean networkCallbackRegistered;
+    private BroadcastReceiver powerReceiver;
+    private boolean powerReceiverRegistered;
     private String activeAiPrompt = "";
     private AndroidAiQueue.Entry activeAiQueueEntry;
     private volatile List<AiImageAttachment> activeAiImageAttachments = Collections.emptyList();
@@ -303,6 +313,9 @@ public final class MainActivity extends Activity {
     private SpeechRecognizer voiceRecognizer;
     private String voiceTranscript = "";
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
+    private final Runnable githubAutoSyncRequest = new Runnable() {
+        @Override public void run() { scheduleGitHubAutoSync(); }
+    };
     private final ExecutorService githubSyncExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService projectIoExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService codexExecutor = Executors.newSingleThreadExecutor();
@@ -390,6 +403,7 @@ public final class MainActivity extends Activity {
         }
         setContentView(createWorkshopView(project));
         registerNetworkMonitoring();
+        registerPowerMonitoring();
         markInterruptedAiOutcomeIfNeeded();
         restoreWorkshopUiState(savedInstanceState);
         restorePendingDraft();
@@ -421,12 +435,17 @@ public final class MainActivity extends Activity {
         codexLoginLifecycle.onResume();
         refreshPhoneNativeCodexStatus();
         startNextQueuedAiIfIdle();
+        refreshGitHubSyncStatus();
+        resumeGitHubAfterNetworkChange();
+        requestGitHubAutoSync();
     }
 
     @Override
     protected void onPause() {
         codexLoginLifecycle.onPause();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
+        gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
+        scheduleGitHubAutoSync();
         persistPendingDraft();
         stopVoiceRecognition();
         stopAudioPreview();
@@ -478,12 +497,14 @@ public final class MainActivity extends Activity {
         activityDestroyed = true;
         stopVoiceRecognition();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
+        gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
         if (codexLoginDialog != null) codexLoginDialog.dismiss();
         if (!WorkshopLongWorkCoordinator.isAiActive()) {
             aiCancelRequested = true;
             nativeCodexCancelResponse();
         }
         unregisterNetworkMonitoring();
+        unregisterPowerMonitoring();
         if (!WorkshopLongWorkCoordinator.isAiActive()) {
             HttpURLConnection aiConnection = activeAiConnection;
             if (aiConnection != null) aiConnection.disconnect();
@@ -2106,6 +2127,20 @@ public final class MainActivity extends Activity {
         githubBranchEditor.setSingleLine(true);
         githubBranchEditor.setText(readGitHubProjectPreference(githubPrefs, GITHUB_PREF_BRANCH, "main"));
         githubSettingsBody.addView(githubBranchEditor, fullWidth());
+        githubAutoSync = new CheckBox(this);
+        githubAutoSync.setText("Automatically back up validated project changes");
+        githubAutoSync.setChecked(githubPrefs.getBoolean(
+                githubProjectPreferenceKey(GITHUB_PREF_AUTO_SYNC), false));
+        githubAutoSync.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(githubProjectPreferenceKey(GITHUB_PREF_AUTO_SYNC),
+                                githubAutoSync.isChecked())
+                        .apply();
+                if (githubAutoSync.isChecked()) requestGitHubAutoSync();
+            }
+        });
+        githubSettingsBody.addView(githubAutoSync, fullWidth());
         Button saveGitHubSettings = new Button(this);
         saveGitHubSettings.setText("Save GitHub Sync Settings");
         saveGitHubSettings.setOnClickListener(new View.OnClickListener() {
@@ -2156,7 +2191,8 @@ public final class MainActivity extends Activity {
         TextView privacyDisclosure = new TextView(this);
         privacyDisclosure.setText("On-device by default: project code, assets, drafts, recovery, and traces. "
                 + "Queue AI Change snapshots the command, workspace context, and only media explicitly selected in review. "
-                + "GitHub receives project files only when Sync or PR is pressed. Microphone access is used only for explicit voice or audio-recording actions.");
+                + "GitHub receives project files only when Sync or PR is pressed, or after you explicitly enable automatic backup. "
+                + "Microphone access is used only for explicit voice or audio-recording actions.");
         privacyDisclosure.setTextSize(12.0f);
         privacyDisclosure.setTextColor(Color.rgb(73, 84, 100));
         privacyDisclosure.setPadding(dp(8), dp(8), dp(8), dp(8));
@@ -2374,6 +2410,7 @@ public final class MainActivity extends Activity {
                 aiRunActive = false;
                 WorkshopLongWorkCoordinator.finishAi(this);
                 if (aiCancelButton != null) aiCancelButton.setVisibility(View.GONE);
+                requestGitHubAutoSync();
             }
         }
     }
@@ -2593,7 +2630,7 @@ public final class MainActivity extends Activity {
     }
 
     private void createAndSwitchProject() {
-        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project creation blocked while AI, GitHub, or project I/O is active");
             return;
@@ -2620,7 +2657,7 @@ public final class MainActivity extends Activity {
     }
 
     private boolean activateProject(WorkshopProjectRegistry.ProjectInfo project) {
-        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project switch blocked while AI, GitHub, or project I/O is active");
             return false;
@@ -2684,7 +2721,7 @@ public final class MainActivity extends Activity {
             setStatusText("Project export needs a registered active project");
             return;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project export blocked while other background work is active");
             return;
@@ -2708,7 +2745,7 @@ public final class MainActivity extends Activity {
     }
 
     private void requestProjectImport() {
-        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project import blocked while other background work is active");
             return;
@@ -2745,6 +2782,10 @@ public final class MainActivity extends Activity {
         if (githubBranchEditor != null) {
             githubBranchEditor.setText(readGitHubProjectPreference(preferences, GITHUB_PREF_BRANCH, "main"));
         }
+        if (githubAutoSync != null) {
+            githubAutoSync.setChecked(preferences.getBoolean(
+                    githubProjectPreferenceKey(GITHUB_PREF_AUTO_SYNC), false));
+        }
     }
 
     private void toggleGitHubSettings() {
@@ -2777,21 +2818,58 @@ public final class MainActivity extends Activity {
     }
 
     private void saveGitHubSyncSettings() {
-        String token = githubTokenEditor == null ? "" : githubTokenEditor.getText().toString().trim();
-        String repository = githubRepositoryEditor == null ? "" : githubRepositoryEditor.getText().toString().trim();
-        String branch = githubBranchEditor == null ? "" : githubBranchEditor.getText().toString().trim();
+        final String token = githubTokenEditor == null ? "" : githubTokenEditor.getText().toString().trim();
+        final String repository = githubRepositoryEditor == null ? "" : githubRepositoryEditor.getText().toString().trim();
+        final String branchValue = githubBranchEditor == null ? "" : githubBranchEditor.getText().toString().trim();
+        final String branch = branchValue.isEmpty() ? "main" : branchValue;
         if (token.isEmpty() || repository.indexOf('/') <= 0 || repository.endsWith("/")) {
             setStatusText("GitHub sync settings need a token and owner/repository");
             return;
         }
-        SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
-        if (!writeSecretPreference(preferences, GITHUB_PREF_TOKEN, token)) return;
-        preferences.edit()
-                .putString(githubProjectPreferenceKey(GITHUB_PREF_REPOSITORY), repository)
-                .putString(githubProjectPreferenceKey(GITHUB_PREF_BRANCH), branch.isEmpty() ? "main" : branch)
-                .apply();
-        refreshGitHubSyncStatus();
-        setStatusText("GitHub sync settings saved; background sync is ready");
+        if (!WorkshopConnectivity.hasUsableNetwork(this)) {
+            setStatusText("GitHub settings need a usable network for authenticated validation");
+            return;
+        }
+        if (!beginGitHubOperation("validate", "GitHub sync: validating repository and branch")) return;
+        githubSyncExecutor.submit(new Runnable() {
+            @Override public void run() {
+                try {
+                    new WorkshopGitHubApi(token, repository).validateTarget(branch);
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+                            String previousRepository = readGitHubProjectPreference(
+                                    preferences, GITHUB_PREF_REPOSITORY, "");
+                            String previousBranch = readGitHubProjectPreference(
+                                    preferences, GITHUB_PREF_BRANCH, "main");
+                            if (!writeSecretPreference(preferences, GITHUB_PREF_TOKEN, token)) {
+                                postGitHubOperationState("", "error",
+                                        "GitHub sync: credential storage failed after validation");
+                                return;
+                            }
+                            SharedPreferences.Editor editor = preferences.edit()
+                                    .putString(githubProjectPreferenceKey(GITHUB_PREF_REPOSITORY), repository)
+                                    .putString(githubProjectPreferenceKey(GITHUB_PREF_BRANCH), branch)
+                                    .putString(githubProjectPreferenceKey(GITHUB_PREF_VALIDATED_TARGET),
+                                            WorkshopGitHubSyncPolicy.targetIdentity(repository, branch));
+                            if (!repository.equals(previousRepository) || !branch.equals(previousBranch)) {
+                                editor.remove(githubProjectPreferenceKey(GITHUB_PREF_REMOTE_STATE));
+                                editor.remove(githubProjectPreferenceKey(GITHUB_PREF_LAST_SYNC_FINGERPRINT));
+                                editor.remove(githubProjectPreferenceKey(GITHUB_PREF_REVIEW_FINGERPRINT));
+                                reviewedGitHubChangeFingerprint = "";
+                            }
+                            editor.apply();
+                            postGitHubOperationState("", "complete",
+                                    "GitHub sync: authenticated target ready for " + repository + ":" + branch);
+                            requestGitHubAutoSync();
+                        }
+                    });
+                } catch (Exception error) {
+                    postGitHubOperationState("", "error",
+                            "GitHub validation error: " + error.getMessage());
+                }
+            }
+        });
     }
 
     private void refreshGitHubSyncStatus() {
@@ -2809,12 +2887,29 @@ public final class MainActivity extends Activity {
             githubSyncStatus.setText("GitHub sync: not configured");
             return;
         }
+        String branch = readGitHubProjectPreference(prefs, GITHUB_PREF_BRANCH, "main").trim();
+        if (!githubTargetValidated(prefs, repository, branch)) {
+            githubSyncStatus.setText("GitHub sync: save settings to authenticate this target");
+            return;
+        }
         String operation = prefs.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
         String state = prefs.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
         String detail = prefs.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_DETAIL), "");
+        boolean inProcessOperationActive = WorkshopLongWorkCoordinator.isGitHubActive();
         if (("queued".equals(state) || "running".equals(state)) && !operation.isEmpty()) {
-            persistGitHubOperationState(operation, "interrupted", "app stopped before completion");
-            githubSyncStatus.setText("GitHub sync: interrupted; retry available");
+            if (inProcessOperationActive) {
+                githubSyncStatus.setText("GitHub sync: continues in background");
+                return;
+            }
+            if (WorkshopGitHubSyncPolicy.shouldMarkInterrupted(
+                    operation, state, inProcessOperationActive)) {
+                persistGitHubOperationState(operation, "interrupted", "app stopped before completion");
+                githubSyncStatus.setText("GitHub sync: interrupted; retry available");
+                return;
+            }
+        }
+        if (("waiting_network".equals(state) || "deferred".equals(state)) && !operation.isEmpty()) {
+            githubSyncStatus.setText(detail.isEmpty() ? "GitHub sync: waiting to retry" : detail);
             return;
         }
         if (("error".equals(state) || "interrupted".equals(state)) && !operation.isEmpty()) {
@@ -2825,6 +2920,10 @@ public final class MainActivity extends Activity {
     }
 
     private void queueGitHubSync() {
+        queueGitHubSync(true);
+    }
+
+    private void queueGitHubSync(boolean userInitiated) {
         if (audioRecordingActive) {
             setStatusText("Finish or cancel audio recording before GitHub sync");
             return;
@@ -2837,27 +2936,118 @@ public final class MainActivity extends Activity {
             setStatusText("GitHub sync needs configured settings");
             return;
         }
+        if (!githubTargetValidated(prefs, repository, branch)) {
+            setStatusText("GitHub sync needs authenticated settings; save them again");
+            return;
+        }
+        WorkshopBackgroundWorkPolicy.Decision background = WorkshopBackgroundWorkPolicy.decide(
+                userInitiated, WorkshopConnectivity.hasUsableNetwork(this),
+                batterySaverEnabled(), deviceCharging());
+        if (background == WorkshopBackgroundWorkPolicy.Decision.WAIT_FOR_NETWORK) {
+            persistGitHubOperationState("sync", "waiting_network",
+                    "GitHub sync: waiting for a usable network");
+            refreshGitHubSyncStatus();
+            return;
+        }
+        if (background == WorkshopBackgroundWorkPolicy.Decision.DEFER_FOR_BATTERY) {
+            persistGitHubOperationState("sync", "deferred",
+                    "GitHub sync: automatic backup deferred by battery saver");
+            refreshGitHubSyncStatus();
+            return;
+        }
+        final String remoteStateKey = githubProjectPreferenceKey(GITHUB_PREF_REMOTE_STATE);
+        final String fingerprintKey = githubProjectPreferenceKey(GITHUB_PREF_LAST_SYNC_FINGERPRINT);
         if (!beginGitHubOperation("sync", "GitHub sync: queued")) return;
         githubSyncExecutor.submit(new Runnable() {
             @Override public void run() {
                 try {
                     Map<String, byte[]> files = githubBackupFiles();
-                    if (files.isEmpty()) {
-                        postGitHubOperationState("", "complete", "GitHub sync: no project files");
-                        return;
-                    }
+                    SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+                    Map<String, String> remoteState = WorkshopGitHubSyncPolicy.decodeRemoteState(
+                            preferences.getString(remoteStateKey, ""));
+                    List<WorkshopGitHubSyncPolicy.Change> plan =
+                            WorkshopGitHubSyncPolicy.backupPlan(files, remoteState);
+                    WorkshopGitHubApi api = new WorkshopGitHubApi(token, repository);
                     int completed = 0;
-                    for (Map.Entry<String, byte[]> entry : files.entrySet()) {
+                    int deleted = 0;
+                    for (WorkshopGitHubSyncPolicy.Change change : plan) {
                         completed += 1;
-                        postGitHubOperationState("sync", "running", "GitHub sync: " + completed + "/" + files.size());
-                        uploadGitHubFile(token, repository, branch, entry.getKey(), entry.getValue());
+                        postGitHubOperationState("sync", "running",
+                                "GitHub sync: " + completed + "/" + plan.size());
+                        String remoteSha = api.applyFileChange(
+                                branch, change.path, change.content, remoteState.get(change.path));
+                        if (change.deletesRemoteFile()) {
+                            remoteState.remove(change.path);
+                            deleted += 1;
+                        } else {
+                            remoteState.put(change.path, remoteSha);
+                        }
+                        preferences.edit().putString(remoteStateKey,
+                                WorkshopGitHubSyncPolicy.encodeRemoteState(remoteState)).apply();
                     }
-                    postGitHubOperationState("", "complete", "GitHub sync: complete (" + completed + " files)");
+                    preferences.edit()
+                            .putString(fingerprintKey, WorkshopGitHubSyncPolicy.fingerprint(files))
+                            .putString(remoteStateKey,
+                                    WorkshopGitHubSyncPolicy.encodeRemoteState(remoteState))
+                            .apply();
+                    postGitHubOperationState("", "complete", plan.isEmpty()
+                            ? "GitHub sync: no project files"
+                            : "GitHub sync: complete (" + (completed - deleted)
+                                    + " uploaded, " + deleted + " deleted)");
                 } catch (final Exception error) {
-                    postGitHubOperationState("sync", "error", "GitHub sync error: " + error.getMessage());
+                    postGitHubOperationFailure("sync", "GitHub sync", error);
                 }
             }
         });
+    }
+
+    private void requestGitHubAutoSync() {
+        gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
+        gameLoopHandler.postDelayed(githubAutoSyncRequest, GITHUB_AUTO_SYNC_DEBOUNCE_MS);
+    }
+
+    private void scheduleGitHubAutoSync() {
+        if (activityDestroyed || WorkshopLongWorkCoordinator.isAnyActive()
+                || audioRecordingActive || hasPendingSourceEdit() || !compileReady) return;
+        SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        boolean enabled = preferences.getBoolean(
+                githubProjectPreferenceKey(GITHUB_PREF_AUTO_SYNC), false);
+        String repository = readGitHubProjectPreference(
+                preferences, GITHUB_PREF_REPOSITORY, "").trim();
+        String branch = readGitHubProjectPreference(
+                preferences, GITHUB_PREF_BRANCH, "main").trim();
+        if (!githubTargetValidated(preferences, repository, branch)) return;
+        String operation = preferences.getString(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
+        String state = preferences.getString(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
+        if (!operation.isEmpty() && ("error".equals(state) || "interrupted".equals(state))
+                && !"sync".equals(operation)) return;
+        try {
+            Map<String, byte[]> files = githubBackupFiles();
+            String current = WorkshopGitHubSyncPolicy.fingerprint(files);
+            String previous = preferences.getString(
+                    githubProjectPreferenceKey(GITHUB_PREF_LAST_SYNC_FINGERPRINT), "");
+            WorkshopGitHubSyncPolicy.ScheduleDecision decision =
+                    WorkshopGitHubSyncPolicy.automaticSchedule(enabled, !current.equals(previous),
+                            WorkshopConnectivity.hasUsableNetwork(this),
+                            batterySaverEnabled(), deviceCharging());
+            if (decision == WorkshopGitHubSyncPolicy.ScheduleDecision.RUN) {
+                queueGitHubSync(false);
+            } else if (decision == WorkshopGitHubSyncPolicy.ScheduleDecision.WAIT_FOR_NETWORK) {
+                persistGitHubOperationState("sync", "waiting_network",
+                        "GitHub sync: automatic backup waiting for a usable network");
+                refreshGitHubSyncStatus();
+            } else if (decision == WorkshopGitHubSyncPolicy.ScheduleDecision.DEFER_FOR_BATTERY) {
+                persistGitHubOperationState("sync", "deferred",
+                        "GitHub sync: automatic backup deferred by battery saver");
+                refreshGitHubSyncStatus();
+            }
+        } catch (Exception error) {
+            persistGitHubOperationState("sync", "error",
+                    "GitHub automatic backup error: " + error.getMessage());
+            refreshGitHubSyncStatus();
+        }
     }
 
     private void enqueuePendingAiRequest(String source) {
@@ -3114,7 +3304,7 @@ public final class MainActivity extends Activity {
     }
 
     private void revokeGitHubCredential() {
-        if (githubOperationActive) {
+        if (isGitHubOperationActive()) {
             setStatusText("GitHub token revocation blocked until the active operation finishes");
             return;
         }
@@ -3199,7 +3389,7 @@ public final class MainActivity extends Activity {
     }
 
     private void requestSupportBundleExport() {
-        if (aiRunActive || githubOperationActive || projectIoActive) {
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive) {
             setStatusText("Support export blocked while background work is active");
             return;
         }
@@ -3274,7 +3464,7 @@ public final class MainActivity extends Activity {
             setStatusText("Bundled Workshop cannot be deleted");
             return;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive) {
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive) {
             setStatusText("Project deletion blocked while background work or recording is active");
             return;
         }
@@ -3620,15 +3810,8 @@ public final class MainActivity extends Activity {
     }
 
     private static Map<String, String> changedProjectSources(ProjectSnapshot baseline, ProjectSnapshot current) {
-        Map<String, String> before = sourcesByFile(baseline);
-        Map<String, String> after = sourcesByFile(current);
-        Map<String, String> changed = new LinkedHashMap<>();
-        for (Map.Entry<String, String> entry : after.entrySet()) {
-            if (!entry.getValue().equals(before.get(entry.getKey()))) {
-                changed.put(entry.getKey(), entry.getValue());
-            }
-        }
-        return changed;
+        return WorkshopGitHubSyncPolicy.changedTextFiles(
+                sourcesByFile(baseline), sourcesByFile(current));
     }
 
     private void reviewGitHubPullRequestChanges() {
@@ -3666,6 +3849,16 @@ public final class MainActivity extends Activity {
             setStatusText("GitHub pull request needs configured settings");
             return;
         }
+        if (!githubTargetValidated(prefs, repository, baseBranch)) {
+            setStatusText("GitHub pull request needs authenticated settings; save them again");
+            return;
+        }
+        if (!WorkshopConnectivity.hasUsableNetwork(this)) {
+            persistGitHubOperationState("pull_request", "waiting_network",
+                    "GitHub pull request: waiting for a usable network");
+            refreshGitHubSyncStatus();
+            return;
+        }
         final Map<String, String> changes;
         try {
             changes = changedProjectSources(loadProjectBaselineSnapshot(), loadBundledProject());
@@ -3689,42 +3882,28 @@ public final class MainActivity extends Activity {
         githubSyncExecutor.submit(new Runnable() {
             @Override public void run() {
                 try {
-                    ensureGitHubReviewBranch(token, repository, baseBranch, reviewBranch);
+                    WorkshopGitHubApi api = new WorkshopGitHubApi(token, repository);
+                    api.ensureReviewBranch(baseBranch, reviewBranch);
                     int completed = 0;
                     for (Map.Entry<String, String> entry : changes.entrySet()) {
                         completed += 1;
                         postGitHubOperationState("pull_request", "running", "GitHub pull request: uploading " + completed + "/" + changes.size());
-                        uploadGitHubFile(token, repository, reviewBranch, entry.getKey(), entry.getValue());
+                        api.applyFileChange(reviewBranch, entry.getKey(),
+                                entry.getValue() == null ? null
+                                        : entry.getValue().getBytes(StandardCharsets.UTF_8), null);
                     }
-                    String url = createOrFindGitHubPullRequest(token, repository, baseBranch, reviewBranch,
-                            formatGitHubPullRequestBody(changes));
+                    String url = api.createOrFindPullRequest(
+                            baseBranch, reviewBranch, formatGitHubPullRequestBody(changes));
                     postGitHubOperationState("", "complete", "GitHub pull request: ready " + url);
                 } catch (Exception error) {
-                    postGitHubOperationState("pull_request", "error", "GitHub pull request error: " + error.getMessage());
+                    postGitHubOperationFailure("pull_request", "GitHub pull request", error);
                 }
             }
         });
     }
 
     private static String githubChangeFingerprint(Map<String, String> changes) {
-        StringBuilder fingerprint = new StringBuilder();
-        for (Map.Entry<String, String> entry : changes.entrySet()) {
-            fingerprint.append(entry.getKey()).append('\n').append(entry.getValue()).append('\n');
-        }
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(fingerprint.toString().getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder(digest.length * 2);
-            String digits = "0123456789abcdef";
-            for (byte value : digest) {
-                int unsigned = value & 0xff;
-                hex.append(digits.charAt(unsigned >>> 4));
-                hex.append(digits.charAt(unsigned & 0x0f));
-            }
-            return hex.toString();
-        } catch (NoSuchAlgorithmException unavailable) {
-            return fingerprint.toString();
-        }
+        return WorkshopGitHubSyncPolicy.reviewFingerprint(changes);
     }
 
     private String githubReviewBranchName() {
@@ -3735,99 +3914,11 @@ public final class MainActivity extends Activity {
 
     private static String formatGitHubPullRequestBody(Map<String, String> changes) {
         StringBuilder body = new StringBuilder("Updated from Stasis Workshop for Android.\n\nChanged files:");
-        for (String path : changes.keySet()) body.append("\n- `").append(path).append('`');
+        for (Map.Entry<String, String> change : changes.entrySet()) {
+            body.append("\n- `").append(change.getKey()).append('`');
+            if (change.getValue() == null) body.append(" (deleted)");
+        }
         return body.toString();
-    }
-
-    private static void ensureGitHubReviewBranch(String token, String repository, String baseBranch, String reviewBranch) throws Exception {
-        String reviewRefUrl = githubApiUrl(repository, "/git/ref/heads/" + encodeGitHubPath(reviewBranch));
-        int reviewCode = githubGetCode(token, reviewRefUrl);
-        if (reviewCode == 200) return;
-        if (reviewCode != 404) throw new IOException("review branch HTTP " + reviewCode);
-
-        JSONObject baseRef = githubGetJson(token,
-                githubApiUrl(repository, "/git/ref/heads/" + encodeGitHubPath(baseBranch)));
-        String baseSha = baseRef.optJSONObject("object") == null
-                ? "" : baseRef.optJSONObject("object").optString("sha", "");
-        if (baseSha.isEmpty()) throw new IOException("base branch has no commit SHA");
-        githubWriteJson(token, "POST", githubApiUrl(repository, "/git/refs"),
-                new JSONObject().put("ref", "refs/heads/" + reviewBranch).put("sha", baseSha), 201);
-    }
-
-    private static String createOrFindGitHubPullRequest(String token, String repository, String baseBranch,
-            String reviewBranch, String body) throws Exception {
-        String owner = repository.substring(0, repository.indexOf('/'));
-        String query = "?state=open&head=" + encodeGitHubQuery(owner + ":" + reviewBranch)
-                + "&base=" + encodeGitHubQuery(baseBranch);
-        JSONArray existing = githubGetArray(token, githubApiUrl(repository, "/pulls" + query));
-        if (existing.length() > 0) return existing.getJSONObject(0).optString("html_url", "existing PR");
-        JSONObject created = githubWriteJson(token, "POST", githubApiUrl(repository, "/pulls"),
-                new JSONObject().put("title", "Stasis Workshop Android changes")
-                        .put("head", reviewBranch).put("base", baseBranch).put("body", body), 201);
-        return created.optString("html_url", "created PR");
-    }
-
-    private static String githubApiUrl(String repository, String path) {
-        return "https://api.github.com/repos/" + repository + path;
-    }
-
-    private static String encodeGitHubPath(String value) throws Exception {
-        return encodeGitHubQuery(value).replace("%2F", "/");
-    }
-
-    private static String encodeGitHubQuery(String value) throws Exception {
-        return URLEncoder.encode(value, "UTF-8").replace("+", "%20");
-    }
-
-    private static void configureGitHubConnection(HttpURLConnection connection, String token) {
-        connection.setConnectTimeout(GITHUB_NETWORK_TIMEOUT_MS);
-        connection.setReadTimeout(GITHUB_NETWORK_TIMEOUT_MS);
-        connection.setRequestProperty("Accept", "application/vnd.github+json");
-        connection.setRequestProperty("Authorization", "Bearer " + token);
-        connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
-    }
-
-    private static int githubGetCode(String token, String url) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
-        configureGitHubConnection(connection, token);
-        int code = connection.getResponseCode();
-        connection.disconnect();
-        return code;
-    }
-
-    private static JSONObject githubGetJson(String token, String url) throws Exception {
-        return new JSONObject(githubRead(token, url));
-    }
-
-    private static JSONArray githubGetArray(String token, String url) throws Exception {
-        return new JSONArray(githubRead(token, url));
-    }
-
-    private static String githubRead(String token, String url) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
-        configureGitHubConnection(connection, token);
-        int code = connection.getResponseCode();
-        if (code != 200) throw new IOException("GitHub read HTTP " + code);
-        String response = readStreamStatic(connection.getInputStream());
-        connection.disconnect();
-        return response;
-    }
-
-    private static JSONObject githubWriteJson(String token, String method, String url, JSONObject body,
-            int expectedCode) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
-        connection.setRequestMethod(method);
-        connection.setDoOutput(true);
-        configureGitHubConnection(connection, token);
-        connection.setRequestProperty("Content-Type", "application/json");
-        OutputStream output = connection.getOutputStream();
-        output.write(body.toString().getBytes(StandardCharsets.UTF_8));
-        output.close();
-        int code = connection.getResponseCode();
-        if (code != expectedCode) throw new IOException("GitHub write HTTP " + code);
-        String response = readStreamStatic(connection.getInputStream());
-        connection.disconnect();
-        return new JSONObject(response);
     }
 
     private void retryGitHubOperation() {
@@ -3840,6 +3931,37 @@ public final class MainActivity extends Activity {
         } else {
             githubSyncStatus.setText("GitHub sync: no retryable operation");
         }
+    }
+
+    private void resumeGitHubAfterNetworkChange() {
+        if (isGitHubOperationActive() || !WorkshopConnectivity.hasUsableNetwork(this)) return;
+        SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        String state = preferences.getString(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
+        String operation = preferences.getString(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
+        if (!WorkshopGitHubSyncPolicy.shouldResumeAfterNetwork(
+                operation, state, WorkshopConnectivity.hasUsableNetwork(this))) return;
+        String detail = preferences.getString(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION_DETAIL), "");
+        if ("sync".equals(operation)) {
+            queueGitHubSync(!detail.contains("automatic"));
+        } else if ("pull_request".equals(operation)) {
+            queueGitHubPullRequest();
+        }
+    }
+
+    private boolean batterySaverEnabled() {
+        PowerManager manager = (PowerManager)getSystemService(POWER_SERVICE);
+        return manager != null && manager.isPowerSaveMode();
+    }
+
+    private boolean deviceCharging() {
+        Intent battery = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        if (battery == null) return false;
+        int status = battery.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+        return status == BatteryManager.BATTERY_STATUS_CHARGING
+                || status == BatteryManager.BATTERY_STATUS_FULL;
     }
 
     private void persistGitHubOperationState(String operation, String state, String detail) {
@@ -3865,6 +3987,14 @@ public final class MainActivity extends Activity {
         return legacy;
     }
 
+    private boolean githubTargetValidated(SharedPreferences preferences,
+            String repository, String branch) {
+        if (repository.isEmpty() || branch.isEmpty()) return false;
+        return WorkshopGitHubSyncPolicy.targetIdentity(repository, branch).equals(
+                preferences.getString(
+                        githubProjectPreferenceKey(GITHUB_PREF_VALIDATED_TARGET), ""));
+    }
+
     private synchronized boolean beginProjectIoWork(String detail) {
         if (projectIoActive || !WorkshopLongWorkCoordinator.beginProjectIo(this, detail)) {
             setStatusText("Project operation blocked while another foreground operation is active");
@@ -3878,57 +4008,42 @@ public final class MainActivity extends Activity {
         projectIoActive = false;
         WorkshopLongWorkCoordinator.finishProjectIo(this);
         if (activityDestroyed) projectIoExecutor.shutdown();
+        requestGitHubAutoSync();
+    }
+
+    private boolean isGitHubOperationActive() {
+        return WorkshopLongWorkCoordinator.isGitHubActive();
     }
 
     private synchronized boolean beginGitHubOperation(String operation, String status) {
-        if (githubOperationActive) {
+        if (WorkshopLongWorkCoordinator.isGitHubActive()) {
             githubSyncStatus.setText("GitHub sync: another operation is already queued or running");
             return false;
         }
-        if (!WorkshopLongWorkCoordinator.beginGitHub(this, "Syncing reviewed project files")) {
+        String detail = "validate".equals(operation) ? "Validating the GitHub backup target"
+                : ("pull_request".equals(operation) ? "Publishing reviewed project files"
+                        : "Backing up project files to GitHub");
+        if (!WorkshopLongWorkCoordinator.beginGitHub(this, detail)) {
             githubSyncStatus.setText("GitHub sync: another foreground operation is active");
             return false;
         }
-        githubOperationActive = true;
         postGitHubOperationState(operation, "queued", status);
         return true;
     }
 
     private void postGitHubOperationState(final String operation, final String state, final String status) {
         persistGitHubOperationState(operation, state, status);
-        if ("complete".equals(state) || "error".equals(state)) {
-            githubOperationActive = false;
+        if ("complete".equals(state) || "error".equals(state)
+                || "waiting_network".equals(state) || "deferred".equals(state)) {
             WorkshopLongWorkCoordinator.finishGitHub(this);
             if (activityDestroyed) githubSyncExecutor.shutdown();
         }
         runOnUiThread(new Runnable() {
-            @Override public void run() { if (githubSyncStatus != null) githubSyncStatus.setText(status); }
+            @Override public void run() {
+                if (githubSyncStatus != null) githubSyncStatus.setText(status);
+                if ("complete".equals(state)) requestGitHubAutoSync();
+            }
         });
-    }
-
-    private static void uploadGitHubFile(String token, String repository, String branch, String path, String source) throws Exception {
-        uploadGitHubFile(token, repository, branch, path, source.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static void uploadGitHubFile(String token, String repository, String branch, String path, byte[] content) throws Exception {
-        String base = githubApiUrl(repository, "/contents/" + encodeGitHubPath(path));
-        HttpURLConnection get = (HttpURLConnection)new URL(base + "?ref=" + encodeGitHubQuery(branch)).openConnection();
-        configureGitHubConnection(get, token);
-        String sha = "";
-        int getCode = get.getResponseCode();
-        if (getCode == 200) sha = new JSONObject(readStreamStatic(get.getInputStream())).optString("sha", "");
-        else if (getCode != 404) throw new IOException("read " + path + " HTTP " + getCode);
-        JSONObject body = new JSONObject().put("message", "stasis workshop sync: " + path)
-                .put("content", Base64.encodeToString(content, Base64.NO_WRAP))
-                .put("branch", branch);
-        if (!sha.isEmpty()) body.put("sha", sha);
-        HttpURLConnection put = (HttpURLConnection)new URL(base).openConnection();
-        put.setRequestMethod("PUT"); put.setDoOutput(true);
-        configureGitHubConnection(put, token);
-        put.setRequestProperty("Content-Type", "application/json");
-        OutputStream output = put.getOutputStream(); output.write(body.toString().getBytes(StandardCharsets.UTF_8)); output.close();
-        int putCode = put.getResponseCode();
-        if (putCode != 200 && putCode != 201) throw new IOException("write " + path + " HTTP " + putCode);
     }
 
     private void toggleAiSettings() {
@@ -4112,9 +4227,9 @@ public final class MainActivity extends Activity {
         connectivityManager = (ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
         if (connectivityManager == null || networkCallbackRegistered) return;
         networkCallback = new ConnectivityManager.NetworkCallback() {
-            @Override public void onAvailable(Network network) { resumeQueuedAiAfterNetworkChange(); }
+            @Override public void onAvailable(Network network) { resumeBackgroundWorkAfterNetworkChange(); }
             @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
-                resumeQueuedAiAfterNetworkChange();
+                resumeBackgroundWorkAfterNetworkChange();
             }
         };
         try {
@@ -4132,6 +4247,26 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void postGitHubOperationFailure(String operation, String label, Exception error) {
+        boolean networkAvailable = WorkshopConnectivity.hasUsableNetwork(this);
+        String state = WorkshopGitHubSyncPolicy.failureState(networkAvailable);
+        String status = networkAvailable
+                ? label + " error: " + error.getMessage()
+                : label + ": network lost; waiting to retry";
+        postGitHubOperationState(operation, state, status);
+    }
+
+    private void resumeBackgroundWorkAfterNetworkChange() {
+        resumeQueuedAiAfterNetworkChange();
+        if (!WorkshopConnectivity.hasUsableNetwork(this)) return;
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                resumeGitHubAfterNetworkChange();
+                requestGitHubAutoSync();
+            }
+        });
+    }
+
     private void unregisterNetworkMonitoring() {
         if (!networkCallbackRegistered || connectivityManager == null || networkCallback == null) return;
         try {
@@ -4141,6 +4276,36 @@ public final class MainActivity extends Activity {
         }
         networkCallbackRegistered = false;
         networkCallback = null;
+    }
+
+    private void registerPowerMonitoring() {
+        if (powerReceiverRegistered) return;
+        powerReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                requestGitHubAutoSync();
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_POWER_CONNECTED);
+        filter.addAction(Intent.ACTION_POWER_DISCONNECTED);
+        filter.addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED);
+        try {
+            registerReceiver(powerReceiver, filter);
+            powerReceiverRegistered = true;
+        } catch (RuntimeException error) {
+            powerReceiver = null;
+        }
+    }
+
+    private void unregisterPowerMonitoring() {
+        if (!powerReceiverRegistered || powerReceiver == null) return;
+        try {
+            unregisterReceiver(powerReceiver);
+        } catch (RuntimeException ignored) {
+            // Android may already have removed the receiver during process teardown.
+        }
+        powerReceiverRegistered = false;
+        powerReceiver = null;
     }
 
     private static boolean isOfficialCodexVerificationUrl(String value) {
@@ -7997,7 +8162,7 @@ public final class MainActivity extends Activity {
             setStatusText("Image import needs a registered active project");
             return;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || hasPendingSourceEdit()) {
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || hasPendingSourceEdit()) {
             setStatusText("Image import blocked by active work or a pending source edit");
             return;
         }
@@ -8141,6 +8306,7 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshAudioAssetList() {
+        requestGitHubAutoSync();
         if (audioAssetList == null) return;
         audioAssetList.removeAllViews();
         if (activeProject == null) return;
@@ -8297,7 +8463,7 @@ public final class MainActivity extends Activity {
             setStatusText("Audio changes need a registered active project");
             return false;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || hasPendingSourceEdit()) {
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || hasPendingSourceEdit()) {
             setStatusText("Audio change blocked by active work or a pending source edit");
             return false;
         }
@@ -8408,6 +8574,7 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshImageAssetList() {
+        requestGitHubAutoSync();
         if (imageAssetList == null) return;
         imageAssetList.removeAllViews();
         if (activeProject == null) return;
@@ -9132,7 +9299,7 @@ public final class MainActivity extends Activity {
             setStatusText("Image changes need a registered active project");
             return false;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || hasPendingSourceEdit()) {
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || hasPendingSourceEdit()) {
             setStatusText("Image change blocked by active work or a pending source edit");
             return false;
         }
@@ -9385,6 +9552,7 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshChangeSummary(ProjectSnapshot currentProject) {
+        requestGitHubAutoSync();
         if (changeSummary == null) {
             return;
         }
