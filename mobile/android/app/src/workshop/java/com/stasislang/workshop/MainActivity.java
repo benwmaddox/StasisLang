@@ -104,9 +104,7 @@ public final class MainActivity extends Activity {
     private static final String PONG_SLOW_BALL_MIGRATION = "pong_slow_ball_v1";
     private static final String AI_PREFS = "ai_settings";
     private static final String ONBOARDING_PREFS = "onboarding_settings";
-    private static final String ONBOARDING_COMPLETE = "manual_tutorial_seen_v1";
     private static final String EXPLORATION_LESSON_PREFS = "exploration_lesson_progress";
-    private static final String AI_SETUP_COMPLETE = "ai_setup_complete_v1";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_PROVIDER = "ai_provider";
     private static final String AI_PREF_CODEX_FAST_MODE = "codex_fast_mode";
@@ -225,6 +223,8 @@ public final class MainActivity extends Activity {
     private LinearLayout githubSettingsBody;
     private LinearLayout privacySettingsBody;
     private LinearLayout onboardingBody;
+    private TextView onboardingSummary;
+    private WorkshopOnboardingPolicy.Progress onboardingState;
     private EditText githubTokenEditor;
     private EditText githubRepositoryEditor;
     private EditText githubBranchEditor;
@@ -258,7 +258,6 @@ public final class MainActivity extends Activity {
     private TextView codexLoginDialogStatus;
     private String codexLoginUserCode = "";
     private String codexLoginVerificationUrl = "";
-    private boolean showProjectChooserAfterCodexLogin;
     private final WorkshopCodexLoginLifecycle codexLoginLifecycle = new WorkshopCodexLoginLifecycle();
     private final Runnable codexStatusPoll = new Runnable() {
         @Override public void run() { refreshPhoneNativeCodexStatus(); }
@@ -423,8 +422,10 @@ public final class MainActivity extends Activity {
         if (savedInstanceState == null) {
             gameLoopHandler.post(new Runnable() {
                 @Override public void run() {
-                    if (needsFirstRunAiSetup()) showFirstRunAiSetup();
-                    else showProjectChooser();
+                    WorkshopOnboardingPolicy.Progress progress = onboardingProgress();
+                    if (!progress.isComplete() && !progress.deferred) {
+                        showOnboardingGuide(true);
+                    }
                 }
             });
         }
@@ -2263,18 +2264,12 @@ public final class MainActivity extends Activity {
         onboardingBody = new LinearLayout(this);
         onboardingBody.setOrientation(LinearLayout.VERTICAL);
         onboardingBody.setVisibility(View.GONE);
-        TextView onboardingSummary = new TextView(this);
-        onboardingSummary.setText("Manual path (no API key):\n"
-                + "1. Tap the Exploration Garden, walk to a keepsake, then open the top-right menu.\n"
-                + "2. Open Manual Symbols & Source and choose a symbol.\n"
-                + "3. Edit, Apply, then Run Tests; use Changes before backup.\n"
-                + "4. Projects creates/switches workshops and exports portable archives.\n\n"
-                + "Optional: AI Settings stores an OpenAI key; GitHub Settings stores a token for explicit Sync/PR actions. "
-                + "Image/Audio Assets stay under Projects. Voice or audio recording asks for microphone permission only when started.");
+        onboardingSummary = new TextView(this);
         onboardingSummary.setTextSize(12.0f);
         onboardingSummary.setTextColor(Color.rgb(73, 84, 100));
         onboardingSummary.setPadding(dp(8), dp(8), dp(8), dp(8));
         onboardingBody.addView(onboardingSummary, fullWidth());
+        refreshOnboardingSummary();
         Button showWelcome = new Button(this);
         showWelcome.setText("Show Welcome Guide");
         showWelcome.setOnClickListener(new View.OnClickListener() {
@@ -2282,11 +2277,17 @@ public final class MainActivity extends Activity {
         });
         onboardingBody.addView(showWelcome, fullWidth());
         Button startManual = new Button(this);
-        startManual.setText("Start Zero-AI Manual Tutorial");
+        startManual.setText("Resume Zero-AI Manual Tutorial");
         startManual.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { startManualTutorial(); }
         });
         onboardingBody.addView(startManual, fullWidth());
+        Button restartManual = new Button(this);
+        restartManual.setText("Restart Manual Tutorial");
+        restartManual.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { restartManualTutorial(); }
+        });
+        onboardingBody.addView(restartManual, fullWidth());
         moreToolsBody.addView(onboardingBody, fullWidth());
         controls.addView(moreToolsBody, fullWidth());
         return controls;
@@ -2431,72 +2432,6 @@ public final class MainActivity extends Activity {
         setStatusText("No AI request is available to retry");
     }
 
-    private boolean needsFirstRunAiSetup() {
-        SharedPreferences onboarding = getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE);
-        if (onboarding.getBoolean(AI_SETUP_COMPLETE, false)) return false;
-        SharedPreferences ai = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
-        if (!ai.getString(AI_PREF_PROVIDER, "").isEmpty()
-                || !readSecretPreference(ai, AI_PREF_API_KEY).isEmpty()) {
-            onboarding.edit().putBoolean(AI_SETUP_COMPLETE, true).apply();
-            return false;
-        }
-        return true;
-    }
-
-    private void markAiSetupComplete() {
-        getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE).edit()
-                .putBoolean(AI_SETUP_COMPLETE, true).apply();
-    }
-
-    private void showFirstRunAiSetup() {
-        final EditText apiKey = new EditText(this);
-        apiKey.setHint("Optional OpenAI API key");
-        apiKey.setSingleLine(true);
-        apiKey.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        apiKey.setPadding(dp(20), dp(8), dp(20), dp(8));
-        new AlertDialog.Builder(this)
-                .setTitle("Set up AI")
-                .setMessage("Sign in with your ChatGPT subscription on this phone, or save an API key as the fallback. You can change both later in Settings.")
-                .setView(apiKey)
-                .setPositiveButton("ChatGPT Sign-in", new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
-                                .putString(AI_PREF_PROVIDER, AI_PROVIDER_CODEX).apply();
-                        if (aiProviderSelector != null) aiProviderSelector.setSelection(0);
-                        markAiSetupComplete();
-                        refreshAiBudgetStatus();
-                        showProjectChooserAfterCodexLogin = true;
-                        beginPhoneNativeCodexLogin();
-                    }
-                })
-                .setNeutralButton("Save API Key", new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        String key = apiKey.getText().toString().trim();
-                        if (key.isEmpty() || !saveAiSettings(key, DEFAULT_AI_MODEL)) {
-                            setStatusText("Enter a valid API key, or choose ChatGPT sign-in / without AI");
-                            gameLoopHandler.post(new Runnable() {
-                                @Override public void run() { showFirstRunAiSetup(); }
-                            });
-                            return;
-                        }
-                        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
-                                .putString(AI_PREF_PROVIDER, AI_PROVIDER_API).apply();
-                        if (aiProviderSelector != null) aiProviderSelector.setSelection(1);
-                        markAiSetupComplete();
-                        refreshAiBudgetStatus();
-                        showProjectChooser();
-                    }
-                })
-                .setNegativeButton("Without AI", new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        markAiSetupComplete();
-                        showProjectChooser();
-                    }
-                })
-                .setCancelable(false)
-                .show();
-    }
-
     private void showProjectChooser() {
         if (isFinishing()) return;
         final ArrayList<WorkshopProjectRegistry.ProjectInfo> projects = new ArrayList<>();
@@ -2530,6 +2465,7 @@ public final class MainActivity extends Activity {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
                         WorkshopProjectRegistry.ProjectInfo project = projects.get(selected[0]);
                         if (activeProject != null && activeProject.id.equals(project.id)) {
+                            recordOnboardingProjectOpened(project);
                             setStatusText("Working on " + project.name);
                         } else {
                             activateProject(project);
@@ -2543,6 +2479,9 @@ public final class MainActivity extends Activity {
                 })
                 .setNegativeButton("Current", new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        if (activeProject != null) {
+                            recordOnboardingProjectOpened(activeProject);
+                        }
                         setStatusText(activeProject == null ? "Using current workspace"
                                 : "Working on " + activeProject.name);
                     }
@@ -2566,6 +2505,8 @@ public final class MainActivity extends Activity {
         content.addView(templates, fullWidth());
         new AlertDialog.Builder(this)
                 .setTitle("New project")
+                .setMessage("Choose a bundled template and give the new app-private project a name. "
+                        + "You can switch or export it later under Projects.")
                 .setView(content)
                 .setPositiveButton("Create", new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
@@ -2700,6 +2641,7 @@ public final class MainActivity extends Activity {
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
+            recordOnboardingProjectOpened(project);
             setStatusText(compileReady ? "Working on " + project.name
                     : "Unable to run " + project.name + " - " + compileResult);
             gameLoopHandler.post(new Runnable() {
@@ -3536,35 +3478,130 @@ public final class MainActivity extends Activity {
     }
 
     private void showOnboardingGuide(boolean firstRun) {
+        final WorkshopOnboardingPolicy.Progress progress = onboardingProgress();
         new AlertDialog.Builder(this)
                 .setTitle("Welcome to Stasis Workshop")
-                .setMessage("You can build and test a game entirely on-device without AI. In the Exploration Garden, tap a destination "
-                        + "and collect a keepsake, then open the menu, "
-                        + "expand Manual Symbols & Source, make a small edit, Apply it, and Run Tests. Projects and archive backup "
-                        + "work without accounts. OpenAI, GitHub, media, and voice are optional and activate only when you choose them.")
-                .setPositiveButton("Start Manual Tutorial", new android.content.DialogInterface.OnClickListener() {
+                .setMessage(WorkshopOnboardingPolicy.checklist(progress))
+                .setPositiveButton(progress.isComplete() ? "Restart Tutorial" : "Resume Tutorial",
+                        new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        markOnboardingSeen();
                         startManualTutorial();
                     }
                 })
-                .setNegativeButton("Got It", new android.content.DialogInterface.OnClickListener() {
+                .setNegativeButton(firstRun ? "Remind Me Later" : "Close",
+                        new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        markOnboardingSeen();
-                        setStatusText("Welcome guide completed; Help & Onboarding remains available");
+                        if (firstRun) {
+                            if (persistOnboardingProgress(WorkshopOnboardingPolicy.defer(progress))) {
+                                setStatusText("Manual tutorial deferred; resume it anytime under Help & Onboarding");
+                            }
+                        }
                     }
                 })
-                .setNeutralButton(firstRun ? "Remind Me Later" : "Close", null)
                 .show();
     }
 
-    private void markOnboardingSeen() {
-        getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE).edit()
-                .putBoolean(ONBOARDING_COMPLETE, true).apply();
+    private WorkshopOnboardingPolicy.Progress onboardingProgress() {
+        if (onboardingState != null) return onboardingState;
+        onboardingState = WorkshopOnboardingStore.load(
+                getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE));
+        return onboardingState;
+    }
+
+    private boolean persistOnboardingProgress(WorkshopOnboardingPolicy.Progress progress) {
+        boolean stored = WorkshopOnboardingStore.save(
+                getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE), progress);
+        if (!stored) {
+            setStatusText("Tutorial progress could not be saved; the current step remains active");
+            return false;
+        }
+        onboardingState = progress;
+        refreshOnboardingSummary();
+        return true;
+    }
+
+    private void refreshOnboardingSummary() {
+        if (onboardingSummary != null) {
+            onboardingSummary.setText(WorkshopOnboardingPolicy.checklist(onboardingProgress()));
+        }
+    }
+
+    private void persistOnboardingAdvance(WorkshopOnboardingPolicy.Progress before,
+            WorkshopOnboardingPolicy.Progress after) {
+        if (after == before) return;
+        if (!persistOnboardingProgress(after)) return;
+        String message = after.isComplete()
+                ? "Zero-AI manual tutorial complete; Help & Onboarding can restart it anytime"
+                : "Tutorial progress saved. Next: " + after.nextStep().instruction;
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+    }
+
+    private void recordOnboardingProjectOpened(WorkshopProjectRegistry.ProjectInfo project) {
+        if (project != null && WorkshopTemplateCatalog.isKnown(project.templateId)) {
+            WorkshopOnboardingPolicy.Progress before = onboardingProgress();
+            persistOnboardingAdvance(before,
+                    WorkshopOnboardingPolicy.recordProjectOpened(before, project.id));
+        }
+    }
+
+    private void recordOnboardingProjectStep(WorkshopOnboardingPolicy.Step event) {
+        WorkshopOnboardingPolicy.Progress before = onboardingProgress();
+        String projectId = activeProject == null ? "" : activeProject.id;
+        persistOnboardingAdvance(before,
+                WorkshopOnboardingPolicy.recordProjectStep(before, event, projectId));
+    }
+
+    private void recordOnboardingChangeApplied(SymbolEntry symbol, String source) {
+        WorkshopOnboardingPolicy.Progress before = onboardingProgress();
+        String projectId = activeProject == null ? "" : activeProject.id;
+        persistOnboardingAdvance(before, WorkshopOnboardingPolicy.recordChangeApplied(
+                before, projectId, symbol.kind, symbol.identityKey(), onboardingSourceHash(source)));
+    }
+
+    private void recordOnboardingTrackedChangeStep(WorkshopOnboardingPolicy.Step event,
+            ProjectSnapshot currentProject) {
+        WorkshopOnboardingPolicy.Progress before = onboardingProgress();
+        SymbolEntry tracked = findSymbolByIdentityKey(currentProject, before.changeId);
+        if (tracked == null) return;
+        String projectId = activeProject == null ? "" : activeProject.id;
+        persistOnboardingAdvance(before, WorkshopOnboardingPolicy.recordChangeStep(
+                before, event, projectId, tracked.identityKey(), onboardingSourceHash(tracked.source)));
+    }
+
+    private void recordOnboardingRevert(String changeId, String changeHash) {
+        WorkshopOnboardingPolicy.Progress before = onboardingProgress();
+        String projectId = activeProject == null ? "" : activeProject.id;
+        persistOnboardingAdvance(before, WorkshopOnboardingPolicy.recordChangeStep(
+                before, WorkshopOnboardingPolicy.Step.CHANGE_REVERTED,
+                projectId, changeId, changeHash));
+    }
+
+    private static String onboardingSourceHash(String source) {
+        try {
+            return sha256Bytes((source == null ? "" : source.trim()).getBytes(StandardCharsets.UTF_8));
+        } catch (IOException error) {
+            return "";
+        }
     }
 
     private void startManualTutorial() {
-        markOnboardingSeen();
+        WorkshopOnboardingPolicy.Progress progress = onboardingProgress();
+        if (progress.isComplete()) progress = WorkshopOnboardingPolicy.restart();
+        progress = WorkshopOnboardingPolicy.resume(progress);
+        if (!persistOnboardingProgress(progress)) return;
+        if (progress.nextStep() == WorkshopOnboardingPolicy.Step.WELCOME) {
+            progress = WorkshopOnboardingPolicy.recordWelcome(progress);
+            if (!persistOnboardingProgress(progress)) return;
+        }
+        if (progress.nextStep() == WorkshopOnboardingPolicy.Step.PROJECT_OPENED) {
+            setStatusText("Tutorial: choose Open for the current template, or New to create from another template");
+            showProjectChooser();
+            return;
+        }
+        if (progress.nextStep() == WorkshopOnboardingPolicy.Step.PROJECT_RAN) {
+            setStatusText("Tutorial: watch the selected project run; the first successful frame completes this step");
+            return;
+        }
         if (editorPanel != null && editorPanel.getVisibility() != View.VISIBLE) toggleEditorPanel();
         if (manualEditBody != null) manualEditBody.setVisibility(View.VISIBLE);
         if (onboardingBody != null) onboardingBody.setVisibility(View.VISIBLE);
@@ -3572,12 +3609,29 @@ public final class MainActivity extends Activity {
             ProjectSnapshot project = loadBundledProject();
             if (project.firstSymbol != null) showSymbol(project.firstSymbol);
         }
-        setStatusText("Manual tutorial: try MOVE_SPEED in src/config.stasis, tap Apply, then Run Tests; no API key is required");
+        if (progress.nextStep() == WorkshopOnboardingPolicy.Step.CHANGE_APPLIED) {
+            setStatusText("Tutorial: select a function, make a small function-body edit, then Apply; no API key is required");
+        } else if (progress.nextStep() == WorkshopOnboardingPolicy.Step.TESTS_PASSED) {
+            setStatusText("Tutorial: choose Run Tests and continue when every runnable test passes");
+        } else if (progress.nextStep() == WorkshopOnboardingPolicy.Step.CHANGES_REVIEWED) {
+            if (diagnosticBody != null) diagnosticBody.setVisibility(View.VISIBLE);
+            setStatusText("Tutorial: choose Changes or Raw Diffs and inspect the saved edit");
+        } else if (progress.nextStep() == WorkshopOnboardingPolicy.Step.CHANGE_REVERTED) {
+            setStatusText("Tutorial: keep the changed baseline symbol selected and choose Revert Saved");
+        } else {
+            setStatusText("Zero-AI manual tutorial complete; Help & Onboarding remains available");
+        }
         if (editorPanel != null && sourceEditor != null) {
             editorPanel.post(new Runnable() {
                 @Override public void run() { editorPanel.smoothScrollTo(0, sourceEditor.getTop()); }
             });
         }
+    }
+
+    private void restartManualTutorial() {
+        if (!persistOnboardingProgress(WorkshopOnboardingPolicy.restart())) return;
+        setStatusText("Manual tutorial restarted with previous project/change context cleared");
+        startManualTutorial();
     }
 
     private void markInterruptedAiOutcomeIfNeeded() {
@@ -4133,11 +4187,6 @@ public final class MainActivity extends Activity {
                                         status.optString("user_code", ""));
                             }
                             showPhoneNativeCodexStatus(status);
-                            if (!"awaiting_user".equals(status.optString("status", ""))
-                                    && showProjectChooserAfterCodexLogin) {
-                                showProjectChooserAfterCodexLogin = false;
-                                showProjectChooser();
-                            }
                         }
                     });
                 } catch (Exception error) {
@@ -4145,10 +4194,6 @@ public final class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             if (codexAccountStatus != null) codexAccountStatus.setText("Codex account error: " + message);
-                            if (showProjectChooserAfterCodexLogin) {
-                                showProjectChooserAfterCodexLogin = false;
-                                showProjectChooser();
-                            }
                         }
                     });
                 }
@@ -4202,10 +4247,6 @@ public final class MainActivity extends Activity {
                                            boolean openBrowserAutomatically) {
         if (!isOfficialCodexVerificationUrl(verificationUrl) || userCode.trim().isEmpty()) {
             setStatusText("Codex sign-in returned an invalid verification link or code; request a new code");
-            if (showProjectChooserAfterCodexLogin) {
-                showProjectChooserAfterCodexLogin = false;
-                showProjectChooser();
-            }
             return;
         }
         codexLoginVerificationUrl = verificationUrl;
@@ -4443,8 +4484,6 @@ public final class MainActivity extends Activity {
             clearCopiedCodexLoginCode();
             refreshAiBudgetStatus();
             if (!handleCompletion) return;
-            final boolean showProjects = showProjectChooserAfterCodexLogin;
-            showProjectChooserAfterCodexLogin = false;
             gameLoopHandler.postDelayed(new Runnable() {
                 @Override public void run() {
                     if (codexLoginDialog != null) codexLoginDialog.dismiss();
@@ -4452,7 +4491,6 @@ public final class MainActivity extends Activity {
                     codexLoginDialogStatus = null;
                     codexLoginUserCode = "";
                     codexLoginVerificationUrl = "";
-                    if (showProjects) showProjectChooser();
                 }
             }, 750L);
             return;
@@ -4639,7 +4677,13 @@ public final class MainActivity extends Activity {
         refreshChanges.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                refreshChangeSummary(loadBundledProject());
+                ProjectSnapshot current = loadBundledProject();
+                boolean reviewedChange = refreshChangeSummary(current);
+                if (diagnosticBody != null) diagnosticBody.setVisibility(View.VISIBLE);
+                if (reviewedChange) {
+                    recordOnboardingTrackedChangeStep(
+                            WorkshopOnboardingPolicy.Step.CHANGES_REVIEWED, current);
+                }
             }
         });
         controls.addView(refreshChanges, fullWidth());
@@ -4759,6 +4803,7 @@ public final class MainActivity extends Activity {
         if (gamePreview != null) {
             gamePreview.setRenderFrameValues(nativeFrameValues);
         }
+        recordOnboardingProjectStep(WorkshopOnboardingPolicy.Step.PROJECT_RAN);
         updateGameDebugText();
     }
 
@@ -5239,8 +5284,10 @@ public final class MainActivity extends Activity {
         try {
             JSONObject result = aiToolRunTests(new AiAgentSession());
             captureFirstTestFailureDiagnostic(result);
-            if (result.optInt("passed", 0) > 0 && result.optInt("failed", 0) == 0) {
+            if (result.optBoolean("all_runnable_tests_passed", false)) {
                 recordExplorationLesson(WorkshopExplorationLessonPolicy.PASSED_TESTS);
+                recordOnboardingTrackedChangeStep(
+                        WorkshopOnboardingPolicy.Step.TESTS_PASSED, loadBundledProject());
             }
             setStatusText(testSummaryText(result));
         } catch (Exception error) {
@@ -7994,6 +8041,7 @@ public final class MainActivity extends Activity {
 
         SymbolEntry editedSymbol = selectedSymbol;
         String editedSource = sourceEditor.getText().toString().trim();
+        boolean sourceChanged = !editedSource.equals(editedSymbol.source.trim());
         String beforeFileSource = editedSymbol.sourceFile.source;
         String reload = classifySelectedReload(editedSymbol, editedSource);
         try {
@@ -8020,6 +8068,9 @@ public final class MainActivity extends Activity {
                 diagnosticEndColumn = 0;
                 diagnosticStatus.setText("Compile passed - " + reload);
                 recordExplorationLesson(WorkshopExplorationLessonPolicy.APPLIED_EDIT);
+                if (sourceChanged && refreshedSymbol != null) {
+                    recordOnboardingChangeApplied(refreshedSymbol, refreshedSymbol.source);
+                }
                 setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
             } else {
                 WorkshopSourceDiagnostic location = WorkshopSourceDiagnostic.fromCompileResult(compileResult);
@@ -9590,16 +9641,18 @@ public final class MainActivity extends Activity {
         writeTextFile(sourceFile.diskFile, sourceFile.source);
     }
 
-    private void refreshChangeSummary(ProjectSnapshot currentProject) {
+    private boolean refreshChangeSummary(ProjectSnapshot currentProject) {
         requestGitHubAutoSync();
         if (changeSummary == null) {
-            return;
+            return false;
         }
         try {
             ProjectSnapshot baseline = loadProjectBaselineSnapshot();
             changeSummary.setText(formatChangeSummary(baseline, currentProject));
+            return !sourcesByFile(baseline).equals(sourcesByFile(currentProject));
         } catch (IOException error) {
             changeSummary.setText("Changed symbols:\n  Unable to read project baseline: " + error.getMessage());
+            return false;
         }
     }
 
@@ -9608,7 +9661,14 @@ public final class MainActivity extends Activity {
             return;
         }
         try {
-            changeSummary.setText(formatRawFileDiffs(loadProjectBaselineSnapshot(), loadBundledProject()));
+            ProjectSnapshot baseline = loadProjectBaselineSnapshot();
+            ProjectSnapshot current = loadBundledProject();
+            changeSummary.setText(formatRawFileDiffs(baseline, current));
+            if (diagnosticBody != null) diagnosticBody.setVisibility(View.VISIBLE);
+            if (!sourcesByFile(baseline).equals(sourcesByFile(current))) {
+                recordOnboardingTrackedChangeStep(
+                        WorkshopOnboardingPolicy.Step.CHANGES_REVIEWED, current);
+            }
         } catch (IOException error) {
             changeSummary.setText("Raw file diffs:\n  Unable to read project baseline: " + error.getMessage());
         }
@@ -10042,6 +10102,9 @@ public final class MainActivity extends Activity {
                 setStatusText("Revert unavailable: selected symbol is not in the project baseline");
                 return;
             }
+            boolean sourceChanged = !selectedSymbol.source.trim().equals(baseline.source.trim());
+            String revertedChangeId = selectedSymbol.identityKey();
+            String revertedChangeHash = onboardingSourceHash(selectedSymbol.source);
             persistSelectedEdit(selectedSymbol, baseline.source);
             clearPendingDraft();
             ProjectSnapshot refreshedProject = loadBundledProject();
@@ -10055,6 +10118,9 @@ public final class MainActivity extends Activity {
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
+            if (compileReady && sourceChanged) {
+                recordOnboardingRevert(revertedChangeId, revertedChangeHash);
+            }
             setStatusText("Reverted saved symbol to project baseline - " + compileResult);
         } catch (IOException error) {
             setStatusText("Revert failed: " + error.getMessage());
@@ -10881,6 +10947,17 @@ public final class MainActivity extends Activity {
                             && symbol.owner.equals(owner) && symbol.name.equals(name)) {
                         return symbol;
                     }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static SymbolEntry findSymbolByIdentityKey(ProjectSnapshot project, String identityKey) {
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (symbol.identityKey().equals(identityKey)) return symbol;
                 }
             }
         }
