@@ -20,6 +20,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTemplateCatalog.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAccessibilityPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAdaptiveLayout.java",
@@ -204,6 +206,12 @@ def main() -> int:
     assert '<item name="android:textColorPrimary">#161B22</item>' in styles
 
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
+    onboarding_policy = read(
+        "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingPolicy.java"
+    )
+    onboarding_store = read(
+        "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingStore.java"
+    )
     secret_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java")
     github_sync_policy = read(
         "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopGitHubSyncPolicy.java"
@@ -575,14 +583,38 @@ def main() -> int:
     assert "project directory deletion did not complete" in project_registry
     assert "clearProject" in recovery_store
     assert 'ONBOARDING_PREFS = "onboarding_settings"' in activity
-    assert 'ONBOARDING_COMPLETE = "manual_tutorial_seen_v1"' in activity
+    assert 'VERSION = "manual_tutorial_version"' in onboarding_store
+    assert 'COMPLETED_STEPS = "manual_tutorial_completed_steps"' in onboarding_store
+    assert 'PROJECT_ID = "manual_tutorial_project_id"' in onboarding_store
+    assert 'CHANGE_HASH = "manual_tutorial_change_hash"' in onboarding_store
+    assert "WorkshopOnboardingStore.load" in activity
+    assert "WorkshopOnboardingStore.save" in activity
+    assert "showFirstRunAiSetup" not in activity
+    assert "showOnboardingGuide(true)" in activity
+    assert "recordOnboardingProjectOpened" in activity
+    assert "recordOnboardingProjectStep(WorkshopOnboardingPolicy.Step.PROJECT_RAN)" in activity
+    assert "recordOnboardingChangeApplied(refreshedSymbol, refreshedSymbol.source)" in activity
+    assert 'result.optBoolean("all_runnable_tests_passed", false)' in activity
+    assert "WorkshopOnboardingPolicy.Step.TESTS_PASSED, loadBundledProject()" in activity
+    assert "recordOnboardingTrackedChangeStep" in activity
+    assert "recordOnboardingRevert" in activity
+    assert ".putInt(COMPLETED_STEPS, progress.completedSteps)" in onboarding_store
+    assert ".commit();" in onboarding_store
+    assert "CURRENT_VERSION = 2" in onboarding_policy
+    assert "PROJECT_OPENED" in onboarding_policy
+    assert "PROJECT_RAN" in onboarding_policy
+    assert "CHANGE_APPLIED" in onboarding_policy
+    assert "TESTS_PASSED" in onboarding_policy
+    assert "CHANGES_REVIEWED" in onboarding_policy
+    assert "CHANGE_REVERTED" in onboarding_policy
     assert "Welcome to Stasis Workshop" in activity
-    assert "You can build and test a game entirely on-device without AI" in activity
     assert "Remind Me Later" in activity
     assert "Help & Onboarding" in activity
-    assert "Start Zero-AI Manual Tutorial" in activity
+    assert "Resume Zero-AI Manual Tutorial" in activity
+    assert "Restart Manual Tutorial" in activity
+    assert "previous project/change context cleared" in activity
     assert "no API key is required" in activity
-    assert "Voice or audio recording asks for microphone permission only when started" in activity
+    assert "permissions are requested only when you start" in onboarding_policy
     assert "toggleEditorPanel();" in activity
     assert "Interactive Stasis game preview" in activity
     assert "Open Workshop menu" in activity
