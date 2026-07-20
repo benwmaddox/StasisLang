@@ -207,7 +207,7 @@ Examples:
 
 - Editable runtime data lives under the project-level `data/` directory.
 - Every JSON or CSV file has a same-name `.struct-meta.json` mapping and is discovered automatically; ordinary development does not require binding flags or project-specific loader code.
-- JSON may map nested properties. CSV mappings are flat and bind columns to scalar fields or primitive arrays.
+- JSON may map nested properties. CSV headers are flat and bind either scalar/primitive-array data or variable rows into a fixed-capacity struct array. Table mappings automatically expose `row_count`, clear unused slots, and validate non-blank unique key columns (including composite keys).
 - Binding rejects extra source properties/columns, missing metadata paths, duplicate mappings, and paths absent from compiled globals before mutating runtime data.
 - Development watches both files and applies a validated set between ticks. Rejected edits preserve the last accepted runtime data.
 - Production AOT packages stage the same data and compile its accepted values into the runtime bridge, so startup never depends on loose development files.

@@ -68,17 +68,42 @@ Put editable runtime data in the project-level `data/` directory. Every JSON or
 CSV file with a matching `<name>.struct-meta.json` mapping is bound
 automatically; normal development commands do not need `--data-bind`.
 
-JSON supports nested metadata paths. CSV is deliberately flat: headers map to
-metadata paths without dots, one row supplies scalar/string fields, and multiple
-rows supply primitive arrays with one value per row. Quoted fields, escaped
-quotes, commas, CRLF, and embedded newlines are supported. A JSON and CSV file
-cannot share the same stem because their metadata mapping would be ambiguous.
+JSON supports nested metadata paths. CSV headers are deliberately flat. The
+basic form maps one row to scalar/string fields or an exact number of rows to
+primitive arrays. The table form maps variable rows into a fixed-capacity struct
+array, writes `row_count` automatically, clears unused slots, and requires one
+or more non-blank unique key columns. For example:
+
+```json
+{
+  "version": 1,
+  "globalName": "level",
+  "csvTable": {
+    "rowsPath": "waves",
+    "rowCountPath": "wave_count",
+    "capacity": 64,
+    "keyColumns": ["id"]
+  },
+  "fields": [
+    { "jsonPath": "waves.id", "csvColumn": "id", "type": "i32", "arrayCount": 64 },
+    { "jsonPath": "waves.tick", "csvColumn": "tick", "type": "i32", "arrayCount": 64 },
+    { "jsonPath": "waves.enemy_kind", "csvColumn": "enemy", "type": "i32", "arrayCount": 64 }
+  ]
+}
+```
+
+This binds `id,tick,enemy` rows to the fields of `level.waves: Wave[64]`
+and maintains `level.wave_count`. Row fields are flat primitive values; CSV does
+not represent nested row properties. Quoted fields, escaped quotes, commas,
+CRLF, and embedded newlines are supported. A JSON and CSV file cannot share the
+same stem because their metadata mapping would be ambiguous.
 
 Binding is schema-strict in both directions. Every JSON property or CSV column
 must exist in the metadata, every metadata path must exist in the data file, and
 development binding fails if the resulting global path is absent from the
 compiled program. Misspellings never create fallback globals or disappear
-silently.
+silently. Table CSV additionally rejects row counts above capacity, mismatched
+field capacities, blank keys, and duplicate (including composite) keys.
 
 While `stasis play` is running, changes to either file are validated and rebound
 between ticks. An invalid edit is rejected without partially applying the set.

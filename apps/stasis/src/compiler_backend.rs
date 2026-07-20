@@ -115,6 +115,8 @@ struct StructMetaFieldExportRow {
     name: Option<String>,
     #[serde(default, rename = "jsonPath")]
     json_path: String,
+    #[serde(default, rename = "csvColumn")]
+    csv_column: Option<String>,
     size: usize,
     #[serde(rename = "type")]
     field_type: String,
@@ -126,6 +128,8 @@ struct StructMetaFieldExportRow {
 struct StructMetaExportFile {
     #[serde(default, rename = "globalName")]
     global_name: String,
+    #[serde(default, rename = "csvTable")]
+    csv_table: Option<crate::CsvTableMetadata>,
     fields: Vec<StructMetaFieldExportRow>,
 }
 
@@ -144,13 +148,15 @@ struct PackagedFunctionAlias {
     returns_i32: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct PackagedRuntimeField {
     name: String,
     size: usize,
     field_type: String,
     array_count: usize,
     initial_value: Option<serde_json::Value>,
+    collection_path: Option<String>,
+    collection_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2554,6 +2560,61 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
                 .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
             let meta: StructMetaExportFile = serde_json::from_str(&text)
                 .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+            if let Some(table) = &meta.csv_table {
+                if table.rows_path.is_empty()
+                    || table.row_count_path.is_empty()
+                    || table.rows_path.contains('.')
+                    || table.row_count_path.contains('.')
+                    || table.capacity == 0
+                    || table.key_columns.is_empty()
+                {
+                    return Err(format!("invalid csvTable schema in {}", path.display()));
+                }
+                let prefix = format!("{}.", table.rows_path);
+                let mut columns = BTreeSet::new();
+                for field in &meta.fields {
+                    let suffix = field.json_path.strip_prefix(&prefix).ok_or_else(|| {
+                        format!(
+                            "CSV table target {} in {} must be below rowsPath {}",
+                            field.json_path,
+                            path.display(),
+                            table.rows_path
+                        )
+                    })?;
+                    if suffix.is_empty()
+                        || suffix.contains('.')
+                        || field.array_count != table.capacity
+                    {
+                        return Err(format!(
+                            "invalid CSV table target {} in {}",
+                            field.json_path,
+                            path.display()
+                        ));
+                    }
+                    let column = field.csv_column.as_deref().unwrap_or(&field.json_path);
+                    if column.is_empty() || column.contains('.') || !columns.insert(column) {
+                        return Err(format!(
+                            "invalid or duplicate CSV table column {column} in {}",
+                            path.display()
+                        ));
+                    }
+                }
+                let mut keys = BTreeSet::new();
+                for key in &table.key_columns {
+                    if !keys.insert(key) {
+                        return Err(format!(
+                            "duplicate CSV table key column {key} in {}",
+                            path.display()
+                        ));
+                    }
+                    if !columns.contains(key.as_str()) {
+                        return Err(format!(
+                            "CSV table key column {key} in {} has no target field",
+                            path.display()
+                        ));
+                    }
+                }
+            }
             let data_name = name
                 .strip_suffix(".struct-meta.json")
                 .expect("metadata suffix checked");
@@ -2586,16 +2647,28 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
                         .iter()
                         .map(|field| crate::CsvBindingField {
                             path: field.json_path.clone(),
+                            csv_column: field.csv_column.clone(),
                             type_name: field.field_type.clone(),
                             array_count: field.array_count,
                         })
                         .collect();
                     Some(
-                        crate::parse_flat_csv_binding(&data_text, &fields).map_err(|error| {
+                        if let Some(table) = &meta.csv_table {
+                            crate::parse_csv_table_binding(&data_text, &fields, table)
+                        } else {
+                            crate::parse_flat_csv_binding(&data_text, &fields)
+                        }
+                        .map_err(|error| {
                             format!("failed to parse {}: {error}", data_path.display())
                         })?,
                     )
                 } else {
+                    if meta.csv_table.is_some() {
+                        return Err(format!(
+                            "csvTable metadata requires a CSV data file: {}",
+                            data_path.display()
+                        ));
+                    }
                     Some(
                         serde_json::from_str::<serde_json::Value>(&data_text).map_err(|error| {
                             format!("failed to parse {}: {error}", data_path.display())
@@ -2606,11 +2679,14 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
                 None
             };
             if let Some(root) = data_root.as_ref() {
-                let paths: Vec<String> = meta
+                let mut paths: Vec<String> = meta
                     .fields
                     .iter()
                     .map(|field| field.json_path.clone())
                     .collect();
+                if let Some(table) = &meta.csv_table {
+                    paths.push(table.row_count_path.clone());
+                }
                 crate::validate_binding_source_paths(root, &paths).map_err(|error| {
                     format!(
                         "data file {} does not match target metadata: {error}",
@@ -2621,6 +2697,7 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
                     )
                 })?;
             }
+            let csv_table = meta.csv_table.clone();
             for field in meta.fields {
                 let field_name = match field.name {
                     Some(name) if !name.is_empty() => name,
@@ -2653,15 +2730,63 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
                         field.json_path
                     ));
                 }
+                let collection_field = if let Some(table) = &csv_table {
+                    Some(
+                        field
+                            .json_path
+                            .strip_prefix(&format!("{}.", table.rows_path))
+                            .ok_or_else(|| {
+                                format!(
+                                    "CSV table target {} in {} must be below rowsPath {}",
+                                    field.json_path,
+                                    path.display(),
+                                    table.rows_path
+                                )
+                            })?
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
                 let next = PackagedRuntimeField {
                     name: field_name.clone(),
                     size: field.size,
                     field_type: field.field_type,
                     array_count: field.array_count,
                     initial_value,
+                    collection_path: csv_table
+                        .as_ref()
+                        .map(|table| format!("{}.{}", meta.global_name, table.rows_path)),
+                    collection_field,
                 };
                 if let Some(existing) = out.get(&field_name) {
-                    if existing.initial_value != next.initial_value {
+                    if existing != &next {
+                        return Err(format!(
+                            "conflicting packaged data values for runtime field {field_name}"
+                        ));
+                    }
+                } else {
+                    out.insert(field_name, next);
+                }
+            }
+            if let Some(table) = csv_table {
+                let path_suffix = table.row_count_path.replace('.', "__");
+                let field_name = format!("{}__{path_suffix}", meta.global_name);
+                let initial_value = data_root
+                    .as_ref()
+                    .and_then(|root| json_value_by_path(root, &table.row_count_path))
+                    .cloned();
+                let next = PackagedRuntimeField {
+                    name: field_name.clone(),
+                    size: 4,
+                    field_type: "i32".to_string(),
+                    array_count: 1,
+                    initial_value,
+                    collection_path: None,
+                    collection_field: None,
+                };
+                if let Some(existing) = out.get(&field_name) {
+                    if existing != &next {
                         return Err(format!(
                             "conflicting packaged data values for runtime field {field_name}"
                         ));
@@ -2909,7 +3034,7 @@ fn stage_entry_support_files(
     for root in staged_roots {
         for field in collect_struct_meta_fields(&root)? {
             if let Some(existing) = fields_by_name.get(&field.name) {
-                if existing.initial_value != field.initial_value {
+                if existing != &field {
                     return Err(format!(
                         "conflicting packaged data values for runtime field {}",
                         field.name
@@ -2999,7 +3124,17 @@ fn append_runtime_bridge_field_source(
     }
 
     let runtime_path = field.name.replace("__", ".");
-    let field_hash = crate::hash_global_path(&runtime_path);
+    let scalar_hash = crate::hash_global_path(&runtime_path);
+    let collection_hash = field
+        .collection_path
+        .as_deref()
+        .map(crate::hash_global_path)
+        .unwrap_or_else(|| crate::hash_global_path(&runtime_path));
+    let field_hash = field
+        .collection_field
+        .as_deref()
+        .map(crate::hash_global_path)
+        .unwrap_or(0);
     match field.field_type.as_str() {
         "bool" | "u8" | "u16" | "u32" | "i32" => {
             let values = values_for_field(field)?;
@@ -3018,7 +3153,7 @@ fn append_runtime_bridge_field_source(
                     field.name, field.array_count,
                 ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_i32_array({field_hash}, 0, {name}, {len});",
+                    "stasis_jit_register_global_i32_array({collection_hash}, {field_hash}, {name}, {len});",
                     name = field.name,
                     len = field.array_count
                 ));
@@ -3033,7 +3168,7 @@ fn append_runtime_bridge_field_source(
                     field.name
                 ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_i32_ptr({field_hash}, &{name});",
+                    "stasis_jit_register_global_i32_ptr({scalar_hash}, &{name});",
                     name = field.name
                 ));
             }
@@ -3055,7 +3190,7 @@ fn append_runtime_bridge_field_source(
                     field.name, field.array_count,
                 ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_f32_array({field_hash}, 0, {name}, {len});",
+                    "stasis_jit_register_global_f32_array({collection_hash}, {field_hash}, {name}, {len});",
                     name = field.name,
                     len = field.array_count
                 ));
@@ -3070,7 +3205,7 @@ fn append_runtime_bridge_field_source(
                     field.name
                 ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_f32_ptr({field_hash}, &{name});",
+                    "stasis_jit_register_global_f32_ptr({scalar_hash}, &{name});",
                     name = field.name
                 ));
             }
@@ -3092,7 +3227,7 @@ fn append_runtime_bridge_field_source(
                     field.name, field.array_count,
                 ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_f64_array({field_hash}, 0, {name}, {len});",
+                    "stasis_jit_register_global_f64_array({collection_hash}, {field_hash}, {name}, {len});",
                     name = field.name,
                     len = field.array_count
                 ));
@@ -3107,7 +3242,7 @@ fn append_runtime_bridge_field_source(
                     field.name
                 ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_f64_ptr({field_hash}, &{name});",
+                    "stasis_jit_register_global_f64_ptr({scalar_hash}, &{name});",
                     name = field.name
                 ));
             }
@@ -3181,7 +3316,7 @@ fn append_runtime_bridge_field_source(
                 ));
             }
             register_lines.push(format!(
-                "stasis_jit_register_global_u8_array({field_hash}, 0, {name} + {header_bytes}, {payload_len});",
+                "stasis_jit_register_global_u8_array({scalar_hash}, 0, {name} + {header_bytes}, {payload_len});",
                 name = field.name,
                 header_bytes = header_bytes,
                 payload_len = payload_len
@@ -3841,12 +3976,31 @@ mod tests {
             }"#,
         )
         .expect("write CSV metadata");
+        fs::write(data_dir.join("waves.csv"), "id,hp\n10,70\n20,110\n")
+            .expect("write table CSV data");
+        fs::write(
+            data_dir.join("waves.struct-meta.json"),
+            r#"{
+                "globalName":"level",
+                "csvTable":{
+                    "rowsPath":"rows",
+                    "rowCountPath":"row_count",
+                    "capacity":4,
+                    "keyColumns":["id"]
+                },
+                "fields":[
+                    {"jsonPath":"rows.id","csvColumn":"id","size":16,"type":"i32","arrayCount":4},
+                    {"jsonPath":"rows.hp","csvColumn":"hp","size":16,"type":"i32","arrayCount":4}
+                ]
+            }"#,
+        )
+        .expect("write table CSV metadata");
 
         let support = stage_entry_support_files(&project_dir, Some(&entry_file), &output_dir)
             .expect("stage project data");
         assert!(output_dir.join("data").join("balance.json").is_file());
         assert!(output_dir.join("data").join("enemy.csv").is_file());
-        assert_eq!(support.runtime_fields.len(), 4);
+        assert_eq!(support.runtime_fields.len(), 7);
 
         let source = build_engine_bundle_runtime_bridge_source(
             &stasis_jit::AotTarget::Native,
@@ -3860,6 +4014,14 @@ mod tests {
         assert!(source.contains("int32_t balance__enabled = 1;"));
         assert!(source.contains("int32_t enemy__cadence[3] = {90, 60, 120};"));
         assert!(source.contains("int32_t enemy__damage[3] = {9, 6, 18};"));
+        assert!(source.contains("int32_t level__rows__id[4] = {10, 20, 0, 0};"));
+        assert!(source.contains("int32_t level__rows__hp[4] = {70, 110, 0, 0};"));
+        assert!(source.contains("int32_t level__row_count = 2;"));
+        let rows_hash = crate::hash_global_path("level.rows");
+        let id_hash = crate::hash_global_path("id");
+        assert!(source.contains(&format!(
+            "stasis_jit_register_global_i32_array({rows_hash}, {id_hash}, level__rows__id, 4);"
+        )));
 
         let _ = fs::remove_dir_all(&temp_root);
     }
@@ -3912,6 +4074,8 @@ mod tests {
             field_type: "i32".to_string(),
             array_count: 3,
             initial_value: Some(serde_json::json!([70, 110, 85])),
+            collection_path: None,
+            collection_field: None,
         }];
         let source = build_engine_bundle_runtime_bridge_source(
             &stasis_jit::AotTarget::Native,

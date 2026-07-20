@@ -219,13 +219,28 @@ struct PlayStructMetadata {
     version: i32,
     #[serde(rename = "globalName")]
     global_name: String,
+    #[serde(default, rename = "csvTable")]
+    csv_table: Option<CsvTableMetadata>,
     fields: Vec<PlayStructFieldMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct CsvTableMetadata {
+    #[serde(rename = "rowsPath")]
+    pub(crate) rows_path: String,
+    #[serde(rename = "rowCountPath")]
+    pub(crate) row_count_path: String,
+    pub(crate) capacity: usize,
+    #[serde(rename = "keyColumns")]
+    pub(crate) key_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct PlayStructFieldMetadata {
     #[serde(rename = "jsonPath")]
     json_path: String,
+    #[serde(default, rename = "csvColumn")]
+    csv_column: Option<String>,
     #[serde(rename = "type")]
     type_name: String,
     #[serde(rename = "arrayCount")]
@@ -235,8 +250,13 @@ struct PlayStructFieldMetadata {
 #[derive(Debug, Clone)]
 pub(crate) struct CsvBindingField {
     pub(crate) path: String,
+    pub(crate) csv_column: Option<String>,
     pub(crate) type_name: String,
     pub(crate) array_count: usize,
+}
+
+fn csv_column_name<'a>(field: &'a CsvBindingField) -> &'a str {
+    field.csv_column.as_deref().unwrap_or(&field.path)
 }
 
 fn parse_csv_records(source: &str) -> Result<Vec<Vec<String>>, String> {
@@ -339,6 +359,9 @@ pub(crate) fn parse_flat_csv_binding(
 ) -> Result<Value, String> {
     let mut metadata_paths = BTreeSet::new();
     for field in fields {
+        if field.csv_column.is_some() {
+            return Err("csvColumn metadata requires csvTable".to_string());
+        }
         if field.path.is_empty() || field.path.contains('.') {
             return Err(format!(
                 "CSV metadata path {} must name one flat column",
@@ -426,6 +449,170 @@ pub(crate) fn parse_flat_csv_binding(
         object.insert(field.path.clone(), value);
     }
     Ok(Value::Object(object))
+}
+
+pub(crate) fn parse_csv_table_binding(
+    source: &str,
+    fields: &[CsvBindingField],
+    table: &CsvTableMetadata,
+) -> Result<Value, String> {
+    if table.rows_path.is_empty()
+        || table.row_count_path.is_empty()
+        || table.rows_path.contains('.')
+        || table.row_count_path.contains('.')
+    {
+        return Err("CSV table rowsPath and rowCountPath must be flat properties".to_string());
+    }
+    if table.capacity == 0 {
+        return Err("CSV table capacity must be greater than zero".to_string());
+    }
+    if table.key_columns.is_empty() {
+        return Err("CSV table requires at least one stable key column".to_string());
+    }
+
+    let prefix = format!("{}.", table.rows_path);
+    let mut columns = BTreeMap::new();
+    for field in fields {
+        let suffix = field.path.strip_prefix(&prefix).ok_or_else(|| {
+            format!(
+                "CSV table target {} must be below rowsPath {}",
+                field.path, table.rows_path
+            )
+        })?;
+        if suffix.is_empty() {
+            return Err(format!("CSV table target {} has no row field", field.path));
+        }
+        if suffix.contains('.') {
+            return Err(format!(
+                "CSV table target {} must name one flat row field",
+                field.path
+            ));
+        }
+        if field.array_count != table.capacity {
+            return Err(format!(
+                "CSV table target {} capacity {} does not match table capacity {}",
+                field.path, field.array_count, table.capacity
+            ));
+        }
+        let column = csv_column_name(field);
+        if column.is_empty() || column.contains('.') {
+            return Err(format!("CSV table column {column} must be a flat header"));
+        }
+        if columns.insert(column.to_string(), field).is_some() {
+            return Err(format!("duplicate CSV table column {column}"));
+        }
+    }
+    let mut key_columns = BTreeSet::new();
+    for key in &table.key_columns {
+        if !key_columns.insert(key) {
+            return Err(format!("duplicate CSV table key column {key}"));
+        }
+        if !columns.contains_key(key) {
+            return Err(format!("CSV table key column {key} has no target field"));
+        }
+    }
+
+    let records = parse_csv_records(source)?;
+    let Some(headers) = records.first() else {
+        return Err("CSV table requires a header row".to_string());
+    };
+    let mut header_indices = BTreeMap::new();
+    for (index, raw_header) in headers.iter().enumerate() {
+        let header = if index == 0 {
+            raw_header.strip_prefix('\u{feff}').unwrap_or(raw_header)
+        } else {
+            raw_header
+        };
+        if header.is_empty() || header.contains('.') {
+            return Err(format!(
+                "CSV table header {header} must be flat and non-empty"
+            ));
+        }
+        if !columns.contains_key(header) {
+            return Err(format!(
+                "CSV column {header} does not exist in target metadata"
+            ));
+        }
+        if header_indices.insert(header.to_string(), index).is_some() {
+            return Err(format!("duplicate CSV header {header}"));
+        }
+    }
+    for column in columns.keys() {
+        if !header_indices.contains_key(column) {
+            return Err(format!("CSV is missing metadata column {column}"));
+        }
+    }
+
+    let data_rows = &records[1..];
+    if data_rows.len() > table.capacity {
+        return Err(format!(
+            "CSV table has {} rows; capacity is {}",
+            data_rows.len(),
+            table.capacity
+        ));
+    }
+    let mut stable_keys = BTreeSet::new();
+    for (row_index, row) in data_rows.iter().enumerate() {
+        if row.len() != headers.len() {
+            return Err(format!(
+                "CSV row {} has {} columns; expected {}",
+                row_index + 2,
+                row.len(),
+                headers.len()
+            ));
+        }
+        let mut parts = Vec::new();
+        for key in &table.key_columns {
+            let raw_value = &row[*header_indices.get(key).expect("key header validated")];
+            if raw_value.trim().is_empty() {
+                return Err(format!(
+                    "CSV table key column {key} is blank on row {}",
+                    row_index + 2
+                ));
+            }
+            let field = columns.get(key).expect("key target validated");
+            parts.push(parse_csv_cell(raw_value, field)?.to_string());
+        }
+        let stable_key = parts.join("\u{1f}");
+        if !stable_keys.insert(stable_key) {
+            return Err(format!("duplicate CSV table key on row {}", row_index + 2));
+        }
+    }
+
+    let mut rows = serde_json::Map::new();
+    for (column, field) in columns {
+        let column_index = *header_indices
+            .get(&column)
+            .expect("column header validated");
+        let mut values = data_rows
+            .iter()
+            .map(|row| parse_csv_cell(&row[column_index], field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let default = match field.type_name.as_str() {
+            "bool" => Value::Bool(false),
+            "u8" | "u16" | "u32" | "i32" => Value::Number(0.into()),
+            "f32" | "f64" => serde_json::json!(0.0),
+            other => {
+                return Err(format!(
+                    "CSV table target {} has unsupported column type {other}",
+                    field.path
+                ));
+            }
+        };
+        values.resize(table.capacity, default);
+        let suffix = field
+            .path
+            .strip_prefix(&prefix)
+            .expect("field prefix validated");
+        rows.insert(suffix.to_string(), Value::Array(values));
+    }
+    let mut root = serde_json::Map::new();
+    root.insert(table.rows_path.clone(), Value::Object(rows));
+    root.insert(
+        table.row_count_path.clone(),
+        Value::Number((data_rows.len() as u64).into()),
+    );
+    Ok(Value::Object(root))
 }
 
 fn resolve_play_sidecar_path(path: &Path, launch_dir: &Path) -> PathBuf {
@@ -544,11 +731,14 @@ fn json_value_by_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
 }
 
 fn validate_play_binding_source(root: &Value, metadata: &PlayStructMetadata) -> Result<(), String> {
-    let paths: Vec<String> = metadata
+    let mut paths: Vec<String> = metadata
         .fields
         .iter()
         .map(|field| field.json_path.clone())
         .collect();
+    if let Some(table) = &metadata.csv_table {
+        paths.push(table.row_count_path.clone());
+    }
     validate_binding_source_paths(root, &paths)
 }
 
@@ -599,6 +789,54 @@ fn validate_play_binding_targets(
     metadata: &PlayStructMetadata,
     jit: &JitProcess,
 ) -> Result<(), String> {
+    if let Some(table) = &metadata.csv_table {
+        let collection_path = format!("{}.{}", metadata.global_name, table.rows_path);
+        let capacity = jit
+            .global_collection_capacity(&collection_path)
+            .ok_or_else(|| {
+                format!(
+                    "binding target property {collection_path} does not exist in compiled globals"
+                )
+            })?;
+        if usize::try_from(capacity).ok() != Some(table.capacity) {
+            return Err(format!(
+                "binding target collection {collection_path} has capacity {capacity}; metadata requires {}",
+                table.capacity
+            ));
+        }
+        let row_count_path = format!("{}.{}", metadata.global_name, table.row_count_path);
+        let row_count_type = jit.global_scalar_type(&row_count_path).ok_or_else(|| {
+            format!("binding target property {row_count_path} does not exist in compiled globals")
+        })?;
+        if row_count_type != "i32" {
+            return Err(format!(
+                "binding target property {row_count_path} has type {row_count_type}; CSV row count requires i32"
+            ));
+        }
+        let prefix = format!("{}.", table.rows_path);
+        for field in &metadata.fields {
+            let suffix = field.json_path.strip_prefix(&prefix).ok_or_else(|| {
+                format!(
+                    "CSV table target {} must be below rowsPath {}",
+                    field.json_path, table.rows_path
+                )
+            })?;
+            let target_type = jit
+                .global_collection_field_type(&collection_path, suffix)
+                .ok_or_else(|| {
+                    format!(
+                        "binding target property {collection_path}[].{suffix} does not exist in compiled globals"
+                    )
+                })?;
+            if target_type != field.type_name {
+                return Err(format!(
+                    "binding target property {collection_path}[].{suffix} has type {target_type}; metadata requires {}",
+                    field.type_name
+                ));
+            }
+        }
+        return Ok(());
+    }
     for field in &metadata.fields {
         let full_path = format!("{}.{}", metadata.global_name, field.json_path);
         if !jit.has_global_path(&full_path) {
@@ -607,6 +845,95 @@ fn validate_play_binding_targets(
             ));
         }
     }
+    Ok(())
+}
+
+fn apply_play_bound_table_array(
+    field: &PlayStructFieldMetadata,
+    collection_hash: i32,
+    field_hash: i32,
+    value: &Value,
+) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    match field.type_name.as_str() {
+        "bool" | "u8" | "u16" | "u32" | "i32" => {
+            for (index, item) in items.iter().enumerate() {
+                let value = if field.type_name == "bool" {
+                    item.as_bool().map(|flag| i32::from(flag))
+                } else {
+                    item.as_i64().and_then(|number| i32::try_from(number).ok())
+                };
+                if let Some(value) = value {
+                    stasis_dynload::stasis_jit_global_i32_array_store(
+                        collection_hash,
+                        field_hash,
+                        index as i32,
+                        value,
+                    );
+                }
+            }
+        }
+        "f32" => {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(value) = item.as_f64() {
+                    stasis_dynload::stasis_jit_global_f32_array_store(
+                        collection_hash,
+                        field_hash,
+                        index as i32,
+                        value as f32,
+                    );
+                }
+            }
+        }
+        "f64" => {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(value) = item.as_f64() {
+                    stasis_dynload::stasis_jit_global_f64_array_store(
+                        collection_hash,
+                        field_hash,
+                        index as i32,
+                        value,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_play_csv_table_value(
+    root: &Value,
+    metadata: &PlayStructMetadata,
+    table: &CsvTableMetadata,
+) -> Result<(), String> {
+    let collection_path = format!("{}.{}", metadata.global_name, table.rows_path);
+    let collection_hash = hash_global_path(&collection_path);
+    let prefix = format!("{}.", table.rows_path);
+    for field in &metadata.fields {
+        let suffix = field.json_path.strip_prefix(&prefix).ok_or_else(|| {
+            format!(
+                "CSV table target {} must be below rowsPath {}",
+                field.json_path, table.rows_path
+            )
+        })?;
+        let value = json_value_by_path(root, &field.json_path)
+            .ok_or_else(|| format!("CSV table is missing target {}", field.json_path))?;
+        apply_play_bound_table_array(field, collection_hash, hash_global_path(suffix), value);
+    }
+    let row_count = json_value_by_path(root, &table.row_count_path)
+        .and_then(Value::as_u64)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| "CSV table row_count is invalid".to_string())?;
+    stasis_dynload::stasis_jit_collection_i32_store(collection_hash, 1, row_count);
+    stasis_dynload::stasis_jit_collection_i32_store(
+        collection_hash,
+        2,
+        i32::try_from(table.capacity).map_err(|_| "CSV table capacity exceeds i32".to_string())?,
+    );
+    let row_count_path = format!("{}.{}", metadata.global_name, table.row_count_path);
+    stasis_dynload::stasis_jit_global_i32_store(hash_global_path(&row_count_path), row_count);
     Ok(())
 }
 
@@ -774,6 +1101,10 @@ fn apply_play_data_binding_value(
         ));
     }
 
+    if let Some(table) = &metadata.csv_table {
+        return apply_play_csv_table_value(root, metadata, table);
+    }
+
     for field in &metadata.fields {
         let Some(value) = json_value_by_path(root, &field.json_path) else {
             continue;
@@ -819,14 +1150,26 @@ fn load_and_apply_play_data_bindings(
                 .iter()
                 .map(|field| CsvBindingField {
                     path: field.json_path.clone(),
+                    csv_column: field.csv_column.clone(),
                     type_name: field.type_name.clone(),
                     array_count: usize::try_from(field.array_count.max(0)).unwrap_or(0),
                 })
                 .collect();
-            parse_flat_csv_binding(&data_source, &fields).map_err(|error| {
+            let parsed = if let Some(table) = &metadata.csv_table {
+                parse_csv_table_binding(&data_source, &fields, table)
+            } else {
+                parse_flat_csv_binding(&data_source, &fields)
+            };
+            parsed.map_err(|error| {
                 format!("failed to parse data CSV {}: {error}", data_path.display())
             })?
         } else {
+            if metadata.csv_table.is_some() {
+                return Err(format!(
+                    "csvTable metadata requires a CSV data file: {}",
+                    data_path.display()
+                ));
+            }
             serde_json::from_str(&data_source).map_err(|error| {
                 format!("failed to parse data JSON {}: {error}", data_path.display())
             })?
@@ -3426,24 +3769,29 @@ mod tests {
         let metadata = PlayStructMetadata {
             version: 1,
             global_name: "state".to_string(),
+            csv_table: None,
             fields: vec![
                 PlayStructFieldMetadata {
                     json_path: "config.json_loaded".to_string(),
+                    csv_column: None,
                     type_name: "bool".to_string(),
                     array_count: 1,
                 },
                 PlayStructFieldMetadata {
                     json_path: "config.screen_width".to_string(),
+                    csv_column: None,
                     type_name: "i32".to_string(),
                     array_count: 1,
                 },
                 PlayStructFieldMetadata {
                     json_path: "config.background_red".to_string(),
+                    csv_column: None,
                     type_name: "f32".to_string(),
                     array_count: 1,
                 },
                 PlayStructFieldMetadata {
                     json_path: "config.font_path".to_string(),
+                    csv_column: None,
                     type_name: "string".to_string(),
                     array_count: 64,
                 },
@@ -3487,6 +3835,7 @@ mod tests {
         let metadata = PlayStructMetadata {
             version: 2,
             global_name: "state".to_string(),
+            csv_table: None,
             fields: Vec::new(),
         };
         let root = serde_json::json!({});
@@ -3503,11 +3852,13 @@ mod tests {
             &[
                 CsvBindingField {
                     path: "enabled".to_string(),
+                    csv_column: None,
                     type_name: "bool".to_string(),
                     array_count: 1,
                 },
                 CsvBindingField {
                     path: "label".to_string(),
+                    csv_column: None,
                     type_name: "string".to_string(),
                     array_count: 32,
                 },
@@ -3524,11 +3875,13 @@ mod tests {
             &[
                 CsvBindingField {
                     path: "hp".to_string(),
+                    csv_column: None,
                     type_name: "i32".to_string(),
                     array_count: 3,
                 },
                 CsvBindingField {
                     path: "speed".to_string(),
+                    csv_column: None,
                     type_name: "f32".to_string(),
                     array_count: 3,
                 },
@@ -3547,6 +3900,7 @@ mod tests {
             "screen_width\n800\n",
             &[CsvBindingField {
                 path: "config.screen_width".to_string(),
+                csv_column: None,
                 type_name: "i32".to_string(),
                 array_count: 1,
             }],
@@ -3561,6 +3915,7 @@ mod tests {
             "hp,typo\n70,99\n",
             &[CsvBindingField {
                 path: "hp".to_string(),
+                csv_column: None,
                 type_name: "i32".to_string(),
                 array_count: 1,
             }],
@@ -3570,12 +3925,105 @@ mod tests {
     }
 
     #[test]
+    fn parse_csv_table_binding_tracks_count_pads_capacity_and_validates_keys() {
+        let fields = vec![
+            CsvBindingField {
+                path: "rows.id".to_string(),
+                csv_column: Some("id".to_string()),
+                type_name: "i32".to_string(),
+                array_count: 4,
+            },
+            CsvBindingField {
+                path: "rows.hp".to_string(),
+                csv_column: Some("health".to_string()),
+                type_name: "i32".to_string(),
+                array_count: 4,
+            },
+        ];
+        let table = CsvTableMetadata {
+            rows_path: "rows".to_string(),
+            row_count_path: "row_count".to_string(),
+            capacity: 4,
+            key_columns: vec!["id".to_string()],
+        };
+        let parsed = parse_csv_table_binding("id,health\n10,70\n20,110\n", &fields, &table)
+            .expect("table should parse");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "rows": {"id": [10, 20, 0, 0], "hp": [70, 110, 0, 0]},
+                "row_count": 2
+            })
+        );
+
+        let duplicate = parse_csv_table_binding("id,health\n10,70\n10,110\n", &fields, &table)
+            .expect_err("duplicate stable keys should fail");
+        assert!(duplicate.contains("duplicate CSV table key"));
+    }
+
+    #[test]
+    fn load_play_data_bindings_applies_struct_array_csv_table() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let collection_hash = hash_global_path("level.rows");
+        let mut ids = [99i32; 4];
+        let mut hp = [99i32; 4];
+        let mut row_count = 0i32;
+        stasis_dynload::register_global_i32_array(
+            collection_hash,
+            hash_global_path("id"),
+            ids.as_mut_ptr(),
+            ids.len(),
+        );
+        stasis_dynload::register_global_i32_array(
+            collection_hash,
+            hash_global_path("hp"),
+            hp.as_mut_ptr(),
+            hp.len(),
+        );
+        stasis_dynload::register_global_i32_ptr(
+            hash_global_path("level.row_count"),
+            &mut row_count,
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_table_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let data_path = temp_root.join("waves.csv");
+        let meta_path = temp_root.join("waves.struct-meta.json");
+        fs::write(&data_path, "id,hp\n10,70\n20,110\n").expect("write CSV");
+        fs::write(
+            &meta_path,
+            r#"{"version":1,"globalName":"level","csvTable":{"rowsPath":"rows","rowCountPath":"row_count","capacity":4,"keyColumns":["id"]},"fields":[{"jsonPath":"rows.id","csvColumn":"id","type":"i32","arrayCount":4},{"jsonPath":"rows.hp","csvColumn":"hp","type":"i32","arrayCount":4}]}"#,
+        )
+        .expect("write metadata");
+
+        load_and_apply_play_data_bindings(&[(data_path, meta_path)], None)
+            .expect("CSV table binding should apply");
+        assert_eq!(ids, [10, 20, 0, 0]);
+        assert_eq!(hp, [70, 110, 0, 0]);
+        assert_eq!(row_count, 2);
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
     fn validate_play_binding_source_requires_an_exact_property_set() {
         let metadata = PlayStructMetadata {
             version: 1,
             global_name: "state".to_string(),
+            csv_table: None,
             fields: vec![PlayStructFieldMetadata {
                 json_path: "config.width".to_string(),
+                csv_column: None,
                 type_name: "i32".to_string(),
                 array_count: 1,
             }],
@@ -3601,8 +4049,10 @@ mod tests {
         let metadata = PlayStructMetadata {
             version: 1,
             global_name: "state".to_string(),
+            csv_table: None,
             fields: vec![PlayStructFieldMetadata {
                 json_path: "typo".to_string(),
+                csv_column: None,
                 type_name: "i32".to_string(),
                 array_count: 1,
             }],
