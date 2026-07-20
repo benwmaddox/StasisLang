@@ -752,6 +752,14 @@ def main() -> int:
     assert "another operation is already queued or running" in activity
     assert "GITHUB_PREF_OPERATION_STATE" in activity
     assert "GITHUB_PREF_OPERATION_DETAIL" in activity
+    assert "GITHUB_PREF_OPERATION_AUTOMATIC" in activity
+    assert "NetworkResumeDecision.RECHECK_AUTOMATIC_SYNC" in activity
+    assert 'queueGitHubSync(!detail.contains("automatic"))' not in activity
+    assert "persistGitHubSyncOrigin" not in activity
+    assert activity.count("persistGitHubSyncOperationState(") == 6
+    assert "GITHUB_PREF_OPERATION_AUTOMATIC), false" in activity
+    assert 'automatic backup waiting for a usable network", true' in activity
+    assert 'automatic backup deferred by battery saver", true' in activity
     assert "GITHUB_PREF_REVIEW_FINGERPRINT" in activity
     assert "Retry GitHub Operation" in activity
     assert "persistGitHubOperationState" in activity

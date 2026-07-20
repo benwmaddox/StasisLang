@@ -11,6 +11,13 @@ import java.util.Map;
 import java.util.TreeSet;
 
 final class WorkshopGitHubSyncPolicy {
+    enum NetworkResumeDecision {
+        NONE,
+        RETRY_USER_SYNC,
+        RECHECK_AUTOMATIC_SYNC,
+        RETRY_PULL_REQUEST
+    }
+
     enum ScheduleDecision {
         DISABLED,
         UNCHANGED,
@@ -89,10 +96,20 @@ final class WorkshopGitHubSyncPolicy {
                 && !inProcessOperationActive;
     }
 
-    static boolean shouldResumeAfterNetwork(String operation, String state,
-            boolean hasUsableNetwork) {
-        return hasUsableNetwork && ("sync".equals(operation) || "pull_request".equals(operation))
-                && ("waiting_network".equals(state) || "deferred".equals(state));
+    static NetworkResumeDecision networkResume(String operation, String state,
+            boolean hasUsableNetwork, boolean automaticSync) {
+        if (!hasUsableNetwork
+                || !("waiting_network".equals(state) || "deferred".equals(state))) {
+            return NetworkResumeDecision.NONE;
+        }
+        if ("pull_request".equals(operation)) {
+            return NetworkResumeDecision.RETRY_PULL_REQUEST;
+        }
+        if (!"sync".equals(operation)) {
+            return NetworkResumeDecision.NONE;
+        }
+        return automaticSync ? NetworkResumeDecision.RECHECK_AUTOMATIC_SYNC
+                : NetworkResumeDecision.RETRY_USER_SYNC;
     }
 
     static void requireNoRemoteConflict(String path, String expectedRemoteSha,

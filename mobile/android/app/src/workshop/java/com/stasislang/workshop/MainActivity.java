@@ -131,6 +131,7 @@ public final class MainActivity extends Activity {
     private static final String GITHUB_PREF_OPERATION = "github_pending_operation";
     private static final String GITHUB_PREF_OPERATION_STATE = "github_operation_state";
     private static final String GITHUB_PREF_OPERATION_DETAIL = "github_operation_detail";
+    private static final String GITHUB_PREF_OPERATION_AUTOMATIC = "github_operation_automatic";
     private static final String GITHUB_PREF_REVIEW_FINGERPRINT = "github_review_fingerprint";
     private static final String GITHUB_PREF_AUTO_SYNC = "github_auto_sync";
     private static final String GITHUB_PREF_REMOTE_STATE = "github_remote_state";
@@ -2944,20 +2945,20 @@ public final class MainActivity extends Activity {
                 userInitiated, WorkshopConnectivity.hasUsableNetwork(this),
                 batterySaverEnabled(), deviceCharging());
         if (background == WorkshopBackgroundWorkPolicy.Decision.WAIT_FOR_NETWORK) {
-            persistGitHubOperationState("sync", "waiting_network",
-                    "GitHub sync: waiting for a usable network");
+            persistGitHubSyncOperationState("waiting_network",
+                    "GitHub sync: waiting for a usable network", !userInitiated);
             refreshGitHubSyncStatus();
             return;
         }
         if (background == WorkshopBackgroundWorkPolicy.Decision.DEFER_FOR_BATTERY) {
-            persistGitHubOperationState("sync", "deferred",
-                    "GitHub sync: automatic backup deferred by battery saver");
+            persistGitHubSyncOperationState("deferred",
+                    "GitHub sync: automatic backup deferred by battery saver", !userInitiated);
             refreshGitHubSyncStatus();
             return;
         }
         final String remoteStateKey = githubProjectPreferenceKey(GITHUB_PREF_REMOTE_STATE);
         final String fingerprintKey = githubProjectPreferenceKey(GITHUB_PREF_LAST_SYNC_FINGERPRINT);
-        if (!beginGitHubOperation("sync", "GitHub sync: queued")) return;
+        if (!beginGitHubOperation("sync", "GitHub sync: queued", !userInitiated)) return;
         githubSyncExecutor.submit(new Runnable() {
             @Override public void run() {
                 try {
@@ -3035,12 +3036,12 @@ public final class MainActivity extends Activity {
             if (decision == WorkshopGitHubSyncPolicy.ScheduleDecision.RUN) {
                 queueGitHubSync(false);
             } else if (decision == WorkshopGitHubSyncPolicy.ScheduleDecision.WAIT_FOR_NETWORK) {
-                persistGitHubOperationState("sync", "waiting_network",
-                        "GitHub sync: automatic backup waiting for a usable network");
+                persistGitHubSyncOperationState("waiting_network",
+                        "GitHub sync: automatic backup waiting for a usable network", true);
                 refreshGitHubSyncStatus();
             } else if (decision == WorkshopGitHubSyncPolicy.ScheduleDecision.DEFER_FOR_BATTERY) {
-                persistGitHubOperationState("sync", "deferred",
-                        "GitHub sync: automatic backup deferred by battery saver");
+                persistGitHubSyncOperationState("deferred",
+                        "GitHub sync: automatic backup deferred by battery saver", true);
                 refreshGitHubSyncStatus();
             }
         } catch (Exception error) {
@@ -3940,13 +3941,16 @@ public final class MainActivity extends Activity {
                 githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
         String operation = preferences.getString(
                 githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
-        if (!WorkshopGitHubSyncPolicy.shouldResumeAfterNetwork(
-                operation, state, WorkshopConnectivity.hasUsableNetwork(this))) return;
-        String detail = preferences.getString(
-                githubProjectPreferenceKey(GITHUB_PREF_OPERATION_DETAIL), "");
-        if ("sync".equals(operation)) {
-            queueGitHubSync(!detail.contains("automatic"));
-        } else if ("pull_request".equals(operation)) {
+        boolean automatic = preferences.getBoolean(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION_AUTOMATIC), false);
+        WorkshopGitHubSyncPolicy.NetworkResumeDecision decision =
+                WorkshopGitHubSyncPolicy.networkResume(
+                        operation, state, WorkshopConnectivity.hasUsableNetwork(this), automatic);
+        if (decision == WorkshopGitHubSyncPolicy.NetworkResumeDecision.RECHECK_AUTOMATIC_SYNC) {
+            scheduleGitHubAutoSync();
+        } else if (decision == WorkshopGitHubSyncPolicy.NetworkResumeDecision.RETRY_USER_SYNC) {
+            queueGitHubSync(true);
+        } else if (decision == WorkshopGitHubSyncPolicy.NetworkResumeDecision.RETRY_PULL_REQUEST) {
             queueGitHubPullRequest();
         }
     }
@@ -3969,6 +3973,15 @@ public final class MainActivity extends Activity {
                 .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), operation)
                 .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), state)
                 .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_DETAIL), detail)
+                .apply();
+    }
+
+    private void persistGitHubSyncOperationState(String state, String detail, boolean automatic) {
+        getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "sync")
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), state)
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_DETAIL), detail)
+                .putBoolean(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_AUTOMATIC), automatic)
                 .apply();
     }
 
@@ -4016,6 +4029,11 @@ public final class MainActivity extends Activity {
     }
 
     private synchronized boolean beginGitHubOperation(String operation, String status) {
+        return beginGitHubOperation(operation, status, null);
+    }
+
+    private synchronized boolean beginGitHubOperation(
+            String operation, String status, Boolean automaticSync) {
         if (WorkshopLongWorkCoordinator.isGitHubActive()) {
             githubSyncStatus.setText("GitHub sync: another operation is already queued or running");
             return false;
@@ -4027,7 +4045,12 @@ public final class MainActivity extends Activity {
             githubSyncStatus.setText("GitHub sync: another foreground operation is active");
             return false;
         }
-        postGitHubOperationState(operation, "queued", status);
+        if (automaticSync == null) {
+            postGitHubOperationState(operation, "queued", status);
+        } else {
+            persistGitHubSyncOperationState("queued", status, automaticSync.booleanValue());
+            if (githubSyncStatus != null) githubSyncStatus.setText(status);
+        }
         return true;
     }
 

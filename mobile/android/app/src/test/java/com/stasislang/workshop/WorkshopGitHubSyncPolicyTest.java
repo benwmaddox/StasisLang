@@ -113,15 +113,22 @@ public final class WorkshopGitHubSyncPolicyTest {
     }
 
     @Test
-    public void offlineWorkResumesOnlyForRetryableOperationsAfterNetworkReturns() {
-        assertTrue(WorkshopGitHubSyncPolicy.shouldResumeAfterNetwork(
-                "sync", "waiting_network", true));
-        assertTrue(WorkshopGitHubSyncPolicy.shouldResumeAfterNetwork(
-                "pull_request", "deferred", true));
-        assertFalse(WorkshopGitHubSyncPolicy.shouldResumeAfterNetwork(
-                "sync", "waiting_network", false));
-        assertFalse(WorkshopGitHubSyncPolicy.shouldResumeAfterNetwork(
-                "validate", "waiting_network", true));
+    public void offlineWorkResumesThroughTheCorrectCurrentGates() {
+        assertEquals(WorkshopGitHubSyncPolicy.NetworkResumeDecision.RECHECK_AUTOMATIC_SYNC,
+                WorkshopGitHubSyncPolicy.networkResume(
+                        "sync", "waiting_network", true, true));
+        assertEquals(WorkshopGitHubSyncPolicy.NetworkResumeDecision.RETRY_USER_SYNC,
+                WorkshopGitHubSyncPolicy.networkResume(
+                        "sync", "waiting_network", true, false));
+        assertEquals(WorkshopGitHubSyncPolicy.NetworkResumeDecision.RETRY_PULL_REQUEST,
+                WorkshopGitHubSyncPolicy.networkResume(
+                        "pull_request", "deferred", true, false));
+        assertEquals(WorkshopGitHubSyncPolicy.NetworkResumeDecision.NONE,
+                WorkshopGitHubSyncPolicy.networkResume(
+                        "sync", "waiting_network", false, true));
+        assertEquals(WorkshopGitHubSyncPolicy.NetworkResumeDecision.NONE,
+                WorkshopGitHubSyncPolicy.networkResume(
+                        "validate", "waiting_network", true, false));
     }
 
     @Test(expected = IllegalStateException.class)
