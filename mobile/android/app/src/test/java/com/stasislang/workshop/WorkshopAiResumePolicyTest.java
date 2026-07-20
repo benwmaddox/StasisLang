@@ -41,10 +41,9 @@ public final class WorkshopAiResumePolicyTest {
 
     @Test
     public void interruptedQueueItemOnlyReturnsToPendingWithSafeCheckpoint() {
-        assertTrue("pending".equals(AiQueuePolicy.recoveredState("in_progress", true, false)));
-        assertTrue("failed".equals(AiQueuePolicy.recoveredState("in_progress", false, false)));
-        assertTrue("cancelled".equals(AiQueuePolicy.recoveredState("in_progress", false, true)));
-        assertTrue("completed".equals(AiQueuePolicy.recoveredState("completed", true, true)));
+        assertTrue("pending".equals(AiQueuePolicy.recoveredState("in_progress", true)));
+        assertTrue("failed".equals(AiQueuePolicy.recoveredState("in_progress", false)));
+        assertTrue("completed".equals(AiQueuePolicy.recoveredState("completed", true)));
     }
 
     private static void assertFresh(WorkshopAiResumePolicy.Decision decision, String detail) {

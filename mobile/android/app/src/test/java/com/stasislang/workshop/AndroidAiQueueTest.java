@@ -53,11 +53,12 @@ public final class AndroidAiQueueTest {
         AndroidAiQueue.Entry cancelled = claimOnly(filesDir, "cancelled", "restore then cancel");
 
         assertEquals(1, AndroidAiQueue.recoverInterrupted(filesDir, "safe",
-                Collections.singleton(safe.id), Collections.<String>emptySet()));
+                Collections.singleton(safe.id)));
         assertEquals(1, AndroidAiQueue.recoverInterrupted(filesDir, "unsafe",
-                Collections.<String>emptySet(), Collections.<String>emptySet()));
-        assertEquals(1, AndroidAiQueue.recoverInterrupted(filesDir, "cancelled",
-                Collections.<String>emptySet(), Collections.singleton(cancelled.id)));
+                Collections.<String>emptySet()));
+        assertTrue(AndroidAiQueue.finish(filesDir, "cancelled", cancelled.id,
+                AndroidAiQueue.CANCELLED, WorkshopAiRunPhase.CANCELLED,
+                "Cancellation completed during process recovery; the original project was restored"));
 
         assertEquals(AndroidAiQueue.PENDING,
                 AndroidAiQueue.list(filesDir, "safe").get(0).state);

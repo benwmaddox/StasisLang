@@ -251,26 +251,23 @@ final class AndroidAiQueue {
     }
 
     static synchronized int recoverInterrupted(Context context, String projectId,
-            Set<String> resumableItemIds, Set<String> cancelledItemIds) throws Exception {
-        return recoverInterrupted(context.getFilesDir(), projectId, resumableItemIds, cancelledItemIds);
+            Set<String> resumableItemIds) throws Exception {
+        return recoverInterrupted(context.getFilesDir(), projectId, resumableItemIds);
     }
 
     static synchronized int recoverInterrupted(File filesDir, String projectId,
-            Set<String> resumableItemIds, Set<String> cancelledItemIds) throws Exception {
+            Set<String> resumableItemIds) throws Exception {
         JSONObject document = loadDocument(filesDir, projectId);
         JSONArray items = document.getJSONArray("items");
         int recovered = 0;
         for (int index = 0; index < items.length(); index += 1) {
             Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
             String recoveredState = AiQueuePolicy.recoveredState(entry.state,
-                    resumableItemIds != null && resumableItemIds.contains(entry.id),
-                    cancelledItemIds != null && cancelledItemIds.contains(entry.id));
+                    resumableItemIds != null && resumableItemIds.contains(entry.id));
             if (entry.state.equals(recoveredState)) continue;
             String detail = PENDING.equals(recoveredState)
                     ? "Interrupted session has a safe checkpoint and will resume without replaying completed calls or tool batches"
-                    : (CANCELLED.equals(recoveredState)
-                            ? "Cancellation completed during process recovery; the original project was restored"
-                            : "Continuation is unsafe; use Fresh Retry to start a new budget-checked run");
+                    : "Continuation is unsafe; use Fresh Retry to start a new budget-checked run";
             items.put(index, entry.withState(recoveredState, detail).toJson());
             recovered += 1;
         }
@@ -278,9 +275,7 @@ final class AndroidAiQueue {
             writeDocument(filesDir, projectId, document);
             for (int index = 0; index < items.length(); index += 1) {
                 Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
-                if (FAILED.equals(entry.state) || CANCELLED.equals(entry.state)) {
-                    deletePreview(filesDir, entry);
-                }
+                if (FAILED.equals(entry.state)) deletePreview(filesDir, entry);
             }
         }
         return recovered;

@@ -402,8 +402,8 @@ def main() -> int:
     assert "writeSyncedAtomic" not in ai_queue or "getFD().sync()" in ai_queue
     assert "StandardCopyOption.ATOMIC_MOVE" in ai_queue
     assert "recoverInterrupted" in ai_queue
-    assert "cancelledItemIds" in ai_queue
-    assert "project was restored" in ai_queue
+    assert "restored AI cancellation could not be recorded" in activity
+    assert "clearTerminalAiRecoveryArtifacts" in activity
     assert "retryTerminal" in ai_queue
     assert 'put("phase", phase)' in ai_queue
     assert "AndroidAiQueue.updatePhase" in activity
