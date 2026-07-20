@@ -3229,9 +3229,6 @@ public final class MainActivity extends Activity {
     }
 
     private void startNextQueuedAiIfIdle() {
-        if (restartLoopRecoveryActive) return;
-        if (aiRunActive || WorkshopLongWorkCoordinator.isAnyActive()
-                || activeAiQueueEntry != null || audioRecordingActive) return;
         try {
             boolean hasPending = false;
             for (AndroidAiQueue.Entry item : AndroidAiQueue.list(this, activeRecoveryProjectId())) {
@@ -3240,13 +3237,15 @@ public final class MainActivity extends Activity {
                     break;
                 }
             }
-            if (!hasPending) {
-                refreshAiQueue();
+            WorkshopAiQueueRunPolicy.Decision decision = WorkshopAiQueueRunPolicy.decide(
+                    restartLoopRecoveryActive, aiRunActive,
+                    WorkshopLongWorkCoordinator.isAnyActive(), activeAiQueueEntry != null,
+                    audioRecordingActive, hasPending, WorkshopConnectivity.hasUsableNetwork(this));
+            if (decision == WorkshopAiQueueRunPolicy.Decision.IDLE) {
+                if (!hasPending) refreshAiQueue();
                 return;
             }
-            if (WorkshopBackgroundWorkPolicy.decide(true,
-                    WorkshopConnectivity.hasUsableNetwork(this), false, false)
-                    == WorkshopBackgroundWorkPolicy.Decision.WAIT_FOR_NETWORK) {
+            if (decision == WorkshopAiQueueRunPolicy.Decision.WAIT_FOR_NETWORK) {
                 setStatusText("AI work is waiting for an internet connection");
                 refreshAiQueue();
                 return;
@@ -3586,6 +3585,7 @@ public final class MainActivity extends Activity {
             HashSet<String> resumable = restoreInterruptedAiTransactions();
             int recovered = AndroidAiQueue.recoverInterrupted(
                     this, activeRecoveryProjectId(), resumable);
+            clearTerminalAiRecoveryArtifacts();
             if (recovered > 0) refreshAiQueue();
         } catch (Exception error) {
             setStatusText("AI queue recovery failed: " + error.getMessage());
@@ -3629,7 +3629,12 @@ public final class MainActivity extends Activity {
                             && WorkshopAiResumePolicy.CANCEL_REQUESTED.equals(checkpoint.stage))) {
                 if (snapshot != null) {
                     WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);
-                    restored = true;
+                    compileRestoredAiProject();
+                    if (!AndroidAiQueue.finish(this, projectId, entry.id,
+                            AndroidAiQueue.CANCELLED, WorkshopAiRunPhase.CANCELLED,
+                            "Cancellation completed during process recovery; the original project was restored")) {
+                        throw new IOException("restored AI cancellation could not be recorded");
+                    }
                 }
                 AndroidAiSessionCheckpointStore.clear(this, projectId, entry.id);
                 AndroidAiTransactionStore.clear(this, projectId, entry.id);
@@ -3658,14 +3663,25 @@ public final class MainActivity extends Activity {
             AndroidAiSessionCheckpointStore.clear(this, projectId, entry.id);
             AndroidAiTransactionStore.clear(this, projectId, entry.id);
         }
-        if (restored) {
-            String compileResult = nativeCompileProject(projectRootPath());
-            lastCompileResult = compileResult;
-            compileReady = isRunnableCompile(compileResult);
-            compileAttempted = true;
-            if (!compileReady) throw new IOException("restored AI checkpoint did not compile");
-        }
+        if (restored) compileRestoredAiProject();
         return resumable;
+    }
+
+    private void compileRestoredAiProject() throws IOException {
+        String compileResult = nativeCompileProject(projectRootPath());
+        lastCompileResult = compileResult;
+        compileReady = isRunnableCompile(compileResult);
+        compileAttempted = true;
+        if (!compileReady) throw new IOException("restored AI checkpoint did not compile");
+    }
+
+    private void clearTerminalAiRecoveryArtifacts() throws Exception {
+        String projectId = activeRecoveryProjectId();
+        for (AndroidAiQueue.Entry entry : AndroidAiQueue.list(this, projectId)) {
+            if (!AiQueuePolicy.terminal(entry.state)) continue;
+            AndroidAiSessionCheckpointStore.clear(this, projectId, entry.id);
+            AndroidAiTransactionStore.clear(this, projectId, entry.id);
+        }
     }
 
     private void persistPendingDraft() {
