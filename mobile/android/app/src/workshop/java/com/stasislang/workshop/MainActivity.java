@@ -3229,9 +3229,6 @@ public final class MainActivity extends Activity {
     }
 
     private void startNextQueuedAiIfIdle() {
-        if (restartLoopRecoveryActive) return;
-        if (aiRunActive || WorkshopLongWorkCoordinator.isAnyActive()
-                || activeAiQueueEntry != null || audioRecordingActive) return;
         try {
             boolean hasPending = false;
             for (AndroidAiQueue.Entry item : AndroidAiQueue.list(this, activeRecoveryProjectId())) {
@@ -3240,13 +3237,15 @@ public final class MainActivity extends Activity {
                     break;
                 }
             }
-            if (!hasPending) {
-                refreshAiQueue();
+            WorkshopAiQueueRunPolicy.Decision decision = WorkshopAiQueueRunPolicy.decide(
+                    restartLoopRecoveryActive, aiRunActive,
+                    WorkshopLongWorkCoordinator.isAnyActive(), activeAiQueueEntry != null,
+                    audioRecordingActive, hasPending, WorkshopConnectivity.hasUsableNetwork(this));
+            if (decision == WorkshopAiQueueRunPolicy.Decision.IDLE) {
+                if (!hasPending) refreshAiQueue();
                 return;
             }
-            if (WorkshopBackgroundWorkPolicy.decide(true,
-                    WorkshopConnectivity.hasUsableNetwork(this), false, false)
-                    == WorkshopBackgroundWorkPolicy.Decision.WAIT_FOR_NETWORK) {
+            if (decision == WorkshopAiQueueRunPolicy.Decision.WAIT_FOR_NETWORK) {
                 setStatusText("AI work is waiting for an internet connection");
                 refreshAiQueue();
                 return;
@@ -3583,9 +3582,10 @@ public final class MainActivity extends Activity {
 
     private void markInterruptedAiOutcomeIfNeeded() {
         try {
-            HashSet<String> resumable = restoreInterruptedAiTransactions();
+            HashSet<String> cancelled = new HashSet<>();
+            HashSet<String> resumable = restoreInterruptedAiTransactions(cancelled);
             int recovered = AndroidAiQueue.recoverInterrupted(
-                    this, activeRecoveryProjectId(), resumable);
+                    this, activeRecoveryProjectId(), resumable, cancelled);
             if (recovered > 0) refreshAiQueue();
         } catch (Exception error) {
             setStatusText("AI queue recovery failed: " + error.getMessage());
@@ -3614,7 +3614,7 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private HashSet<String> restoreInterruptedAiTransactions() throws Exception {
+    private HashSet<String> restoreInterruptedAiTransactions(HashSet<String> cancelled) throws Exception {
         String projectId = activeRecoveryProjectId();
         HashSet<String> resumable = new HashSet<>();
         boolean restored = false;
@@ -3630,6 +3630,7 @@ public final class MainActivity extends Activity {
                 if (snapshot != null) {
                     WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);
                     restored = true;
+                    cancelled.add(entry.id);
                 }
                 AndroidAiSessionCheckpointStore.clear(this, projectId, entry.id);
                 AndroidAiTransactionStore.clear(this, projectId, entry.id);

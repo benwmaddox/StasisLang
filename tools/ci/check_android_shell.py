@@ -45,6 +45,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopRestartLoopPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiQueueRunPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiSessionCheckpointStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiResumePolicy.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
@@ -265,6 +266,7 @@ def main() -> int:
     temporary_verification = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiTemporaryVerification.java")
     project_transaction = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiProjectTransaction.java")
     ai_queue_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java")
+    ai_queue_run_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiQueueRunPolicy.java")
     host_agent = read("tools/android_ai_agent_host.py")
     host_comparison = read("tools/run_android_ai_model_comparison.py")
     host_compile = read("crates/stasis_android_bridge/src/android_workshop_compile.rs")
@@ -400,6 +402,8 @@ def main() -> int:
     assert "writeSyncedAtomic" not in ai_queue or "getFD().sync()" in ai_queue
     assert "StandardCopyOption.ATOMIC_MOVE" in ai_queue
     assert "recoverInterrupted" in ai_queue
+    assert "cancelledItemIds" in ai_queue
+    assert "project was restored" in ai_queue
     assert "retryTerminal" in ai_queue
     assert 'put("phase", phase)' in ai_queue
     assert "AndroidAiQueue.updatePhase" in activity
@@ -423,7 +427,7 @@ def main() -> int:
     assert 'MAX_PREVIEW_BYTES = 12 * 1024 * 1024' in ai_queue
     assert 'MessageDigest.getInstance("SHA-256")' in ai_queue
     assert "writeSyncedAtomic(savedPreview, previewPng)" in ai_queue
-    assert "deletePreview(context, entry)" in ai_queue
+    assert "deletePreview(filesDir, entry)" in ai_queue
     assert "pruneOrphanPreviews" in ai_queue
     assert "removeOldestTerminal" in ai_queue
     assert "AiQueuePolicy.terminal(state)" in ai_queue
@@ -442,6 +446,9 @@ def main() -> int:
     assert "encodeBitmapPng" in activity
     assert "queuedEntry.previewFile" in activity
     assert "nextPendingIndex" in ai_queue_policy
+    assert "WorkshopAiQueueRunPolicy.decide" in activity
+    assert "WAIT_FOR_NETWORK" in ai_queue_run_policy
+    assert "CLAIM_NEXT" in ai_queue_run_policy
     assert "AI Settings" in activity
     assert "aiSettingsBody.setVisibility(View.GONE)" in activity
     assert "AI run started: preparing workspace and command context" in activity

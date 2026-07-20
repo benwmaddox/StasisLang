@@ -23,11 +23,13 @@ public final class AiQueuePolicyTest {
         require(AiQueuePolicy.nextPendingIndex("gamma",
                 new String[] { "alpha" }, new String[] { "pending" }) == -1,
                 "another project is never claimed");
-        require("failed".equals(AiQueuePolicy.recoveredState("in_progress", false)),
+        require("failed".equals(AiQueuePolicy.recoveredState("in_progress", false, false)),
                 "unsafe interrupted item fails explicitly");
-        require("pending".equals(AiQueuePolicy.recoveredState("in_progress", true)),
+        require("pending".equals(AiQueuePolicy.recoveredState("in_progress", true, false)),
                 "safe interrupted item resumes through FIFO");
-        require("pending".equals(AiQueuePolicy.recoveredState("pending", false)),
+        require("cancelled".equals(AiQueuePolicy.recoveredState("in_progress", false, true)),
+                "interrupted cancellation remains truthful after project restore");
+        require("pending".equals(AiQueuePolicy.recoveredState("pending", false, false)),
                 "pending item survives recovery");
         require(AiQueuePolicy.retryNeedsNewPreview(true), "terminal preview retry requires new consent");
         require(!AiQueuePolicy.retryNeedsNewPreview(false), "non-preview terminal item can retry");
