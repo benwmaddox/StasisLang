@@ -21,9 +21,11 @@ public final class WorkshopOnboardingPolicyTest {
         progress = WorkshopOnboardingPolicy.recordProjectStep(
                 progress, WorkshopOnboardingPolicy.Step.PROJECT_RAN, "project-a");
         assertSame(progress, WorkshopOnboardingPolicy.recordChangeApplied(
-                progress, "project-b", "function|main", "hash-a"));
+                progress, "project-b", "function", "function|main", "hash-a"));
+        assertSame(progress, WorkshopOnboardingPolicy.recordChangeApplied(
+                progress, "project-a", "struct", "struct|GameState", "hash-a"));
         progress = WorkshopOnboardingPolicy.recordChangeApplied(
-                progress, "project-a", "function|main", "hash-a");
+                progress, "project-a", "function", "function|main", "hash-a");
         progress = WorkshopOnboardingPolicy.recordChangeStep(
                 progress, WorkshopOnboardingPolicy.Step.TESTS_PASSED,
                 "project-a", "function|main", "hash-a");

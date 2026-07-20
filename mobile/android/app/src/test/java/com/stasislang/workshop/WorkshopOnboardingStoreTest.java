@@ -28,7 +28,8 @@ public final class WorkshopOnboardingStoreTest {
         progress = saveAndReload(preferences, WorkshopOnboardingPolicy.recordProjectStep(
                 progress, WorkshopOnboardingPolicy.Step.PROJECT_RAN, "project-a"));
         progress = saveAndReload(preferences, WorkshopOnboardingPolicy.recordChangeApplied(
-                progress, "project-a", "function|src/main.stasis|Root|tick", "source-hash"));
+                progress, "project-a", "function",
+                "function|src/main.stasis|Root|tick", "source-hash"));
 
         progress = saveAndReload(preferences, WorkshopOnboardingPolicy.defer(progress));
         assertTrue(progress.deferred);

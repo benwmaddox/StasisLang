@@ -3555,7 +3555,7 @@ public final class MainActivity extends Activity {
         WorkshopOnboardingPolicy.Progress before = onboardingProgress();
         String projectId = activeProject == null ? "" : activeProject.id;
         persistOnboardingAdvance(before, WorkshopOnboardingPolicy.recordChangeApplied(
-                before, projectId, symbol.identityKey(), onboardingSourceHash(source)));
+                before, projectId, symbol.kind, symbol.identityKey(), onboardingSourceHash(source)));
     }
 
     private void recordOnboardingTrackedChangeStep(WorkshopOnboardingPolicy.Step event,

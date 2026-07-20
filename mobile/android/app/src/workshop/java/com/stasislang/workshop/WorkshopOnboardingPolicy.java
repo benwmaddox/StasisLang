@@ -104,10 +104,11 @@ final class WorkshopOnboardingPolicy {
     }
 
     static Progress recordChangeApplied(Progress progress, String projectId,
-            String changeId, String changeHash) {
+            String changeKind, String changeId, String changeHash) {
         String cleanChangeId = clean(changeId);
         String cleanChangeHash = clean(changeHash);
         if (progress.nextStep() != Step.CHANGE_APPLIED || !same(progress.projectId, projectId)
+                || !"function".equals(clean(changeKind))
                 || cleanChangeId.isEmpty() || cleanChangeHash.isEmpty()) {
             return progress;
         }
