@@ -384,6 +384,34 @@ impl JitProcess {
             .is_some_and(|analysis| analysis.global_path_types.contains_key(path))
     }
 
+    pub fn global_scalar_type(&self, path: &str) -> Option<&'static str> {
+        let type_id = self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        scalar_type_name(*type_id)
+    }
+
+    pub fn global_collection_capacity(&self, path: &str) -> Option<i32> {
+        self.compile_analysis_cache
+            .as_ref()?
+            .collection_infos
+            .get(path)
+            .map(|info| info.len)
+    }
+
+    pub fn global_collection_field_type(&self, path: &str, field: &str) -> Option<&'static str> {
+        let type_id = self
+            .compile_analysis_cache
+            .as_ref()?
+            .collection_infos
+            .get(path)?
+            .field_types
+            .get(field)?;
+        scalar_type_name(*type_id)
+    }
+
     pub fn global_scalar_paths(&self) -> Vec<(String, &'static str)> {
         let Some(analysis) = self.compile_analysis_cache.as_ref() else {
             return Vec::new();

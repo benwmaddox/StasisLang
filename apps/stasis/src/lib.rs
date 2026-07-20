@@ -219,17 +219,400 @@ struct PlayStructMetadata {
     version: i32,
     #[serde(rename = "globalName")]
     global_name: String,
+    #[serde(default, rename = "csvTable")]
+    csv_table: Option<CsvTableMetadata>,
     fields: Vec<PlayStructFieldMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct CsvTableMetadata {
+    #[serde(rename = "rowsPath")]
+    pub(crate) rows_path: String,
+    #[serde(rename = "rowCountPath")]
+    pub(crate) row_count_path: String,
+    pub(crate) capacity: usize,
+    #[serde(rename = "keyColumns")]
+    pub(crate) key_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct PlayStructFieldMetadata {
     #[serde(rename = "jsonPath")]
     json_path: String,
+    #[serde(default, rename = "csvColumn")]
+    csv_column: Option<String>,
     #[serde(rename = "type")]
     type_name: String,
     #[serde(rename = "arrayCount")]
     array_count: i32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CsvBindingField {
+    pub(crate) path: String,
+    pub(crate) csv_column: Option<String>,
+    pub(crate) type_name: String,
+    pub(crate) array_count: usize,
+}
+
+fn csv_column_name<'a>(field: &'a CsvBindingField) -> &'a str {
+    field.csv_column.as_deref().unwrap_or(&field.path)
+}
+
+fn parse_csv_records(source: &str) -> Result<Vec<Vec<String>>, String> {
+    let mut records = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut chars = source.chars().peekable();
+    let mut in_quotes = false;
+    let mut closed_quote = false;
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                    closed_quote = true;
+                }
+            } else {
+                field.push(ch);
+            }
+            continue;
+        }
+        if closed_quote && !matches!(ch, ',' | '\r' | '\n') {
+            return Err("unexpected character after closing quote".to_string());
+        }
+        match ch {
+            '"' if field.is_empty() && !closed_quote => in_quotes = true,
+            '"' => return Err("quote must begin a CSV field".to_string()),
+            ',' => {
+                row.push(std::mem::take(&mut field));
+                closed_quote = false;
+            }
+            '\n' => {
+                row.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut row));
+                closed_quote = false;
+            }
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                row.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut row));
+                closed_quote = false;
+            }
+            _ => field.push(ch),
+        }
+    }
+    if in_quotes {
+        return Err("unterminated quoted CSV field".to_string());
+    }
+    if !field.is_empty() || !row.is_empty() || closed_quote {
+        row.push(field);
+        records.push(row);
+    }
+    Ok(records)
+}
+
+fn parse_csv_cell(value: &str, field: &CsvBindingField) -> Result<Value, String> {
+    let trimmed = value.trim();
+    match field.type_name.as_str() {
+        "string" => Ok(Value::String(value.to_string())),
+        "bool" => match trimmed.to_ascii_lowercase().as_str() {
+            "true" | "1" => Ok(Value::Bool(true)),
+            "false" | "0" => Ok(Value::Bool(false)),
+            _ => Err(format!(
+                "field {} requires true, false, 1, or 0",
+                field.path
+            )),
+        },
+        "u8" | "u16" | "u32" | "i32" => {
+            let number = trimmed
+                .parse::<i64>()
+                .map_err(|error| format!("field {} requires an integer: {error}", field.path))?;
+            i32::try_from(number)
+                .map_err(|_| format!("field {} is outside i32 range", field.path))?;
+            Ok(Value::Number(number.into()))
+        }
+        "f32" | "f64" => {
+            let number = trimmed
+                .parse::<f64>()
+                .map_err(|error| format!("field {} requires a number: {error}", field.path))?;
+            let number = serde_json::Number::from_f64(number)
+                .ok_or_else(|| format!("field {} must be finite", field.path))?;
+            Ok(Value::Number(number))
+        }
+        other => Err(format!(
+            "field {} has unsupported CSV type {other}",
+            field.path
+        )),
+    }
+}
+
+pub(crate) fn parse_flat_csv_binding(
+    source: &str,
+    fields: &[CsvBindingField],
+) -> Result<Value, String> {
+    let mut metadata_paths = BTreeSet::new();
+    for field in fields {
+        if field.csv_column.is_some() {
+            return Err("csvColumn metadata requires csvTable".to_string());
+        }
+        if field.path.is_empty() || field.path.contains('.') {
+            return Err(format!(
+                "CSV metadata path {} must name one flat column",
+                field.path
+            ));
+        }
+        if !metadata_paths.insert(field.path.as_str()) {
+            return Err(format!("duplicate CSV metadata path {}", field.path));
+        }
+    }
+    let records = parse_csv_records(source)?;
+    let Some(headers) = records.first() else {
+        return Err("CSV data requires a header row".to_string());
+    };
+    if records.len() == 1 {
+        return Err("CSV data requires at least one data row".to_string());
+    }
+    let mut header_indices = BTreeMap::new();
+    for (index, header) in headers.iter().enumerate() {
+        let header = if index == 0 {
+            header.strip_prefix('\u{feff}').unwrap_or(header)
+        } else {
+            header
+        };
+        if header.is_empty() {
+            return Err("CSV headers must not be empty".to_string());
+        }
+        if header.contains('.') {
+            return Err(format!(
+                "CSV header {header} cannot contain nested path separators"
+            ));
+        }
+        if !metadata_paths.contains(header) {
+            return Err(format!(
+                "CSV column {header} does not exist in target metadata"
+            ));
+        }
+        if header_indices.insert(header.to_string(), index).is_some() {
+            return Err(format!("duplicate CSV header {header}"));
+        }
+    }
+    for (row_index, row) in records.iter().enumerate().skip(1) {
+        if row.len() != headers.len() {
+            return Err(format!(
+                "CSV row {} has {} columns; expected {}",
+                row_index + 1,
+                row.len(),
+                headers.len()
+            ));
+        }
+    }
+
+    let data_rows = &records[1..];
+    let mut object = serde_json::Map::new();
+    for field in fields {
+        let column = header_indices
+            .get(&field.path)
+            .copied()
+            .ok_or_else(|| format!("CSV is missing metadata column {}", field.path))?;
+        let is_array = field.type_name != "string" && field.array_count > 1;
+        let value = if is_array {
+            if data_rows.len() != field.array_count {
+                return Err(format!(
+                    "CSV column {} requires {} rows, found {}",
+                    field.path,
+                    field.array_count,
+                    data_rows.len()
+                ));
+            }
+            Value::Array(
+                data_rows
+                    .iter()
+                    .map(|row| parse_csv_cell(&row[column], field))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else {
+            if data_rows.len() != 1 {
+                return Err(format!(
+                    "scalar CSV column {} requires exactly one data row",
+                    field.path
+                ));
+            }
+            parse_csv_cell(&data_rows[0][column], field)?
+        };
+        object.insert(field.path.clone(), value);
+    }
+    Ok(Value::Object(object))
+}
+
+pub(crate) fn parse_csv_table_binding(
+    source: &str,
+    fields: &[CsvBindingField],
+    table: &CsvTableMetadata,
+) -> Result<Value, String> {
+    if table.rows_path.is_empty()
+        || table.row_count_path.is_empty()
+        || table.rows_path.contains('.')
+        || table.row_count_path.contains('.')
+    {
+        return Err("CSV table rowsPath and rowCountPath must be flat properties".to_string());
+    }
+    if table.capacity == 0 {
+        return Err("CSV table capacity must be greater than zero".to_string());
+    }
+    if table.key_columns.is_empty() {
+        return Err("CSV table requires at least one stable key column".to_string());
+    }
+
+    let prefix = format!("{}.", table.rows_path);
+    let mut columns = BTreeMap::new();
+    for field in fields {
+        let suffix = field.path.strip_prefix(&prefix).ok_or_else(|| {
+            format!(
+                "CSV table target {} must be below rowsPath {}",
+                field.path, table.rows_path
+            )
+        })?;
+        if suffix.is_empty() {
+            return Err(format!("CSV table target {} has no row field", field.path));
+        }
+        if suffix.contains('.') {
+            return Err(format!(
+                "CSV table target {} must name one flat row field",
+                field.path
+            ));
+        }
+        if field.array_count != table.capacity {
+            return Err(format!(
+                "CSV table target {} capacity {} does not match table capacity {}",
+                field.path, field.array_count, table.capacity
+            ));
+        }
+        let column = csv_column_name(field);
+        if column.is_empty() || column.contains('.') {
+            return Err(format!("CSV table column {column} must be a flat header"));
+        }
+        if columns.insert(column.to_string(), field).is_some() {
+            return Err(format!("duplicate CSV table column {column}"));
+        }
+    }
+    let mut key_columns = BTreeSet::new();
+    for key in &table.key_columns {
+        if !key_columns.insert(key) {
+            return Err(format!("duplicate CSV table key column {key}"));
+        }
+        if !columns.contains_key(key) {
+            return Err(format!("CSV table key column {key} has no target field"));
+        }
+    }
+
+    let records = parse_csv_records(source)?;
+    let Some(headers) = records.first() else {
+        return Err("CSV table requires a header row".to_string());
+    };
+    let mut header_indices = BTreeMap::new();
+    for (index, raw_header) in headers.iter().enumerate() {
+        let header = if index == 0 {
+            raw_header.strip_prefix('\u{feff}').unwrap_or(raw_header)
+        } else {
+            raw_header
+        };
+        if header.is_empty() || header.contains('.') {
+            return Err(format!(
+                "CSV table header {header} must be flat and non-empty"
+            ));
+        }
+        if !columns.contains_key(header) {
+            return Err(format!(
+                "CSV column {header} does not exist in target metadata"
+            ));
+        }
+        if header_indices.insert(header.to_string(), index).is_some() {
+            return Err(format!("duplicate CSV header {header}"));
+        }
+    }
+    for column in columns.keys() {
+        if !header_indices.contains_key(column) {
+            return Err(format!("CSV is missing metadata column {column}"));
+        }
+    }
+
+    let data_rows = &records[1..];
+    if data_rows.len() > table.capacity {
+        return Err(format!(
+            "CSV table has {} rows; capacity is {}",
+            data_rows.len(),
+            table.capacity
+        ));
+    }
+    let mut stable_keys = BTreeSet::new();
+    for (row_index, row) in data_rows.iter().enumerate() {
+        if row.len() != headers.len() {
+            return Err(format!(
+                "CSV row {} has {} columns; expected {}",
+                row_index + 2,
+                row.len(),
+                headers.len()
+            ));
+        }
+        let mut parts = Vec::new();
+        for key in &table.key_columns {
+            let raw_value = &row[*header_indices.get(key).expect("key header validated")];
+            if raw_value.trim().is_empty() {
+                return Err(format!(
+                    "CSV table key column {key} is blank on row {}",
+                    row_index + 2
+                ));
+            }
+            let field = columns.get(key).expect("key target validated");
+            parts.push(parse_csv_cell(raw_value, field)?.to_string());
+        }
+        let stable_key = parts.join("\u{1f}");
+        if !stable_keys.insert(stable_key) {
+            return Err(format!("duplicate CSV table key on row {}", row_index + 2));
+        }
+    }
+
+    let mut rows = serde_json::Map::new();
+    for (column, field) in columns {
+        let column_index = *header_indices
+            .get(&column)
+            .expect("column header validated");
+        let mut values = data_rows
+            .iter()
+            .map(|row| parse_csv_cell(&row[column_index], field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let default = match field.type_name.as_str() {
+            "bool" => Value::Bool(false),
+            "u8" | "u16" | "u32" | "i32" => Value::Number(0.into()),
+            "f32" | "f64" => serde_json::json!(0.0),
+            other => {
+                return Err(format!(
+                    "CSV table target {} has unsupported column type {other}",
+                    field.path
+                ));
+            }
+        };
+        values.resize(table.capacity, default);
+        let suffix = field
+            .path
+            .strip_prefix(&prefix)
+            .expect("field prefix validated");
+        rows.insert(suffix.to_string(), Value::Array(values));
+    }
+    let mut root = serde_json::Map::new();
+    root.insert(table.rows_path.clone(), Value::Object(rows));
+    root.insert(
+        table.row_count_path.clone(),
+        Value::Number((data_rows.len() as u64).into()),
+    );
+    Ok(Value::Object(root))
 }
 
 fn resolve_play_sidecar_path(path: &Path, launch_dir: &Path) -> PathBuf {
@@ -244,38 +627,96 @@ fn resolve_play_data_binding_paths(
     launch_dir: &Path,
     data_bind_json: Option<&Path>,
     data_bind_struct_meta: Option<&Path>,
-) -> Result<Option<(PathBuf, PathBuf)>, String> {
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     match (data_bind_json, data_bind_struct_meta) {
         (Some(json_path), Some(struct_meta_path)) => {
-            return Ok(Some((
+            return Ok(vec![(
                 resolve_play_sidecar_path(json_path, launch_dir),
                 resolve_play_sidecar_path(struct_meta_path, launch_dir),
-            )));
+            )]);
         }
         (None, None) => {}
         _ => return Err("play data binding requires both json and struct-meta paths".to_string()),
     }
 
+    fn discover_pairs(data_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+        fn collect_data_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+            for entry in fs::read_dir(dir).map_err(|error| {
+                format!("failed to read data directory {}: {error}", dir.display())
+            })? {
+                let entry = entry.map_err(|error| {
+                    format!("failed to read data directory {}: {error}", dir.display())
+                })?;
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_data_paths(&path, out)?;
+                } else if path.is_file()
+                    && path.extension().is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("csv")
+                    })
+                    && !path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.ends_with(".struct-meta.json"))
+                {
+                    out.push(path);
+                }
+            }
+            Ok(())
+        }
+
+        if !data_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut data_paths = Vec::new();
+        collect_data_paths(data_dir, &mut data_paths)?;
+        data_paths.sort();
+        let mut out = Vec::new();
+        let mut metadata_owners = BTreeMap::new();
+        for data_path in data_paths {
+            let stem = data_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| format!("invalid data file name {}", data_path.display()))?;
+            let meta_path = data_path.with_file_name(format!("{stem}.struct-meta.json"));
+            if !meta_path.is_file() {
+                return Err(format!(
+                    "data file {} requires matching metadata {}",
+                    data_path.display(),
+                    meta_path.display()
+                ));
+            }
+            if let Some(owner) = metadata_owners.insert(meta_path.clone(), data_path.clone()) {
+                return Err(format!(
+                    "data files {} and {} cannot share metadata {}",
+                    owner.display(),
+                    data_path.display(),
+                    meta_path.display()
+                ));
+            }
+            out.push((data_path, meta_path));
+        }
+        Ok(out)
+    }
+
     let watch_file_path = resolve_play_sidecar_path(watch_file, launch_dir);
+    let mut roots = vec![launch_dir.join("data")];
     let Some(file_stem) = watch_file_path.file_stem() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let base_dir = watch_file_path.parent().unwrap_or(launch_dir);
-    let auto_root = base_dir.join(file_stem);
-    let json_path = auto_root.join("data").join("config.json");
-    let struct_meta_path = auto_root.join("data").join("config.struct-meta.json");
-
-    if json_path.exists() && struct_meta_path.exists() {
-        return Ok(Some((json_path, struct_meta_path)));
+    roots.push(base_dir.join(file_stem).join("data"));
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for root in roots {
+        for pair in discover_pairs(&root)? {
+            let key = normalize_watch_path_for_log(&pair.0);
+            if seen.insert(key) {
+                out.push(pair);
+            }
+        }
     }
-    if !json_path.exists() && !struct_meta_path.exists() {
-        return Ok(None);
-    }
-    Err(format!(
-        "play auto data binding requires both sidecars; looked for {} and {}",
-        json_path.display(),
-        struct_meta_path.display()
-    ))
+    Ok(out)
 }
 fn json_value_by_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
     if path.is_empty() {
@@ -287,6 +728,213 @@ fn json_value_by_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
         current = current.get(segment)?;
     }
     Some(current)
+}
+
+fn validate_play_binding_source(root: &Value, metadata: &PlayStructMetadata) -> Result<(), String> {
+    let mut paths: Vec<String> = metadata
+        .fields
+        .iter()
+        .map(|field| field.json_path.clone())
+        .collect();
+    if let Some(table) = &metadata.csv_table {
+        paths.push(table.row_count_path.clone());
+    }
+    validate_binding_source_paths(root, &paths)
+}
+
+pub(crate) fn validate_binding_source_paths(root: &Value, paths: &[String]) -> Result<(), String> {
+    let mut field_paths = BTreeSet::new();
+    for path in paths {
+        if path.is_empty() {
+            return Err("binding metadata paths must not be empty".to_string());
+        }
+        if !field_paths.insert(path.as_str()) {
+            return Err(format!("duplicate binding metadata path {path}"));
+        }
+        if json_value_by_path(root, path).is_none() {
+            return Err(format!("binding source is missing target property {path}"));
+        }
+    }
+
+    fn walk(value: &Value, path: &str, field_paths: &BTreeSet<&str>) -> Result<(), String> {
+        let Value::Object(properties) = value else {
+            return Ok(());
+        };
+        for (name, child) in properties {
+            let child_path = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}.{name}")
+            };
+            let exact = field_paths.contains(child_path.as_str());
+            let prefix = field_paths
+                .iter()
+                .any(|field| field.starts_with(&format!("{child_path}.")));
+            if !exact && !prefix {
+                return Err(format!(
+                    "binding source property {child_path} does not exist in target metadata"
+                ));
+            }
+            if prefix {
+                walk(child, &child_path, field_paths)?;
+            }
+        }
+        Ok(())
+    }
+
+    walk(root, "", &field_paths)
+}
+
+fn validate_play_binding_targets(
+    metadata: &PlayStructMetadata,
+    jit: &JitProcess,
+) -> Result<(), String> {
+    if let Some(table) = &metadata.csv_table {
+        let collection_path = format!("{}.{}", metadata.global_name, table.rows_path);
+        let capacity = jit
+            .global_collection_capacity(&collection_path)
+            .ok_or_else(|| {
+                format!(
+                    "binding target property {collection_path} does not exist in compiled globals"
+                )
+            })?;
+        if usize::try_from(capacity).ok() != Some(table.capacity) {
+            return Err(format!(
+                "binding target collection {collection_path} has capacity {capacity}; metadata requires {}",
+                table.capacity
+            ));
+        }
+        let row_count_path = format!("{}.{}", metadata.global_name, table.row_count_path);
+        let row_count_type = jit.global_scalar_type(&row_count_path).ok_or_else(|| {
+            format!("binding target property {row_count_path} does not exist in compiled globals")
+        })?;
+        if row_count_type != "i32" {
+            return Err(format!(
+                "binding target property {row_count_path} has type {row_count_type}; CSV row count requires i32"
+            ));
+        }
+        let prefix = format!("{}.", table.rows_path);
+        for field in &metadata.fields {
+            let suffix = field.json_path.strip_prefix(&prefix).ok_or_else(|| {
+                format!(
+                    "CSV table target {} must be below rowsPath {}",
+                    field.json_path, table.rows_path
+                )
+            })?;
+            let target_type = jit
+                .global_collection_field_type(&collection_path, suffix)
+                .ok_or_else(|| {
+                    format!(
+                        "binding target property {collection_path}[].{suffix} does not exist in compiled globals"
+                    )
+                })?;
+            if target_type != field.type_name {
+                return Err(format!(
+                    "binding target property {collection_path}[].{suffix} has type {target_type}; metadata requires {}",
+                    field.type_name
+                ));
+            }
+        }
+        return Ok(());
+    }
+    for field in &metadata.fields {
+        let full_path = format!("{}.{}", metadata.global_name, field.json_path);
+        if !jit.has_global_path(&full_path) {
+            return Err(format!(
+                "binding target property {full_path} does not exist in compiled globals"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_play_bound_table_array(
+    field: &PlayStructFieldMetadata,
+    collection_hash: i32,
+    field_hash: i32,
+    value: &Value,
+) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    match field.type_name.as_str() {
+        "bool" | "u8" | "u16" | "u32" | "i32" => {
+            for (index, item) in items.iter().enumerate() {
+                let value = if field.type_name == "bool" {
+                    item.as_bool().map(|flag| i32::from(flag))
+                } else {
+                    item.as_i64().and_then(|number| i32::try_from(number).ok())
+                };
+                if let Some(value) = value {
+                    stasis_dynload::stasis_jit_global_i32_array_store(
+                        collection_hash,
+                        field_hash,
+                        index as i32,
+                        value,
+                    );
+                }
+            }
+        }
+        "f32" => {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(value) = item.as_f64() {
+                    stasis_dynload::stasis_jit_global_f32_array_store(
+                        collection_hash,
+                        field_hash,
+                        index as i32,
+                        value as f32,
+                    );
+                }
+            }
+        }
+        "f64" => {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(value) = item.as_f64() {
+                    stasis_dynload::stasis_jit_global_f64_array_store(
+                        collection_hash,
+                        field_hash,
+                        index as i32,
+                        value,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_play_csv_table_value(
+    root: &Value,
+    metadata: &PlayStructMetadata,
+    table: &CsvTableMetadata,
+) -> Result<(), String> {
+    let collection_path = format!("{}.{}", metadata.global_name, table.rows_path);
+    let collection_hash = hash_global_path(&collection_path);
+    let prefix = format!("{}.", table.rows_path);
+    for field in &metadata.fields {
+        let suffix = field.json_path.strip_prefix(&prefix).ok_or_else(|| {
+            format!(
+                "CSV table target {} must be below rowsPath {}",
+                field.json_path, table.rows_path
+            )
+        })?;
+        let value = json_value_by_path(root, &field.json_path)
+            .ok_or_else(|| format!("CSV table is missing target {}", field.json_path))?;
+        apply_play_bound_table_array(field, collection_hash, hash_global_path(suffix), value);
+    }
+    let row_count = json_value_by_path(root, &table.row_count_path)
+        .and_then(Value::as_u64)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| "CSV table row_count is invalid".to_string())?;
+    stasis_dynload::stasis_jit_collection_i32_store(collection_hash, 1, row_count);
+    stasis_dynload::stasis_jit_collection_i32_store(
+        collection_hash,
+        2,
+        i32::try_from(table.capacity).map_err(|_| "CSV table capacity exceeds i32".to_string())?,
+    );
+    let row_count_path = format!("{}.{}", metadata.global_name, table.row_count_path);
+    stasis_dynload::stasis_jit_global_i32_store(hash_global_path(&row_count_path), row_count);
+    Ok(())
 }
 
 fn truncate_utf8_to_capacity(value: &str, max_bytes: usize) -> (Vec<u8>, i32) {
@@ -453,6 +1101,10 @@ fn apply_play_data_binding_value(
         ));
     }
 
+    if let Some(table) = &metadata.csv_table {
+        return apply_play_csv_table_value(root, metadata, table);
+    }
+
     for field in &metadata.fields {
         let Some(value) = json_value_by_path(root, &field.json_path) else {
             continue;
@@ -468,37 +1120,80 @@ fn apply_play_data_binding_value(
     Ok(())
 }
 
-fn load_and_apply_play_data_binding(
-    json_path: &Path,
-    struct_meta_path: &Path,
+fn load_and_apply_play_data_bindings(
+    paths: &[(PathBuf, PathBuf)],
+    jit: Option<&JitProcess>,
 ) -> Result<(), String> {
-    let json_source = fs::read_to_string(json_path).map_err(|error| {
-        format!(
-            "failed to read data-bind json {}: {error}",
-            json_path.display()
-        )
-    })?;
-    let json_root: Value = serde_json::from_str(&json_source).map_err(|error| {
-        format!(
-            "failed to parse data-bind json {}: {error}",
-            json_path.display()
-        )
-    })?;
-
-    let meta_source = fs::read_to_string(struct_meta_path).map_err(|error| {
-        format!(
-            "failed to read data-bind struct-meta {}: {error}",
-            struct_meta_path.display()
-        )
-    })?;
-    let metadata: PlayStructMetadata = serde_json::from_str(&meta_source).map_err(|error| {
-        format!(
-            "failed to parse data-bind struct-meta {}: {error}",
-            struct_meta_path.display()
-        )
-    })?;
-
-    apply_play_data_binding_value(&json_root, &metadata)
+    let mut loaded = Vec::new();
+    for (data_path, meta_path) in paths {
+        let meta_source = fs::read_to_string(meta_path).map_err(|error| {
+            format!(
+                "failed to read data-bind struct-meta {}: {error}",
+                meta_path.display()
+            )
+        })?;
+        let metadata: PlayStructMetadata = serde_json::from_str(&meta_source).map_err(|error| {
+            format!(
+                "failed to parse data-bind struct-meta {}: {error}",
+                meta_path.display()
+            )
+        })?;
+        let data_source = fs::read_to_string(data_path).map_err(|error| {
+            format!("failed to read data file {}: {error}", data_path.display())
+        })?;
+        let is_csv = data_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"));
+        let data_root = if is_csv {
+            let fields: Vec<CsvBindingField> = metadata
+                .fields
+                .iter()
+                .map(|field| CsvBindingField {
+                    path: field.json_path.clone(),
+                    csv_column: field.csv_column.clone(),
+                    type_name: field.type_name.clone(),
+                    array_count: usize::try_from(field.array_count.max(0)).unwrap_or(0),
+                })
+                .collect();
+            let parsed = if let Some(table) = &metadata.csv_table {
+                parse_csv_table_binding(&data_source, &fields, table)
+            } else {
+                parse_flat_csv_binding(&data_source, &fields)
+            };
+            parsed.map_err(|error| {
+                format!("failed to parse data CSV {}: {error}", data_path.display())
+            })?
+        } else {
+            if metadata.csv_table.is_some() {
+                return Err(format!(
+                    "csvTable metadata requires a CSV data file: {}",
+                    data_path.display()
+                ));
+            }
+            serde_json::from_str(&data_source).map_err(|error| {
+                format!("failed to parse data JSON {}: {error}", data_path.display())
+            })?
+        };
+        loaded.push((data_root, metadata));
+    }
+    for (_, metadata) in &loaded {
+        if metadata.version != 1 {
+            return Err(format!(
+                "unsupported struct-meta version {}; expected 1",
+                metadata.version
+            ));
+        }
+    }
+    for (data_root, metadata) in &loaded {
+        validate_play_binding_source(data_root, metadata)?;
+        if let Some(jit) = jit {
+            validate_play_binding_targets(metadata, jit)?;
+        }
+    }
+    for (json_root, metadata) in loaded {
+        apply_play_data_binding_value(&json_root, &metadata)?;
+    }
+    Ok(())
 }
 
 fn resolve_play_watch_dir(watch_file: &Path, watch_dir: Option<&Path>) -> PathBuf {
@@ -899,6 +1594,28 @@ fn run_play_in_process_inner(
             watch_dir.display()
         )
     })?;
+    let mut data_watchers = Vec::new();
+    let mut watched_data_dirs = BTreeSet::new();
+    for (json_path, _) in &data_binding_paths {
+        let Some(parent) = json_path.parent() else {
+            continue;
+        };
+        let parent_abs = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        if parent_abs.starts_with(&watch_dir_abs) {
+            continue;
+        }
+        let key = normalize_watch_path_for_log(&parent_abs);
+        if watched_data_dirs.insert(key) {
+            data_watchers.push(WatchService::start(&parent_abs).map_err(|error| {
+                format!(
+                    "failed to watch data directory {}: {error}",
+                    parent_abs.display()
+                )
+            })?);
+        }
+    }
 
     let root_path = watch_file
         .canonicalize()
@@ -987,9 +1704,7 @@ fn run_play_in_process_inner(
     let _ = jit
         .compile()
         .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
-    if let Some((json_path, struct_meta_path)) = data_binding_paths.as_ref() {
-        load_and_apply_play_data_binding(json_path, struct_meta_path)?;
-    }
+    load_and_apply_play_data_bindings(&data_binding_paths, Some(&jit))?;
     let package = jit
         .build_engine_package(&EngineEntrypoints::runtime_default())
         .map_err(|error| format!("failed to build engine package: {error}"))?;
@@ -1042,12 +1757,26 @@ fn run_play_in_process_inner(
         let mut needs_recompile = false;
         let mut ignored_changes: u32 = 0;
         let mut triggered_paths: Vec<String> = Vec::new();
-        for event in watcher.drain_stasis_changes() {
+        let mut watch_events = watcher.drain_stasis_changes();
+        for data_watcher in &mut data_watchers {
+            watch_events.extend(data_watcher.drain_stasis_changes());
+        }
+        let mut needs_data_reload = false;
+        for event in watch_events {
             if live
                 .as_mut()
                 .is_some_and(|workspace| workspace.consumes_self_write(&event.path))
             {
                 ignored_changes = ignored_changes.saturating_add(1);
+                continue;
+            }
+            let event_path = normalize_watch_path_for_log(&event.path);
+            let is_data_event = data_binding_paths.iter().any(|(json_path, meta_path)| {
+                event_path == normalize_watch_path_for_log(json_path)
+                    || event_path == normalize_watch_path_for_log(meta_path)
+            });
+            if is_data_event {
+                needs_data_reload = true;
                 continue;
             }
             let submit = should_submit_watch_event(
@@ -1060,6 +1789,12 @@ fn run_play_in_process_inner(
                 triggered_paths.push(normalize_watch_path_for_log(&event.path));
             } else {
                 ignored_changes = ignored_changes.saturating_add(1);
+            }
+        }
+        if needs_data_reload {
+            match load_and_apply_play_data_bindings(&data_binding_paths, Some(&jit)) {
+                Ok(()) => println!("[data] rebound {} file(s)", data_binding_paths.len()),
+                Err(error) => println!("[data] reload rejected: {error}"),
             }
         }
         if ignored_changes > 0 && !needs_recompile {
@@ -3034,24 +3769,29 @@ mod tests {
         let metadata = PlayStructMetadata {
             version: 1,
             global_name: "state".to_string(),
+            csv_table: None,
             fields: vec![
                 PlayStructFieldMetadata {
                     json_path: "config.json_loaded".to_string(),
+                    csv_column: None,
                     type_name: "bool".to_string(),
                     array_count: 1,
                 },
                 PlayStructFieldMetadata {
                     json_path: "config.screen_width".to_string(),
+                    csv_column: None,
                     type_name: "i32".to_string(),
                     array_count: 1,
                 },
                 PlayStructFieldMetadata {
                     json_path: "config.background_red".to_string(),
+                    csv_column: None,
                     type_name: "f32".to_string(),
                     array_count: 1,
                 },
                 PlayStructFieldMetadata {
                     json_path: "config.font_path".to_string(),
+                    csv_column: None,
                     type_name: "string".to_string(),
                     array_count: 64,
                 },
@@ -3095,6 +3835,7 @@ mod tests {
         let metadata = PlayStructMetadata {
             version: 2,
             global_name: "state".to_string(),
+            csv_table: None,
             fields: Vec::new(),
         };
         let root = serde_json::json!({});
@@ -3102,6 +3843,311 @@ mod tests {
         let error =
             apply_play_data_binding_value(&root, &metadata).expect_err("binding should fail");
         assert!(error.contains("unsupported struct-meta version"));
+    }
+
+    #[test]
+    fn parse_flat_csv_binding_supports_scalar_and_columnar_data() {
+        let scalar = parse_flat_csv_binding(
+            "enabled,label\r\ntrue,\"Fast, tough\"\r\n",
+            &[
+                CsvBindingField {
+                    path: "enabled".to_string(),
+                    csv_column: None,
+                    type_name: "bool".to_string(),
+                    array_count: 1,
+                },
+                CsvBindingField {
+                    path: "label".to_string(),
+                    csv_column: None,
+                    type_name: "string".to_string(),
+                    array_count: 32,
+                },
+            ],
+        )
+        .expect("scalar CSV should parse");
+        assert_eq!(
+            scalar,
+            serde_json::json!({"enabled": true, "label": "Fast, tough"})
+        );
+
+        let arrays = parse_flat_csv_binding(
+            "hp,speed\n70,1.5\n110,2.25\n85,3\n",
+            &[
+                CsvBindingField {
+                    path: "hp".to_string(),
+                    csv_column: None,
+                    type_name: "i32".to_string(),
+                    array_count: 3,
+                },
+                CsvBindingField {
+                    path: "speed".to_string(),
+                    csv_column: None,
+                    type_name: "f32".to_string(),
+                    array_count: 3,
+                },
+            ],
+        )
+        .expect("columnar CSV should parse");
+        assert_eq!(
+            arrays,
+            serde_json::json!({"hp": [70, 110, 85], "speed": [1.5, 2.25, 3.0]})
+        );
+    }
+
+    #[test]
+    fn parse_flat_csv_binding_rejects_nested_metadata_paths() {
+        let error = parse_flat_csv_binding(
+            "screen_width\n800\n",
+            &[CsvBindingField {
+                path: "config.screen_width".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        )
+        .expect_err("nested CSV metadata should fail");
+        assert!(error.contains("flat column"));
+    }
+
+    #[test]
+    fn parse_flat_csv_binding_rejects_columns_missing_from_target_metadata() {
+        let error = parse_flat_csv_binding(
+            "hp,typo\n70,99\n",
+            &[CsvBindingField {
+                path: "hp".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        )
+        .expect_err("extra CSV columns should fail");
+        assert!(error.contains("column typo does not exist in target metadata"));
+    }
+
+    #[test]
+    fn parse_csv_table_binding_tracks_count_pads_capacity_and_validates_keys() {
+        let fields = vec![
+            CsvBindingField {
+                path: "rows.id".to_string(),
+                csv_column: Some("id".to_string()),
+                type_name: "i32".to_string(),
+                array_count: 4,
+            },
+            CsvBindingField {
+                path: "rows.hp".to_string(),
+                csv_column: Some("health".to_string()),
+                type_name: "i32".to_string(),
+                array_count: 4,
+            },
+        ];
+        let table = CsvTableMetadata {
+            rows_path: "rows".to_string(),
+            row_count_path: "row_count".to_string(),
+            capacity: 4,
+            key_columns: vec!["id".to_string()],
+        };
+        let parsed = parse_csv_table_binding("id,health\n10,70\n20,110\n", &fields, &table)
+            .expect("table should parse");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "rows": {"id": [10, 20, 0, 0], "hp": [70, 110, 0, 0]},
+                "row_count": 2
+            })
+        );
+
+        let duplicate = parse_csv_table_binding("id,health\n10,70\n10,110\n", &fields, &table)
+            .expect_err("duplicate stable keys should fail");
+        assert!(duplicate.contains("duplicate CSV table key"));
+    }
+
+    #[test]
+    fn load_play_data_bindings_applies_struct_array_csv_table() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let collection_hash = hash_global_path("level.rows");
+        let mut ids = [99i32; 4];
+        let mut hp = [99i32; 4];
+        let mut row_count = 0i32;
+        stasis_dynload::register_global_i32_array(
+            collection_hash,
+            hash_global_path("id"),
+            ids.as_mut_ptr(),
+            ids.len(),
+        );
+        stasis_dynload::register_global_i32_array(
+            collection_hash,
+            hash_global_path("hp"),
+            hp.as_mut_ptr(),
+            hp.len(),
+        );
+        stasis_dynload::register_global_i32_ptr(
+            hash_global_path("level.row_count"),
+            &mut row_count,
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_table_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let data_path = temp_root.join("waves.csv");
+        let meta_path = temp_root.join("waves.struct-meta.json");
+        fs::write(&data_path, "id,hp\n10,70\n20,110\n").expect("write CSV");
+        fs::write(
+            &meta_path,
+            r#"{"version":1,"globalName":"level","csvTable":{"rowsPath":"rows","rowCountPath":"row_count","capacity":4,"keyColumns":["id"]},"fields":[{"jsonPath":"rows.id","csvColumn":"id","type":"i32","arrayCount":4},{"jsonPath":"rows.hp","csvColumn":"hp","type":"i32","arrayCount":4}]}"#,
+        )
+        .expect("write metadata");
+
+        load_and_apply_play_data_bindings(&[(data_path, meta_path)], None)
+            .expect("CSV table binding should apply");
+        assert_eq!(ids, [10, 20, 0, 0]);
+        assert_eq!(hp, [70, 110, 0, 0]);
+        assert_eq!(row_count, 2);
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn validate_play_binding_source_requires_an_exact_property_set() {
+        let metadata = PlayStructMetadata {
+            version: 1,
+            global_name: "state".to_string(),
+            csv_table: None,
+            fields: vec![PlayStructFieldMetadata {
+                json_path: "config.width".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        };
+        validate_play_binding_source(&serde_json::json!({"config": {"width": 800}}), &metadata)
+            .expect("exact JSON properties should pass");
+
+        let extra = validate_play_binding_source(
+            &serde_json::json!({"config": {"width": 800, "widht": 600}}),
+            &metadata,
+        )
+        .expect_err("extra JSON properties should fail");
+        assert!(extra.contains("config.widht does not exist in target metadata"));
+
+        let missing = validate_play_binding_source(&serde_json::json!({"config": {}}), &metadata)
+            .expect_err("missing JSON properties should fail");
+        assert!(missing.contains("missing target property config.width"));
+    }
+
+    #[test]
+    fn validate_play_binding_targets_rejects_missing_compiled_global() {
+        let jit = JitProcess::new();
+        let metadata = PlayStructMetadata {
+            version: 1,
+            global_name: "state".to_string(),
+            csv_table: None,
+            fields: vec![PlayStructFieldMetadata {
+                json_path: "typo".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        };
+        let error = validate_play_binding_targets(&metadata, &jit)
+            .expect_err("missing runtime targets should fail");
+        assert!(error.contains("state.typo does not exist in compiled globals"));
+    }
+
+    #[test]
+    fn load_play_data_bindings_applies_columnar_csv_arrays() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let mut hp = [0i32; 3];
+        stasis_dynload::register_global_i32_array(
+            hash_global_path("state.hp"),
+            0,
+            hp.as_mut_ptr(),
+            hp.len(),
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_csv_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let data_path = temp_root.join("balance.csv");
+        let meta_path = temp_root.join("balance.struct-meta.json");
+        fs::write(&data_path, "hp\n70\n110\n85\n").expect("write CSV");
+        fs::write(
+            &meta_path,
+            r#"{"version":1,"globalName":"state","fields":[{"jsonPath":"hp","type":"i32","arrayCount":3}]}"#,
+        )
+        .expect("write metadata");
+
+        load_and_apply_play_data_bindings(&[(data_path, meta_path)], None)
+            .expect("CSV binding should apply");
+        assert_eq!(hp, [70, 110, 85]);
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn load_play_data_bindings_rejects_set_before_mutating_runtime() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let mut value = 5i32;
+        stasis_dynload::register_global_i32_ptr(hash_global_path("state.value"), &mut value);
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_atomic_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let first_json = temp_root.join("first.json");
+        let first_meta = temp_root.join("first.struct-meta.json");
+        let second_json = temp_root.join("second.json");
+        let second_meta = temp_root.join("second.struct-meta.json");
+        fs::write(&first_json, r#"{"value":9}"#).expect("write first json");
+        fs::write(
+            &first_meta,
+            r#"{"version":1,"globalName":"state","fields":[{"jsonPath":"value","type":"i32","arrayCount":1}]}"#,
+        )
+        .expect("write first metadata");
+        fs::write(&second_json, "{invalid").expect("write invalid json");
+        fs::write(
+            &second_meta,
+            r#"{"version":1,"globalName":"other","fields":[]}"#,
+        )
+        .expect("write second metadata");
+
+        let error = load_and_apply_play_data_bindings(
+            &[(first_json, first_meta), (second_json, second_meta)],
+            None,
+        )
+        .expect_err("invalid set should be rejected");
+        assert!(error.contains("failed to parse data JSON"));
+        assert_eq!(
+            value, 5,
+            "the earlier valid file must not be partially applied"
+        );
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]
@@ -3120,11 +4166,62 @@ mod tests {
         fs::write(data_dir.join("config.struct-meta.json"), "{}\n").expect("write struct meta");
 
         let resolved = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
-            .expect("auto discovery should succeed")
-            .expect("expected auto binding paths");
+            .expect("auto discovery should succeed");
 
-        assert_eq!(resolved.0, data_dir.join("config.json"));
-        assert_eq!(resolved.1, data_dir.join("config.struct-meta.json"));
+        assert_eq!(
+            resolved,
+            vec![(
+                data_dir.join("config.json"),
+                data_dir.join("config.struct-meta.json")
+            )]
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn resolve_play_data_binding_paths_discovers_all_project_data_in_name_order() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_project_{stamp}"));
+        let data_dir = temp_root.join("data");
+        let watch_file = temp_root.join("src").join("main.stasis");
+        fs::create_dir_all(watch_file.parent().expect("source parent")).expect("create src");
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        fs::write(&watch_file, "function main(): i32 { return 0; }\n").expect("write entry");
+        for stem in ["pieces", "enemies"] {
+            fs::write(data_dir.join(format!("{stem}.json")), "{}\n").expect("write json");
+            fs::write(data_dir.join(format!("{stem}.struct-meta.json")), "{}\n")
+                .expect("write metadata");
+        }
+        let nested_data_dir = data_dir.join("tables");
+        fs::create_dir_all(&nested_data_dir).expect("create nested data dir");
+        fs::write(nested_data_dir.join("tuning.csv"), "hp\n70\n").expect("write CSV");
+        fs::write(nested_data_dir.join("tuning.struct-meta.json"), "{}\n")
+            .expect("write CSV metadata");
+
+        let resolved = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
+            .expect("project data discovery should succeed");
+
+        assert_eq!(
+            resolved,
+            vec![
+                (
+                    data_dir.join("enemies.json"),
+                    data_dir.join("enemies.struct-meta.json")
+                ),
+                (
+                    data_dir.join("pieces.json"),
+                    data_dir.join("pieces.struct-meta.json")
+                ),
+                (
+                    nested_data_dir.join("tuning.csv"),
+                    nested_data_dir.join("tuning.struct-meta.json")
+                )
+            ]
+        );
 
         let _ = fs::remove_dir_all(&temp_root);
     }
@@ -3145,7 +4242,29 @@ mod tests {
 
         let error = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
             .expect_err("partial sidecars should fail");
-        assert!(error.contains("play auto data binding requires both sidecars"));
+        assert!(error.contains("requires matching metadata"));
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn resolve_play_data_binding_paths_rejects_json_csv_stem_collision() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_collision_{stamp}"));
+        let data_dir = temp_root.join("data");
+        let watch_file = temp_root.join("main.stasis");
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        fs::write(&watch_file, "function main(): i32 { return 0; }\n").expect("write entry");
+        fs::write(data_dir.join("balance.json"), "{}\n").expect("write JSON");
+        fs::write(data_dir.join("balance.csv"), "hp\n70\n").expect("write CSV");
+        fs::write(data_dir.join("balance.struct-meta.json"), "{}\n").expect("write metadata");
+
+        let error = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
+            .expect_err("shared JSON/CSV metadata should fail");
+        assert!(error.contains("cannot share metadata"));
 
         let _ = fs::remove_dir_all(&temp_root);
     }

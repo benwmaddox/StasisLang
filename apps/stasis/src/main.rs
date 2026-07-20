@@ -564,7 +564,7 @@ fn parse_play_cli_args(args: &[String]) -> Result<PlayCliArgs, String> {
         if arg == "--data-bind" {
             if i + 2 >= args.len() {
                 return Err(
-                    "missing values for --data-bind <json_path> <struct_meta_path>".to_string(),
+                    "missing values for --data-bind <data_path> <struct_meta_path>".to_string(),
                 );
             }
             data_bind_json = Some(PathBuf::from(args[i + 1].clone()));
