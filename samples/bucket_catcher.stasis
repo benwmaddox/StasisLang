@@ -14,15 +14,13 @@ import "../src/stdlib/sdl_scancodes.stasis";
 // - Use SVG sprites for the bucket/ball to show asset binding.
 //
 // Config binding:
-// - A JSON file at samples/bucket_catcher/data/config.json can populate state.config.
-// - The runtime runner auto-binds matching sidecars from bucket_catcher/data/.
-// - Use --data-bind only to override the default sidecar paths.
+// - A JSON file at samples/bucket_catcher/data/config.json populates state.config.
+// - The runtime auto-binds and watches matching files under data/.
+// - Project data is also embedded when the sample is built AOT.
 // - We require JSON binding; json_loaded must be true.
 // - json_loaded stays false unless the JSON file explicitly sets it to true.
 // - Example (auto-discovery):
 //   stasis.exe play samples/bucket_catcher.stasis --watch-dir samples
-// - Example (explicit override):
-//   stasis.exe play samples/bucket_catcher.stasis --watch-dir samples --data-bind samples/bucket_catcher/data/config.json samples/bucket_catcher/data/config.struct-meta.json
 
 const MAX_BALLS: i32 = 500;
 

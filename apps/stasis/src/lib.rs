@@ -244,38 +244,87 @@ fn resolve_play_data_binding_paths(
     launch_dir: &Path,
     data_bind_json: Option<&Path>,
     data_bind_struct_meta: Option<&Path>,
-) -> Result<Option<(PathBuf, PathBuf)>, String> {
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     match (data_bind_json, data_bind_struct_meta) {
         (Some(json_path), Some(struct_meta_path)) => {
-            return Ok(Some((
+            return Ok(vec![(
                 resolve_play_sidecar_path(json_path, launch_dir),
                 resolve_play_sidecar_path(struct_meta_path, launch_dir),
-            )));
+            )]);
         }
         (None, None) => {}
         _ => return Err("play data binding requires both json and struct-meta paths".to_string()),
     }
 
+    fn discover_pairs(data_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+        fn collect_json_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+            for entry in fs::read_dir(dir).map_err(|error| {
+                format!("failed to read data directory {}: {error}", dir.display())
+            })? {
+                let entry = entry.map_err(|error| {
+                    format!("failed to read data directory {}: {error}", dir.display())
+                })?;
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_json_paths(&path, out)?;
+                } else if path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                    && !path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.ends_with(".struct-meta.json"))
+                {
+                    out.push(path);
+                }
+            }
+            Ok(())
+        }
+
+        if !data_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut json_paths = Vec::new();
+        collect_json_paths(data_dir, &mut json_paths)?;
+        json_paths.sort();
+        let mut out = Vec::new();
+        for json_path in json_paths {
+            let stem = json_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| format!("invalid data file name {}", json_path.display()))?;
+            let meta_path = data_dir.join(format!("{stem}.struct-meta.json"));
+            if !meta_path.is_file() {
+                return Err(format!(
+                    "data file {} requires matching metadata {}",
+                    json_path.display(),
+                    meta_path.display()
+                ));
+            }
+            out.push((json_path, meta_path));
+        }
+        Ok(out)
+    }
+
     let watch_file_path = resolve_play_sidecar_path(watch_file, launch_dir);
+    let mut roots = vec![launch_dir.join("data")];
     let Some(file_stem) = watch_file_path.file_stem() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let base_dir = watch_file_path.parent().unwrap_or(launch_dir);
-    let auto_root = base_dir.join(file_stem);
-    let json_path = auto_root.join("data").join("config.json");
-    let struct_meta_path = auto_root.join("data").join("config.struct-meta.json");
-
-    if json_path.exists() && struct_meta_path.exists() {
-        return Ok(Some((json_path, struct_meta_path)));
+    roots.push(base_dir.join(file_stem).join("data"));
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for root in roots {
+        for pair in discover_pairs(&root)? {
+            let key = normalize_watch_path_for_log(&pair.0);
+            if seen.insert(key) {
+                out.push(pair);
+            }
+        }
     }
-    if !json_path.exists() && !struct_meta_path.exists() {
-        return Ok(None);
-    }
-    Err(format!(
-        "play auto data binding requires both sidecars; looked for {} and {}",
-        json_path.display(),
-        struct_meta_path.display()
-    ))
+    Ok(out)
 }
 fn json_value_by_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
     if path.is_empty() {
@@ -468,37 +517,47 @@ fn apply_play_data_binding_value(
     Ok(())
 }
 
-fn load_and_apply_play_data_binding(
-    json_path: &Path,
-    struct_meta_path: &Path,
-) -> Result<(), String> {
-    let json_source = fs::read_to_string(json_path).map_err(|error| {
-        format!(
-            "failed to read data-bind json {}: {error}",
-            json_path.display()
-        )
-    })?;
-    let json_root: Value = serde_json::from_str(&json_source).map_err(|error| {
-        format!(
-            "failed to parse data-bind json {}: {error}",
-            json_path.display()
-        )
-    })?;
-
-    let meta_source = fs::read_to_string(struct_meta_path).map_err(|error| {
-        format!(
-            "failed to read data-bind struct-meta {}: {error}",
-            struct_meta_path.display()
-        )
-    })?;
-    let metadata: PlayStructMetadata = serde_json::from_str(&meta_source).map_err(|error| {
-        format!(
-            "failed to parse data-bind struct-meta {}: {error}",
-            struct_meta_path.display()
-        )
-    })?;
-
-    apply_play_data_binding_value(&json_root, &metadata)
+fn load_and_apply_play_data_bindings(paths: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    let mut loaded = Vec::new();
+    for (json_path, meta_path) in paths {
+        let json_source = fs::read_to_string(json_path).map_err(|error| {
+            format!(
+                "failed to read data-bind json {}: {error}",
+                json_path.display()
+            )
+        })?;
+        let json_root: Value = serde_json::from_str(&json_source).map_err(|error| {
+            format!(
+                "failed to parse data-bind json {}: {error}",
+                json_path.display()
+            )
+        })?;
+        let meta_source = fs::read_to_string(meta_path).map_err(|error| {
+            format!(
+                "failed to read data-bind struct-meta {}: {error}",
+                meta_path.display()
+            )
+        })?;
+        let metadata: PlayStructMetadata = serde_json::from_str(&meta_source).map_err(|error| {
+            format!(
+                "failed to parse data-bind struct-meta {}: {error}",
+                meta_path.display()
+            )
+        })?;
+        loaded.push((json_root, metadata));
+    }
+    for (_, metadata) in &loaded {
+        if metadata.version != 1 {
+            return Err(format!(
+                "unsupported struct-meta version {}; expected 1",
+                metadata.version
+            ));
+        }
+    }
+    for (json_root, metadata) in loaded {
+        apply_play_data_binding_value(&json_root, &metadata)?;
+    }
+    Ok(())
 }
 
 fn resolve_play_watch_dir(watch_file: &Path, watch_dir: Option<&Path>) -> PathBuf {
@@ -899,6 +958,28 @@ fn run_play_in_process_inner(
             watch_dir.display()
         )
     })?;
+    let mut data_watchers = Vec::new();
+    let mut watched_data_dirs = BTreeSet::new();
+    for (json_path, _) in &data_binding_paths {
+        let Some(parent) = json_path.parent() else {
+            continue;
+        };
+        let parent_abs = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        if parent_abs.starts_with(&watch_dir_abs) {
+            continue;
+        }
+        let key = normalize_watch_path_for_log(&parent_abs);
+        if watched_data_dirs.insert(key) {
+            data_watchers.push(WatchService::start(&parent_abs).map_err(|error| {
+                format!(
+                    "failed to watch data directory {}: {error}",
+                    parent_abs.display()
+                )
+            })?);
+        }
+    }
 
     let root_path = watch_file
         .canonicalize()
@@ -987,9 +1068,7 @@ fn run_play_in_process_inner(
     let _ = jit
         .compile()
         .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
-    if let Some((json_path, struct_meta_path)) = data_binding_paths.as_ref() {
-        load_and_apply_play_data_binding(json_path, struct_meta_path)?;
-    }
+    load_and_apply_play_data_bindings(&data_binding_paths)?;
     let package = jit
         .build_engine_package(&EngineEntrypoints::runtime_default())
         .map_err(|error| format!("failed to build engine package: {error}"))?;
@@ -1042,12 +1121,26 @@ fn run_play_in_process_inner(
         let mut needs_recompile = false;
         let mut ignored_changes: u32 = 0;
         let mut triggered_paths: Vec<String> = Vec::new();
-        for event in watcher.drain_stasis_changes() {
+        let mut watch_events = watcher.drain_stasis_changes();
+        for data_watcher in &mut data_watchers {
+            watch_events.extend(data_watcher.drain_stasis_changes());
+        }
+        let mut needs_data_reload = false;
+        for event in watch_events {
             if live
                 .as_mut()
                 .is_some_and(|workspace| workspace.consumes_self_write(&event.path))
             {
                 ignored_changes = ignored_changes.saturating_add(1);
+                continue;
+            }
+            let event_path = normalize_watch_path_for_log(&event.path);
+            let is_data_event = data_binding_paths.iter().any(|(json_path, meta_path)| {
+                event_path == normalize_watch_path_for_log(json_path)
+                    || event_path == normalize_watch_path_for_log(meta_path)
+            });
+            if is_data_event {
+                needs_data_reload = true;
                 continue;
             }
             let submit = should_submit_watch_event(
@@ -1060,6 +1153,12 @@ fn run_play_in_process_inner(
                 triggered_paths.push(normalize_watch_path_for_log(&event.path));
             } else {
                 ignored_changes = ignored_changes.saturating_add(1);
+            }
+        }
+        if needs_data_reload {
+            match load_and_apply_play_data_bindings(&data_binding_paths) {
+                Ok(()) => println!("[data] rebound {} file(s)", data_binding_paths.len()),
+                Err(error) => println!("[data] reload rejected: {error}"),
             }
         }
         if ignored_changes > 0 && !needs_recompile {
@@ -3105,6 +3204,55 @@ mod tests {
     }
 
     #[test]
+    fn load_play_data_bindings_rejects_set_before_mutating_runtime() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let mut value = 5i32;
+        stasis_dynload::register_global_i32_ptr(hash_global_path("state.value"), &mut value);
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_atomic_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let first_json = temp_root.join("first.json");
+        let first_meta = temp_root.join("first.struct-meta.json");
+        let second_json = temp_root.join("second.json");
+        let second_meta = temp_root.join("second.struct-meta.json");
+        fs::write(&first_json, r#"{"value":9}"#).expect("write first json");
+        fs::write(
+            &first_meta,
+            r#"{"version":1,"globalName":"state","fields":[{"jsonPath":"value","type":"i32","arrayCount":1}]}"#,
+        )
+        .expect("write first metadata");
+        fs::write(&second_json, "{invalid").expect("write invalid json");
+        fs::write(
+            &second_meta,
+            r#"{"version":1,"globalName":"other","fields":[]}"#,
+        )
+        .expect("write second metadata");
+
+        let error = load_and_apply_play_data_bindings(&[
+            (first_json, first_meta),
+            (second_json, second_meta),
+        ])
+        .expect_err("invalid set should be rejected");
+        assert!(error.contains("failed to parse data-bind json"));
+        assert_eq!(
+            value, 5,
+            "the earlier valid file must not be partially applied"
+        );
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
     fn resolve_play_data_binding_paths_auto_discovers_bucket_layout() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3120,11 +3268,53 @@ mod tests {
         fs::write(data_dir.join("config.struct-meta.json"), "{}\n").expect("write struct meta");
 
         let resolved = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
-            .expect("auto discovery should succeed")
-            .expect("expected auto binding paths");
+            .expect("auto discovery should succeed");
 
-        assert_eq!(resolved.0, data_dir.join("config.json"));
-        assert_eq!(resolved.1, data_dir.join("config.struct-meta.json"));
+        assert_eq!(
+            resolved,
+            vec![(
+                data_dir.join("config.json"),
+                data_dir.join("config.struct-meta.json")
+            )]
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn resolve_play_data_binding_paths_discovers_all_project_data_in_name_order() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_project_{stamp}"));
+        let data_dir = temp_root.join("data");
+        let watch_file = temp_root.join("src").join("main.stasis");
+        fs::create_dir_all(watch_file.parent().expect("source parent")).expect("create src");
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        fs::write(&watch_file, "function main(): i32 { return 0; }\n").expect("write entry");
+        for stem in ["pieces", "enemies"] {
+            fs::write(data_dir.join(format!("{stem}.json")), "{}\n").expect("write json");
+            fs::write(data_dir.join(format!("{stem}.struct-meta.json")), "{}\n")
+                .expect("write metadata");
+        }
+
+        let resolved = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
+            .expect("project data discovery should succeed");
+
+        assert_eq!(
+            resolved,
+            vec![
+                (
+                    data_dir.join("enemies.json"),
+                    data_dir.join("enemies.struct-meta.json")
+                ),
+                (
+                    data_dir.join("pieces.json"),
+                    data_dir.join("pieces.struct-meta.json")
+                )
+            ]
+        );
 
         let _ = fs::remove_dir_all(&temp_root);
     }
@@ -3145,7 +3335,7 @@ mod tests {
 
         let error = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
             .expect_err("partial sidecars should fail");
-        assert!(error.contains("play auto data binding requires both sidecars"));
+        assert!(error.contains("requires matching metadata"));
 
         let _ = fs::remove_dir_all(&temp_root);
     }

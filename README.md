@@ -62,6 +62,22 @@ That keeps the common Windows command simple:
 .\stasis.exe play samples\bucket_catcher.stasis
 ```
 
+## Project Data
+
+Put editable runtime data in the project-level `data/` directory. Every
+`data/<name>.json` file with a matching `data/<name>.struct-meta.json` mapping is
+bound automatically; normal development commands do not need `--data-bind`.
+
+While `stasis play` is running, changes to either file are validated and rebound
+between ticks. An invalid edit is rejected without partially applying the set.
+For AOT output, the same files are staged with the package and their values are
+compiled into the runtime bridge, so mobile and desktop builds start with the
+data even when no loose development JSON is available.
+
+The older entry-specific `<entry-name>/data/` layout remains supported for
+existing projects. `--data-bind` is reserved for intentionally overriding the
+project convention with an external pair.
+
 On Windows, SmartScreen may warn on unsigned binaries.
 
 ## Hello, World

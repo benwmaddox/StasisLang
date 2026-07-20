@@ -203,6 +203,15 @@ Examples:
 - rendering commands
 - audio events
 
+### First-Class Project Data
+
+- Editable runtime data lives under the project-level `data/` directory.
+- Every JSON file has a same-name `.struct-meta.json` mapping and is discovered automatically; ordinary development does not require binding flags or project-specific loader code.
+- Development watches both files and applies a validated set between ticks. Rejected edits preserve the last accepted runtime data.
+- Production AOT packages stage the same data and compile its accepted values into the runtime bridge, so startup never depends on loose development files.
+- The JIT and AOT paths use the same global names, field types, array bounds, and JSON-path mapping.
+- Explicit binding paths are compatibility overrides, not the standard project workflow.
+
 ### First-Class Sprite and Audio Assets
 
 Sprite and audio support is a cross-platform runtime contract, not an editor-only feature.
@@ -495,4 +504,3 @@ This system is intentionally:
 - developer-trust-focused
 
 It provides a robust, file-level hot reload pipeline with per-function efficiency, an explicit swap hook, and a deterministic tick-based UI confirmation mechanism.
-
