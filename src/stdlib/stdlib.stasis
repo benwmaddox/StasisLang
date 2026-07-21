@@ -4,6 +4,9 @@
 
 import "memory.stasis";
 
+// Abort the current hot swap after on_code_swap restores any application invariants it can.
+extern function reject_code_swap(): void;
+
 // Rewrite V1 canonical integer print name.
 // Bootstrap currently provides `print_int`; this wrapper keeps source-level API aligned.
 function print_i32(value: i32): void {

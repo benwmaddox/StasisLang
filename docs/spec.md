@@ -688,15 +688,23 @@ Swap is rejected if:
 - `on_code_swap()` fails.
 
 Current policy (pre-1.0):
-- Layout-hash changes are rejected deterministically with a `restart required` error.
-- Automatic blob state migration (`state-map` old->new layout copy) is planned but not yet implemented.
+- Layout-affecting semantic edits produce a versioned preview and require explicit apply.
+- The preview reports candidate dispatch-patch functions, state-layout compatibility, struct or whole-state scope, migration steps, capacity-shrink warnings, and estimated commit cost.
+- Apply regenerates the preview; any preview/commit mismatch rejects the swap.
 
 On rejection, old code and old data remain active.
 
 Current migration policy (pre-1.0):
-- Layout hash changes can commit only when both active and incoming builds provide deterministic state-map metadata.
-- Migration compatibility is path-based: overlapping paths must keep compatible type shape; added/removed paths are allowed.
-- Incompatible or missing state-map metadata fails commit deterministically with actionable `restart required` diagnostics.
+- JIT and AOT derive layout identity from the same canonical compiler-owned state-layout model; source text and function bodies are not layout identity inputs.
+- Development JIT compilation produces a staged runtime candidate and never activates dispatch, literals, collection headers, or state from the compiler thread.
+- Every JIT entry point uses the same migration planner and bounded transactional activation at the runtime safe point. There is no scalar-only runner migration path.
+- Layout-changing commits without a staged JIT candidate, including current AOT runtime swaps, reject with a restart-required diagnostic.
+- Migration compatibility is path-based: overlapping paths must keep compatible scalar or collection-element type shape.
+- Compatible scalar and fixed-collection fields are copied; new fields are initialized to their type default; removed fields are discarded with an explicit preview warning.
+- Fixed-collection growth is storage-ownership preflighted and bounded before allocation, preserves the old prefix, and initializes the expanded tail.
+- Shrink copies the retained prefix, warns about the discarded range, and clamps logical lengths; UTF-8 shrink retains the largest valid code-point prefix and recomputes byte and character counts.
+- Incompatible or missing state metadata fails deterministically with an actionable diagnostic.
+- Migration, `on_code_swap`, or pointer commit failure restores the old code and complete bounded runtime snapshot; partial migration is forbidden.
 
 ### 14.4 Development File-Change Boundary Contracts
 
@@ -711,8 +719,8 @@ Role ownership:
 Required high-level message contracts:
 - `FileChangeEvent(path, revision, text_source, change_kind)`
 - `CompileRequest(request_id, changed_files[], target_mode)`
-- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set, hook_symbol?, state_map?)`
-- `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol, state_map?)`
+- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set, hook_symbol?, staged_candidate?)`
+- `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol)`
 - `SwapCommitResult(request_id, status, swapped_fn_ids[], new_generation, error)`
 
 Rules:
@@ -736,6 +744,7 @@ Rules:
 - Runs between ticks.
 - Runs before new code executes.
 - May mutate global data.
+- May call `reject_code_swap()` to abort; the runtime restores the old code and complete bounded state snapshot.
 - Must not invoke gameplay entrypoints.
 
 ## 16. Diagnostics
@@ -770,4 +779,3 @@ Rules:
 
 This document defines the current direction.
 Legacy bootstrap/tooling details from prior repository generations are intentionally excluded.
-

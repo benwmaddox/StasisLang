@@ -136,6 +136,23 @@ pub fn invoke_noarg_void(address: usize) -> Result<(), String> {
     }
 }
 
+thread_local! {
+    static CODE_SWAP_REJECTION: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+pub fn invoke_code_swap_hook(address: usize) -> Result<(), String> {
+    let _ = CODE_SWAP_REJECTION.with(|rejection| rejection.borrow_mut().take());
+    invoke_noarg_void(address)?;
+    CODE_SWAP_REJECTION.with(|rejection| rejection.borrow_mut().take().map_or(Ok(()), Err))
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_reject_code_swap() {
+    CODE_SWAP_REJECTION.with(|rejection| {
+        *rejection.borrow_mut() = Some("hook requested rejection".to_string());
+    });
+}
+
 pub fn invoke_i32_to_void(address: usize, arg0: i32) -> Result<(), String> {
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
@@ -759,6 +776,202 @@ fn owned_f64_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<f64>>> {
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn ensure_owned_array_capacity<T: Copy>(
+    key: ArrayKey,
+    requested_len: usize,
+    default: T,
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
+    registered: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+) -> Result<(), String> {
+    let mut owned_guard = owned.lock().expect("owned array table mutex poisoned");
+    if let Some(array) = owned_guard.get_mut(&key) {
+        if let Some((registered_ptr, registered_len)) = registered
+            .lock()
+            .expect("registered array table mutex poisoned")
+            .get(&key)
+            .copied()
+        {
+            if registered_ptr != array.as_mut_ptr() as usize {
+                return (registered_len >= requested_len)
+                    .then_some(())
+                    .ok_or_else(|| {
+                        format!(
+                            "cannot grow host-owned collection storage from {registered_len} to {requested_len}"
+                        )
+                    });
+            }
+        }
+        array.resize(array.len().max(requested_len), default);
+        let mut registered_guard = registered
+            .lock()
+            .expect("registered array table mutex poisoned");
+        registered_guard.insert(key, (array.as_mut_ptr() as usize, array.len()));
+        return Ok(());
+    }
+    if let Some((_, registered_len)) = registered
+        .lock()
+        .expect("registered array table mutex poisoned")
+        .get(&key)
+        .copied()
+    {
+        return (registered_len >= requested_len)
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                "cannot grow host-owned collection storage from {registered_len} to {requested_len}"
+            )
+            });
+    }
+    let mut array = vec![default; requested_len];
+    let ptr = array.as_mut_ptr() as usize;
+    owned_guard.insert(key, array);
+    registered
+        .lock()
+        .expect("registered array table mutex poisoned")
+        .insert(key, (ptr, requested_len));
+    Ok(())
+}
+
+fn preflight_owned_array_capacity<T>(
+    key: ArrayKey,
+    requested_len: usize,
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
+    registered: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+) -> Result<(), String> {
+    let owned_guard = owned.lock().expect("owned array table mutex poisoned");
+    let registered_entry = registered
+        .lock()
+        .expect("registered array table mutex poisoned")
+        .get(&key)
+        .copied();
+    if let Some(array) = owned_guard.get(&key) {
+        if registered_entry
+            .is_none_or(|(registered_ptr, _)| registered_ptr == array.as_ptr() as usize)
+        {
+            return Ok(());
+        }
+    }
+    if let Some((_, registered_len)) = registered_entry {
+        return (registered_len >= requested_len)
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                    "cannot grow host-owned collection storage from {registered_len} to {requested_len}"
+                )
+            });
+    }
+    Ok(())
+}
+
+pub fn preflight_jit_i32_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    preflight_owned_array_capacity(
+        (collection_hash, field_hash),
+        requested_len,
+        owned_i32_arrays(),
+        registered_i32_arrays(),
+    )
+}
+
+pub fn preflight_jit_f32_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    preflight_owned_array_capacity(
+        (collection_hash, field_hash),
+        requested_len,
+        owned_f32_arrays(),
+        registered_f32_arrays(),
+    )
+}
+
+pub fn preflight_jit_f64_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    preflight_owned_array_capacity(
+        (collection_hash, field_hash),
+        requested_len,
+        owned_f64_arrays(),
+        registered_f64_arrays(),
+    )
+}
+
+fn migrate_fallback_array<T: Copy>(
+    key: ArrayKey,
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
+    fallback: &Mutex<HashMap<(i32, i32, i32), T>>,
+) {
+    let mut owned_guard = owned.lock().expect("owned array table mutex poisoned");
+    let Some(array) = owned_guard.get_mut(&key) else {
+        return;
+    };
+    let mut fallback = fallback
+        .lock()
+        .expect("fallback array table mutex poisoned");
+    for (index, slot) in array.iter_mut().enumerate() {
+        if let Some(value) = fallback.remove(&(key.0, key.1, index as i32)) {
+            *slot = value;
+        }
+    }
+}
+
+pub fn ensure_jit_i32_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    let key = (collection_hash, field_hash);
+    ensure_owned_array_capacity(
+        key,
+        requested_len,
+        0,
+        owned_i32_arrays(),
+        registered_i32_arrays(),
+    )?;
+    migrate_fallback_array(key, owned_i32_arrays(), jit_i32_array_global_table());
+    Ok(())
+}
+
+pub fn ensure_jit_f32_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    let key = (collection_hash, field_hash);
+    ensure_owned_array_capacity(
+        key,
+        requested_len,
+        0.0,
+        owned_f32_arrays(),
+        registered_f32_arrays(),
+    )?;
+    migrate_fallback_array(key, owned_f32_arrays(), jit_f32_array_global_table());
+    Ok(())
+}
+
+pub fn ensure_jit_f64_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    let key = (collection_hash, field_hash);
+    ensure_owned_array_capacity(
+        key,
+        requested_len,
+        0.0,
+        owned_f64_arrays(),
+        registered_f64_arrays(),
+    )?;
+    migrate_fallback_array(key, owned_f64_arrays(), jit_f64_array_global_table());
+    Ok(())
+}
+
 pub fn clear_registered_global_memory() {
     registered_i32_ptrs()
         .lock()
@@ -814,10 +1027,18 @@ pub struct JitRuntimeStateSnapshot {
     i32_ptrs: Vec<(usize, i32)>,
     f32_ptrs: Vec<(usize, f32)>,
     f64_ptrs: Vec<(usize, f64)>,
-    i32_arrays: Vec<(usize, Vec<i32>)>,
-    f32_arrays: Vec<(usize, Vec<f32>)>,
-    f64_arrays: Vec<(usize, Vec<f64>)>,
-    u8_arrays: Vec<(usize, Vec<u8>)>,
+    i32_arrays: Vec<RegisteredArraySnapshot<i32>>,
+    f32_arrays: Vec<RegisteredArraySnapshot<f32>>,
+    f64_arrays: Vec<RegisteredArraySnapshot<f64>>,
+    u8_arrays: Vec<RegisteredArraySnapshot<u8>>,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredArraySnapshot<T> {
+    key: ArrayKey,
+    address: usize,
+    values: Vec<T>,
+    owned: bool,
 }
 
 pub fn snapshot_jit_runtime_state() -> JitRuntimeStateSnapshot {
@@ -862,10 +1083,13 @@ pub fn snapshot_jit_runtime_state_bounded(
         i32_ptrs: snapshot_registered_ptrs(registered_i32_ptrs()),
         f32_ptrs: snapshot_registered_ptrs(registered_f32_ptrs()),
         f64_ptrs: snapshot_registered_ptrs(registered_f64_ptrs()),
-        i32_arrays: snapshot_registered_arrays(registered_i32_arrays()),
-        f32_arrays: snapshot_registered_arrays(registered_f32_arrays()),
-        f64_arrays: snapshot_registered_arrays(registered_f64_arrays()),
-        u8_arrays: snapshot_registered_arrays(registered_u8_arrays()),
+        i32_arrays: snapshot_registered_arrays(registered_i32_arrays(), Some(owned_i32_arrays())),
+        f32_arrays: snapshot_registered_arrays(registered_f32_arrays(), Some(owned_f32_arrays())),
+        f64_arrays: snapshot_registered_arrays(registered_f64_arrays(), Some(owned_f64_arrays())),
+        u8_arrays: snapshot_registered_arrays(
+            registered_u8_arrays(),
+            None::<&Mutex<HashMap<ArrayKey, Vec<u8>>>>,
+        ),
     })
 }
 
@@ -998,10 +1222,26 @@ pub fn restore_jit_runtime_state(snapshot: &JitRuntimeStateSnapshot) {
     restore_registered_ptrs(&snapshot.i32_ptrs);
     restore_registered_ptrs(&snapshot.f32_ptrs);
     restore_registered_ptrs(&snapshot.f64_ptrs);
-    restore_registered_arrays(&snapshot.i32_arrays);
-    restore_registered_arrays(&snapshot.f32_arrays);
-    restore_registered_arrays(&snapshot.f64_arrays);
-    restore_registered_arrays(&snapshot.u8_arrays);
+    restore_registered_arrays(
+        &snapshot.i32_arrays,
+        registered_i32_arrays(),
+        Some(owned_i32_arrays()),
+    );
+    restore_registered_arrays(
+        &snapshot.f32_arrays,
+        registered_f32_arrays(),
+        Some(owned_f32_arrays()),
+    );
+    restore_registered_arrays(
+        &snapshot.f64_arrays,
+        registered_f64_arrays(),
+        Some(owned_f64_arrays()),
+    );
+    restore_registered_arrays(
+        &snapshot.u8_arrays,
+        registered_u8_arrays(),
+        None::<&Mutex<HashMap<ArrayKey, Vec<u8>>>>,
+    );
 }
 
 fn snapshot_registered_ptrs<T: Copy>(table: &Mutex<HashMap<i32, usize>>) -> Vec<(usize, T)> {
@@ -1027,27 +1267,69 @@ fn restore_registered_ptrs<T: Copy>(values: &[(usize, T)]) {
 
 fn snapshot_registered_arrays<T: Copy>(
     table: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
-) -> Vec<(usize, Vec<T>)> {
+    owned: Option<&Mutex<HashMap<ArrayKey, Vec<T>>>>,
+) -> Vec<RegisteredArraySnapshot<T>> {
+    let owned_addresses = owned
+        .map(|owned| {
+            owned
+                .lock()
+                .expect("owned array table mutex poisoned")
+                .iter()
+                .map(|(key, values)| (*key, values.as_ptr() as usize))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
     table
         .lock()
         .expect("registered global array table mutex poisoned")
-        .values()
-        .copied()
-        .map(|(address, len)| {
+        .iter()
+        .map(|(key, (address, len))| {
             // Registered array memory remains valid until the in-process runner unregisters it.
-            let values = unsafe { std::slice::from_raw_parts(address as *const T, len) }.to_vec();
-            (address, values)
+            let values = unsafe { std::slice::from_raw_parts(*address as *const T, *len) }.to_vec();
+            RegisteredArraySnapshot {
+                key: *key,
+                address: *address,
+                values,
+                owned: owned_addresses.contains_key(key),
+            }
         })
         .collect()
 }
 
-fn restore_registered_arrays<T: Copy>(arrays: &[(usize, Vec<T>)]) {
-    for (address, values) in arrays {
-        // Restoration is serialized with guest execution at the between-tick boundary.
-        unsafe {
-            std::slice::from_raw_parts_mut(*address as *mut T, values.len()).copy_from_slice(values)
-        };
+fn restore_registered_arrays<T: Copy + Default>(
+    arrays: &[RegisteredArraySnapshot<T>],
+    registered: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+    owned: Option<&Mutex<HashMap<ArrayKey, Vec<T>>>>,
+) {
+    let mut restored = HashMap::new();
+    let mut owned_guard =
+        owned.map(|owned| owned.lock().expect("owned array table mutex poisoned"));
+    if let Some(owned) = owned_guard.as_mut() {
+        owned.retain(|key, _| arrays.iter().any(|array| array.owned && array.key == *key));
     }
+    for array in arrays {
+        let address = if array.owned {
+            let values = owned_guard
+                .as_mut()
+                .expect("owned snapshot requires owned storage")
+                .entry(array.key)
+                .or_default();
+            values.clear();
+            values.extend_from_slice(&array.values);
+            values.as_mut_ptr() as usize
+        } else {
+            // Restoration is serialized with guest execution at the between-tick boundary.
+            unsafe {
+                std::slice::from_raw_parts_mut(array.address as *mut T, array.values.len())
+                    .copy_from_slice(&array.values)
+            };
+            array.address
+        };
+        restored.insert(array.key, (address, array.values.len()));
+    }
+    *registered
+        .lock()
+        .expect("registered array table mutex poisoned") = restored;
 }
 
 pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
@@ -1087,33 +1369,53 @@ pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mu
     if ptr.is_null() {
         return;
     }
+    let key = (collection_hash, field_hash);
+    remove_replaced_owned_array(key, ptr as usize, owned_i32_arrays());
     let table = registered_i32_arrays();
     let mut guard = table
         .lock()
         .expect("registered i32 array table mutex poisoned");
-    guard.insert((collection_hash, field_hash), (ptr as usize, len));
+    guard.insert(key, (ptr as usize, len));
 }
 
 pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mut f32, len: usize) {
     if ptr.is_null() {
         return;
     }
+    let key = (collection_hash, field_hash);
+    remove_replaced_owned_array(key, ptr as usize, owned_f32_arrays());
     let table = registered_f32_arrays();
     let mut guard = table
         .lock()
         .expect("registered f32 array table mutex poisoned");
-    guard.insert((collection_hash, field_hash), (ptr as usize, len));
+    guard.insert(key, (ptr as usize, len));
 }
 
 pub fn register_global_f64_array(collection_hash: i32, field_hash: i32, ptr: *mut f64, len: usize) {
     if ptr.is_null() {
         return;
     }
+    let key = (collection_hash, field_hash);
+    remove_replaced_owned_array(key, ptr as usize, owned_f64_arrays());
     let table = registered_f64_arrays();
     let mut guard = table
         .lock()
         .expect("registered f64 array table mutex poisoned");
-    guard.insert((collection_hash, field_hash), (ptr as usize, len));
+    guard.insert(key, (ptr as usize, len));
+}
+
+fn remove_replaced_owned_array<T>(
+    key: ArrayKey,
+    registered_ptr: usize,
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
+) {
+    let mut guard = owned.lock().expect("owned array table mutex poisoned");
+    if guard
+        .get(&key)
+        .is_some_and(|values| values.as_ptr() as usize != registered_ptr)
+    {
+        guard.remove(&key);
+    }
 }
 
 pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut u8, len: usize) {
@@ -1205,14 +1507,30 @@ pub extern "C" fn stasis_jit_global_i32_array_ptr(
     }
 
     // Fast path: already registered (host-owned or previously allocated).
-    {
+    let registered_len = {
         let table = registered_i32_arrays();
         let guard = table
             .lock()
             .expect("registered i32 array table mutex poisoned");
-        if let Some((ptr, _)) = guard.get(&(collection_hash, field_hash)).copied() {
-            return ptr as *mut i32;
+        if let Some((ptr, registered_len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if registered_len >= len as usize {
+                return ptr as *mut i32;
+            }
+            Some(registered_len)
+        } else {
+            None
         }
+    };
+
+    if registered_len.is_some() {
+        if ensure_jit_i32_array_capacity(collection_hash, field_hash, len as usize).is_err() {
+            return std::ptr::null_mut();
+        }
+        return registered_i32_arrays()
+            .lock()
+            .expect("registered i32 array table mutex poisoned")
+            .get(&(collection_hash, field_hash))
+            .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut i32);
     }
 
     let requested_len = len as usize;
@@ -1266,14 +1584,30 @@ pub extern "C" fn stasis_jit_global_f32_array_ptr(
     }
 
     // Fast path: already registered (host-owned or previously allocated).
-    {
+    let registered_len = {
         let table = registered_f32_arrays();
         let guard = table
             .lock()
             .expect("registered f32 array table mutex poisoned");
-        if let Some((ptr, _)) = guard.get(&(collection_hash, field_hash)).copied() {
-            return ptr as *mut f32;
+        if let Some((ptr, registered_len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if registered_len >= len as usize {
+                return ptr as *mut f32;
+            }
+            Some(registered_len)
+        } else {
+            None
         }
+    };
+
+    if registered_len.is_some() {
+        if ensure_jit_f32_array_capacity(collection_hash, field_hash, len as usize).is_err() {
+            return std::ptr::null_mut();
+        }
+        return registered_f32_arrays()
+            .lock()
+            .expect("registered f32 array table mutex poisoned")
+            .get(&(collection_hash, field_hash))
+            .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut f32);
     }
 
     let requested_len = len as usize;
@@ -1330,14 +1664,30 @@ pub extern "C" fn stasis_jit_global_f64_array_ptr(
     }
 
     // Fast path: already registered (host-owned or previously allocated).
-    {
+    let registered_len = {
         let table = registered_f64_arrays();
         let guard = table
             .lock()
             .expect("registered f64 array table mutex poisoned");
-        if let Some((ptr, _)) = guard.get(&(collection_hash, field_hash)).copied() {
-            return ptr as *mut f64;
+        if let Some((ptr, registered_len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if registered_len >= len as usize {
+                return ptr as *mut f64;
+            }
+            Some(registered_len)
+        } else {
+            None
         }
+    };
+
+    if registered_len.is_some() {
+        if ensure_jit_f64_array_capacity(collection_hash, field_hash, len as usize).is_err() {
+            return std::ptr::null_mut();
+        }
+        return registered_f64_arrays()
+            .lock()
+            .expect("registered f64 array table mutex poisoned")
+            .get(&(collection_hash, field_hash))
+            .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut f64);
     }
 
     let requested_len = len as usize;

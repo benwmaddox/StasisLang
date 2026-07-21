@@ -1,4 +1,5 @@
 use crate::backend::emit::RuntimeHelperLinkage;
+use crate::backend::state_layout::build_state_layout;
 use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::indexer::hash_text;
@@ -17,6 +18,12 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::SystemTime;
 
+pub use crate::backend::state_layout::{
+    StateCollectionFieldLayout as JitStateCollectionFieldLayout,
+    StateCollectionLayout as JitStateCollectionLayout, StateLayout as JitStateLayout,
+    StateOpaqueLayout as JitStateOpaqueLayout, StateScalarLayout as JitStateScalarLayout,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum JitScalarValue {
@@ -24,6 +31,7 @@ pub enum JitScalarValue {
     F32(f32),
     F64(f64),
     Bool(bool),
+    U8(u8),
 }
 
 impl JitScalarValue {
@@ -33,6 +41,7 @@ impl JitScalarValue {
             Self::F32(_) => "f32",
             Self::F64(_) => "f64",
             Self::Bool(_) => "bool",
+            Self::U8(_) => "u8",
         }
     }
 }
@@ -61,7 +70,7 @@ pub struct JitProcess {
     required_emit_roots: Vec<String>,
     local_runtime_helper_trampolines: bool,
     #[cfg(test)]
-    _test_guard: MutexGuard<'static, ()>,
+    _test_guard: Option<MutexGuard<'static, ()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +99,13 @@ impl JitProcess {
             stasis_dynload::clear_registered_global_memory();
         }
 
+        Self::new_inner(
+            #[cfg(test)]
+            Some(_test_guard),
+        )
+    }
+
+    fn new_inner(#[cfg(test)] _test_guard: Option<MutexGuard<'static, ()>>) -> Self {
         Self {
             compiler: Compiler::new(),
             next_slot: 0,
@@ -108,6 +124,29 @@ impl JitProcess {
             #[cfg(test)]
             _test_guard,
         }
+    }
+
+    pub fn staged_candidate(&self) -> Self {
+        let mut candidate = Self::new_inner(
+            #[cfg(test)]
+            None,
+        );
+        for file in self.compiler.files() {
+            candidate.upsert_file(file.path.clone(), file.content.clone());
+        }
+        candidate.required_emit_roots = self.required_emit_roots.clone();
+        candidate.local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
+        candidate
+    }
+
+    pub fn accept_staged_candidate(&mut self, candidate: Self) {
+        #[cfg(test)]
+        let candidate = {
+            let mut candidate = candidate;
+            candidate._test_guard = self._test_guard.take();
+            candidate
+        };
+        *self = candidate;
     }
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
@@ -456,6 +495,158 @@ impl JitProcess {
             .collect()
     }
 
+    pub fn state_layout(&self) -> JitStateLayout {
+        self.compile_analysis_cache
+            .as_ref()
+            .map_or_else(JitStateLayout::default, |analysis| {
+                build_state_layout(
+                    &analysis.global_path_types,
+                    &analysis.collection_infos,
+                    self.compiler.types(),
+                )
+            })
+    }
+
+    pub fn read_global_collection_scalar(
+        &self,
+        path: &str,
+        field: &str,
+        index: i32,
+    ) -> Result<JitScalarValue, String> {
+        let (type_id, capacity) = self.global_collection_value_type(path, field)?;
+        if index < 0 || index >= capacity {
+            return Err(format!(
+                "global collection path '{path}' index {index} is outside capacity {capacity}"
+            ));
+        }
+        let collection_hash = hash_global_path(path);
+        let field_hash = hash_foreach_field_suffix(field);
+        if field.is_empty() && self.global_fixed_text_capacity(path).is_some() {
+            return Ok(JitScalarValue::U8(
+                stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
+                    as u8,
+            ));
+        }
+        match type_id {
+            TYPE_ID_I32 => Ok(JitScalarValue::I32(
+                stasis_dynload::stasis_jit_global_i32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
+            TYPE_ID_F32 => Ok(JitScalarValue::F32(
+                stasis_dynload::stasis_jit_global_f32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
+            TYPE_ID_F64 => Ok(JitScalarValue::F64(
+                stasis_dynload::stasis_jit_global_f64_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
+            TYPE_ID_BOOL => Ok(JitScalarValue::Bool(
+                stasis_dynload::stasis_jit_global_i32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ) != 0,
+            )),
+            type_id if is_u8_type(self.compiler.types(), type_id) => Ok(JitScalarValue::U8(
+                stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
+                    as u8,
+            )),
+            _ => Err(format!(
+                "global collection path '{path}' field '{field}' is not a supported scalar"
+            )),
+        }
+    }
+
+    pub fn write_global_collection_scalar(
+        &self,
+        path: &str,
+        field: &str,
+        index: i32,
+        value: JitScalarValue,
+    ) -> Result<(), String> {
+        let (type_id, capacity) = self.global_collection_value_type(path, field)?;
+        if index < 0 || index >= capacity {
+            return Err(format!(
+                "global collection path '{path}' index {index} is outside capacity {capacity}"
+            ));
+        }
+        let collection_hash = hash_global_path(path);
+        let field_hash = hash_foreach_field_suffix(field);
+        if field.is_empty() && self.global_fixed_text_capacity(path).is_some() {
+            let JitScalarValue::U8(value) = value else {
+                return Err(format!(
+                    "global text path '{path}' does not accept {}",
+                    value.type_name()
+                ));
+            };
+            stasis_dynload::stasis_jit_global_i32_array_store(
+                collection_hash,
+                field_hash,
+                index,
+                i32::from(value),
+            );
+            return Ok(());
+        }
+        match (type_id, value) {
+            (TYPE_ID_I32, JitScalarValue::I32(value)) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
+                )
+            }
+            (TYPE_ID_F32, JitScalarValue::F32(value)) => {
+                stasis_dynload::stasis_jit_global_f32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
+                )
+            }
+            (TYPE_ID_F64, JitScalarValue::F64(value)) => {
+                stasis_dynload::stasis_jit_global_f64_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
+                )
+            }
+            (TYPE_ID_BOOL, JitScalarValue::Bool(value)) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    i32::from(value),
+                )
+            }
+            (type_id, JitScalarValue::U8(value)) if is_u8_type(self.compiler.types(), type_id) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    i32::from(value),
+                )
+            }
+            (_, value) => {
+                return Err(format!(
+                    "global collection path '{path}' field '{field}' does not accept {}",
+                    value.type_name()
+                ))
+            }
+        }
+        Ok(())
+    }
+
     pub fn read_global_scalar(&self, path: &str) -> Result<JitScalarValue, String> {
         let type_id = self.global_path_type(path)?;
         let path_hash = hash_global_path(path);
@@ -528,6 +719,120 @@ impl JitProcess {
             .as_ref()
             .and_then(|analysis| analysis.global_path_types.get(path).copied())
             .ok_or_else(|| format!("global path '{path}' was not found in compiler metadata"))
+    }
+
+    fn global_collection_value_type(&self, path: &str, field: &str) -> Result<(u16, i32), String> {
+        let analysis = self
+            .compile_analysis_cache
+            .as_ref()
+            .ok_or_else(|| "JIT collection metadata is unavailable".to_string())?;
+        if let Some(info) = analysis.collection_infos.get(path) {
+            let type_id = if field.is_empty() {
+                info.element_type
+            } else {
+                info.field_types.get(field).copied()
+            }
+            .ok_or_else(|| {
+                format!("global collection path '{path}' field '{field}' was not found")
+            })?;
+            return Ok((type_id, info.len));
+        }
+        if field.is_empty() {
+            if let Some(capacity) = self.global_fixed_text_capacity(path) {
+                let type_id = analysis
+                    .global_path_types
+                    .get(path)
+                    .and_then(|type_id| self.compiler.types().indexed_element_type_id(*type_id))
+                    .ok_or_else(|| format!("global text path '{path}' has no payload type"))?;
+                return Ok((type_id, capacity));
+            }
+        }
+        Err(format!("global collection path '{path}' was not found"))
+    }
+
+    fn global_fixed_text_capacity(&self, path: &str) -> Option<i32> {
+        let type_id = self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        let category = self.compiler.types().type_info(*type_id)?.category;
+        matches!(category, TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed)
+            .then(|| self.compiler.types().fixed_collection_len(*type_id))
+            .flatten()
+    }
+
+    pub fn global_fixed_text_encoding(&self, path: &str) -> Option<&'static str> {
+        let type_id = self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        match self.compiler.types().type_info(*type_id)?.category {
+            TypeCategory::AsciiFixed => Some("ascii"),
+            TypeCategory::Utf8Fixed => Some("utf8"),
+            _ => None,
+        }
+    }
+
+    pub fn preflight_global_collection_capacity(
+        &self,
+        path: &str,
+        field: &str,
+        capacity: u32,
+    ) -> Result<(), String> {
+        self.collection_capacity_operation(path, field, capacity, false)
+    }
+
+    pub fn ensure_global_collection_capacity(
+        &self,
+        path: &str,
+        field: &str,
+        capacity: u32,
+    ) -> Result<(), String> {
+        self.collection_capacity_operation(path, field, capacity, true)
+    }
+
+    fn collection_capacity_operation(
+        &self,
+        path: &str,
+        field: &str,
+        capacity: u32,
+        grow: bool,
+    ) -> Result<(), String> {
+        let (type_id, _) = self.global_collection_value_type(path, field)?;
+        let capacity = capacity as usize;
+        let collection_hash = hash_global_path(path);
+        let field_hash = hash_foreach_field_suffix(field);
+        let i32_capacity = if grow {
+            stasis_dynload::ensure_jit_i32_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_i32_array_capacity
+        };
+        let f32_capacity = if grow {
+            stasis_dynload::ensure_jit_f32_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_f32_array_capacity
+        };
+        let f64_capacity = if grow {
+            stasis_dynload::ensure_jit_f64_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_f64_array_capacity
+        };
+        if field.is_empty() && self.global_fixed_text_capacity(path).is_some() {
+            return i32_capacity(collection_hash, field_hash, capacity);
+        }
+        match type_id {
+            TYPE_ID_I32 | TYPE_ID_BOOL => i32_capacity(collection_hash, field_hash, capacity),
+            TYPE_ID_F32 => f32_capacity(collection_hash, field_hash, capacity),
+            TYPE_ID_F64 => f64_capacity(collection_hash, field_hash, capacity),
+            type_id if is_u8_type(self.compiler.types(), type_id) => {
+                i32_capacity(collection_hash, field_hash, capacity)
+            }
+            _ => Err(format!(
+                "global collection path '{path}' field '{field}' is not resizable"
+            )),
+        }
     }
 
     pub fn write_i32_global_path(&self, path: &str, value: i32) {
@@ -854,6 +1159,12 @@ fn scalar_type_name(type_id: u16) -> Option<&'static str> {
     }
 }
 
+fn is_u8_type(type_table: &TypeTable, type_id: u16) -> bool {
+    type_table
+        .type_info(type_id)
+        .is_some_and(|info| info.name == "u8")
+}
+
 fn collect_current_string_literals(compiler: &Compiler) -> Result<HashMap<i32, String>, String> {
     let mut literals = HashMap::new();
     for file in compiler.files() {
@@ -1019,6 +1330,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "sys_memmove_f32" | "stasis_jit_sys_memmove_f32" => {
             function_address(stasis_dynload::stasis_jit_sys_memmove_f32 as *const ())
         }
+        "reject_code_swap" | "stasis_jit_reject_code_swap" => {
+            function_address(stasis_dynload::stasis_jit_reject_code_swap as *const ())
+        }
         _ => return None,
     };
     Some(address)
@@ -1028,6 +1342,7 @@ fn seed_fixed_collection_max_length_headers(
     global_path_types: &GlobalPathTypeMap,
     type_table: &TypeTable,
 ) -> Result<(), String> {
+    let mut headers = Vec::new();
     for (path, type_id) in global_path_types {
         let Some(type_info) = type_table.type_info(*type_id) else {
             continue;
@@ -1043,7 +1358,7 @@ fn seed_fixed_collection_max_length_headers(
                         path, payload_bytes
                     )
                 })?;
-                seed_collection_max_length(path, max_length);
+                headers.push((path, max_length));
             }
             TypeCategory::Utf8Fixed => {
                 let Some(payload_bytes) = type_info.layout.payload_size_bytes else {
@@ -1055,16 +1370,19 @@ fn seed_fixed_collection_max_length_headers(
                         path, payload_bytes
                     )
                 })?;
-                seed_collection_max_length(path, max_length);
+                headers.push((path, max_length));
             }
             TypeCategory::ArrayFixed => {
                 let Some(max_length) = type_table.fixed_collection_len(*type_id) else {
                     continue;
                 };
-                seed_collection_max_length(path, max_length);
+                headers.push((path, max_length));
             }
             _ => {}
         }
+    }
+    for (path, max_length) in headers {
+        seed_collection_max_length(path, max_length);
     }
     Ok(())
 }
@@ -1148,6 +1466,7 @@ fn runtime_helper_addresses() -> BTreeMap<String, usize> {
         stasis_jit_global_f64_array_load,
         stasis_jit_global_f64_array_store,
         stasis_jit_global_f64_array_ptr,
+        stasis_jit_reject_code_swap,
     );
     out
 }

@@ -3,6 +3,7 @@ pub(crate) mod emit;
 pub mod jit;
 mod reachability;
 mod runtime_exports;
+pub mod state_layout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineEntrypoints {

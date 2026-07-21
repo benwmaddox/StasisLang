@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
+use stasis_compiler::backend::state_layout::StateLayout;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
-use stasis_compiler::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
+use stasis_compiler::frontend::parser::parse_top_level_functions;
 #[cfg(test)]
 use stasis_compiler::{SimpleI32Condition, SimpleI32ReturnExpr};
 use stasis_jit::{
@@ -11,12 +12,18 @@ use stasis_jit::{
 };
 use stasis_runner::swap::contracts::{
     AotFunctionSymbol, CompileRequest, CompileResult, Diagnostic, DiagnosticSeverity, FnId,
-    FunctionPatch, FunctionPatchSet, JitCodePtrOverride, LayoutHash, StateMapEntry, TargetMode,
+    FunctionPatch, FunctionPatchSet, JitCodePtrOverride, LayoutHash, RequestId, TargetMode,
 };
 use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::SyncSender;
+
+pub(crate) struct PreparedJitSwap {
+    pub(crate) request_id: stasis_runner::swap::contracts::RequestId,
+    pub(crate) candidate: JitProcess,
+}
 
 pub struct IncrementalCompilerBackend {
     source_by_path: BTreeMap<String, String>,
@@ -30,6 +37,9 @@ pub struct IncrementalCompilerBackend {
     enable_aot_link_step: bool,
     last_jit_engine_package: Option<JitEnginePackage>,
     last_aot_engine_bundle: Option<AotEngineBundle>,
+    prepared_jit_swap_tx: Option<SyncSender<PreparedJitSwap>>,
+    pending_jit_candidate: Option<JitProcess>,
+    last_state_layout: Option<StateLayout>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,12 +82,6 @@ struct SelfHostObjectBundle {
 struct EngineFunctionEntry {
     path: String,
     name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StructFieldType {
-    field_name: String,
-    type_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,7 +217,18 @@ impl IncrementalCompilerBackend {
                 .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
             last_jit_engine_package: None,
             last_aot_engine_bundle: None,
+            prepared_jit_swap_tx: None,
+            pending_jit_candidate: None,
+            last_state_layout: None,
         }
+    }
+
+    pub(crate) fn new_with_prepared_jit_swaps(
+        prepared_jit_swap_tx: SyncSender<PreparedJitSwap>,
+    ) -> Self {
+        let mut backend = Self::new();
+        backend.prepared_jit_swap_tx = Some(prepared_jit_swap_tx);
+        backend
     }
 
     pub fn new_self_host_aot_cli(aot_artifact_root: PathBuf) -> Self {
@@ -244,6 +259,9 @@ impl IncrementalCompilerBackend {
             enable_aot_link_step: false,
             last_jit_engine_package: None,
             last_aot_engine_bundle: None,
+            prepared_jit_swap_tx: None,
+            pending_jit_candidate: None,
+            last_state_layout: None,
         }
     }
 
@@ -266,6 +284,9 @@ impl IncrementalCompilerBackend {
             enable_aot_link_step,
             last_jit_engine_package: None,
             last_aot_engine_bundle: None,
+            prepared_jit_swap_tx: None,
+            pending_jit_candidate: None,
+            last_state_layout: None,
         }
     }
 
@@ -291,8 +312,34 @@ impl Default for IncrementalCompilerBackend {
 
 impl CompilerBackend for IncrementalCompilerBackend {
     fn compile(&mut self, request: CompileRequest) -> CompileResult {
+        let request_id = request.request_id;
+        let mut result = self.compile_request(request);
+        if result.status == stasis_runner::swap::contracts::CompileStatus::Success {
+            if let Err(message) = self.publish_prepared_jit_candidate(request_id) {
+                result = CompileResult::failed(
+                    request_id,
+                    vec![Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message,
+                        path: None,
+                        line: None,
+                        column: None,
+                    }],
+                );
+            }
+        } else {
+            self.pending_jit_candidate = None;
+        }
+        result
+    }
+}
+
+impl IncrementalCompilerBackend {
+    fn compile_request(&mut self, request: CompileRequest) -> CompileResult {
         self.last_jit_engine_package = None;
         self.last_aot_engine_bundle = None;
+        self.pending_jit_candidate = None;
+        self.last_state_layout = None;
         let source_delta = match self.refresh_cached_sources(&request.changed_files) {
             Ok(delta) => delta,
             Err(message) => {
@@ -640,7 +687,7 @@ impl IncrementalCompilerBackend {
 
         let mut result = CompileResult::success_with_host_set_metadata(
             request.request_id,
-            self.layout_hash_from_source_cache(),
+            self.layout_hash_from_state_layout(),
             FunctionPatchSet { functions },
             request.host_set_id.clone(),
             request.host_set_hash,
@@ -652,22 +699,6 @@ impl IncrementalCompilerBackend {
             aot_function_symbols,
         );
         result.jit_code_ptr_overrides = jit_code_ptr_overrides;
-        let state_map = match self.state_map_from_source_cache() {
-            Ok(map) => map,
-            Err(message) => {
-                return CompileResult::failed(
-                    request.request_id,
-                    vec![Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message,
-                        path: request.changed_files.first().cloned(),
-                        line: None,
-                        column: None,
-                    }],
-                );
-            }
-        };
-        result.state_map = Some(state_map);
         result
     }
 
@@ -727,7 +758,7 @@ impl IncrementalCompilerBackend {
 
         let mut result = CompileResult::success_with_host_set_metadata(
             request.request_id,
-            self.layout_hash_from_source_cache(),
+            self.layout_hash_from_state_layout(),
             FunctionPatchSet { functions },
             request.host_set_id.clone(),
             request.host_set_hash,
@@ -739,7 +770,6 @@ impl IncrementalCompilerBackend {
             None,
         );
         result.jit_code_ptr_overrides = Some(jit_code_ptr_overrides);
-        result.state_map = Some(self.state_map_from_source_cache()?);
         Ok(result)
     }
 
@@ -784,9 +814,9 @@ impl IncrementalCompilerBackend {
             );
         }
 
-        let mut result = CompileResult::success_with_host_set_metadata(
+        let result = CompileResult::success_with_host_set_metadata(
             request.request_id,
-            self.layout_hash_from_source_cache(),
+            self.layout_hash_from_state_layout(),
             FunctionPatchSet { functions },
             request.host_set_id.clone(),
             request.host_set_hash,
@@ -797,7 +827,6 @@ impl IncrementalCompilerBackend {
             compile.linked_image_sha256,
             Some(aot_function_symbols),
         );
-        result.state_map = Some(self.state_map_from_source_cache()?);
         Ok(result)
     }
 
@@ -847,6 +876,28 @@ impl IncrementalCompilerBackend {
         }
     }
 
+    fn publish_prepared_jit_candidate(&mut self, request_id: RequestId) -> Result<(), String> {
+        let Some(candidate) = self.pending_jit_candidate.take() else {
+            return Ok(());
+        };
+        let Some(sender) = self.prepared_jit_swap_tx.as_ref() else {
+            self.jit_process = candidate;
+            return Ok(());
+        };
+        self.jit_process = candidate.staged_candidate();
+        sender
+            .send(PreparedJitSwap {
+                request_id,
+                candidate,
+            })
+            .map_err(|_| {
+                format!(
+                    "failed publishing staged JIT candidate for request {}",
+                    request_id.0
+                )
+            })
+    }
+
     fn source_cache_has_function(&self, function_name: &str) -> bool {
         let needle = format!("function {function_name}(");
         self.source_by_path
@@ -891,113 +942,19 @@ impl IncrementalCompilerBackend {
         })
     }
 
-    fn layout_hash_from_source_cache(&self) -> LayoutHash {
+    fn layout_hash_from_state_layout(&self) -> LayoutHash {
+        let serialized = serde_json::to_vec(
+            self.last_state_layout
+                .as_ref()
+                .expect("successful compiler result must have canonical state layout"),
+        )
+        .expect("canonical state layout serialization is infallible");
         let mut hasher = Sha256::new();
-        for (path, source) in &self.source_by_path {
-            hasher.update(path.as_bytes());
-            hasher.update([0u8]);
-            hasher.update(source.as_bytes());
-            hasher.update([0xffu8]);
-        }
+        hasher.update(serialized);
         let digest = hasher.finalize();
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&digest);
         LayoutHash(bytes)
-    }
-
-    fn state_map_from_source_cache(&self) -> Result<Vec<StateMapEntry>, String> {
-        let mut struct_fields_by_name: BTreeMap<String, Vec<StructFieldType>> = BTreeMap::new();
-        for (path, source) in &self.source_by_path {
-            let parsed = parse_top_level_type_layout(source).map_err(|error| {
-                format!(
-                    "failed parsing top-level type layout in {} for state map extraction: {error}",
-                    path
-                )
-            })?;
-            for struct_def in parsed.structs {
-                let mut fields = Vec::new();
-                for field in struct_def.fields {
-                    fields.push(StructFieldType {
-                        field_name: field.name,
-                        type_name: field.type_name,
-                    });
-                }
-                struct_fields_by_name.insert(struct_def.name, fields);
-            }
-        }
-
-        let mut leaf_by_path: BTreeMap<String, StateMapEntry> = BTreeMap::new();
-        for (path, source) in &self.source_by_path {
-            let parsed = parse_top_level_type_layout(source).map_err(|error| {
-                format!(
-                    "failed parsing top-level type layout in {} for state map extraction: {error}",
-                    path
-                )
-            })?;
-            for global in parsed.globals {
-                Self::collect_state_map_leaf_entries(
-                    &global.name,
-                    &global.type_name,
-                    &struct_fields_by_name,
-                    &mut Vec::new(),
-                    &mut leaf_by_path,
-                )?;
-            }
-            for block in parsed.global_blocks {
-                for field in block.fields {
-                    let field_path = format!("{}.{}", block.name, field.name);
-                    Self::collect_state_map_leaf_entries(
-                        &field_path,
-                        &field.type_name,
-                        &struct_fields_by_name,
-                        &mut Vec::new(),
-                        &mut leaf_by_path,
-                    )?;
-                }
-            }
-        }
-
-        Ok(leaf_by_path.into_values().collect())
-    }
-
-    fn collect_state_map_leaf_entries(
-        path: &str,
-        type_name: &str,
-        struct_fields_by_name: &BTreeMap<String, Vec<StructFieldType>>,
-        struct_stack: &mut Vec<String>,
-        leaf_by_path: &mut BTreeMap<String, StateMapEntry>,
-    ) -> Result<(), String> {
-        if let Some(fields) = struct_fields_by_name.get(type_name) {
-            if struct_stack.iter().any(|name| name == type_name) {
-                return Err(format!(
-                    "state-map extraction rejected recursive struct '{}' in path '{}'",
-                    type_name, path
-                ));
-            }
-            struct_stack.push(type_name.to_string());
-            for field in fields {
-                let child_path = format!("{}.{}", path, field.field_name);
-                Self::collect_state_map_leaf_entries(
-                    &child_path,
-                    &field.type_name,
-                    struct_fields_by_name,
-                    struct_stack,
-                    leaf_by_path,
-                )?;
-            }
-            struct_stack.pop();
-            return Ok(());
-        }
-
-        leaf_by_path.insert(
-            path.to_string(),
-            StateMapEntry {
-                path: path.to_string(),
-                path_hash: crate::hash_global_path(path),
-                type_name: type_name.to_string(),
-            },
-        );
-        Ok(())
     }
 
     fn compile_jit_engine_package_from_cache(
@@ -1006,15 +963,24 @@ impl IncrementalCompilerBackend {
         source_delta: &SourceCacheDelta,
     ) -> Result<(), String> {
         self.sync_jit_process_sources(source_delta);
-        self.jit_process
-            .compile()
-            .map_err(|error| format!("rust-native JIT engine compile failed: {error:?}"))?;
-        self.jit_process.validate_on_code_swap_signature()?;
-        let package = self
-            .jit_process
+        let mut candidate = if self.prepared_jit_swap_tx.is_some() {
+            self.jit_process.staged_candidate()
+        } else {
+            std::mem::take(&mut self.jit_process)
+        };
+        if let Err(error) = candidate.compile_staged() {
+            if self.prepared_jit_swap_tx.is_none() {
+                self.jit_process = candidate;
+            }
+            return Err(format!("rust-native JIT engine compile failed: {error:?}"));
+        }
+        candidate.validate_on_code_swap_signature()?;
+        let package = candidate
             .build_engine_package(&Self::engine_entrypoints(include_on_code_swap))
             .map_err(|error| format!("failed to build JIT engine package: {error}"))?;
+        self.last_state_layout = Some(candidate.state_layout());
         self.last_jit_engine_package = Some(package);
+        self.pending_jit_candidate = Some(candidate);
         Ok(())
     }
 
@@ -1023,11 +989,22 @@ impl IncrementalCompilerBackend {
         source_delta: &SourceCacheDelta,
     ) -> Result<BTreeMap<String, u64>, String> {
         self.sync_jit_process_sources(source_delta);
-        self.jit_process
-            .compile()
-            .map_err(|error| format!("rust-native JIT compile failed: {error:?}"))?;
-        self.jit_process.validate_on_code_swap_signature()?;
-        Ok(self.jit_process.symbol_code_ptrs())
+        let mut candidate = if self.prepared_jit_swap_tx.is_some() {
+            self.jit_process.staged_candidate()
+        } else {
+            std::mem::take(&mut self.jit_process)
+        };
+        if let Err(error) = candidate.compile_staged() {
+            if self.prepared_jit_swap_tx.is_none() {
+                self.jit_process = candidate;
+            }
+            return Err(format!("rust-native JIT compile failed: {error:?}"));
+        }
+        candidate.validate_on_code_swap_signature()?;
+        let symbol_code_ptrs = candidate.symbol_code_ptrs();
+        self.last_state_layout = Some(candidate.state_layout());
+        self.pending_jit_candidate = Some(candidate);
+        Ok(symbol_code_ptrs)
     }
 
     fn compile_aot_engine_bundle_from_cache(
@@ -1036,6 +1013,7 @@ impl IncrementalCompilerBackend {
         include_on_code_swap: bool,
     ) -> Result<AotEngineBundle, String> {
         let process = self.compile_aot_process_from_source_cache()?;
+        self.last_state_layout = Some(process.state_layout());
 
         let bundle_output_dir = self
             .aot_artifact_root
@@ -1073,10 +1051,11 @@ impl IncrementalCompilerBackend {
     }
 
     fn compile_aot_non_engine_artifacts_from_cache(
-        &self,
+        &mut self,
         request_id: u64,
     ) -> Result<DirectAotArtifactBundle, String> {
         let process = self.compile_aot_process_from_source_cache()?;
+        self.last_state_layout = Some(process.state_layout());
         let output_dir = self
             .aot_artifact_root
             .join("non_engine")
@@ -7280,6 +7259,48 @@ mod tests {
     }
 
     #[test]
+    fn jit_layout_hash_ignores_function_body_only_edits() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_layout_hash_body_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("main.stasis");
+        fs::write(
+            &source,
+            "global score: i32;\nfunction main(): i32 { return score + 1; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let first = backend.compile(CompileRequest::new(
+            RequestId(9_113),
+            vec![source.clone()],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(first.status, CompileStatus::Success);
+
+        fs::write(
+            &source,
+            "global score: i32;\nfunction main(): i32 { return score + 2; }\n",
+        )
+        .expect("rewrite source");
+        let second = backend.compile(CompileRequest::new(
+            RequestId(9_114),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(second.status, CompileStatus::Success);
+        assert_eq!(
+            first.layout_hash, second.layout_hash,
+            "function body changes must not create a parallel layout identity"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn jit_dev_non_engine_source_emits_jit_code_ptr_overrides() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -7330,70 +7351,6 @@ mod tests {
         assert!(backend.last_jit_engine_package().is_none());
         assert!(backend.last_aot_engine_bundle().is_none());
         fs::remove_dir_all(&temp_root).ok();
-    }
-
-    #[test]
-    fn jit_dev_non_engine_result_includes_flattened_state_map_entries() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("stasis_jit_state_map_{stamp}"));
-        fs::create_dir_all(&temp_root).expect("create temp root");
-        let source = temp_root.join("game_logic.stasis");
-        fs::write(
-            &source,
-            "struct Enemy { hp: i32; speed: f32; }\nglobal Game { score: i32; first_enemy: Enemy; }\nfunction main(): i32 { return Game.score; }\n",
-        )
-        .expect("write source");
-
-        let mut backend = IncrementalCompilerBackend::new();
-        let result = backend.compile(CompileRequest::new(
-            RequestId(9_103),
-            vec![source],
-            TargetMode::JitDev,
-        ));
-        assert_eq!(result.status, CompileStatus::Success);
-        let state_map = result
-            .state_map
-            .as_ref()
-            .expect("state map should be populated on successful compile");
-        assert!(
-            state_map
-                .iter()
-                .any(|entry| entry.path == "Game.score" && entry.type_name == "i32"),
-            "expected scalar global block entry in state map"
-        );
-        assert!(
-            state_map
-                .iter()
-                .any(|entry| entry.path == "Game.first_enemy.hp" && entry.type_name == "i32"),
-            "expected flattened struct field entry in state map"
-        );
-        assert!(
-            state_map
-                .iter()
-                .any(|entry| entry.path == "Game.first_enemy.speed" && entry.type_name == "f32"),
-            "expected flattened struct field entry in state map"
-        );
-        fs::remove_dir_all(&temp_root).ok();
-    }
-
-    #[test]
-    fn state_map_extraction_rejects_recursive_structs() {
-        let mut backend = IncrementalCompilerBackend::new();
-        backend.source_by_path.insert(
-            "recursive.stasis".to_string(),
-            "struct Node { next: Node; }\nglobal root: Node;\nfunction main(): i32 { return 0; }\n"
-                .to_string(),
-        );
-        let result = backend.state_map_from_source_cache();
-        assert!(
-            result.is_err(),
-            "recursive struct layout should be rejected"
-        );
-        let message = result.expect_err("state map extraction should fail");
-        assert!(message.contains("recursive struct"));
     }
 
     #[test]

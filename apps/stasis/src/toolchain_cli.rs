@@ -1300,10 +1300,105 @@ fn format_live_plan(data: &Value) -> String {
         .pointer("/reload/expected_reload")
         .and_then(Value::as_str)
         .unwrap_or("reload unknown");
-    if symbols.is_empty() {
+    let mut summary = if symbols.is_empty() {
         format!("{file_count} file(s), {reload}")
     } else {
         format!("{symbols}; {file_count} file(s), {reload}")
+    };
+    if let Some(swap) = data.get("swap") {
+        let compatible = if swap
+            .get("state_layout_compatible")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "compatible"
+        } else {
+            "incompatible"
+        };
+        let migration_steps = swap
+            .get("migration_steps")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let estimated_us = swap
+            .get("estimated_commit_cost_us")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        summary.push_str(&format!(
+            "; state layout {compatible}, {migration_steps} migration step(s), estimated commit {estimated_us} us"
+        ));
+        if let Some(functions) = swap.get("changed_functions").and_then(Value::as_array) {
+            let functions = functions
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            summary.push_str(&format!(
+                "\nchanged functions: {}",
+                if functions.is_empty() {
+                    "none"
+                } else {
+                    &functions
+                }
+            ));
+        }
+        if let (Some(from), Some(to)) = (
+            swap.get("from_layout_version").and_then(Value::as_str),
+            swap.get("to_layout_version").and_then(Value::as_str),
+        ) {
+            summary.push_str(&format!("\nlayout version: {from} -> {to}"));
+        }
+        if let Some(scope) = swap.get("migration_scope") {
+            let kind = string_field(scope, "kind", "none");
+            let path = scope.get("path").and_then(Value::as_str);
+            summary.push_str(&format!(
+                "\nmigration scope: {kind}{}",
+                path.map_or_else(String::new, |path| format!(" ({path})"))
+            ));
+        }
+        if let Some(steps) = swap.get("migration_steps").and_then(Value::as_array) {
+            for step in steps {
+                let path = string_field(step, "path", "state");
+                let field = step.get("field").and_then(Value::as_str);
+                let start = step.get("start_index").and_then(Value::as_u64).unwrap_or(0);
+                let elements = step.get("elements").and_then(Value::as_u64).unwrap_or(1);
+                let target = field.map_or_else(
+                    || path.to_string(),
+                    |field| {
+                        if field.is_empty() {
+                            path.to_string()
+                        } else {
+                            display_live_collection_path(path, field)
+                        }
+                    },
+                );
+                let range = field
+                    .is_some()
+                    .then(|| format!("[{start}..{})", start.saturating_add(elements)))
+                    .unwrap_or_default();
+                summary.push_str(&format!(
+                    "\nmigration: {} {target}{range} ({})",
+                    string_field(step, "kind", "unknown"),
+                    string_field(step, "type_name", "unknown")
+                ));
+            }
+        }
+        if let Some(warnings) = swap.get("warnings").and_then(Value::as_array) {
+            for warning in warnings.iter().filter_map(Value::as_str) {
+                summary.push_str(&format!("\nwarning: {warning}"));
+            }
+        }
+        if let Some(rejection) = swap.get("rejection").and_then(Value::as_str) {
+            summary.push_str(&format!("\nrejected: {rejection}"));
+        }
+    }
+    summary
+}
+
+fn display_live_collection_path(path: &str, field: &str) -> String {
+    if field.is_empty() {
+        format!("{path}[]")
+    } else {
+        format!("{path}[].{field}")
     }
 }
 
@@ -2582,6 +2677,41 @@ mod tests {
         assert!(!output.contains("source"));
         assert!(!output.contains("receipt"));
         assert!(!output.contains('{'));
+    }
+
+    #[test]
+    fn human_live_preview_shows_layout_migration_cost_and_warning() {
+        let response = LiveResponse::success(
+            9,
+            44,
+            "edit_preview",
+            json!({
+                "plan": {
+                    "changed_files": [{"file": "src/main.stasis"}],
+                    "reload": {
+                        "changed_symbols": [{"name": "State"}],
+                        "expected_reload": "ResetRequired"
+                    }
+                },
+                "swap": {
+                    "state_layout_compatible": true,
+                    "changed_functions": ["tick"],
+                    "from_layout_version": "layout-v1",
+                    "to_layout_version": "layout-v2",
+                    "migration_scope": {"kind": "struct", "path": "State"},
+                    "migration_steps": [
+                        {"kind": "copy", "path": "State.score", "type_name": "i32", "elements": 1, "start_index": 0},
+                        {"kind": "initialize", "path": "State.items", "field": "", "type_name": "i32", "elements": 4, "start_index": 4}
+                    ],
+                    "estimated_commit_cost_us": 37,
+                    "warnings": ["collection 'State.items' shrinks from 8 to 4"]
+                }
+            }),
+        );
+        assert_eq!(
+            format_live_response(&response),
+            "preview ready: State; 1 file(s), ResetRequired; state layout compatible, 2 migration step(s), estimated commit 37 us\nchanged functions: tick\nlayout version: layout-v1 -> layout-v2\nmigration scope: struct (State)\nmigration: copy State.score (i32)\nmigration: initialize State.items[4..8) (i32)\nwarning: collection 'State.items' shrinks from 8 to 4"
+        );
     }
 
     #[test]

@@ -251,7 +251,6 @@ impl DevHotSwapPipeline {
                                 result.host_set_id.clone(),
                                 result.host_set_hash,
                                 result.hook_fn_id,
-                                result.state_map.clone(),
                             );
                         }
                     }
@@ -270,7 +269,6 @@ impl DevHotSwapPipeline {
         host_set_id: Option<String>,
         host_set_hash: Option<[u8; 32]>,
         hook_fn_id: Option<FnId>,
-        state_map: Option<Vec<crate::swap::contracts::StateMapEntry>>,
     ) {
         let Some(layout_hash) = layout_hash else {
             return;
@@ -291,7 +289,6 @@ impl DevHotSwapPipeline {
             host_set_id,
             host_set_hash,
             hook_fn_id,
-            state_map,
         };
         let _ = self.commit_request_tx.send(request);
         self.in_flight_commit = Some(request_id);

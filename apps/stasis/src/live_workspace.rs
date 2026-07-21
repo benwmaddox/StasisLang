@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess, JitScalarValue};
+use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess, JitScalarValue, JitStateLayout};
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
@@ -24,10 +24,14 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 
+use crate::state_migration::{
+    activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
+    state_layout_version, StateMigrationPreview as LiveSwapPreview,
+};
+
 const REQUESTS_PER_TICK: usize = 8;
 const MAX_PENDING_LIVE_REQUESTS: usize = 64;
 const MAX_LIVE_EDIT_SOURCE_BYTES: usize = 256 * 1024;
-const MAX_LIVE_STATE_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LIVE_TRANSACTION_ASSIGNMENTS: usize = 64;
 const MAX_STAGED_TEST_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_STAGED_TEST_DIAGNOSTIC_BYTES: usize = 4096;
@@ -51,7 +55,14 @@ impl LiveRunConfig {
 #[derive(Debug, Clone)]
 struct HistoryEntry {
     plan: WorkshopSemanticEditPlan,
+    swap_preview: LiveSwapPreview,
     receipt: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct PendingEdit {
+    plan: WorkshopSemanticEditPlan,
+    swap_preview: LiveSwapPreview,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +77,8 @@ enum PreparedAction {
 struct PreparedEdit {
     request_id: u64,
     plan: WorkshopSemanticEditPlan,
+    swap_preview: LiveSwapPreview,
+    expected_swap_preview: Option<LiveSwapPreview>,
     restore: bool,
     action: PreparedAction,
     tests_ran: bool,
@@ -109,6 +122,7 @@ enum EditPreparationInput {
     },
     Plan {
         plan: WorkshopSemanticEditPlan,
+        expected_swap_preview: Option<LiveSwapPreview>,
         restore: bool,
         run_tests: bool,
         action: PreparedAction,
@@ -136,7 +150,7 @@ pub(crate) struct LiveWorkspace {
     completion_snapshot: Arc<CompletionSnapshot>,
     scratch: ScratchWorkspace,
     watches: BTreeMap<String, Option<JitScalarValue>>,
-    pending_plan: Option<WorkshopSemanticEditPlan>,
+    pending_plan: Option<PendingEdit>,
     pending_requests: VecDeque<LiveRequest>,
     pending_responses: VecDeque<LiveResponse>,
     self_write_hashes: BTreeMap<PathBuf, String>,
@@ -518,25 +532,37 @@ impl LiveWorkspace {
                     preview,
                     run_tests,
                 },
+                jit,
             ),
             LiveCommand::Preview => self
                 .pending_plan
                 .as_ref()
-                .map(|plan| ("edit_preview", json!({"validated": true, "plan": plan})))
+                .map(|pending| {
+                    (
+                        "edit_preview",
+                        json!({
+                            "validated": pending.swap_preview.state_layout_compatible,
+                            "plan": pending.plan,
+                            "swap": pending.swap_preview,
+                        }),
+                    )
+                })
                 .ok_or_else(|| "no validated live semantic preview is pending".to_string()),
             LiveCommand::Apply { run_tests } => {
-                let plan = self
+                let pending = self
                     .pending_plan
                     .clone()
                     .ok_or_else(|| "no validated live semantic preview is pending".to_string())?;
                 self.start_edit_preparation(
                     request_id,
                     EditPreparationInput::Plan {
-                        plan,
+                        plan: pending.plan,
+                        expected_swap_preview: Some(pending.swap_preview),
                         restore: false,
                         run_tests,
                         action: PreparedAction::ApplyPending,
                     },
+                    jit,
                 )
             }
             LiveCommand::Changes => Ok((
@@ -549,6 +575,7 @@ impl LiveWorkspace {
                         "receipt": entry.receipt,
                         "changed_files": entry.plan.changed_files.iter().map(|change| &change.file).collect::<Vec<_>>(),
                         "changed_symbols": entry.plan.reload.changed_symbols,
+                        "swap": entry.swap_preview,
                     })).collect::<Vec<_>>()
                 }),
             )),
@@ -561,10 +588,12 @@ impl LiveWorkspace {
                     request_id,
                     EditPreparationInput::Plan {
                         plan: self.history[index].plan.clone(),
+                        expected_swap_preview: None,
                         restore: true,
                         run_tests,
                         action: PreparedAction::Undo { index },
                     },
+                    jit,
                 )
             }
             LiveCommand::Redo { run_tests } => {
@@ -576,10 +605,12 @@ impl LiveWorkspace {
                         request_id,
                         EditPreparationInput::Plan {
                             plan: self.history[index].plan.clone(),
+                            expected_swap_preview: None,
                             restore: false,
                             run_tests,
                             action: PreparedAction::Redo { index },
                         },
+                        jit,
                     )
                 }
             }
@@ -661,6 +692,7 @@ impl LiveWorkspace {
                         preview,
                         run_tests,
                     },
+                    jit,
                 )
             }
         })();
@@ -756,6 +788,7 @@ impl LiveWorkspace {
         &mut self,
         request_id: u64,
         input: EditPreparationInput,
+        active: &JitProcess,
     ) -> Result<(&'static str, Value), String> {
         if let Some(preparation) = self.edit_preparation.as_ref() {
             return Err(format!(
@@ -765,13 +798,15 @@ impl LiveWorkspace {
         }
         validate_edit_input_size(&input)?;
         let config = self.config.clone();
+        let active_layout = active.state_layout();
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_canceled = Arc::clone(&canceled);
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
             .name(format!("stasis-live-edit-{request_id}"))
             .spawn(move || {
-                let result = prepare_edit(request_id, &config, input, &worker_canceled);
+                let result =
+                    prepare_edit(request_id, &config, input, &active_layout, &worker_canceled);
                 let _ = sender.send(result);
             })
             .map_err(|error| format!("failed starting live edit preparation: {error}"))?;
@@ -885,19 +920,38 @@ impl LiveWorkspace {
                 "live edit preparation canceled",
             ));
         }
-        let prepared = match result {
+        let mut prepared = match result {
             Ok(prepared) => prepared,
             Err(error) => {
                 return Some(LiveResponse::failure(preparation.request_id, tick, error));
             }
         };
+        finalize_runtime_preview(&prepared.candidate, &mut prepared.swap_preview);
+        if prepared
+            .expected_swap_preview
+            .as_ref()
+            .is_some_and(|expected| expected != &prepared.swap_preview)
+        {
+            return Some(LiveResponse::failure(
+                prepared.request_id,
+                tick,
+                "refusing live commit because the regenerated swap preview differs from the validated preview",
+            ));
+        }
         if matches!(prepared.action, PreparedAction::Preview) {
-            self.pending_plan = Some(prepared.plan.clone());
+            self.pending_plan = Some(PendingEdit {
+                plan: prepared.plan.clone(),
+                swap_preview: prepared.swap_preview.clone(),
+            });
             return Some(LiveResponse::success(
                 prepared.request_id,
                 tick,
                 "edit_preview",
-                json!({"validated": true, "plan": prepared.plan}),
+                json!({
+                    "validated": prepared.swap_preview.state_layout_compatible,
+                    "plan": prepared.plan,
+                    "swap": prepared.swap_preview,
+                }),
             ));
         }
         let request_id = prepared.request_id;
@@ -915,8 +969,21 @@ impl LiveWorkspace {
         render_code_ptr: &mut u64,
     ) -> Result<(&'static str, Value), String> {
         verify_prepared_input_hashes(&self.config, &prepared.input_hashes)?;
-        let snapshot =
-            stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_LIVE_STATE_SNAPSHOT_BYTES)?;
+        let active_layout = jit.state_layout();
+        let active_version = state_layout_version(&active_layout)?;
+        if active_version != prepared.swap_preview.from_layout_version {
+            return Err(format!(
+                "refusing live commit because active state layout changed after preview (expected {}, found {})",
+                prepared.swap_preview.from_layout_version, active_version
+            ));
+        }
+        if !prepared.swap_preview.state_layout_compatible {
+            return Err(prepared
+                .swap_preview
+                .rejection
+                .clone()
+                .unwrap_or_else(|| "incoming state layout is incompatible".to_string()));
+        }
         let receipt_directory = self.config.output.join("live-edits");
         let serialized_plan = serde_json::to_string(&prepared.plan)
             .map_err(|error| format!("failed serializing live receipt: {error}"))?;
@@ -939,33 +1006,47 @@ impl LiveWorkspace {
         ) {
             Ok(receipt) => receipt,
             Err(error) => {
-                self.rollback_prepared(&prepared, jit, &snapshot)?;
+                self.rollback_prepared(&prepared)?;
                 return Err(format!(
                     "live receipt failed; disk/runtime remained unchanged: {error}"
                 ));
             }
         };
 
-        if let Err(error) = prepared.candidate.activate_staged_runtime() {
-            self.rollback_prepared(&prepared, jit, &snapshot)?;
-            cleanup_new_receipt(&self.config, &receipt, receipt_existed)?;
-            return Err(format!(
-                "live runtime activation failed; disk/code/state remained unchanged: {error}"
-            ));
-        }
-        stasis_dynload::restore_jit_runtime_state(&snapshot);
-        if let Some(hook) = prepared.package.on_code_swap_code_ptr {
-            if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize) {
-                self.rollback_prepared(&prepared, jit, &snapshot)?;
+        let hook = prepared.package.on_code_swap_code_ptr;
+        let runtime_result = activate_candidate_transactionally(
+            Some(jit),
+            &prepared.candidate,
+            &prepared.swap_preview,
+            hook.is_some(),
+            || {
+                hook.map_or(Ok(()), |code_ptr| {
+                    stasis_dynload::invoke_code_swap_hook(code_ptr as usize)
+                })
+            },
+            Result::is_ok,
+        );
+        let runtime_result = match runtime_result {
+            Ok(result) => result,
+            Err(error) => {
+                self.rollback_prepared(&prepared)?;
                 cleanup_new_receipt(&self.config, &receipt, receipt_existed)?;
                 return Err(format!(
-                    "on_code_swap failed; disk/code/state remained on the prior version: {error}"
+                    "live runtime transaction failed; disk/code/state remained on the prior version: {error}"
                 ));
             }
+        };
+        if let Err(error) = runtime_result {
+            self.rollback_prepared(&prepared)?;
+            cleanup_new_receipt(&self.config, &receipt, receipt_existed)?;
+            return Err(format!(
+                "on_code_swap failed; disk/code/state remained on the prior version: {error}"
+            ));
         }
         *tick_code_ptr = prepared.package.tick_code_ptr;
         *render_code_ptr = prepared.package.render_code_ptr;
         let plan = prepared.plan.clone();
+        let swap_preview = prepared.swap_preview.clone();
         let action = prepared.action.clone();
         let source_items = prepared.source_items;
         let completion_items = prepared.completion_items;
@@ -985,39 +1066,41 @@ impl LiveWorkspace {
                 self.history.truncate(self.history_cursor);
                 self.history.push(HistoryEntry {
                     plan: plan.clone(),
+                    swap_preview: swap_preview.clone(),
                     receipt: receipt.clone(),
                 });
                 self.history_cursor = self.history.len();
                 (
                     "edit_applied",
-                    json!({"plan": plan, "receipt": receipt, "tests": tests}),
+                    json!({"plan": plan, "swap": swap_preview, "receipt": receipt, "tests": tests}),
                 )
             }
             PreparedAction::ApplyPending => {
                 self.history.truncate(self.history_cursor);
                 self.history.push(HistoryEntry {
                     plan: plan.clone(),
+                    swap_preview: swap_preview.clone(),
                     receipt: receipt.clone(),
                 });
                 self.history_cursor = self.history.len();
                 self.pending_plan = None;
                 (
                     "edit_applied",
-                    json!({"plan": plan, "receipt": receipt, "tests": tests}),
+                    json!({"plan": plan, "swap": swap_preview, "receipt": receipt, "tests": tests}),
                 )
             }
             PreparedAction::Undo { index } => {
                 self.history_cursor = index;
                 (
                     "edit_undone",
-                    json!({"index": index, "receipt": receipt, "tests": tests}),
+                    json!({"index": index, "swap": swap_preview, "receipt": receipt, "tests": tests}),
                 )
             }
             PreparedAction::Redo { index } => {
                 self.history_cursor = index + 1;
                 (
                     "edit_redone",
-                    json!({"index": index, "receipt": receipt, "tests": tests}),
+                    json!({"index": index, "swap": swap_preview, "receipt": receipt, "tests": tests}),
                 )
             }
             PreparedAction::Preview => unreachable!("preview never commits"),
@@ -1026,13 +1109,8 @@ impl LiveWorkspace {
         Ok((kind, data))
     }
 
-    fn rollback_prepared(
-        &mut self,
-        prepared: &PreparedEdit,
-        active: &JitProcess,
-        snapshot: &stasis_dynload::JitRuntimeStateSnapshot,
-    ) -> Result<(), String> {
-        let result = rollback_prepared_disk(&self.config, prepared, active, snapshot);
+    fn rollback_prepared(&mut self, prepared: &PreparedEdit) -> Result<(), String> {
+        let result = rollback_prepared_disk(&self.config, prepared);
         self.remember_plan_hashes(&prepared.plan, !prepared.restore);
         result
     }
@@ -1258,6 +1336,7 @@ fn prepare_edit(
     request_id: u64,
     config: &LiveRunConfig,
     input: EditPreparationInput,
+    active_layout: &JitStateLayout,
     canceled: &AtomicBool,
 ) -> Result<PreparedEdit, String> {
     check_preparation_canceled(canceled)?;
@@ -1266,7 +1345,8 @@ fn prepare_edit(
         .iter()
         .map(|file| (file.path.clone(), workshop_source_hash(&file.source)))
         .collect::<BTreeMap<_, _>>();
-    let (candidate_files, plan, restore, run_tests, action) = match input {
+    let (candidate_files, plan, restore, run_tests, mut action, expected_swap_preview) = match input
+    {
         EditPreparationInput::Edit {
             operation,
             target,
@@ -1287,6 +1367,7 @@ fn prepare_edit(
                 } else {
                     PreparedAction::ApplyNew
                 },
+                None,
             )
         }
         EditPreparationInput::Persist {
@@ -1311,26 +1392,58 @@ fn prepare_edit(
                 } else {
                     PreparedAction::ApplyNew
                 },
+                None,
             )
         }
         EditPreparationInput::Plan {
             plan,
+            expected_swap_preview,
             restore,
             run_tests,
             action,
         } => {
             let candidate_files = files_for_plan(&files, &plan, restore)?;
-            (candidate_files, plan, restore, run_tests, action)
+            (
+                candidate_files,
+                plan,
+                restore,
+                run_tests,
+                action,
+                expected_swap_preview,
+            )
         }
     };
-    if plan.reload.expected_reload == ExpectedReload::ResetRequired {
-        return Err(format!(
-            "live edit rejected until layout migration support lands in Maddox #153: {}",
-            plan.reload.reason
-        ));
-    }
     check_preparation_canceled(canceled)?;
     let (candidate, package) = compile_candidate(config, &candidate_files)?;
+    let changed_functions = candidate.symbol_code_ptrs().into_keys().collect();
+    let abi_rejection = (plan.reload.expected_reload == ExpectedReload::ResetRequired
+        && plan
+            .reload
+            .reason
+            .to_ascii_lowercase()
+            .contains("signature changed"))
+    .then(|| {
+        format!(
+            "{} Hot reload cannot migrate function ABI changes.",
+            plan.reload.reason
+        )
+    });
+    let swap_preview = plan_state_migration(
+        active_layout,
+        &candidate.state_layout(),
+        changed_functions,
+        plan.reload.expected_reload == ExpectedReload::ResetRequired,
+        abi_rejection,
+    )?;
+    if matches!(action, PreparedAction::ApplyNew) && swap_preview.requires_explicit_apply {
+        action = PreparedAction::Preview;
+    }
+    if !matches!(action, PreparedAction::Preview) && !swap_preview.state_layout_compatible {
+        return Err(swap_preview
+            .rejection
+            .clone()
+            .unwrap_or_else(|| "incoming state layout is incompatible".to_string()));
+    }
     check_preparation_canceled(canceled)?;
     if run_tests {
         run_staged_tests(config, &candidate_files, request_id, canceled).map_err(|error| {
@@ -1343,6 +1456,8 @@ fn prepare_edit(
     Ok(PreparedEdit {
         request_id,
         plan,
+        swap_preview,
+        expected_swap_preview,
         restore,
         action,
         tests_ran: run_tests,
@@ -1613,18 +1728,9 @@ fn check_preparation_canceled(canceled: &AtomicBool) -> Result<(), String> {
     }
 }
 
-fn rollback_prepared_disk(
-    config: &LiveRunConfig,
-    prepared: &PreparedEdit,
-    active: &JitProcess,
-    snapshot: &stasis_dynload::JitRuntimeStateSnapshot,
-) -> Result<(), String> {
-    let rollback =
-        write_workshop_semantic_plan(&config.project_root, &prepared.plan, !prepared.restore);
-    let activation = active.activate_staged_runtime();
-    stasis_dynload::restore_jit_runtime_state(snapshot);
-    rollback.map_err(|error| format!("disk rollback failed: {error}"))?;
-    activation.map_err(|error| format!("runtime rollback failed: {error}"))
+fn rollback_prepared_disk(config: &LiveRunConfig, prepared: &PreparedEdit) -> Result<(), String> {
+    write_workshop_semantic_plan(&config.project_root, &prepared.plan, !prepared.restore)
+        .map_err(|error| format!("disk rollback failed: {error}"))
 }
 
 fn verify_prepared_input_hashes(
@@ -1927,6 +2033,10 @@ fn parse_scalar_value(
             "false" => Ok(JitScalarValue::Bool(false)),
             _ => Err(format!("invalid bool expression '{expression}'")),
         },
+        JitScalarValue::U8(_) => expression
+            .parse::<u8>()
+            .map(JitScalarValue::U8)
+            .map_err(|error| format!("invalid u8 expression '{expression}': {error}")),
     }
 }
 
@@ -2068,6 +2178,9 @@ mod tests {
     }
 
     fn prepared_tick_edit(config: &LiveRunConfig, request_id: u64) -> PreparedEdit {
+        let (active, _) = compile(config);
+        let active_layout = active.state_layout();
+        drop(active);
         prepare_edit(
             request_id,
             config,
@@ -2085,6 +2198,7 @@ mod tests {
                 preview: false,
                 run_tests: false,
             },
+            &active_layout,
             &AtomicBool::new(false),
         )
         .expect("prepare edit")
@@ -2357,9 +2471,10 @@ mod tests {
     }
 
     #[test]
-    fn layout_edit_is_rejected_before_disk_or_runtime_change() {
+    fn layout_edit_previews_then_preserves_state_and_initializes_new_field() {
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
         let (client, server) = stasis_runner::live::live_session(4);
         let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
         let mut tick_ptr = package.tick_code_ptr;
@@ -2389,12 +2504,732 @@ mod tests {
                 },
             ),
         );
-        assert!(!response.ok);
-        assert!(response.error.expect("error").contains("#153"));
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.kind, "edit_preview");
+        let data = response.data.expect("preview data");
+        assert_eq!(data["validated"], true);
+        assert_eq!(data["swap"]["layout_changed"], true);
+        assert_eq!(data["swap"]["requires_explicit_apply"], true);
+        assert_eq!(data["swap"]["migration_scope"]["kind"], "whole_state");
+        assert!(data["swap"]["changed_functions"]
+            .as_array()
+            .is_some_and(|functions| !functions.is_empty()));
+        assert!(data["swap"]["migration_steps"]
+            .as_array()
+            .expect("migration steps")
+            .iter()
+            .any(|step| step["kind"] == "initialize" && step["path"] == "extra"));
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).expect("after"),
             before
         );
+
+        let applied = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(2, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(applied.ok, "{:?}", applied.error);
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(1)));
+        assert_eq!(jit.read_global_scalar("extra"), Ok(JitScalarValue::I32(0)));
+        assert!(fs::read_to_string(root.join("src/main.stasis"))
+            .expect("source")
+            .contains("global extra: i32;"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn collection_capacity_shrink_warns_and_copies_only_retained_elements() {
+        let (root, config) = project();
+        let sample = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("samples/layout_migration_preview.stasis");
+        fs::write(
+            root.join("src/main.stasis"),
+            fs::read_to_string(sample).expect("migration sample"),
+        )
+        .expect("array source");
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                10,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "globals".into(),
+                        kind: Some("globals".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("global score: i32;\nglobal values: i32[2];".into()),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(response.ok, "{:?}", response.error);
+        let swap = &response.data.expect("preview")["swap"];
+        assert!(swap["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("shrinks from 4 to 2"))));
+
+        let applied = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(11, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(applied.ok, "{:?}", applied.error);
+        assert_eq!(
+            jit.read_global_collection_scalar("values", "", 0),
+            Ok(JitScalarValue::I32(11))
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("values", "", 1),
+            Ok(JitScalarValue::I32(22))
+        );
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(7)));
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(tick_ptr as usize).expect("migrated tick"),
+            19
+        );
+        assert!(jit
+            .read_global_collection_scalar("values", "", 2)
+            .expect_err("new capacity should reject index 2")
+            .contains("outside capacity 2"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn collection_capacity_growth_preserves_prefix_and_initializes_tail() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "global values: i32[2];\nfunction main(): i32 { values[0] = 11; values[1] = 22; return 0; }\nfunction tick(): i32 { return values[0] + values[1]; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("array source");
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                12,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "globals".into(),
+                        kind: Some("globals".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("global values: i32[4];".into()),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "{:?}", preview.error);
+        assert!(preview.data.expect("preview")["swap"]["migration_steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .any(|step| {
+                step["kind"] == "initialize" && step["start_index"] == 2 && step["elements"] == 2
+            }));
+
+        let applied = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(13, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(applied.ok, "{:?}", applied.error);
+        assert_eq!(
+            jit.read_global_collection_scalar("values", "", 0),
+            Ok(JitScalarValue::I32(11))
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("values", "", 1),
+            Ok(JitScalarValue::I32(22))
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("values", "", 2),
+            Ok(JitScalarValue::I32(0))
+        );
+        jit.write_global_collection_scalar("values", "", 3, JitScalarValue::I32(44))
+            .expect("expanded storage accepts the new tail");
+        assert_eq!(
+            jit.read_global_collection_scalar("values", "", 3),
+            Ok(JitScalarValue::I32(44))
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn collection_growth_preview_rejects_host_owned_storage() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "global values: i32[2];\nfunction main(): i32 { return 0; }\nfunction tick(): i32 { return values[0]; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("array source");
+        let (mut jit, package) = compile(&config);
+        let mut host_values = vec![11, 22];
+        stasis_dynload::register_global_i32_array(
+            crate::hash_global_path("values"),
+            0,
+            host_values.as_mut_ptr(),
+            host_values.len(),
+        );
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                18,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "globals".into(),
+                        kind: Some("globals".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("global values: i32[4];".into()),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "{:?}", preview.error);
+        let data = preview.data.expect("preview");
+        assert_eq!(data["validated"], false);
+        assert!(data["swap"]["rejection"]
+            .as_str()
+            .is_some_and(|error| error.contains("host-owned")));
+        assert_eq!(host_values, [11, 22]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn collection_growth_preview_rejects_unbounded_allocation() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "global values: i32[2];\nfunction main(): i32 { return 0; }\nfunction tick(): i32 { return values[0]; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("array source");
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                19,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "globals".into(),
+                        kind: Some("globals".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("global values: i32[3000000];".into()),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "{:?}", preview.error);
+        let data = preview.data.expect("preview");
+        assert_eq!(data["validated"], false);
+        assert!(data["swap"]["rejection"]
+            .as_str()
+            .is_some_and(|error| error.contains("8") && error.contains("live limit")));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn new_collection_commit_allocates_and_initializes_storage() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "global score: i32;\nfunction main(): i32 { score = 7; return 0; }\nfunction tick(): i32 { return score; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("scalar source");
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                20,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "globals".into(),
+                        kind: Some("globals".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("global score: i32;\nglobal fresh_values: i32[4];".into()),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "{:?}", preview.error);
+        assert_eq!(preview.data.expect("preview")["validated"], true);
+
+        let applied = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(21, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(applied.ok, "{:?}", applied.error);
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(7)));
+        assert_eq!(
+            jit.read_global_collection_scalar("fresh_values", "", 3),
+            Ok(JitScalarValue::I32(0))
+        );
+        jit.write_global_collection_scalar("fresh_values", "", 3, JitScalarValue::I32(44))
+            .expect("new storage accepts writes");
+        assert_eq!(
+            jit.read_global_collection_scalar("fresh_values", "", 3),
+            Ok(JitScalarValue::I32(44))
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn new_collection_preview_rejects_unbounded_allocation() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "global score: i32;\nfunction main(): i32 { return 0; }\nfunction tick(): i32 { return score; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("scalar source");
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                22,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "globals".into(),
+                        kind: Some("globals".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("global score: i32;\nglobal huge_values: i32[3000000];".into()),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "{:?}", preview.error);
+        let data = preview.data.expect("preview");
+        assert_eq!(data["validated"], false);
+        assert!(data["swap"]["rejection"]
+            .as_str()
+            .is_some_and(|error| error.contains("8") && error.contains("live limit")));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn text_capacity_shrink_copies_bytes_and_clamps_lengths() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "global label: ascii[4];\nglobal glyphs: utf8[3];\nglobal word: utf8[3];\nfunction main(): i32 { label[0] = 65; label[1] = 66; label[2] = 67; label.length = 4; label.byte_length = 4; glyphs[0] = 195; glyphs[1] = 169; glyphs[2] = 65; glyphs.length = 3; glyphs.byte_length = 3; glyphs.char_length = 2; word[0] = 195; word[1] = 169; word[2] = 65; word.length = 3; word.char_length = 2; return 0; }\nfunction tick(): i32 { return label.length + glyphs.length + word.length; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("text source");
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                14,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "globals".into(),
+                        kind: Some("globals".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some(
+                        "global label: ascii[2];\nglobal glyphs: utf8[1];\nglobal word: utf8[2];"
+                            .into(),
+                    ),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "{:?}", preview.error);
+        let preview_data = preview.data.expect("preview");
+        let swap = &preview_data["swap"];
+        let warnings = swap["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            warnings.iter().any(|warning| warning.contains("label[]")),
+            "{swap:#}\nactive={:#?}",
+            jit.state_layout()
+        );
+        assert!(
+            warnings.iter().any(|warning| warning.contains("glyphs[]")),
+            "{swap:#}\nactive={:#?}",
+            jit.state_layout()
+        );
+        assert!(warnings.iter().any(|warning| warning.contains("word[]")));
+
+        let applied = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(15, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(applied.ok, "{:?}", applied.error);
+        assert_eq!(
+            jit.read_global_scalar("label.length"),
+            Ok(JitScalarValue::I32(2))
+        );
+        assert_eq!(
+            jit.read_global_scalar("glyphs.length"),
+            Ok(JitScalarValue::I32(0))
+        );
+        assert_eq!(
+            jit.read_global_scalar("label.byte_length"),
+            Ok(JitScalarValue::I32(2))
+        );
+        assert_eq!(
+            jit.read_global_scalar("glyphs.byte_length"),
+            Ok(JitScalarValue::I32(0))
+        );
+        assert_eq!(
+            jit.read_global_scalar("glyphs.char_length"),
+            Ok(JitScalarValue::I32(0))
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("label", "", 0),
+            Ok(JitScalarValue::U8(65))
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("glyphs", "", 1),
+            Err("global collection path 'glyphs' index 1 is outside capacity 1".to_string())
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("glyphs", "", 0),
+            Ok(JitScalarValue::U8(0))
+        );
+        assert_eq!(
+            jit.read_global_scalar("word.length"),
+            Ok(JitScalarValue::I32(2))
+        );
+        assert_eq!(
+            jit.read_global_scalar("word.byte_length"),
+            Ok(JitScalarValue::I32(2))
+        );
+        assert_eq!(
+            jit.read_global_scalar("word.char_length"),
+            Ok(JitScalarValue::I32(1))
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("word", "", 0),
+            Ok(JitScalarValue::U8(195))
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("word", "", 1),
+            Ok(JitScalarValue::U8(169))
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn hook_rejection_rolls_back_hook_mutation_code_and_disk() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "extern function reject_code_swap(): void;\nglobal score: i32;\nfunction main(): i32 { score = 7; return 0; }\nfunction tick(): i32 { return score; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("hook source");
+        let before = fs::read_to_string(root.join("src/main.stasis")).expect("before");
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let old_tick_ptr = package.tick_code_ptr;
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                16,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "on_code_swap".into(),
+                        kind: Some("function".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some(
+                        "function on_code_swap(): void { score = 99; reject_code_swap(); return; }"
+                            .into(),
+                    ),
+                    expected_source_hash: None,
+                    preview: true,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "{:?}", preview.error);
+        let rejected = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(17, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(!rejected.ok);
+        assert!(rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("hook requested rejection")));
+        assert_eq!(tick_ptr, old_tick_ptr);
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(7)));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).expect("after"),
+            before
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn hook_rejection_after_growth_restores_old_collection_registration() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "extern function reject_code_swap(): void;\nglobal rollback_values: i32[2];\nfunction main(): i32 { rollback_values[0] = 11; rollback_values[1] = 22; return 0; }\nfunction tick(): i32 { return rollback_values[0] + rollback_values[1]; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { rollback_values[0] = 99; reject_code_swap(); return; }\n",
+        )
+        .expect("hook source");
+        let before = fs::read_to_string(root.join("src/main.stasis")).expect("before");
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                22,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "globals".into(),
+                        kind: Some("globals".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("global rollback_values: i32[4];".into()),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "{:?}", preview.error);
+        let rejected = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(23, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(!rejected.ok);
+        assert_eq!(
+            jit.read_global_collection_scalar("rollback_values", "", 0),
+            Ok(JitScalarValue::I32(11))
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("rollback_values", "", 1),
+            Ok(JitScalarValue::I32(22))
+        );
+        assert!(jit
+            .read_global_collection_scalar("rollback_values", "", 2)
+            .expect_err("old capacity restored")
+            .contains("outside capacity 2"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).expect("after"),
+            before
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn incompatible_state_type_preview_cannot_commit() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "global score: i32;\nglobal spare: i32;\nfunction main(): i32 { score = 7; return 0; }\nfunction tick(): i32 { return score; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("source");
+        let before = fs::read_to_string(root.join("src/main.stasis")).expect("before");
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                20,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "globals".into(),
+                        kind: Some("globals".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("global score: i32;\nglobal spare: f32;".into()),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(response.ok, "{:?}", response.error);
+        let data = response.data.expect("preview");
+        assert_eq!(data["validated"], false);
+        assert!(data["swap"]["rejection"]
+            .as_str()
+            .is_some_and(|text| text.contains("spare")
+                && text.contains("i32")
+                && text.contains("f32")));
+
+        let rejected = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(21, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(!rejected.ok);
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).expect("after"),
+            before
+        );
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(7)));
         fs::remove_dir_all(root).ok();
     }
 

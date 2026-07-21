@@ -69,6 +69,7 @@ float stasis_jit_call_f32_i32_1(int32_t fn, int32_t a0);
 void stasis_jit_sys_memcpy_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n);
 void stasis_jit_sys_memcpy_i32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n);
 void stasis_jit_sys_memcpy_f32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n);
+void stasis_jit_reject_code_swap(void);
 void stasis_jit_sys_memmove_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n);
 void stasis_jit_sys_memmove_i32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n);
 void stasis_jit_sys_memmove_f32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n);

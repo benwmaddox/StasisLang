@@ -99,6 +99,8 @@ pub(crate) struct ForeachCollectionInfo {
     pub(crate) len: i32,
     pub(crate) element_type: Option<TypeId>,
     pub(crate) field_types: BTreeMap<String, TypeId>,
+    pub(crate) element_shape: String,
+    pub(crate) fully_migratable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1042,12 +1044,15 @@ pub(crate) fn collect_foreach_collections_from_type(
             element_type_name,
             struct_fields_by_name,
             type_table,
+            constant_values,
             visiting_structs,
         )?;
         let info = ForeachCollectionInfo {
             len,
             element_type: collection.element_type,
             field_types: collection.field_types,
+            element_shape: collection.element_shape,
+            fully_migratable: collection.fully_migratable,
         };
         if let Some(existing) = out.get(path) {
             if existing != &info {
@@ -1094,13 +1099,22 @@ pub(crate) fn build_collection_info_for_element_type(
     element_type_name: &str,
     struct_fields_by_name: &BTreeMap<String, Vec<ParsedField>>,
     type_table: &mut TypeTable,
+    constant_values: &ConstantValueMap,
     visiting_structs: &mut Vec<String>,
 ) -> Result<ForeachCollectionInfo, String> {
+    let (element_shape, fully_migratable) = collection_element_shape(
+        element_type_name,
+        struct_fields_by_name,
+        constant_values,
+        visiting_structs,
+    )?;
     if let Some(type_id) = resolve_primitive_scalar_type_id(element_type_name, type_table) {
         return Ok(ForeachCollectionInfo {
             len: 0,
             element_type: Some(type_id),
             field_types: BTreeMap::new(),
+            element_shape,
+            fully_migratable,
         });
     }
     if !struct_fields_by_name.contains_key(element_type_name) {
@@ -1109,6 +1123,8 @@ pub(crate) fn build_collection_info_for_element_type(
             len: 0,
             element_type: Some(element_type),
             field_types: BTreeMap::new(),
+            element_shape,
+            fully_migratable,
         });
     }
     let mut field_types = BTreeMap::new();
@@ -1124,7 +1140,77 @@ pub(crate) fn build_collection_info_for_element_type(
         len: 0,
         element_type: None,
         field_types,
+        element_shape,
+        fully_migratable,
     })
+}
+
+fn collection_element_shape(
+    type_name: &str,
+    struct_fields_by_name: &BTreeMap<String, Vec<ParsedField>>,
+    constant_values: &ConstantValueMap,
+    visiting_structs: &mut Vec<String>,
+) -> Result<(String, bool), String> {
+    let type_name = type_name.trim();
+    if matches!(
+        type_name,
+        "i32" | "f32" | "f64" | "bool" | "u8" | "ascii" | "utf8"
+    ) {
+        return Ok((type_name.to_string(), true));
+    }
+    let Some(fields) = struct_fields_by_name.get(type_name) else {
+        return Ok((type_name.to_string(), false));
+    };
+    if visiting_structs
+        .iter()
+        .any(|existing| existing == type_name)
+    {
+        return Err(format!(
+            "recursive collection element shape is unsupported for '{type_name}'"
+        ));
+    }
+    visiting_structs.push(type_name.to_string());
+    let mut shape = String::from("{");
+    let mut fully_migratable = true;
+    for field in fields {
+        if shape.len() > 1 {
+            shape.push(',');
+        }
+        shape.push_str(&field.name);
+        shape.push(':');
+        let field_type = field.type_name.trim();
+        if let Some((element, extent)) = parse_array_type_parts(field_type) {
+            let (element_shape, _) = collection_element_shape(
+                element,
+                struct_fields_by_name,
+                constant_values,
+                visiting_structs,
+            )?;
+            let extent = resolve_fixed_array_extent(extent, constant_values).ok_or_else(|| {
+                format!(
+                    "collection element field '{}.{}' has unresolved fixed extent '{}'",
+                    type_name, field.name, extent
+                )
+            })?;
+            shape.push_str(&element_shape);
+            shape.push('[');
+            shape.push_str(&extent.to_string());
+            shape.push(']');
+            fully_migratable = false;
+        } else {
+            let (field_shape, field_migratable) = collection_element_shape(
+                field_type,
+                struct_fields_by_name,
+                constant_values,
+                visiting_structs,
+            )?;
+            shape.push_str(&field_shape);
+            fully_migratable &= field_migratable;
+        }
+    }
+    shape.push('}');
+    visiting_structs.pop();
+    Ok((shape, fully_migratable))
 }
 
 pub(crate) fn collect_struct_primitive_leaf_fields(
@@ -7629,12 +7715,20 @@ pub(crate) fn build_local_foreach_collection_info(
             len,
             element_type: None,
             field_types: field_types.clone(),
+            element_shape: type_table
+                .type_info(element_type)
+                .map_or_else(|| format!("type#{element_type}"), |info| info.name.clone()),
+            fully_migratable: true,
         });
     }
     Ok(ForeachCollectionInfo {
         len,
         element_type: Some(element_type),
         field_types: BTreeMap::new(),
+        element_shape: type_table
+            .type_info(element_type)
+            .map_or_else(|| format!("type#{element_type}"), |info| info.name.clone()),
+        fully_migratable: true,
     })
 }
 
