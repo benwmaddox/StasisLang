@@ -393,6 +393,37 @@ impl JitProcess {
         scalar_type_name(*type_id)
     }
 
+    pub fn global_binding_type(&self, path: &str) -> Option<&'static str> {
+        let type_id = *self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        if let Some(type_name) = scalar_type_name(type_id) {
+            return Some(type_name);
+        }
+        let type_table = self.compiler.types();
+        match type_table.type_info(type_id)?.category {
+            TypeCategory::AsciiFixed
+            | TypeCategory::AsciiView
+            | TypeCategory::Utf8Fixed
+            | TypeCategory::Utf8View => Some("string"),
+            TypeCategory::ArrayFixed | TypeCategory::ArrayView => {
+                scalar_type_name(type_table.indexed_element_type_id(type_id)?)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn global_binding_capacity(&self, path: &str) -> Option<i32> {
+        let type_id = *self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        self.compiler.types().fixed_collection_len(type_id)
+    }
+
     pub fn global_collection_capacity(&self, path: &str) -> Option<i32> {
         self.compile_analysis_cache
             .as_ref()?

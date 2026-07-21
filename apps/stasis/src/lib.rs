@@ -839,10 +839,52 @@ fn validate_play_binding_targets(
     }
     for field in &metadata.fields {
         let full_path = format!("{}.{}", metadata.global_name, field.json_path);
-        if !jit.has_global_path(&full_path) {
+        let target_type = jit.global_binding_type(&full_path).ok_or_else(|| {
+            format!("binding target property {full_path} does not exist in compiled globals")
+        })?;
+        if target_type != field.type_name {
             return Err(format!(
-                "binding target property {full_path} does not exist in compiled globals"
+                "binding target property {full_path} has type {target_type}; metadata requires {}",
+                field.type_name
             ));
+        }
+        let metadata_capacity =
+            (field.type_name == "string" || field.array_count > 1).then_some(field.array_count);
+        let target_capacity = jit.global_binding_capacity(&full_path);
+        if target_capacity != metadata_capacity {
+            return Err(format!(
+                "binding target property {full_path} has capacity {}; metadata requires {}",
+                target_capacity
+                    .map(|capacity| capacity.to_string())
+                    .unwrap_or_else(|| "scalar".to_string()),
+                metadata_capacity
+                    .map(|capacity| capacity.to_string())
+                    .unwrap_or_else(|| "scalar".to_string())
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_play_binding_targets(
+    loaded: &[(PathBuf, Value, PlayStructMetadata)],
+) -> Result<(), String> {
+    let mut owners = BTreeMap::new();
+    for (data_path, _, metadata) in loaded {
+        let targets = metadata
+            .fields
+            .iter()
+            .map(|field| &field.json_path)
+            .chain(metadata.csv_table.iter().map(|table| &table.row_count_path));
+        for target in targets {
+            let full_path = format!("{}.{}", metadata.global_name, target);
+            if let Some(previous_path) = owners.insert(full_path.clone(), data_path) {
+                return Err(format!(
+                    "binding target property {full_path} is mapped by both {} and {}",
+                    previous_path.display(),
+                    data_path.display()
+                ));
+            }
         }
     }
     Ok(())
@@ -1174,9 +1216,9 @@ fn load_and_apply_play_data_bindings(
                 format!("failed to parse data JSON {}: {error}", data_path.display())
             })?
         };
-        loaded.push((data_root, metadata));
+        loaded.push((data_path.clone(), data_root, metadata));
     }
-    for (_, metadata) in &loaded {
+    for (_, _, metadata) in &loaded {
         if metadata.version != 1 {
             return Err(format!(
                 "unsupported struct-meta version {}; expected 1",
@@ -1184,13 +1226,14 @@ fn load_and_apply_play_data_bindings(
             ));
         }
     }
-    for (data_root, metadata) in &loaded {
+    validate_unique_play_binding_targets(&loaded)?;
+    for (_, data_root, metadata) in &loaded {
         validate_play_binding_source(data_root, metadata)?;
         if let Some(jit) = jit {
             validate_play_binding_targets(metadata, jit)?;
         }
     }
-    for (json_root, metadata) in loaded {
+    for (_, json_root, metadata) in loaded {
         apply_play_data_binding_value(&json_root, &metadata)?;
     }
     Ok(())
@@ -4063,6 +4106,46 @@ mod tests {
     }
 
     #[test]
+    fn validate_play_binding_targets_rejects_wrong_type_and_capacity() {
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            "binding-shape.stasis",
+            "global State { speed: f32; values: i32[2]; }\nfunction main(): i32 { return 0; }\n",
+        );
+        jit.compile().expect("binding shape fixture should compile");
+
+        let wrong_type = PlayStructMetadata {
+            version: 1,
+            global_name: "State".to_string(),
+            csv_table: None,
+            fields: vec![PlayStructFieldMetadata {
+                json_path: "speed".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        };
+        let error = validate_play_binding_targets(&wrong_type, &jit)
+            .expect_err("wrong scalar type should fail");
+        assert!(error.contains("State.speed has type f32; metadata requires i32"));
+
+        let wrong_capacity = PlayStructMetadata {
+            version: 1,
+            global_name: "State".to_string(),
+            csv_table: None,
+            fields: vec![PlayStructFieldMetadata {
+                json_path: "values".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 3,
+            }],
+        };
+        let error = validate_play_binding_targets(&wrong_capacity, &jit)
+            .expect_err("wrong array capacity should fail");
+        assert!(error.contains("State.values has capacity 2; metadata requires 3"));
+    }
+
+    #[test]
     fn load_play_data_bindings_applies_columnar_csv_arrays() {
         let _global_lock = jit_global_table_lock()
             .lock()
@@ -4144,6 +4227,45 @@ mod tests {
             value, 5,
             "the earlier valid file must not be partially applied"
         );
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn load_play_data_bindings_rejects_duplicate_targets_before_mutating_runtime() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let mut value = 5i32;
+        stasis_dynload::register_global_i32_ptr(hash_global_path("state.value"), &mut value);
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_duplicate_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let first_json = temp_root.join("first.json");
+        let first_meta = temp_root.join("first.struct-meta.json");
+        let second_json = temp_root.join("second.json");
+        let second_meta = temp_root.join("second.struct-meta.json");
+        fs::write(&first_json, r#"{"value":9}"#).expect("write first json");
+        fs::write(&second_json, r#"{"value":10}"#).expect("write second json");
+        let metadata = r#"{"version":1,"globalName":"state","fields":[{"jsonPath":"value","type":"i32","arrayCount":1}]}"#;
+        fs::write(&first_meta, metadata).expect("write first metadata");
+        fs::write(&second_meta, metadata).expect("write second metadata");
+
+        let error = load_and_apply_play_data_bindings(
+            &[(first_json, first_meta), (second_json, second_meta)],
+            None,
+        )
+        .expect_err("duplicate targets should be rejected");
+        assert!(error.contains("binding target property state.value is mapped by both"));
+        assert_eq!(value, 5, "duplicate files must not partially apply");
 
         stasis_dynload::clear_registered_global_memory();
         stasis_dynload::clear_jit_i32_global_table();
