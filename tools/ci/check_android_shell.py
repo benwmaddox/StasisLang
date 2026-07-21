@@ -13,6 +13,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java",
@@ -52,6 +53,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiResumePolicy.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/PublishedSpriteCatalog.java",
+    "mobile/android/app/src/main/java/com/stasislang/workshop/StasisPreviewRenderer.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_android_sprite.c",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
@@ -206,6 +208,8 @@ def main() -> int:
     assert '<item name="android:textColorPrimary">#161B22</item>' in styles
 
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
+    preview_renderer = read("mobile/android/app/src/main/java/com/stasislang/workshop/StasisPreviewRenderer.java")
+    workshop_textures = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java")
     onboarding_policy = read(
         "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingPolicy.java"
     )
@@ -365,7 +369,24 @@ def main() -> int:
     assert "startGameLoop();" in activity
     assert "GamePreviewView" in activity
     assert "GLSurfaceView" in activity
-    assert "onDrawFrame" in activity
+    assert "new StasisPreviewRenderer(" in activity
+    assert "onDrawFrame" in preview_renderer
+    assert "drawCommands" in preview_renderer
+    draw_loop = preview_renderer.split("private void drawCommands()", 1)[1].split(
+        "private void appendRect", 1
+    )[0]
+    assert "new " not in draw_loop
+    assert "allocate" not in draw_loop
+    assert "appendSprite(base);" in draw_loop
+    assert "int runEnd = index + 1;" in draw_loop
+    assert "GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)" in preview_renderer
+    assert "GLES20.glScissor" in preview_renderer
+    assert "WorkshopTextureProvider" in activity
+    assert "implements StasisPreviewRenderer.TextureProvider" in workshop_textures
+    assert "SparseArray<SpriteTexture>" in workshop_textures
+    assert "projectChanged(projectRootPath, currentProjectRoot)" in workshop_textures
+    assert "clearTextures();" in workshop_textures
+    assert "private final int[] deletedTexture = new int[1]" in workshop_textures
     assert "extractIntField" in activity
     assert "private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY]" in activity
     assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in activity
@@ -375,7 +396,7 @@ def main() -> int:
     assert '"GameState.collected_count"' in activity
     assert '"keepsakes="' in activity
     assert "garden complete" in activity
-    assert "private String projectRootPath" in activity
+    assert "String projectRootPath" in activity
     assert "nativeCompileProject(projectRootPath())" in activity
     assert "String.format" not in activity
     assert "gamePreview.setRenderFrameValues(nativeFrameValues)" in activity
@@ -500,11 +521,12 @@ def main() -> int:
     assert "Attach these rendered pixels" in activity
     assert "Attach logical render/runtime/input snapshot" in activity
     assert "Nothing is sent until selected here and Queue AI Change is pressed" in activity
-    assert "GLES20.glReadPixels" in activity
-    assert "lastDrawnFrame" in activity
-    assert "MAX_PREVIEW_CAPTURE_PIXELS = 8_000_000L" in activity
-    assert "preview framebuffer exceeds the 8 megapixel capture limit" in activity
-    assert "Bitmap.createScaledBitmap" in activity
+    assert "GLES20.glReadPixels" in preview_renderer
+    assert "capturedFrame = capture == null ? null : frame.clone()" in preview_renderer
+    assert "lastDrawnFrame" not in preview_renderer
+    assert "MAX_CAPTURE_PIXELS = 8_000_000" in preview_renderer
+    assert "preview framebuffer exceeds the 8 megapixel capture limit" in preview_renderer
+    assert "Bitmap.createScaledBitmap" in preview_renderer
     assert "selected_preview_logical_snapshot" in activity
     assert '"captured-preview.png"' in activity
     assert "clearPendingPreviewCapture();" in activity
@@ -1222,23 +1244,23 @@ def main() -> int:
     assert "gamePreview.touchY()" in activity
     assert "gamePreview.touchActive()" in activity
     assert "MotionEvent" in activity
-    assert "RENDER_COMMAND_STRIDE = 13" in activity
-    assert "drawBatch((runEnd - index) * RECT_VERTICES)" in activity
-    assert "drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture)" in activity
-    assert "GLES20.glScissor" in activity
-    assert "sameClip(base, runBase)" in activity
-    assert "frameValues[5]" in activity
-    assert "frameValues[base + 6]" in activity
-    assert "GLES20.glDrawArrays" in activity
-    assert "GL_TRIANGLES" in activity
-    assert "glUniform4f" not in activity
-    assert "attribute vec4 aColor" in activity
-    assert "TEXTURE_FRAGMENT_SHADER" in activity
-    assert "nativeResolveSpriteAsset" in activity
-    assert "nativeDecodeSvgSprite" in activity
-    assert "createFallbackTexture" in activity
-    assert "decoded sprite dimensions do not match the manifest" in activity
-    assert "glTexImage2D" in activity
+    assert "COMMAND_STRIDE = 13" in preview_renderer
+    assert "drawRectBatch((runEnd - index) * RECT_VERTICES)" in preview_renderer
+    assert "drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture)" in preview_renderer
+    assert "GLES20.glScissor" in preview_renderer
+    assert "sameClip(base, runBase)" in preview_renderer
+    assert "frame[5]" in preview_renderer
+    assert "frame[base + 6]" in preview_renderer
+    assert "GLES20.glDrawArrays" in preview_renderer
+    assert "GL_TRIANGLES" in preview_renderer
+    assert "glUniform4f" not in preview_renderer
+    assert "attribute vec4 aColor" in preview_renderer
+    assert "TEXTURE_FRAGMENT_SHADER" in preview_renderer
+    assert "nativeResolveSpriteAsset" in workshop_textures
+    assert "nativeDecodeSvgSprite" in workshop_textures
+    assert "createFallbackTexture" in workshop_textures
+    assert "decoded sprite dimensions do not match the manifest" in workshop_textures
+    assert "glTexImage2D" in workshop_textures
     assert "applySelectedEdit" in activity
     assert "persistSelectedEdit" in activity
     assert "getFilesDir()" in activity
@@ -1300,16 +1322,20 @@ def main() -> int:
     assert "Manual Symbols and Source" not in published_activity
     assert "GameSurfaceView" in published_activity
     assert "GLSurfaceView" in published_activity
-    assert "onDrawFrame" in published_activity
+    assert "new StasisPreviewRenderer(" in published_activity
+    assert "onDrawFrame" not in published_activity
     assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in published_activity
     assert "event.getPointerCount() >= 3" in published_activity
     assert "PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID" in published_activity
     assert "PublishedSpriteCatalog" in published_activity
-    assert "drawSpriteBatch" in published_activity
+    assert "drawSpriteBatch" in preview_renderer
     assert "nativeDecodeSvgSpriteBytes" in published_activity
     assert 'MANIFEST = ROOT + "assets/manifest.json"' in published_sprites
     assert "MessageDigest.getInstance(\"SHA-256\")" in published_sprites
-    assert "spriteCatalog.textureFor" in published_activity
+    assert "implements StasisPreviewRenderer.TextureProvider" in published_sprites
+    assert "textureFor(int handle)" in published_sprites
+    assert "SparseIntArray textures" in published_sprites
+    assert "SparseBooleanArray failedHandles" in published_sprites
     assert '"com.stasislang.pong"' in device_script
     assert "ensureBundledProject" not in published_activity
     workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")

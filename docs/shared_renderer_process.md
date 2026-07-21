@@ -40,11 +40,19 @@ Shipping CMake builds set `STASIS_GRAPHICS_SDL_ONLY=ON`. Android and iOS shells
 add only lifecycle, asset-root, input/surface, and package glue. Windows CI
 builds this same SDL-only target and runs the portable trace contract test.
 
-The Android Workshop and its bundled Published preview flavor retain an embedded
-GLES development adapter. They are tested on-device for preview correctness, but
-they do not yet share the SDL resource lifecycle and are not evidence of pixel
-parity with a shipping package. Published game artifacts use
-`stasis package-mobile` and the SDL runtime. The old desktop GL adapter is
-available only when CMake is explicitly configured with
-`STASIS_GRAPHICS_SDL_ONLY=OFF`; it is not packaged or exercised as the canonical
-process.
+The Android Workshop menus remain native Android UI. Its embedded game canvas
+cannot use SDL's single Android window without handing the editor activity and
+surface lifecycle to SDL, so Workshop and the bundled Published preview flavor
+share one thin `StasisPreviewRenderer` GLES adapter instead. Both flavors use the
+same command interpreter, batching, clipping, rotation, alpha, filtering, and
+fallback behavior; only their texture sources differ. The steady-state draw loop
+uses fixed command arrays and direct vertex buffers. Texture uploads happen on
+first use or an explicit Workshop asset change, and framebuffer allocations
+happen only for an explicit screenshot capture.
+
+Published shipping artifacts use `stasis package-mobile` and the SDL runtime.
+The preview adapter is therefore an embedded-editor boundary, not a competing
+shipping renderer. It performs no per-command JNI calls and adds no additional
+full-frame copy. The old desktop GL adapter is available only when CMake is
+explicitly configured with `STASIS_GRAPHICS_SDL_ONLY=OFF`; it is not packaged or
+exercised as the canonical process.

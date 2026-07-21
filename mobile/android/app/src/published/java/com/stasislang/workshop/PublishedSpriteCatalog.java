@@ -5,6 +5,9 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.opengl.GLES20;
 import android.opengl.GLUtils;
+import android.util.SparseArray;
+import android.util.SparseBooleanArray;
+import android.util.SparseIntArray;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -14,12 +17,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
 
-final class PublishedSpriteCatalog {
+final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvider {
     private static final String ROOT = "stasis_game/";
     private static final String MANIFEST = ROOT + "assets/manifest.json";
     private static final int MAX_MANIFEST_BYTES = 1024 * 1024;
@@ -29,9 +28,9 @@ final class PublishedSpriteCatalog {
     private static final long MAX_PIXELS = 16_000_000L;
 
     private final AssetManager assets;
-    private final Map<Integer, SpriteAsset> sprites = new HashMap<>();
-    private final Map<Integer, Integer> textures = new HashMap<>();
-    private final Set<Integer> failedHandles = new HashSet<>();
+    private final SparseArray<SpriteAsset> sprites = new SparseArray<>();
+    private final SparseIntArray textures = new SparseIntArray();
+    private final SparseBooleanArray failedHandles = new SparseBooleanArray();
     private boolean manifestRead;
     private boolean manifestValid;
     private int fallbackTexture;
@@ -40,16 +39,18 @@ final class PublishedSpriteCatalog {
         this.assets = assets;
     }
 
-    void onSurfaceCreated() {
+    @Override
+    public void onSurfaceCreated() {
         textures.clear();
         failedHandles.clear();
         fallbackTexture = createFallbackTexture();
     }
 
-    int textureFor(int handle) {
-        Integer cached = textures.get(handle);
-        if (cached != null) return cached;
-        if (failedHandles.contains(handle)) return fallbackTexture;
+    @Override
+    public int textureFor(int handle) {
+        int cached = textures.get(handle, 0);
+        if (cached != 0) return cached;
+        if (failedHandles.get(handle)) return fallbackTexture;
         try {
             ensureManifest();
             SpriteAsset sprite = sprites.get(handle);
@@ -66,7 +67,7 @@ final class PublishedSpriteCatalog {
             textures.put(handle, texture);
             return texture;
         } catch (Exception error) {
-            failedHandles.add(handle);
+            failedHandles.put(handle, true);
             return fallbackTexture;
         }
     }
@@ -96,9 +97,10 @@ final class PublishedSpriteCatalog {
                 throw new IOException("invalid packaged sprite metadata");
             }
             int handle = stableHandle("sprite:" + id);
-            if (sprites.put(handle, new SpriteAsset(path, hash, encoding, width, height)) != null) {
+            if (sprites.get(handle) != null) {
                 throw new IOException("packaged sprite handle collision");
             }
+            sprites.put(handle, new SpriteAsset(path, hash, encoding, width, height));
         }
         manifestValid = true;
     }

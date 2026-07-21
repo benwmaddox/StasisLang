@@ -411,7 +411,7 @@ impl AotProcess {
         })?;
 
         let mut object_paths_by_function: BTreeMap<String, PathBuf> = BTreeMap::new();
-        let mut manifest_rows: Vec<(String, String, String)> = Vec::new();
+        let mut manifest_rows: Vec<(String, String, String, u16)> = Vec::new();
         for artifact in &self.artifacts {
             let function = self
                 .compiler
@@ -451,6 +451,7 @@ impl AotProcess {
                 function.name.clone(),
                 artifact.symbol_name.clone(),
                 object_file_name,
+                function.return_type,
             ));
         }
 
@@ -880,7 +881,7 @@ fn json_escape(value: &str) -> String {
 fn build_engine_bundle_manifest(
     optimization_profile: AotOptimizationProfile,
     entrypoints: &EngineEntrypoints,
-    rows: &[(String, String, String)],
+    rows: &[(String, String, String, u16)],
     string_literals: &BTreeMap<i32, String>,
     collection_max_lengths: &BTreeMap<String, i32>,
 ) -> String {
@@ -909,13 +910,14 @@ fn build_engine_bundle_manifest(
     }
     out.push_str("  },\n");
     out.push_str("  \"functions\": [\n");
-    for (index, (name, symbol, object_file)) in rows.iter().enumerate() {
+    for (index, (name, symbol, object_file, return_type)) in rows.iter().enumerate() {
         let comma = if index + 1 < rows.len() { "," } else { "" };
         out.push_str(&format!(
-            "    {{\"name\":\"{}\",\"symbol\":\"{}\",\"object\":\"{}\"}}{}\n",
+            "    {{\"name\":\"{}\",\"symbol\":\"{}\",\"object\":\"{}\",\"return_type\":{}}}{}\n",
             json_escape(name),
             json_escape(symbol),
             json_escape(object_file),
+            return_type,
             comma
         ));
     }
@@ -969,6 +971,64 @@ mod tests {
         expected_clif_markers: &'static [(&'static str, &'static [&'static str])],
     }
 
+    const RENDER_TRACE_FIXTURE: &str = r#"
+function @extern("stasis_jit_render_v1_trace") native_render_trace(
+    cmd_i32: i32[], cmd_i32_len: i32,
+    cmd_f32: f32[], cmd_f32_len: i32,
+    cmd_u8: u8[], cmd_u8_len: i32
+): i32;
+
+global cmd_i32: i32[34848];
+global cmd_f32: f32[92292];
+global cmd_u8: u8[65536];
+
+function main(): i32 {
+    cmd_i32[0] = 1196967473;
+    cmd_i32[1] = 1;
+    cmd_i32[2] = 3;
+    cmd_i32[3] = 1;
+    cmd_i32[4] = 1;
+    cmd_i32[7] = 1;
+    cmd_i32[9] = 3;
+
+    cmd_f32[0] = 0.05;
+    cmd_f32[1] = 0.10;
+    cmd_f32[2] = 0.15;
+    cmd_f32[3] = 1.0;
+    cmd_f32[4] = 10.0;
+    cmd_f32[5] = 20.0;
+    cmd_f32[6] = 30.0;
+    cmd_f32[7] = 40.0;
+    cmd_f32[8] = 0.25;
+    cmd_f32[9] = 0.50;
+    cmd_f32[10] = 0.75;
+    cmd_f32[11] = 1.0;
+
+    cmd_i32[32] = 17;
+    cmd_i32[33] = 50;
+    cmd_i32[34] = 60;
+    cmd_i32[35] = 70;
+    cmd_i32[36] = 80;
+    cmd_i32[37] = 45;
+    cmd_i32[38] = 192;
+
+    cmd_i32[28704] = 4;
+    cmd_i32[28705] = 0;
+    cmd_i32[28706] = 2;
+    cmd_f32[80004] = 90.0;
+    cmd_f32[80005] = 100.0;
+    cmd_f32[80006] = 1.0;
+    cmd_f32[80007] = 0.5;
+    cmd_f32[80008] = 0.25;
+    cmd_f32[80009] = 1.0;
+    cmd_u8[0] = 79;
+    cmd_u8[1] = 75;
+    cmd_u8[2] = 0;
+
+    return native_render_trace(cmd_i32, 34848, cmd_f32, 92292, cmd_u8, 65536);
+}
+"#;
+
     #[cfg(windows)]
     fn run_linked_i32_noarg_fixture(
         process: &AotProcess,
@@ -983,8 +1043,28 @@ mod tests {
         let temp_root = std::env::temp_dir().join(format!("stasis_aot_fixture_{label}_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
         let exe_path = temp_root.join(format!("{function_name}_{label}.exe"));
-        let link_result =
-            process.link_executable_for_i32_noarg_function(function_name, &exe_path, link_config);
+        let mut effective_config = link_config.clone();
+        let debug_dir = std::env::current_exe()
+            .expect("current test executable")
+            .parent()
+            .expect("target debug deps directory")
+            .to_path_buf();
+        let import_library = debug_dir.join("stasis_dynload.dll.lib");
+        let runtime_dll = debug_dir.join("stasis_dynload.dll");
+        assert!(
+            import_library.is_file(),
+            "missing {}",
+            import_library.display()
+        );
+        assert!(runtime_dll.is_file(), "missing {}", runtime_dll.display());
+        effective_config.runtime_lib_paths.push(import_library);
+        fs::copy(&runtime_dll, temp_root.join("stasis_dynload.dll"))
+            .expect("copy AOT test runtime");
+        let link_result = process.link_executable_for_i32_noarg_function(
+            function_name,
+            &exe_path,
+            &effective_config,
+        );
         if let Err(ref message) = link_result {
             if message.contains("undefined symbol") {
                 eprintln!(
@@ -1042,15 +1122,19 @@ mod tests {
             },
             ParityCorpusCase {
                 label: "renderer_command_trace",
-                source: "global cmd: i32[15];\nfunction emit_renderer_trace(): i32 {\n    cmd[0] = 1196967473;\n    cmd[1] = 1;\n    cmd[2] = 3;\n    cmd[3] = 1;\n    cmd[4] = 1;\n    cmd[5] = 1;\n    cmd[6] = 17;\n    cmd[7] = 10;\n    cmd[8] = 20;\n    cmd[9] = 30;\n    cmd[10] = 40;\n    cmd[11] = 45;\n    cmd[12] = 192;\n    cmd[13] = 4;\n    cmd[14] = 6;\n    let trace: i32 = 0;\n    for (let i: i32 = 0; i < 15; i += 1) {\n        trace = (trace * 17 + cmd[i]) % 251;\n    }\n    return trace;\n}\nfunction main(): i32 { return emit_renderer_trace(); }\n",
-                expected_exit: 189,
-                expected_extern_symbols: &[],
+                source: RENDER_TRACE_FIXTURE,
+                expected_exit: 975_559_585,
+                expected_extern_symbols: &[(
+                    "native_render_trace",
+                    "stasis_jit_render_v1_trace",
+                )],
                 expected_string_literals: &[],
-                expected_collection_max_lengths: &[("cmd", 15)],
-                expected_clif_markers: &[
-                    ("main", &["call"]),
-                    ("emit_renderer_trace", &["call", "brif", "jump"]),
+                expected_collection_max_lengths: &[
+                    ("cmd_i32", 34_848),
+                    ("cmd_f32", 92_292),
+                    ("cmd_u8", 65_536),
                 ],
+                expected_clif_markers: &[("main", &["call"])],
             },
             ParityCorpusCase {
                 label: "control_flow_branching",

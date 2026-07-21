@@ -69,10 +69,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.FloatBuffer;
-import java.nio.IntBuffer;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -143,7 +139,7 @@ public final class MainActivity extends Activity {
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
-    private static final int MAX_RENDER_COMMANDS = 8;
+    private static final int MAX_RENDER_COMMANDS = StasisPreviewRenderer.COMMAND_CAPACITY;
     private static final int MAX_AI_AGENT_TURNS = 25;
     private static final int MAX_AI_TOOL_CALLS_PER_BATCH = 12;
     private static final int MAX_AI_READ_ONLY_BATCHES = 2;
@@ -151,7 +147,6 @@ public final class MainActivity extends Activity {
     private static final int MAX_AI_IMAGE_ATTACHMENTS = 4;
     private static final int MAX_AI_IMAGE_ATTACHMENT_BYTES = 12 * 1024 * 1024;
     private static final int MAX_AI_GENERATED_BASE64_CHARS = ((8 * 1024 * 1024 + 2) / 3) * 4 + 16;
-    private static final long MAX_PREVIEW_CAPTURE_PIXELS = 8_000_000L;
     private static final int MAX_COMMAND_HISTORY = 20;
     private static final long GITHUB_AUTO_SYNC_DEBOUNCE_MS = 2_000L;
     private static final int MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024;
@@ -170,19 +165,9 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
     private static final double GPT_IMAGE_2_LOW_1024_USD = 0.006;
-    private static final int RENDER_FRAME_HEADER_SIZE = 6;
-    private static final int RENDER_COMMAND_STRIDE = 13;
-    private static final int RENDER_FRAME_I32_CAPACITY =
-            RENDER_FRAME_HEADER_SIZE + MAX_RENDER_COMMANDS * RENDER_COMMAND_STRIDE;
-    private static final int RECT_VERTICES = 6;
-    private static final int RENDER_VERTEX_FLOATS = 6;
-    private static final int RENDER_VERTEX_BYTES = RENDER_VERTEX_FLOATS * 4;
-    private static final int RENDER_VERTEX_BUFFER_FLOATS =
-            MAX_RENDER_COMMANDS * RECT_VERTICES * RENDER_VERTEX_FLOATS;
-    private static final int SPRITE_VERTEX_FLOATS = 8;
-    private static final int SPRITE_VERTEX_BYTES = SPRITE_VERTEX_FLOATS * 4;
-    private static final int SPRITE_VERTEX_BUFFER_FLOATS =
-            MAX_RENDER_COMMANDS * RECT_VERTICES * SPRITE_VERTEX_FLOATS;
+    private static final int RENDER_FRAME_HEADER_SIZE = StasisPreviewRenderer.FRAME_HEADER_SIZE;
+    private static final int RENDER_COMMAND_STRIDE = StasisPreviewRenderer.COMMAND_STRIDE;
+    private static final int RENDER_FRAME_I32_CAPACITY = StasisPreviewRenderer.FRAME_I32_CAPACITY;
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
     private LinearLayout manualEditBody;
@@ -355,8 +340,8 @@ public final class MainActivity extends Activity {
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
     private static native String nativeGetRuntimeI32(String projectRoot, String path);
-    private static native String nativeResolveSpriteAsset(String projectRoot, int handle);
-    private static native int[] nativeDecodeSvgSprite(String path, int width, int height);
+    static native String nativeResolveSpriteAsset(String projectRoot, int handle);
+    static native int[] nativeDecodeSvgSprite(String path, int width, int height);
     private static native String nativeRunTests(String projectRoot);
     private static native String nativeCodexBeginDeviceLogin(String codexHome);
     private static native String nativeCodexAccountStatus(String codexHome);
@@ -10155,7 +10140,7 @@ public final class MainActivity extends Activity {
         return trimmed.substring("function ".length(), bodyStart).trim();
     }
 
-    private File projectRoot() {
+    File projectRoot() {
         return projectRootFile;
     }
 
@@ -10246,7 +10231,7 @@ public final class MainActivity extends Activity {
             out.add(new SourceFile(path, file, readTextFile(file)));
         }
     }
-    private String projectRootPath() {
+    String projectRootPath() {
         return projectRootPath;
     }
     private ProjectSnapshot loadBundledProject() {
@@ -11281,7 +11266,7 @@ public final class MainActivity extends Activity {
         }
 
         private final MainActivity activity;
-        private final PreviewRenderer renderer;
+        private final StasisPreviewRenderer renderer;
         private int touchX;
         private int touchY;
         private boolean touchActive;
@@ -11290,7 +11275,9 @@ public final class MainActivity extends Activity {
             super(activity);
             this.activity = activity;
             setEGLContextClientVersion(2);
-            renderer = new PreviewRenderer(activity);
+            renderer = new StasisPreviewRenderer(
+                    new WorkshopTextureProvider(activity),
+                    activity::recordRenderTimeNanos);
             setRenderer(renderer);
             setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
             setFocusable(true);
@@ -11309,12 +11296,12 @@ public final class MainActivity extends Activity {
         }
 
         void setRenderFrameValues(int[] frameValues) {
-            renderer.setFrameValues(frameValues);
+            renderer.setFrame(frameValues);
             requestRender();
         }
 
         void captureFrame(CaptureCallback callback) {
-            renderer.requestCapture(callback);
+            renderer.requestCapture(callback::onCaptured);
             requestRender();
         }
 
@@ -11323,505 +11310,12 @@ public final class MainActivity extends Activity {
             touchX = Math.round(event.getX());
             touchY = Math.round(event.getY());
             int action = event.getActionMasked();
-            if (BuildConfig.STASIS_PUBLISHED_BUILD && action == MotionEvent.ACTION_POINTER_DOWN && event.getPointerCount() >= 3) {
+            if (BuildConfig.STASIS_PUBLISHED_BUILD && action == MotionEvent.ACTION_POINTER_DOWN
+                    && event.getPointerCount() >= 3) {
                 activity.toggleBenchmarkHudFromPreview();
             }
             touchActive = action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL;
             return true;
-        }
-    }
-
-    private static final class PreviewRenderer implements GLSurfaceView.Renderer {
-        private static final String VERTEX_SHADER =
-                "attribute vec2 aPosition;" +
-                "attribute vec4 aColor;" +
-                "uniform vec2 uResolution;" +
-                "varying vec4 vColor;" +
-                "void main() {" +
-                "  vec2 zeroToOne = aPosition / uResolution;" +
-                "  vec2 clip = zeroToOne * 2.0 - 1.0;" +
-                "  vColor = aColor;" +
-                "  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);" +
-                "}";
-        private static final String FRAGMENT_SHADER =
-                "precision mediump float;" +
-                "varying vec4 vColor;" +
-                "void main() {" +
-                "  gl_FragColor = vColor;" +
-                "}";
-        private static final String TEXTURE_VERTEX_SHADER =
-                "attribute vec2 aPosition;" +
-                "attribute vec2 aTexCoord;" +
-                "attribute vec4 aColor;" +
-                "uniform vec2 uResolution;" +
-                "varying vec2 vTexCoord;" +
-                "varying vec4 vColor;" +
-                "void main() {" +
-                "  vec2 zeroToOne = aPosition / uResolution;" +
-                "  vec2 clip = zeroToOne * 2.0 - 1.0;" +
-                "  vTexCoord = aTexCoord;" +
-                "  vColor = aColor;" +
-                "  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);" +
-                "}";
-        private static final String TEXTURE_FRAGMENT_SHADER =
-                "precision mediump float;" +
-                "uniform sampler2D uTexture;" +
-                "varying vec2 vTexCoord;" +
-                "varying vec4 vColor;" +
-                "void main() {" +
-                "  gl_FragColor = texture2D(uTexture, vTexCoord) * vColor;" +
-                "}";
-
-        private final MainActivity activity;
-        private final FloatBuffer vertexBuffer = ByteBuffer
-                .allocateDirect(RENDER_VERTEX_BUFFER_FLOATS * 4)
-                .order(ByteOrder.nativeOrder())
-                .asFloatBuffer();
-        private final FloatBuffer spriteVertexBuffer = ByteBuffer
-                .allocateDirect(SPRITE_VERTEX_BUFFER_FLOATS * 4)
-                .order(ByteOrder.nativeOrder())
-                .asFloatBuffer();
-        private final int[] frameValues = new int[RENDER_FRAME_I32_CAPACITY];
-        private final int[] lastDrawnFrame = new int[RENDER_FRAME_I32_CAPACITY];
-        private int program;
-        private int positionHandle;
-        private int resolutionHandle;
-        private int colorHandle;
-        private int textureProgram;
-        private int texturePositionHandle;
-        private int textureCoordHandle;
-        private int textureColorHandle;
-        private int textureResolutionHandle;
-        private int textureSamplerHandle;
-        private final Map<Integer, SpriteTexture> spriteTextures = new LinkedHashMap<>();
-        private int fallbackTexture;
-        private long manifestStamp = Long.MIN_VALUE;
-        private int surfaceWidth = 1;
-        private int surfaceHeight = 1;
-        private GamePreviewView.CaptureCallback pendingCapture;
-
-        PreviewRenderer(MainActivity activity) {
-            this.activity = activity;
-        }
-
-        synchronized void setFrameValues(int[] values) {
-            System.arraycopy(values, 0, frameValues, 0, RENDER_FRAME_I32_CAPACITY);
-        }
-
-        synchronized void requestCapture(GamePreviewView.CaptureCallback callback) {
-            if (pendingCapture != null) {
-                pendingCapture.onCaptured(null, "a newer preview capture replaced this request", new int[0]);
-            }
-            pendingCapture = callback;
-        }
-
-        @Override
-        public void onSurfaceCreated(javax.microedition.khronos.opengles.GL10 gl, javax.microedition.khronos.egl.EGLConfig config) {
-            spriteTextures.clear();
-            manifestStamp = Long.MIN_VALUE;
-            program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER);
-            positionHandle = GLES20.glGetAttribLocation(program, "aPosition");
-            resolutionHandle = GLES20.glGetUniformLocation(program, "uResolution");
-            colorHandle = GLES20.glGetAttribLocation(program, "aColor");
-            textureProgram = createProgram(TEXTURE_VERTEX_SHADER, TEXTURE_FRAGMENT_SHADER);
-            texturePositionHandle = GLES20.glGetAttribLocation(textureProgram, "aPosition");
-            textureCoordHandle = GLES20.glGetAttribLocation(textureProgram, "aTexCoord");
-            textureColorHandle = GLES20.glGetAttribLocation(textureProgram, "aColor");
-            textureResolutionHandle = GLES20.glGetUniformLocation(textureProgram, "uResolution");
-            textureSamplerHandle = GLES20.glGetUniformLocation(textureProgram, "uTexture");
-            fallbackTexture = createFallbackTexture();
-            GLES20.glEnable(GLES20.GL_BLEND);
-            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-            GLES20.glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
-        }
-
-        @Override
-        public void onSurfaceChanged(javax.microedition.khronos.opengles.GL10 gl, int width, int height) {
-            surfaceWidth = Math.max(1, width);
-            surfaceHeight = Math.max(1, height);
-            GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
-        }
-
-        @Override
-        public void onDrawFrame(javax.microedition.khronos.opengles.GL10 gl) {
-            long renderStartNanos = System.nanoTime();
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-            synchronized (this) {
-                System.arraycopy(frameValues, 0, lastDrawnFrame, 0, lastDrawnFrame.length);
-                int commandCount = Math.max(0, Math.min(MAX_RENDER_COMMANDS, frameValues[5]));
-                int index = 0;
-                while (index < commandCount) {
-                    int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
-                    int kind = frameValues[base];
-                    if (kind == 1) {
-                        vertexBuffer.clear();
-                        int runEnd = index;
-                        while (runEnd < commandCount) {
-                            int runBase = RENDER_FRAME_HEADER_SIZE + runEnd * RENDER_COMMAND_STRIDE;
-                            if (frameValues[runBase] != 1 || !sameClip(base, runBase)) break;
-                            appendRect(runBase);
-                            runEnd += 1;
-                        }
-                        vertexBuffer.flip();
-                        applyClip(base);
-                        drawBatch((runEnd - index) * RECT_VERTICES);
-                        index = runEnd;
-                    } else if (kind == 2) {
-                        int texture = spriteTexture(frameValues[base + 6]);
-                        spriteVertexBuffer.clear();
-                        int runEnd = index;
-                        while (runEnd < commandCount) {
-                            int runBase = RENDER_FRAME_HEADER_SIZE + runEnd * RENDER_COMMAND_STRIDE;
-                            if (frameValues[runBase] != 2 || !sameClip(base, runBase)) break;
-                            int runTexture = spriteTexture(frameValues[runBase + 6]);
-                            if (runTexture != texture) break;
-                            appendSprite(runBase);
-                            runEnd += 1;
-                        }
-                        spriteVertexBuffer.flip();
-                        applyClip(base);
-                        drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture);
-                        index = runEnd;
-                    } else {
-                        index += 1;
-                    }
-                }
-                GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
-            }
-            captureRenderedPixelsIfRequested();
-            activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
-        }
-
-        private void captureRenderedPixelsIfRequested() {
-            GamePreviewView.CaptureCallback callback;
-            synchronized (this) {
-                callback = pendingCapture;
-                pendingCapture = null;
-            }
-            if (callback == null) return;
-            int[] capturedFrame = new int[RENDER_FRAME_I32_CAPACITY];
-            synchronized (this) {
-                System.arraycopy(lastDrawnFrame, 0, capturedFrame, 0, capturedFrame.length);
-            }
-            try {
-                long pixelCount = (long)surfaceWidth * (long)surfaceHeight;
-                if (pixelCount > MAX_PREVIEW_CAPTURE_PIXELS) {
-                    callback.onCaptured(null, "preview framebuffer exceeds the 8 megapixel capture limit", capturedFrame);
-                    return;
-                }
-                IntBuffer pixels = ByteBuffer.allocateDirect(surfaceWidth * surfaceHeight * 4)
-                        .order(ByteOrder.nativeOrder()).asIntBuffer();
-                GLES20.glReadPixels(0, 0, surfaceWidth, surfaceHeight, GLES20.GL_RGBA,
-                        GLES20.GL_UNSIGNED_BYTE, pixels);
-                int[] flipped = new int[surfaceWidth * surfaceHeight];
-                for (int y = 0; y < surfaceHeight; y++) {
-                    int sourceRow = y * surfaceWidth;
-                    int targetRow = (surfaceHeight - y - 1) * surfaceWidth;
-                    for (int x = 0; x < surfaceWidth; x++) {
-                        int rgba = pixels.get(sourceRow + x);
-                        int redBlueSwapped = (rgba & 0xff00ff00)
-                                | ((rgba << 16) & 0x00ff0000) | ((rgba >> 16) & 0x000000ff);
-                        flipped[targetRow + x] = redBlueSwapped;
-                    }
-                }
-                Bitmap full = Bitmap.createBitmap(flipped, surfaceWidth, surfaceHeight, Bitmap.Config.ARGB_8888);
-                int largest = Math.max(surfaceWidth, surfaceHeight);
-                if (largest <= 1024) {
-                    callback.onCaptured(full, "", capturedFrame);
-                    return;
-                }
-                float scale = 1024.0f / largest;
-                Bitmap bounded = Bitmap.createScaledBitmap(full, Math.max(1, Math.round(surfaceWidth * scale)),
-                        Math.max(1, Math.round(surfaceHeight * scale)), true);
-                full.recycle();
-                callback.onCaptured(bounded, "", capturedFrame);
-            } catch (OutOfMemoryError error) {
-                callback.onCaptured(null, "not enough memory for bounded pixel capture", capturedFrame);
-            } catch (RuntimeException error) {
-                callback.onCaptured(null, error.getMessage(), capturedFrame);
-            }
-        }
-
-        private void appendRect(int base) {
-            int color = frameValues[base + 5];
-            float red = ((color >> 16) & 255) / 255.0f;
-            float green = ((color >> 8) & 255) / 255.0f;
-            float blue = (color & 255) / 255.0f;
-            float alpha = Math.max(0, Math.min(255, frameValues[base + 8])) / 255.0f;
-            float left = frameValues[base + 1];
-            float top = frameValues[base + 2];
-            float right = frameValues[base + 1] + frameValues[base + 3];
-            float bottom = frameValues[base + 2] + frameValues[base + 4];
-            float centerX = (left + right) * 0.5f;
-            float centerY = (top + bottom) * 0.5f;
-            double radians = Math.toRadians(frameValues[base + 7] % 360);
-            float cosine = (float)Math.cos(radians);
-            float sine = (float)Math.sin(radians);
-            putVertex(left, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
-            putVertex(right, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
-            putVertex(left, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
-            putVertex(right, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
-            putVertex(right, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
-            putVertex(left, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
-        }
-
-        private boolean sameClip(int leftBase, int rightBase) {
-            return frameValues[leftBase + 9] == frameValues[rightBase + 9]
-                    && frameValues[leftBase + 10] == frameValues[rightBase + 10]
-                    && frameValues[leftBase + 11] == frameValues[rightBase + 11]
-                    && frameValues[leftBase + 12] == frameValues[rightBase + 12];
-        }
-
-        private void applyClip(int base) {
-            int width = frameValues[base + 11];
-            int height = frameValues[base + 12];
-            if (width <= 0 || height <= 0) {
-                GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
-                return;
-            }
-            long sourceRight = (long)frameValues[base + 9] + width;
-            long sourceBottom = (long)frameValues[base + 10] + height;
-            int left = Math.max(0, Math.min(surfaceWidth, frameValues[base + 9]));
-            int top = Math.max(0, Math.min(surfaceHeight, frameValues[base + 10]));
-            int right = Math.max(left, (int)Math.max(0L, Math.min((long)surfaceWidth, sourceRight)));
-            int bottom = Math.max(top, (int)Math.max(0L, Math.min((long)surfaceHeight, sourceBottom)));
-            GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
-            GLES20.glScissor(left, surfaceHeight - bottom, right - left, bottom - top);
-        }
-
-        private void putVertex(float x, float y, float centerX, float centerY,
-                float cosine, float sine, float red, float green, float blue, float alpha) {
-            float offsetX = x - centerX;
-            float offsetY = y - centerY;
-            float rotatedX = centerX + offsetX * cosine - offsetY * sine;
-            float rotatedY = centerY + offsetX * sine + offsetY * cosine;
-            vertexBuffer.put(rotatedX).put(rotatedY).put(red).put(green).put(blue).put(alpha);
-        }
-
-        private void appendSprite(int base) {
-            int color = frameValues[base + 5];
-            float red = ((color >> 16) & 255) / 255.0f;
-            float green = ((color >> 8) & 255) / 255.0f;
-            float blue = (color & 255) / 255.0f;
-            float alpha = Math.max(0, Math.min(255, frameValues[base + 8])) / 255.0f;
-            float left = frameValues[base + 1];
-            float top = frameValues[base + 2];
-            float right = frameValues[base + 1] + frameValues[base + 3];
-            float bottom = frameValues[base + 2] + frameValues[base + 4];
-            float centerX = (left + right) * 0.5f;
-            float centerY = (top + bottom) * 0.5f;
-            double radians = Math.toRadians(frameValues[base + 7] % 360);
-            float cosine = (float)Math.cos(radians);
-            float sine = (float)Math.sin(radians);
-            putRotatedSpriteVertex(left, top, centerX, centerY, cosine, sine, 0.0f, 0.0f, red, green, blue, alpha);
-            putRotatedSpriteVertex(right, top, centerX, centerY, cosine, sine, 1.0f, 0.0f, red, green, blue, alpha);
-            putRotatedSpriteVertex(left, bottom, centerX, centerY, cosine, sine, 0.0f, 1.0f, red, green, blue, alpha);
-            putRotatedSpriteVertex(right, top, centerX, centerY, cosine, sine, 1.0f, 0.0f, red, green, blue, alpha);
-            putRotatedSpriteVertex(right, bottom, centerX, centerY, cosine, sine, 1.0f, 1.0f, red, green, blue, alpha);
-            putRotatedSpriteVertex(left, bottom, centerX, centerY, cosine, sine, 0.0f, 1.0f, red, green, blue, alpha);
-        }
-
-        private void putRotatedSpriteVertex(float x, float y, float centerX, float centerY,
-                float cosine, float sine, float u, float v, float red, float green, float blue,
-                float alpha) {
-            float offsetX = x - centerX;
-            float offsetY = y - centerY;
-            float rotatedX = centerX + offsetX * cosine - offsetY * sine;
-            float rotatedY = centerY + offsetX * sine + offsetY * cosine;
-            spriteVertexBuffer.put(rotatedX).put(rotatedY).put(u).put(v)
-                    .put(red).put(green).put(blue).put(alpha);
-        }
-        private void drawBatch(int vertexCount) {
-            GLES20.glUseProgram(program);
-            GLES20.glUniform2f(resolutionHandle, (float)surfaceWidth, (float)surfaceHeight);
-            GLES20.glEnableVertexAttribArray(positionHandle);
-            GLES20.glEnableVertexAttribArray(colorHandle);
-            vertexBuffer.position(0);
-            GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, RENDER_VERTEX_BYTES, vertexBuffer);
-            vertexBuffer.position(2);
-            GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, RENDER_VERTEX_BYTES, vertexBuffer);
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
-            vertexBuffer.position(0);
-            GLES20.glDisableVertexAttribArray(colorHandle);
-            GLES20.glDisableVertexAttribArray(positionHandle);
-        }
-
-        private void drawSpriteBatch(int vertexCount, int texture) {
-            GLES20.glUseProgram(textureProgram);
-            GLES20.glUniform2f(textureResolutionHandle, (float)surfaceWidth, (float)surfaceHeight);
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
-            GLES20.glUniform1i(textureSamplerHandle, 0);
-            GLES20.glEnableVertexAttribArray(texturePositionHandle);
-            GLES20.glEnableVertexAttribArray(textureCoordHandle);
-            GLES20.glEnableVertexAttribArray(textureColorHandle);
-            spriteVertexBuffer.position(0);
-            GLES20.glVertexAttribPointer(texturePositionHandle, 2, GLES20.GL_FLOAT, false, SPRITE_VERTEX_BYTES, spriteVertexBuffer);
-            spriteVertexBuffer.position(2);
-            GLES20.glVertexAttribPointer(textureCoordHandle, 2, GLES20.GL_FLOAT, false, SPRITE_VERTEX_BYTES, spriteVertexBuffer);
-            spriteVertexBuffer.position(4);
-            GLES20.glVertexAttribPointer(textureColorHandle, 4, GLES20.GL_FLOAT, false, SPRITE_VERTEX_BYTES, spriteVertexBuffer);
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
-            spriteVertexBuffer.position(0);
-            GLES20.glDisableVertexAttribArray(textureColorHandle);
-            GLES20.glDisableVertexAttribArray(textureCoordHandle);
-            GLES20.glDisableVertexAttribArray(texturePositionHandle);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        }
-
-        private int spriteTexture(int handle) {
-            File manifest = new File(activity.projectRoot(), WorkshopAssetManifest.RELATIVE_PATH);
-            long currentStamp = manifest.isFile()
-                    ? manifest.lastModified() ^ (manifest.length() << 7) : 0L;
-            if (currentStamp != manifestStamp) manifestStamp = currentStamp;
-            SpriteTexture cached = spriteTextures.get(handle);
-            if (cached != null && cached.checkedManifestStamp == manifestStamp) return cached.texture;
-            try {
-                JSONObject resolved = new JSONObject(nativeResolveSpriteAsset(
-                        activity.projectRootPath(), handle));
-                if (!"ok".equals(resolved.optString("status"))) {
-                    throw new IOException(resolved.optString("error", "sprite resolution failed"));
-                }
-                String hash = resolved.getString("content_sha256");
-                if (cached != null && hash.equals(cached.contentHash)) {
-                    cached.checkedManifestStamp = manifestStamp;
-                    return cached.texture;
-                }
-                String encoding = resolved.getString("encoding");
-                int width = resolved.getInt("width");
-                int height = resolved.getInt("height");
-                long pixels = (long)width * (long)height;
-                if (width <= 0 || height <= 0 || width > 16384 || height > 16384
-                        || pixels > 16_000_000L) {
-                    throw new IOException("sprite dimensions exceed Android decode limits");
-                }
-                File file = new File(resolved.getString("path"));
-                if (!file.isFile() || file.length() > 64L * 1024L * 1024L) {
-                    throw new IOException("sprite file exceeds Android decode limits");
-                }
-                Bitmap bitmap;
-                if ("svg".equals(encoding)) {
-                    int[] argb = nativeDecodeSvgSprite(file.getAbsolutePath(), width, height);
-                    if (argb == null || argb.length != width * height) {
-                        throw new IOException("Android could not decode the SVG sprite");
-                    }
-                    bitmap = Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_8888);
-                } else if ("png".equals(encoding) || "jpeg".equals(encoding)
-                        || "webp".equals(encoding)) {
-                    android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
-                    bounds.inJustDecodeBounds = true;
-                    android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
-                    if (bounds.outWidth != width || bounds.outHeight != height) {
-                        throw new IOException("decoded sprite dimensions do not match the manifest");
-                    }
-                    android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
-                    options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-                    options.inScaled = false;
-                    bitmap = android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath(), options);
-                    if (bitmap == null) throw new IOException("Android could not decode the sprite");
-                } else {
-                    throw new IOException("unsupported Android sprite encoding " + encoding);
-                }
-                int uploaded;
-                try {
-                    uploaded = uploadBitmapTexture(bitmap);
-                } finally {
-                    bitmap.recycle();
-                }
-                SpriteTexture replacement = new SpriteTexture(uploaded, hash, manifestStamp);
-                spriteTextures.put(handle, replacement);
-                if (cached != null) GLES20.glDeleteTextures(1, new int[]{cached.texture}, 0);
-                return uploaded;
-            } catch (Exception error) {
-                if (cached != null) {
-                    cached.checkedManifestStamp = manifestStamp;
-                    return cached.texture;
-                }
-                return fallbackTexture;
-            }
-        }
-
-        private static int uploadBitmapTexture(Bitmap bitmap) throws IOException {
-            int[] textures = new int[1];
-            GLES20.glGenTextures(1, textures, 0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0]);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-            while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
-            android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0);
-            int error = GLES20.glGetError();
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-            if (error != GLES20.GL_NO_ERROR) {
-                GLES20.glDeleteTextures(1, textures, 0);
-                throw new IOException("Android texture upload failed with GL error " + error);
-            }
-            return textures[0];
-        }
-
-        private static int createFallbackTexture() {
-            ByteBuffer pixels = ByteBuffer.allocateDirect(16);
-            pixels.put(new byte[]{
-                    (byte)255, 0, (byte)255, (byte)255,
-                    35, 35, 35, (byte)255,
-                    35, 35, 35, (byte)255,
-                    (byte)255, 0, (byte)255, (byte)255});
-            pixels.flip();
-            int[] textures = new int[1];
-            GLES20.glGenTextures(1, textures, 0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0]);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 2, 2, 0,
-                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-            return textures[0];
-        }
-
-        private static final class SpriteTexture {
-            final int texture;
-            final String contentHash;
-            long checkedManifestStamp;
-
-            SpriteTexture(int texture, String contentHash, long checkedManifestStamp) {
-                this.texture = texture;
-                this.contentHash = contentHash;
-                this.checkedManifestStamp = checkedManifestStamp;
-            }
-        }
-
-        private static int createProgram(String vertexSource, String fragmentSource) {
-            int vertexShader = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource);
-            int fragmentShader = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource);
-            int program = GLES20.glCreateProgram();
-            GLES20.glAttachShader(program, vertexShader);
-            GLES20.glAttachShader(program, fragmentShader);
-            GLES20.glLinkProgram(program);
-            int[] linked = new int[1];
-            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0);
-            if (linked[0] == 0) {
-                String log = GLES20.glGetProgramInfoLog(program);
-                GLES20.glDeleteProgram(program);
-                throw new IllegalStateException("OpenGL program link failed: " + log);
-            }
-            return program;
-        }
-
-        private static int compileShader(int type, String source) {
-            int shader = GLES20.glCreateShader(type);
-            GLES20.glShaderSource(shader, source);
-            GLES20.glCompileShader(shader);
-            int[] compiled = new int[1];
-            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0);
-            if (compiled[0] == 0) {
-                String log = GLES20.glGetShaderInfoLog(shader);
-                GLES20.glDeleteShader(shader);
-                throw new IllegalStateException("OpenGL shader compile failed: " + log);
-            }
-            return shader;
         }
     }
 
