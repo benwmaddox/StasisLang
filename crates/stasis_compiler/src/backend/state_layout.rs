@@ -2,6 +2,7 @@ use super::emit::{CollectionInfoMap, GlobalPathTypeMap};
 use crate::frontend::types::{
     TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -36,6 +37,22 @@ pub struct StateCollectionFieldLayout {
 pub struct StateOpaqueLayout {
     pub path: String,
     pub type_name: String,
+}
+
+pub fn state_layout_digest(layout: &StateLayout) -> Result<[u8; 32], String> {
+    let serialized = serde_json::to_vec(layout)
+        .map_err(|error| format!("failed versioning compiler state layout: {error}"))?;
+    let digest = Sha256::digest(serialized);
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    Ok(bytes)
+}
+
+pub fn state_layout_version(layout: &StateLayout) -> Result<String, String> {
+    Ok(state_layout_digest(layout)?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 pub(crate) fn build_state_layout(
