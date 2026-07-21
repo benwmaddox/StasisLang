@@ -575,6 +575,7 @@ fn with_initialized_runtime_session<R>(
         let session = session_slot
             .as_mut()
             .ok_or_else(|| "Android runtime session was not initialized".to_string())?;
+        activate_pending_runtime_candidate(session)?;
         if !session.initialized {
             execute_lifecycle_noarg(&session.jit, "main")?;
             session.initialized = true;
@@ -1630,6 +1631,48 @@ mod tests {
         fs::remove_dir_all(&root).ok();
         clear_runtime_session_for_test();
     }
+
+    #[test]
+    fn bridge_state_helper_activates_pending_candidate_before_write() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("state_set_pending_reload");
+        let source = root.join("src/main.stasis");
+        fs::write(
+            &source,
+            "global GameState { score: i32; }\nfunction main(): void { GameState.score = 1; }\nfunction tick(): void { return; }\n",
+        )
+        .expect("write active source");
+        run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+            .expect("initialize active runtime");
+
+        fs::write(
+            &source,
+            "global GameState { score: i32; bonus: i32; }\nfunction main(): void { GameState.score = 1; }\nfunction tick(): void { return; }\n",
+        )
+        .expect("write layout-changing source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("stage layout-changing candidate");
+
+        set_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "GameState.bonus", 42)
+            .expect("state helper should activate candidate before write");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "GameState.bonus")
+                .expect("read migrated candidate state"),
+            42
+        );
+        run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+            .expect("run already-activated candidate");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "GameState.bonus")
+                .expect("write should survive next frame"),
+            42
+        );
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
     #[test]
     fn bridge_run_tick_executes_real_void_lifecycle_functions() {
         let _guard = bridge_runtime_test_guard();
