@@ -7,7 +7,6 @@ mod host_set_registry;
 mod live_workspace;
 mod runtime_exec;
 mod stasis_test_runner;
-mod state_migration;
 mod watch;
 mod window_config;
 
@@ -27,6 +26,10 @@ use runtime_exec::RuntimeLauncher;
 use serde::Deserialize;
 use serde_json::Value;
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::state_migration::{
+    activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
+    MAX_STATE_SNAPSHOT_BYTES,
+};
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
@@ -36,10 +39,6 @@ use stasis_runner::swap::contracts::{
     TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
-use state_migration::{
-    activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
-    MAX_STATE_SNAPSHOT_BYTES,
-};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;

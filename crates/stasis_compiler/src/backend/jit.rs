@@ -899,6 +899,29 @@ impl JitProcess {
         Ok(())
     }
 
+    pub fn execute_optional_on_code_swap(&self) -> Result<(), String> {
+        self.validate_on_code_swap_signature()?;
+        let Some(function) = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "on_code_swap")
+        else {
+            return Ok(());
+        };
+        let artifact = self
+            .artifact_for_function_id(function.id)
+            .ok_or_else(|| "compiled artifact missing for function 'on_code_swap'".to_string())?;
+        stasis_dynload::invoke_code_swap_hook(artifact.code_ptr as usize)
+    }
+
+    pub fn has_on_code_swap(&self) -> bool {
+        self.compiler
+            .functions()
+            .iter()
+            .any(|function| function.name == "on_code_swap")
+    }
+
     pub fn build_engine_package(
         &self,
         entrypoints: &EngineEntrypoints,
