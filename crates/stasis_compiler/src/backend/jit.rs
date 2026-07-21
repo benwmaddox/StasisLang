@@ -95,7 +95,7 @@ pub struct JitProcess {
     required_emit_roots: Vec<String>,
     local_runtime_helper_trampolines: bool,
     #[cfg(test)]
-    _test_guard: MutexGuard<'static, ()>,
+    _test_guard: Option<MutexGuard<'static, ()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +124,13 @@ impl JitProcess {
             stasis_dynload::clear_registered_global_memory();
         }
 
+        Self::new_inner(
+            #[cfg(test)]
+            Some(_test_guard),
+        )
+    }
+
+    fn new_inner(#[cfg(test)] _test_guard: Option<MutexGuard<'static, ()>>) -> Self {
         Self {
             compiler: Compiler::new(),
             next_slot: 0,
@@ -142,6 +149,29 @@ impl JitProcess {
             #[cfg(test)]
             _test_guard,
         }
+    }
+
+    pub fn staged_candidate(&self) -> Self {
+        let mut candidate = Self::new_inner(
+            #[cfg(test)]
+            None,
+        );
+        for file in self.compiler.files() {
+            candidate.upsert_file(file.path.clone(), file.content.clone());
+        }
+        candidate.required_emit_roots = self.required_emit_roots.clone();
+        candidate.local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
+        candidate
+    }
+
+    pub fn accept_staged_candidate(&mut self, candidate: Self) {
+        #[cfg(test)]
+        let candidate = {
+            let mut candidate = candidate;
+            candidate._test_guard = self._test_guard.take();
+            candidate
+        };
+        *self = candidate;
     }
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
@@ -1415,6 +1445,7 @@ fn seed_fixed_collection_max_length_headers(
     global_path_types: &GlobalPathTypeMap,
     type_table: &TypeTable,
 ) -> Result<(), String> {
+    let mut headers = Vec::new();
     for (path, type_id) in global_path_types {
         let Some(type_info) = type_table.type_info(*type_id) else {
             continue;
@@ -1430,7 +1461,7 @@ fn seed_fixed_collection_max_length_headers(
                         path, payload_bytes
                     )
                 })?;
-                seed_collection_max_length(path, max_length);
+                headers.push((path, max_length));
             }
             TypeCategory::Utf8Fixed => {
                 let Some(payload_bytes) = type_info.layout.payload_size_bytes else {
@@ -1442,16 +1473,19 @@ fn seed_fixed_collection_max_length_headers(
                         path, payload_bytes
                     )
                 })?;
-                seed_collection_max_length(path, max_length);
+                headers.push((path, max_length));
             }
             TypeCategory::ArrayFixed => {
                 let Some(max_length) = type_table.fixed_collection_len(*type_id) else {
                     continue;
                 };
-                seed_collection_max_length(path, max_length);
+                headers.push((path, max_length));
             }
             _ => {}
         }
+    }
+    for (path, max_length) in headers {
+        seed_collection_max_length(path, max_length);
     }
     Ok(())
 }
