@@ -1030,6 +1030,46 @@ function main(): i32 {
 "#;
 
     #[cfg(windows)]
+    fn ensure_test_dynload_artifacts(deps_dir: &Path) -> (PathBuf, PathBuf) {
+        let find_artifacts = || {
+            [
+                deps_dir,
+                deps_dir.parent().expect("Cargo profile directory"),
+            ]
+            .into_iter()
+            .find_map(|directory| {
+                let import_library = directory.join("stasis_dynload.dll.lib");
+                let runtime_dll = directory.join("stasis_dynload.dll");
+                (import_library.is_file() && runtime_dll.is_file())
+                    .then_some((import_library, runtime_dll))
+            })
+        };
+        if let Some(artifacts) = find_artifacts() {
+            return artifacts;
+        }
+
+        let profile_dir = deps_dir.parent().expect("Cargo profile directory");
+        let target_dir = profile_dir.parent().expect("Cargo target directory");
+        let mut command = Command::new("cargo");
+        command.arg("build").arg("-p").arg("stasis_dynload");
+        if profile_dir.file_name().and_then(|name| name.to_str()) == Some("release") {
+            command.arg("--release");
+        }
+        let output = command
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .env("CARGO_TARGET_DIR", target_dir)
+            .output()
+            .expect("build stasis_dynload test runtime");
+        assert!(
+            output.status.success(),
+            "failed to build stasis_dynload test runtime\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        find_artifacts().expect("stasis_dynload build did not produce DLL and import library")
+    }
+
+    #[cfg(windows)]
     fn run_linked_i32_noarg_fixture(
         process: &AotProcess,
         function_name: &str,
@@ -1044,19 +1084,12 @@ function main(): i32 {
         fs::create_dir_all(&temp_root).expect("create temp root");
         let exe_path = temp_root.join(format!("{function_name}_{label}.exe"));
         let mut effective_config = link_config.clone();
-        let debug_dir = std::env::current_exe()
+        let deps_dir = std::env::current_exe()
             .expect("current test executable")
             .parent()
-            .expect("target debug deps directory")
+            .expect("Cargo deps directory")
             .to_path_buf();
-        let import_library = debug_dir.join("stasis_dynload.dll.lib");
-        let runtime_dll = debug_dir.join("stasis_dynload.dll");
-        assert!(
-            import_library.is_file(),
-            "missing {}",
-            import_library.display()
-        );
-        assert!(runtime_dll.is_file(), "missing {}", runtime_dll.display());
+        let (import_library, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
         effective_config.runtime_lib_paths.push(import_library);
         fs::copy(&runtime_dll, temp_root.join("stasis_dynload.dll"))
             .expect("copy AOT test runtime");

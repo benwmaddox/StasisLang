@@ -1662,7 +1662,7 @@ fn package_mobile_workspace(
                 String::from_utf8_lossy(&child.stderr).trim()
             ));
         }
-        assemble_mobile_shell(workspace, target, entry, &aot_root, &staging_root)?;
+        assemble_mobile_shell(workspace, target, &aot_root, &staging_root)?;
         Ok(())
     })();
     if let Err(error) = child_result {
@@ -1694,7 +1694,6 @@ fn package_mobile_workspace(
 fn assemble_mobile_shell(
     workspace: &Workspace,
     target: PackageTarget,
-    entry: &Path,
     aot_root: &Path,
     staging_root: &Path,
 ) -> Result<(), String> {
@@ -1723,29 +1722,17 @@ fn assemble_mobile_shell(
     };
     let package_id = mobile_package_id(&workspace.manifest.name);
     let jni_package = package_id.replace('.', "_");
-    let asset_base = entry
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let asset_base_token = asset_base.to_string_lossy().replace('\\', "/");
     let replacements = [
         ("@STASIS_APP_NAME@", workspace.manifest.name.as_str()),
         ("@STASIS_PACKAGE_ID@", package_id.as_str()),
         ("@STASIS_JNI_PACKAGE@", jni_package.as_str()),
-        ("@STASIS_ASSET_BASE@", asset_base_token.as_str()),
+        ("@STASIS_ASSET_BASE@", "."),
     ];
     replace_shell_tokens(&common_destination, &replacements)?;
     replace_shell_tokens(&platform_destination, &replacements)?;
     copy_required_dir(&asset_source, &asset_destination)?;
-    let packaged_asset_base = asset_destination.join(asset_base);
-    fs::create_dir_all(&packaged_asset_base).map_err(|error| {
-        format!(
-            "failed to create packaged asset base {}: {error}",
-            packaged_asset_base.display()
-        )
-    })?;
     fs::write(
-        packaged_asset_base.join("stasis_asset_base.marker"),
+        asset_destination.join("stasis_asset_base.marker"),
         b"stasis.mobile.asset_base.v1\n",
     )
     .map_err(|error| format!("failed to write packaged asset base marker: {error}"))?;
@@ -1808,6 +1795,7 @@ fn copy_mobile_runtime(source: &Path, destination: &Path) -> Result<(), String> 
         "nanosvg.h",
         "nanosvgrast.h",
         "stasis_display_scale.h",
+        "stasis_asset_path.h",
         "stasis_render_contract.h",
         "stasis_graphics.c",
         "stasis_mobile_aot_runtime.c",
@@ -2930,14 +2918,8 @@ mod tests {
 
         let android = root.join("android-package");
         fs::create_dir_all(&android).expect("create Android staging");
-        assemble_mobile_shell(
-            &workspace,
-            PackageTarget::AndroidArm64,
-            Path::new("src/main.stasis"),
-            &aot,
-            &android,
-        )
-        .expect("assemble Android shell");
+        assemble_mobile_shell(&workspace, PackageTarget::AndroidArm64, &aot, &android)
+            .expect("assemble Android shell");
         let android_cmake =
             fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
                 .expect("read Android CMake");
@@ -2951,12 +2933,13 @@ mod tests {
             .expect("read shared mobile runtime header");
         assert!(runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
         assert!(android.join("runtime/stasis_display_scale.h").is_file());
+        assert!(android.join("runtime/stasis_asset_path.h").is_file());
         assert!(android.join("runtime/stasis_render_contract.h").is_file());
         assert!(android
             .join("android/app/src/main/assets/stasis_game/assets/manifest.json")
             .is_file());
         assert!(android
-            .join("android/app/src/main/assets/stasis_game/src/stasis_asset_base.marker")
+            .join("android/app/src/main/assets/stasis_game/stasis_asset_base.marker")
             .is_file());
         assert_eq!(
             fs::read_to_string(
@@ -2970,7 +2953,7 @@ mod tests {
         )
         .expect("read Android activity");
         assert!(java.contains(".stasis_game.staging"));
-        assert!(java.contains("new File(root, \"src\")"));
+        assert!(java.contains("new File(root, \".\")"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
                 .expect("read Android asset bridge");
@@ -2981,14 +2964,8 @@ mod tests {
 
         let ios = root.join("ios-package");
         fs::create_dir_all(&ios).expect("create iOS staging");
-        assemble_mobile_shell(
-            &workspace,
-            PackageTarget::IosArm64,
-            Path::new("src/main.stasis"),
-            &aot,
-            &ios,
-        )
-        .expect("assemble iOS shell");
+        assemble_mobile_shell(&workspace, PackageTarget::IosArm64, &aot, &ios)
+            .expect("assemble iOS shell");
         let project = fs::read_to_string(ios.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
             .expect("read Xcode project");
         let config =
@@ -2997,6 +2974,7 @@ mod tests {
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
         assert!(config.contains("STASIS_GRAPHICS_SDL_ONLY=1"));
         assert!(ios.join("runtime/stasis_display_scale.h").is_file());
+        assert!(ios.join("runtime/stasis_asset_path.h").is_file());
         assert!(ios.join("runtime/stasis_render_contract.h").is_file());
         assert!(config.contains("@executable_path/Frameworks"));
         assert!(project.contains("Embed SDL frameworks"));
@@ -3004,7 +2982,7 @@ mod tests {
             .join("ios/StasisMobile/stasis_game/assets/manifest.json")
             .is_file());
         assert!(ios
-            .join("ios/StasisMobile/stasis_game/src/stasis_asset_base.marker")
+            .join("ios/StasisMobile/stasis_game/stasis_asset_base.marker")
             .is_file());
         assert!(!project.contains("@STASIS_"));
 

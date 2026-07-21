@@ -15,6 +15,7 @@
 #endif
 #include <stdbool.h>
 #include <string.h>
+#include "stasis_asset_path.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -1283,10 +1284,19 @@ static int resolve_asset_path(const char* path, char* out, size_t out_size) {
     if (!out || out_size < 2 || !path || !*path) return 0;
     ensure_asset_base();
     if (is_absolute_path(path)) {
+        if (g_asset_env[0] != 0) return 0;
         strncpy(out, path, out_size - 1);
         out[out_size - 1] = 0;
     } else {
-        snprintf(out, out_size, "%s/%s", g_asset_base, path);
+        char normalized[1024];
+        const char* relative = path;
+        if (g_asset_env[0] != 0) {
+            if (!stasis_asset_normalize_relative_path(path, normalized, sizeof(normalized))) {
+                return 0;
+            }
+            relative = normalized;
+        }
+        snprintf(out, out_size, "%s/%s", g_asset_base, relative);
         out[out_size - 1] = 0;
     }
     for (char* p = out; *p; ++p) {
