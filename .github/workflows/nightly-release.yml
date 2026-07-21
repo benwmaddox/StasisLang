@@ -121,7 +121,7 @@ jobs:
           }
 
           $triplet = "x64-windows-static"
-          & (Join-Path $vcpkgRoot "vcpkg.exe") install "sdl2:$triplet" "sdl2-image:$triplet" "glew:$triplet" --recurse
+          & (Join-Path $vcpkgRoot "vcpkg.exe") install "sdl2:$triplet" "sdl2-image:$triplet" --recurse
 
           $buildDir = "runtime/build_ci"
           $cmakeHelp = cmake --help | Out-String
@@ -137,10 +137,13 @@ jobs:
             -DVCPKG_TARGET_TRIPLET="$triplet" `
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
+            -DSTASIS_GRAPHICS_SDL_ONLY=ON `
+            -DSTASIS_MOBILE_RUNTIME_BUILD_TESTS=ON `
             -DSTASIS_BUILD_RUNNER=ON `
             -DSTASIS_BUILD_SYS=OFF
 
-          cmake --build $buildDir --config Release --target stasis_graphics stasis_runner
+          cmake --build $buildDir --config Release --target stasis_graphics stasis_runner stasis_render_contract_test
+          ctest --test-dir $buildDir -C Release -R stasis_render_command_contract --output-on-failure
 
       - name: Assemble bundle (unix)
         if: runner.os != 'Windows'
@@ -159,7 +162,7 @@ jobs:
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
           mkdir -p "${out}/runtime"
-          cp runtime/CMakeLists.txt runtime/nanosvg.h runtime/nanosvgrast.h runtime/stasis_display_scale.h runtime/stasis_graphics.c runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stb_truetype.h "${out}/runtime/"
+          cp runtime/CMakeLists.txt runtime/nanosvg.h runtime/nanosvgrast.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_graphics.c runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stb_truetype.h "${out}/runtime/"
           mkdir -p "${out}/docs"
           cp docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md "${out}/docs/"
           tar -C dist -czf "dist/${{ matrix.archive }}.${{ matrix.ext }}" "${{ matrix.archive }}"

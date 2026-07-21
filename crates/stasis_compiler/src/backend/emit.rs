@@ -313,12 +313,15 @@ pub(crate) fn build_extern_call_signature(
         params.push(type_id);
     }
     let return_type = type_table.resolve_or_intern(&declaration.return_type_name)?;
+    let symbol_name = match declaration.symbol_name.as_str() {
+        // Stasis strings are stable integer IDs. Keep legacy stdlib declarations on the
+        // adapter that resolves the ID before entering the native renderer.
+        "stasis_gfx_cache_text" => "stasis_jit_gfx_cache_text",
+        symbol_name => symbol_name,
+    };
     Ok(ExternCallSignature {
         name: declaration.name,
-        symbol_candidates: build_extern_symbol_candidates(
-            &declaration.symbol_name,
-            declaration.explicit_symbol,
-        ),
+        symbol_candidates: build_extern_symbol_candidates(symbol_name, declaration.explicit_symbol),
         params,
         return_type,
     })

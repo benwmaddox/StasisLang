@@ -1041,6 +1041,18 @@ mod tests {
                 expected_clif_markers: &[("main", &["call", "iadd"])],
             },
             ParityCorpusCase {
+                label: "renderer_command_trace",
+                source: "global cmd: i32[15];\nfunction emit_renderer_trace(): i32 {\n    cmd[0] = 1196967473;\n    cmd[1] = 1;\n    cmd[2] = 3;\n    cmd[3] = 1;\n    cmd[4] = 1;\n    cmd[5] = 1;\n    cmd[6] = 17;\n    cmd[7] = 10;\n    cmd[8] = 20;\n    cmd[9] = 30;\n    cmd[10] = 40;\n    cmd[11] = 45;\n    cmd[12] = 192;\n    cmd[13] = 4;\n    cmd[14] = 6;\n    let trace: i32 = 0;\n    for (let i: i32 = 0; i < 15; i += 1) {\n        trace = (trace * 17 + cmd[i]) % 251;\n    }\n    return trace;\n}\nfunction main(): i32 { return emit_renderer_trace(); }\n",
+                expected_exit: 189,
+                expected_extern_symbols: &[],
+                expected_string_literals: &[],
+                expected_collection_max_lengths: &[("cmd", 15)],
+                expected_clif_markers: &[
+                    ("main", &["call"]),
+                    ("emit_renderer_trace", &["call", "brif", "jump"]),
+                ],
+            },
+            ParityCorpusCase {
                 label: "control_flow_branching",
                 source: "function main(): i32 {\n    let sum: i32 = 0;\n    for (let i: i32 = 0; i < 3; i += 1) {\n        sum += i;\n    }\n    if (sum == 3) {\n        return 1;\n    }\n    return 0;\n}\n",
                 expected_exit: 1,
@@ -1611,7 +1623,7 @@ mod tests {
         );
         assert_eq!(
             resolved.get("gfx_cache_text").copied(),
-            Some("stasis_gfx_cache_text")
+            Some("stasis_jit_gfx_cache_text")
         );
     }
 

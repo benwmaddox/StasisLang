@@ -28,7 +28,11 @@ public final class MainActivity extends SDLActivity {
         } catch (IOException error) {
             throw new IllegalStateException("Unable to install bundled Stasis assets", error);
         }
-        nativeSetAssetRoot(root.getAbsolutePath());
+        File assetBase = new File(root, "@STASIS_ASSET_BASE@");
+        if (!assetBase.isDirectory()) {
+            throw new IllegalStateException("Bundled Stasis asset base is missing: " + assetBase);
+        }
+        nativeSetAssetRoot(assetBase.getAbsolutePath());
         super.onCreate(state);
     }
 

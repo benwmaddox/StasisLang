@@ -3307,6 +3307,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/CMakeLists.txt"
     ));
+    const STASIS_RENDER_CONTRACT_HEADER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_render_contract.h"
+    ));
 
     fn jit_global_table_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -3678,6 +3682,47 @@ mod tests {
                 && STASIS_GRAPHICS_SOURCE
                     .contains("SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0)"),
             "mobile pause should continue polling events and pause the audio device"
+        );
+    }
+
+    #[test]
+    fn shipping_renderers_share_one_versioned_sdl_command_process() {
+        for required in [
+            "STASIS_RENDER_V1_MAGIC 0x47584631",
+            "STASIS_RENDER_V1_VERSION 1",
+            "STASIS_RENDER_V1_TRACE_VERSION 1",
+            "STASIS_RENDER_I32_COUNT",
+            "STASIS_RENDER_F32_COUNT",
+            "stasis_render_v1_is_valid",
+            "stasis_render_v1_trace",
+        ] {
+            assert!(
+                STASIS_RENDER_CONTRACT_HEADER.contains(required),
+                "shared renderer contract should contain {required}"
+            );
+        }
+        assert!(
+            STASIS_RUNTIME_CMAKE.contains(
+                "Build the canonical SDL_Renderer runtime (disable only for legacy GL conformance)"
+            ) && STASIS_RUNTIME_CMAKE.contains("    ON\n)"),
+            "shipping runtime should default to the canonical SDL backend"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("stasis_render_v1_is_valid(cmd_i32)")
+                && STASIS_GRAPHICS_SOURCE.contains("STASIS_RENDER_FLAG_PRESENT")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, \"linear\")")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_RenderSetClipRect(g_renderer, NULL)")
+                && STASIS_GRAPHICS_SOURCE.contains("if (a < 0) a = 0;")
+                && STASIS_GRAPHICS_SOURCE.contains("if (a > 255) a = 255;")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_BLENDMODE_BLEND")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_RenderCopyEx"),
+            "desktop and mobile should enter the shared versioned command interpreter"
+        );
+        assert!(
+            STASIS_MOBILE_RUNTIME_SOURCE.contains("STASIS_RENDER_I32_COUNT")
+                && STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_gfx_submit_u8("),
+            "mobile AOT should bind and submit the same command representation"
         );
     }
 

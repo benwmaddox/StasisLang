@@ -1,5 +1,6 @@
 #include "stasis_mobile_runtime.h"
 #include "stasis_mobile_aot_runtime.h"
+#include "stasis_render_contract.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -25,9 +26,9 @@ void stasis_shutdown(void);
 
 static int32_t host_i32[768];
 static float host_f32[64];
-static int32_t gfx_cmd_i32[34848];
-static float gfx_cmd_f32[92292];
-static uint8_t gfx_cmd_u8[65536];
+static int32_t gfx_cmd_i32[STASIS_RENDER_I32_COUNT];
+static float gfx_cmd_f32[STASIS_RENDER_F32_COUNT];
+static uint8_t gfx_cmd_u8[STASIS_RENDER_U8_COUNT];
 static int32_t host_req_seq;
 static int32_t host_req_flags;
 static int32_t host_req_window_w_px;
@@ -63,9 +64,12 @@ static void bind_host_globals(void) {
     host_req_window_h_px = 0;
     stasis_jit_register_global_i32_array(hash_global_path("host_i32"), 0, host_i32, 768);
     stasis_jit_register_global_f32_array(hash_global_path("host_f32"), 0, host_f32, 64);
-    stasis_jit_register_global_i32_array(hash_global_path("gfx_cmd_i32"), 0, gfx_cmd_i32, 34848);
-    stasis_jit_register_global_f32_array(hash_global_path("gfx_cmd_f32"), 0, gfx_cmd_f32, 92292);
-    stasis_jit_register_global_u8_array(hash_global_path("gfx_cmd_u8"), 0, gfx_cmd_u8, 65536);
+    stasis_jit_register_global_i32_array(
+        hash_global_path("gfx_cmd_i32"), 0, gfx_cmd_i32, STASIS_RENDER_I32_COUNT);
+    stasis_jit_register_global_f32_array(
+        hash_global_path("gfx_cmd_f32"), 0, gfx_cmd_f32, STASIS_RENDER_F32_COUNT);
+    stasis_jit_register_global_u8_array(
+        hash_global_path("gfx_cmd_u8"), 0, gfx_cmd_u8, STASIS_RENDER_U8_COUNT);
     stasis_jit_register_global_i32_ptr(hash_global_path("host_req_seq"), &host_req_seq);
     stasis_jit_register_global_i32_ptr(hash_global_path("host_req_flags"), &host_req_flags);
     stasis_jit_register_global_i32_ptr(
