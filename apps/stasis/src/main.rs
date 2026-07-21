@@ -1929,24 +1929,24 @@ fn write_mobile_aot_symbols_header(
     manifest: &serde_json::Value,
     output_path: &Path,
 ) -> Result<(), String> {
-    let main = mobile_aot_symbol_for(manifest, "main")?;
-    let tick = mobile_aot_symbol_for(manifest, "tick")?;
-    let render = mobile_aot_symbol_for(manifest, "render")?;
+    mobile_aot_function_for(manifest, "main")?;
+    mobile_aot_function_for(manifest, "tick")?;
+    mobile_aot_function_for(manifest, "render")?;
     let on_code_swap = mobile_aot_symbol_for(manifest, "on_code_swap").ok();
     let mut out = String::new();
     out.push_str("#pragma once\n\n#include <stdint.h>\n\n");
     out.push_str("extern void stasis_aot_bind_runtime_globals(void);\n");
-    for symbol in [&main, &tick, &render] {
-        out.push_str(&format!("extern int32_t {symbol}(void);\n"));
-    }
+    out.push_str("extern int32_t stasis_mobile_main_entry(void);\n");
+    out.push_str("extern int32_t stasis_mobile_tick_entry(void);\n");
+    out.push_str("extern int32_t stasis_mobile_render_entry(void);\n");
     if let Some(symbol) = on_code_swap.as_ref() {
         out.push_str(&format!("extern void {symbol}(void);\n"));
     }
     out.push_str("\n");
     out.push_str("#define STASIS_AOT_BIND_RUNTIME_GLOBALS stasis_aot_bind_runtime_globals\n");
-    out.push_str(&format!("#define STASIS_AOT_MAIN {main}\n"));
-    out.push_str(&format!("#define STASIS_AOT_TICK {tick}\n"));
-    out.push_str(&format!("#define STASIS_AOT_RENDER {render}\n"));
+    out.push_str("#define STASIS_AOT_MAIN stasis_mobile_main_entry\n");
+    out.push_str("#define STASIS_AOT_TICK stasis_mobile_tick_entry\n");
+    out.push_str("#define STASIS_AOT_RENDER stasis_mobile_render_entry\n");
     if let Some(symbol) = on_code_swap.as_ref() {
         out.push_str(&format!("#define STASIS_AOT_ON_CODE_SWAP {symbol}\n"));
     }
@@ -1980,20 +1980,32 @@ fn write_mobile_aot_bindings_source(
         .ok_or_else(|| "mobile AOT manifest missing string_literals array".to_string())?;
     let mut out = String::from("#include <stdint.h>\n#include \"stasis_mobile_aot_runtime.h\"\n\n");
     for function in functions {
-        let name = function
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "mobile AOT function missing name".to_string())?;
         let symbol = function
             .get("symbol")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "mobile AOT function missing symbol".to_string())?;
-        let return_type = if matches!(name, "main" | "tick" | "render") {
-            "int32_t"
-        } else {
-            "void"
-        };
+        let return_type = mobile_aot_c_return_type(function)?;
         out.push_str(&format!("extern {return_type} {symbol}(void);\n"));
+    }
+    for (name, wrapper) in [
+        ("main", "stasis_mobile_main_entry"),
+        ("tick", "stasis_mobile_tick_entry"),
+        ("render", "stasis_mobile_render_entry"),
+    ] {
+        let (symbol, return_type) = mobile_aot_function_for(manifest, name)?;
+        if return_type == 0 {
+            out.push_str(&format!(
+                "int32_t {wrapper}(void) {{ {symbol}(); return 0; }}\n"
+            ));
+        } else if return_type == 1 {
+            out.push_str(&format!(
+                "int32_t {wrapper}(void) {{ return {symbol}(); }}\n"
+            ));
+        } else {
+            return Err(format!(
+                "mobile AOT entry '{name}' must return void or i32, found type id {return_type}"
+            ));
+        }
     }
     for literal in literals {
         let id = literal
@@ -2074,6 +2086,42 @@ fn mobile_aot_symbol_for(
         .and_then(|entry| entry.get("symbol").and_then(serde_json::Value::as_str))
         .map(str::to_string)
         .ok_or_else(|| format!("mobile AOT manifest missing symbol for function '{function_name}'"))
+}
+
+fn mobile_aot_function_for(
+    manifest: &serde_json::Value,
+    function_name: &str,
+) -> Result<(String, u64), String> {
+    let functions = manifest
+        .get("functions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "mobile AOT manifest missing functions array".to_string())?;
+    let function = functions
+        .iter()
+        .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(function_name))
+        .ok_or_else(|| format!("mobile AOT manifest missing function '{function_name}'"))?;
+    let symbol = function
+        .get("symbol")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("mobile AOT function '{function_name}' missing symbol"))?;
+    let return_type = function
+        .get("return_type")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("mobile AOT function '{function_name}' missing return_type"))?;
+    Ok((symbol.to_string(), return_type))
+}
+
+fn mobile_aot_c_return_type(function: &serde_json::Value) -> Result<&'static str, String> {
+    match function
+        .get("return_type")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(0) => Ok("void"),
+        Some(2) => Ok("float"),
+        Some(4) => Ok("double"),
+        Some(_) => Ok("int32_t"),
+        None => Err("mobile AOT function missing return_type".to_string()),
+    }
 }
 
 fn write_mobile_aot_package_manifest(
@@ -2703,29 +2751,40 @@ mod tests {
 
         assert!(summary.object_count >= 3, "expected lifecycle objects");
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
-        assert!(
-            header
-                .lines()
-                .filter(
-                    |line| line.starts_with("extern int32_t aot_fn_") && line.ends_with("(void);")
-                )
-                .count()
-                >= 3,
-            "mobile AOT lifecycle symbols must match StasisMobileI32Entry callbacks"
-        );
+        for entry in ["main", "tick", "render"] {
+            assert!(header.contains(&format!(
+                "extern int32_t stasis_mobile_{entry}_entry(void);"
+            )));
+            assert!(header.contains(&format!(
+                "#define STASIS_AOT_{} stasis_mobile_{entry}_entry",
+                entry.to_ascii_uppercase()
+            )));
+        }
         let mobile_runtime_header =
             fs::read_to_string(repo_root.join("runtime/stasis_mobile_runtime.h"))
                 .expect("read mobile runtime header");
         assert!(mobile_runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
         let bindings =
             fs::read_to_string(&summary.bindings_source).expect("read mobile AOT bindings source");
-        assert!(bindings.contains("extern int32_t aot_fn_"));
+        assert!(bindings.contains("extern void aot_fn_0(void);"));
+        assert!(bindings.contains("stasis_mobile_main_entry(void) { aot_fn_0(); return 0; }"));
         assert!(bindings.contains("void stasis_aot_bind_runtime_globals(void)"));
         assert!(bindings.contains("stasis_jit_register_code_ptr(0"));
-        assert!(header.contains("#define STASIS_AOT_MAIN aot_fn_"));
         assert!(header.contains("#define STASIS_AOT_BIND_RUNTIME_GLOBALS"));
-        assert!(header.contains("#define STASIS_AOT_TICK aot_fn_"));
-        assert!(header.contains("#define STASIS_AOT_RENDER aot_fn_"));
+        let engine_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("engine_bundle_manifest.json"))
+                .expect("read engine manifest"),
+        )
+        .expect("parse engine manifest");
+        assert!(engine_manifest["functions"]
+            .as_array()
+            .expect("functions")
+            .iter()
+            .filter(|function| matches!(
+                function["name"].as_str(),
+                Some("main" | "tick" | "render")
+            ))
+            .all(|function| function["return_type"] == 0));
         let cmake = fs::read_to_string(&summary.cmake_file).expect("read cmake file");
         assert!(cmake.contains("set(STASIS_PUBLISHED_AOT_OBJECTS"));
         assert!(cmake.contains("${CMAKE_CURRENT_LIST_DIR}/"));
@@ -3030,10 +3089,12 @@ function frame_width(): i32 { return 360; }
         )
         .expect("missing on_code_swap should be accepted for mobile");
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
+        let bindings = fs::read_to_string(&summary.bindings_source).expect("read bindings source");
 
-        assert!(header.contains("#define STASIS_AOT_MAIN aot_fn_"));
-        assert!(header.contains("#define STASIS_AOT_TICK aot_fn_"));
-        assert!(header.contains("#define STASIS_AOT_RENDER aot_fn_"));
+        assert!(header.contains("#define STASIS_AOT_MAIN stasis_mobile_main_entry"));
+        assert!(header.contains("#define STASIS_AOT_TICK stasis_mobile_tick_entry"));
+        assert!(header.contains("#define STASIS_AOT_RENDER stasis_mobile_render_entry"));
+        assert!(bindings.contains("stasis_mobile_main_entry(void) { return aot_fn_0(); }"));
         assert!(!header.contains("STASIS_AOT_ON_CODE_SWAP"));
 
         std::fs::remove_dir_all(&project_dir).ok();
@@ -3091,7 +3152,7 @@ function frame_width(): i32 { return 360; }
                 .as_str()
                 .is_some_and(|path| { path.ends_with(".o") && !Path::new(path).is_absolute() })));
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
-        assert!(header.contains("#define STASIS_AOT_MAIN aot_fn_"));
+        assert!(header.contains("#define STASIS_AOT_MAIN stasis_mobile_main_entry"));
 
         std::fs::remove_dir_all(&output_dir).ok();
     }

@@ -33,8 +33,8 @@ option(STASIS_MOBILE_RUNTIME_BUILD_TESTS "Build mobile runtime lifecycle tests" 
 # Android and other restricted platforms do not support the OpenGL 2.1 + GLEW path.
 option(
     STASIS_GRAPHICS_SDL_ONLY
-    "Build SDL_Renderer-only runtime (no OpenGL/GLEW backend)"
-    ${STASIS_MOBILE_PLATFORM}
+    "Build the canonical SDL_Renderer runtime (disable only for legacy GL conformance)"
+    ON
 )
 
 # Prefer static CRT when possible (for single-exe bundling)
@@ -148,13 +148,19 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
     )
     install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
     install(
-        FILES stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
+        FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
         DESTINATION include
     )
 endif()
 
 if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     enable_testing()
+    add_executable(
+        stasis_render_contract_test
+        tests/stasis_render_contract_test.c
+    )
+    target_include_directories(stasis_render_contract_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME stasis_render_command_contract COMMAND stasis_render_contract_test)
     add_executable(
         stasis_display_scale_test
         tests/stasis_display_scale_test.c
@@ -164,6 +170,12 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         target_link_libraries(stasis_display_scale_test PRIVATE m)
     endif()
     add_test(NAME stasis_display_scale_contract COMMAND stasis_display_scale_test)
+    add_executable(
+        stasis_asset_path_test
+        tests/stasis_asset_path_test.c
+    )
+    target_include_directories(stasis_asset_path_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME stasis_asset_path_contract COMMAND stasis_asset_path_test)
     add_executable(
         stasis_mobile_runtime_test
         tests/stasis_mobile_runtime_test.c

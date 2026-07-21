@@ -1296,7 +1296,7 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "measure_text" | "stasis_measure_text" => {
             function_address(stasis_dynload::stasis_jit_measure_text as *const ())
         }
-        "gfx_cache_text" | "stasis_gfx_cache_text" => {
+        "gfx_cache_text" | "stasis_gfx_cache_text" | "stasis_jit_gfx_cache_text" => {
             function_address(stasis_dynload::stasis_jit_gfx_cache_text as *const ())
         }
         "audio_is_available" | "stasis_audio_is_available" => {
@@ -1355,6 +1355,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         }
         "reject_code_swap" | "stasis_jit_reject_code_swap" => {
             function_address(stasis_dynload::stasis_jit_reject_code_swap as *const ())
+        }
+        "stasis_jit_render_v1_trace" => {
+            function_address(stasis_dynload::stasis_jit_render_v1_trace as *const ())
         }
         _ => return None,
     };

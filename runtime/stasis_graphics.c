@@ -15,6 +15,7 @@
 #endif
 #include <stdbool.h>
 #include <string.h>
+#include "stasis_asset_path.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -22,6 +23,10 @@
 #include <limits.h>
 #include <ctype.h>
 #include <time.h>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
+#include "stasis_render_contract.h"
 #include "stasis_display_scale.h"
 #if defined(_WIN32)
 #include <sys/types.h>
@@ -54,8 +59,12 @@ static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority 
     (void)category;
     (void)priority;
     if (!message) return;
+#if defined(__ANDROID__)
+    __android_log_write(ANDROID_LOG_INFO, "Stasis", message);
+#else
     fprintf(stderr, "%s\n", message);
     fflush(stderr);
+#endif
 }
 
 #if defined(STASIS_GRAPHICS_STATIC)
@@ -1275,10 +1284,19 @@ static int resolve_asset_path(const char* path, char* out, size_t out_size) {
     if (!out || out_size < 2 || !path || !*path) return 0;
     ensure_asset_base();
     if (is_absolute_path(path)) {
+        if (g_asset_env[0] != 0) return 0;
         strncpy(out, path, out_size - 1);
         out[out_size - 1] = 0;
     } else {
-        snprintf(out, out_size, "%s/%s", g_asset_base, path);
+        char normalized[1024];
+        const char* relative = path;
+        if (g_asset_env[0] != 0) {
+            if (!stasis_asset_normalize_relative_path(path, normalized, sizeof(normalized))) {
+                return 0;
+            }
+            relative = normalized;
+        }
+        snprintf(out, out_size, "%s/%s", g_asset_base, relative);
         out[out_size - 1] = 0;
     }
     for (char* p = out; *p; ++p) {
@@ -3373,6 +3391,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 
     SDL_LogSetOutputFunction(stasis_sdl_log_output, NULL);
     SDL_LogSetAllPriority(SDL_LOG_PRIORITY_INFO);
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 0;
@@ -3768,6 +3787,7 @@ STASIS_EXPORT void stasis_begin_frame(void) {
     g_line_count = 0;
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        SDL_RenderSetClipRect(g_renderer, NULL);
     } else {
         (void)g_force_debug_overlay;
     }
@@ -3946,19 +3966,25 @@ static void flush_sprites_before_text(void) {
 }
 
 static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
+    static int contract_logged = 0;
     if (!cmd_i32 || !cmd_f32) return;
 
-    const int32_t magic = cmd_i32[0];
-    const int32_t version = cmd_i32[1];
-    if (magic != 0x47584631 || version != 1) {
+    if (!stasis_render_v1_is_valid(cmd_i32)) {
+        if (!contract_logged) {
+            SDL_Log(
+                "Stasis render contract rejected: magic=%d version=%d",
+                cmd_i32[STASIS_RENDER_I_MAGIC],
+                cmd_i32[STASIS_RENDER_I_VERSION]);
+            contract_logged = 1;
+        }
         return;
     }
 
-    const int32_t flags = cmd_i32[2];
-    const int32_t gfx_cmd_max_lines = MAX_LINES;
-    const int32_t gfx_cmd_max_sprites = 4096;  /* must match MAX_SPRITE_VERTS/6 */
-    const int32_t gfx_cmd_max_text = 2048;
-    const int32_t gfx_cmd_max_text_bytes = 65536;
+    const int32_t flags = cmd_i32[STASIS_RENDER_I_FLAGS];
+    const int32_t gfx_cmd_max_lines = STASIS_RENDER_MAX_LINES;
+    const int32_t gfx_cmd_max_sprites = STASIS_RENDER_MAX_SPRITES;
+    const int32_t gfx_cmd_max_text = STASIS_RENDER_MAX_TEXT;
+    const int32_t gfx_cmd_max_text_bytes = STASIS_RENDER_TEXT_MAX_BYTES;
 
     int32_t line_count = cmd_i32[3];
     int32_t sprite_count = cmd_i32[4];
@@ -3975,9 +4001,21 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
     if (text_count > gfx_cmd_max_text) text_count = gfx_cmd_max_text;
     if (text_bytes_used > gfx_cmd_max_text_bytes) text_bytes_used = gfx_cmd_max_text_bytes;
 
+    if (!contract_logged) {
+        SDL_Log(
+            "Stasis render contract v%d trace=%u flags=%d lines=%d sprites=%d text=%d",
+            STASIS_RENDER_V1_VERSION,
+            (unsigned int)stasis_render_v1_trace(cmd_i32, cmd_f32, cmd_u8),
+            flags,
+            line_count,
+            sprite_count,
+            text_count);
+        contract_logged = 1;
+    }
+
     stasis_begin_frame();
 
-    if ((flags & 1) != 0) {
+    if ((flags & STASIS_RENDER_FLAG_CLEAR) != 0) {
         stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
     }
 
@@ -3992,7 +4030,7 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
 
     /* sprites: i32 header is 32, then sprite payload */
     if (sprite_count > 0) {
-        const int32_t* sprites = cmd_i32 + 32;
+        const int32_t* sprites = cmd_i32 + STASIS_RENDER_I_SPRITE_BASE;
         if (!g_debug_hash_enabled && !g_use_sdl_renderer) {
             stasis_gfx_draw_sprites_i32_fast(sprites, sprite_count);
         } else {
@@ -4018,8 +4056,8 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
     /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
     /* byte_off < 0 encodes cached text run handle (no cmd_u8 access). */
     if (text_count > 0) {
-        const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
-        const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
+        const int32_t text_i32_base = STASIS_RENDER_I_TEXT_BASE;
+        const int32_t text_f32_base = STASIS_RENDER_F_TEXT_BASE;
         const int32_t* text_meta = cmd_i32 + text_i32_base;
 
         for (int i = 0; i < text_count; i++) {
@@ -4042,9 +4080,8 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
                 continue;
             }
             if (!cmd_u8 || text_bytes_used <= 0) continue;
-            if (byte_off >= text_bytes_used) continue;
-            if (byte_len < 0) continue;
-            if (byte_off + byte_len >= text_bytes_used) continue;
+            if (!stasis_render_v1_text_span_is_valid(
+                    byte_off, byte_len, text_bytes_used)) continue;
 
             const char* text = (const char*)(cmd_u8 + byte_off);
 
@@ -4061,7 +4098,7 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
     }
 
     /* Present only if requested (lets benchmarks exclude swap/vsync). */
-    if ((flags & 2) != 0) {
+    if ((flags & STASIS_RENDER_FLAG_PRESENT) != 0) {
         stasis_end_frame();
     }
 }
@@ -4492,6 +4529,8 @@ static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int
     if (!e) return;
 
     if (w <= 0 || h <= 0) return;
+    if (a < 0) a = 0;
+    if (a > 255) a = 255;
 
     /* Re-rasterize only when explicitly invalidated (resize/reload).
      *

@@ -1726,10 +1726,16 @@ fn assemble_mobile_shell(
         ("@STASIS_APP_NAME@", workspace.manifest.name.as_str()),
         ("@STASIS_PACKAGE_ID@", package_id.as_str()),
         ("@STASIS_JNI_PACKAGE@", jni_package.as_str()),
+        ("@STASIS_ASSET_BASE@", "."),
     ];
     replace_shell_tokens(&common_destination, &replacements)?;
     replace_shell_tokens(&platform_destination, &replacements)?;
     copy_required_dir(&asset_source, &asset_destination)?;
+    fs::write(
+        asset_destination.join("stasis_asset_base.marker"),
+        b"stasis.mobile.asset_base.v1\n",
+    )
+    .map_err(|error| format!("failed to write packaged asset base marker: {error}"))?;
     if !asset_destination.join("assets/manifest.json").is_file() {
         return Err(format!(
             "mobile AOT bundle is missing asset manifest: {}",
@@ -1789,6 +1795,8 @@ fn copy_mobile_runtime(source: &Path, destination: &Path) -> Result<(), String> 
         "nanosvg.h",
         "nanosvgrast.h",
         "stasis_display_scale.h",
+        "stasis_asset_path.h",
+        "stasis_render_contract.h",
         "stasis_graphics.c",
         "stasis_mobile_aot_runtime.c",
         "stasis_mobile_aot_runtime.h",
@@ -2925,8 +2933,13 @@ mod tests {
             .expect("read shared mobile runtime header");
         assert!(runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
         assert!(android.join("runtime/stasis_display_scale.h").is_file());
+        assert!(android.join("runtime/stasis_asset_path.h").is_file());
+        assert!(android.join("runtime/stasis_render_contract.h").is_file());
         assert!(android
             .join("android/app/src/main/assets/stasis_game/assets/manifest.json")
+            .is_file());
+        assert!(android
+            .join("android/app/src/main/assets/stasis_game/stasis_asset_base.marker")
             .is_file());
         assert_eq!(
             fs::read_to_string(
@@ -2940,6 +2953,7 @@ mod tests {
         )
         .expect("read Android activity");
         assert!(java.contains(".stasis_game.staging"));
+        assert!(java.contains("new File(root, \".\")"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
                 .expect("read Android asset bridge");
@@ -2960,10 +2974,15 @@ mod tests {
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
         assert!(config.contains("STASIS_GRAPHICS_SDL_ONLY=1"));
         assert!(ios.join("runtime/stasis_display_scale.h").is_file());
+        assert!(ios.join("runtime/stasis_asset_path.h").is_file());
+        assert!(ios.join("runtime/stasis_render_contract.h").is_file());
         assert!(config.contains("@executable_path/Frameworks"));
         assert!(project.contains("Embed SDL frameworks"));
         assert!(ios
             .join("ios/StasisMobile/stasis_game/assets/manifest.json")
+            .is_file());
+        assert!(ios
+            .join("ios/StasisMobile/stasis_game/stasis_asset_base.marker")
             .is_file());
         assert!(!project.contains("@STASIS_"));
 

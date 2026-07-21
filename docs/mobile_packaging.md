@@ -21,6 +21,16 @@ Each output contains the same pieces:
 - `stasis_mobile_package.json`: the versioned package receipt
 - `android/` or `ios/`: a thin platform-native app project
 
+The packaged runtime is the same canonical SDL command interpreter used by the
+desktop distribution. The versioned guest buffer and deterministic trace
+contract are documented in `shared_renderer_process.md`.
+
+The runtime asset root is always the packaged `stasis_game` project root.
+Canonical game paths therefore start with `assets/`. For compatibility with
+older source-relative literals such as `../assets/foo.svg`, an explicit
+packaged asset root normalizes `.` and leading parent segments without allowing
+the resolved path to escape `stasis_game`.
+
 No package contains the Stasis compiler, JIT, watcher, dynamic game loader, or
 writable Stasis source.
 

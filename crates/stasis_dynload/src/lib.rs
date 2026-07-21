@@ -771,6 +771,11 @@ fn owned_i32_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<i32>>> {
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn owned_u8_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<u8>>> {
+    static TABLE: OnceLock<Mutex<HashMap<ArrayKey, Vec<u8>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn owned_f64_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<f64>>> {
     static TABLE: OnceLock<Mutex<HashMap<ArrayKey, Vec<f64>>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -1014,6 +1019,10 @@ pub fn clear_registered_global_memory() {
         .lock()
         .expect("owned f64 array table mutex poisoned")
         .clear();
+    owned_u8_arrays()
+        .lock()
+        .expect("owned u8 array table mutex poisoned")
+        .clear();
 }
 
 #[derive(Debug, Clone)]
@@ -1086,10 +1095,7 @@ pub fn snapshot_jit_runtime_state_bounded(
         i32_arrays: snapshot_registered_arrays(registered_i32_arrays(), Some(owned_i32_arrays())),
         f32_arrays: snapshot_registered_arrays(registered_f32_arrays(), Some(owned_f32_arrays())),
         f64_arrays: snapshot_registered_arrays(registered_f64_arrays(), Some(owned_f64_arrays())),
-        u8_arrays: snapshot_registered_arrays(
-            registered_u8_arrays(),
-            None::<&Mutex<HashMap<ArrayKey, Vec<u8>>>>,
-        ),
+        u8_arrays: snapshot_registered_arrays(registered_u8_arrays(), Some(owned_u8_arrays())),
     })
 }
 
@@ -1240,7 +1246,7 @@ pub fn restore_jit_runtime_state(snapshot: &JitRuntimeStateSnapshot) {
     restore_registered_arrays(
         &snapshot.u8_arrays,
         registered_u8_arrays(),
-        None::<&Mutex<HashMap<ArrayKey, Vec<u8>>>>,
+        Some(owned_u8_arrays()),
     );
 }
 
@@ -1653,6 +1659,53 @@ pub extern "C" fn stasis_jit_global_f32_array_ptr(
     ptr
 }
 
+fn global_u8_array_ptr(collection_hash: i32, field_hash: i32, len: i32) -> *mut u8 {
+    if len <= 0 {
+        return std::ptr::null_mut();
+    }
+
+    let requested_len = len as usize;
+    let key = (collection_hash, field_hash);
+    if let Some((ptr, registered_len)) = registered_u8_arrays()
+        .lock()
+        .expect("registered u8 array table mutex poisoned")
+        .get(&key)
+        .copied()
+    {
+        return if registered_len >= requested_len {
+            ptr as *mut u8
+        } else {
+            std::ptr::null_mut()
+        };
+    }
+
+    let ptr = {
+        let mut owned_guard = owned_u8_arrays()
+            .lock()
+            .expect("owned u8 array table mutex poisoned");
+        let array = owned_guard
+            .entry(key)
+            .or_insert_with(|| vec![0; requested_len]);
+        if array.len() < requested_len {
+            array.resize(requested_len, 0);
+        }
+        let mut fallback = jit_i32_array_global_table()
+            .lock()
+            .expect("jit global table mutex poisoned");
+        for (index, value) in array.iter_mut().enumerate() {
+            if let Some(stored) = fallback.remove(&(collection_hash, field_hash, index as i32)) {
+                *value = stored as u8;
+            }
+        }
+        array.as_mut_ptr()
+    };
+    registered_u8_arrays()
+        .lock()
+        .expect("registered u8 array table mutex poisoned")
+        .insert(key, (ptr as usize, requested_len));
+    ptr
+}
+
 #[no_mangle]
 pub extern "C" fn stasis_jit_global_f64_array_ptr(
     collection_hash: i32,
@@ -1752,6 +1805,42 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
         print!("{text}");
         let _ = std::io::stdout().flush();
     }
+}
+
+const STASIS_RENDER_I32_COUNT: i32 = 34_848;
+const STASIS_RENDER_F32_COUNT: i32 = 92_292;
+const STASIS_RENDER_U8_COUNT: i32 = 65_536;
+
+unsafe extern "C" {
+    fn stasis_render_v1_trace_native(
+        cmd_i32: *const i32,
+        cmd_f32: *const f32,
+        cmd_u8: *const u8,
+    ) -> u32;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn stasis_jit_render_v1_trace(
+    cmd_i32_id: i32,
+    cmd_i32_len: i32,
+    cmd_f32_id: i32,
+    cmd_f32_len: i32,
+    cmd_u8_id: i32,
+    cmd_u8_len: i32,
+) -> i32 {
+    if cmd_i32_len != STASIS_RENDER_I32_COUNT
+        || cmd_f32_len != STASIS_RENDER_F32_COUNT
+        || cmd_u8_len != STASIS_RENDER_U8_COUNT
+    {
+        return 0;
+    }
+    let cmd_i32 = stasis_jit_global_i32_array_ptr(cmd_i32_id, 0, STASIS_RENDER_I32_COUNT);
+    let cmd_f32 = stasis_jit_global_f32_array_ptr(cmd_f32_id, 0, STASIS_RENDER_F32_COUNT);
+    let cmd_u8 = global_u8_array_ptr(cmd_u8_id, 0, STASIS_RENDER_U8_COUNT);
+    if cmd_i32.is_null() || cmd_f32.is_null() || cmd_u8.is_null() {
+        return 0;
+    }
+    stasis_render_v1_trace_native(cmd_i32, cmd_f32, cmd_u8) as i32
 }
 
 fn jit_text_buffer_is_registered(value_id: i32) -> bool {
@@ -3465,6 +3554,38 @@ mod tests {
 
         let ptr2 = stasis_jit_global_i32_array_ptr(collection_hash, field_hash, 4);
         assert_eq!(ptr, ptr2);
+    }
+
+    #[test]
+    fn render_trace_rejects_non_contract_lengths_before_allocating() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+
+        // Safety: invalid lengths must be rejected before any pointer is resolved.
+        let trace = unsafe {
+            stasis_jit_render_v1_trace(
+                101,
+                i32::MAX,
+                102,
+                STASIS_RENDER_F32_COUNT,
+                103,
+                STASIS_RENDER_U8_COUNT,
+            )
+        };
+
+        assert_eq!(trace, 0);
+        assert!(registered_i32_arrays()
+            .lock()
+            .expect("registered i32 array table mutex poisoned")
+            .is_empty());
+        assert!(registered_f32_arrays()
+            .lock()
+            .expect("registered f32 array table mutex poisoned")
+            .is_empty());
+        assert!(registered_u8_arrays()
+            .lock()
+            .expect("registered u8 array table mutex poisoned")
+            .is_empty());
     }
 
     #[test]
