@@ -7,6 +7,7 @@ mod host_set_registry;
 mod live_workspace;
 mod runtime_exec;
 mod stasis_test_runner;
+mod state_migration;
 mod watch;
 mod window_config;
 
@@ -20,7 +21,7 @@ pub use stasis_test_runner::{
 };
 pub use window_config::WindowConfig;
 
-use compiler_backend::IncrementalCompilerBackend;
+use compiler_backend::{IncrementalCompilerBackend, PreparedJitSwap};
 use live_workspace::LiveWorkspace;
 use runtime_exec::RuntimeLauncher;
 use serde::Deserialize;
@@ -31,10 +32,14 @@ use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
     AotFunctionSymbol, CompileRequest, CompileResult, CompileStatus, Diagnostic,
     DiagnosticSeverity, FileChangeEvent, FileChangeKind, FnId, FunctionPatch, FunctionPatchSet,
-    JitCodePtrOverride, LayoutHash, RequestId, StateMapEntry, SwapCommitResult, SwapCommitStatus,
-    TargetMode, TextSource,
+    JitCodePtrOverride, LayoutHash, RequestId, SwapCommitResult, SwapCommitStatus, TargetMode,
+    TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
+use state_migration::{
+    activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
+    MAX_STATE_SNAPSHOT_BYTES,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
@@ -45,7 +50,6 @@ use std::time::Instant;
 use watch::WatchService;
 
 const SWAP_FLASH_TICKS_MAX: u32 = 180;
-const MAX_HOT_SWAP_STATE_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 struct PendingAotCompileMetadata {
@@ -1832,15 +1836,36 @@ fn run_play_in_process_inner(
                             let candidate_on_code_swap_code_ptr =
                                 next_package.on_code_swap_code_ptr;
 
+                            let mut migration_preview = match plan_state_migration(
+                                &jit.state_layout(),
+                                &candidate.state_layout(),
+                                next_package.symbol_code_ptrs.keys().cloned().collect(),
+                                false,
+                                None,
+                            ) {
+                                Ok(preview) => preview,
+                                Err(error) => {
+                                    println!("[swap] aborted before activation: {error}");
+                                    continue;
+                                }
+                            };
+                            finalize_runtime_preview(&candidate, &mut migration_preview);
                             let t_hook = Instant::now();
-                            // Activate and run the candidate hook transactionally. Rejection restores the
-                            // active process's dispatch, literals, headers, and runtime state.
-                            let hook_failed = activate_candidate_runtime_transactionally(
-                                &jit,
+                            let hook_failed = match activate_candidate_transactionally(
+                                Some(&jit),
                                 &candidate,
-                                candidate_on_code_swap_code_ptr,
-                            )
-                            .err();
+                                &migration_preview,
+                                candidate_on_code_swap_code_ptr.is_some(),
+                                || {
+                                    candidate_on_code_swap_code_ptr.map_or(Ok(()), |code_ptr| {
+                                        stasis_dynload::invoke_code_swap_hook(code_ptr as usize)
+                                    })
+                                },
+                                Result::is_ok,
+                            ) {
+                                Ok(Ok(())) => None,
+                                Ok(Err(error)) | Err(error) => Some(error),
+                            };
                             let hook_ms = t_hook.elapsed().as_millis();
 
                             let t_deps = Instant::now();
@@ -1946,8 +1971,9 @@ fn run_play_in_process_inner(
 }
 
 pub fn run_with_real_backend(config: RunnerConfig) -> RunnerSummary {
-    let backend = IncrementalCompilerBackend::new();
-    run_with_backend(config, backend)
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+    let backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(prepared_tx);
+    run_with_backend_and_prepared_swaps(config, backend, Some(prepared_rx))
 }
 
 fn is_stasis_source_file(path: &Path) -> bool {
@@ -2138,6 +2164,14 @@ fn resolve_initial_source_file(config: &RunnerConfig) -> Option<PathBuf> {
 }
 
 pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) -> RunnerSummary {
+    run_with_backend_and_prepared_swaps(config, backend, None)
+}
+
+fn run_with_backend_and_prepared_swaps<B: CompilerBackend>(
+    config: RunnerConfig,
+    backend: B,
+    prepared_jit_swap_rx: Option<std::sync::mpsc::Receiver<PreparedJitSwap>>,
+) -> RunnerSummary {
     let mut watcher = config
         .watch_directory
         .as_deref()
@@ -2213,8 +2247,10 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let mut pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
     let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
         BTreeMap::new();
+    let requires_prepared_jit = prepared_jit_swap_rx.is_some();
+    let mut pending_jit_candidates: BTreeMap<RequestId, JitProcess> = BTreeMap::new();
+    let mut active_jit_candidate: Option<JitProcess> = None;
     let mut active_layout_hash: Option<LayoutHash> = None;
-    let mut active_state_map: Option<Vec<StateMapEntry>> = None;
     let mut aot_linked_image_activations: u32 = 0;
     let mut active_aot_linked_image_path: Option<PathBuf> = None;
     let mut active_aot_linked_image_size_bytes: Option<u64> = None;
@@ -2272,10 +2308,10 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         pipeline.pump_coordinator();
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
+        capture_prepared_jit_swaps(prepared_jit_swap_rx.as_ref(), &mut pending_jit_candidates);
         pipeline.process_commits_at_safe_point(|request| {
             let request_id = request.request_id;
             let request_layout_hash = request.layout_hash;
-            let request_state_map = request.state_map.clone();
             let hook_may_mutate_state = commit_request_may_execute_runtime_hook(
                 &request,
                 &config,
@@ -2283,32 +2319,44 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                 &pending_aot_metadata,
                 &pending_jit_code_ptr_overrides,
             );
-            let result = apply_runtime_state_transaction(
-                active_layout_hash,
-                request_layout_hash,
-                active_state_map.as_deref(),
-                request_state_map.as_deref(),
-                hook_may_mutate_state,
-                || {
-                    apply_commit_request(
-                        request,
-                        &mut pointer_table,
-                        &config,
-                        &host_set_contract,
-                        &mut hook_runs,
-                        &mut hook_failures,
-                        &mut hook_failure_reasons,
-                        &mut swap_commit_successes,
-                        &mut swap_commit_failures,
-                        &mut swap_failure_reasons,
-                        &mut events,
-                        hook_failure_reason.as_ref(),
-                        swap_failure_reason.as_ref(),
-                        &pending_aot_metadata,
-                        &pending_jit_code_ptr_overrides,
-                    )
-                },
-            );
+            let prepared_candidate = pending_jit_candidates.remove(&request_id);
+            let commit = || {
+                apply_commit_request(
+                    request,
+                    &mut pointer_table,
+                    &config,
+                    &host_set_contract,
+                    &mut hook_runs,
+                    &mut hook_failures,
+                    &mut hook_failure_reasons,
+                    &mut swap_commit_successes,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                    &mut events,
+                    hook_failure_reason.as_ref(),
+                    swap_failure_reason.as_ref(),
+                    &pending_aot_metadata,
+                    &pending_jit_code_ptr_overrides,
+                )
+            };
+            let result = if config.target_mode == TargetMode::JitDev
+                && (requires_prepared_jit || prepared_candidate.is_some())
+            {
+                apply_prepared_jit_transaction(
+                    request_id,
+                    prepared_candidate,
+                    &mut active_jit_candidate,
+                    hook_may_mutate_state,
+                    commit,
+                )
+            } else {
+                apply_runtime_state_transaction(
+                    active_layout_hash,
+                    request_layout_hash,
+                    hook_may_mutate_state,
+                    commit,
+                )
+            };
             let result = match result {
                 Ok(result) => result,
                 Err(message) => {
@@ -2322,9 +2370,6 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             };
             if result.status == SwapCommitStatus::Success {
                 active_layout_hash = Some(request_layout_hash);
-                if let Some(state_map) = request_state_map {
-                    active_state_map = Some(state_map);
-                }
             }
             result
         });
@@ -2399,10 +2444,10 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         pipeline.pump_coordinator();
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
+        capture_prepared_jit_swaps(prepared_jit_swap_rx.as_ref(), &mut pending_jit_candidates);
         pipeline.process_commits_at_safe_point(|request| {
             let request_id = request.request_id;
             let request_layout_hash = request.layout_hash;
-            let request_state_map = request.state_map.clone();
             let hook_may_mutate_state = commit_request_may_execute_runtime_hook(
                 &request,
                 &config,
@@ -2410,32 +2455,44 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
                 &pending_aot_metadata,
                 &pending_jit_code_ptr_overrides,
             );
-            let result = apply_runtime_state_transaction(
-                active_layout_hash,
-                request_layout_hash,
-                active_state_map.as_deref(),
-                request_state_map.as_deref(),
-                hook_may_mutate_state,
-                || {
-                    apply_commit_request(
-                        request,
-                        &mut pointer_table,
-                        &config,
-                        &host_set_contract,
-                        &mut hook_runs,
-                        &mut hook_failures,
-                        &mut hook_failure_reasons,
-                        &mut swap_commit_successes,
-                        &mut swap_commit_failures,
-                        &mut swap_failure_reasons,
-                        &mut events,
-                        hook_failure_reason.as_ref(),
-                        swap_failure_reason.as_ref(),
-                        &pending_aot_metadata,
-                        &pending_jit_code_ptr_overrides,
-                    )
-                },
-            );
+            let prepared_candidate = pending_jit_candidates.remove(&request_id);
+            let commit = || {
+                apply_commit_request(
+                    request,
+                    &mut pointer_table,
+                    &config,
+                    &host_set_contract,
+                    &mut hook_runs,
+                    &mut hook_failures,
+                    &mut hook_failure_reasons,
+                    &mut swap_commit_successes,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                    &mut events,
+                    hook_failure_reason.as_ref(),
+                    swap_failure_reason.as_ref(),
+                    &pending_aot_metadata,
+                    &pending_jit_code_ptr_overrides,
+                )
+            };
+            let result = if config.target_mode == TargetMode::JitDev
+                && (requires_prepared_jit || prepared_candidate.is_some())
+            {
+                apply_prepared_jit_transaction(
+                    request_id,
+                    prepared_candidate,
+                    &mut active_jit_candidate,
+                    hook_may_mutate_state,
+                    commit,
+                )
+            } else {
+                apply_runtime_state_transaction(
+                    active_layout_hash,
+                    request_layout_hash,
+                    hook_may_mutate_state,
+                    commit,
+                )
+            };
             let result = match result {
                 Ok(result) => result,
                 Err(message) => {
@@ -2449,9 +2506,6 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
             };
             if result.status == SwapCommitStatus::Success {
                 active_layout_hash = Some(request_layout_hash);
-                if let Some(state_map) = request_state_map {
-                    active_state_map = Some(state_map);
-                }
             }
             result
         });
@@ -2607,6 +2661,18 @@ fn capture_pending_jit_compile_metadata(
         .or_insert(overrides);
 }
 
+fn capture_prepared_jit_swaps(
+    receiver: Option<&std::sync::mpsc::Receiver<PreparedJitSwap>>,
+    pending: &mut BTreeMap<RequestId, JitProcess>,
+) {
+    let Some(receiver) = receiver else {
+        return;
+    };
+    while let Ok(prepared) = receiver.try_recv() {
+        pending.insert(prepared.request_id, prepared.candidate);
+    }
+}
+
 fn format_layout_hash_hex(layout_hash: LayoutHash) -> String {
     let mut out = String::with_capacity(64);
     for byte in layout_hash.0 {
@@ -2624,119 +2690,6 @@ fn record_swap_failure(
 ) {
     *swap_commit_failures += 1;
     swap_failure_reasons.push(message.to_string());
-}
-
-fn normalize_state_map(
-    entries: &[StateMapEntry],
-    label: &str,
-) -> Result<BTreeMap<String, StateMapEntry>, String> {
-    let mut by_path: BTreeMap<String, StateMapEntry> = BTreeMap::new();
-    for entry in entries {
-        if entry.path.trim().is_empty() {
-            return Err(format!(
-                "{label} state-map contains empty path entry (restart required)"
-            ));
-        }
-        if let Some(previous) = by_path.insert(entry.path.clone(), entry.clone()) {
-            if previous.type_name != entry.type_name || previous.path_hash != entry.path_hash {
-                return Err(format!(
-                    "{label} state-map contains conflicting duplicate path '{}' (restart required)",
-                    entry.path
-                ));
-            }
-        }
-    }
-    Ok(by_path)
-}
-
-fn validate_layout_transition(
-    active_layout_hash: Option<LayoutHash>,
-    request_layout_hash: LayoutHash,
-    active_state_map: Option<&[StateMapEntry]>,
-    request_state_map: Option<&[StateMapEntry]>,
-) -> Result<(), String> {
-    let Some(active_layout_hash) = active_layout_hash else {
-        return Ok(());
-    };
-    if active_layout_hash == request_layout_hash {
-        return Ok(());
-    }
-    let Some(active_state_map) = active_state_map else {
-        return Err(format!(
-            "layout hash changed from {} to {}, but active state-map metadata is missing (restart required)",
-            format_layout_hash_hex(active_layout_hash),
-            format_layout_hash_hex(request_layout_hash)
-        ));
-    };
-    let Some(request_state_map) = request_state_map else {
-        return Err(format!(
-            "layout hash changed from {} to {}, but incoming state-map metadata is missing (restart required)",
-            format_layout_hash_hex(active_layout_hash),
-            format_layout_hash_hex(request_layout_hash)
-        ));
-    };
-
-    let active_by_path = normalize_state_map(active_state_map, "active")?;
-    let request_by_path = normalize_state_map(request_state_map, "incoming")?;
-    for (path, request_entry) in &request_by_path {
-        if let Some(active_entry) = active_by_path.get(path) {
-            if active_entry.type_name != request_entry.type_name {
-                return Err(format!(
-                    "layout hash changed from {} to {} and state-map path '{}' changed type '{}' -> '{}' (restart required)",
-                    format_layout_hash_hex(active_layout_hash),
-                    format_layout_hash_hex(request_layout_hash),
-                    path,
-                    active_entry.type_name,
-                    request_entry.type_name
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn type_name_is_f32(type_name: &str) -> bool {
-    type_name.trim() == "f32"
-}
-
-fn type_name_is_f64(type_name: &str) -> bool {
-    type_name.trim() == "f64"
-}
-
-fn type_name_is_collection_like(type_name: &str) -> bool {
-    let normalized = type_name.trim();
-    normalized.contains('[') || normalized == "ascii" || normalized == "utf8"
-}
-
-fn activate_candidate_runtime_transactionally(
-    active: &JitProcess,
-    candidate: &JitProcess,
-    hook_code_ptr: Option<u64>,
-) -> Result<(), String> {
-    let snapshot = hook_code_ptr
-        .map(|_| {
-            stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_HOT_SWAP_STATE_SNAPSHOT_BYTES)
-        })
-        .transpose()?;
-    let result = candidate.activate_staged_runtime().and_then(|()| {
-        hook_code_ptr.map_or(Ok(()), |code_ptr| {
-            stasis_dynload::invoke_code_swap_hook(code_ptr as usize)
-        })
-    });
-    if let Err(error) = result {
-        let Some(snapshot) = snapshot else {
-            return Err(error);
-        };
-        let reactivation = active.activate_staged_runtime();
-        stasis_dynload::restore_jit_runtime_state(&snapshot);
-        return match reactivation {
-            Ok(()) => Err(error),
-            Err(rollback_error) => Err(format!(
-                "{error}; failed restoring active JIT runtime after rejected candidate: {rollback_error}"
-            )),
-        };
-    }
-    Ok(())
 }
 
 fn commit_request_may_execute_runtime_hook(
@@ -2761,73 +2714,64 @@ fn commit_request_may_execute_runtime_hook(
     }
 }
 
-fn apply_runtime_state_transaction(
-    active_layout_hash: Option<LayoutHash>,
-    request_layout_hash: LayoutHash,
-    active_state_map: Option<&[StateMapEntry]>,
-    request_state_map: Option<&[StateMapEntry]>,
+fn apply_prepared_jit_transaction(
+    request_id: RequestId,
+    candidate: Option<JitProcess>,
+    active: &mut Option<JitProcess>,
     hook_may_mutate_state: bool,
     apply: impl FnOnce() -> SwapCommitResult,
 ) -> Result<SwapCommitResult, String> {
-    validate_layout_transition(
-        active_layout_hash,
-        request_layout_hash,
-        active_state_map,
-        request_state_map,
+    let candidate = candidate.ok_or_else(|| {
+        format!(
+            "JIT commit {} is missing its staged runtime candidate",
+            request_id.0
+        )
+    })?;
+    let incoming_layout = candidate.state_layout();
+    let active_layout = active
+        .as_ref()
+        .map(JitProcess::state_layout)
+        .unwrap_or_else(|| incoming_layout.clone());
+    let mut preview =
+        plan_state_migration(&active_layout, &incoming_layout, Vec::new(), false, None)?;
+    finalize_runtime_preview(&candidate, &mut preview);
+    let result = activate_candidate_transactionally(
+        active.as_ref(),
+        &candidate,
+        &preview,
+        hook_may_mutate_state,
+        apply,
+        |result| result.status == SwapCommitStatus::Success,
     )?;
+    if result.status == SwapCommitStatus::Success {
+        *active = Some(candidate);
+    }
+    Ok(result)
+}
+
+fn apply_runtime_state_transaction(
+    active_layout_hash: Option<LayoutHash>,
+    request_layout_hash: LayoutHash,
+    hook_may_mutate_state: bool,
+    apply: impl FnOnce() -> SwapCommitResult,
+) -> Result<SwapCommitResult, String> {
     let layout_changed = active_layout_hash.is_some_and(|hash| hash != request_layout_hash);
-    if !layout_changed && !hook_may_mutate_state {
+    if layout_changed {
+        return Err(format!(
+            "layout-changing commit from {} to {} requires a staged JIT candidate; restart required for this backend",
+            format_layout_hash_hex(active_layout_hash.expect("layout change has active hash")),
+            format_layout_hash_hex(request_layout_hash)
+        ));
+    }
+    if !hook_may_mutate_state {
         return Ok(apply());
     }
-    let snapshot =
-        stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_HOT_SWAP_STATE_SNAPSHOT_BYTES)?;
-    if layout_changed {
-        if let (Some(from), Some(to)) = (active_state_map, request_state_map) {
-            if let Err(error) = migrate_state_map_fields(from, to) {
-                stasis_dynload::restore_jit_runtime_state(&snapshot);
-                return Err(error);
-            }
-        }
-    }
+    let snapshot = stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES)?;
     let result = apply();
     if result.status != SwapCommitStatus::Success {
         stasis_dynload::restore_jit_runtime_state(&snapshot);
     }
     Ok(result)
-}
-
-fn migrate_state_map_fields(
-    active_state_map: &[StateMapEntry],
-    request_state_map: &[StateMapEntry],
-) -> Result<(), String> {
-    let active_by_path = normalize_state_map(active_state_map, "active")?;
-    let request_by_path = normalize_state_map(request_state_map, "incoming")?;
-
-    for (path, request_entry) in &request_by_path {
-        let Some(active_entry) = active_by_path.get(path) else {
-            continue;
-        };
-        if active_entry.type_name != request_entry.type_name {
-            continue;
-        }
-        if type_name_is_collection_like(&request_entry.type_name) {
-            continue;
-        }
-        if type_name_is_f32(&request_entry.type_name) {
-            let value = stasis_dynload::stasis_jit_global_f32_load(active_entry.path_hash);
-            stasis_dynload::stasis_jit_global_f32_store(request_entry.path_hash, value);
-            continue;
-        }
-        if type_name_is_f64(&request_entry.type_name) {
-            let value = stasis_dynload::stasis_jit_global_f64_load(active_entry.path_hash);
-            stasis_dynload::stasis_jit_global_f64_store(request_entry.path_hash, value);
-            continue;
-        }
-        let value = stasis_dynload::stasis_jit_global_i32_load(active_entry.path_hash);
-        stasis_dynload::stasis_jit_global_i32_store(request_entry.path_hash, value);
-    }
-
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3809,30 +3753,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_layout_transition_rejects_type_change_for_existing_path() {
-        let active_map = vec![StateMapEntry {
-            path: "State.score".to_string(),
-            path_hash: 11,
-            type_name: "i32".to_string(),
-        }];
-        let incoming_map = vec![StateMapEntry {
-            path: "State.score".to_string(),
-            path_hash: 11,
-            type_name: "f32".to_string(),
-        }];
-        let result = validate_layout_transition(
-            Some(LayoutHash([1; 32])),
-            LayoutHash([2; 32]),
-            Some(active_map.as_slice()),
-            Some(incoming_map.as_slice()),
-        );
-        assert!(result.is_err());
-        let message = result.expect_err("transition should fail");
-        assert!(message.contains("changed type"));
-        assert!(message.contains("restart required"));
-    }
-
-    #[test]
     fn apply_play_data_binding_value_populates_registered_scalars_and_strings() {
         let _global_lock = jit_global_table_lock()
             .lock()
@@ -4366,63 +4286,177 @@ mod tests {
     }
 
     #[test]
-    fn validate_layout_transition_allows_added_and_removed_paths_when_types_match() {
-        let active_map = vec![
-            StateMapEntry {
-                path: "State.score".to_string(),
-                path_hash: 11,
-                type_name: "i32".to_string(),
-            },
-            StateMapEntry {
-                path: "State.removed".to_string(),
-                path_hash: 12,
-                type_name: "i32".to_string(),
-            },
-        ];
-        let incoming_map = vec![
-            StateMapEntry {
-                path: "State.score".to_string(),
-                path_hash: 21,
-                type_name: "i32".to_string(),
-            },
-            StateMapEntry {
-                path: "State.added".to_string(),
-                path_hash: 22,
-                type_name: "i32".to_string(),
-            },
-        ];
-        let result = validate_layout_transition(
-            Some(LayoutHash([3; 32])),
-            LayoutHash([4; 32]),
-            Some(active_map.as_slice()),
-            Some(incoming_map.as_slice()),
-        );
-        assert!(result.is_ok(), "expected migration-compatible transition");
-    }
-
-    #[test]
-    fn migrate_state_map_fields_copies_i32_for_matching_paths() {
+    fn compiler_thread_stages_jit_candidate_without_activating_runtime() {
         let _global_lock = jit_global_table_lock()
             .lock()
             .expect("jit global lock should be acquired");
         stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::stasis_jit_global_i32_store(11, 777);
-        stasis_dynload::stasis_jit_global_i32_store(22, 0);
 
-        let active_map = vec![StateMapEntry {
-            path: "State.score".to_string(),
-            path_hash: 11,
-            type_name: "i32".to_string(),
-        }];
-        let incoming_map = vec![StateMapEntry {
-            path: "State.score".to_string(),
-            path_hash: 22,
-            type_name: "i32".to_string(),
-        }];
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_staged_candidate_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("main.stasis");
+        fs::write(
+            &source,
+            "global values: i32[4];\nfunction main(): i32 { return values.max_length; }\n",
+        )
+        .expect("write source");
 
-        migrate_state_map_fields(&active_map, &incoming_map).expect("migration should succeed");
-        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(22), 777);
+        let max_length_hash = hash_global_path("values.max_length");
+        stasis_dynload::stasis_jit_global_i32_store(max_length_hash, 99);
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+        let mut backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(prepared_tx);
+        let result = backend.compile(CompileRequest::new(
+            RequestId(89),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+
+        assert_eq!(result.status, CompileStatus::Success);
+        assert_eq!(
+            stasis_dynload::stasis_jit_global_i32_load(max_length_hash),
+            99,
+            "background compilation must not seed the active runtime"
+        );
+        let prepared = prepared_rx
+            .try_recv()
+            .expect("successful compile should stage a candidate");
+        assert_eq!(prepared.request_id, RequestId(89));
+        prepared
+            .candidate
+            .activate_staged_runtime()
+            .expect("safe-point activation should succeed");
+        assert_eq!(
+            stasis_dynload::stasis_jit_global_i32_load(max_length_hash),
+            4
+        );
+
         stasis_dynload::clear_jit_i32_global_table();
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn runner_collection_growth_uses_shared_migration_transaction() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "runner_collection.stasis",
+            "global values: i32[2]; function main(): i32 { return values[0]; }",
+        );
+        active.compile().expect("active compile");
+        active
+            .write_global_collection_scalar(
+                "values",
+                "",
+                0,
+                stasis_compiler::backend::jit::JitScalarValue::I32(11),
+            )
+            .expect("seed first value");
+        active
+            .write_global_collection_scalar(
+                "values",
+                "",
+                1,
+                stasis_compiler::backend::jit::JitScalarValue::I32(22),
+            )
+            .expect("seed second value");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "runner_collection.stasis",
+            "global values: i32[4]; function main(): i32 { return values[0]; }",
+        );
+        candidate.compile_staged().expect("candidate compile");
+        let mut active_candidate = Some(active);
+        let result = apply_prepared_jit_transaction(
+            RequestId(90),
+            Some(candidate),
+            &mut active_candidate,
+            false,
+            || {
+                SwapCommitResult::success(
+                    RequestId(90),
+                    Vec::new(),
+                    stasis_runner::swap::contracts::CodeGeneration(1),
+                )
+            },
+        )
+        .expect("shared transaction should apply collection migration");
+
+        assert_eq!(result.status, SwapCommitStatus::Success);
+        let active = active_candidate.expect("candidate should become active");
+        assert_eq!(
+            active.read_global_collection_scalar("values", "", 0),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(11))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("values", "", 1),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(22))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("values", "", 2),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(0))
+        );
+
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+    }
+
+    #[test]
+    fn runner_rejects_missing_jit_candidate_without_mutating_state() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_jit_i32_global_table();
+        let score_hash = hash_global_path("score");
+        stasis_dynload::stasis_jit_global_i32_store(score_hash, 7);
+        let mut active = None;
+        let mut applied = false;
+
+        let error = apply_prepared_jit_transaction(RequestId(91), None, &mut active, false, || {
+            applied = true;
+            SwapCommitResult::success(
+                RequestId(91),
+                Vec::new(),
+                stasis_runner::swap::contracts::CodeGeneration(1),
+            )
+        })
+        .expect_err("missing candidate must reject");
+
+        assert!(error.contains("missing its staged runtime candidate"));
+        assert!(!applied, "commit callback must not run");
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(score_hash), 7);
+        stasis_dynload::clear_jit_i32_global_table();
+    }
+
+    #[test]
+    fn layout_change_without_jit_candidate_requires_restart() {
+        let mut applied = false;
+        let error = apply_runtime_state_transaction(
+            Some(LayoutHash([1; 32])),
+            LayoutHash([2; 32]),
+            false,
+            || {
+                applied = true;
+                SwapCommitResult::success(
+                    RequestId(92),
+                    Vec::new(),
+                    stasis_runner::swap::contracts::CodeGeneration(1),
+                )
+            },
+        )
+        .expect_err("layout-changing fallback backend must reject");
+
+        assert!(error.contains("requires a staged JIT candidate"));
+        assert!(!applied, "commit callback must not run");
     }
 
     #[test]
@@ -4443,11 +4477,23 @@ mod tests {
         REJECTING_HOOK_PATH_HASH.store(path_hash, std::sync::atomic::Ordering::Relaxed);
         stasis_dynload::stasis_jit_global_i32_store(path_hash, 7);
 
-        let error = activate_candidate_runtime_transactionally(
-            &active,
-            &candidate,
-            Some(mutating_rejecting_hook as usize as u64),
+        let preview = plan_state_migration(
+            &active.state_layout(),
+            &candidate.state_layout(),
+            Vec::new(),
+            false,
+            None,
         )
+        .expect("plan");
+        let error = activate_candidate_transactionally(
+            Some(&active),
+            &candidate,
+            &preview,
+            true,
+            || stasis_dynload::invoke_code_swap_hook(mutating_rejecting_hook as usize),
+            Result::is_ok,
+        )
+        .expect("runtime transaction should execute")
         .expect_err("hook should reject");
 
         assert!(error.contains("rejection"));
@@ -4466,16 +4512,31 @@ mod tests {
         let mut candidate = active.staged_candidate();
         candidate.upsert_file("watch_large.stasis", "function main(): i32 { return 1; }");
         candidate.compile_staged().expect("candidate compile");
-        let oversized_len = MAX_HOT_SWAP_STATE_SNAPSHOT_BYTES / std::mem::size_of::<i32>() + 1;
+        let oversized_len = MAX_STATE_SNAPSHOT_BYTES / std::mem::size_of::<i32>() + 1;
         stasis_dynload::ensure_jit_i32_array_capacity(9002, 0, oversized_len)
             .expect("oversized test storage should allocate");
-        assert!(stasis_dynload::snapshot_jit_runtime_state_bounded(
-            MAX_HOT_SWAP_STATE_SNAPSHOT_BYTES
-        )
-        .is_err());
+        assert!(
+            stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES).is_err()
+        );
 
-        activate_candidate_runtime_transactionally(&active, &candidate, None)
-            .expect("hook-free candidate activation should not snapshot state");
+        let preview = plan_state_migration(
+            &active.state_layout(),
+            &candidate.state_layout(),
+            Vec::new(),
+            false,
+            None,
+        )
+        .expect("plan");
+        activate_candidate_transactionally(
+            Some(&active),
+            &candidate,
+            &preview,
+            false,
+            || Ok::<(), String>(()),
+            Result::is_ok,
+        )
+        .expect("hook-free candidate activation should not snapshot state")
+        .expect("commit should succeed");
 
         stasis_dynload::clear_registered_global_memory();
         stasis_dynload::clear_jit_i32_array_global_table();
@@ -4487,22 +4548,27 @@ mod tests {
             .lock()
             .expect("jit global lock should be acquired");
         stasis_dynload::clear_jit_i32_global_table();
-        let active_hash = hash_global_path("RunnerRollback.active_score");
-        let incoming_hash = hash_global_path("RunnerRollback.incoming_score");
-        stasis_dynload::stasis_jit_global_i32_store(active_hash, 7);
-        stasis_dynload::stasis_jit_global_i32_store(incoming_hash, 3);
-        REJECTING_HOOK_PATH_HASH.store(incoming_hash, std::sync::atomic::Ordering::Relaxed);
-
-        let active_map = vec![StateMapEntry {
-            path: "State.score".to_string(),
-            path_hash: active_hash,
-            type_name: "i32".to_string(),
-        }];
-        let incoming_map = vec![StateMapEntry {
-            path: "State.score".to_string(),
-            path_hash: incoming_hash,
-            type_name: "i32".to_string(),
-        }];
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "runner_rollback.stasis",
+            "global score: i32; function main(): i32 { return score; }",
+        );
+        active.compile().expect("active compile");
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "runner_rollback.stasis",
+            "global score: i32; global added: i32; function main(): i32 { return score + added; }",
+        );
+        candidate.compile_staged().expect("candidate compile");
+        active
+            .write_global_scalar(
+                "score",
+                stasis_compiler::backend::jit::JitScalarValue::I32(7),
+            )
+            .expect("seed active score");
+        let added_hash = hash_global_path("added");
+        stasis_dynload::stasis_jit_global_i32_store(added_hash, 3);
+        REJECTING_HOOK_PATH_HASH.store(added_hash, std::sync::atomic::Ordering::Relaxed);
         let request_id = RequestId(90);
         let hook_fn_id = FnId(2);
         let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
@@ -4514,7 +4580,6 @@ mod tests {
             Some("on_code_swap".to_string()),
         );
         request.hook_fn_id = Some(hook_fn_id);
-        request.state_map = Some(incoming_map.clone());
         let config = RunnerConfig::default();
         let host_set_contract = expected_host_set(&config);
         attach_host_set(&mut request, &host_set_contract);
@@ -4535,11 +4600,11 @@ mod tests {
             }],
         )]);
 
-        let result = apply_runtime_state_transaction(
-            Some(LayoutHash([1; 32])),
-            LayoutHash([2; 32]),
-            Some(&active_map),
-            Some(&incoming_map),
+        let mut active_candidate = Some(active);
+        let result = apply_prepared_jit_transaction(
+            request_id,
+            Some(candidate),
+            &mut active_candidate,
             true,
             || {
                 apply_commit_request(
@@ -4564,8 +4629,14 @@ mod tests {
         .expect("runtime transaction should execute");
 
         assert_eq!(result.status, SwapCommitStatus::Failed);
-        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(active_hash), 7);
-        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(incoming_hash), 3);
+        assert_eq!(
+            active_candidate
+                .as_ref()
+                .expect("active candidate retained")
+                .read_global_scalar("score"),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(7))
+        );
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(added_hash), 3);
         assert_eq!(pointer_table.generation().0, 0);
         assert_eq!(hook_runs, 1);
         assert_eq!(hook_failures, 1);
@@ -4580,19 +4651,16 @@ mod tests {
             .lock()
             .expect("jit global lock should be acquired");
         let _jit = JitProcess::new();
-        let oversized_len = MAX_HOT_SWAP_STATE_SNAPSHOT_BYTES / std::mem::size_of::<i32>() + 1;
+        let oversized_len = MAX_STATE_SNAPSHOT_BYTES / std::mem::size_of::<i32>() + 1;
         stasis_dynload::ensure_jit_i32_array_capacity(9001, 0, oversized_len)
             .expect("oversized test storage should allocate");
-        assert!(stasis_dynload::snapshot_jit_runtime_state_bounded(
-            MAX_HOT_SWAP_STATE_SNAPSHOT_BYTES
-        )
-        .is_err());
+        assert!(
+            stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES).is_err()
+        );
 
         let result = apply_runtime_state_transaction(
             Some(LayoutHash([1; 32])),
             LayoutHash([1; 32]),
-            None,
-            None,
             false,
             || {
                 SwapCommitResult::success(
@@ -6381,7 +6449,8 @@ mod tests {
         let game = temp_root.join("game.stasis");
         fs::copy(&fixture, &game).expect("copy hook fixture");
 
-        let backend = IncrementalCompilerBackend::new();
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+        let backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(prepared_tx);
         let mut pipeline = DevHotSwapPipeline::with_target_mode(backend, TargetMode::JitDev);
         let mut pointer_table = FunctionPointerTable::new();
         let config = RunnerConfig {
@@ -6409,6 +6478,8 @@ mod tests {
         let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
         let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
             BTreeMap::new();
+        let mut pending_jit_candidates = BTreeMap::new();
+        let mut active_jit_candidate = None;
 
         pipeline.submit_file_change(FileChangeEvent::new(
             game.clone(),
@@ -6423,24 +6494,36 @@ mod tests {
         while start.elapsed() < timeout {
             pipeline.pump_coordinator();
             capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
+            capture_prepared_jit_swaps(Some(&prepared_rx), &mut pending_jit_candidates);
             pipeline.process_commits_at_safe_point(|request| {
-                apply_commit_request(
-                    request,
-                    &mut pointer_table,
-                    &config,
-                    &host_set_contract,
-                    &mut hook_runs,
-                    &mut hook_failures,
-                    &mut hook_failure_reasons,
-                    &mut swap_commit_successes,
-                    &mut swap_commit_failures,
-                    &mut swap_failure_reasons,
-                    &mut events,
-                    None,
-                    None,
-                    &pending_aot_metadata,
-                    &pending_jit_code_ptr_overrides,
+                let request_id = request.request_id;
+                let candidate = pending_jit_candidates.remove(&request_id);
+                apply_prepared_jit_transaction(
+                    request_id,
+                    candidate,
+                    &mut active_jit_candidate,
+                    true,
+                    || {
+                        apply_commit_request(
+                            request,
+                            &mut pointer_table,
+                            &config,
+                            &host_set_contract,
+                            &mut hook_runs,
+                            &mut hook_failures,
+                            &mut hook_failure_reasons,
+                            &mut swap_commit_successes,
+                            &mut swap_commit_failures,
+                            &mut swap_failure_reasons,
+                            &mut events,
+                            None,
+                            None,
+                            &pending_aot_metadata,
+                            &pending_jit_code_ptr_overrides,
+                        )
+                    },
                 )
+                .unwrap_or_else(|error| SwapCommitResult::failed(request_id, error))
             });
             pipeline.pump_coordinator();
 
@@ -6479,24 +6562,36 @@ mod tests {
         while start.elapsed() < timeout {
             pipeline.pump_coordinator();
             capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
+            capture_prepared_jit_swaps(Some(&prepared_rx), &mut pending_jit_candidates);
             pipeline.process_commits_at_safe_point(|request| {
-                apply_commit_request(
-                    request,
-                    &mut pointer_table,
-                    &config,
-                    &host_set_contract,
-                    &mut hook_runs,
-                    &mut hook_failures,
-                    &mut hook_failure_reasons,
-                    &mut swap_commit_successes,
-                    &mut swap_commit_failures,
-                    &mut swap_failure_reasons,
-                    &mut events,
-                    None,
-                    None,
-                    &pending_aot_metadata,
-                    &pending_jit_code_ptr_overrides,
+                let request_id = request.request_id;
+                let candidate = pending_jit_candidates.remove(&request_id);
+                apply_prepared_jit_transaction(
+                    request_id,
+                    candidate,
+                    &mut active_jit_candidate,
+                    true,
+                    || {
+                        apply_commit_request(
+                            request,
+                            &mut pointer_table,
+                            &config,
+                            &host_set_contract,
+                            &mut hook_runs,
+                            &mut hook_failures,
+                            &mut hook_failure_reasons,
+                            &mut swap_commit_successes,
+                            &mut swap_commit_failures,
+                            &mut swap_failure_reasons,
+                            &mut events,
+                            None,
+                            None,
+                            &pending_aot_metadata,
+                            &pending_jit_code_ptr_overrides,
+                        )
+                    },
                 )
+                .unwrap_or_else(|error| SwapCommitResult::failed(request_id, error))
             });
             pipeline.pump_coordinator();
 

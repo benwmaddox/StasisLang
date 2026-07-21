@@ -695,7 +695,10 @@ Current policy (pre-1.0):
 On rejection, old code and old data remain active.
 
 Current migration policy (pre-1.0):
-- Layout hash changes can commit only when both active and incoming builds provide deterministic state metadata.
+- JIT and AOT derive layout identity from the same canonical compiler-owned state-layout model; source text and function bodies are not layout identity inputs.
+- Development JIT compilation produces a staged runtime candidate and never activates dispatch, literals, collection headers, or state from the compiler thread.
+- Every JIT entry point uses the same migration planner and bounded transactional activation at the runtime safe point. There is no scalar-only runner migration path.
+- Layout-changing commits without a staged JIT candidate, including current AOT runtime swaps, reject with a restart-required diagnostic.
 - Migration compatibility is path-based: overlapping paths must keep compatible scalar or collection-element type shape.
 - Compatible scalar and fixed-collection fields are copied; new fields are initialized to their type default; removed fields are discarded with an explicit preview warning.
 - Fixed-collection growth is storage-ownership preflighted and bounded before allocation, preserves the old prefix, and initializes the expanded tail.
@@ -716,8 +719,8 @@ Role ownership:
 Required high-level message contracts:
 - `FileChangeEvent(path, revision, text_source, change_kind)`
 - `CompileRequest(request_id, changed_files[], target_mode)`
-- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set, hook_symbol?, state_map?)`
-- `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol, state_map?)`
+- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set, hook_symbol?, staged_candidate?)`
+- `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol)`
 - `SwapCommitResult(request_id, status, swapped_fn_ids[], new_generation, error)`
 
 Rules:

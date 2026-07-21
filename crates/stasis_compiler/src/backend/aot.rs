@@ -1,4 +1,5 @@
 use crate::backend::emit::*;
+use crate::backend::state_layout::{build_state_layout, StateLayout};
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32};
@@ -212,6 +213,18 @@ impl AotProcess {
         compact_active_artifact_storage(artifacts, object_bytes);
         self.next_object_index = u32::try_from(self.object_bytes.len()).unwrap_or(u32::MAX);
         Ok(CompileReport { index, emit })
+    }
+
+    pub fn state_layout(&self) -> StateLayout {
+        self.compile_analysis_cache
+            .as_ref()
+            .map_or_else(StateLayout::default, |analysis| {
+                build_state_layout(
+                    &analysis.global_path_types,
+                    &analysis.collection_infos,
+                    self.compiler.types(),
+                )
+            })
     }
 
     fn load_import_graph_sources(&mut self) -> Result<(), String> {

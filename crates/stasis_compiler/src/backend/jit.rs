@@ -1,4 +1,5 @@
 use crate::backend::emit::RuntimeHelperLinkage;
+use crate::backend::state_layout::build_state_layout;
 use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::indexer::hash_text;
@@ -16,6 +17,12 @@ use std::path::Path;
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::SystemTime;
+
+pub use crate::backend::state_layout::{
+    StateCollectionFieldLayout as JitStateCollectionFieldLayout,
+    StateCollectionLayout as JitStateCollectionLayout, StateLayout as JitStateLayout,
+    StateOpaqueLayout as JitStateOpaqueLayout, StateScalarLayout as JitStateScalarLayout,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -45,38 +52,6 @@ pub struct JitArtifact {
     pub slot: u32,
     pub body_hash: u64,
     pub code_ptr: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct JitStateLayout {
-    pub scalars: Vec<JitStateScalarLayout>,
-    pub collections: Vec<JitStateCollectionLayout>,
-    pub opaque: Vec<JitStateOpaqueLayout>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct JitStateScalarLayout {
-    pub path: String,
-    pub type_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct JitStateCollectionLayout {
-    pub path: String,
-    pub capacity: i32,
-    pub fields: Vec<JitStateCollectionFieldLayout>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct JitStateCollectionFieldLayout {
-    pub field: String,
-    pub type_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct JitStateOpaqueLayout {
-    pub path: String,
-    pub type_name: String,
 }
 
 pub struct JitProcess {
@@ -490,116 +465,15 @@ impl JitProcess {
     }
 
     pub fn state_layout(&self) -> JitStateLayout {
-        let scalars = self
-            .global_scalar_paths()
-            .into_iter()
-            .map(|(path, type_name)| JitStateScalarLayout {
-                path,
-                type_name: type_name.to_string(),
-            })
-            .collect();
-        let mut collections: Vec<JitStateCollectionLayout> = self
-            .compile_analysis_cache
+        self.compile_analysis_cache
             .as_ref()
-            .map(|analysis| {
-                analysis
-                    .collection_infos
-                    .iter()
-                    .map(|(path, info)| {
-                        let mut fields = Vec::new();
-                        if let Some(type_name) = info.element_type.and_then(|type_id| {
-                            collection_type_name(self.compiler.types(), type_id)
-                        }) {
-                            fields.push(JitStateCollectionFieldLayout {
-                                field: String::new(),
-                                type_name: type_name.to_string(),
-                            });
-                        }
-                        fields.extend(info.field_types.iter().filter_map(|(field, type_id)| {
-                            collection_type_name(self.compiler.types(), *type_id).map(|type_name| {
-                                JitStateCollectionFieldLayout {
-                                    field: field.clone(),
-                                    type_name: type_name.to_string(),
-                                }
-                            })
-                        }));
-                        JitStateCollectionLayout {
-                            path: path.clone(),
-                            capacity: info.len,
-                            fields,
-                        }
-                    })
-                    .collect()
+            .map_or_else(JitStateLayout::default, |analysis| {
+                build_state_layout(
+                    &analysis.global_path_types,
+                    &analysis.collection_infos,
+                    self.compiler.types(),
+                )
             })
-            .unwrap_or_default();
-        if let Some(analysis) = self.compile_analysis_cache.as_ref() {
-            for path in analysis.global_path_types.keys() {
-                let Some(capacity) = self.global_fixed_text_capacity(path) else {
-                    continue;
-                };
-                if let Some(collection) = collections
-                    .iter_mut()
-                    .find(|collection| collection.path == *path)
-                {
-                    if !collection.fields.iter().any(|field| field.field.is_empty()) {
-                        collection.fields.push(JitStateCollectionFieldLayout {
-                            field: String::new(),
-                            type_name: "u8".to_string(),
-                        });
-                    }
-                    continue;
-                }
-                collections.push(JitStateCollectionLayout {
-                    path: path.clone(),
-                    capacity,
-                    fields: vec![JitStateCollectionFieldLayout {
-                        field: String::new(),
-                        type_name: "u8".to_string(),
-                    }],
-                });
-            }
-        }
-        collections.sort_by(|left, right| left.path.cmp(&right.path));
-        let collection_paths = collections
-            .iter()
-            .map(|collection| collection.path.as_str())
-            .collect::<BTreeSet<_>>();
-        let opaque = self
-            .compile_analysis_cache
-            .as_ref()
-            .map(|analysis| {
-                analysis
-                    .global_path_types
-                    .iter()
-                    .filter_map(|(path, type_id)| {
-                        if scalar_type_name(*type_id).is_some()
-                            || collection_paths.contains(path.as_str())
-                        {
-                            return None;
-                        }
-                        let info = self.compiler.types().type_info(*type_id)?;
-                        let prefix = format!("{path}.");
-                        if info.category == TypeCategory::Named
-                            && analysis
-                                .global_path_types
-                                .keys()
-                                .any(|candidate| candidate.starts_with(&prefix))
-                        {
-                            return None;
-                        }
-                        Some(JitStateOpaqueLayout {
-                            path: path.clone(),
-                            type_name: info.name.clone(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        JitStateLayout {
-            scalars,
-            collections,
-            opaque,
-        }
     }
 
     pub fn read_global_collection_scalar(
@@ -1251,14 +1125,6 @@ fn scalar_type_name(type_id: u16) -> Option<&'static str> {
         TYPE_ID_F64 => Some("f64"),
         TYPE_ID_BOOL => Some("bool"),
         _ => None,
-    }
-}
-
-fn collection_type_name(type_table: &TypeTable, type_id: u16) -> Option<&'static str> {
-    if is_u8_type(type_table, type_id) {
-        Some("u8")
-    } else {
-        scalar_type_name(type_id)
     }
 }
 
