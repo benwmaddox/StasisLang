@@ -688,15 +688,20 @@ Swap is rejected if:
 - `on_code_swap()` fails.
 
 Current policy (pre-1.0):
-- Layout-hash changes are rejected deterministically with a `restart required` error.
-- Automatic blob state migration (`state-map` old->new layout copy) is planned but not yet implemented.
+- Layout-affecting semantic edits produce a versioned preview and require explicit apply.
+- The preview reports candidate dispatch-patch functions, state-layout compatibility, struct or whole-state scope, migration steps, capacity-shrink warnings, and estimated commit cost.
+- Apply regenerates the preview; any preview/commit mismatch rejects the swap.
 
 On rejection, old code and old data remain active.
 
 Current migration policy (pre-1.0):
-- Layout hash changes can commit only when both active and incoming builds provide deterministic state-map metadata.
-- Migration compatibility is path-based: overlapping paths must keep compatible type shape; added/removed paths are allowed.
-- Incompatible or missing state-map metadata fails commit deterministically with actionable `restart required` diagnostics.
+- Layout hash changes can commit only when both active and incoming builds provide deterministic state metadata.
+- Migration compatibility is path-based: overlapping paths must keep compatible scalar or collection-element type shape.
+- Compatible scalar and fixed-collection fields are copied; new fields are initialized to their type default; removed fields are discarded with an explicit preview warning.
+- Fixed-collection growth is storage-ownership preflighted and bounded before allocation, preserves the old prefix, and initializes the expanded tail.
+- Shrink copies the retained prefix, warns about the discarded range, and clamps logical lengths; UTF-8 shrink retains the largest valid code-point prefix and recomputes byte and character counts.
+- Incompatible or missing state metadata fails deterministically with an actionable diagnostic.
+- Migration, `on_code_swap`, or pointer commit failure restores the old code and complete bounded runtime snapshot; partial migration is forbidden.
 
 ### 14.4 Development File-Change Boundary Contracts
 
@@ -736,6 +741,7 @@ Rules:
 - Runs between ticks.
 - Runs before new code executes.
 - May mutate global data.
+- May call `reject_code_swap()` to abort; the runtime restores the old code and complete bounded state snapshot.
 - Must not invoke gameplay entrypoints.
 
 ## 16. Diagnostics
@@ -770,4 +776,3 @@ Rules:
 
 This document defines the current direction.
 Legacy bootstrap/tooling details from prior repository generations are intentionally excluded.
-

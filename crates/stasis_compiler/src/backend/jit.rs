@@ -24,6 +24,7 @@ pub enum JitScalarValue {
     F32(f32),
     F64(f64),
     Bool(bool),
+    U8(u8),
 }
 
 impl JitScalarValue {
@@ -33,6 +34,7 @@ impl JitScalarValue {
             Self::F32(_) => "f32",
             Self::F64(_) => "f64",
             Self::Bool(_) => "bool",
+            Self::U8(_) => "u8",
         }
     }
 }
@@ -43,6 +45,38 @@ pub struct JitArtifact {
     pub slot: u32,
     pub body_hash: u64,
     pub code_ptr: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JitStateLayout {
+    pub scalars: Vec<JitStateScalarLayout>,
+    pub collections: Vec<JitStateCollectionLayout>,
+    pub opaque: Vec<JitStateOpaqueLayout>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JitStateScalarLayout {
+    pub path: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JitStateCollectionLayout {
+    pub path: String,
+    pub capacity: i32,
+    pub fields: Vec<JitStateCollectionFieldLayout>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JitStateCollectionFieldLayout {
+    pub field: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JitStateOpaqueLayout {
+    pub path: String,
+    pub type_name: String,
 }
 
 pub struct JitProcess {
@@ -425,6 +459,259 @@ impl JitProcess {
             .collect()
     }
 
+    pub fn state_layout(&self) -> JitStateLayout {
+        let scalars = self
+            .global_scalar_paths()
+            .into_iter()
+            .map(|(path, type_name)| JitStateScalarLayout {
+                path,
+                type_name: type_name.to_string(),
+            })
+            .collect();
+        let mut collections: Vec<JitStateCollectionLayout> = self
+            .compile_analysis_cache
+            .as_ref()
+            .map(|analysis| {
+                analysis
+                    .collection_infos
+                    .iter()
+                    .map(|(path, info)| {
+                        let mut fields = Vec::new();
+                        if let Some(type_name) = info.element_type.and_then(|type_id| {
+                            collection_type_name(self.compiler.types(), type_id)
+                        }) {
+                            fields.push(JitStateCollectionFieldLayout {
+                                field: String::new(),
+                                type_name: type_name.to_string(),
+                            });
+                        }
+                        fields.extend(info.field_types.iter().filter_map(|(field, type_id)| {
+                            collection_type_name(self.compiler.types(), *type_id).map(|type_name| {
+                                JitStateCollectionFieldLayout {
+                                    field: field.clone(),
+                                    type_name: type_name.to_string(),
+                                }
+                            })
+                        }));
+                        JitStateCollectionLayout {
+                            path: path.clone(),
+                            capacity: info.len,
+                            fields,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(analysis) = self.compile_analysis_cache.as_ref() {
+            for path in analysis.global_path_types.keys() {
+                let Some(capacity) = self.global_fixed_text_capacity(path) else {
+                    continue;
+                };
+                if let Some(collection) = collections
+                    .iter_mut()
+                    .find(|collection| collection.path == *path)
+                {
+                    if !collection.fields.iter().any(|field| field.field.is_empty()) {
+                        collection.fields.push(JitStateCollectionFieldLayout {
+                            field: String::new(),
+                            type_name: "u8".to_string(),
+                        });
+                    }
+                    continue;
+                }
+                collections.push(JitStateCollectionLayout {
+                    path: path.clone(),
+                    capacity,
+                    fields: vec![JitStateCollectionFieldLayout {
+                        field: String::new(),
+                        type_name: "u8".to_string(),
+                    }],
+                });
+            }
+        }
+        collections.sort_by(|left, right| left.path.cmp(&right.path));
+        let collection_paths = collections
+            .iter()
+            .map(|collection| collection.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let opaque = self
+            .compile_analysis_cache
+            .as_ref()
+            .map(|analysis| {
+                analysis
+                    .global_path_types
+                    .iter()
+                    .filter_map(|(path, type_id)| {
+                        if scalar_type_name(*type_id).is_some()
+                            || collection_paths.contains(path.as_str())
+                        {
+                            return None;
+                        }
+                        let info = self.compiler.types().type_info(*type_id)?;
+                        let prefix = format!("{path}.");
+                        if info.category == TypeCategory::Named
+                            && analysis
+                                .global_path_types
+                                .keys()
+                                .any(|candidate| candidate.starts_with(&prefix))
+                        {
+                            return None;
+                        }
+                        Some(JitStateOpaqueLayout {
+                            path: path.clone(),
+                            type_name: info.name.clone(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        JitStateLayout {
+            scalars,
+            collections,
+            opaque,
+        }
+    }
+
+    pub fn read_global_collection_scalar(
+        &self,
+        path: &str,
+        field: &str,
+        index: i32,
+    ) -> Result<JitScalarValue, String> {
+        let (type_id, capacity) = self.global_collection_value_type(path, field)?;
+        if index < 0 || index >= capacity {
+            return Err(format!(
+                "global collection path '{path}' index {index} is outside capacity {capacity}"
+            ));
+        }
+        let collection_hash = hash_global_path(path);
+        let field_hash = hash_foreach_field_suffix(field);
+        if field.is_empty() && self.global_fixed_text_capacity(path).is_some() {
+            return Ok(JitScalarValue::U8(
+                stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
+                    as u8,
+            ));
+        }
+        match type_id {
+            TYPE_ID_I32 => Ok(JitScalarValue::I32(
+                stasis_dynload::stasis_jit_global_i32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
+            TYPE_ID_F32 => Ok(JitScalarValue::F32(
+                stasis_dynload::stasis_jit_global_f32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
+            TYPE_ID_F64 => Ok(JitScalarValue::F64(
+                stasis_dynload::stasis_jit_global_f64_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
+            TYPE_ID_BOOL => Ok(JitScalarValue::Bool(
+                stasis_dynload::stasis_jit_global_i32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ) != 0,
+            )),
+            type_id if is_u8_type(self.compiler.types(), type_id) => Ok(JitScalarValue::U8(
+                stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
+                    as u8,
+            )),
+            _ => Err(format!(
+                "global collection path '{path}' field '{field}' is not a supported scalar"
+            )),
+        }
+    }
+
+    pub fn write_global_collection_scalar(
+        &self,
+        path: &str,
+        field: &str,
+        index: i32,
+        value: JitScalarValue,
+    ) -> Result<(), String> {
+        let (type_id, capacity) = self.global_collection_value_type(path, field)?;
+        if index < 0 || index >= capacity {
+            return Err(format!(
+                "global collection path '{path}' index {index} is outside capacity {capacity}"
+            ));
+        }
+        let collection_hash = hash_global_path(path);
+        let field_hash = hash_foreach_field_suffix(field);
+        if field.is_empty() && self.global_fixed_text_capacity(path).is_some() {
+            let JitScalarValue::U8(value) = value else {
+                return Err(format!(
+                    "global text path '{path}' does not accept {}",
+                    value.type_name()
+                ));
+            };
+            stasis_dynload::stasis_jit_global_i32_array_store(
+                collection_hash,
+                field_hash,
+                index,
+                i32::from(value),
+            );
+            return Ok(());
+        }
+        match (type_id, value) {
+            (TYPE_ID_I32, JitScalarValue::I32(value)) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
+                )
+            }
+            (TYPE_ID_F32, JitScalarValue::F32(value)) => {
+                stasis_dynload::stasis_jit_global_f32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
+                )
+            }
+            (TYPE_ID_F64, JitScalarValue::F64(value)) => {
+                stasis_dynload::stasis_jit_global_f64_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
+                )
+            }
+            (TYPE_ID_BOOL, JitScalarValue::Bool(value)) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    i32::from(value),
+                )
+            }
+            (type_id, JitScalarValue::U8(value)) if is_u8_type(self.compiler.types(), type_id) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    i32::from(value),
+                )
+            }
+            (_, value) => {
+                return Err(format!(
+                    "global collection path '{path}' field '{field}' does not accept {}",
+                    value.type_name()
+                ))
+            }
+        }
+        Ok(())
+    }
+
     pub fn read_global_scalar(&self, path: &str) -> Result<JitScalarValue, String> {
         let type_id = self.global_path_type(path)?;
         let path_hash = hash_global_path(path);
@@ -497,6 +784,120 @@ impl JitProcess {
             .as_ref()
             .and_then(|analysis| analysis.global_path_types.get(path).copied())
             .ok_or_else(|| format!("global path '{path}' was not found in compiler metadata"))
+    }
+
+    fn global_collection_value_type(&self, path: &str, field: &str) -> Result<(u16, i32), String> {
+        let analysis = self
+            .compile_analysis_cache
+            .as_ref()
+            .ok_or_else(|| "JIT collection metadata is unavailable".to_string())?;
+        if let Some(info) = analysis.collection_infos.get(path) {
+            let type_id = if field.is_empty() {
+                info.element_type
+            } else {
+                info.field_types.get(field).copied()
+            }
+            .ok_or_else(|| {
+                format!("global collection path '{path}' field '{field}' was not found")
+            })?;
+            return Ok((type_id, info.len));
+        }
+        if field.is_empty() {
+            if let Some(capacity) = self.global_fixed_text_capacity(path) {
+                let type_id = analysis
+                    .global_path_types
+                    .get(path)
+                    .and_then(|type_id| self.compiler.types().indexed_element_type_id(*type_id))
+                    .ok_or_else(|| format!("global text path '{path}' has no payload type"))?;
+                return Ok((type_id, capacity));
+            }
+        }
+        Err(format!("global collection path '{path}' was not found"))
+    }
+
+    fn global_fixed_text_capacity(&self, path: &str) -> Option<i32> {
+        let type_id = self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        let category = self.compiler.types().type_info(*type_id)?.category;
+        matches!(category, TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed)
+            .then(|| self.compiler.types().fixed_collection_len(*type_id))
+            .flatten()
+    }
+
+    pub fn global_fixed_text_encoding(&self, path: &str) -> Option<&'static str> {
+        let type_id = self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        match self.compiler.types().type_info(*type_id)?.category {
+            TypeCategory::AsciiFixed => Some("ascii"),
+            TypeCategory::Utf8Fixed => Some("utf8"),
+            _ => None,
+        }
+    }
+
+    pub fn preflight_global_collection_capacity(
+        &self,
+        path: &str,
+        field: &str,
+        capacity: u32,
+    ) -> Result<(), String> {
+        self.collection_capacity_operation(path, field, capacity, false)
+    }
+
+    pub fn ensure_global_collection_capacity(
+        &self,
+        path: &str,
+        field: &str,
+        capacity: u32,
+    ) -> Result<(), String> {
+        self.collection_capacity_operation(path, field, capacity, true)
+    }
+
+    fn collection_capacity_operation(
+        &self,
+        path: &str,
+        field: &str,
+        capacity: u32,
+        grow: bool,
+    ) -> Result<(), String> {
+        let (type_id, _) = self.global_collection_value_type(path, field)?;
+        let capacity = capacity as usize;
+        let collection_hash = hash_global_path(path);
+        let field_hash = hash_foreach_field_suffix(field);
+        let i32_capacity = if grow {
+            stasis_dynload::ensure_jit_i32_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_i32_array_capacity
+        };
+        let f32_capacity = if grow {
+            stasis_dynload::ensure_jit_f32_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_f32_array_capacity
+        };
+        let f64_capacity = if grow {
+            stasis_dynload::ensure_jit_f64_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_f64_array_capacity
+        };
+        if field.is_empty() && self.global_fixed_text_capacity(path).is_some() {
+            return i32_capacity(collection_hash, field_hash, capacity);
+        }
+        match type_id {
+            TYPE_ID_I32 | TYPE_ID_BOOL => i32_capacity(collection_hash, field_hash, capacity),
+            TYPE_ID_F32 => f32_capacity(collection_hash, field_hash, capacity),
+            TYPE_ID_F64 => f64_capacity(collection_hash, field_hash, capacity),
+            type_id if is_u8_type(self.compiler.types(), type_id) => {
+                i32_capacity(collection_hash, field_hash, capacity)
+            }
+            _ => Err(format!(
+                "global collection path '{path}' field '{field}' is not resizable"
+            )),
+        }
     }
 
     pub fn write_i32_global_path(&self, path: &str, value: i32) {
@@ -823,6 +1224,20 @@ fn scalar_type_name(type_id: u16) -> Option<&'static str> {
     }
 }
 
+fn collection_type_name(type_table: &TypeTable, type_id: u16) -> Option<&'static str> {
+    if is_u8_type(type_table, type_id) {
+        Some("u8")
+    } else {
+        scalar_type_name(type_id)
+    }
+}
+
+fn is_u8_type(type_table: &TypeTable, type_id: u16) -> bool {
+    type_table
+        .type_info(type_id)
+        .is_some_and(|info| info.name == "u8")
+}
+
 fn collect_current_string_literals(compiler: &Compiler) -> Result<HashMap<i32, String>, String> {
     let mut literals = HashMap::new();
     for file in compiler.files() {
@@ -988,6 +1403,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "sys_memmove_f32" | "stasis_jit_sys_memmove_f32" => {
             function_address(stasis_dynload::stasis_jit_sys_memmove_f32 as *const ())
         }
+        "reject_code_swap" | "stasis_jit_reject_code_swap" => {
+            function_address(stasis_dynload::stasis_jit_reject_code_swap as *const ())
+        }
         _ => return None,
     };
     Some(address)
@@ -1117,6 +1535,7 @@ fn runtime_helper_addresses() -> BTreeMap<String, usize> {
         stasis_jit_global_f64_array_load,
         stasis_jit_global_f64_array_store,
         stasis_jit_global_f64_array_ptr,
+        stasis_jit_reject_code_swap,
     );
     out
 }

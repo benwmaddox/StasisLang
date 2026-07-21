@@ -41,6 +41,7 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_measure_text",
     "stasis_jit_print_i32",
     "stasis_jit_print_string",
+    "stasis_jit_reject_code_swap",
     "stasis_jit_sin_fast",
     "stasis_jit_sleep_ms",
     "stasis_jit_sys_memcpy_f32",

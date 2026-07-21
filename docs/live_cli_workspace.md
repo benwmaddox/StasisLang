@@ -198,10 +198,22 @@ Add `--preview` to an inline `:add`, `:update`, or `:delete` to compile and reta
 plan without writing. `:preview` displays that staged plan and `:apply` commits it only if its
 source hashes are still current.
 
-Layout-changing edits return a deterministic diagnostic until the first-class migration contract
-tracked by Maddox #153 is available. Compiler, test, stale-hash, receipt, or `on_code_swap`
-invocation failure restores the prior disk sources, dispatch table, and bounded typed runtime
-state. The current `on_code_swap(): void` ABI has no application-level rejection return value.
+Layout-affecting edits always stop at a versioned swap preview, even when the original edit did
+not pass `--preview`. The preview lists candidate dispatch-patch functions, source and target state-layout versions,
+struct-scoped or whole-state migration steps, compatibility, capacity-shrink data-loss warnings,
+and a deterministic commit-cost estimate. `:apply` regenerates the preview and refuses the commit
+if it differs from the validated version.
+
+Compatible scalar and fixed-collection fields are copied by compiler-owned path/type metadata.
+New fields and expanded collection capacity are explicitly initialized to the type default before
+`on_code_swap`; removed fields are reported, and collection lengths are clamped when capacity
+shrinks. Growth is preflighted against runtime storage ownership and the bounded live-state budget.
+UTF-8 shrink retains only the largest valid code-point prefix and recomputes byte and character
+counts. Type changes at an existing state path and function ABI changes reject deterministically.
+Compiler, migration, test, stale-hash, receipt, or `on_code_swap` failure restores the prior disk
+sources, dispatch table, fixed-capacity headers, and bounded typed runtime state with no partial
+commit. `on_code_swap(): void` can call the stdlib `reject_code_swap()` helper to reject after
+validating or adjusting migrated state; the runtime then restores the prior disk, code, and state.
 
 ## Scratch and state transactions
 

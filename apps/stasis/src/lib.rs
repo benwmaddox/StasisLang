@@ -1836,7 +1836,8 @@ fn run_play_in_process_inner(
                                 let t_hook = Instant::now();
                                 // Run the hook against the newly compiled code. If it fails, abort the swap attempt
                                 // and keep running last-known-good code/data.
-                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize)
+                                if let Err(error) =
+                                    stasis_dynload::invoke_code_swap_hook(hook as usize)
                                 {
                                     hook_ms = t_hook.elapsed().as_millis();
                                     hook_failed = Some(error);
@@ -2832,7 +2833,7 @@ fn apply_commit_request(
                     swap_failure_reasons.push(hook_error.clone());
                     return SwapCommitResult::failed(request.request_id, hook_error);
                 }
-                if let Err(error) = stasis_dynload::invoke_noarg_void(code_ptr as usize) {
+                if let Err(error) = stasis_dynload::invoke_code_swap_hook(code_ptr as usize) {
                     *hook_failures += 1;
                     let hook_error = format!("{hook_symbol} failed: {error}");
                     hook_failure_reasons.push(hook_error.clone());
@@ -3000,7 +3001,7 @@ fn apply_commit_request(
                 }
             };
 
-            if let Err(error) = stasis_dynload::invoke_noarg_void(address) {
+            if let Err(error) = stasis_dynload::invoke_code_swap_hook(address) {
                 *hook_failures += 1;
                 let hook_error = format!("{hook_symbol} failed: {error}");
                 hook_failure_reasons.push(hook_error.clone());

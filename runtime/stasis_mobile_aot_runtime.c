@@ -525,6 +525,9 @@ static void copy_f32_values(int32_t dst, int32_t di, int32_t src, int32_t si, in
 void stasis_jit_sys_memcpy_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
 void stasis_jit_sys_memcpy_i32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
 void stasis_jit_sys_memcpy_f32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_f32_values(d, di, s, si, n); }
+
+/* Mobile AOT has no live swap coordinator; retain the shared import contract as a no-op. */
+void stasis_jit_reject_code_swap(void) {}
 void stasis_jit_sys_memmove_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
 void stasis_jit_sys_memmove_i32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
 void stasis_jit_sys_memmove_f32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_f32_values(d, di, s, si, n); }
