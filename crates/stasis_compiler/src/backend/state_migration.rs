@@ -1,49 +1,49 @@
-use sha2::{Digest, Sha256};
-use stasis_compiler::backend::jit::{JitProcess, JitScalarValue, JitStateLayout};
+use super::jit::{JitProcess, JitScalarValue, JitStateLayout};
+pub use super::state_layout::state_layout_version;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const MAX_STATE_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_STATE_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct StateMigrationPreview {
-    pub(crate) schema_version: u16,
-    pub(crate) changed_functions: Vec<String>,
-    pub(crate) state_layout_compatible: bool,
-    pub(crate) layout_changed: bool,
-    pub(crate) from_layout_version: String,
-    pub(crate) to_layout_version: String,
-    pub(crate) migration_scope: StateMigrationScope,
-    pub(crate) migration_steps: Vec<StateMigrationStep>,
-    pub(crate) warnings: Vec<String>,
-    pub(crate) rejection: Option<String>,
-    pub(crate) estimated_commit_cost_us: u64,
-    pub(crate) requires_explicit_apply: bool,
+pub struct StateMigrationPreview {
+    pub schema_version: u16,
+    pub changed_functions: Vec<String>,
+    pub state_layout_compatible: bool,
+    pub layout_changed: bool,
+    pub from_layout_version: String,
+    pub to_layout_version: String,
+    pub migration_scope: StateMigrationScope,
+    pub migration_steps: Vec<StateMigrationStep>,
+    pub warnings: Vec<String>,
+    pub rejection: Option<String>,
+    pub estimated_commit_cost_us: u64,
+    pub requires_explicit_apply: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct StateMigrationScope {
-    kind: &'static str,
-    path: Option<String>,
+pub struct StateMigrationScope {
+    pub kind: &'static str,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum StateMigrationStepKind {
+pub enum StateMigrationStepKind {
     Copy,
     Initialize,
     Remove,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct StateMigrationStep {
-    pub(crate) kind: StateMigrationStepKind,
-    pub(crate) path: String,
-    pub(crate) field: Option<String>,
-    pub(crate) type_name: String,
-    pub(crate) elements: u32,
-    pub(crate) start_index: u32,
-    pub(crate) from_capacity: Option<u32>,
-    pub(crate) to_capacity: Option<u32>,
+pub struct StateMigrationStep {
+    pub kind: StateMigrationStepKind,
+    pub path: String,
+    pub field: Option<String>,
+    pub type_name: String,
+    pub elements: u32,
+    pub start_index: u32,
+    pub from_capacity: Option<u32>,
+    pub to_capacity: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -58,7 +58,7 @@ struct CollectionFieldLayout {
     capacity: u32,
 }
 
-pub(crate) fn plan_state_migration(
+pub fn plan_state_migration(
     active: &JitStateLayout,
     incoming: &JitStateLayout,
     mut changed_functions: Vec<String>,
@@ -369,17 +369,7 @@ pub(crate) fn plan_state_migration(
     })
 }
 
-pub(crate) fn state_layout_version(layout: &JitStateLayout) -> Result<String, String> {
-    let serialized = serde_json::to_vec(layout)
-        .map_err(|error| format!("failed versioning compiler state layout: {error}"))?;
-    let digest = Sha256::digest(serialized);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-pub(crate) fn finalize_runtime_preview(
-    candidate: &JitProcess,
-    preview: &mut StateMigrationPreview,
-) {
+pub fn finalize_runtime_preview(candidate: &JitProcess, preview: &mut StateMigrationPreview) {
     if !preview.state_layout_compatible {
         return;
     }
@@ -391,7 +381,7 @@ pub(crate) fn finalize_runtime_preview(
     }
 }
 
-pub(crate) fn activate_candidate_transactionally<T>(
+pub fn activate_candidate_transactionally<T>(
     active: Option<&JitProcess>,
     candidate: &JitProcess,
     preview: &StateMigrationPreview,
@@ -832,7 +822,7 @@ fn migration_type_bytes(type_name: &str) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stasis_compiler::backend::jit::{JitStateCollectionFieldLayout, JitStateCollectionLayout};
+    use crate::backend::jit::{JitStateCollectionFieldLayout, JitStateCollectionLayout};
 
     #[test]
     fn non_migratable_collection_shape_rejects_before_activation() {

@@ -1028,6 +1028,7 @@ dependencies = [
  "serde_json",
  "stasis_assets",
  "stasis_compiler",
+ "stasis_dynload",
 ]
 
 [[package]]

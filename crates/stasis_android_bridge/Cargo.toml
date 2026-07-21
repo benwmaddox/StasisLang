@@ -16,3 +16,6 @@ path = "src/android_workshop_compile.rs"
 stasis_compiler = { path = "../stasis_compiler" }
 stasis_assets = { path = "../stasis_assets" }
 serde_json.workspace = true
+
+[dev-dependencies]
+stasis_dynload = { path = "../stasis_dynload" }

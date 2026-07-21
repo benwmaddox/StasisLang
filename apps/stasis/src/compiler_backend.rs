@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
-use stasis_compiler::backend::state_layout::StateLayout;
+use stasis_compiler::backend::state_layout::{state_layout_digest, StateLayout};
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
 use stasis_compiler::frontend::parser::parse_top_level_functions;
 #[cfg(test)]
@@ -943,18 +943,14 @@ impl IncrementalCompilerBackend {
     }
 
     fn layout_hash_from_state_layout(&self) -> LayoutHash {
-        let serialized = serde_json::to_vec(
-            self.last_state_layout
-                .as_ref()
-                .expect("successful compiler result must have canonical state layout"),
+        LayoutHash(
+            state_layout_digest(
+                self.last_state_layout
+                    .as_ref()
+                    .expect("successful compiler result must have canonical state layout"),
+            )
+            .expect("canonical state layout serialization is infallible"),
         )
-        .expect("canonical state layout serialization is infallible");
-        let mut hasher = Sha256::new();
-        hasher.update(serialized);
-        let digest = hasher.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&digest);
-        LayoutHash(bytes)
     }
 
     fn compile_jit_engine_package_from_cache(

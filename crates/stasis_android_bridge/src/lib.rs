@@ -8,6 +8,11 @@ use std::path::{Path, PathBuf};
 
 use stasis_assets::{AssetFormat, AssetHandle, AssetLimits, ResolvedAssetManifest};
 use stasis_compiler::backend::jit::JitProcess;
+#[cfg(test)]
+use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
+use stasis_compiler::backend::state_migration::{
+    activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
+};
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_compiler::frontend::workshop::{
     build_workshop_compile_plan, load_workshop_edit_workspace, load_workshop_project,
@@ -70,7 +75,7 @@ struct AndroidRuntimeSession {
     source_fingerprint: u64,
     jit: JitProcess,
     initialized: bool,
-    pending_code_swap: bool,
+    pending_candidate: Option<JitProcess>,
     tick_count: i32,
 }
 
@@ -381,6 +386,7 @@ pub fn compile_android_workshop_project(
 ) -> Result<AndroidBridgeCompileResult, String> {
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
+    discard_pending_runtime_candidate(project_root);
     let files = load_workshop_project(project_root, entry_file)?;
     let changed_files = files
         .iter()
@@ -493,11 +499,10 @@ pub fn run_android_workshop_tick(
         let session = session_slot
             .as_mut()
             .ok_or_else(|| "Android runtime session was not initialized".to_string())?;
-        let swapped_code = session.pending_code_swap;
+        let swapped_code = activate_pending_runtime_candidate(session)?;
         if swapped_code {
             recompiled = true;
         }
-        session.pending_code_swap = false;
         let initialized = if session.initialized {
             false
         } else {
@@ -505,9 +510,6 @@ pub fn run_android_workshop_tick(
             session.initialized = true;
             true
         };
-        if swapped_code && !initialized {
-            execute_optional_lifecycle_noarg(&session.jit, "on_code_swap")?;
-        }
         session
             .jit
             .write_i32_global_path("Input.touch_x", input.touch_x);
@@ -573,6 +575,7 @@ fn with_initialized_runtime_session<R>(
         let session = session_slot
             .as_mut()
             .ok_or_else(|| "Android runtime session was not initialized".to_string())?;
+        activate_pending_runtime_candidate(session)?;
         if !session.initialized {
             execute_lifecycle_noarg(&session.jit, "main")?;
             session.initialized = true;
@@ -621,7 +624,7 @@ fn build_runtime_session(
         source_fingerprint,
         jit,
         initialized: false,
-        pending_code_swap: false,
+        pending_candidate: None,
         tick_count: 0,
     })
 }
@@ -636,7 +639,6 @@ fn warm_or_reload_runtime_session(
         match session_slot.as_mut() {
             Some(session) if session.project_root == project_root => {
                 recompile_runtime_session(session, project_root, files, source_fingerprint)?;
-                session.pending_code_swap = session.initialized;
             }
             _ => {
                 *session_slot = Some(build_runtime_session(
@@ -656,16 +658,62 @@ fn recompile_runtime_session(
     files: &[WorkshopSourceFile],
     source_fingerprint: u64,
 ) -> Result<(), String> {
-    configure_runtime_jit(&mut session.jit, project_root, files);
-    if let Err(error) = session.jit.compile() {
-        return Err(session
-            .jit
+    session.pending_candidate = None;
+    let mut candidate = session.jit.staged_candidate();
+    configure_runtime_jit(&mut candidate, project_root, files);
+    if let Err(error) = candidate.compile_staged() {
+        return Err(candidate
             .last_source_diagnostic()
             .map(|diagnostic| format_compiler_source_diagnostic(project_root, diagnostic))
             .unwrap_or_else(|| format!("Android JIT hot reload failed: {error:?}")));
     }
+    candidate.validate_on_code_swap_signature()?;
+    session.pending_candidate = Some(candidate);
     session.source_fingerprint = source_fingerprint;
     Ok(())
+}
+
+fn activate_pending_runtime_candidate(session: &mut AndroidRuntimeSession) -> Result<bool, String> {
+    let Some(candidate) = session.pending_candidate.take() else {
+        return Ok(false);
+    };
+    let mut preview = plan_state_migration(
+        &session.jit.state_layout(),
+        &candidate.state_layout(),
+        Vec::new(),
+        false,
+        None,
+    )?;
+    finalize_runtime_preview(&candidate, &mut preview);
+    let run_hook = session.initialized && candidate.has_on_code_swap();
+    activate_candidate_transactionally(
+        Some(&session.jit),
+        &candidate,
+        &preview,
+        run_hook,
+        || {
+            if run_hook {
+                candidate.execute_optional_on_code_swap()
+            } else {
+                Ok(())
+            }
+        },
+        Result::is_ok,
+    )??;
+    session.jit = candidate;
+    Ok(true)
+}
+
+fn discard_pending_runtime_candidate(project_root: &Path) {
+    RUNTIME_SESSION.with(|session_cell| {
+        let mut session_slot = session_cell.borrow_mut();
+        if let Some(session) = session_slot
+            .as_mut()
+            .filter(|session| session.project_root == project_root)
+        {
+            session.pending_candidate = None;
+        }
+    });
 }
 
 fn configure_runtime_jit(jit: &mut JitProcess, project_root: &Path, files: &[WorkshopSourceFile]) {
@@ -1583,6 +1631,48 @@ mod tests {
         fs::remove_dir_all(&root).ok();
         clear_runtime_session_for_test();
     }
+
+    #[test]
+    fn bridge_state_helper_activates_pending_candidate_before_write() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("state_set_pending_reload");
+        let source = root.join("src/main.stasis");
+        fs::write(
+            &source,
+            "global GameState { score: i32; }\nfunction main(): void { GameState.score = 1; }\nfunction tick(): void { return; }\n",
+        )
+        .expect("write active source");
+        run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+            .expect("initialize active runtime");
+
+        fs::write(
+            &source,
+            "global GameState { score: i32; bonus: i32; }\nfunction main(): void { GameState.score = 1; }\nfunction tick(): void { return; }\n",
+        )
+        .expect("write layout-changing source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("stage layout-changing candidate");
+
+        set_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "GameState.bonus", 42)
+            .expect("state helper should activate candidate before write");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "GameState.bonus")
+                .expect("read migrated candidate state"),
+            42
+        );
+        run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+            .expect("run already-activated candidate");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "GameState.bonus")
+                .expect("write should survive next frame"),
+            42
+        );
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
     #[test]
     fn bridge_run_tick_executes_real_void_lifecycle_functions() {
         let _guard = bridge_runtime_test_guard();
@@ -1642,7 +1732,7 @@ mod tests {
 
         fs::write(
             &source,
-            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 2; }\nfunction on_code_swap(): void { GameState.tick_count += 100; }\n",
+            "global GameState { tick_count: i32; bonus: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 2; }\nfunction on_code_swap(): void { GameState.tick_count += 100; GameState.bonus = 7; }\n",
         )
         .expect("write hot reload source");
         compile_android_workshop_project(&root, Path::new("src/main.stasis"))
@@ -1658,6 +1748,129 @@ mod tests {
 
         fs::remove_dir_all(&root).ok();
     }
+
+    #[test]
+    fn bridge_hot_reload_hook_rejection_restores_old_code_and_state() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("hot_reload_rejection");
+        let source = root.join("src/main.stasis");
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 1; }\n",
+        )
+        .expect("write first source");
+
+        let first =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("first real tick");
+        assert_eq!(first.observed_game_tick_count, 11);
+
+        fs::write(
+            &source,
+            "extern function reject_code_swap(): void;\nglobal GameState { tick_count: i32; added: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 2; }\nfunction on_code_swap(): void { GameState.tick_count = 99; reject_code_swap(); return; }\n",
+        )
+        .expect("write rejecting hot reload source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("stage rejecting hot reload source");
+
+        let error =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect_err("hook rejection should abort hot reload");
+        assert!(error.contains("hook requested rejection"));
+
+        let resumed =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("old runtime should remain usable");
+        assert!(!resumed.recompiled);
+        assert_eq!(resumed.observed_game_tick_count, 12);
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn bridge_code_only_reload_bypasses_oversized_state_snapshot() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "android_large.stasis",
+            "function main(): void { return; } function tick(): void { return; }",
+        );
+        active.compile().expect("compile active runtime");
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "android_large.stasis",
+            "function main(): void { return; } function tick(): void { let value: i32 = 1; return; }",
+        );
+        candidate
+            .compile_staged()
+            .expect("compile code-only candidate");
+        let oversized_len = MAX_STATE_SNAPSHOT_BYTES / std::mem::size_of::<i32>() + 1;
+        stasis_dynload::ensure_jit_i32_array_capacity(91_153, 0, oversized_len)
+            .expect("allocate oversized state fixture");
+        assert!(
+            stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES).is_err()
+        );
+        let mut session = AndroidRuntimeSession {
+            project_root: PathBuf::from("android-large-state"),
+            source_fingerprint: 1,
+            jit: active,
+            initialized: true,
+            pending_candidate: Some(candidate),
+            tick_count: 0,
+        };
+
+        assert!(activate_pending_runtime_candidate(&mut session)
+            .expect("hook-free activation should bypass snapshot limit"));
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_array_global_table();
+    }
+
+    #[test]
+    fn bridge_failed_newer_compile_discards_older_pending_candidate() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("stale_pending_candidate");
+        let source = root.join("src/main.stasis");
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 1; }\n",
+        )
+        .expect("write active source");
+        let first =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("run active source");
+        assert_eq!(first.observed_game_tick_count, 11);
+
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 2; }\n",
+        )
+        .expect("write first candidate");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("stage first candidate");
+
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { missing_target(); }\n",
+        )
+        .expect("write invalid newer candidate");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("newer compile should fail");
+
+        let resumed =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("old runtime should remain active");
+        assert!(!resumed.recompiled);
+        assert_eq!(resumed.observed_game_tick_count, 12);
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
     #[test]
     fn bridge_run_tick_passes_input_to_stasis_and_exports_render_commands() {
         let _guard = bridge_runtime_test_guard();

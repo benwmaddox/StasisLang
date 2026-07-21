@@ -24,7 +24,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 
-use crate::state_migration::{
+use stasis_compiler::backend::state_migration::{
     activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
     state_layout_version, StateMigrationPreview as LiveSwapPreview,
 };
