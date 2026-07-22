@@ -20,6 +20,76 @@ Status: the first desktop feel slice is implemented. Run `stasis run --interacti
 project to open it. The deterministic `--live-script` and `--live-json` clients remain available
 without the TUI.
 
+### Subscription-backed AI
+
+`stasis ai "PROMPT"` starts the live runtime, executes one AI change, and exits after the atomic
+result. It is the simplest form for automation and repeatable evaluations.
+
+`:ai PROMPT` runs a bounded coding turn through the locally installed `codex` executable and its
+existing ChatGPT/Codex subscription sign-in. Stasis does not request, store, or infer an API key.
+On Windows, the provider prefers the current npm-installed native Codex binary over older desktop
+shims on `PATH`. It defaults to `gpt-5.6-sol` with medium reasoning. Set `STASIS_CODEX_EXE`,
+`STASIS_AI_MODEL`, or `STASIS_AI_REASONING_EFFORT` to override those selections. `:ai status`,
+`:ai cancel`, and Ctrl+C expose status and cancellation without stopping the live runtime.
+Deterministic `--live-script` files may also contain `:ai PROMPT`; each line runs through the same
+provider, live tools, atomic transaction boundary, and trace policy as the interactive TUI.
+
+Each model turn runs ephemerally in an empty read-only temporary directory. The project is not
+mounted into that directory. Codex receives only the user request, bounded Stasis tool catalog,
+and bounded observations returned by the live workspace. Symbol reads, runtime inspection, and
+deterministic ticks pass through `stasis_runner::live`; model write batches become one
+`WorkshopSemanticEditBatch`, compile and test on the normal preparation worker, and commit at a
+between-tick boundary. A layout-changing edit remains a validated preview and requires explicit
+user `:apply` approval.
+
+Before changing a behavior-bearing symbol, the AI must use compiler-backed `find_references` to
+locate its definition, reads, writes, and calls without receiving unrelated source bodies. For an
+observable game change it uses AI-only `validate_runtime_state` acceptance checks: the requested
+condition must fail before the edit (red), the atomic edit must compile and pass project tests, and
+the same condition must pass afterward (green). The default `live` baseline pauses and restores the
+same bounded runtime snapshot, so normal game progression cannot manufacture a pass. The optional
+`fresh` baseline boots `main`, advances bounded `tick` frames, renders, and inspects state in a
+separate Stasis child process for integration-style red/green checks without changing the running
+game. Projects with host adapters can select game-level `setup`, `tick`, and `render` entrypoints so
+the isolated check exercises logical gameplay without opening a second window or duplicating host
+resource side effects. These acceptance checks are ephemeral and do not create or replace project `.test.stasis`
+files; durable regression tests remain the appropriate place for behavior that should be protected
+after the AI turn.
+
+Human commands intentionally cover every useful live AI capability:
+
+| AI tool | CLI / TUI equivalent |
+| --- | --- |
+| `list_symbols` | `stasis symbol list` / `:symbols` |
+| `find_references` | `stasis symbol references SYMBOL` / `:references SYMBOL` |
+| `read_symbol` | `stasis symbol read SYMBOL` / `:read SYMBOL` |
+| `write_symbol`, `delete_symbol` | `stasis symbol add|update|delete` / `:add`, `:update`, `:delete` |
+| `inspect_runtime_state` | `:inspect`; `stasis validate` exposes fresh-run scalar evidence |
+| `validate_runtime_state` | `stasis validate PATH OP VALUE` / `:validate PATH OP VALUE` |
+| `run_frame` | `:step`; `stasis validate --frames N` in an isolated CLI run |
+| `run_tests` | `stasis test`; live `:apply`, `:undo`, `:redo`, and definition apply run tests automatically |
+
+`stasis validate` uses the isolated `fresh` baseline and accepts `--frames`, `--setup`, `--tick`,
+and `--render`. TUI `:validate` uses a snapshot of the live game, runs the requested frames, reports
+PASS/FAIL with expected and actual values, and restores the snapshot before returning.
+
+Every run creates `build/ai-traces/tui-ai-<timestamp>.jsonl`. The trace records the user request,
+turns, user-visible working notes, and the exact tool calls and bounded tool observations exchanged
+with the agent. Tool source arguments and results therefore appear verbatim when they were sent to
+or received from the agent. The trace does not store the complete Codex transport request, response
+schema, tool catalog, repeated conversation envelope, or CLI transport output.
+
+Provider-reported token usage is written separately to
+`build/ai-traces/tui-ai-<timestamp>.usage.jsonl`. Each line is the exact `usage` object from a
+Codex `turn.completed` event; Stasis does not estimate or add missing token categories. The Codex
+JSON event stream is consumed in memory and all non-usage transport events are discarded.
+
+AI `list_symbols` calls return at most 32 entries by default and accept `query`, `kind`, `file`,
+`owner`, `page`, and `limit` filters. Listings omit imports, empty global groups, source bodies, and
+source hashes. Each item contains only its name, kind, signature, file, and owner when applicable.
+`read_symbol` returns the selected source and its hash so a later write can use that hash solely as
+a stale-write guard.
+
 The current key map is:
 
 ```text

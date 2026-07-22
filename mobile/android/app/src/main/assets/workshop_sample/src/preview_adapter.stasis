@@ -30,21 +30,23 @@ function pong_host_render(): void {
     gfx_cmd_i32[2] = 3;
 }
 
-function main(): void {
+function main(): i32 {
     pong_game_main();
-    PongHost.ball_sprite = gfx_load_sprite("../assets/ball.svg", 32, 32);
-    PongHost.paddle_sprite = gfx_load_sprite("../assets/paddle.svg", 1, 1);
-    PongHost.center_sprite = gfx_load_sprite("../assets/center_line.svg", 1, 1);
+    PongHost.ball_sprite = gfx_load_sprite("assets/ball.svg", 32, 32);
+    PongHost.paddle_sprite = gfx_load_sprite("assets/paddle.svg", 1, 1);
+    PongHost.center_sprite = gfx_load_sprite("assets/center_line.svg", 1, 1);
     pong_host_render();
+    return 0;
 }
 
-function tick(): void {
+function tick(): i32 {
     Input.screen_w = host_i32[5]; Input.screen_h = host_i32[6];
     Input.touch_active = host_i32[545];
     let touch_x: i32; touch_x.from_f32(host_f32[0]); Input.touch_x = touch_x;
     let touch_y: i32; touch_y.from_f32(host_f32[1]); Input.touch_y = touch_y;
     pong_game_tick();
+    return 0;
 }
 
-function render(): void { pong_host_render(); }
+function render(): i32 { pong_host_render(); return 0; }
 function on_code_swap(): void { pong_game_on_code_swap(); pong_host_render(); }

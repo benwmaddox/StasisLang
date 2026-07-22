@@ -73,6 +73,68 @@ fn project_commands_emit_stable_json_from_nested_directories() {
 }
 
 #[test]
+fn fresh_runtime_validation_runs_in_a_separate_cli_process() {
+    let parent = temp_dir("fresh_validation");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    fs::write(
+        project.join("src/main.stasis"),
+        "global State { value: i32; rendered: i32; }\nfunction main(): i32 { State.value = 1; return 0; }\nfunction tick(): i32 { State.value += 1; return 0; }\nfunction render(): i32 { State.rendered = 1; return 0; }\n",
+    )
+    .expect("write validation game");
+    let requirements = r#"[{"path":"State.value","op":"eq","value":3},{"path":"State.rendered","op":"eq","value":1}]"#;
+
+    let output = stasis(
+        &[
+            "--json",
+            "__validate-runtime",
+            "--frames",
+            "2",
+            "--requirements-json",
+            requirements,
+        ],
+        &project,
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let result = json_stdout(&output);
+    assert_eq!(result["command"], "__validate-runtime");
+    assert_eq!(result["result"]["baseline"], "fresh");
+    assert_eq!(result["result"]["requirements_met"], true);
+
+    let human_validation = stasis(
+        &[
+            "--json",
+            "validate",
+            "State.value",
+            "eq",
+            "3",
+            "--frames",
+            "2",
+        ],
+        &project,
+    );
+    assert_eq!(human_validation.status.code(), Some(0));
+    assert_eq!(
+        json_stdout(&human_validation)["result"]["requirements_met"],
+        true
+    );
+
+    let references = stasis(&["--json", "symbol", "references", "State.value"], &project);
+    assert_eq!(references.status.code(), Some(0));
+    assert!(json_stdout(&references)["result"]["references"]
+        .as_array()
+        .is_some_and(|references| references.len() >= 2));
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
 fn usage_compile_test_and_guest_exit_codes_are_stable() {
     let parent = temp_dir("failures");
     fs::create_dir_all(&parent).expect("create temp parent");
@@ -160,11 +222,14 @@ fn semantic_symbol_cli_previews_applies_runs_and_reverts() {
     let listed = stasis(&["--json", "symbol", "list"], &project);
     assert_eq!(listed.status.code(), Some(0));
     let listed_json = json_stdout(&listed);
-    assert!(listed_json["result"]["items"]
-        .as_array()
-        .expect("items")
+    let listed_items = listed_json["result"]["items"].as_array().expect("items");
+    assert!(listed_items.iter().all(|item| item["kind"] != "imports"));
+    assert!(listed_items
         .iter()
-        .any(|item| item["kind"] == "imports" && item["file"] == "src/main.stasis"));
+        .all(|item| item.get("source").is_none() && item.get("source_hash").is_none()));
+    assert!(listed_items
+        .iter()
+        .any(|item| item["name"] == "tick" && item["file"] == "src/main.stasis"));
 
     let preview = stasis(
         &[

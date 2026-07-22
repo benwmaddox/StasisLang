@@ -86,6 +86,12 @@ The current first slice provides:
 
 ## Workshop tool harness
 
+The provider-neutral agent loop, turn limits, and Workshop tool-name catalog live in the shared
+Rust `stasis_ai` crate. The Android Codex native build copies that crate beside its pinned upstream
+Codex wrapper and exports the versioned contract to Java. Android retains its platform-specific
+tool handlers, queue, foreground-service lifecycle, image tools, and richer descriptions; the
+desktop TUI uses the same Rust contract with the smaller set supported by the live protocol.
+
 The agent turn layer should expose only controlled Workshop operations, not a
 general Android shell:
 

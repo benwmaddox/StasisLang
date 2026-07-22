@@ -75,6 +75,12 @@ pub enum LiveCommand {
         #[serde(default)]
         query: Option<String>,
         #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        file: Option<String>,
+        #[serde(default)]
+        owner: Option<String>,
+        #[serde(default)]
         page: u32,
         #[serde(default = "default_symbol_page_limit")]
         limit: usize,
@@ -90,6 +96,19 @@ pub enum LiveCommand {
         #[serde(default)]
         signature: Option<String>,
     },
+    References {
+        symbol: String,
+        #[serde(default = "default_reference_limit")]
+        limit: usize,
+    },
+    Validate {
+        requirement: LiveValidationRequirement,
+        #[serde(default)]
+        frames: u32,
+    },
+    ValidationSnapshot,
+    ValidationRestore,
+    ValidationClear,
     Complete {
         buffer: String,
         cursor: usize,
@@ -115,6 +134,13 @@ pub enum LiveCommand {
         source: Option<String>,
         #[serde(default)]
         expected_source_hash: Option<String>,
+        #[serde(default)]
+        preview: bool,
+        #[serde(default = "default_true")]
+        run_tests: bool,
+    },
+    EditBatch {
+        edits: Vec<LiveEdit>,
         #[serde(default)]
         preview: bool,
         #[serde(default = "default_true")]
@@ -188,6 +214,44 @@ pub enum LiveCommand {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveValidationRequirement {
+    pub path: String,
+    #[serde(default = "default_validation_operator")]
+    pub op: String,
+    pub value: serde_json::Value,
+}
+
+pub fn compare_live_validation_values(
+    actual: &serde_json::Value,
+    operator: &str,
+    expected: &serde_json::Value,
+) -> Result<bool, String> {
+    if matches!(operator, "eq" | "ne") {
+        let equal = actual == expected
+            || actual
+                .as_f64()
+                .zip(expected.as_f64())
+                .is_some_and(|(actual, expected)| actual == expected);
+        return Ok(if operator == "eq" { equal } else { !equal });
+    }
+    let actual = actual
+        .as_f64()
+        .ok_or_else(|| format!("operator '{operator}' requires a numeric actual value"))?;
+    let expected = expected
+        .as_f64()
+        .ok_or_else(|| format!("operator '{operator}' requires a numeric expected value"))?;
+    match operator {
+        "lt" => Ok(actual < expected),
+        "lte" => Ok(actual <= expected),
+        "gt" => Ok(actual > expected),
+        "gte" => Ok(actual >= expected),
+        _ => Err(format!(
+            "unsupported validation operator '{operator}'; use eq, ne, lt, lte, gt, or gte"
+        )),
+    }
+}
+
 const fn one_tick() -> u32 {
     1
 }
@@ -201,7 +265,15 @@ const fn default_inspect_limit() -> usize {
 }
 
 const fn default_symbol_page_limit() -> usize {
-    50
+    32
+}
+
+const fn default_reference_limit() -> usize {
+    128
+}
+
+fn default_validation_operator() -> String {
+    "eq".to_string()
 }
 
 const fn default_true() -> bool {
@@ -214,6 +286,16 @@ pub enum LiveEditOperation {
     Add,
     Update,
     Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveEdit {
+    pub operation: LiveEditOperation,
+    pub target: LiveSymbolTarget,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub expected_source_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1031,6 +1113,9 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         }),
         ":symbols" | ":find" => ready(LiveCommand::Symbols {
             query: args.get(1).filter(|arg| !arg.starts_with("--")).cloned(),
+            kind: terminal_selector_value(&args, "--kind"),
+            file: terminal_selector_value(&args, "--file"),
+            owner: terminal_selector_value(&args, "--owner"),
             page: terminal_selector_value(&args, "--page")
                 .map(|value| parse_u32("page", &value))
                 .transpose()?
@@ -1048,6 +1133,25 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
                 .or_else(|| args.get(3).filter(|arg| !arg.starts_with("--")).cloned()),
             owner: terminal_selector_value(&args, "--owner"),
             signature: terminal_selector_value(&args, "--signature"),
+        }),
+        ":references" | ":refs" => ready(LiveCommand::References {
+            symbol: required_arg(&args, 1, "symbol")?.to_string(),
+            limit: terminal_selector_value(&args, "--limit")
+                .map(|value| parse_u32("limit", &value))
+                .transpose()?
+                .map(|value| value as usize)
+                .unwrap_or_else(default_reference_limit),
+        }),
+        ":validate" => ready(LiveCommand::Validate {
+            requirement: LiveValidationRequirement {
+                path: required_arg(&args, 1, "state path")?.to_string(),
+                op: required_arg(&args, 2, "operator")?.to_string(),
+                value: parse_terminal_scalar(required_arg(&args, 3, "expected value")?),
+            },
+            frames: terminal_selector_value(&args, "--frames")
+                .map(|value| parse_u32("frames", &value))
+                .transpose()?
+                .unwrap_or(0),
         }),
         ":complete" => {
             let buffer = args.get(1).cloned().unwrap_or_default();
@@ -1179,6 +1283,10 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
     }
 }
 
+fn parse_terminal_scalar(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
+}
+
 fn terminal_selector_value(args: &[String], option: &str) -> Option<String> {
     args.windows(2)
         .find(|pair| pair[0] == option)
@@ -1245,6 +1353,37 @@ fn split_terminal_args(line: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_batch_has_a_stable_json_contract() {
+        let request = LiveRequest::new(
+            7,
+            LiveCommand::EditBatch {
+                edits: vec![LiveEdit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "tick".into(),
+                        kind: Some("function".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("function tick(): void {}".into()),
+                    expected_source_hash: Some("before".into()),
+                }],
+                preview: false,
+                run_tests: true,
+            },
+        );
+        let json = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(json["type"], "edit_batch");
+        assert_eq!(json["edits"][0]["operation"], "update");
+        assert_eq!(json["edits"][0]["target"]["name"], "tick");
+        assert_eq!(
+            serde_json::from_value::<LiveRequest>(json).expect("round trip"),
+            request
+        );
+    }
 
     #[test]
     fn bounded_queue_reports_backpressure_without_blocking() {
@@ -1812,7 +1951,7 @@ mod tests {
         assert_eq!(signature.as_deref(), Some("update(i32): void"));
 
         let TerminalInput::Request(request) = terminal
-            .feed_line(":symbols update --page 2 --limit 10")
+            .feed_line(":symbols update --kind function --file src/game.stasis --owner Enemy --page 2 --limit 10")
             .expect("page")
         else {
             panic!("expected request")
@@ -1820,10 +1959,52 @@ mod tests {
         assert!(matches!(
             request.command,
             LiveCommand::Symbols {
+                query: Some(ref query),
+                kind: Some(ref kind),
+                file: Some(ref file),
+                owner: Some(ref owner),
                 page: 2,
                 limit: 10,
-                ..
-            }
+            } if query == "update"
+                && kind == "function"
+                && file == "src/game.stasis"
+                && owner == "Enemy"
         ));
+    }
+
+    #[test]
+    fn terminal_exposes_reference_and_runtime_validation_commands() {
+        let mut terminal = TerminalBuffer::new();
+        let TerminalInput::Request(references) = terminal
+            .feed_line(":references GameState.player_y --limit 24")
+            .expect("references")
+        else {
+            panic!("expected reference request");
+        };
+        assert_eq!(
+            references.command,
+            LiveCommand::References {
+                symbol: "GameState.player_y".into(),
+                limit: 24,
+            }
+        );
+
+        let TerminalInput::Request(validation) = terminal
+            .feed_line(":validate Render.command1_h eq 144 --frames 2")
+            .expect("validation")
+        else {
+            panic!("expected validation request");
+        };
+        assert_eq!(
+            validation.command,
+            LiveCommand::Validate {
+                requirement: LiveValidationRequirement {
+                    path: "Render.command1_h".into(),
+                    op: "eq".into(),
+                    value: serde_json::json!(144),
+                },
+                frames: 2,
+            }
+        );
     }
 }

@@ -2070,14 +2070,23 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
     #[cfg(windows)]
     {
         let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+            eprintln!("gfx_load_sprite failed: unknown string handle {path_id}");
             return 0;
         };
-        let Ok(api) = stasis_graphics_assets_api() else {
-            return 0;
+        let api = match stasis_graphics_assets_api() {
+            Ok(api) => api,
+            Err(error) => {
+                eprintln!("gfx_load_sprite failed: {error}");
+                return 0;
+            }
         };
         let callback: extern "system" fn(*const c_char, i32, i32) -> i32 =
             unsafe { std::mem::transmute(api.stasis_gfx_load_sprite) };
-        return callback(path.as_ptr(), max_w, max_h);
+        let handle = callback(path.as_ptr(), max_w, max_h);
+        if handle == 0 {
+            eprintln!("gfx_load_sprite failed for {}", path.to_string_lossy());
+        }
+        return handle;
     }
     #[cfg(not(windows))]
     {

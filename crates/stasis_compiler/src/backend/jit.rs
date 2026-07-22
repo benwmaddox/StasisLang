@@ -398,6 +398,12 @@ impl JitProcess {
                 function.return_type
             ));
         }
+        if !function.params.is_empty() {
+            return Err(format!(
+                "function '{name}' is not a no-argument function (param count {})",
+                function.params.len()
+            ));
+        }
         let artifact = self
             .artifact_for_function_id(function.id)
             .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
@@ -974,9 +980,10 @@ impl JitProcess {
         &self,
         entrypoints: &EngineEntrypoints,
     ) -> Result<JitEnginePackage, String> {
-        let tick_code_ptr = self.code_ptr_for_function_name(&entrypoints.tick)?;
-        let render_code_ptr = self.code_ptr_for_function_name(&entrypoints.render)?;
+        let tick_code_ptr = self.code_ptr_for_i32_noarg_entrypoint(&entrypoints.tick)?;
+        let render_code_ptr = self.code_ptr_for_i32_noarg_entrypoint(&entrypoints.render)?;
         let on_code_swap_code_ptr = if let Some(name) = entrypoints.on_code_swap.as_ref() {
+            self.validate_on_code_swap_signature()?;
             Some(self.code_ptr_for_function_name(name)?)
         } else {
             None
@@ -1001,6 +1008,25 @@ impl JitProcess {
             .artifact_for_function_id(function.id)
             .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))?;
         Ok(artifact.code_ptr)
+    }
+
+    fn code_ptr_for_i32_noarg_entrypoint(&self, name: &str) -> Result<u64, String> {
+        let function = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .ok_or_else(|| format!("required engine entrypoint '{name}' not found"))?;
+        if function.return_type != TYPE_ID_I32 || !function.params.is_empty() {
+            return Err(format!(
+                "engine entrypoint signature mismatch for '{name}': expected `function {name}(): i32`; actual return type id {}, parameter count {}",
+                function.return_type,
+                function.params.len()
+            ));
+        }
+        self.artifact_for_function_id(function.id)
+            .map(|artifact| artifact.code_ptr)
+            .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))
     }
 
     fn refresh_runtime_dispatch_table(&self) {
@@ -4574,7 +4600,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "function tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+            "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
         );
         process.compile().expect("compile");
         let package = process
@@ -4602,7 +4628,7 @@ mod tests {
     #[test]
     fn jit_engine_package_errors_when_required_entrypoint_missing() {
         let mut process = JitProcess::new();
-        process.upsert_file("sample.stasis", "function tick(): void { return; }\n");
+        process.upsert_file("sample.stasis", "function tick(): i32 { return 0; }\n");
         process.compile().expect("compile");
         let error = process
             .build_engine_package(&EngineEntrypoints::runtime_default())
@@ -4611,5 +4637,20 @@ mod tests {
             error.contains("required engine entrypoint 'render' not found"),
             "unexpected message: {error}"
         );
+    }
+
+    #[test]
+    fn jit_engine_package_reports_signature_mismatch() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function tick(): void { return; }\nfunction render(): i32 { return 0; }\n",
+        );
+        process.compile().expect("compile");
+        let error = process
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect_err("void tick should fail");
+        assert!(error.contains("expected `function tick(): i32`"));
+        assert!(error.contains("actual return type id"));
     }
 }

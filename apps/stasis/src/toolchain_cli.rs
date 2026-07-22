@@ -7,14 +7,16 @@ use stasis::{
 };
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::workshop::{
-    find_workshop_symbols, load_workshop_edit_workspace, plan_workshop_semantic_edits,
-    workshop_reachable_files, workshop_source_hash, workshop_source_items,
-    write_workshop_semantic_plan, write_workshop_semantic_receipt, WorkshopSemanticEdit,
-    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
-    WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
+    plan_workshop_semantic_edits, workshop_reachable_files, workshop_source_hash,
+    workshop_source_items, write_workshop_semantic_plan, write_workshop_semantic_receipt,
+    WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
+    WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
+pub(super) use stasis_runner::live::LiveValidationRequirement as RuntimeValidationRequirement;
 use stasis_runner::live::{
-    live_session, LiveCommand, LiveRequest, LiveResponse, TerminalBuffer, TerminalInput,
+    compare_live_validation_values, live_session, LiveCommand, LiveRequest, LiveResponse,
+    TerminalBuffer, TerminalInput,
 };
 use std::env;
 use std::ffi::OsString;
@@ -22,6 +24,8 @@ use std::fs;
 use std::io::{self, BufRead};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -35,6 +39,8 @@ const COMMANDS: &[&str] = &[
     "fmt",
     "check",
     "test",
+    "ai",
+    "validate",
     "run",
     "build",
     "package",
@@ -46,6 +52,7 @@ const COMMANDS: &[&str] = &[
     "env",
     "symbol",
     "help",
+    "__validate-runtime",
 ];
 
 #[derive(Debug, Parser)]
@@ -101,6 +108,38 @@ enum ToolchainCommand {
     Test {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+    },
+    /// Run one subscription-backed AI change against the live workspace.
+    Ai {
+        #[arg(value_name = "PROMPT")]
+        prompt: String,
+    },
+    /// Boot a fresh isolated runtime and validate one scalar requirement.
+    Validate {
+        path: String,
+        op: String,
+        value: String,
+        #[arg(long, default_value_t = 0)]
+        frames: u32,
+        #[arg(long, default_value = "main")]
+        setup: String,
+        #[arg(long, default_value = "tick")]
+        tick: String,
+        #[arg(long, default_value = "render")]
+        render: String,
+    },
+    #[command(name = "__validate-runtime", hide = true)]
+    ValidateRuntime {
+        #[arg(long, default_value_t = 0)]
+        frames: u32,
+        #[arg(long)]
+        requirements_json: String,
+        #[arg(long, default_value = "main")]
+        setup: String,
+        #[arg(long, default_value = "tick")]
+        tick: String,
+        #[arg(long, default_value = "render")]
+        render: String,
     },
     /// JIT-compile and run main() in the headless toolchain runtime.
     Run {
@@ -164,17 +203,29 @@ enum ToolchainCommand {
 enum SymbolCommand {
     /// List symbols in deterministic source order.
     List {
+        #[arg(long)]
+        query: Option<String>,
         #[arg(long, value_enum)]
         kind: Option<SymbolKindArg>,
         #[arg(long)]
         file: Option<String>,
         #[arg(long)]
         owner: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        page: usize,
+        #[arg(long, default_value_t = 32)]
+        limit: usize,
     },
     /// Find symbol metadata without returning its source.
     Find(SymbolSelectorArgs),
     /// Read one unambiguous symbol and its source.
     Read(SymbolSelectorArgs),
+    /// Find compact definitions, reads, writes, and calls for a symbol or field.
+    References {
+        symbol: String,
+        #[arg(long, default_value_t = 128)]
+        limit: usize,
+    },
     /// Add one declaration to an existing imported file.
     Add {
         #[command(flatten)]
@@ -490,6 +541,9 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Fmt { .. } => "fmt",
         ToolchainCommand::Check => "check",
         ToolchainCommand::Test { .. } => "test",
+        ToolchainCommand::Ai { .. } => "ai",
+        ToolchainCommand::Validate { .. } => "validate",
+        ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
@@ -538,6 +592,32 @@ fn execute(
                     validate_optional_workspace_path(&workspace, "test path", path.as_deref())?;
                     test_workspace(&workspace, path.as_deref())
                 }
+                ToolchainCommand::Ai { prompt } => run_workspace_ai(&workspace, &prompt),
+                ToolchainCommand::Validate {
+                    path,
+                    op,
+                    value,
+                    frames,
+                    setup,
+                    tick,
+                    render,
+                } => validate_runtime_command(
+                    &workspace, path, op, value, frames, setup, tick, render,
+                ),
+                ToolchainCommand::ValidateRuntime {
+                    frames,
+                    requirements_json,
+                    setup,
+                    tick,
+                    render,
+                } => validate_fresh_runtime(
+                    &workspace,
+                    frames,
+                    &requirements_json,
+                    &setup,
+                    &tick,
+                    &render,
+                ),
                 ToolchainCommand::Run {
                     watch,
                     headless,
@@ -780,6 +860,146 @@ fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
     Ok(jit)
 }
 
+fn validate_fresh_runtime(
+    workspace: &Workspace,
+    frames: u32,
+    requirements_json: &str,
+    setup: &str,
+    tick: &str,
+    render: &str,
+) -> Result<CommandResult, String> {
+    if frames > 600 {
+        return Err("frames exceeds the 600-frame limit".to_string());
+    }
+    let requirements = serde_json::from_str::<Vec<RuntimeValidationRequirement>>(requirements_json)
+        .map_err(|error| format!("invalid runtime validation requirements: {error}"))?;
+    if requirements.is_empty() || requirements.len() > 16 {
+        return Err("requirements must contain 1..=16 checks".to_string());
+    }
+    for (label, name) in [("setup", setup), ("tick", tick), ("render", render)] {
+        if name.is_empty()
+            || !name.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+            })
+        {
+            return Err(format!(
+                "fresh validation {label} must be a Stasis identifier"
+            ));
+        }
+    }
+    let entry = workspace.root.join(&workspace.manifest.entry);
+    validate_workspace_destination(workspace, "entry", &entry)?;
+    let source = fs::read_to_string(&entry)
+        .map_err(|error| format!("failed to read entry {}: {error}", entry.display()))?;
+    let mut jit = JitProcess::new();
+    jit.set_required_emit_roots(&[setup.to_string(), tick.to_string(), render.to_string()]);
+    jit.upsert_file(display_path(&entry), source);
+    jit.compile()
+        .map_err(|error| format!("fresh validation compile failed: {error:?}"))?;
+    execute_noarg_entry(&jit, setup)?;
+    for _ in 0..frames {
+        execute_noarg_entry(&jit, tick)?;
+    }
+    execute_noarg_entry(&jit, render)?;
+
+    let mut requirements_met = true;
+    let mut checks = Vec::with_capacity(requirements.len());
+    for requirement in requirements {
+        let actual = serde_json::to_value(jit.read_global_scalar(&requirement.path)?)
+            .map_err(|error| format!("failed encoding {}: {error}", requirement.path))?
+            .get("value")
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "inspection for {} returned no scalar value",
+                    requirement.path
+                )
+            })?;
+        let passed = compare_live_validation_values(&actual, &requirement.op, &requirement.value)?;
+        requirements_met &= passed;
+        checks.push(json!({
+            "path": requirement.path,
+            "op": requirement.op,
+            "expected": requirement.value,
+            "actual": actual,
+            "passed": passed,
+        }));
+    }
+    Ok(CommandResult::success(
+        "fresh runtime validation complete",
+        json!({
+            "baseline": "fresh",
+            "entrypoints": {"setup": setup, "tick": tick, "render": render},
+            "frames": frames,
+            "requirements_met": requirements_met,
+            "checks": checks,
+        }),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_runtime_command(
+    workspace: &Workspace,
+    path: String,
+    op: String,
+    value: String,
+    frames: u32,
+    setup: String,
+    tick: String,
+    render: String,
+) -> Result<CommandResult, String> {
+    let expected = serde_json::from_str(&value).unwrap_or(Value::String(value));
+    let requirements = serde_json::to_string(&[RuntimeValidationRequirement {
+        path: path.clone(),
+        op: op.clone(),
+        value: expected,
+    }])
+    .map_err(|error| format!("failed encoding runtime requirement: {error}"))?;
+    let result = validate_fresh_runtime(workspace, frames, &requirements, &setup, &tick, &render)?;
+    if !result
+        .data
+        .get("requirements_met")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let check = result
+            .data
+            .get("checks")
+            .and_then(Value::as_array)
+            .and_then(|checks| checks.first())
+            .cloned()
+            .unwrap_or(Value::Null);
+        return Err(format!(
+            "runtime validation failed: {path} {op} {}; actual {}",
+            scalar_text(check.get("expected").unwrap_or(&Value::Null)),
+            scalar_text(check.get("actual").unwrap_or(&Value::Null)),
+        ));
+    }
+    let check = result
+        .data
+        .get("checks")
+        .and_then(Value::as_array)
+        .and_then(|checks| checks.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(CommandResult::success(
+        format!(
+            "runtime validation passed: {path} {op} {} (actual {}, {frames} frame(s))",
+            scalar_text(check.get("expected").unwrap_or(&Value::Null)),
+            scalar_text(check.get("actual").unwrap_or(&Value::Null)),
+        ),
+        result.data,
+    ))
+}
+
+fn execute_noarg_entry(jit: &JitProcess, name: &str) -> Result<(), String> {
+    match jit.execute_i32_noarg_by_name(name) {
+        Ok(_) => Ok(()),
+        Err(error) if error.contains("not i32-returning") => jit.execute_void_noarg_by_name(name),
+        Err(error) => Err(error),
+    }
+}
+
 fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandResult, String> {
     let directory = path
         .map(|value| workspace.root.join(value))
@@ -838,6 +1058,53 @@ fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
     ))
 }
 
+fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("AI prompt must not be empty".to_string());
+    }
+    let entry = workspace.root.join(&workspace.manifest.entry);
+    let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
+    let ai_root = workspace.root.clone();
+    let prompt = prompt.to_string();
+    let canceled = Arc::new(AtomicBool::new(false));
+    let ai_canceled = Arc::clone(&canceled);
+    let ai = thread::spawn(move || {
+        let result =
+            live_tui::run_scripted_ai_with_cancel(&client, &ai_root, &prompt, &ai_canceled);
+        let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
+        result
+    });
+    let config = LiveRunConfig::new(
+        workspace.root.clone(),
+        PathBuf::from(&workspace.manifest.entry),
+        PathBuf::from(&workspace.manifest.output),
+    );
+    let run_result =
+        run_live_in_process(&entry, Some(&workspace.root), 16_000, None, server, config);
+    if let Err(error) = run_result {
+        canceled.store(true, Ordering::Release);
+        let _ = ai.join();
+        return Err(error);
+    }
+    let (summary, trace, usage_trace) = ai
+        .join()
+        .map_err(|_| "live AI thread panicked".to_string())??;
+    Ok(CommandResult::success(
+        format!(
+            "AI complete: {summary}\nAI trace: {}\nAI usage: {}",
+            trace.display(),
+            usage_trace.display()
+        ),
+        json!({
+            "backend": "jit",
+            "provider": "installed_codex_subscription",
+            "summary": summary,
+            "trace": trace,
+            "usage_trace": usage_trace,
+        }),
+    ))
+}
+
 fn run_workspace_live(
     workspace: &Workspace,
     script: Option<&Path>,
@@ -846,7 +1113,10 @@ fn run_workspace_live(
     let entry = workspace.root.join(&workspace.manifest.entry);
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
     let script = script.map(|path| workspace.root.join(path));
-    let terminal = thread::spawn(move || run_live_terminal(client, script.as_deref(), json_lines));
+    let terminal_root = workspace.root.clone();
+    let terminal = thread::spawn(move || {
+        run_live_terminal(client, script.as_deref(), json_lines, &terminal_root)
+    });
     let config = LiveRunConfig::new(
         workspace.root.clone(),
         PathBuf::from(&workspace.manifest.entry),
@@ -875,8 +1145,9 @@ fn run_live_terminal(
     client: stasis_runner::live::LiveSessionClient,
     script: Option<&Path>,
     json_lines: bool,
+    project_root: &Path,
 ) -> Result<(), String> {
-    let result = run_live_terminal_inner(&client, script, json_lines);
+    let result = run_live_terminal_inner(&client, script, json_lines, project_root);
     if result.is_err() {
         let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
     }
@@ -887,6 +1158,7 @@ fn run_live_terminal_inner(
     client: &stasis_runner::live::LiveSessionClient,
     script: Option<&Path>,
     json_lines: bool,
+    project_root: &Path,
 ) -> Result<(), String> {
     let mut terminal = TerminalBuffer::new();
     let mut saw_quit = false;
@@ -896,6 +1168,31 @@ fn run_live_terminal_inner(
             .map_err(|error| format!("failed to open live script {}: {error}", script.display()))?;
         for line in io::BufReader::new(file).lines() {
             let line = line.map_err(|error| format!("failed reading live script: {error}"))?;
+            if let Some(prompt) = line.trim().strip_prefix(":ai ") {
+                let (summary, trace, usage_trace) =
+                    live_tui::run_scripted_ai(client, project_root, prompt)?;
+                if json_lines {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "schema_version": 1,
+                            "kind": "ai_completed",
+                            "ok": true,
+                            "summary": summary,
+                            "trace": trace,
+                            "usage_trace": usage_trace,
+                        })
+                    );
+                } else {
+                    println!("AI complete: {summary}");
+                    println!("AI trace: {}", trace.display());
+                    println!("AI usage: {}", usage_trace.display());
+                }
+                continue;
+            }
+            if line.trim() == ":ai" {
+                return Err("live script :ai requires a prompt".to_string());
+            }
             if let TerminalInput::Request(request) = terminal.feed_line(&line)? {
                 saw_quit |= matches!(&request.command, LiveCommand::Quit);
                 let request_id = request.request_id;
@@ -912,7 +1209,7 @@ fn run_live_terminal_inner(
             );
         }
     } else {
-        saw_quit = live_tui::run(client)?;
+        saw_quit = live_tui::run(client, project_root)?;
     }
     if !saw_quit {
         submit_and_print_live_response(
@@ -1002,6 +1299,7 @@ fn format_live_response(response: &LiveResponse) -> String {
         ),
         "symbols" => format_live_symbols(data),
         "symbol" => format_live_symbol(data),
+        "references" => format_live_references(data),
         "completion" | "palette" if response.truncated => {
             "completion response exceeded the output bound; narrow the query".to_string()
         }
@@ -1025,6 +1323,7 @@ fn format_live_response(response: &LiveResponse) -> String {
                 ""
             }
         ),
+        "runtime_validation" => format_live_runtime_validation(data),
         "print" => format!(
             "{} = {}",
             string_field(data, "static_type", "value"),
@@ -1197,6 +1496,60 @@ fn format_live_symbol(data: &Value) -> String {
         Some(source) => format!("{header}\n{}", source.trim()),
         None => header,
     }
+}
+
+fn format_live_references(data: &Value) -> String {
+    let references = data
+        .get("references")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if references.is_empty() {
+        return format!(
+            "no references found for {}",
+            string_field(data, "symbol", "symbol")
+        );
+    }
+    references
+        .iter()
+        .map(|reference| {
+            format!(
+                "{}  {}  {}  {}",
+                string_field(reference, "kind", "read"),
+                string_field(reference, "file", "unknown"),
+                string_field(reference, "containing_name", "unknown"),
+                string_field(reference, "containing_signature", ""),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_live_runtime_validation(data: &Value) -> String {
+    let Some(check) = data
+        .get("checks")
+        .and_then(Value::as_array)
+        .and_then(|checks| checks.first())
+    else {
+        return "runtime validation returned no check".to_string();
+    };
+    format!(
+        "{}: {} {} {} (actual {}, {} frame(s))",
+        if check
+            .get("passed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "PASS"
+        } else {
+            "FAIL"
+        },
+        string_field(check, "path", "value"),
+        string_field(check, "op", "eq"),
+        scalar_text(check.get("expected").unwrap_or(&Value::Null)),
+        scalar_text(check.get("actual").unwrap_or(&Value::Null)),
+        data.get("frames").and_then(Value::as_u64).unwrap_or(0),
+    )
 }
 
 fn format_live_completion(data: &Value) -> String {
@@ -1906,10 +2259,26 @@ fn symbol_workspace(
         .cloned()
         .collect::<Vec<_>>();
     match command {
-        SymbolCommand::List { kind, file, owner } => {
+        SymbolCommand::List {
+            query,
+            kind,
+            file,
+            owner,
+            page,
+            limit,
+        } => {
+            let limit = limit.clamp(1, 200);
             let mut items = workshop_source_items(&editable_files)?;
             items.retain(|item| {
-                kind.is_none_or(|kind| item.kind == kind.into())
+                item.kind != WorkshopSourceItemKind::Imports
+                    && !(item.kind == WorkshopSourceItemKind::Globals
+                        && item.source.trim().is_empty())
+                    && query.as_deref().is_none_or(|query| {
+                        let query = query.to_ascii_lowercase();
+                        item.name.to_ascii_lowercase().contains(&query)
+                            || item.signature.to_ascii_lowercase().contains(&query)
+                    })
+                    && kind.is_none_or(|kind| item.kind == kind.into())
                     && file.as_deref().is_none_or(|file| {
                         normalize_symbol_file(&item.file) == normalize_symbol_file(file)
                     })
@@ -1917,6 +2286,12 @@ fn symbol_workspace(
                         .as_deref()
                         .is_none_or(|owner| item.owner.as_deref() == Some(owner))
             });
+            let total = items.len();
+            let items = items
+                .into_iter()
+                .skip(page.saturating_mul(limit))
+                .take(limit)
+                .collect::<Vec<_>>();
             let human = items
                 .iter()
                 .map(|item| {
@@ -1930,9 +2305,24 @@ fn symbol_workspace(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let metadata = items
+                .into_iter()
+                .map(|item| {
+                    let mut value = json!({
+                        "kind": item.kind,
+                        "name": item.name,
+                        "file": item.file,
+                        "signature": item.signature,
+                    });
+                    if let Some(owner) = item.owner {
+                        value["owner"] = Value::String(owner);
+                    }
+                    value
+                })
+                .collect::<Vec<_>>();
             Ok(CommandResult::success(
                 human,
-                json!({"schema_version": 1, "items": items}),
+                json!({"schema_version": 1, "page": page, "limit": limit, "total": total, "items": metadata}),
             ))
         }
         SymbolCommand::Find(args) => {
@@ -1968,6 +2358,26 @@ fn symbol_workspace(
             Ok(CommandResult::success(
                 item.source.clone(),
                 json!({"schema_version": 1, "item": item}),
+            ))
+        }
+        SymbolCommand::References { symbol, limit } => {
+            let references = find_workshop_references(&editable_files, &symbol, limit)?;
+            let human = references
+                .iter()
+                .map(|reference| {
+                    format!(
+                        "{:?}\t{}\t{}\t{}",
+                        reference.kind,
+                        reference.file,
+                        reference.containing_name,
+                        reference.containing_signature,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(CommandResult::success(
+                human,
+                json!({"schema_version": 1, "symbol": symbol, "references": references}),
             ))
         }
         SymbolCommand::Add {
@@ -2592,6 +3002,8 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stasis_ai::live_tool_specs;
+    use std::collections::BTreeMap;
 
     #[test]
     fn invalid_interactive_command_does_not_poison_terminal_buffer() {
@@ -2653,6 +3065,71 @@ mod tests {
             }),
         );
         assert_eq!(format_live_response(&response), "player.score: i32 = 12");
+    }
+
+    #[test]
+    fn human_live_output_formats_references_and_validation_evidence() {
+        let references = LiveResponse::success(
+            12,
+            42,
+            "references",
+            json!({
+                "symbol": "GameState.player_y",
+                "references": [{
+                    "kind": "write",
+                    "file": "src/main.stasis",
+                    "containing_name": "update_player_paddle",
+                    "containing_signature": "update_player_paddle(): void"
+                }]
+            }),
+        );
+        assert_eq!(
+            format_live_response(&references),
+            "write  src/main.stasis  update_player_paddle  update_player_paddle(): void"
+        );
+
+        let validation = LiveResponse::success(
+            13,
+            42,
+            "runtime_validation",
+            json!({
+                "frames": 2,
+                "checks": [{
+                    "path": "Render.command1_h",
+                    "op": "eq",
+                    "expected": 144,
+                    "actual": 144,
+                    "passed": true
+                }]
+            }),
+        );
+        assert_eq!(
+            format_live_response(&validation),
+            "PASS: Render.command1_h eq 144 (actual 144, 2 frame(s))"
+        );
+    }
+
+    #[test]
+    fn every_live_ai_tool_has_a_human_command_surface() {
+        let mappings = BTreeMap::from([
+            ("list_symbols", "stasis symbol list / :symbols"),
+            ("find_references", "stasis symbol references / :references"),
+            ("read_symbol", "stasis symbol read / :read"),
+            ("write_symbol", "stasis symbol update / :update"),
+            ("delete_symbol", "stasis symbol delete / :delete"),
+            ("inspect_runtime_state", ":inspect"),
+            ("validate_runtime_state", "stasis validate / :validate"),
+            ("run_frame", ":step / stasis validate --frames"),
+            ("run_tests", "stasis test / tested TUI apply"),
+        ]);
+
+        for tool in live_tool_specs() {
+            assert!(
+                mappings.contains_key(tool.tool.as_str()),
+                "live AI tool '{}' needs a useful CLI/TUI mapping",
+                tool.tool
+            );
+        }
     }
 
     #[test]
@@ -2791,6 +3268,44 @@ mod tests {
     }
 
     #[test]
+    fn fresh_runtime_validation_boots_ticks_renders_and_checks_state() {
+        let root = temp_dir("fresh_validation");
+        fs::create_dir_all(root.join("src")).expect("src");
+        fs::write(
+            root.join(MANIFEST_NAME),
+            serde_json::to_vec(&ProjectManifest::new("fresh_validation".into())).expect("manifest"),
+        )
+        .expect("write manifest");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global State { value: i32; rendered: i32; }\nfunction main(): i32 { State.value = 1; State.rendered = 0; return 0; }\nfunction tick(): i32 { State.value += 1; return 0; }\nfunction render(): i32 { State.rendered = 1; return 0; }\n",
+        )
+        .expect("write source");
+        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let requirements = serde_json::to_string(&vec![
+            RuntimeValidationRequirement {
+                path: "State.value".into(),
+                op: "eq".into(),
+                value: json!(3),
+            },
+            RuntimeValidationRequirement {
+                path: "State.rendered".into(),
+                op: "eq".into(),
+                value: json!(1),
+            },
+        ])
+        .expect("requirements");
+
+        let result = validate_fresh_runtime(&workspace, 2, &requirements, "main", "tick", "render")
+            .expect("validation");
+
+        assert_eq!(result.data["baseline"], "fresh");
+        assert_eq!(result.data["requirements_met"], true);
+        assert_eq!(result.data["checks"].as_array().expect("checks").len(), 2);
+        remove_temp(&root);
+    }
+
+    #[test]
     fn workspace_discovery_works_from_nested_directories() {
         let root = temp_dir("discovery");
         create_project(root.clone(), "demo".to_string()).expect("create project");
@@ -2838,6 +3353,23 @@ mod tests {
                 headless: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn ai_command_accepts_one_prompt() {
+        let parsed = ToolchainCli::try_parse_from([
+            "stasis",
+            "--workspace",
+            "demo",
+            "ai",
+            "make the paddle twice as long",
+        ])
+        .expect("parse AI command");
+        assert!(matches!(
+            parsed.command,
+            ToolchainCommand::Ai { ref prompt }
+                if prompt == "make the paddle twice as long"
         ));
     }
 

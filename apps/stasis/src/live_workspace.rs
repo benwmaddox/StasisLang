@@ -1,20 +1,21 @@
 use serde_json::{json, Value};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess, JitScalarValue, JitStateLayout};
+use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
 use stasis_compiler::frontend::workshop::{
-    find_workshop_symbols, load_workshop_edit_workspace, plan_workshop_semantic_edits,
-    workshop_completion_items, workshop_reachable_files, workshop_source_hash,
-    workshop_source_items, write_workshop_semantic_plan, write_workshop_semantic_receipt,
-    ExpectedReload, WorkshopCompletionItem, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
-    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
-    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
+    plan_workshop_semantic_edits, workshop_completion_items, workshop_reachable_files,
+    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
+    write_workshop_semantic_receipt, ExpectedReload, WorkshopCompletionItem, WorkshopSemanticEdit,
+    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
+    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_runner::live::{
-    CompletionContext, CompletionIndex, CompletionItem, CompletionQuery, CompletionScope,
-    LiveCommand, LiveEditOperation, LiveRequest, LiveResponse, LiveResponseSendError,
-    LiveSessionServer, LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_WATCHES,
+    compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
+    CompletionQuery, CompletionScope, LiveCommand, LiveEditOperation, LiveRequest, LiveResponse,
+    LiveResponseSendError, LiveSessionServer, LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_WATCHES,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
@@ -32,6 +33,7 @@ use stasis_compiler::backend::state_migration::{
 const REQUESTS_PER_TICK: usize = 8;
 const MAX_PENDING_LIVE_REQUESTS: usize = 64;
 const MAX_LIVE_EDIT_SOURCE_BYTES: usize = 256 * 1024;
+const MAX_LIVE_EDIT_BATCH: usize = 64;
 const MAX_LIVE_TRANSACTION_ASSIGNMENTS: usize = 64;
 const MAX_STAGED_TEST_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_STAGED_TEST_DIAGNOSTIC_BYTES: usize = 4096;
@@ -120,6 +122,11 @@ enum EditPreparationInput {
         preview: bool,
         run_tests: bool,
     },
+    EditBatch {
+        edits: Vec<stasis_runner::live::LiveEdit>,
+        preview: bool,
+        run_tests: bool,
+    },
     Plan {
         plan: WorkshopSemanticEditPlan,
         expected_swap_preview: Option<LiveSwapPreview>,
@@ -157,6 +164,7 @@ pub(crate) struct LiveWorkspace {
     edit_preparation: Option<EditPreparation>,
     completion_preparation: Option<CompletionPreparation>,
     dropped_watch_events: u64,
+    validation_snapshot: Option<stasis_dynload::JitRuntimeStateSnapshot>,
 }
 
 impl Drop for LiveWorkspace {
@@ -203,6 +211,7 @@ impl LiveWorkspace {
             edit_preparation: None,
             completion_preparation: None,
             dropped_watch_events: 0,
+            validation_snapshot: None,
         };
         workspace.refresh_completion(jit)?;
         Ok(workspace)
@@ -478,9 +487,21 @@ impl LiveWorkspace {
                 self.quit = true;
                 Ok(("quitting", json!({"tick": tick})))
             }
-            LiveCommand::Symbols { query, page, limit } => {
-                self.symbols(query.as_deref(), page, limit)
-            }
+            LiveCommand::Symbols {
+                query,
+                kind,
+                file,
+                owner,
+                page,
+                limit,
+            } => self.symbols(
+                query.as_deref(),
+                kind.as_deref(),
+                file.as_deref(),
+                owner.as_deref(),
+                page,
+                limit,
+            ),
             LiveCommand::Read {
                 name,
                 kind,
@@ -494,6 +515,35 @@ impl LiveWorkspace {
                 owner,
                 signature,
             }),
+            LiveCommand::References { symbol, limit } => Ok((
+                "references",
+                json!({
+                    "symbol": symbol,
+                    "references": find_workshop_references(&self.source_files, &symbol, limit)?,
+                }),
+            )),
+            LiveCommand::Validate {
+                requirement,
+                frames,
+            } => validate_live_runtime(jit, &requirement, frames),
+            LiveCommand::ValidationSnapshot => {
+                self.validation_snapshot = Some(
+                    stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES)?,
+                );
+                Ok(("validation_snapshot", json!({"captured": true})))
+            }
+            LiveCommand::ValidationRestore => {
+                let snapshot = self
+                    .validation_snapshot
+                    .as_ref()
+                    .ok_or_else(|| "no AI validation baseline is available".to_string())?;
+                stasis_dynload::restore_jit_runtime_state(snapshot);
+                Ok(("validation_restored", json!({"restored": true})))
+            }
+            LiveCommand::ValidationClear => {
+                self.validation_snapshot = None;
+                Ok(("validation_cleared", json!({"cleared": true})))
+            }
             LiveCommand::Complete {
                 buffer,
                 cursor,
@@ -529,6 +579,19 @@ impl LiveWorkspace {
                     target,
                     source,
                     expected_source_hash,
+                    preview,
+                    run_tests,
+                },
+                jit,
+            ),
+            LiveCommand::EditBatch {
+                edits,
+                preview,
+                run_tests,
+            } => self.start_edit_preparation(
+                request_id,
+                EditPreparationInput::EditBatch {
+                    edits,
                     preview,
                     run_tests,
                 },
@@ -709,38 +772,53 @@ impl LiveWorkspace {
     fn symbols(
         &self,
         query: Option<&str>,
+        kind: Option<&str>,
+        file: Option<&str>,
+        owner: Option<&str>,
         page: u32,
         limit: usize,
     ) -> Result<(&'static str, Value), String> {
         let query = query.unwrap_or("").to_ascii_lowercase();
-        let matching = self
-            .source_items
-            .iter()
-            .filter(|item| {
-                query.is_empty()
+        let kind = kind.map(parse_kind).transpose()?;
+        let file = file.map(normalize_file);
+        let matches = |item: &WorkshopSourceItem| {
+            item.kind != WorkshopSourceItemKind::Imports
+                && !(item.kind == WorkshopSourceItemKind::Globals && item.source.trim().is_empty())
+                && (query.is_empty()
                     || item.name.to_ascii_lowercase().contains(&query)
-                    || item.signature.to_ascii_lowercase().contains(&query)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+                    || item.signature.to_ascii_lowercase().contains(&query))
+                && kind.is_none_or(|kind| item.kind == kind)
+                && file
+                    .as_deref()
+                    .is_none_or(|file| normalize_file(&item.file) == file)
+                && owner.is_none_or(|owner| item.owner.as_deref() == Some(owner))
+        };
         let limit = limit.clamp(1, 200);
         let offset = usize::try_from(page)
             .unwrap_or(usize::MAX)
             .saturating_mul(limit);
-        let total = matching.len();
-        let items = matching
-            .into_iter()
+        let total = self
+            .source_items
+            .iter()
+            .filter(|item| matches(item))
+            .count();
+        let items = self
+            .source_items
+            .iter()
+            .filter(|item| matches(item))
             .skip(offset)
             .take(limit)
             .map(|item| {
-                json!({
+                let mut value = json!({
                     "kind": item.kind,
                     "name": item.name,
-                    "owner": item.owner,
                     "file": item.file,
                     "signature": item.signature,
-                    "source_hash": item.source_hash,
-                })
+                });
+                if let Some(owner) = &item.owner {
+                    value["owner"] = Value::String(owner.clone());
+                }
+                value
             })
             .collect::<Vec<_>>();
         Ok((
@@ -1321,6 +1399,24 @@ fn paged_completion_query(
 fn validate_edit_input_size(input: &EditPreparationInput) -> Result<(), String> {
     let source = match input {
         EditPreparationInput::Edit { source, .. } => source.as_deref(),
+        EditPreparationInput::EditBatch { edits, .. } => {
+            if edits.len() > MAX_LIVE_EDIT_BATCH {
+                return Err(format!(
+                    "live edit batch exceeds {MAX_LIVE_EDIT_BATCH} edits"
+                ));
+            }
+            let bytes = edits
+                .iter()
+                .filter_map(|edit| edit.source.as_deref())
+                .map(str::len)
+                .sum::<usize>();
+            if bytes > MAX_LIVE_EDIT_SOURCE_BYTES {
+                return Err(format!(
+                    "live edit source exceeds {MAX_LIVE_EDIT_SOURCE_BYTES} bytes"
+                ));
+            }
+            None
+        }
         EditPreparationInput::Persist { source, .. } => Some(source.as_str()),
         EditPreparationInput::Plan { .. } => None,
     };
@@ -1357,6 +1453,25 @@ fn prepare_edit(
         } => {
             let (after, plan) =
                 plan_live_edit(&files, operation, target, source, expected_source_hash)?;
+            (
+                after,
+                plan,
+                false,
+                run_tests && !preview,
+                if preview {
+                    PreparedAction::Preview
+                } else {
+                    PreparedAction::ApplyNew
+                },
+                None,
+            )
+        }
+        EditPreparationInput::EditBatch {
+            edits,
+            preview,
+            run_tests,
+        } => {
+            let (after, plan) = plan_live_edit_batch(&files, edits)?;
             (
                 after,
                 plan,
@@ -1413,6 +1528,7 @@ fn prepare_edit(
             )
         }
     };
+    require_semantic_changes(&plan)?;
     check_preparation_canceled(canceled)?;
     let (candidate, package) = compile_candidate(config, &candidate_files)?;
     let changed_functions = candidate.symbol_code_ptrs().into_keys().collect();
@@ -1470,6 +1586,14 @@ fn prepare_edit(
     })
 }
 
+fn require_semantic_changes(plan: &WorkshopSemanticEditPlan) -> Result<(), String> {
+    if plan.reload.changed_symbols.is_empty() {
+        Err("live edit has no semantic changes; disk and runtime were left unchanged".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 fn plan_live_edit(
     files: &[WorkshopSourceFile],
     operation: LiveEditOperation,
@@ -1510,6 +1634,50 @@ fn plan_live_edit(
     )
 }
 
+fn plan_live_edit_batch(
+    files: &[WorkshopSourceFile],
+    edits: Vec<stasis_runner::live::LiveEdit>,
+) -> Result<(Vec<WorkshopSourceFile>, WorkshopSemanticEditPlan), String> {
+    if edits.is_empty() {
+        return Err("live edit batch must contain at least one edit".to_string());
+    }
+    let mut semantic_edits = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let mut target = selector(&edit.target)?;
+        let operation = match edit.operation {
+            LiveEditOperation::Add => WorkshopSemanticEditOperation::Add,
+            LiveEditOperation::Update => WorkshopSemanticEditOperation::Update,
+            LiveEditOperation::Delete => WorkshopSemanticEditOperation::Delete,
+        };
+        if operation == WorkshopSemanticEditOperation::Add && target.file.is_none() {
+            return Err("code-aware live add requires a project src/ or tests/ file".to_string());
+        }
+        if operation != WorkshopSemanticEditOperation::Add && target.file.is_none() {
+            let matches = find_workshop_symbols(files, &target)?;
+            if matches.len() != 1 {
+                return Err(format!(
+                    "code-aware live edit requires one target; found {}",
+                    matches.len()
+                ));
+            }
+            target.file = Some(matches[0].file.clone());
+        }
+        semantic_edits.push(WorkshopSemanticEdit {
+            operation,
+            target,
+            new_source: edit.source,
+            expected_source_hash: edit.expected_source_hash,
+        });
+    }
+    plan_workshop_semantic_edits(
+        files,
+        &WorkshopSemanticEditBatch {
+            schema_version: 1,
+            edits: semantic_edits,
+        },
+    )
+}
+
 fn compile_candidate(
     config: &LiveRunConfig,
     files: &[WorkshopSourceFile],
@@ -1524,6 +1692,7 @@ fn compile_candidate(
     ]);
     for file in runtime_files {
         let path = config.project_root.join(&file.path);
+        let path = path.canonicalize().unwrap_or(path);
         candidate.upsert_file(path.to_string_lossy().to_string(), file.source);
     }
     candidate
@@ -1773,7 +1942,9 @@ fn help_data() -> Value {
             ":help", ":status", ":pause", ":resume", ":step [ticks]", ":cancel REQUEST_ID", ":quit",
             ":symbols [query] [--page N --limit N]",
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
+            ":references SYMBOL [--limit N]", ":validate PATH OP VALUE [--frames N]",
             ":edit SYMBOL (interactive TUI)",
+            ":ai PROMPT | :ai status | :ai cancel (interactive TUI; installed Codex subscription)",
             ":complete BUFFER", ":palette [QUERY]",
             ":add KIND NAME FILE ... :end", ":update KIND NAME [FILE] ... :end",
             ":delete KIND NAME [FILE]", ":preview", ":apply", ":changes", ":undo", ":redo",
@@ -1800,7 +1971,10 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":symbols",
         ":find",
         ":read",
+        ":references",
+        ":validate",
         ":edit",
+        ":ai",
         ":complete",
         ":palette",
         ":add",
@@ -1909,6 +2083,59 @@ fn inspect_scalar(jit: &JitProcess, path: &str) -> Result<(&'static str, Value),
         "inspection",
         json!({"path": path, "static_type": value.type_name(), "value": value}),
     ))
+}
+
+fn validate_live_runtime(
+    jit: &JitProcess,
+    requirement: &stasis_runner::live::LiveValidationRequirement,
+    frames: u32,
+) -> Result<(&'static str, Value), String> {
+    if frames > 600 {
+        return Err("frames exceeds the 600-frame limit".to_string());
+    }
+    let snapshot = stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES)?;
+    let result = (|| {
+        for _ in 0..frames {
+            execute_validation_entry(jit, "tick")?;
+        }
+        execute_validation_entry(jit, "render")?;
+        let actual = serde_json::to_value(jit.read_global_scalar(&requirement.path)?)
+            .map_err(|error| format!("failed encoding {}: {error}", requirement.path))?
+            .get("value")
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "inspection for {} returned no scalar value",
+                    requirement.path
+                )
+            })?;
+        let passed = compare_live_validation_values(&actual, &requirement.op, &requirement.value)?;
+        Ok((
+            "runtime_validation",
+            json!({
+                "baseline": "live",
+                "frames": frames,
+                "requirements_met": passed,
+                "checks": [{
+                    "path": requirement.path,
+                    "op": requirement.op,
+                    "expected": requirement.value,
+                    "actual": actual,
+                    "passed": passed,
+                }],
+            }),
+        ))
+    })();
+    stasis_dynload::restore_jit_runtime_state(&snapshot);
+    result
+}
+
+fn execute_validation_entry(jit: &JitProcess, name: &str) -> Result<(), String> {
+    match jit.execute_i32_noarg_by_name(name) {
+        Ok(_) => Ok(()),
+        Err(error) if error.contains("not i32-returning") => jit.execute_void_noarg_by_name(name),
+        Err(error) => Err(error),
+    }
 }
 
 fn inspect_all_scalars(
@@ -2151,6 +2378,71 @@ mod tests {
         (jit, package)
     }
 
+    #[test]
+    fn live_edit_batch_plans_all_symbols_as_one_transaction() {
+        let (root, config) = project();
+        let files = load_workshop_edit_workspace(&root, &config.entry).expect("files");
+        let (after, plan) = plan_live_edit_batch(
+            &files,
+            vec![
+                stasis_runner::live::LiveEdit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "tick".into(),
+                        kind: Some("function".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("function tick(): i32 { score += 3; return 0; }".into()),
+                    expected_source_hash: None,
+                },
+                stasis_runner::live::LiveEdit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "render".into(),
+                        kind: Some("function".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("function render(): i32 { return score; }".into()),
+                    expected_source_hash: None,
+                },
+            ],
+        )
+        .expect("batch plan");
+        assert_eq!(plan.edits.len(), 2);
+        assert_eq!(plan.changed_files.len(), 1);
+        let main = after
+            .iter()
+            .find(|file| file.path == "src/main.stasis")
+            .expect("main");
+        assert!(main.source.contains("score += 3"));
+        assert!(main.source.contains("return score"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn compile_candidate_does_not_reload_imports_under_a_second_path() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"adapter.stasis\";\nfunction main(): i32 { return helper(1); }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return helper(2); }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("main");
+        fs::write(
+            root.join("src/adapter.stasis"),
+            "function helper(value: i32): i32 { return value; }\n",
+        )
+        .expect("adapter");
+        let files = load_workshop_edit_workspace(&root, &config.entry).expect("files");
+
+        compile_candidate(&config, &files).expect("candidate with imported helper");
+
+        fs::remove_dir_all(root).ok();
+    }
+
     fn run_request(
         client: &stasis_runner::live::LiveSessionClient,
         workspace: &mut LiveWorkspace,
@@ -2306,6 +2598,196 @@ mod tests {
         stasis_dynload::invoke_noarg_i32(package.tick_code_ptr as usize).expect("tick");
         assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(7)));
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reference_request_returns_compact_containing_symbols() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                39,
+                LiveCommand::References {
+                    symbol: "score".into(),
+                    limit: 16,
+                },
+            ),
+        );
+
+        assert!(response.ok);
+        let references = response.data.expect("reference data")["references"]
+            .as_array()
+            .expect("references")
+            .clone();
+        assert!(references
+            .iter()
+            .any(|reference| reference["containing_name"] == "tick"));
+        assert!(references
+            .iter()
+            .all(|reference| reference.get("source").is_none()));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn symbol_search_is_filtered_compact_and_hash_free() {
+        let (root, config) = project();
+        let (jit, _package) = compile(&config);
+        let (_client, server) = stasis_runner::live::live_session(8);
+        let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+
+        let (_, all) = workspace
+            .symbols(None, None, None, None, 0, 32)
+            .expect("symbols");
+        let items = all["items"].as_array().expect("items");
+        assert!(items.iter().all(|item| item["kind"] != "imports"));
+        assert!(items.iter().all(|item| item.get("source_hash").is_none()));
+        assert!(items.iter().all(|item| item.get("source").is_none()));
+        assert!(items
+            .iter()
+            .all(|item| { matches!(item.as_object().map(|object| object.len()), Some(4 | 5)) }));
+
+        let (_, filtered) = workspace
+            .symbols(
+                Some("tick"),
+                Some("function"),
+                Some("src/main.stasis"),
+                None,
+                0,
+                1,
+            )
+            .expect("filtered symbols");
+        assert_eq!(filtered["total"], 1);
+        assert_eq!(filtered["items"][0]["name"], "tick");
+        assert!(filtered["items"][0].get("owner").is_none());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn validation_snapshot_restores_the_same_runtime_baseline() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(40, LiveCommand::ValidationSnapshot),
+            )
+            .ok
+        );
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(
+                    41,
+                    LiveCommand::Set {
+                        path: "score".into(),
+                        expression: "9".into(),
+                        preview: false,
+                    },
+                ),
+            )
+            .ok
+        );
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(9)));
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(42, LiveCommand::ValidationRestore),
+            )
+            .ok
+        );
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(1)));
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(43, LiveCommand::ValidationClear),
+            )
+            .ok
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn human_runtime_validation_restores_live_state_after_frames() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                44,
+                LiveCommand::Validate {
+                    requirement: stasis_runner::live::LiveValidationRequirement {
+                        path: "score".into(),
+                        op: "eq".into(),
+                        value: json!(3),
+                    },
+                    frames: 2,
+                },
+            ),
+        );
+
+        assert!(response.ok);
+        assert_eq!(response.data.expect("validation")["requirements_met"], true);
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(1)));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn semantic_noop_edit_is_rejected_without_writing() {
+        let plan = WorkshopSemanticEditPlan {
+            schema_version: 1,
+            edits: Vec::new(),
+            changed_files: Vec::new(),
+            reload: stasis_compiler::frontend::workshop::WorkshopReloadClassification {
+                expected_reload: ExpectedReload::FastReload,
+                reason: "No symbol changes detected.".into(),
+                changed_symbols: Vec::new(),
+            },
+        };
+        let error = require_semantic_changes(&plan).expect_err("semantic no-op");
+
+        assert!(error.contains("disk and runtime were left unchanged"));
     }
 
     #[test]

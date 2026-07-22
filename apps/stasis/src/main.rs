@@ -2818,7 +2818,7 @@ mod tests {
                 function["name"].as_str(),
                 Some("main" | "tick" | "render")
             ))
-            .all(|function| function["return_type"] == 0));
+            .all(|function| function["return_type"] == 1));
         let cmake = fs::read_to_string(&summary.cmake_file).expect("read cmake file");
         assert!(cmake.contains("set(STASIS_PUBLISHED_AOT_OBJECTS"));
         assert!(cmake.contains("${CMAKE_CURRENT_LIST_DIR}/"));

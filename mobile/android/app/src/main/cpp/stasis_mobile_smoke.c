@@ -45,6 +45,7 @@ typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
 typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
 typedef void (*stasis_codex_android_cancel_response_fn)(void);
 typedef char *(*stasis_codex_android_response_fn)(const char *codex_home, const char *request_json, uint64_t generation);
+typedef char *(*stasis_codex_android_ai_contract_fn)(void);
 typedef int (*stasis_codex_android_initialize_fn)(void *env, void *context);
 typedef void (*stasis_codex_android_free_string_fn)(char *value);
 typedef struct CompileStats {
@@ -96,6 +97,7 @@ typedef struct CodexBridgeApi {
     stasis_codex_android_begin_response_fn begin_response;
     stasis_codex_android_cancel_response_fn cancel_response;
     stasis_codex_android_response_fn response;
+    stasis_codex_android_ai_contract_fn ai_contract;
     stasis_codex_android_free_string_fn free_string;
     int attempted;
 } CodexBridgeApi;
@@ -1362,6 +1364,8 @@ static CodexBridgeApi *load_codex_bridge_api(void) {
             codex_bridge_api.handle, "stasis_codex_android_cancel_response");
     codex_bridge_api.response = (stasis_codex_android_response_fn)dlsym(
             codex_bridge_api.handle, "stasis_codex_android_response");
+    codex_bridge_api.ai_contract = (stasis_codex_android_ai_contract_fn)dlsym(
+            codex_bridge_api.handle, "stasis_codex_android_ai_contract");
     codex_bridge_api.free_string = (stasis_codex_android_free_string_fn)dlsym(
             codex_bridge_api.handle, "stasis_codex_android_free_string");
     if (codex_bridge_api.initialize == NULL ||
@@ -1753,6 +1757,25 @@ Java_com_stasislang_workshop_MainActivity_nativeCodexAccountRateLimits(
         JNIEnv *env, jclass activity_class, jstring codex_home) {
     (void)activity_class;
     return call_codex_rate_limits(env, codex_home);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeSharedAiContract(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    CodexBridgeApi *bridge = load_codex_bridge_api();
+    if (bridge == NULL || bridge->ai_contract == NULL || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"shared AI contract unavailable\"}");
+    }
+    char *message = bridge->ai_contract();
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"shared AI contract returned no result\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
 }
 
 JNIEXPORT jstring JNICALL

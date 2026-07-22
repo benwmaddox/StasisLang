@@ -8,6 +8,7 @@ members = [
   "crates/stasis_android_bridge",
   "crates/stasis_jit",
   "crates/stasis_runner",
+  "crates/stasis_ai",
 ]
 
 [workspace.package]
