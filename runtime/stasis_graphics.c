@@ -327,6 +327,29 @@ static void stasis_sync_display_metrics(void) {
 #endif
 }
 
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+static void stasis_gl_clear_rect(int x, int y, int width, int height) {
+    if (width <= 0 || height <= 0) return;
+    glScissor(x, y, width, height);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
+
+static void stasis_gl_clear_letterbox_bars(void) {
+    const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
+    const int left = (int)viewport.x;
+    const int bottom = (int)viewport.y;
+    const int right = left + (int)viewport.w;
+    const int top = bottom + (int)viewport.h;
+    glEnable(GL_SCISSOR_TEST);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    stasis_gl_clear_rect(0, 0, left, g_drawable_height);
+    stasis_gl_clear_rect(right, 0, g_drawable_width - right, g_drawable_height);
+    stasis_gl_clear_rect(0, 0, g_drawable_width, bottom);
+    stasis_gl_clear_rect(0, top, g_drawable_width, g_drawable_height - top);
+    glDisable(GL_SCISSOR_TEST);
+}
+#endif
+
 static void stasis_window_to_logical(float native_x, float native_y, float* logical_x, float* logical_y) {
     if (!logical_x || !logical_y) return;
     stasis_display_native_to_logical_xy(
@@ -3840,7 +3863,11 @@ STASIS_EXPORT void stasis_begin_frame(void) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
         SDL_RenderSetClipRect(g_renderer, NULL);
     } else {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        stasis_gl_clear_letterbox_bars();
+#else
         (void)g_force_debug_overlay;
+#endif
     }
 }
 
@@ -3895,12 +3922,26 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
     gfx_debug_hash_f32(b);
     gfx_debug_hash_f32(a);
     if (g_use_sdl_renderer) {
-        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
         SDL_RenderClear(g_renderer);
+        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
+        SDL_FRect logical_canvas = {
+            0.0f, 0.0f, (float)g_window_width, (float)g_window_height};
+        SDL_RenderFillRectF(g_renderer, &logical_canvas);
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
     } else {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(
+            (int)viewport.x,
+            (int)viewport.y,
+            (int)viewport.w,
+            (int)viewport.h);
         glClearColor(r, g, b, a);
         glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
 #else
         (void)r; (void)g; (void)b; (void)a;
 #endif
