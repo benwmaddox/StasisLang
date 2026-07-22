@@ -3158,9 +3158,7 @@ mod tests {
             ("write_symbol", "stasis symbol update / :update"),
             ("delete_symbol", "stasis symbol delete / :delete"),
             ("inspect_runtime_state", ":inspect"),
-            ("validate_runtime_state", "stasis validate / :validate"),
             ("run_frame", ":step / stasis validate --frames"),
-            ("run_tests", "stasis test / tested TUI apply"),
         ]);
 
         for tool in live_tool_specs() {

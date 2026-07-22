@@ -92,3 +92,33 @@ red/green replay tests passed, but the model used the capability only for render
 task still scored 3/4 with the same paddle-center failure, while rising to 342.4 seconds, 50 tool
 calls, 308,626 input tokens, and an estimated $1.849. The capability and its prompt instruction
 were therefore reverted rather than adding unproven surface area.
+
+## Tested-write completion
+
+The next refinement removed runtime-state validation from the built-in AI contract. Human
+`stasis validate` and TUI `:validate` remain available, but AI writes now compile and run project
+tests atomically, and the agent cannot report completion without a successful write batch. A
+separate live `run_tests` tool was also removed because it only repeated the result already
+returned by the write. Repeated failures from the same atomic batch now include full diagnostics
+once instead of duplicating them for every write observation.
+
+The first lean run passed medium 4/4 in 201.9 seconds with 38 tool calls, 160,967 input tokens,
+25,344 cached input tokens, 9,540 output tokens, and an estimated $0.977. Its first small run was
+faster and cheaper but failed one paddle-contact case, so that configuration was rejected. The
+trace showed that the model copied an old collision constant instead of deriving contact from the
+rendered rectangle after movement.
+
+A generic game-geometry instruction corrected that reasoning: collision and geometry changes use
+rendered rectangle bounds as the coordinate source of truth and derive test inputs after the
+update function's movement order. The retained configuration passed 4/4 at every scale:
+
+| Size | Total s | Tool calls | Input | Cached | Output | Est. USD |
+|---|---:|---:|---:|---:|---:|---:|
+| small | 255.6 | 31 | 131,859 | 22,016 | 12,972 | 0.949 |
+| medium | 262.6 | 41 | 183,149 | 30,208 | 12,620 | 1.158 |
+| large | 204.7 | 40 | 224,678 | 32,000 | 9,551 | 1.266 |
+
+These single-run timings vary enough that the change is not claimed as a universal speedup. It is
+retained because it removes an ineffective validation loop, keeps all acceptance checks green,
+and makes the mandatory completion path one tested atomic edit rather than an edit plus a second
+synthetic runtime protocol.

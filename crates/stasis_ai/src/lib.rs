@@ -14,7 +14,7 @@ pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 pub const DEFAULT_REASONING_EFFORT: &str = "medium";
 pub const MAX_OBSERVATION_BYTES: usize = 1024 * 1024;
-const AGENT_INSTRUCTION: &str = "Use only the supplied Stasis tools. The first JSONL record is the immutable request header; every following record is the authoritative append-only transcript of an earlier model response and its tool observations. Do not repeat completed inspection or validation. Start with initial_context.initial_symbols, which is the completed compact default list_symbols result for the entry file and its direct imports. Treat every listed function whose name directly contains the requested behavior noun as a candidate: batch read_symbol and find_references for all of them before editing. Do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. If relevant symbols are missing, batch multiple narrow list_symbols searches directly suggested by the request, such as the behavior noun plus render or update terms; never enumerate the whole project. A reference lookup does not require a prior source read. Call find_references for behavior-bearing symbols before writing. For an observable requested behavior, call validate_runtime_state with the target requirements and expected_outcome=fail before writing. Never guess setup, tick, or render names: omit optional entrypoints unless a tool observation established the exact function. When source edits are ready, place red validation immediately before one contiguous atomic write batch in the same turn; writes run only when the red contract is accepted. The runtime automatically applies the identical green validation after a successful write, so do not request it again. Use baseline=fresh for startup/reset or integration-style behavior and baseline=live when the current running state matters. If the before check already passes, report that the request is already satisfied without rewriting it. Do not claim an affected behavior is consistent unless you inspected its source or validated it. Return done after the edit reports compilation/tests passed and automatic green validation passes. Return exactly one JSON object matching the response contract.";
+const AGENT_INSTRUCTION: &str = "Use only the supplied Stasis tools. The first JSONL record is the immutable request header; every following record is the authoritative append-only transcript of an earlier model response and its tool observations. Do not repeat completed inspection. Start with initial_context.initial_symbols, which is the completed compact default list_symbols result for the entry file and its direct imports. Treat every listed function whose name directly contains the requested behavior noun as a candidate: batch read_symbol and find_references for all of them before editing. Do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. If relevant symbols are missing, batch multiple narrow list_symbols searches directly suggested by the request, such as the behavior noun plus render or update terms; never enumerate the whole project. A reference lookup does not require a prior source read. Call find_references for behavior-bearing symbols before writing. For collision or geometry changes, use rendered rectangle bounds as the coordinate source of truth and derive contact test inputs after the update function's movement order instead of copying old collision constants. Put all related source and requested durable-test changes in one contiguous atomic write batch. The write compiles the batch and runs project tests; if it succeeds, return done immediately without a separate test call. If it fails, correct only the reported defect and retry atomically. Return exactly one JSON object matching the response contract.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -340,7 +340,6 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
         spec("get_diagnostics", "Read the latest compiler diagnostics.", &[], &[]),
         spec("set_input_state", "Set simulated input state.", &[], &["x", "y", "active", "screen_w", "screen_h"]),
         spec("inspect_runtime_state", "Read bounded live scalar state.", &[], &[]),
-        spec("validate_runtime_state", "Evaluate 1..=16 scalar requirements shaped as {path, op, value}, where op is eq, ne, lt, lte, gt, or gte. baseline=live pauses and restores the running game; baseline=fresh boots an isolated child process for an integration-style check. Fresh defaults to main/tick/render. Omit setup, tick, or render unless an earlier tool result established the exact game-level function; never infer an entrypoint name. Use expected_outcome=fail immediately before a contiguous write batch; the runtime automatically repeats the identical contract as green validation after a successful write.", &["requirements", "expected_outcome"], &["frames", "baseline", "setup", "tick", "render"]),
         spec("run_frame", "Advance the live runtime by one deterministic tick.", &[], &[]),
         spec("take_screenshot", "Capture a logical render snapshot and runtime state.", &[], &[]),
         spec("list_tests", "List Stasis test files.", &[], &[]),
@@ -359,9 +358,7 @@ pub fn live_tool_specs() -> Vec<ToolSpec> {
         "write_symbol",
         "delete_symbol",
         "inspect_runtime_state",
-        "validate_runtime_state",
         "run_frame",
-        "run_tests",
     ];
     workshop_tool_specs()
         .into_iter()
@@ -870,7 +867,7 @@ mod tests {
             fn validate_completion(&self) -> Result<(), String> {
                 self.ready
                     .then_some(())
-                    .ok_or_else(|| "green validation required".to_string())
+                    .ok_or_else(|| "successful tool execution required".to_string())
             }
         }
 
@@ -891,7 +888,7 @@ mod tests {
                     }],
                 },
                 ModelResponse::Done {
-                    working_notes: "Intent: finish. Observed: green. Next: none. Blocker: none."
+                    working_notes: "Intent: finish. Observed: success. Next: none. Blocker: none."
                         .to_string(),
                     summary: "verified".to_string(),
                 },
@@ -967,7 +964,8 @@ mod tests {
             .all(|tool| workshop.iter().any(|candidate| candidate.tool == tool.tool)));
         assert!(live.iter().any(|tool| tool.tool == "write_symbol"));
         assert!(live.iter().any(|tool| tool.tool == "find_references"));
-        assert!(live
+        assert!(!live.iter().any(|tool| tool.tool == "run_tests"));
+        assert!(!workshop
             .iter()
             .any(|tool| tool.tool == "validate_runtime_state"));
         assert!(!live.iter().any(|tool| tool.tool == "capture_screenshot"));
