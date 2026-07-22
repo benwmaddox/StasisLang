@@ -111,7 +111,7 @@ Validate the Android AI Responses payload locally before a live run. This does n
 python ..\..\tools\android_ai_agent_host.py --preflight --prompt "verify Android AI payload"
 ```
 
-For a live local run, the same host tool always writes a trace, including API failures, tool observations, test results, token usage, and cost estimates. After it finishes, provide the printed trace path for review:
+For a live local run, the same host tool always writes a trace, including API failures, tool observations, test results, token usage, and cost estimates. On device, `ai_trace.jsonl` records the exact application request context and tool exchanges, while provider token usage is written separately to `ai_usage.jsonl`. After a host run finishes, provide the printed trace path for review:
 
 ```powershell
 python ..\..\tools\android_ai_agent_host.py --reset-paddle-speed-feature --prompt "enemy paddle should have speed change"

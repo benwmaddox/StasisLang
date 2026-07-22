@@ -1,7 +1,7 @@
 package com.stasislang.workshop;
 
 final class WorkshopAiInitialContextPolicy {
-    static final int MAX_SYMBOLS = 256;
+    static final int MAX_SYMBOLS = 40;
     static final int MAX_SYMBOL_INDEX_CHARS = 16 * 1024;
 
     private WorkshopAiInitialContextPolicy() {}

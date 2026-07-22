@@ -16,11 +16,11 @@ use stasis_compiler::backend::state_migration::{
 };
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_compiler::frontend::workshop::{
-    build_workshop_compile_plan, load_workshop_edit_workspace, load_workshop_project,
-    plan_workshop_semantic_edits, render_workshop_artifacts, workshop_reachable_files,
-    workshop_source_items, write_workshop_semantic_plan, write_workshop_semantic_receipt,
-    WorkshopCompilePlan, WorkshopReload, WorkshopSemanticEditBatch, WorkshopSemanticEditPlan,
-    WorkshopSourceFile,
+    build_workshop_compile_plan, find_workshop_references, load_workshop_edit_workspace,
+    load_workshop_project, plan_workshop_semantic_edits, render_workshop_artifacts,
+    workshop_reachable_files, workshop_source_items, write_workshop_semantic_plan,
+    write_workshop_semantic_receipt, WorkshopCompilePlan, WorkshopReload,
+    WorkshopSemanticEditBatch, WorkshopSemanticEditPlan, WorkshopSourceFile,
 };
 #[cfg(test)]
 use stasis_compiler::frontend::workshop::{
@@ -331,6 +331,32 @@ pub fn android_workshop_source_items(
     Ok(serde_json::json!({
         "schema_version": 1,
         "items": workshop_source_items(&editable)?,
+    }))
+}
+
+pub fn android_workshop_references(
+    project_root: impl AsRef<Path>,
+    entry_file: impl AsRef<Path>,
+    symbol: &str,
+    limit: usize,
+) -> Result<serde_json::Value, String> {
+    let files = load_workshop_edit_workspace(project_root.as_ref(), entry_file.as_ref())?;
+    let references = find_workshop_references(&files, symbol, limit)?
+        .into_iter()
+        .map(|reference| {
+            serde_json::json!({
+                "kind": reference.kind,
+                "file": reference.file,
+                "containing_kind": reference.containing_kind,
+                "containing_name": reference.containing_name,
+                "containing_signature": reference.containing_signature,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "symbol": symbol,
+        "references": references,
     }))
 }
 
@@ -1655,6 +1681,26 @@ pub extern "C" fn stasis_android_bridge_source_items(
         android_workshop_source_items(&project_root, &entry_file)
     }));
     semantic_bridge_json_result(result, "source item indexing")
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_find_references(
+    project_root: *const c_char,
+    entry_file: *const c_char,
+    symbol: *const c_char,
+    limit: usize,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let (project_root, entry_file) = semantic_bridge_paths(project_root, entry_file)?;
+        if symbol.is_null() {
+            return Err("null reference symbol".to_string());
+        }
+        let symbol = CStr::from_ptr(symbol)
+            .to_str()
+            .map_err(|error| format!("reference symbol was not UTF-8: {error}"))?;
+        android_workshop_references(&project_root, &entry_file, symbol, limit)
+    }));
+    semantic_bridge_json_result(result, "reference lookup")
 }
 
 #[no_mangle]
@@ -3447,6 +3493,36 @@ function render(): void {}
         stasis_android_bridge_free_string(ptr);
         assert!(message.contains("CompilePlanned"));
         assert!(message.contains("functions="));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn c_reference_bridge_returns_compact_compiler_owned_results() {
+        let root = temp_project("reference_ffi");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global GameState { score: i32; }\nfunction tick(): void { GameState.score += 1; }\nfunction current(): i32 { return GameState.score; }\n",
+        )
+        .expect("write source");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let symbol_c = CString::new("GameState.score").expect("symbol cstr");
+
+        let result = ffi_json(stasis_android_bridge_find_references(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            symbol_c.as_ptr(),
+            16,
+        ));
+
+        assert_eq!(result["schema_version"], 1);
+        assert_eq!(result["references"].as_array().map(Vec::len), Some(2));
+        assert!(result["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|reference| reference.get("source_hash").is_none()
+                && reference.get("source").is_none()));
         fs::remove_dir_all(&root).ok();
     }
 
