@@ -1807,9 +1807,104 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     }
 }
 
-const STASIS_RENDER_I32_COUNT: i32 = 34_848;
-const STASIS_RENDER_F32_COUNT: i32 = 92_292;
-const STASIS_RENDER_U8_COUNT: i32 = 65_536;
+pub const STASIS_RENDER_I32_COUNT: usize = 34_848;
+pub const STASIS_RENDER_F32_COUNT: usize = 92_292;
+pub const STASIS_RENDER_U8_COUNT: usize = 65_536;
+const STASIS_RENDER_MAGIC: i32 = 0x4758_4631;
+const STASIS_RENDER_VERSION: i32 = 1;
+const STASIS_RENDER_HEADER_I32_COUNT: usize = 10;
+const STASIS_RENDER_SPRITE_BASE: usize = 32;
+const STASIS_RENDER_MAX_LINES: usize = 10_000;
+const STASIS_RENDER_LINE_STRIDE: usize = 8;
+const STASIS_RENDER_MAX_SPRITES: usize = 4_096;
+const STASIS_RENDER_SPRITE_STRIDE: usize = 7;
+const STASIS_RENDER_TEXT_BASE_I32: usize = 28_704;
+const STASIS_RENDER_TEXT_BASE_F32: usize = 80_004;
+const STASIS_RENDER_MAX_TEXT: usize = 2_048;
+const STASIS_RENDER_TEXT_STRIDE_I32: usize = 3;
+const STASIS_RENDER_TEXT_STRIDE_F32: usize = 6;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderV1ActiveCounts {
+    pub lines: usize,
+    pub sprites: usize,
+    pub text: usize,
+    pub text_bytes: usize,
+}
+
+fn global_path_hash(path: &str) -> i32 {
+    let mut hash = 2_166_136_261u32;
+    for byte in path.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash as i32
+}
+
+/// Copies only the active spans of the canonical JIT render buffers.
+///
+/// The destination retains production offsets so the Android GLES adapter consumes the exact
+/// same ABI as the SDL renderer without copying unused command capacity.
+pub fn copy_jit_render_v1_active(
+    out_i32: &mut [i32],
+    out_f32: &mut [f32],
+    out_u8: &mut [u8],
+) -> Result<RenderV1ActiveCounts, String> {
+    if out_i32.len() < STASIS_RENDER_I32_COUNT
+        || out_f32.len() < STASIS_RENDER_F32_COUNT
+        || out_u8.len() < STASIS_RENDER_U8_COUNT
+    {
+        return Err("production render destination has the wrong capacity".to_string());
+    }
+    let i32_ptr = stasis_jit_global_i32_array_ptr(
+        global_path_hash("gfx_cmd_i32"),
+        0,
+        STASIS_RENDER_I32_COUNT as i32,
+    );
+    let f32_ptr = stasis_jit_global_f32_array_ptr(
+        global_path_hash("gfx_cmd_f32"),
+        0,
+        STASIS_RENDER_F32_COUNT as i32,
+    );
+    let u8_ptr = global_u8_array_ptr(
+        global_path_hash("gfx_cmd_u8"),
+        0,
+        STASIS_RENDER_U8_COUNT as i32,
+    );
+    if i32_ptr.is_null() || f32_ptr.is_null() || u8_ptr.is_null() {
+        return Err("production render buffers were not registered by the JIT".to_string());
+    }
+    let source_i32 = unsafe { std::slice::from_raw_parts(i32_ptr, STASIS_RENDER_I32_COUNT) };
+    let source_f32 = unsafe { std::slice::from_raw_parts(f32_ptr, STASIS_RENDER_F32_COUNT) };
+    let source_u8 = unsafe { std::slice::from_raw_parts(u8_ptr, STASIS_RENDER_U8_COUNT) };
+    if source_i32[0] != STASIS_RENDER_MAGIC || source_i32[1] != STASIS_RENDER_VERSION {
+        return Err("JIT frame is not production gfx_cmd v1".to_string());
+    }
+
+    let counts = RenderV1ActiveCounts {
+        lines: source_i32[3].clamp(0, STASIS_RENDER_MAX_LINES as i32) as usize,
+        sprites: source_i32[4].clamp(0, STASIS_RENDER_MAX_SPRITES as i32) as usize,
+        text: source_i32[7].clamp(0, STASIS_RENDER_MAX_TEXT as i32) as usize,
+        text_bytes: source_i32[9].clamp(0, STASIS_RENDER_U8_COUNT as i32) as usize,
+    };
+    out_i32[..STASIS_RENDER_HEADER_I32_COUNT]
+        .copy_from_slice(&source_i32[..STASIS_RENDER_HEADER_I32_COUNT]);
+    let sprite_end = STASIS_RENDER_SPRITE_BASE + counts.sprites * STASIS_RENDER_SPRITE_STRIDE;
+    out_i32[STASIS_RENDER_SPRITE_BASE..sprite_end]
+        .copy_from_slice(&source_i32[STASIS_RENDER_SPRITE_BASE..sprite_end]);
+    let text_i32_end = STASIS_RENDER_TEXT_BASE_I32 + counts.text * STASIS_RENDER_TEXT_STRIDE_I32;
+    out_i32[STASIS_RENDER_TEXT_BASE_I32..text_i32_end]
+        .copy_from_slice(&source_i32[STASIS_RENDER_TEXT_BASE_I32..text_i32_end]);
+
+    out_f32[..4].copy_from_slice(&source_f32[..4]);
+    let line_end = 4 + counts.lines * STASIS_RENDER_LINE_STRIDE;
+    out_f32[4..line_end].copy_from_slice(&source_f32[4..line_end]);
+    let text_f32_end = STASIS_RENDER_TEXT_BASE_F32 + counts.text * STASIS_RENDER_TEXT_STRIDE_F32;
+    out_f32[STASIS_RENDER_TEXT_BASE_F32..text_f32_end]
+        .copy_from_slice(&source_f32[STASIS_RENDER_TEXT_BASE_F32..text_f32_end]);
+    out_u8[..counts.text_bytes].copy_from_slice(&source_u8[..counts.text_bytes]);
+    Ok(counts)
+}
 
 unsafe extern "C" {
     fn stasis_render_v1_trace_native(
@@ -1828,15 +1923,15 @@ pub unsafe extern "C" fn stasis_jit_render_v1_trace(
     cmd_u8_id: i32,
     cmd_u8_len: i32,
 ) -> i32 {
-    if cmd_i32_len != STASIS_RENDER_I32_COUNT
-        || cmd_f32_len != STASIS_RENDER_F32_COUNT
-        || cmd_u8_len != STASIS_RENDER_U8_COUNT
+    if cmd_i32_len != STASIS_RENDER_I32_COUNT as i32
+        || cmd_f32_len != STASIS_RENDER_F32_COUNT as i32
+        || cmd_u8_len != STASIS_RENDER_U8_COUNT as i32
     {
         return 0;
     }
-    let cmd_i32 = stasis_jit_global_i32_array_ptr(cmd_i32_id, 0, STASIS_RENDER_I32_COUNT);
-    let cmd_f32 = stasis_jit_global_f32_array_ptr(cmd_f32_id, 0, STASIS_RENDER_F32_COUNT);
-    let cmd_u8 = global_u8_array_ptr(cmd_u8_id, 0, STASIS_RENDER_U8_COUNT);
+    let cmd_i32 = stasis_jit_global_i32_array_ptr(cmd_i32_id, 0, STASIS_RENDER_I32_COUNT as i32);
+    let cmd_f32 = stasis_jit_global_f32_array_ptr(cmd_f32_id, 0, STASIS_RENDER_F32_COUNT as i32);
+    let cmd_u8 = global_u8_array_ptr(cmd_u8_id, 0, STASIS_RENDER_U8_COUNT as i32);
     if cmd_i32.is_null() || cmd_f32.is_null() || cmd_u8.is_null() {
         return 0;
     }
@@ -1900,6 +1995,61 @@ fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
     guard.get(&value_id).map(|text| text.as_bytes().to_vec())
 }
 
+thread_local! {
+    static JIT_TEXT_SCRATCH: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn with_jit_text_arg_bytes<R>(value_id: i32, mut callback: impl FnMut(&[u8]) -> R) -> Option<R> {
+    if jit_text_buffer_is_registered(value_id) {
+        let byte_len = usize::try_from(stasis_jit_collection_i32_load(value_id, 1)).ok()?;
+        return JIT_TEXT_SCRATCH.with(|scratch| {
+            let mut bytes = scratch.borrow_mut();
+            bytes.clear();
+            bytes.try_reserve(byte_len).ok()?;
+            for index in 0..byte_len {
+                let byte = stasis_jit_global_i32_array_load(value_id, 0, index as i32);
+                bytes.push(u8::try_from(byte).ok()?);
+            }
+            Some(callback(&bytes))
+        });
+    }
+
+    let table = jit_string_literal_table();
+    let guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    guard.get(&value_id).map(|text| callback(text.as_bytes()))
+}
+
+#[derive(Clone, Copy)]
+pub struct EmbeddedGraphicsHost {
+    pub load_sprite: fn(&[u8], i32, i32) -> i32,
+    pub release_sprite: fn(i32),
+    pub load_font: fn(&[u8], i32) -> i32,
+    pub measure_text: fn(i32, &[u8]) -> f32,
+    pub cache_text: fn(i32, &[u8]) -> i32,
+    pub measure_text_cached: fn(i32) -> f32,
+    pub poll_reload: fn(i32) -> i32,
+}
+
+thread_local! {
+    static EMBEDDED_GRAPHICS_HOST: std::cell::Cell<Option<EmbeddedGraphicsHost>> =
+        const { std::cell::Cell::new(None) };
+}
+
+pub fn set_embedded_graphics_host(host: Option<EmbeddedGraphicsHost>) {
+    EMBEDDED_GRAPHICS_HOST.with(|slot| slot.set(host));
+}
+
+pub fn embedded_graphics_host_is_set() -> bool {
+    EMBEDDED_GRAPHICS_HOST.with(|slot| slot.get().is_some())
+}
+
+fn embedded_graphics_host() -> Option<EmbeddedGraphicsHost> {
+    EMBEDDED_GRAPHICS_HOST.with(|slot| slot.get())
+}
+
 #[cfg(windows)]
 fn jit_text_arg_to_cstring(value_id: i32) -> Result<CString, String> {
     let bytes = jit_text_arg_bytes(value_id).ok_or_else(|| {
@@ -1914,6 +2064,9 @@ fn jit_text_arg_to_cstring(value_id: i32) -> Result<CString, String> {
 // translate that into a stable `const char*` when calling the C runtime.
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
+    if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
+        return (host.load_sprite)(&path, max_w, max_h);
+    }
     #[cfg(windows)]
     {
         let Ok(path) = jit_text_arg_to_cstring(path_id) else {
@@ -1937,6 +2090,10 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_release_sprite(handle: i32) {
+    if let Some(host) = embedded_graphics_host() {
+        (host.release_sprite)(handle);
+        return;
+    }
     #[cfg(windows)]
     {
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -1999,6 +2156,9 @@ pub extern "C" fn stasis_jit_gfx_dump_png(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
+    if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
+        return (host.load_font)(&path, size);
+    }
     #[cfg(windows)]
     {
         let Ok(path) = jit_text_arg_to_cstring(path_id) else {
@@ -2021,6 +2181,13 @@ pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
+    if let Some(host) = embedded_graphics_host() {
+        if let Some(width) =
+            with_jit_text_arg_bytes(text_id, |text| (host.measure_text)(font, text))
+        {
+            return width;
+        }
+    }
     #[cfg(windows)]
     {
         let Ok(text) = jit_text_arg_to_cstring(text_id) else {
@@ -2043,6 +2210,9 @@ pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
+    if let (Some(host), Some(text)) = (embedded_graphics_host(), jit_text_arg_bytes(text_id)) {
+        return (host.cache_text)(font, &text);
+    }
     #[cfg(windows)]
     {
         let Ok(text) = jit_text_arg_to_cstring(text_id) else {
@@ -2065,6 +2235,9 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
+    if let Some(host) = embedded_graphics_host() {
+        return (host.poll_reload)(handle);
+    }
     #[cfg(windows)]
     {
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -2083,6 +2256,9 @@ pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
+    if let Some(host) = embedded_graphics_host() {
+        return (host.measure_text_cached)(run_handle);
+    }
     #[cfg(windows)]
     {
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -3567,9 +3743,9 @@ mod tests {
                 101,
                 i32::MAX,
                 102,
-                STASIS_RENDER_F32_COUNT,
+                STASIS_RENDER_F32_COUNT as i32,
                 103,
-                STASIS_RENDER_U8_COUNT,
+                STASIS_RENDER_U8_COUNT as i32,
             )
         };
 

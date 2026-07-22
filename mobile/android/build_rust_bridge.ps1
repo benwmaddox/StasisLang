@@ -44,6 +44,8 @@ if ($installedTargets -notcontains "aarch64-linux-android") {
 }
 
 $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = $linker
+$env:CC_aarch64_linux_android = $linker
+$env:AR_aarch64_linux_android = Join-Path $prebuilt "bin\llvm-ar.exe"
 $env:CARGO_INCREMENTAL = "0"
 $profileArgs = @()
 $profileDir = "debug"

@@ -71,6 +71,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -139,7 +140,6 @@ public final class MainActivity extends Activity {
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
-    private static final int MAX_RENDER_COMMANDS = StasisPreviewRenderer.COMMAND_CAPACITY;
     private static final int MAX_AI_AGENT_TURNS = 25;
     private static final int MAX_AI_TOOL_CALLS_PER_BATCH = 12;
     private static final int MAX_AI_READ_ONLY_BATCHES = 2;
@@ -165,9 +165,7 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
     private static final double GPT_IMAGE_2_LOW_1024_USD = 0.006;
-    private static final int RENDER_FRAME_HEADER_SIZE = StasisPreviewRenderer.FRAME_HEADER_SIZE;
-    private static final int RENDER_COMMAND_STRIDE = StasisPreviewRenderer.COMMAND_STRIDE;
-    private static final int RENDER_FRAME_I32_CAPACITY = StasisPreviewRenderer.FRAME_I32_CAPACITY;
+    private static final int RENDER_FRAME_HEADER_SIZE = 10;
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
     private LinearLayout manualEditBody;
@@ -305,7 +303,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService projectIoExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService codexExecutor = Executors.newSingleThreadExecutor();
     private Runnable gameLoop;
-    private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY];
+    private final int[] nativeFrameValues = new int[RENDER_FRAME_HEADER_SIZE];
     private final StringBuilder debugTextBuilder = new StringBuilder(64);
     private final RollingMetric tickMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
@@ -337,11 +335,20 @@ public final class MainActivity extends Activity {
     private static native String nativeSemanticEdit(String projectRoot, String requestJson,
                                                     boolean dryRun, boolean validate, boolean runTests);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
-    private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
+    private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
+            int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
+            ByteBuffer frameF32, ByteBuffer frameU8);
+    private static native String nativeLastFrameError();
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
     private static native String nativeGetRuntimeI32(String projectRoot, String path);
     static native String nativeResolveSpriteAsset(String projectRoot, int handle);
+    static native String nativeResolveCachedText(String projectRoot, int handle);
+    static native String nativeResolveFont(String projectRoot, int handle);
     static native int[] nativeDecodeSvgSprite(String path, int width, int height);
+
+    void reportPreviewResourceError(String message) {
+        runOnUiThread(() -> setStatusText("RenderResourceError: " + message));
+    }
     private static native String nativeRunTests(String projectRoot);
     private static native String nativeCodexBeginDeviceLogin(String codexHome);
     private static native String nativeCodexAccountStatus(String codexHome);
@@ -915,10 +922,10 @@ public final class MainActivity extends Activity {
 
     private void installGameStatusOverlay(FrameLayout root, boolean visible) {
         gameStatus = new TextView(this);
-        gameStatus.setText("tick=-- ms  render=-- ms  budget=--%");
+        gameStatus.setText("tick avg=-- p50=-- p95=-- ms\nrender avg=-- p50=-- p95=-- ms  budget=--%");
         gameStatus.setTextColor(Color.WHITE);
         gameStatus.setTextSize(12.0f);
-        gameStatus.setSingleLine(true);
+        gameStatus.setSingleLine(false);
         gameStatus.setPadding(dp(10), dp(6), dp(10), dp(6));
         gameStatus.setBackgroundColor(Color.argb(150, 20, 28, 38));
         gameStatus.setVisibility(visible ? View.VISIBLE : View.GONE);
@@ -1442,12 +1449,24 @@ public final class MainActivity extends Activity {
         lastDebugUpdateNanos = now;
         double tickMillis = tickMetric.averageMillis();
         double renderMillis = renderMetric.averageMillis();
+        double tickP50Millis = tickMetric.percentileMillis(50);
+        double tickP95Millis = tickMetric.percentileMillis(95);
+        double renderP50Millis = renderMetric.percentileMillis(50);
+        double renderP95Millis = renderMetric.percentileMillis(95);
         int budgetPercent = Math.max(0, (int)(((tickMillis + renderMillis) * 100.0 / FRAME_BUDGET_MILLIS) + 0.5));
         debugTextBuilder.setLength(0);
-        debugTextBuilder.append("tick=");
+        debugTextBuilder.append("tick avg=");
         appendMillis(debugTextBuilder, tickMillis);
-        debugTextBuilder.append(" ms  render=");
+        debugTextBuilder.append(" p50=");
+        appendMillis(debugTextBuilder, tickP50Millis);
+        debugTextBuilder.append(" p95=");
+        appendMillis(debugTextBuilder, tickP95Millis);
+        debugTextBuilder.append(" ms\nrender avg=");
         appendMillis(debugTextBuilder, renderMillis);
+        debugTextBuilder.append(" p50=");
+        appendMillis(debugTextBuilder, renderP50Millis);
+        debugTextBuilder.append(" p95=");
+        appendMillis(debugTextBuilder, renderP95Millis);
         debugTextBuilder.append(" ms  budget=");
         appendPercent(debugTextBuilder, budgetPercent);
         appendExplorationProgress(debugTextBuilder);
@@ -4769,24 +4788,17 @@ public final class MainActivity extends Activity {
         int screenWidth = gamePreview == null ? 0 : gamePreview.getWidth();
         int screenHeight = gamePreview == null ? 0 : gamePreview.getHeight();
         long tickStartNanos = System.nanoTime();
-        int frameStatus = nativeRunFrameInto(
-                projectRootPath(),
-                touchX,
-                touchY,
-                touchActive,
-                screenWidth,
-                screenHeight,
+        int frameStatus = gamePreview == null ? -1 : gamePreview.runNativeFrame(
+                projectRootPath(), touchX, touchY, touchActive, screenWidth, screenHeight,
                 nativeFrameValues);
         long tickEndNanos = System.nanoTime();
         tickMetric.add(tickEndNanos, tickEndNanos - tickStartNanos);
-        if (frameStatus != 0 || nativeFrameValues[0] != 0) {
+        if (frameStatus != 0 || nativeFrameValues[0] != StasisPreviewRenderer.RENDER_MAGIC
+                || nativeFrameValues[1] != StasisPreviewRenderer.RENDER_VERSION) {
             compileReady = false;
             compileAttempted = true;
-            setStatusText("RunError: native frame tick failed");
+            setStatusText("RunError: " + nativeLastFrameError());
             return;
-        }
-        if (gamePreview != null) {
-            gamePreview.setRenderFrameValues(nativeFrameValues);
         }
         recordOnboardingProjectStep(WorkshopOnboardingPolicy.Step.PROJECT_RAN);
         updateGameDebugText();
@@ -6997,31 +7009,23 @@ public final class MainActivity extends Activity {
     }
     private JSONObject aiToolRunFrame() throws Exception {
         ensureAiTestCompileReady();
-        int[] frame = new int[RENDER_FRAME_I32_CAPACITY];
-        int status = nativeRunFrameInto(
-                projectRootPath(),
-                aiSimTouchX,
-                aiSimTouchY,
-                aiSimTouchActive,
-                currentAiScreenWidth(),
-                currentAiScreenHeight(),
-                frame);
-        System.arraycopy(frame, 0, nativeFrameValues, 0, RENDER_FRAME_I32_CAPACITY);
-        if (gamePreview != null) {
-            gamePreview.setRenderFrameValues(nativeFrameValues);
-        }
-        return new JSONObject()
+        int status = gamePreview == null ? -1 : gamePreview.runNativeFrame(
+                projectRootPath(), aiSimTouchX, aiSimTouchY, aiSimTouchActive,
+                currentAiScreenWidth(), currentAiScreenHeight(), nativeFrameValues);
+        JSONObject result = new JSONObject()
                 .put("status", status)
                 .put("input", currentInputStateJson())
-                .put("frame", frameValuesToJson(frame))
+                .put("frame", frameValuesToJson(currentLogicalFrame()))
                 .put("runtime_state", runtimeStateJson());
+        if (status != 0) result.put("error", nativeLastFrameError());
+        return result;
     }
 
     private JSONObject aiToolInspectRuntimeState() throws Exception {
         return new JSONObject()
                 .put("input", currentInputStateJson())
                 .put("runtime_state", runtimeStateJson())
-                .put("frame", frameValuesToJson(nativeFrameValues));
+                .put("frame", frameValuesToJson(currentLogicalFrame()));
     }
 
     private void ensureAiTestCompileReady() throws Exception {
@@ -7080,49 +7084,55 @@ public final class MainActivity extends Activity {
                 .put("values", values);
     }
 
-    private static JSONObject frameValuesToJson(int[] frame) throws Exception {
-        JSONArray values = new JSONArray();
-        for (int index = 0; index < frame.length; index += 1) {
-            values.put(frame[index]);
-        }
-        JSONArray commands = new JSONArray();
-        int commandCount = frame.length > 5 ? Math.max(0, Math.min(MAX_RENDER_COMMANDS, frame[5])) : 0;
-        for (int index = 0; index < commandCount; index += 1) {
-            int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
-            commands.put(new JSONObject()
-                    .put("kind", frame[base])
-                    .put("x", frame[base + 1])
-                    .put("y", frame[base + 2])
-                    .put("w", frame[base + 3])
-                    .put("h", frame[base + 4])
-                     .put("color", frame[base + 5])
-                    .put("asset", frame[base + 6])
-                    .put("rotation_degrees", frame[base + 7])
-                    .put("alpha", frame[base + 8])
-                    .put("clip_x", frame[base + 9])
-                    .put("clip_y", frame[base + 10])
-                    .put("clip_w", frame[base + 11])
-                    .put("clip_h", frame[base + 12]));
-        }
-        return new JSONObject()
-                .put("status", frame.length > 0 ? frame[0] : -1)
-                .put("tick_count", frame.length > 1 ? frame[1] : 0)
-                .put("game_tick_count", frame.length > 2 ? frame[2] : 0)
-                .put("command_count", commandCount)
-                .put("commands", commands)
-                .put("raw_values", values);
-    }
-    private JSONObject aiToolTakeScreenshot() throws Exception {
-        return logicalRenderSnapshot(nativeFrameValues);
+    private StasisPreviewRenderer.LogicalFrameSnapshot currentLogicalFrame() {
+        return gamePreview == null ? null : gamePreview.logicalFrameSnapshot();
     }
 
-    private JSONObject logicalRenderSnapshot(int[] capturedFrame) throws Exception {
+    private static JSONObject frameValuesToJson(
+            StasisPreviewRenderer.LogicalFrameSnapshot frame) throws Exception {
+        if (frame == null) return new JSONObject().put("status", "unavailable");
+        JSONArray header = jsonArray(frame.header);
+        JSONArray lines = jsonArray(frame.lines);
+        JSONArray sprites = jsonArray(frame.sprites);
+        JSONArray textMetadata = jsonArray(frame.textMetadata);
+        JSONArray textValues = jsonArray(frame.textValues);
+        JSONArray textBytes = new JSONArray();
+        for (byte value : frame.textBytes) textBytes.put(value & 255);
+        return new JSONObject()
+                .put("magic", frame.header[0])
+                .put("version", frame.header[1])
+                .put("flags", frame.header[2])
+                .put("line_count", frame.header[3])
+                .put("sprite_count", frame.header[4])
+                .put("text_count", frame.header[7])
+                .put("text_bytes_used", frame.header[9])
+                .put("header_i32", header)
+                .put("line_f32", lines)
+                .put("sprite_i32", sprites)
+                .put("text_i32", textMetadata)
+                .put("text_f32", textValues)
+                .put("text_u8", textBytes);
+    }
+
+    private static JSONArray jsonArray(int[] values) {
+        JSONArray out = new JSONArray();
+        for (int value : values) out.put(value);
+        return out;
+    }
+
+    private static JSONArray jsonArray(float[] values) throws Exception {
+        JSONArray out = new JSONArray();
+        for (float value : values) out.put(value);
+        return out;
+    }
+    private JSONObject aiToolTakeScreenshot() throws Exception {
+        return logicalRenderSnapshot(currentLogicalFrame());
+    }
+
+    private JSONObject logicalRenderSnapshot(
+            StasisPreviewRenderer.LogicalFrameSnapshot capturedFrame) throws Exception {
         int width = gamePreview == null ? 0 : gamePreview.getWidth();
         int height = gamePreview == null ? 0 : gamePreview.getHeight();
-        JSONArray frame = new JSONArray();
-        for (int index = 0; index < capturedFrame.length; index += 1) {
-            frame.put(capturedFrame[index]);
-        }
         return new JSONObject()
                 .put("kind", "logical_render_snapshot")
                 .put("width", width)
@@ -7132,8 +7142,7 @@ public final class MainActivity extends Activity {
                 .put("touch_active", gamePreview != null && gamePreview.touchActive() == 1)
                 .put("input", currentInputStateJson())
                 .put("runtime_state", runtimeStateJson())
-                .put("frame", frameValuesToJson(capturedFrame))
-                .put("frame_values", frame);
+                .put("frame", frameValuesToJson(capturedFrame));
     }
 
     private static SourceFile findProjectFile(ProjectSnapshot project, String file) throws Exception {
@@ -9187,7 +9196,8 @@ public final class MainActivity extends Activity {
         }
         screenshotAttachmentStatus.setText("AI preview: capturing rendered pixels");
         gamePreview.captureFrame(new GamePreviewView.CaptureCallback() {
-            @Override public void onCaptured(final Bitmap bitmap, final String error, final int[] capturedFrame) {
+            @Override public void onCaptured(final Bitmap bitmap, final String error,
+                    final StasisPreviewRenderer.LogicalFrameSnapshot capturedFrame) {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         if (bitmap == null) {
@@ -11262,7 +11272,8 @@ public final class MainActivity extends Activity {
 
     private static final class GamePreviewView extends GLSurfaceView {
         interface CaptureCallback {
-            void onCaptured(Bitmap bitmap, String error, int[] capturedFrame);
+            void onCaptured(Bitmap bitmap, String error,
+                    StasisPreviewRenderer.LogicalFrameSnapshot capturedFrame);
         }
 
         private final MainActivity activity;
@@ -11295,14 +11306,26 @@ public final class MainActivity extends Activity {
             return touchActive ? 1 : 0;
         }
 
-        void setRenderFrameValues(int[] frameValues) {
-            renderer.setFrame(frameValues);
-            requestRender();
+        int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
+                int screenWidth, int screenHeight, int[] header) {
+            int status;
+            synchronized (renderer) {
+                status = nativeRunFrameInto(projectRoot, inputX, inputY, inputActive,
+                        screenWidth, screenHeight, renderer.frameI32Bytes(),
+                        renderer.frameF32Bytes(), renderer.frameU8Bytes());
+                renderer.copyFrameHeaderInto(header);
+            }
+            if (status == 0) requestRender();
+            return status;
         }
 
         void captureFrame(CaptureCallback callback) {
             renderer.requestCapture(callback::onCaptured);
             requestRender();
+        }
+
+        StasisPreviewRenderer.LogicalFrameSnapshot logicalFrameSnapshot() {
+            return renderer.captureLogicalFrame();
         }
 
         @Override
@@ -11330,6 +11353,7 @@ public final class MainActivity extends Activity {
         private static final int CAPACITY = 600;
         private final long[] timestamps = new long[CAPACITY];
         private final long[] durations = new long[CAPACITY];
+        private final long[] orderedDurations = new long[CAPACITY];
         private int next;
         private int count;
 
@@ -11356,6 +11380,20 @@ public final class MainActivity extends Activity {
                 return 0.0;
             }
             return total / (samples * 1_000_000.0);
+        }
+
+        double percentileMillis(int percentile) {
+            long now = System.nanoTime();
+            int samples = 0;
+            for (int index = 0; index < count; index += 1) {
+                if (now - timestamps[index] <= WINDOW_NANOS) {
+                    orderedDurations[samples++] = durations[index];
+                }
+            }
+            if (samples == 0) return 0.0;
+            Arrays.sort(orderedDurations, 0, samples);
+            int rank = Math.min(samples - 1, (samples * percentile + 99) / 100 - 1);
+            return orderedDurations[Math.max(0, rank)] / 1_000_000.0;
         }
     }
 

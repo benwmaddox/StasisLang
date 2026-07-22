@@ -7,23 +7,67 @@ import android.opengl.GLSurfaceView;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
 
 final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
-    static final int COMMAND_CAPACITY = 8;
-    static final int FRAME_HEADER_SIZE = 6;
-    static final int COMMAND_STRIDE = 13;
-    static final int FRAME_I32_CAPACITY = FRAME_HEADER_SIZE + COMMAND_CAPACITY * COMMAND_STRIDE;
+    static final int RENDER_MAGIC = 0x47584631;
+    static final int RENDER_VERSION = 1;
+    static final int FLAG_CLEAR = 1;
+    static final int FLAG_PRESENT = 2;
 
-    private static final int RECT_VERTICES = 6;
-    private static final int RECT_VERTEX_FLOATS = 6;
-    private static final int RECT_VERTEX_BYTES = RECT_VERTEX_FLOATS * 4;
-    private static final int SPRITE_VERTEX_FLOATS = 8;
-    private static final int SPRITE_VERTEX_BYTES = SPRITE_VERTEX_FLOATS * 4;
+    static final int I_FLAGS = 2;
+    static final int I_LINE_COUNT = 3;
+    static final int I_SPRITE_COUNT = 4;
+    static final int I_TEXT_COUNT = 7;
+    static final int I_TEXT_BYTES_USED = 9;
+    static final int I_SPRITE_BASE = 32;
+    static final int F_LINE_BASE = 4;
+    static final int MAX_LINES = 10_000;
+    static final int LINE_F32_STRIDE = 8;
+    static final int MAX_SPRITES = 4_096;
+    static final int SPRITE_I32_STRIDE = 7;
+    static final int MAX_TEXT = 2_048;
+    static final int TEXT_I32_STRIDE = 3;
+    static final int TEXT_F32_STRIDE = 6;
+    static final int TEXT_U8_CAPACITY = 65_536;
+    static final int I_TEXT_BASE = I_SPRITE_BASE + MAX_SPRITES * SPRITE_I32_STRIDE;
+    static final int F_TEXT_BASE = F_LINE_BASE + MAX_LINES * LINE_F32_STRIDE;
+    static final int FRAME_I32_CAPACITY = I_TEXT_BASE + MAX_TEXT * TEXT_I32_STRIDE;
+    static final int FRAME_F32_CAPACITY = F_TEXT_BASE + MAX_TEXT * TEXT_F32_STRIDE;
+
+    private static final int CAPTURE_HEADER_I32S = 10;
+    private static final int LINE_CHUNK_SIZE = 256;
+    private static final int SPRITE_CHUNK_SIZE = 128;
+    private static final int VERTICES_PER_QUAD = 6;
+    private static final int COLOR_VERTEX_FLOATS = 6;
+    private static final int TEXTURE_VERTEX_FLOATS = 8;
+    private static final int COLOR_VERTEX_BYTES = COLOR_VERTEX_FLOATS * 4;
+    private static final int TEXTURE_VERTEX_BYTES = TEXTURE_VERTEX_FLOATS * 4;
     private static final int MAX_CAPTURE_PIXELS = 8_000_000;
 
     interface TextureProvider {
         void onSurfaceCreated();
+
+        default void onFrameStart() {}
+
         int textureFor(int handle);
+
+        default int fallbackTexture() {
+            return 0;
+        }
+
+        default int filterFor(int handle) {
+            return GLES20.GL_LINEAR;
+        }
+
+        // Packed as texture:u32, width:u16, height:u16. Zero means unavailable.
+        default long textTextureFor(int font, ByteBuffer utf8, int offset, int length) {
+            return 0L;
+        }
+
+        default long cachedTextTextureFor(int runHandle) {
+            return 0L;
+        }
     }
 
     interface TimingListener {
@@ -31,7 +75,26 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     interface CaptureCallback {
-        void onCaptured(Bitmap bitmap, String error, int[] capturedFrame);
+        void onCaptured(Bitmap bitmap, String error, LogicalFrameSnapshot capturedFrame);
+    }
+
+    static final class LogicalFrameSnapshot {
+        final int[] header;
+        final float[] lines;
+        final int[] sprites;
+        final int[] textMetadata;
+        final float[] textValues;
+        final byte[] textBytes;
+
+        LogicalFrameSnapshot(int[] header, float[] lines, int[] sprites,
+                int[] textMetadata, float[] textValues, byte[] textBytes) {
+            this.header = header;
+            this.lines = lines;
+            this.sprites = sprites;
+            this.textMetadata = textMetadata;
+            this.textValues = textValues;
+            this.textBytes = textBytes;
+        }
     }
 
     private static final String VERTEX_SHADER =
@@ -39,48 +102,33 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             "attribute vec4 aColor;" +
             "uniform vec2 uResolution;" +
             "varying vec4 vColor;" +
-            "void main() {" +
-            "  vec2 zeroToOne = aPosition / uResolution;" +
-            "  vec2 clip = zeroToOne * 2.0 - 1.0;" +
-            "  vColor = aColor;" +
-            "  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);" +
-            "}";
+            "void main(){vec2 p=aPosition/uResolution*2.0-1.0;vColor=aColor;" +
+            "gl_Position=vec4(p.x,-p.y,0.0,1.0);}";
     private static final String FRAGMENT_SHADER =
-            "precision mediump float;" +
-            "varying vec4 vColor;" +
-            "void main() { gl_FragColor = vColor; }";
+            "precision mediump float;varying vec4 vColor;" +
+            "void main(){gl_FragColor=vColor;}";
     private static final String TEXTURE_VERTEX_SHADER =
-            "attribute vec2 aPosition;" +
-            "attribute vec2 aTexCoord;" +
-            "attribute vec4 aColor;" +
-            "uniform vec2 uResolution;" +
-            "varying vec2 vTexCoord;" +
-            "varying vec4 vColor;" +
-            "void main() {" +
-            "  vec2 zeroToOne = aPosition / uResolution;" +
-            "  vec2 clip = zeroToOne * 2.0 - 1.0;" +
-            "  vTexCoord = aTexCoord;" +
-            "  vColor = aColor;" +
-            "  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);" +
-            "}";
+            "attribute vec2 aPosition;attribute vec2 aTexCoord;attribute vec4 aColor;" +
+            "uniform vec2 uResolution;varying vec2 vTexCoord;varying vec4 vColor;" +
+            "void main(){vec2 p=aPosition/uResolution*2.0-1.0;vTexCoord=aTexCoord;" +
+            "vColor=aColor;gl_Position=vec4(p.x,-p.y,0.0,1.0);}";
     private static final String TEXTURE_FRAGMENT_SHADER =
-            "precision mediump float;" +
-            "uniform sampler2D uTexture;" +
-            "varying vec2 vTexCoord;" +
-            "varying vec4 vColor;" +
-            "void main() { gl_FragColor = texture2D(uTexture, vTexCoord) * vColor; }";
+            "precision mediump float;uniform sampler2D uTexture;varying vec2 vTexCoord;" +
+            "varying vec4 vColor;void main(){gl_FragColor=texture2D(uTexture,vTexCoord)*vColor;}";
 
     private final TextureProvider textures;
     private final TimingListener timing;
-    private final FloatBuffer rectVertices = ByteBuffer
-            .allocateDirect(COMMAND_CAPACITY * RECT_VERTICES * RECT_VERTEX_FLOATS * 4)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer();
-    private final FloatBuffer spriteVertices = ByteBuffer
-            .allocateDirect(COMMAND_CAPACITY * RECT_VERTICES * SPRITE_VERTEX_FLOATS * 4)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer();
-    private final int[] frame = new int[FRAME_I32_CAPACITY];
+    private final ByteBuffer frameI32Bytes = directBytes(FRAME_I32_CAPACITY * 4);
+    private final ByteBuffer frameF32Bytes = directBytes(FRAME_F32_CAPACITY * 4);
+    private final ByteBuffer frameU8Bytes = directBytes(TEXT_U8_CAPACITY);
+    private final IntBuffer frameI32 = frameI32Bytes.asIntBuffer();
+    private final FloatBuffer frameF32 = frameF32Bytes.asFloatBuffer();
+    private final FloatBuffer lineVertices = directBytes(
+            LINE_CHUNK_SIZE * 2 * COLOR_VERTEX_FLOATS * 4).asFloatBuffer();
+    private final FloatBuffer spriteVertices = directBytes(
+            SPRITE_CHUNK_SIZE * VERTICES_PER_QUAD * TEXTURE_VERTEX_FLOATS * 4).asFloatBuffer();
+    private final FloatBuffer textVertices = directBytes(
+            VERTICES_PER_QUAD * TEXTURE_VERTEX_FLOATS * 4).asFloatBuffer();
     private int colorProgram;
     private int colorPosition;
     private int colorValue;
@@ -100,22 +148,40 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         this.timing = timing;
     }
 
-    synchronized void setFrame(int[] values) {
-        if (values.length < FRAME_I32_CAPACITY) {
-            throw new IllegalArgumentException("render frame is smaller than schema v3");
+    // Callers fill these only while synchronized on this renderer. Native code writes
+    // active spans directly, so a frame does not copy the full production capacities.
+    ByteBuffer frameI32Bytes() {
+        return frameI32Bytes;
+    }
+
+    ByteBuffer frameF32Bytes() {
+        return frameF32Bytes;
+    }
+
+    ByteBuffer frameU8Bytes() {
+        return frameU8Bytes;
+    }
+
+    synchronized void copyFrameHeaderInto(int[] destination) {
+        if (destination.length < CAPTURE_HEADER_I32S) {
+            throw new IllegalArgumentException("render header destination is too small");
         }
-        System.arraycopy(values, 0, frame, 0, FRAME_I32_CAPACITY);
+        for (int index = 0; index < CAPTURE_HEADER_I32S; index += 1) {
+            destination[index] = frameI32.get(index);
+        }
     }
 
     synchronized void requestCapture(CaptureCallback callback) {
         if (pendingCapture != null) {
-            pendingCapture.onCaptured(null, "a newer preview capture replaced this request", new int[0]);
+            pendingCapture.onCaptured(null, "a newer preview capture replaced this request",
+                    new LogicalFrameSnapshot(new int[0], new float[0], new int[0],
+                            new int[0], new float[0], new byte[0]));
         }
         pendingCapture = callback;
     }
 
     @Override
-    public void onSurfaceCreated(javax.microedition.khronos.opengles.GL10 gl,
+    public synchronized void onSurfaceCreated(javax.microedition.khronos.opengles.GL10 gl,
             javax.microedition.khronos.egl.EGLConfig config) {
         colorProgram = createProgram(VERTEX_SHADER, FRAGMENT_SHADER);
         colorPosition = GLES20.glGetAttribLocation(colorProgram, "aPosition");
@@ -131,10 +197,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
         GLES20.glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
     }
 
     @Override
-    public void onSurfaceChanged(javax.microedition.khronos.opengles.GL10 gl, int width, int height) {
+    public synchronized void onSurfaceChanged(javax.microedition.khronos.opengles.GL10 gl,
+            int width, int height) {
         surfaceWidth = Math.max(1, width);
         surfaceHeight = Math.max(1, height);
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
@@ -143,194 +211,352 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     @Override
     public void onDrawFrame(javax.microedition.khronos.opengles.GL10 gl) {
         long started = System.nanoTime();
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         CaptureCallback capture;
-        int[] capturedFrame;
+        LogicalFrameSnapshot capturedFrame;
         synchronized (this) {
-            drawCommands();
+            if (shouldPresent(frameI32)) {
+                drawFrame();
+            }
             capture = pendingCapture;
             pendingCapture = null;
-            capturedFrame = capture == null ? null : frame.clone();
+            capturedFrame = capture == null ? null : captureLogicalFrame();
         }
         captureIfRequested(capture, capturedFrame);
         timing.onRendered(System.nanoTime() - started);
     }
 
-    private void drawCommands() {
-        int commandCount = Math.max(0, Math.min(COMMAND_CAPACITY, frame[5]));
-        int index = 0;
-        while (index < commandCount) {
-            int base = FRAME_HEADER_SIZE + index * COMMAND_STRIDE;
-            int kind = frame[base];
-            if (kind == 1) {
-                rectVertices.clear();
-                int runEnd = index;
-                while (runEnd < commandCount) {
-                    int runBase = FRAME_HEADER_SIZE + runEnd * COMMAND_STRIDE;
-                    if (frame[runBase] != 1 || !sameClip(base, runBase)) break;
-                    appendRect(runBase);
-                    runEnd += 1;
-                }
-                rectVertices.flip();
-                applyClip(base);
-                drawRectBatch((runEnd - index) * RECT_VERTICES);
-                index = runEnd;
-            } else if (kind == 2) {
-                int texture = textures.textureFor(frame[base + 6]);
-                spriteVertices.clear();
-                appendSprite(base);
-                int runEnd = index + 1;
-                while (runEnd < commandCount) {
-                    int runBase = FRAME_HEADER_SIZE + runEnd * COMMAND_STRIDE;
-                    if (frame[runBase] != 2 || !sameClip(base, runBase)
-                            || textures.textureFor(frame[runBase + 6]) != texture) break;
-                    appendSprite(runBase);
-                    runEnd += 1;
-                }
-                spriteVertices.flip();
-                applyClip(base);
-                drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture);
-                index = runEnd;
-            } else {
-                index += 1;
-            }
-        }
+    private void drawFrame() {
+        textures.onFrameStart();
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+        int flags = frameI32.get(I_FLAGS);
+        if ((flags & FLAG_CLEAR) != 0) {
+            GLES20.glClearColor(frameF32.get(0), frameF32.get(1), frameF32.get(2), frameF32.get(3));
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        }
+        drawLines(clampCount(frameI32.get(I_LINE_COUNT), MAX_LINES));
+        drawSprites(clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES));
+        drawText(clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT),
+                clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY));
     }
 
-    private void appendRect(int base) {
-        int color = frame[base + 5];
-        float red = ((color >> 16) & 255) / 255.0f;
-        float green = ((color >> 8) & 255) / 255.0f;
-        float blue = (color & 255) / 255.0f;
-        float alpha = Math.max(0, Math.min(255, frame[base + 8])) / 255.0f;
-        float left = frame[base + 1];
-        float top = frame[base + 2];
-        float right = left + frame[base + 3];
-        float bottom = top + frame[base + 4];
-        float centerX = (left + right) * 0.5f;
-        float centerY = (top + bottom) * 0.5f;
-        double radians = Math.toRadians(frame[base + 7] % 360);
-        float cosine = (float)Math.cos(radians);
-        float sine = (float)Math.sin(radians);
-        putRectVertex(left, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
-        putRectVertex(right, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
-        putRectVertex(left, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
-        putRectVertex(right, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
-        putRectVertex(right, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
-        putRectVertex(left, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
+    private void drawLines(int count) {
+        int first = 0;
+        while (first < count) {
+            int horizontalRun = horizontalRunLength(frameF32, first, count);
+            if (horizontalRun >= 2) {
+                lineVertices.clear();
+                int quadCount = 0;
+                while (first < count && quadCount < LINE_CHUNK_SIZE / 3) {
+                    horizontalRun = horizontalRunLength(frameF32, first, count);
+                    if (horizontalRun < 2) break;
+                    int base = F_LINE_BASE + first * LINE_F32_STRIDE;
+                    appendColorQuad(lineVertices,
+                            frameF32.get(base), frameF32.get(base + 1), frameF32.get(base + 2),
+                            frameF32.get(base + 1) + horizontalRun,
+                            frameF32.get(base + 4), frameF32.get(base + 5),
+                            frameF32.get(base + 6), frameF32.get(base + 7));
+                    first += horizontalRun;
+                    quadCount += 1;
+                }
+                lineVertices.flip();
+                drawColorBatch(lineVertices,
+                        quadCount * VERTICES_PER_QUAD, GLES20.GL_TRIANGLES);
+                continue;
+            }
+            int chunk = Math.min(LINE_CHUNK_SIZE, count - first);
+            for (int offset = 1; offset < chunk; offset += 1) {
+                if (horizontalRunLength(frameF32, first + offset, count) >= 2) {
+                    chunk = offset;
+                    break;
+                }
+            }
+            lineVertices.clear();
+            for (int index = 0; index < chunk; index += 1) {
+                int base = F_LINE_BASE + (first + index) * LINE_F32_STRIDE;
+                putColorVertex(lineVertices, frameF32.get(base), frameF32.get(base + 1), base);
+                putColorVertex(lineVertices, frameF32.get(base + 2), frameF32.get(base + 3), base);
+            }
+            lineVertices.flip();
+            drawColorBatch(lineVertices, chunk * 2, GLES20.GL_LINES);
+            first += chunk;
+        }
+    }
+
+    static int horizontalRunLength(FloatBuffer values, int first, int count) {
+        if (values == null || first < 0 || first >= count) return 0;
+        int base = F_LINE_BASE + first * LINE_F32_STRIDE;
+        float left = values.get(base);
+        float top = values.get(base + 1);
+        float right = values.get(base + 2);
+        if (top != values.get(base + 3)) return 1;
+        int run = 1;
+        while (first + run < count) {
+            int next = F_LINE_BASE + (first + run) * LINE_F32_STRIDE;
+            if (values.get(next) != left || values.get(next + 2) != right
+                    || values.get(next + 1) != top + run || values.get(next + 3) != top + run
+                    || values.get(next + 4) != values.get(base + 4)
+                    || values.get(next + 5) != values.get(base + 5)
+                    || values.get(next + 6) != values.get(base + 6)
+                    || values.get(next + 7) != values.get(base + 7)) {
+                break;
+            }
+            run += 1;
+        }
+        return run;
+    }
+
+    private static void appendColorQuad(FloatBuffer output, float left, float top,
+            float right, float bottom, float red, float green, float blue, float alpha) {
+        putColorVertex(output, left, top, red, green, blue, alpha);
+        putColorVertex(output, right, top, red, green, blue, alpha);
+        putColorVertex(output, left, bottom, red, green, blue, alpha);
+        putColorVertex(output, right, top, red, green, blue, alpha);
+        putColorVertex(output, right, bottom, red, green, blue, alpha);
+        putColorVertex(output, left, bottom, red, green, blue, alpha);
+    }
+
+    private static void putColorVertex(FloatBuffer output, float x, float y,
+            float red, float green, float blue, float alpha) {
+        output.put(x).put(y).put(red).put(green).put(blue).put(alpha);
+    }
+
+    private void putColorVertex(FloatBuffer output, float x, float y, int lineBase) {
+        output.put(x).put(y)
+                .put(frameF32.get(lineBase + 4)).put(frameF32.get(lineBase + 5))
+                .put(frameF32.get(lineBase + 6)).put(frameF32.get(lineBase + 7));
+    }
+
+    private void drawSprites(int count) {
+        if (count == 0) return;
+        beginTextureBatches(spriteVertices);
+        int index = 0;
+        while (index < count) {
+            int base = I_SPRITE_BASE + index * SPRITE_I32_STRIDE;
+            int handle = frameI32.get(base);
+            int texture = spriteTextureFor(handle);
+            int filter = textures.filterFor(handle);
+            spriteVertices.clear();
+            appendSprite(base);
+            int chunk = 1;
+            while (index + chunk < count && chunk < SPRITE_CHUNK_SIZE) {
+                int next = I_SPRITE_BASE + (index + chunk) * SPRITE_I32_STRIDE;
+                int nextHandle = frameI32.get(next);
+                if (spriteTextureFor(nextHandle) != texture || textures.filterFor(nextHandle) != filter) break;
+                appendSprite(next);
+                chunk += 1;
+            }
+            spriteVertices.flip();
+            drawPreparedTextureBatch(chunk * VERTICES_PER_QUAD, texture);
+            index += chunk;
+        }
+        endTextureBatches();
     }
 
     private void appendSprite(int base) {
-        int color = frame[base + 5];
-        float red = ((color >> 16) & 255) / 255.0f;
-        float green = ((color >> 8) & 255) / 255.0f;
-        float blue = (color & 255) / 255.0f;
-        float alpha = Math.max(0, Math.min(255, frame[base + 8])) / 255.0f;
-        float left = frame[base + 1];
-        float top = frame[base + 2];
-        float right = left + frame[base + 3];
-        float bottom = top + frame[base + 4];
+        float left = frameI32.get(base + 1);
+        float top = frameI32.get(base + 2);
+        float right = left + frameI32.get(base + 3);
+        float bottom = top + frameI32.get(base + 4);
         float centerX = (left + right) * 0.5f;
         float centerY = (top + bottom) * 0.5f;
-        double radians = Math.toRadians(frame[base + 7] % 360);
+        double radians = Math.toRadians(frameI32.get(base + 5) % 360);
         float cosine = (float)Math.cos(radians);
         float sine = (float)Math.sin(radians);
-        putSpriteVertex(left, top, centerX, centerY, cosine, sine, 0.0f, 0.0f, red, green, blue, alpha);
-        putSpriteVertex(right, top, centerX, centerY, cosine, sine, 1.0f, 0.0f, red, green, blue, alpha);
-        putSpriteVertex(left, bottom, centerX, centerY, cosine, sine, 0.0f, 1.0f, red, green, blue, alpha);
-        putSpriteVertex(right, top, centerX, centerY, cosine, sine, 1.0f, 0.0f, red, green, blue, alpha);
-        putSpriteVertex(right, bottom, centerX, centerY, cosine, sine, 1.0f, 1.0f, red, green, blue, alpha);
-        putSpriteVertex(left, bottom, centerX, centerY, cosine, sine, 0.0f, 1.0f, red, green, blue, alpha);
+        float alpha = clampUnit(frameI32.get(base + 6) / 255.0f);
+        putTextureVertex(spriteVertices, left, top, centerX, centerY, cosine, sine, 0, 0, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, 1, 0, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, 0, 1, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, right, top, centerX, centerY, cosine, sine, 1, 0, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, right, bottom, centerX, centerY, cosine, sine, 1, 1, 1, 1, 1, alpha);
+        putTextureVertex(spriteVertices, left, bottom, centerX, centerY, cosine, sine, 0, 1, 1, 1, 1, alpha);
     }
 
-    private void putRectVertex(float x, float y, float centerX, float centerY,
-            float cosine, float sine, float red, float green, float blue, float alpha) {
-        float offsetX = x - centerX;
-        float offsetY = y - centerY;
-        rectVertices.put(centerX + offsetX * cosine - offsetY * sine)
-                .put(centerY + offsetX * sine + offsetY * cosine)
-                .put(red).put(green).put(blue).put(alpha);
+    private int spriteTextureFor(int handle) {
+        int texture = textures.textureFor(handle);
+        return texture == 0 ? textures.fallbackTexture() : texture;
     }
 
-    private void putSpriteVertex(float x, float y, float centerX, float centerY,
-            float cosine, float sine, float u, float v, float red, float green, float blue,
-            float alpha) {
+    private void drawText(int count, int bytesUsed) {
+        if (count == 0) return;
+        beginTextureBatches(textVertices);
+        for (int index = 0; index < count; index += 1) {
+            int meta = I_TEXT_BASE + index * TEXT_I32_STRIDE;
+            int font = frameI32.get(meta);
+            int offset = frameI32.get(meta + 1);
+            int length = frameI32.get(meta + 2);
+            if (font <= 0) continue;
+            long packed;
+            if (offset < 0) {
+                packed = offset == Integer.MIN_VALUE ? 0L
+                        : textures.cachedTextTextureFor(-offset);
+            } else {
+                if (!isValidTextSpan(offset, length, bytesUsed)) continue;
+                packed = textures.textTextureFor(font, frameU8Bytes, offset, length);
+            }
+            int texture = (int)packed;
+            int width = (int)((packed >>> 32) & 0xffffL);
+            int height = (int)((packed >>> 48) & 0xffffL);
+            if (texture == 0 || width == 0 || height == 0) continue;
+            int values = F_TEXT_BASE + index * TEXT_F32_STRIDE;
+            float left = frameF32.get(values);
+            float top = frameF32.get(values + 1);
+            textVertices.clear();
+            appendAxisAlignedQuad(textVertices, left, top, left + width, top + height,
+                    clampUnit(frameF32.get(values + 2)), clampUnit(frameF32.get(values + 3)),
+                    clampUnit(frameF32.get(values + 4)), clampUnit(frameF32.get(values + 5)));
+            textVertices.flip();
+            drawPreparedTextureBatch(VERTICES_PER_QUAD, texture);
+        }
+        endTextureBatches();
+    }
+
+    private static void appendAxisAlignedQuad(FloatBuffer output, float left, float top,
+            float right, float bottom, float red, float green, float blue, float alpha) {
+        putTextureVertex(output, left, top, left, top, 1, 0, 0, 0, red, green, blue, alpha);
+        putTextureVertex(output, right, top, left, top, 1, 0, 1, 0, red, green, blue, alpha);
+        putTextureVertex(output, left, bottom, left, top, 1, 0, 0, 1, red, green, blue, alpha);
+        putTextureVertex(output, right, top, left, top, 1, 0, 1, 0, red, green, blue, alpha);
+        putTextureVertex(output, right, bottom, left, top, 1, 0, 1, 1, red, green, blue, alpha);
+        putTextureVertex(output, left, bottom, left, top, 1, 0, 0, 1, red, green, blue, alpha);
+    }
+
+    private static void putTextureVertex(FloatBuffer output, float x, float y,
+            float centerX, float centerY, float cosine, float sine, float u, float v,
+            float red, float green, float blue, float alpha) {
         float offsetX = x - centerX;
         float offsetY = y - centerY;
-        spriteVertices.put(centerX + offsetX * cosine - offsetY * sine)
+        output.put(centerX + offsetX * cosine - offsetY * sine)
                 .put(centerY + offsetX * sine + offsetY * cosine)
                 .put(u).put(v).put(red).put(green).put(blue).put(alpha);
     }
 
-    private boolean sameClip(int leftBase, int rightBase) {
-        return frame[leftBase + 9] == frame[rightBase + 9]
-                && frame[leftBase + 10] == frame[rightBase + 10]
-                && frame[leftBase + 11] == frame[rightBase + 11]
-                && frame[leftBase + 12] == frame[rightBase + 12];
-    }
-
-    private void applyClip(int base) {
-        int width = frame[base + 11];
-        int height = frame[base + 12];
-        if (width <= 0 || height <= 0) {
-            GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
-            return;
-        }
-        long sourceRight = (long)frame[base + 9] + width;
-        long sourceBottom = (long)frame[base + 10] + height;
-        int left = Math.max(0, Math.min(surfaceWidth, frame[base + 9]));
-        int top = Math.max(0, Math.min(surfaceHeight, frame[base + 10]));
-        int right = Math.max(left, (int)Math.max(0L, Math.min((long)surfaceWidth, sourceRight)));
-        int bottom = Math.max(top, (int)Math.max(0L, Math.min((long)surfaceHeight, sourceBottom)));
-        GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
-        GLES20.glScissor(left, surfaceHeight - bottom, right - left, bottom - top);
-    }
-
-    private void drawRectBatch(int vertexCount) {
+    private void drawColorBatch(FloatBuffer vertices, int vertexCount, int mode) {
         GLES20.glUseProgram(colorProgram);
-        GLES20.glUniform2f(colorResolution, (float)surfaceWidth, (float)surfaceHeight);
+        GLES20.glUniform2f(colorResolution, surfaceWidth, surfaceHeight);
         GLES20.glEnableVertexAttribArray(colorPosition);
         GLES20.glEnableVertexAttribArray(colorValue);
-        rectVertices.position(0);
-        GLES20.glVertexAttribPointer(colorPosition, 2, GLES20.GL_FLOAT, false,
-                RECT_VERTEX_BYTES, rectVertices);
-        rectVertices.position(2);
-        GLES20.glVertexAttribPointer(colorValue, 4, GLES20.GL_FLOAT, false,
-                RECT_VERTEX_BYTES, rectVertices);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
-        rectVertices.position(0);
+        vertices.position(0);
+        GLES20.glVertexAttribPointer(colorPosition, 2, GLES20.GL_FLOAT, false, COLOR_VERTEX_BYTES, vertices);
+        vertices.position(2);
+        GLES20.glVertexAttribPointer(colorValue, 4, GLES20.GL_FLOAT, false, COLOR_VERTEX_BYTES, vertices);
+        GLES20.glDrawArrays(mode, 0, vertexCount);
+        vertices.position(0);
         GLES20.glDisableVertexAttribArray(colorValue);
         GLES20.glDisableVertexAttribArray(colorPosition);
     }
 
-    private void drawSpriteBatch(int vertexCount, int texture) {
+    private void beginTextureBatches(FloatBuffer vertices) {
         GLES20.glUseProgram(textureProgram);
-        GLES20.glUniform2f(textureResolution, (float)surfaceWidth, (float)surfaceHeight);
+        GLES20.glUniform2f(textureResolution, surfaceWidth, surfaceHeight);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
         GLES20.glUniform1i(textureSampler, 0);
         GLES20.glEnableVertexAttribArray(texturePosition);
         GLES20.glEnableVertexAttribArray(textureCoordinate);
         GLES20.glEnableVertexAttribArray(textureColor);
-        spriteVertices.position(0);
-        GLES20.glVertexAttribPointer(texturePosition, 2, GLES20.GL_FLOAT, false,
-                SPRITE_VERTEX_BYTES, spriteVertices);
-        spriteVertices.position(2);
-        GLES20.glVertexAttribPointer(textureCoordinate, 2, GLES20.GL_FLOAT, false,
-                SPRITE_VERTEX_BYTES, spriteVertices);
-        spriteVertices.position(4);
-        GLES20.glVertexAttribPointer(textureColor, 4, GLES20.GL_FLOAT, false,
-                SPRITE_VERTEX_BYTES, spriteVertices);
+        vertices.position(0);
+        GLES20.glVertexAttribPointer(texturePosition, 2, GLES20.GL_FLOAT, false, TEXTURE_VERTEX_BYTES, vertices);
+        vertices.position(2);
+        GLES20.glVertexAttribPointer(textureCoordinate, 2, GLES20.GL_FLOAT, false, TEXTURE_VERTEX_BYTES, vertices);
+        vertices.position(4);
+        GLES20.glVertexAttribPointer(textureColor, 4, GLES20.GL_FLOAT, false, TEXTURE_VERTEX_BYTES, vertices);
+        vertices.position(0);
+    }
+
+    private void drawPreparedTextureBatch(int vertexCount, int texture) {
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
-        spriteVertices.position(0);
+    }
+
+    private void endTextureBatches() {
         GLES20.glDisableVertexAttribArray(textureColor);
         GLES20.glDisableVertexAttribArray(textureCoordinate);
         GLES20.glDisableVertexAttribArray(texturePosition);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
     }
 
-    private void captureIfRequested(CaptureCallback callback, int[] capturedFrame) {
+    static int clampCount(int value, int maximum) {
+        return Math.max(0, Math.min(maximum, value));
+    }
+
+    static boolean isValidFrame(IntBuffer values) {
+        return values != null && values.capacity() >= FRAME_I32_CAPACITY
+                && values.get(0) == RENDER_MAGIC && values.get(1) == RENDER_VERSION;
+    }
+
+    static boolean shouldPresent(IntBuffer values) {
+        return isValidFrame(values) && (values.get(I_FLAGS) & FLAG_PRESENT) != 0;
+    }
+
+    static boolean isValidTextSpan(int offset, int length, int bytesUsed) {
+        return offset >= 0 && length >= 0 && offset < bytesUsed
+                && length < bytesUsed - offset;
+    }
+
+    static int activeSpriteI32Count(int spriteCount) {
+        return clampCount(spriteCount, MAX_SPRITES) * SPRITE_I32_STRIDE;
+    }
+
+    static int activeTextI32Count(int textCount) {
+        return clampCount(textCount, MAX_TEXT) * TEXT_I32_STRIDE;
+    }
+
+    static int activeLineF32Count(int lineCount) {
+        return clampCount(lineCount, MAX_LINES) * LINE_F32_STRIDE;
+    }
+
+    static int activeTextF32Count(int textCount) {
+        return clampCount(textCount, MAX_TEXT) * TEXT_F32_STRIDE;
+    }
+
+    static int activeTextU8Count(int bytesUsed) {
+        return clampCount(bytesUsed, TEXT_U8_CAPACITY);
+    }
+
+    static long packTexture(int texture, int width, int height) {
+        if (texture == 0 || width <= 0 || height <= 0 || width > 0xffff || height > 0xffff) return 0L;
+        return (texture & 0xffffffffL) | ((long)width << 32) | ((long)height << 48);
+    }
+
+    private static float clampUnit(float value) {
+        return Math.max(0.0f, Math.min(1.0f, value));
+    }
+
+    synchronized LogicalFrameSnapshot captureLogicalFrame() {
+        int[] header = new int[CAPTURE_HEADER_I32S];
+        for (int index = 0; index < header.length; index += 1) header[index] = frameI32.get(index);
+        int lineCount = clampCount(header[I_LINE_COUNT], MAX_LINES);
+        int spriteCount = clampCount(header[I_SPRITE_COUNT], MAX_SPRITES);
+        int textCount = clampCount(header[I_TEXT_COUNT], MAX_TEXT);
+        int textByteCount = clampCount(header[I_TEXT_BYTES_USED], TEXT_U8_CAPACITY);
+        float[] lines = new float[activeLineF32Count(lineCount)];
+        for (int index = 0; index < lines.length; index += 1) {
+            lines[index] = frameF32.get(F_LINE_BASE + index);
+        }
+        int[] sprites = new int[activeSpriteI32Count(spriteCount)];
+        for (int index = 0; index < sprites.length; index += 1) {
+            sprites[index] = frameI32.get(I_SPRITE_BASE + index);
+        }
+        int[] textMetadata = new int[activeTextI32Count(textCount)];
+        for (int index = 0; index < textMetadata.length; index += 1) {
+            textMetadata[index] = frameI32.get(I_TEXT_BASE + index);
+        }
+        float[] textValues = new float[activeTextF32Count(textCount)];
+        for (int index = 0; index < textValues.length; index += 1) {
+            textValues[index] = frameF32.get(F_TEXT_BASE + index);
+        }
+        byte[] textBytes = new byte[textByteCount];
+        for (int index = 0; index < textBytes.length; index += 1) {
+            textBytes[index] = frameU8Bytes.get(index);
+        }
+        return new LogicalFrameSnapshot(
+                header, lines, sprites, textMetadata, textValues, textBytes);
+    }
+
+    private static ByteBuffer directBytes(int capacity) {
+        return ByteBuffer.allocateDirect(capacity).order(ByteOrder.nativeOrder());
+    }
+
+    private void captureIfRequested(CaptureCallback callback, LogicalFrameSnapshot capturedFrame) {
         if (callback == null) return;
         try {
             long pixelCount = (long)surfaceWidth * surfaceHeight;
@@ -338,15 +564,14 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 callback.onCaptured(null, "preview framebuffer exceeds the 8 megapixel capture limit", capturedFrame);
                 return;
             }
-            java.nio.IntBuffer pixels = ByteBuffer.allocateDirect(surfaceWidth * surfaceHeight * 4)
-                    .order(ByteOrder.nativeOrder()).asIntBuffer();
+            java.nio.IntBuffer pixels = directBytes(surfaceWidth * surfaceHeight * 4).asIntBuffer();
             GLES20.glReadPixels(0, 0, surfaceWidth, surfaceHeight, GLES20.GL_RGBA,
                     GLES20.GL_UNSIGNED_BYTE, pixels);
             int[] flipped = new int[surfaceWidth * surfaceHeight];
-            for (int y = 0; y < surfaceHeight; y++) {
+            for (int y = 0; y < surfaceHeight; y += 1) {
                 int sourceRow = y * surfaceWidth;
                 int targetRow = (surfaceHeight - y - 1) * surfaceWidth;
-                for (int x = 0; x < surfaceWidth; x++) {
+                for (int x = 0; x < surfaceWidth; x += 1) {
                     int rgba = pixels.get(sourceRow + x);
                     flipped[targetRow + x] = (rgba & 0xff00ff00)
                             | ((rgba << 16) & 0x00ff0000) | ((rgba >> 16) & 0x000000ff);

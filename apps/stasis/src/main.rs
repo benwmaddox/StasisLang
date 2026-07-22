@@ -18,7 +18,9 @@ use stasis::{
     run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
     RunnerConfig, StasisTestRunSession,
 };
-use stasis_assets::{load_project_asset_manifest, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH};
+use stasis_assets::{
+    load_project_asset_manifest, AssetFormat, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
+};
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
@@ -1621,7 +1623,7 @@ fn write_mobile_aot_engine_bundle(
     let symbols_header = output_dir.join("published_aot_symbols.h");
     write_mobile_aot_symbols_header(&manifest_json, &symbols_header)?;
     let bindings_source = output_dir.join("published_aot_bindings.c");
-    write_mobile_aot_bindings_source(&manifest_json, &bindings_source)?;
+    write_mobile_aot_bindings_source(&manifest_json, project_dir, &bindings_source)?;
     let cmake_file = if target == MobileAotTarget::AndroidArm64 {
         let path = output_dir.join("published_aot_objects.cmake");
         write_android_aot_cmake_file(&bundle.object_paths_by_function, &path)?;
@@ -1968,6 +1970,7 @@ fn write_mobile_aot_symbols_header(
 
 fn write_mobile_aot_bindings_source(
     manifest: &serde_json::Value,
+    project_dir: &Path,
     output_path: &Path,
 ) -> Result<(), String> {
     let functions = manifest
@@ -1978,7 +1981,9 @@ fn write_mobile_aot_bindings_source(
         .get("string_literals")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "mobile AOT manifest missing string_literals array".to_string())?;
-    let mut out = String::from("#include <stdint.h>\n#include \"stasis_mobile_aot_runtime.h\"\n\n");
+    let mut out = String::from(
+        "#include <stdint.h>\n#include <string.h>\n#include \"stasis_mobile_aot_runtime.h\"\n\n",
+    );
     for function in functions {
         let symbol = function
             .get("symbol")
@@ -2022,6 +2027,33 @@ fn write_mobile_aot_bindings_source(
             escape_mobile_c_string_literal(value)
         ));
     }
+    let assets = load_project_asset_manifest(project_dir, AssetLimits::default())
+        .map_err(|error| format!("failed to resolve mobile AOT assets: {error}"))?;
+    out.push_str("\ntypedef struct { const char *path; int32_t handle; } StasisPublishedSprite;\n");
+    out.push_str("static const StasisPublishedSprite stasis_published_sprites[] = {\n");
+    for asset in assets
+        .assets
+        .iter()
+        .filter(|asset| matches!(asset.entry.format, AssetFormat::Sprite { .. }))
+    {
+        out.push_str(&format!(
+            "    {{\"{}\", {}}},\n",
+            escape_mobile_c_string_literal(&asset.entry.path),
+            asset.handle.as_i32()
+        ));
+    }
+    out.push_str("    {0, 0},\n};\n");
+    out.push_str(
+        "int32_t stasis_published_sprite_handle_for_path(const char *path) {\n\
+         \x20   if (path == 0) return 0;\n\
+         \x20   while (path[0] == '.' && path[1] == '/') path += 2;\n\
+         \x20   while (path[0] == '.' && path[1] == '.' && path[2] == '/') path += 3;\n\
+         \x20   for (uintptr_t index = 0; index < sizeof(stasis_published_sprites) / sizeof(stasis_published_sprites[0]); index += 1) {\n\
+         \x20       if (stasis_published_sprites[index].path != 0 && strcmp(path, stasis_published_sprites[index].path) == 0) return stasis_published_sprites[index].handle;\n\
+         \x20   }\n\
+         \x20   return 0;\n\
+         }\n",
+    );
     out.push_str("\nvoid stasis_aot_bind_runtime_globals(void) {\n");
     for function in functions {
         let symbol = function
@@ -2767,9 +2799,11 @@ mod tests {
         let bindings =
             fs::read_to_string(&summary.bindings_source).expect("read mobile AOT bindings source");
         assert!(bindings.contains("extern void aot_fn_0(void);"));
-        assert!(bindings.contains("stasis_mobile_main_entry(void) { aot_fn_0(); return 0; }"));
+        assert!(bindings.contains("int32_t stasis_mobile_main_entry(void)"));
         assert!(bindings.contains("void stasis_aot_bind_runtime_globals(void)"));
         assert!(bindings.contains("stasis_jit_register_code_ptr(0"));
+        assert!(bindings.contains("stasis_published_sprite_handle_for_path"));
+        assert!(bindings.contains("{\"assets/ball.svg\","));
         assert!(header.contains("#define STASIS_AOT_BIND_RUNTIME_GLOBALS"));
         let engine_manifest: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(output_dir.join("engine_bundle_manifest.json"))

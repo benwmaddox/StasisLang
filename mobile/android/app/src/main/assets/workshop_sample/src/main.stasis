@@ -77,7 +77,7 @@ global Render {
     command4_clip_x: i32; command4_clip_y: i32; command4_clip_w: i32; command4_clip_h: i32;
 }
 
-function main(): void {
+function pong_game_main(): void {
     init();
 }
 
@@ -97,7 +97,7 @@ function init(): void {
     GameState.ai_score = 0;
 }
 
-function tick(): void {
+function pong_game_tick(): void {
     GameState.tick_count += 1;
 
     update_input();
@@ -212,7 +212,7 @@ function reset_ball(): void {
     GameState.enemy_paddle_speed_x100 = 1500;
 }
 
-function render(): void {
+function pong_game_render(): void {
     Render.command_schema_version = 3;
     Render.command_count = 5;
 
@@ -273,6 +273,67 @@ function render(): void {
     Render.command4_clip_x = 0; Render.command4_clip_y = 0; Render.command4_clip_w = GameState.screen_w; Render.command4_clip_h = GameState.screen_h;
 }
 
-function on_code_swap(): void {
-    render();
+function pong_game_on_code_swap(): void {
+    pong_game_render();
 }
+
+@link("stasis_graphics");
+global host_i32: i32[768];
+global host_f32: f32[64];
+global gfx_cmd_i32: i32[34848];
+global gfx_cmd_f32: f32[92292];
+global gfx_cmd_u8: u8[65536];
+global PongHost { ball_sprite: i32; }
+extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+
+function pong_host_line(x1: i32, y1: i32, x2: i32, y2: i32, r: f32, g: f32, b: f32): void {
+    let index: i32 = gfx_cmd_i32[3];
+    if (index >= 10000) { return; }
+    let base: i32 = 4 + index * 8;
+    gfx_cmd_f32[base].from_i32(x1); gfx_cmd_f32[base + 1].from_i32(y1);
+    gfx_cmd_f32[base + 2].from_i32(x2); gfx_cmd_f32[base + 3].from_i32(y2);
+    gfx_cmd_f32[base + 4] = r; gfx_cmd_f32[base + 5] = g;
+    gfx_cmd_f32[base + 6] = b; gfx_cmd_f32[base + 7] = 1.0;
+    gfx_cmd_i32[3] = index + 1;
+}
+
+function pong_host_filled_rect(x: i32, y: i32, w: i32, h: i32, r: f32, g: f32, b: f32): void {
+    let column: i32 = 0;
+    for (column = 0; column < w; column += 1) {
+        pong_host_line(x + column, y, x + column, y + h, r, g, b);
+    }
+}
+
+function pong_host_render(): void {
+    pong_game_render();
+    gfx_cmd_i32[0] = 1196967473; gfx_cmd_i32[1] = 1; gfx_cmd_i32[2] = 1;
+    gfx_cmd_i32[3] = 0; gfx_cmd_i32[4] = 0; gfx_cmd_i32[7] = 0; gfx_cmd_i32[9] = 0;
+    gfx_cmd_f32[0] = 0.0588; gfx_cmd_f32[1] = 0.0667;
+    gfx_cmd_f32[2] = 0.1098; gfx_cmd_f32[3] = 1.0;
+    pong_host_filled_rect(24, GameState.player_y - 36, 10, 72, 0.357, 0.749, 0.494);
+    pong_host_filled_rect(GameState.screen_w - 34, GameState.ai_y - 36, 10, 72, 0.357, 0.749, 0.494);
+    pong_host_filled_rect((GameState.screen_w / 2) - 1, 0, 2, GameState.screen_h, 0.267, 0.267, 0.267);
+    gfx_cmd_i32[32] = PongHost.ball_sprite;
+    gfx_cmd_i32[33] = GameState.ball_x - 7; gfx_cmd_i32[34] = GameState.ball_y - 7;
+    gfx_cmd_i32[35] = 14; gfx_cmd_i32[36] = 14;
+    gfx_cmd_i32[37] = (GameState.tick_count * 3) % 360; gfx_cmd_i32[38] = 255;
+    gfx_cmd_i32[4] = 1;
+    gfx_cmd_i32[2] = 3;
+}
+
+function main(): void {
+    pong_game_main();
+    PongHost.ball_sprite = gfx_load_sprite("../assets/ball.svg", 32, 32);
+    pong_host_render();
+}
+
+function tick(): void {
+    Input.screen_w = host_i32[5]; Input.screen_h = host_i32[6];
+    Input.touch_active = host_i32[545];
+    let touch_x: i32; touch_x.from_f32(host_f32[0]); Input.touch_x = touch_x;
+    let touch_y: i32; touch_y.from_f32(host_f32[1]); Input.touch_y = touch_y;
+    pong_game_tick();
+}
+
+function render(): void { pong_host_render(); }
+function on_code_swap(): void { pong_host_render(); }

@@ -15,6 +15,9 @@ import android.view.WindowInsets;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+
 public final class MainActivity extends Activity {
     private static final String PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID;
     private static final long FRAME_DELAY_MS = 16L;
@@ -26,12 +29,12 @@ public final class MainActivity extends Activity {
     }
 
     private final Handler frameHandler = new Handler(Looper.getMainLooper());
-    private final int[] frameValues = new int[StasisPreviewRenderer.FRAME_I32_CAPACITY];
     private final RollingMetric tickMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
     private final StringBuilder hudText = new StringBuilder(80);
     private GameSurfaceView gameSurface;
     private TextView hud;
+    private TextView runtimeError;
     private Runnable frameLoop;
     private boolean compileAttempted;
     private boolean compileReady;
@@ -39,8 +42,12 @@ public final class MainActivity extends Activity {
 
     private static native String nativeCompileProject(String projectRoot);
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
-            int touchActive, int screenWidth, int screenHeight, int[] frameValues);
+            int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
+            ByteBuffer frameF32, ByteBuffer frameU8);
+    private static native String nativeLastFrameError();
     static native int[] nativeDecodeSvgSpriteBytes(byte[] bytes, int width, int height);
+    static native String nativeResolveCachedText(String projectRoot, int handle);
+    static native String nativeResolveFont(String projectRoot, int handle);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -61,16 +68,28 @@ public final class MainActivity extends Activity {
         hud = new TextView(this);
         hud.setTextColor(Color.WHITE);
         hud.setTextSize(12.0f);
-        hud.setSingleLine(true);
+        hud.setSingleLine(false);
         hud.setPadding(dp(10), dp(6), dp(10), dp(6));
         hud.setBackgroundColor(Color.argb(135, 20, 28, 38));
-        hud.setVisibility(View.GONE);
+        hud.setVisibility(BuildConfig.DEBUG ? View.VISIBLE : View.GONE);
         FrameLayout.LayoutParams hudParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.START);
         hudParams.setMargins(dp(8), dp(8), dp(8), 0);
         root.addView(hud, hudParams);
+
+        runtimeError = new TextView(this);
+        runtimeError.setTextColor(Color.rgb(255, 180, 180));
+        runtimeError.setTextSize(12.0f);
+        runtimeError.setPadding(dp(10), dp(6), dp(10), dp(6));
+        runtimeError.setBackgroundColor(Color.argb(210, 80, 0, 0));
+        runtimeError.setVisibility(View.GONE);
+        FrameLayout.LayoutParams errorParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.START);
+        root.addView(runtimeError, errorParams);
 
         setContentView(root);
         startFrameLoop();
@@ -90,6 +109,13 @@ public final class MainActivity extends Activity {
 
     private void recordRenderTimeNanos(long durationNanos) {
         renderMetric.add(System.nanoTime(), durationNanos);
+    }
+
+    void reportPreviewResourceError(String message) {
+        runOnUiThread(() -> {
+            runtimeError.setText("Render resource error: " + message);
+            runtimeError.setVisibility(View.VISIBLE);
+        });
     }
 
     private void startFrameLoop() {
@@ -114,17 +140,13 @@ public final class MainActivity extends Activity {
         int width = gameSurface == null ? 0 : gameSurface.getWidth();
         int height = gameSurface == null ? 0 : gameSurface.getHeight();
         long started = System.nanoTime();
-        int status = nativeRunFrameInto(
-                PUBLISHED_RUNTIME_ID,
-                gameSurface == null ? 0 : gameSurface.touchX(),
-                gameSurface == null ? 0 : gameSurface.touchY(),
-                gameSurface == null ? 0 : gameSurface.touchActive(),
-                width,
-                height,
-                frameValues);
+        int status = gameSurface == null ? -1 : gameSurface.runNativeFrame(
+                PUBLISHED_RUNTIME_ID, gameSurface.touchX(), gameSurface.touchY(),
+                gameSurface.touchActive(), width, height);
         tickMetric.add(System.nanoTime(), System.nanoTime() - started);
-        if (status == 0 && frameValues[0] == 0 && gameSurface != null) {
-            gameSurface.setRenderFrameValues(frameValues);
+        if (status != 0) {
+            compileReady = false;
+            reportPreviewResourceError(nativeLastFrameError());
         }
         updateHud(false);
     }
@@ -136,13 +158,25 @@ public final class MainActivity extends Activity {
         lastHudUpdateNanos = now;
         double tickMillis = tickMetric.averageMillis();
         double renderMillis = renderMetric.averageMillis();
+        double tickP50Millis = tickMetric.percentileMillis(50);
+        double tickP95Millis = tickMetric.percentileMillis(95);
+        double renderP50Millis = renderMetric.percentileMillis(50);
+        double renderP95Millis = renderMetric.percentileMillis(95);
         int budgetPercent = Math.max(0,
                 (int)(((tickMillis + renderMillis) * 100.0 / FRAME_BUDGET_MILLIS) + 0.5));
         hudText.setLength(0);
-        hudText.append("tick=");
+        hudText.append("tick avg=");
         appendMillis(hudText, tickMillis);
-        hudText.append(" ms  render=");
+        hudText.append(" p50=");
+        appendMillis(hudText, tickP50Millis);
+        hudText.append(" p95=");
+        appendMillis(hudText, tickP95Millis);
+        hudText.append(" ms\nrender avg=");
         appendMillis(hudText, renderMillis);
+        hudText.append(" p50=");
+        appendMillis(hudText, renderP50Millis);
+        hudText.append(" p95=");
+        appendMillis(hudText, renderP95Millis);
         hudText.append(" ms  budget=").append(budgetPercent).append('%');
         hud.setTextColor(debugColorForBudget(budgetPercent));
         hud.setText(hudText.toString());
@@ -203,7 +237,7 @@ public final class MainActivity extends Activity {
             this.activity = activity;
             setEGLContextClientVersion(2);
             renderer = new StasisPreviewRenderer(
-                    new PublishedSpriteCatalog(activity.getAssets()),
+                    new PublishedSpriteCatalog(activity, activity.getAssets()),
                     activity::recordRenderTimeNanos);
             setRenderer(renderer);
             setRenderMode(RENDERMODE_WHEN_DIRTY);
@@ -213,9 +247,16 @@ public final class MainActivity extends Activity {
         int touchY() { return touchY; }
         int touchActive() { return touchActive ? 1 : 0; }
 
-        void setRenderFrameValues(int[] values) {
-            renderer.setFrame(values);
-            requestRender();
+        int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
+                int screenWidth, int screenHeight) {
+            int status;
+            synchronized (renderer) {
+                status = nativeRunFrameInto(projectRoot, inputX, inputY, inputActive,
+                        screenWidth, screenHeight, renderer.frameI32Bytes(),
+                        renderer.frameF32Bytes(), renderer.frameU8Bytes());
+            }
+            if (status == 0) requestRender();
+            return status;
         }
 
         @Override
@@ -236,6 +277,7 @@ public final class MainActivity extends Activity {
         private static final int CAPACITY = 360;
         private final long[] sampleTimes = new long[CAPACITY];
         private final long[] durations = new long[CAPACITY];
+        private final long[] orderedDurations = new long[CAPACITY];
         private int nextIndex;
         private int count;
 
@@ -258,6 +300,20 @@ public final class MainActivity extends Activity {
                 }
             }
             return samples == 0 ? 0.0 : (double)total / samples / 1_000_000.0;
+        }
+
+        double percentileMillis(int percentile) {
+            long now = System.nanoTime();
+            int samples = 0;
+            for (int index = 0; index < count; index += 1) {
+                if (now - sampleTimes[index] <= WINDOW_NANOS) {
+                    orderedDurations[samples++] = durations[index];
+                }
+            }
+            if (samples == 0) return 0.0;
+            Arrays.sort(orderedDurations, 0, samples);
+            int rank = Math.min(samples - 1, (samples * percentile + 99) / 100 - 1);
+            return orderedDurations[Math.max(0, rank)] / 1_000_000.0;
         }
     }
 }

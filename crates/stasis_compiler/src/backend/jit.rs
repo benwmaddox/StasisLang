@@ -13,6 +13,7 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Module};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -290,19 +291,35 @@ impl JitProcess {
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
-                let (module, code_ptr) = compile_function_to_jit_module(
-                    meta,
-                    hir,
-                    &symbol,
-                    &analysis.call_signatures,
-                    &mut type_table,
-                    &analysis.global_path_types,
-                    &analysis.constant_values,
-                    &analysis.collection_infos,
-                    &analysis.named_struct_field_types,
-                    &analysis.extern_symbol_addresses,
-                    local_runtime_helper_trampolines,
-                )?;
+                let compiled = catch_unwind(AssertUnwindSafe(|| {
+                    compile_function_to_jit_module(
+                        meta,
+                        hir,
+                        &symbol,
+                        &analysis.call_signatures,
+                        &mut type_table,
+                        &analysis.global_path_types,
+                        &analysis.constant_values,
+                        &analysis.collection_infos,
+                        &analysis.named_struct_field_types,
+                        &analysis.extern_symbol_addresses,
+                        local_runtime_helper_trampolines,
+                    )
+                }));
+                let (module, code_ptr) = match compiled {
+                    Ok(result) => result?,
+                    Err(payload) => {
+                        let message = payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                            .unwrap_or("unknown panic");
+                        return Err(format!(
+                            "JIT backend panicked while compiling '{}': {message}",
+                            meta.name
+                        ));
+                    }
+                };
                 let slot = next_slot;
                 next_slot = next_slot.saturating_add(1);
                 staged_modules.push(module);
@@ -1290,6 +1307,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "gfx_dump_png" | "stasis_gfx_dump_png" => {
             function_address(stasis_dynload::stasis_jit_gfx_dump_png as *const ())
         }
+        "gfx_poll_reload" | "stasis_gfx_poll_reload" | "stasis_jit_gfx_poll_reload" => {
+            function_address(stasis_dynload::stasis_jit_gfx_poll_reload as *const ())
+        }
         "load_font" | "stasis_load_font" => {
             function_address(stasis_dynload::stasis_jit_load_font as *const ())
         }
@@ -1299,8 +1319,40 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "gfx_cache_text" | "stasis_gfx_cache_text" | "stasis_jit_gfx_cache_text" => {
             function_address(stasis_dynload::stasis_jit_gfx_cache_text as *const ())
         }
+        "gfx_measure_text_cached"
+        | "stasis_gfx_measure_text_cached"
+        | "stasis_jit_gfx_measure_text_cached" => {
+            function_address(stasis_dynload::stasis_jit_gfx_measure_text_cached as *const ())
+        }
+        "time" | "stasis_time" | "stasis_jit_time" | "stasis_get_time_ms" => {
+            function_address(stasis_dynload::stasis_get_time_ms as *const ())
+        }
+        "time_us" | "stasis_time_us" | "stasis_jit_time_us" | "stasis_get_time_us" => {
+            function_address(stasis_dynload::stasis_get_time_us as *const ())
+        }
+        "sleep_ms" | "stasis_sleep_ms" | "stasis_jit_sleep_ms" => {
+            function_address(stasis_dynload::stasis_jit_sleep_ms as *const ())
+        }
+        "audio_init" | "stasis_audio_init" => {
+            function_address(stasis_dynload::stasis_jit_audio_init as *const ())
+        }
+        "audio_shutdown" | "stasis_audio_shutdown" => {
+            function_address(stasis_dynload::stasis_jit_audio_shutdown as *const ())
+        }
         "audio_is_available" | "stasis_audio_is_available" => {
             function_address(stasis_dynload::stasis_jit_audio_is_available as *const ())
+        }
+        "audio_get_sample_rate" | "stasis_audio_get_sample_rate" => {
+            function_address(stasis_dynload::stasis_jit_audio_get_sample_rate as *const ())
+        }
+        "audio_get_channels" | "stasis_audio_get_channels" => {
+            function_address(stasis_dynload::stasis_jit_audio_get_channels as *const ())
+        }
+        "audio_get_queued_frames" | "stasis_audio_get_queued_frames" => {
+            function_address(stasis_dynload::stasis_jit_audio_get_queued_frames as *const ())
+        }
+        "audio_get_underruns" | "stasis_audio_get_underruns" => {
+            function_address(stasis_dynload::stasis_jit_audio_get_underruns as *const ())
         }
         "audio_push_f32_interleaved" | "stasis_audio_push_f32_interleaved" => {
             function_address(stasis_dynload::stasis_jit_audio_push_f32_interleaved as *const ())
@@ -1422,7 +1474,7 @@ fn new_stasis_jit_builder() -> Result<JITBuilder, String> {
     let mut flag_builder = settings::builder();
     flag_builder
         .set("is_pic", "false")
-        .map_err(|error| format!("failed to configure non-PIC JIT: {error}"))?;
+        .map_err(|error| format!("failed to configure JIT relocation model: {error}"))?;
     let isa_builder = cranelift_native::builder()
         .map_err(|message| format!("host machine is not supported by Cranelift: {message}"))?;
     let isa = isa_builder
@@ -1712,7 +1764,15 @@ fn compile_function_to_jit_module(
         }
         jit_builder.symbol(extern_symbol, *address as *const u8);
     }
-    let runtime_helper_addresses = local_runtime_helper_trampolines.then(runtime_helper_addresses);
+    let runtime_helper_addresses = local_runtime_helper_trampolines.then(|| {
+        let mut addresses = runtime_helper_addresses();
+        addresses.extend(
+            extern_symbol_addresses
+                .iter()
+                .map(|(symbol, address)| (symbol.clone(), *address)),
+        );
+        addresses
+    });
     let runtime_helper_linkage = runtime_helper_addresses
         .as_ref()
         .map_or(RuntimeHelperLinkage::Imported, |addresses| {
@@ -1796,6 +1856,22 @@ mod tests {
             crate::backend::emit::runtime_helper_trampoline_count_for_test(),
             2
         );
+    }
+
+    #[test]
+    fn local_runtime_resolves_production_preview_externs() {
+        crate::backend::emit::reset_runtime_helper_trampoline_count_for_test();
+        let mut process = JitProcess::new();
+        process.set_local_runtime_helper_trampolines(true);
+        process.upsert_file(
+            "sample.stasis",
+            "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let width: f32 = gfx_measure_text_cached(0); if (gfx_poll_reload(0) || audio_is_available() || width != 0.0) { return 2; } if (ms == 0 && us == 0) { return 0; } return 1; }\n",
+        );
+        process
+            .compile()
+            .expect("compile production preview externs");
+        assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 1);
+        assert!(crate::backend::emit::runtime_helper_trampoline_count_for_test() >= 5);
     }
 
     #[test]

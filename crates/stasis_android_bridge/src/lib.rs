@@ -5,6 +5,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use stasis_assets::{AssetFormat, AssetHandle, AssetLimits, ResolvedAssetManifest};
 use stasis_compiler::backend::jit::JitProcess;
@@ -33,6 +34,9 @@ pub const ANDROID_RENDER_FRAME_HEADER_SIZE: usize = 6;
 pub const ANDROID_RENDER_COMMAND_STRIDE: usize = 13;
 pub const ANDROID_RENDER_FRAME_I32_CAPACITY: usize = ANDROID_RENDER_FRAME_HEADER_SIZE
     + ANDROID_RENDER_COMMAND_CAPACITY * ANDROID_RENDER_COMMAND_STRIDE;
+pub const ANDROID_RENDER_V1_I32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_I32_COUNT;
+pub const ANDROID_RENDER_V1_F32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_F32_COUNT;
+pub const ANDROID_RENDER_V1_U8_CAPACITY: usize = stasis_dynload::STASIS_RENDER_U8_COUNT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AndroidBridgeTickInput {
@@ -76,11 +80,14 @@ struct AndroidRuntimeSession {
     jit: JitProcess,
     initialized: bool,
     pending_candidate: Option<JitProcess>,
+    pending_resource_catalog: Option<EmbeddedResourceCatalog>,
     tick_count: i32,
+    previous_input: Option<AndroidBridgeTickInput>,
 }
 
 thread_local! {
     static RUNTIME_SESSION: RefCell<Option<AndroidRuntimeSession>> = const { RefCell::new(None) };
+    static LAST_FRAME_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,7 +412,38 @@ pub fn compile_android_workshop_project(
         }
     };
     let previous = read_previous_android_plan(project_root)?;
-    let plan = build_workshop_compile_plan(&files, &compile, previous.as_ref())?;
+    let mut plan = build_workshop_compile_plan(&files, &compile, previous.as_ref())?;
+    warm_or_reload_runtime_session(project_root, &files, fingerprint_workshop_sources(&files))?;
+
+    // The legacy artifact analyzer does not understand every production extern and can
+    // report detector errors for programs the real JIT has compiled successfully. The
+    // executable pipeline above is authoritative for Workshop; retain the artifact
+    // manifest for tooling, but derive its success/reload state from the source set.
+    let executable_project_hash = fingerprint_workshop_sources(&files) as i32;
+    let previous_hashes = previous
+        .as_ref()
+        .map(|previous| (previous.project_hash, previous.layout_hash));
+    plan.status = 0;
+    plan.errors.clear();
+    plan.project_hash = executable_project_hash;
+    (plan.reload, plan.reason) = match previous_hashes {
+        None => (
+            WorkshopReload::InitialCompile,
+            "Production JIT initialized the Workshop runtime.".to_string(),
+        ),
+        Some((project_hash, _)) if project_hash == executable_project_hash => (
+            WorkshopReload::NoChange,
+            "Production JIT source fingerprint is unchanged.".to_string(),
+        ),
+        Some((_, layout_hash)) if layout_hash == plan.layout_hash => (
+            WorkshopReload::FastReload,
+            "Production JIT accepted a layout-compatible source update.".to_string(),
+        ),
+        Some(_) => (
+            WorkshopReload::ResetRequired,
+            "Production JIT accepted a layout-changing source update.".to_string(),
+        ),
+    };
     let artifacts = render_workshop_artifacts(&plan);
 
     let manifest_path = project_root.join(&artifacts.manifest_path);
@@ -460,8 +498,6 @@ pub fn compile_android_workshop_project(
         })?;
     }
 
-    warm_or_reload_runtime_session(project_root, &files, fingerprint_workshop_sources(&files))?;
-
     Ok(AndroidBridgeCompileResult {
         status: plan.status,
         reload: plan.reload,
@@ -475,6 +511,340 @@ pub fn run_android_workshop_tick(
     project_root: impl AsRef<Path>,
     entry_file: impl AsRef<Path>,
     input: AndroidBridgeTickInput,
+) -> Result<AndroidBridgeRunTickResult, String> {
+    run_android_workshop_tick_internal(project_root, entry_file, input, true)
+}
+
+const MAX_EMBEDDED_FONTS: usize = 64;
+const MAX_EMBEDDED_TEXT_RUNS: usize = 4096;
+
+#[derive(Clone)]
+struct EmbeddedFont {
+    handle: i32,
+    path: PathBuf,
+    size: i32,
+}
+
+#[derive(Clone)]
+struct EmbeddedTextRun {
+    handle: i32,
+    font: i32,
+    text: String,
+    measured_width: f32,
+}
+
+struct EmbeddedResourceCatalog {
+    project_root: PathBuf,
+    assets: ResolvedAssetManifest,
+    fonts: Vec<EmbeddedFont>,
+    text_runs: Vec<EmbeddedTextRun>,
+    error: Option<String>,
+}
+
+fn embedded_resource_catalog() -> &'static Mutex<Option<EmbeddedResourceCatalog>> {
+    static CATALOG: OnceLock<Mutex<Option<EmbeddedResourceCatalog>>> = OnceLock::new();
+    CATALOG.get_or_init(|| Mutex::new(None))
+}
+
+fn install_embedded_resource_host(project_root: &Path) -> Result<(), String> {
+    let catalog = prepare_embedded_resource_catalog(project_root, false)?;
+    *embedded_resource_catalog()
+        .lock()
+        .map_err(|_| "embedded resource catalog mutex poisoned")? = Some(catalog);
+    stasis_dynload::set_embedded_graphics_host(Some(stasis_dynload::EmbeddedGraphicsHost {
+        load_sprite: embedded_load_sprite,
+        release_sprite: |_| {},
+        load_font: embedded_load_font,
+        measure_text: embedded_measure_text,
+        cache_text: embedded_cache_text,
+        measure_text_cached: embedded_measure_text_cached,
+        poll_reload: |_| 0,
+    }));
+    Ok(())
+}
+
+fn prepare_embedded_resource_catalog(
+    project_root: &Path,
+    preserve_loaded_resources: bool,
+) -> Result<EmbeddedResourceCatalog, String> {
+    let project_root = project_root
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize embedded project root: {error}"))?;
+    let manifest_path = project_root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH);
+    let assets = if manifest_path.is_file() {
+        load_android_workshop_asset_manifest(&project_root)?
+    } else {
+        ResolvedAssetManifest {
+            manifest_path,
+            assets: Vec::new(),
+        }
+    };
+    let (fonts, text_runs) = if preserve_loaded_resources {
+        let slot = embedded_resource_catalog()
+            .lock()
+            .map_err(|_| "embedded resource catalog mutex poisoned")?;
+        slot.as_ref()
+            .filter(|catalog| catalog.project_root == project_root)
+            .map(|catalog| (catalog.fonts.clone(), catalog.text_runs.clone()))
+            .unwrap_or_else(|| {
+                (
+                    Vec::with_capacity(MAX_EMBEDDED_FONTS),
+                    Vec::with_capacity(MAX_EMBEDDED_TEXT_RUNS),
+                )
+            })
+    } else {
+        (
+            Vec::with_capacity(MAX_EMBEDDED_FONTS),
+            Vec::with_capacity(MAX_EMBEDDED_TEXT_RUNS),
+        )
+    };
+    Ok(EmbeddedResourceCatalog {
+        project_root,
+        assets,
+        fonts,
+        text_runs,
+        error: None,
+    })
+}
+
+fn embedded_path(catalog: &EmbeddedResourceCatalog, bytes: &[u8]) -> Option<PathBuf> {
+    let path = std::str::from_utf8(bytes).ok()?;
+    let absolute = catalog
+        .project_root
+        .join("src")
+        .join(path)
+        .canonicalize()
+        .ok()?;
+    absolute
+        .starts_with(&catalog.project_root)
+        .then_some(absolute)
+}
+
+fn set_embedded_resource_error(catalog: &mut EmbeddedResourceCatalog, message: String) {
+    if catalog.error.is_none() {
+        catalog.error = Some(message);
+    }
+}
+
+fn take_embedded_resource_error() -> Result<(), String> {
+    let mut slot = embedded_resource_catalog()
+        .lock()
+        .map_err(|_| "embedded resource catalog mutex poisoned".to_string())?;
+    let catalog = slot
+        .as_mut()
+        .ok_or_else(|| "embedded resource catalog is not initialized".to_string())?;
+    match catalog.error.take() {
+        Some(error) => Err(format!("render resource error: {error}")),
+        None => Ok(()),
+    }
+}
+
+fn embedded_load_sprite(path: &[u8], _max_w: i32, _max_h: i32) -> i32 {
+    let Ok(mut slot) = embedded_resource_catalog().lock() else {
+        return 0;
+    };
+    let Some(catalog) = slot.as_mut() else {
+        return 0;
+    };
+    let display_path = String::from_utf8_lossy(path);
+    let Some(absolute) = embedded_path(catalog, path) else {
+        set_embedded_resource_error(
+            catalog,
+            format!("sprite path is invalid or missing: {display_path}"),
+        );
+        return 0;
+    };
+    let handle = catalog
+        .assets
+        .assets
+        .iter()
+        .find(|asset| {
+            asset.absolute_path == absolute
+                && matches!(asset.entry.format, AssetFormat::Sprite { .. })
+        })
+        .map_or(0, |asset| asset.handle.as_i32());
+    if handle == 0 {
+        set_embedded_resource_error(
+            catalog,
+            format!("sprite is not declared in the asset manifest: {display_path}"),
+        );
+    }
+    handle
+}
+
+fn embedded_load_font(path: &[u8], size: i32) -> i32 {
+    let Ok(mut slot) = embedded_resource_catalog().lock() else {
+        return 0;
+    };
+    let Some(catalog) = slot.as_mut() else {
+        return 0;
+    };
+    let display_path = String::from_utf8_lossy(path);
+    if size <= 0 {
+        set_embedded_resource_error(
+            catalog,
+            format!("font size must be positive: {display_path}"),
+        );
+        return 0;
+    }
+    let Some(absolute) = embedded_path(catalog, path) else {
+        set_embedded_resource_error(
+            catalog,
+            format!("font path is invalid or missing: {display_path}"),
+        );
+        return 0;
+    };
+    if !absolute.is_file() {
+        set_embedded_resource_error(catalog, format!("font file is missing: {display_path}"));
+        return 0;
+    }
+    if let Some(font) = catalog
+        .fonts
+        .iter()
+        .find(|font| font.path == absolute && font.size == size)
+    {
+        return font.handle;
+    }
+    if catalog.fonts.len() >= MAX_EMBEDDED_FONTS {
+        set_embedded_resource_error(catalog, "font registry is full".to_string());
+        return 0;
+    }
+    let handle = catalog.fonts.len() as i32 + 1;
+    catalog.fonts.push(EmbeddedFont {
+        handle,
+        path: absolute,
+        size,
+    });
+    handle
+}
+
+fn embedded_measure_text(font: i32, text: &[u8]) -> f32 {
+    let Ok(slot) = embedded_resource_catalog().lock() else {
+        return 0.0;
+    };
+    let Some(catalog) = slot.as_ref() else {
+        return 0.0;
+    };
+    let Some(font) = catalog.fonts.iter().find(|entry| entry.handle == font) else {
+        return 0.0;
+    };
+    text.len() as f32 * font.size as f32 * 0.6
+}
+
+fn embedded_cache_text(font: i32, text: &[u8]) -> i32 {
+    let Ok(mut slot) = embedded_resource_catalog().lock() else {
+        return 0;
+    };
+    let Some(catalog) = slot.as_mut() else {
+        return 0;
+    };
+    let Ok(text) = std::str::from_utf8(text) else {
+        set_embedded_resource_error(catalog, "cached text is not valid UTF-8".to_string());
+        return 0;
+    };
+    let Some(font_entry) = catalog.fonts.iter().find(|entry| entry.handle == font) else {
+        set_embedded_resource_error(catalog, format!("font handle {font} was not loaded"));
+        return 0;
+    };
+    if let Some(run) = catalog
+        .text_runs
+        .iter()
+        .find(|run| run.font == font && run.text == text)
+    {
+        return run.handle;
+    }
+    if catalog.text_runs.len() >= MAX_EMBEDDED_TEXT_RUNS {
+        set_embedded_resource_error(catalog, "cached text registry is full".to_string());
+        return 0;
+    }
+    let handle = catalog.text_runs.len() as i32 + 1;
+    let measured_width = text.len() as f32 * font_entry.size as f32 * 0.6;
+    catalog.text_runs.push(EmbeddedTextRun {
+        handle,
+        font,
+        text: text.to_string(),
+        measured_width,
+    });
+    handle
+}
+
+fn embedded_measure_text_cached(handle: i32) -> f32 {
+    let Ok(slot) = embedded_resource_catalog().lock() else {
+        return 0.0;
+    };
+    slot.as_ref()
+        .and_then(|catalog| catalog.text_runs.iter().find(|run| run.handle == handle))
+        .map_or(0.0, |run| run.measured_width)
+}
+
+fn resolve_embedded_text_run(
+    project_root: &Path,
+    handle: i32,
+) -> Result<serde_json::Value, String> {
+    let root = project_root
+        .canonicalize()
+        .map_err(|error| format!("invalid project root: {error}"))?;
+    let slot = embedded_resource_catalog()
+        .lock()
+        .map_err(|_| "embedded resource catalog mutex poisoned")?;
+    let catalog = slot
+        .as_ref()
+        .ok_or_else(|| "embedded resource catalog is not initialized".to_string())?;
+    if catalog.project_root != root {
+        return Err("cached text belongs to a different project".to_string());
+    }
+    let run = catalog
+        .text_runs
+        .iter()
+        .find(|run| run.handle == handle)
+        .ok_or_else(|| format!("cached text handle {handle} was not loaded"))?;
+    let font = catalog
+        .fonts
+        .iter()
+        .find(|font| font.handle == run.font)
+        .ok_or_else(|| format!("font handle {} was not loaded", run.font))?;
+    Ok(serde_json::json!({
+        "status": "ok",
+        "handle": run.handle,
+        "font": font.handle,
+        "font_path": font.path,
+        "font_size": font.size,
+        "text": run.text,
+        "measured_width": run.measured_width,
+    }))
+}
+
+fn resolve_embedded_font(project_root: &Path, handle: i32) -> Result<serde_json::Value, String> {
+    let root = project_root
+        .canonicalize()
+        .map_err(|error| format!("invalid project root: {error}"))?;
+    let slot = embedded_resource_catalog()
+        .lock()
+        .map_err(|_| "embedded resource catalog mutex poisoned")?;
+    let catalog = slot
+        .as_ref()
+        .ok_or_else(|| "embedded resource catalog is not initialized".to_string())?;
+    if catalog.project_root != root {
+        return Err("font belongs to a different project".to_string());
+    }
+    let font = catalog
+        .fonts
+        .iter()
+        .find(|font| font.handle == handle)
+        .ok_or_else(|| format!("font handle {handle} was not loaded"))?;
+    Ok(serde_json::json!({
+        "status": "ok",
+        "handle": font.handle,
+        "font_path": font.path,
+        "font_size": font.size,
+    }))
+}
+
+fn run_android_workshop_tick_internal(
+    project_root: impl AsRef<Path>,
+    entry_file: impl AsRef<Path>,
+    input: AndroidBridgeTickInput,
+    read_legacy_render_commands: bool,
 ) -> Result<AndroidBridgeRunTickResult, String> {
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
@@ -503,10 +873,12 @@ pub fn run_android_workshop_tick(
         if swapped_code {
             recompiled = true;
         }
+        write_production_host_frame(session, input)?;
         let initialized = if session.initialized {
             false
         } else {
             execute_lifecycle_noarg(&session.jit, "main")?;
+            take_embedded_resource_error()?;
             session.initialized = true;
             true
         };
@@ -528,9 +900,19 @@ pub fn run_android_workshop_tick(
         execute_lifecycle_noarg(&session.jit, "tick")?;
         session.tick_count = session.tick_count.saturating_add(1);
         execute_optional_lifecycle_noarg(&session.jit, "render")?;
+        take_embedded_resource_error()?;
         let observed_game_tick_count = session.jit.read_i32_global_path("GameState.tick_count");
-        let render_command_count = session.jit.read_i32_global_path("Render.command_count");
-        let render_commands = read_render_commands(&session.jit);
+        let (render_command_count, render_commands) = if read_legacy_render_commands {
+            (
+                session.jit.read_i32_global_path("Render.command_count"),
+                read_render_commands(&session.jit),
+            )
+        } else {
+            (
+                0,
+                [AndroidBridgeRenderCommand::default(); ANDROID_RENDER_COMMAND_CAPACITY],
+            )
+        };
         if should_write_jit_runtime_state(session.tick_count, initialized, recompiled) {
             write_jit_runtime_state(
                 project_root,
@@ -550,6 +932,84 @@ pub fn run_android_workshop_tick(
             render_commands,
         })
     })
+}
+
+fn hash_global_path(path: &str) -> i32 {
+    let mut hash = 2_166_136_261u32;
+    for byte in path.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash as i32
+}
+
+fn write_production_host_frame(
+    session: &mut AndroidRuntimeSession,
+    input: AndroidBridgeTickInput,
+) -> Result<(), String> {
+    const HOST_I32_COUNT: i32 = 768;
+    const HOST_F32_COUNT: i32 = 64;
+    const POINTER_I32_BASE: usize = 544;
+    let host_i32_ptr = stasis_dynload::stasis_jit_global_i32_array_ptr(
+        hash_global_path("host_i32"),
+        0,
+        HOST_I32_COUNT,
+    );
+    let host_f32_ptr = stasis_dynload::stasis_jit_global_f32_array_ptr(
+        hash_global_path("host_f32"),
+        0,
+        HOST_F32_COUNT,
+    );
+    if host_i32_ptr.is_null() || host_f32_ptr.is_null() {
+        return Err("production host frame buffers were not registered".to_string());
+    }
+    let host_i32 = unsafe { std::slice::from_raw_parts_mut(host_i32_ptr, HOST_I32_COUNT as usize) };
+    let host_f32 = unsafe { std::slice::from_raw_parts_mut(host_f32_ptr, HOST_F32_COUNT as usize) };
+    let previous = session.previous_input;
+    let was_down = previous.is_some_and(|value| value.touch_active != 0);
+    let is_down = input.touch_active != 0;
+    host_i32[0] = stasis_dynload::stasis_get_time_ms();
+    host_i32[1] = input.screen_w;
+    host_i32[2] = input.screen_h;
+    host_i32[3] = 0;
+    host_i32[4] = 0;
+    host_i32[5] = input.screen_w;
+    host_i32[6] = input.screen_h;
+    host_i32[7] = 1;
+    host_i32[8] = 0;
+    host_i32[9] = 0;
+    host_i32[10] = session.tick_count;
+    host_i32[11] = 0;
+    host_i32[12] = input.screen_w;
+    host_i32[13] = input.screen_h;
+    host_i32[14] = 1;
+    host_i32[15] = 0;
+    host_i32[16] = 60;
+    host_i32[17] = 1;
+    host_i32[18] = 0;
+    host_i32[19] = stasis_dynload::stasis_get_time_us();
+    host_i32[POINTER_I32_BASE] = 0;
+    host_i32[POINTER_I32_BASE + 1] = i32::from(is_down);
+    host_i32[POINTER_I32_BASE + 2] = i32::from(is_down && !was_down);
+    host_i32[POINTER_I32_BASE + 3] = i32::from(!is_down && was_down);
+    let previous_x = previous.map_or(input.touch_x, |value| value.touch_x);
+    let previous_y = previous.map_or(input.touch_y, |value| value.touch_y);
+    host_f32[0] = input.touch_x as f32;
+    host_f32[1] = input.touch_y as f32;
+    host_f32[2] = (input.touch_x - previous_x) as f32;
+    host_f32[3] = (input.touch_y - previous_y) as f32;
+    host_f32[4] = if input.screen_w > 0 {
+        input.touch_x as f32 / input.screen_w as f32
+    } else {
+        0.0
+    };
+    host_f32[5] = if input.screen_h > 0 {
+        input.touch_y as f32 / input.screen_h as f32
+    } else {
+        0.0
+    };
+    session.previous_input = Some(input);
+    Ok(())
 }
 
 fn with_initialized_runtime_session<R>(
@@ -610,6 +1070,7 @@ fn build_runtime_session(
     files: &[WorkshopSourceFile],
     source_fingerprint: u64,
 ) -> Result<AndroidRuntimeSession, String> {
+    install_embedded_resource_host(project_root)?;
     let mut jit = JitProcess::new();
     jit.set_local_runtime_helper_trampolines(true);
     configure_runtime_jit(&mut jit, project_root, files);
@@ -625,7 +1086,9 @@ fn build_runtime_session(
         jit,
         initialized: false,
         pending_candidate: None,
+        pending_resource_catalog: None,
         tick_count: 0,
+        previous_input: None,
     })
 }
 
@@ -659,6 +1122,7 @@ fn recompile_runtime_session(
     source_fingerprint: u64,
 ) -> Result<(), String> {
     session.pending_candidate = None;
+    session.pending_resource_catalog = None;
     let mut candidate = session.jit.staged_candidate();
     configure_runtime_jit(&mut candidate, project_root, files);
     if let Err(error) = candidate.compile_staged() {
@@ -668,7 +1132,9 @@ fn recompile_runtime_session(
             .unwrap_or_else(|| format!("Android JIT hot reload failed: {error:?}")));
     }
     candidate.validate_on_code_swap_signature()?;
+    let resource_catalog = prepare_embedded_resource_catalog(project_root, true)?;
     session.pending_candidate = Some(candidate);
+    session.pending_resource_catalog = Some(resource_catalog);
     session.source_fingerprint = source_fingerprint;
     Ok(())
 }
@@ -677,6 +1143,7 @@ fn activate_pending_runtime_candidate(session: &mut AndroidRuntimeSession) -> Re
     let Some(candidate) = session.pending_candidate.take() else {
         return Ok(false);
     };
+    let pending_catalog = session.pending_resource_catalog.take();
     let mut preview = plan_state_migration(
         &session.jit.state_layout(),
         &candidate.state_layout(),
@@ -685,8 +1152,16 @@ fn activate_pending_runtime_candidate(session: &mut AndroidRuntimeSession) -> Re
         None,
     )?;
     finalize_runtime_preview(&candidate, &mut preview);
+    let previous_catalog = if let Some(catalog) = pending_catalog {
+        let mut slot = embedded_resource_catalog()
+            .lock()
+            .map_err(|_| "embedded resource catalog mutex poisoned")?;
+        Some(slot.replace(catalog))
+    } else {
+        None
+    };
     let run_hook = session.initialized && candidate.has_on_code_swap();
-    activate_candidate_transactionally(
+    let activation = activate_candidate_transactionally(
         Some(&session.jit),
         &candidate,
         &preview,
@@ -699,7 +1174,19 @@ fn activate_pending_runtime_candidate(session: &mut AndroidRuntimeSession) -> Re
             }
         },
         Result::is_ok,
-    )??;
+    );
+    let activation_error = match activation {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) | Err(error) => Some(error),
+    };
+    if let Some(error) = activation_error {
+        if let Some(previous) = previous_catalog {
+            *embedded_resource_catalog()
+                .lock()
+                .map_err(|_| "embedded resource catalog mutex poisoned")? = previous;
+        }
+        return Err(error);
+    }
     session.jit = candidate;
     Ok(true)
 }
@@ -712,6 +1199,7 @@ fn discard_pending_runtime_candidate(project_root: &Path) {
             .filter(|session| session.project_root == project_root)
         {
             session.pending_candidate = None;
+            session.pending_resource_catalog = None;
         }
     });
 }
@@ -955,16 +1443,26 @@ pub extern "C" fn stasis_android_bridge_compile_project(
     project_root: *const c_char,
     entry_file: *const c_char,
 ) -> *mut c_char {
-    let result = unsafe { compile_project_from_c(project_root, entry_file) };
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        compile_project_from_c(project_root, entry_file)
+    }));
     let message = match result {
-        Ok(result) => format!(
+        Ok(Ok(result)) => format!(
             "CompilePlanned: reload={:?} status={} functions={} manifest={}",
             result.reload,
             result.status,
             result.function_artifact_count,
             result.manifest_path.display()
         ),
-        Err(error) => format!("CompileError: {error}"),
+        Ok(Err(error)) => format!("CompileError: {error}"),
+        Err(payload) => {
+            let panic_message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            format!("CompileError: panic while compiling Android project: {panic_message}")
+        }
     };
     CString::new(message)
         .unwrap_or_else(|_| CString::new("CompileError: invalid bridge message").unwrap())
@@ -1315,6 +1813,94 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame(
 }
 
 #[no_mangle]
+pub extern "C" fn stasis_android_bridge_run_tick_frame_v1(
+    project_root: *const c_char,
+    entry_file: *const c_char,
+    touch_x: i32,
+    touch_y: i32,
+    touch_active: i32,
+    screen_w: i32,
+    screen_h: i32,
+    out_i32: *mut i32,
+    out_i32_len: usize,
+    out_f32: *mut f32,
+    out_f32_len: usize,
+    out_u8: *mut u8,
+    out_u8_len: usize,
+) -> i32 {
+    if out_i32.is_null()
+        || out_f32.is_null()
+        || out_u8.is_null()
+        || out_i32_len < ANDROID_RENDER_V1_I32_CAPACITY
+        || out_f32_len < ANDROID_RENDER_V1_F32_CAPACITY
+        || out_u8_len < ANDROID_RENDER_V1_U8_CAPACITY
+    {
+        return -1;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        if project_root.is_null() || entry_file.is_null() {
+            return Err("null project root or entry file".to_string());
+        }
+        let project_root = CStr::from_ptr(project_root)
+            .to_str()
+            .map_err(|error| format!("project root was not UTF-8: {error}"))?;
+        let entry_file = CStr::from_ptr(entry_file)
+            .to_str()
+            .map_err(|error| format!("entry file was not UTF-8: {error}"))?;
+        run_android_workshop_tick_internal(
+            project_root,
+            entry_file,
+            AndroidBridgeTickInput {
+                touch_x,
+                touch_y,
+                touch_active,
+                screen_w,
+                screen_h,
+            },
+            false,
+        )?;
+        let i32_values = std::slice::from_raw_parts_mut(out_i32, out_i32_len);
+        let f32_values = std::slice::from_raw_parts_mut(out_f32, out_f32_len);
+        let u8_values = std::slice::from_raw_parts_mut(out_u8, out_u8_len);
+        stasis_dynload::copy_jit_render_v1_active(i32_values, f32_values, u8_values).map(|_| ())
+    }));
+    match result {
+        Ok(Ok(())) => {
+            LAST_FRAME_ERROR.with(|slot| *slot.borrow_mut() = None);
+            0
+        }
+        Ok(Err(error)) => {
+            LAST_FRAME_ERROR.with(|slot| *slot.borrow_mut() = Some(error));
+            unsafe {
+                *out_i32 = -1;
+            }
+            -1
+        }
+        Err(_) => {
+            LAST_FRAME_ERROR.with(|slot| {
+                *slot.borrow_mut() = Some("panic while running Android preview frame".to_string());
+            });
+            unsafe {
+                *out_i32 = -1;
+            }
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_last_frame_error() -> *mut c_char {
+    let message = LAST_FRAME_ERROR.with(|slot| {
+        slot.borrow()
+            .clone()
+            .unwrap_or_else(|| "native preview frame failed".to_string())
+    });
+    CString::new(message)
+        .unwrap_or_else(|_| CString::new("native preview frame failed").unwrap())
+        .into_raw()
+}
+
+#[no_mangle]
 pub extern "C" fn stasis_android_bridge_run_tick(
     project_root: *const c_char,
     entry_file: *const c_char,
@@ -1387,6 +1973,56 @@ pub extern "C" fn stasis_android_bridge_resolve_sprite_asset(
         "{\"status\":\"error\",\"error\":\"invalid sprite response\"}".to_string()
     });
     CString::new(message)
+        .unwrap_or_else(|_| CString::new("{\"status\":\"error\"}").unwrap())
+        .into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_resolve_cached_text(
+    project_root: *const c_char,
+    handle: i32,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        if project_root.is_null() {
+            return Err("null project root".to_string());
+        }
+        let root = CStr::from_ptr(project_root)
+            .to_str()
+            .map_err(|error| format!("project root was not UTF-8: {error}"))?;
+        resolve_embedded_text_run(Path::new(root), handle)
+    }));
+    let value = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => serde_json::json!({ "status": "error", "error": error }),
+        Err(_) => {
+            serde_json::json!({ "status": "error", "error": "panic while resolving cached text" })
+        }
+    };
+    CString::new(value.to_string())
+        .unwrap_or_else(|_| CString::new("{\"status\":\"error\"}").unwrap())
+        .into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_resolve_font(
+    project_root: *const c_char,
+    handle: i32,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        if project_root.is_null() {
+            return Err("null project root".to_string());
+        }
+        let root = CStr::from_ptr(project_root)
+            .to_str()
+            .map_err(|error| format!("project root was not UTF-8: {error}"))?;
+        resolve_embedded_font(Path::new(root), handle)
+    }));
+    let value = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => serde_json::json!({ "status": "error", "error": error }),
+        Err(_) => serde_json::json!({ "status": "error", "error": "panic while resolving font" }),
+    };
+    CString::new(value.to_string())
         .unwrap_or_else(|_| CString::new("{\"status\":\"error\"}").unwrap())
         .into_raw()
 }
@@ -1568,6 +2204,28 @@ mod tests {
         assert!(state.contains("status=RuntimeStateReady"));
         assert!(state.contains("tick_count=0"));
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bridge_uses_successful_jit_result_when_legacy_scan_misreads_from_field() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("production_jit_authoritative");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global GameState { from_file: i32; }\nfunction main(): void { GameState.from_file = 3; }\nfunction tick(): void { GameState.from_file += 1; }\n",
+        )
+        .expect("write source");
+
+        let result = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("production JIT compile");
+        assert_eq!(result.status, 0);
+        let manifest = fs::read_to_string(root.join("build/native_compile_manifest.txt"))
+            .expect("read manifest");
+        assert!(manifest.contains("errors=0"));
+
+        fs::remove_dir_all(root).ok();
+        clear_runtime_session_for_test();
     }
 
     #[test]
@@ -1819,7 +2477,9 @@ mod tests {
             jit: active,
             initialized: true,
             pending_candidate: Some(candidate),
+            pending_resource_catalog: None,
             tick_count: 0,
+            previous_input: None,
         };
 
         assert!(activate_pending_runtime_candidate(&mut session)
@@ -2085,12 +2745,14 @@ mod tests {
     }
     #[test]
     fn android_bridge_runs_bundled_stasis_tests() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../mobile/android/app/src/main/assets/workshop_sample")
             .canonicalize()
             .expect("bundled sample root");
         let result = run_android_workshop_stasis_tests(&root).expect("run bundled Stasis tests");
-        assert_eq!(result["passed"], 1);
+        assert_eq!(result["passed"], 1, "{result}");
         assert_eq!(result["failed"], 0);
         assert_eq!(result["all_passed"], true);
         assert_eq!(
@@ -2098,6 +2760,7 @@ mod tests {
             "tests/enemy_paddle_speed_schedule.test.stasis"
         );
         assert_eq!(result["results"][0]["line"], 3);
+        clear_runtime_session_for_test();
     }
 
     #[test]
@@ -2271,6 +2934,165 @@ function render(): void { Render.command_count = 1; Render.command0_kind = 1; Re
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 10], 0);
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 11], 0);
         assert_eq!(frame[ANDROID_RENDER_FRAME_HEADER_SIZE + 12], 0);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn c_bridge_run_tick_frame_v1_copies_only_production_active_spans() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("ffi_production_frame_tick");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global host_i32: i32[768];
+global host_f32: f32[64];
+global gfx_cmd_i32: i32[34848];
+global gfx_cmd_f32: f32[92292];
+global gfx_cmd_u8: u8[65536];
+function main(): void {}
+function tick(): void {}
+function render(): void {
+  gfx_cmd_i32[0] = 1196967473;
+  gfx_cmd_i32[1] = 1;
+  gfx_cmd_i32[2] = 3;
+  gfx_cmd_i32[3] = 1;
+  gfx_cmd_i32[4] = 1;
+  gfx_cmd_i32[7] = 1;
+  gfx_cmd_i32[9] = 2;
+  gfx_cmd_f32[0] = 0.1;
+  gfx_cmd_f32[4] = host_f32[0];
+  gfx_cmd_f32[5] = host_f32[1];
+  gfx_cmd_f32[6] = 30.0;
+  gfx_cmd_f32[7] = 40.0;
+  gfx_cmd_f32[8] = 1.0;
+  gfx_cmd_i32[32] = 77;
+  gfx_cmd_i32[33] = 11;
+  gfx_cmd_i32[28704] = 5;
+  gfx_cmd_i32[28705] = 0;
+  gfx_cmd_i32[28706] = 1;
+  gfx_cmd_f32[80004] = 12.0;
+  gfx_cmd_u8[0] = 65;
+  gfx_cmd_u8[1] = 0;
+}
+",
+        )
+        .expect("write production source");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let mut frame_i32 = vec![0i32; ANDROID_RENDER_V1_I32_CAPACITY];
+        let mut frame_f32 = vec![0.0f32; ANDROID_RENDER_V1_F32_CAPACITY];
+        let mut frame_u8 = vec![0u8; ANDROID_RENDER_V1_U8_CAPACITY];
+        let status = stasis_android_bridge_run_tick_frame_v1(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            17,
+            23,
+            1,
+            360,
+            640,
+            frame_i32.as_mut_ptr(),
+            frame_i32.len(),
+            frame_f32.as_mut_ptr(),
+            frame_f32.len(),
+            frame_u8.as_mut_ptr(),
+            frame_u8.len(),
+        );
+        assert_eq!(status, 0);
+        assert_eq!(&frame_i32[..5], &[1196967473, 1, 3, 1, 1]);
+        assert_eq!(frame_i32[32], 77);
+        assert_eq!(frame_i32[33], 11);
+        assert_eq!(&frame_i32[28704..28707], &[5, 0, 1]);
+        assert_eq!(frame_f32[4], 17.0);
+        assert_eq!(frame_f32[5], 23.0);
+        assert_eq!(frame_f32[80004], 12.0);
+        assert_eq!(&frame_u8[..2], &[65, 0]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn c_bridge_reports_resource_load_failure_for_runtime_ui() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("ffi_resource_error");
+        fs::write(
+            root.join("src/main.stasis"),
+            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+global host_i32: i32[768];
+global host_f32: f32[64];
+global gfx_cmd_i32: i32[34848];
+global gfx_cmd_f32: f32[92292];
+global gfx_cmd_u8: u8[65536];
+function main(): void { gfx_load_sprite(\"../assets/missing.svg\", 32, 32); }
+function tick(): void {}
+function render(): void {}
+",
+        )
+        .expect("write source");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let mut i32_values = vec![0; ANDROID_RENDER_V1_I32_CAPACITY];
+        let mut f32_values = vec![0.0; ANDROID_RENDER_V1_F32_CAPACITY];
+        let mut u8_values = vec![0; ANDROID_RENDER_V1_U8_CAPACITY];
+        let status = stasis_android_bridge_run_tick_frame_v1(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            0,
+            0,
+            0,
+            360,
+            640,
+            i32_values.as_mut_ptr(),
+            i32_values.len(),
+            f32_values.as_mut_ptr(),
+            f32_values.len(),
+            u8_values.as_mut_ptr(),
+            u8_values.len(),
+        );
+        assert_eq!(status, -1);
+        let error_ptr = stasis_android_bridge_last_frame_error();
+        let error = unsafe { CStr::from_ptr(error_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        stasis_android_bridge_free_string(error_ptr);
+        assert!(
+            error.contains("render resource error"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("missing.svg"), "unexpected error: {error}");
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn embedded_resource_refresh_preserves_loaded_font_handles() {
+        let _guard = bridge_runtime_test_guard();
+        let root = temp_project("embedded_resource_refresh");
+        install_embedded_resource_host(&root).expect("install embedded resource host");
+        {
+            let mut slot = embedded_resource_catalog()
+                .lock()
+                .expect("resource catalog lock");
+            let catalog = slot.as_mut().expect("installed resource catalog");
+            catalog.fonts.push(EmbeddedFont {
+                handle: 1,
+                path: root.join("assets/font.ttf"),
+                size: 18,
+            });
+            catalog.text_runs.push(EmbeddedTextRun {
+                handle: 1,
+                font: 1,
+                text: "refresh".to_string(),
+                measured_width: 75.6,
+            });
+        }
+
+        let refreshed = prepare_embedded_resource_catalog(&root, true)
+            .expect("prepare refreshed embedded resource catalog");
+
+        assert_eq!(refreshed.fonts.len(), 1);
+        assert_eq!(refreshed.fonts[0].handle, 1);
+        assert_eq!(refreshed.text_runs.len(), 1);
+        assert_eq!(refreshed.text_runs[0].text, "refresh");
         fs::remove_dir_all(&root).ok();
     }
 

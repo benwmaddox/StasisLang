@@ -1811,8 +1811,12 @@ pub(crate) fn declare_runtime_helper(
                 return Err(format!("missing runtime helper address for {symbol}"));
             }
             let local_symbol = format!("__stasis_runtime_helper_{symbol}");
+            // Preemptible deliberately marks the helper as non-colocated. On AArch64,
+            // Cranelift then emits an address load plus an indirect call instead of a
+            // range-limited BL relocation. The helper is still defined in this private
+            // JIT module; the linkage only controls the generated call sequence.
             module
-                .declare_function(&local_symbol, Linkage::Local, &signature)
+                .declare_function(&local_symbol, Linkage::Preemptible, &signature)
                 .map_err(|error| {
                     format!("failed to declare runtime helper trampoline {symbol}: {error}")
                 })
@@ -2181,6 +2185,7 @@ pub(crate) fn declare_extern_call_imports(
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<BTreeMap<ExternImportKey, FuncId>, String> {
     let mut out = BTreeMap::new();
     for signatures in call_signatures.values() {
@@ -2213,14 +2218,14 @@ pub(crate) fn declare_extern_call_imports(
                         type_table,
                     )?));
             }
-            let func_id = module
-                .declare_function(symbol, Linkage::Import, &clif_signature)
-                .map_err(|error| {
+            let func_id = declare_runtime_helper(module, symbol, clif_signature, linkage).map_err(
+                |error| {
                     format!(
                         "failed to declare extern import '{}' with params {:?} return {}: {}",
                         symbol, signature.params, signature.return_type, error
                     )
-                })?;
+                },
+            )?;
             out.insert(key, func_id);
         }
     }
@@ -9840,6 +9845,7 @@ pub(crate) fn build_runtime_call_import_ids(
             call_signatures,
             type_table,
             named_struct_field_types,
+            linkage,
         )?,
     })
 }
