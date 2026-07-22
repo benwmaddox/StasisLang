@@ -35,10 +35,6 @@ android {
         versionCode 1
         versionName '0.1.0'
 
-        ndk {
-            abiFilters 'arm64-v8a'
-        }
-
         externalNativeBuild {
             cmake {
                 arguments '-DSTASIS_ANDROID_SMOKE_ONLY=ON'
@@ -55,6 +51,9 @@ android {
         workshop {
             dimension 'mode'
             applicationId 'com.stasislang.workshop'
+            ndk {
+                abiFilters 'arm64-v8a', 'x86_64'
+            }
             manifestPlaceholders = [appLabel: 'Stasis Workshop']
             buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'false'
             buildConfigField 'String', 'STASIS_GAME_ID', '""'
@@ -68,6 +67,9 @@ android {
         published {
             dimension 'mode'
             applicationId publishedGame.applicationId
+            ndk {
+                abiFilters 'arm64-v8a'
+            }
             manifestPlaceholders = [appLabel: publishedGame.label]
             buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'true'
             buildConfigField 'String', 'STASIS_GAME_ID', "\"${publishedGame.id}\""

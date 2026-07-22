@@ -2,6 +2,7 @@ param(
     [string]$AndroidHome = "",
     [string]$NdkVersion = "",
     [int]$MinSdk = 26,
+    [string[]]$Abis = @("arm64-v8a", "x86_64"),
     [switch]$Release
 )
 
@@ -32,18 +33,8 @@ $ndkRoot = if ($NdkVersion) {
 }
 
 $prebuilt = Join-Path $ndkRoot "toolchains\llvm\prebuilt\windows-x86_64"
-$linker = Join-Path $prebuilt "bin\aarch64-linux-android$MinSdk-clang.cmd"
-if (-not (Test-Path $linker)) {
-    throw "Android linker not found: $linker"
-}
-
 $installedTargets = & rustup target list --installed
 if ($LASTEXITCODE -ne 0) { throw "rustup target discovery failed with exit code $LASTEXITCODE" }
-if ($installedTargets -notcontains "aarch64-linux-android") {
-    throw "Rust target aarch64-linux-android is not installed. Run: rustup target add aarch64-linux-android"
-}
-
-$env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = $linker
 $env:CARGO_INCREMENTAL = "0"
 $profileArgs = @()
 $profileDir = "debug"
@@ -52,21 +43,37 @@ if ($Release) {
     $profileDir = "release"
 }
 
-Push-Location $repoRoot
-try {
-    cargo build -p stasis_android_bridge --target aarch64-linux-android @profileArgs
-    if ($LASTEXITCODE -ne 0) { throw "Rust Android bridge build failed with exit code $LASTEXITCODE" }
-} finally {
-    Pop-Location
+$targets = @{
+    "arm64-v8a" = @{ Rust = "aarch64-linux-android"; Clang = "aarch64-linux-android" }
+    "x86_64" = @{ Rust = "x86_64-linux-android"; Clang = "x86_64-linux-android" }
 }
 
-$source = Join-Path $repoRoot "target\aarch64-linux-android\$profileDir\libstasis_android_bridge.so"
-if (-not (Test-Path $source)) {
-    throw "Rust bridge output was not produced: $source"
-}
+foreach ($abi in $Abis) {
+    $target = $targets[$abi]
+    if (-not $target) { throw "Unsupported Android ABI: $abi" }
+    $rustTarget = $target.Rust
+    $linker = Join-Path $prebuilt "bin\$($target.Clang)$MinSdk-clang.cmd"
+    if (-not (Test-Path $linker)) { throw "Android linker not found: $linker" }
+    if ($installedTargets -notcontains $rustTarget) {
+        throw "Rust target $rustTarget is not installed. Run: rustup target add $rustTarget"
+    }
 
-$destDir = Join-Path $scriptRoot "app\src\workshop\jniLibs\arm64-v8a"
-New-Item -ItemType Directory -Force $destDir | Out-Null
-$dest = Join-Path $destDir "libstasis_android_bridge.so"
-Copy-Item -Force $source $dest
-Write-Host "Packaged Rust Android bridge: $dest"
+    $linkerVariable = "CARGO_TARGET_$($rustTarget.ToUpperInvariant().Replace('-', '_'))_LINKER"
+    Set-Item -Path "Env:$linkerVariable" -Value $linker
+
+    Push-Location $repoRoot
+    try {
+        cargo build -p stasis_android_bridge --target $rustTarget @profileArgs
+        if ($LASTEXITCODE -ne 0) { throw "Rust Android bridge build failed with exit code $LASTEXITCODE" }
+    } finally {
+        Pop-Location
+    }
+
+    $source = Join-Path $repoRoot "target\$rustTarget\$profileDir\libstasis_android_bridge.so"
+    if (-not (Test-Path $source)) { throw "Rust bridge output was not produced: $source" }
+    $destDir = Join-Path $scriptRoot "app\src\workshop\jniLibs\$abi"
+    New-Item -ItemType Directory -Force $destDir | Out-Null
+    $dest = Join-Path $destDir "libstasis_android_bridge.so"
+    Copy-Item -Force $source $dest
+    Write-Host "Packaged Rust Android bridge: $dest"
+}

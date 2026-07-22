@@ -5,7 +5,7 @@ This is the first checked-in Android app shell for the `android` branch.
 Current scope:
 
 - Builds one Android app module with `workshop` and `published` product flavors.
-- Targets `arm64-v8a` only.
+- Targets `arm64-v8a` devices and `x86_64` Android emulators for Workshop debug builds. Published builds remain arm64-only.
 - Loads a tiny native C library through JNI.
 - Bundles the default Exploration Garden tutorial plus Pong as independently identified Workshop templates.
 - Opens the native Android symbol browser and source editor from a top-right hamburger overlay grouped by Main, Structs, Systems, and Root.
@@ -100,6 +100,24 @@ Record a bounded device acceptance launch for the workshop APK:
 ```
 
 Use `-Published` for the published debug package. Without `-RequireDevice`, an unavailable phone/emulator writes an explicit skipped JSON record under `artifacts/android_device_acceptance/` and exits successfully; CI or a release gate should use `-RequireDevice`.
+
+## Local Emulator
+
+The standard local AVD is `Stasis_API_35`, backed by the API 35 Google APIs x86_64 image. Install and create it once from PowerShell:
+
+```powershell
+& "$env:ANDROID_HOME\cmdline-tools\latest\bin\sdkmanager.bat" --install "emulator" "system-images;android-35;google_apis;x86_64"
+"no" | & "$env:ANDROID_HOME\cmdline-tools\latest\bin\avdmanager.bat" create avd --force --name Stasis_API_35 --package "system-images;android-35;google_apis;x86_64" --device pixel_7
+rustup target add x86_64-linux-android
+```
+
+Then build, install, launch, and record the normal Workshop acceptance check without a phone:
+
+```powershell
+.\test_emulator.ps1
+```
+
+Pass `-Headless` for unattended runs or `-SkipBuild` to relaunch and validate an APK that is already installed. `start_emulator.ps1` can also be used independently. Workshop validation prefers an attached emulator when both an emulator and phone are connected; pass `-Serial` to `validate_device.ps1` to select explicitly.
 
 ## Host AI Run Review
 

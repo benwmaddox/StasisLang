@@ -106,16 +106,19 @@ def main() -> int:
 
     rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
     debug_script = read("mobile/android/build_debug.ps1")
+    emulator_script = read("mobile/android/start_emulator.ps1")
+    emulator_test_script = read("mobile/android/test_emulator.ps1")
     assert "Workshop Android Gradle build failed with exit code" in debug_script
     assert "Rust Android bridge build failed with exit code" in rust_bridge_script
     assert "rustup target discovery failed with exit code" in rust_bridge_script
     published_script = read("mobile/android/build_published.ps1")
     device_script = read("mobile/android/validate_device.ps1")
     android_gitignore = read("mobile/android/.gitignore")
-    assert "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER" in rust_bridge_script
+    assert 'linkerVariable = "CARGO_TARGET_' in rust_bridge_script
     assert "aarch64-linux-android" in rust_bridge_script
+    assert "x86_64-linux-android" in rust_bridge_script
     assert "libstasis_android_bridge.so" in rust_bridge_script
-    assert "app\\src\\workshop\\jniLibs\\arm64-v8a" in rust_bridge_script
+    assert '"app\\src\\workshop\\jniLibs\\$abi"' in rust_bridge_script
     assert "build_rust_bridge.ps1" in debug_script
     assert ":app:assembleWorkshopDebug" in debug_script
     assert ":app:assemblePublishedRelease" in published_script
@@ -131,6 +134,13 @@ def main() -> int:
     assert "arm64-v8a" in device_script
     assert "am\", \"start\", \"-W" in device_script
     assert "pidof" in device_script
+    assert "$appPid" in device_script
+    assert "$pid =" not in device_script
+    assert "Serial" in device_script
+    assert "Stasis_API_35" in emulator_script
+    assert "sys.boot_completed" in emulator_script
+    assert "build_debug.ps1" in emulator_test_script
+    assert "validate_device.ps1" in emulator_test_script
 
     app_gradle = read("mobile/android/app/build.gradle")
     pong_descriptor = read("mobile/android/games/pong.gradle")
@@ -151,6 +161,7 @@ def main() -> int:
     assert "assetManifest: 'assets/manifest.json'" in pong_descriptor
     assert "STASIS_PUBLISHED_BUILD" in app_gradle
     assert "abiFilters 'arm64-v8a'" in app_gradle
+    assert "abiFilters 'arm64-v8a', 'x86_64'" in app_gradle
     assert "externalNativeBuild" in app_gradle
     assert "STASIS_ANDROID_SMOKE_ONLY=ON" in app_gradle
     assert "generatePublishedAotBundle" in app_gradle
