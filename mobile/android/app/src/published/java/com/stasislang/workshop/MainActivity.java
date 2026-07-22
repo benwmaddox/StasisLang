@@ -103,14 +103,14 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
-        if (frameLoop != null) frameHandler.removeCallbacks(frameLoop);
+        stopFrameLoop();
         if (gameSurface != null) gameSurface.onHostPause();
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
-        if (frameLoop != null) frameHandler.removeCallbacks(frameLoop);
+        stopFrameLoop();
         super.onDestroy();
     }
 
@@ -147,6 +147,12 @@ public final class MainActivity extends Activity {
             }
         };
         frameHandler.post(frameLoop);
+    }
+
+    private void stopFrameLoop() {
+        if (frameLoop == null) return;
+        frameHandler.removeCallbacks(frameLoop);
+        frameLoop = null;
     }
 
     private void runFrame() {
