@@ -274,8 +274,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         textures.onFrameStart();
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
-        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        clearLetterboxBars();
         GLES20.glViewport(displayViewport.x,
                 surfaceHeight - displayViewport.y - displayViewport.height,
                 displayViewport.width, displayViewport.height);
@@ -293,6 +292,25 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         drawSprites(clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES));
         drawText(clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT),
                 clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY));
+    }
+
+    private void clearLetterboxBars() {
+        int right = displayViewport.x + displayViewport.width;
+        int bottom = displayViewport.y + displayViewport.height;
+        GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        clearScissorRect(0, 0, displayViewport.x, surfaceHeight);
+        clearScissorRect(right, 0, surfaceWidth - right, surfaceHeight);
+        clearScissorRect(0, 0, surfaceWidth, surfaceHeight - bottom);
+        clearScissorRect(0, surfaceHeight - displayViewport.y,
+                surfaceWidth, displayViewport.y);
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+    }
+
+    private static void clearScissorRect(int x, int y, int width, int height) {
+        if (width <= 0 || height <= 0) return;
+        GLES20.glScissor(x, y, width, height);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
     }
 
     private void updateDisplayMetrics() {
