@@ -57,6 +57,11 @@ A single refinement that discouraged repeated validation and generated-output in
 passed 4/4, but regressed to 329.7 seconds, 48 actions, and an estimated $1.298, so the instruction
 was not retained.
 
+A final generalist attempt added a narrow stop condition after atomic edit validation and the final
+diff audit. It still passed 4/4 and improved slightly to 288.4 seconds and 46 actions, but input
+rose to 1,336,968 tokens and estimated weighted cost regressed to $1.333. The stop instruction was
+therefore not retained; the existing guide remains the better overall-cost configuration.
+
 ## Next provider target
 
 Built-in Stasis AI remains faster and consumes far fewer raw input tokens, but its medium result
