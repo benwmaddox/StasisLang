@@ -96,6 +96,12 @@ in each turn, such as reading a related set of functions after targeted discover
 observations are bounded to 1 MiB; this supports substantial explicit source reads without making
 whole-project enumeration the default behavior.
 
+Provider requests use JSONL: one immutable request-header record followed by append-only
+`turn_result` records. Each model response and its tool observations appear exactly once, including
+completion-gate feedback. Every later payload is the complete previous payload byte-for-byte plus
+one newline and one new record, so provider prefix caching can reuse the stable instruction,
+context, tools, contract, and prior interactions.
+
 The current key map is:
 
 ```text

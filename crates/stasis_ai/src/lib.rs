@@ -14,6 +14,7 @@ pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 pub const DEFAULT_REASONING_EFFORT: &str = "medium";
 pub const MAX_OBSERVATION_BYTES: usize = 1024 * 1024;
+const AGENT_INSTRUCTION: &str = "Use only the supplied Stasis tools. The first JSONL record is the immutable request header; every following record is the authoritative append-only transcript of an earlier model response and its tool observations. Do not repeat completed inspection or validation. Start discovery narrowly instead of enumerating the whole project. Once relevant symbols are identified, batch related read_symbol or other independent tool calls in one turn when useful. Call find_references for behavior-bearing symbols before writing. For an observable requested behavior, call validate_runtime_state with the target requirements and expected_outcome=fail before writing, then the identical baseline, requirements, and frames with expected_outcome=pass after writing. Use baseline=fresh for startup/reset or integration-style behavior and baseline=live when the current running state matters. If the before check already passes, report that the request is already satisfied without rewriting it. Return done after any edit reports compilation/tests passed and the green validation passes. Return exactly one JSON object matching the response contract.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -95,8 +96,20 @@ pub enum AgentEvent {
     Completed(String),
 }
 
+#[derive(Serialize)]
+struct ModelRequestHeader<'a> {
+    record: &'static str,
+    schema_version: u32,
+    role: &'static str,
+    instruction: &'static str,
+    user_prompt: &'a str,
+    initial_context: &'a Value,
+    tool_specs: &'a [ToolSpec],
+    response_contract: &'a Value,
+}
+
 pub trait ModelProvider {
-    fn respond(&mut self, request: &Value, canceled: &AtomicBool) -> Result<ModelResponse, String>;
+    fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String>;
 
     fn take_usage(&mut self) -> Option<Value> {
         None
@@ -132,8 +145,18 @@ where
         .iter()
         .map(|spec| spec.tool.as_str())
         .collect::<BTreeSet<_>>();
-    let mut observations = Vec::<ToolObservation>::new();
-    let mut conversation_history = Vec::<Value>::new();
+    let response_contract = response_contract();
+    let mut request = serde_json::to_string(&ModelRequestHeader {
+        record: "request",
+        schema_version: 1,
+        role: "Stasis live-workspace coding agent",
+        instruction: AGENT_INSTRUCTION,
+        user_prompt,
+        initial_context: &initial_context,
+        tool_specs: &tool_specs,
+        response_contract: &response_contract,
+    })
+    .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?;
     for turn in 1..=MAX_AGENT_TURNS {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
@@ -141,16 +164,6 @@ where
         emit(AgentEvent::Turn {
             current: turn,
             maximum: MAX_AGENT_TURNS,
-        });
-        let request = json!({
-            "role": "Stasis live-workspace coding agent",
-            "instruction": "Use only the supplied Stasis tools. Treat conversation_history as the authoritative record of your earlier tool calls and their results; do not repeat completed inspection or validation. Start discovery narrowly instead of enumerating the whole project. Once relevant symbols are identified, batch related read_symbol or other independent tool calls in one turn when useful. Call find_references for behavior-bearing symbols before writing. For an observable requested behavior, call validate_runtime_state with the target requirements and expected_outcome=fail before writing, then the identical baseline, requirements, and frames with expected_outcome=pass after writing. Use baseline=fresh for startup/reset or integration-style behavior and baseline=live when the current running state matters. If the before check already passes, report that the request is already satisfied without rewriting it. Return done after any edit reports compilation/tests passed and the green validation passes. Return exactly one JSON object matching the response contract.",
-            "user_prompt": user_prompt,
-            "initial_context": initial_context,
-            "tool_specs": tool_specs,
-            "conversation_history": conversation_history,
-            "observations": observations,
-            "response_contract": response_contract(),
         });
         let response = provider.respond(&request, canceled)?;
         if let Some(usage) = provider.take_usage() {
@@ -165,8 +178,9 @@ where
         match response {
             ModelResponse::Done { summary, .. } => {
                 if let Err(error) = executor.validate_completion() {
-                    observations = vec![ToolObservation::error("completion_gate", error)];
+                    let observations = vec![ToolObservation::error("completion_gate", error)];
                     emit(AgentEvent::Observations(observations.clone()));
+                    append_transcript_entry(&mut request, &response_record, &observations)?;
                     continue;
                 }
                 let summary = if summary.trim().is_empty() {
@@ -191,16 +205,29 @@ where
                     validate_tool_call(call, &tool_specs, &known_tools)?;
                 }
                 emit(AgentEvent::ToolBatch(tool_calls.clone()));
-                observations = bound_observations(executor.execute(&tool_calls, canceled));
+                let observations = bound_observations(executor.execute(&tool_calls, canceled));
                 emit(AgentEvent::Observations(observations.clone()));
-                conversation_history.push(json!({
-                    "response": response_record,
-                    "observations": observations,
-                }));
+                append_transcript_entry(&mut request, &response_record, &observations)?;
             }
         }
     }
     Err(format!("AI agent reached the {MAX_AGENT_TURNS}-turn limit"))
+}
+
+fn append_transcript_entry(
+    request: &mut String,
+    response: &Value,
+    observations: &[ToolObservation],
+) -> Result<(), String> {
+    let entry = serde_json::to_string(&json!({
+        "record": "turn_result",
+        "response": response,
+        "observations": observations,
+    }))
+    .map_err(|error| format!("failed encoding append-only AI transcript entry: {error}"))?;
+    request.push('\n');
+    request.push_str(&entry);
+    Ok(())
 }
 
 fn validate_working_notes(notes: &str) -> Result<(), String> {
@@ -372,7 +399,7 @@ fn default_codex_executable() -> PathBuf {
 }
 
 impl ModelProvider for CodexExecProvider {
-    fn respond(&mut self, request: &Value, canceled: &AtomicBool) -> Result<ModelResponse, String> {
+    fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String> {
         self.last_usage = None;
         let run = TemporaryRun::create()?;
         fs::write(
@@ -426,12 +453,11 @@ impl ModelProvider for CodexExecProvider {
             .take()
             .ok_or_else(|| "Codex stdout was unavailable".to_string())?;
         let usage_worker = std::thread::spawn(move || read_codex_usage(stdout));
-        let encoded = serde_json::to_vec(request).map_err(|error| error.to_string())?;
         child
             .stdin
             .take()
             .ok_or_else(|| "Codex stdin was unavailable".to_string())?
-            .write_all(&encoded)
+            .write_all(request.as_bytes())
             .map_err(|error| format!("failed sending Codex request: {error}"))?;
         loop {
             if canceled.load(Ordering::Acquire) {
@@ -564,7 +590,7 @@ mod tests {
     impl ModelProvider for Responses {
         fn respond(
             &mut self,
-            _request: &Value,
+            _request: &str,
             _canceled: &AtomicBool,
         ) -> Result<ModelResponse, String> {
             Ok(self.0.remove(0))
@@ -685,15 +711,15 @@ mod tests {
     fn later_turns_receive_prior_calls_and_observations() {
         struct RecordingResponses {
             responses: Vec<ModelResponse>,
-            requests: Vec<Value>,
+            requests: Vec<String>,
         }
         impl ModelProvider for RecordingResponses {
             fn respond(
                 &mut self,
-                request: &Value,
+                request: &str,
                 _canceled: &AtomicBool,
             ) -> Result<ModelResponse, String> {
-                self.requests.push(request.clone());
+                self.requests.push(request.to_string());
                 Ok(self.responses.remove(0))
             }
         }
@@ -706,6 +732,14 @@ mod tests {
                     tool_calls: vec![ToolCall {
                         tool: "read_symbol".to_string(),
                         args: json!({"name": "tick"}),
+                    }],
+                },
+                ModelResponse::ToolCalls {
+                    working_notes: "Inspect one related symbol in the next batch.".to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![ToolCall {
+                        tool: "read_symbol".to_string(),
+                        args: json!({"name": "render"}),
                     }],
                 },
                 ModelResponse::Done {
@@ -727,21 +761,44 @@ mod tests {
         )
         .expect("agent");
 
-        assert_eq!(provider.requests.len(), 2);
-        assert_eq!(provider.requests[0]["conversation_history"], json!([]));
+        assert_eq!(provider.requests.len(), 3);
+        let header = serde_json::from_str::<Value>(&provider.requests[0]).expect("request header");
+        assert_eq!(header["record"], "request");
+        assert!(header.get("observations").is_none());
+        let first_entry = serde_json::from_str::<Value>(
+            provider.requests[1]
+                .lines()
+                .nth(1)
+                .expect("first transcript entry"),
+        )
+        .expect("transcript JSON");
         assert_eq!(
-            provider.requests[1]["conversation_history"][0]["response"]["tool_calls"][0]["args"]
-                ["name"],
+            first_entry["response"]["tool_calls"][0]["args"]["name"],
             "tick"
         );
-        assert_eq!(
-            provider.requests[1]["conversation_history"][0]["observations"][0]["result"]["ok"],
-            true
-        );
+        assert_eq!(first_entry["observations"][0]["result"]["ok"], true);
+        assert_eq!(provider.requests[2].lines().count(), 3);
+        assert!(provider.requests[1].starts_with(&format!("{}\n", provider.requests[0])));
+        assert!(provider.requests[2].starts_with(&format!("{}\n", provider.requests[1])));
     }
 
     #[test]
     fn completion_gate_returns_evidence_to_the_agent_before_finishing() {
+        struct RecordingResponses {
+            responses: Vec<ModelResponse>,
+            requests: Vec<String>,
+        }
+        impl ModelProvider for RecordingResponses {
+            fn respond(
+                &mut self,
+                request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.requests.push(request.to_string());
+                Ok(self.responses.remove(0))
+            }
+        }
+
         #[derive(Default)]
         struct GatedTools {
             ready: bool,
@@ -766,27 +823,30 @@ mod tests {
             }
         }
 
-        let mut provider = Responses(vec![
-            ModelResponse::Done {
-                working_notes: "Intent: finish. Observed: edit. Next: none. Blocker: none."
-                    .to_string(),
-                summary: "too early".to_string(),
-            },
-            ModelResponse::ToolCalls {
-                working_notes: "Intent: validate. Observed: gate. Next: check. Blocker: none."
-                    .to_string(),
-                summary: String::new(),
-                tool_calls: vec![ToolCall {
-                    tool: "run_tests".to_string(),
-                    args: json!({}),
-                }],
-            },
-            ModelResponse::Done {
-                working_notes: "Intent: finish. Observed: green. Next: none. Blocker: none."
-                    .to_string(),
-                summary: "verified".to_string(),
-            },
-        ]);
+        let mut provider = RecordingResponses {
+            responses: vec![
+                ModelResponse::Done {
+                    working_notes: "Intent: finish. Observed: edit. Next: none. Blocker: none."
+                        .to_string(),
+                    summary: "too early".to_string(),
+                },
+                ModelResponse::ToolCalls {
+                    working_notes: "Intent: validate. Observed: gate. Next: check. Blocker: none."
+                        .to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![ToolCall {
+                        tool: "run_tests".to_string(),
+                        args: json!({}),
+                    }],
+                },
+                ModelResponse::Done {
+                    working_notes: "Intent: finish. Observed: green. Next: none. Blocker: none."
+                        .to_string(),
+                    summary: "verified".to_string(),
+                },
+            ],
+            requests: Vec::new(),
+        };
         let mut tools = GatedTools::default();
         let mut saw_gate = false;
 
@@ -809,6 +869,17 @@ mod tests {
 
         assert_eq!(result, "verified");
         assert!(saw_gate);
+        let gate_entry = serde_json::from_str::<Value>(
+            provider.requests[1]
+                .lines()
+                .nth(1)
+                .expect("completion gate entry"),
+        )
+        .expect("completion gate JSON");
+        assert_eq!(gate_entry["observations"][0]["tool"], "completion_gate");
+        let header = serde_json::from_str::<Value>(provider.requests[1].lines().next().unwrap())
+            .expect("request header");
+        assert!(header.get("observations").is_none());
     }
 
     #[test]
@@ -894,12 +965,7 @@ mod tests {
         let mut provider = CodexExecProvider::default();
         let response = provider
             .respond(
-                &json!({
-                    "system": "Return a done response without calling tools.",
-                    "user_prompt": "Confirm the Stasis AI provider is connected.",
-                    "tool_specs": [],
-                    "observations": [],
-                }),
+                r#"{"system":"Return a done response without calling tools.","user_prompt":"Confirm the Stasis AI provider is connected.","tool_specs":[],"transcript":[]}"#,
                 &AtomicBool::new(false),
             )
             .expect("signed-in Codex response");
