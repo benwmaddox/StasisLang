@@ -1,6 +1,7 @@
 param(
     [switch]$Published,
     [switch]$Install,
+    [switch]$Lifecycle,
     [switch]$RequireDevice,
     [string]$Serial = "",
     [string]$OutputPath = ""
@@ -69,6 +70,8 @@ function Invoke-Adb([string[]]$Arguments) {
     return $result
 }
 
+$originalAutoRotation = $null
+$originalRotation = $null
 try {
     $model = (Invoke-Adb @("shell", "getprop", "ro.product.model") | Select-Object -First 1).Trim()
     $sdk = (Invoke-Adb @("shell", "getprop", "ro.build.version.sdk") | Select-Object -First 1).Trim()
@@ -81,6 +84,7 @@ try {
         Invoke-Adb @("install", "-r", $apk) | Out-Null
     }
 
+    Invoke-Adb @("logcat", "-c") | Out-Null
     Invoke-Adb @("shell", "am", "force-stop", $package) | Out-Null
     $launchOutput = Invoke-Adb @("shell", "am", "start", "-W", "-n", "$package/com.stasislang.workshop.MainActivity")
     Start-Sleep -Seconds 2
@@ -88,6 +92,34 @@ try {
     if (-not $appPid) { throw "Android package did not remain running after launch: $package" }
     $packageInfo = Invoke-Adb @("shell", "dumpsys", "package", $package)
     $versionName = ($packageInfo | Select-String -Pattern 'versionName=' | Select-Object -First 1).Line.Trim()
+
+    $lifecycleLog = @()
+    $restoreCount = 0
+    if ($Lifecycle) {
+        $originalAutoRotation = (Invoke-Adb @("shell", "settings", "get", "system", "accelerometer_rotation") | Select-Object -First 1).Trim()
+        $originalRotation = (Invoke-Adb @("shell", "settings", "get", "system", "user_rotation") | Select-Object -First 1).Trim()
+        Invoke-Adb @("shell", "settings", "put", "system", "accelerometer_rotation", "0") | Out-Null
+        Invoke-Adb @("shell", "settings", "put", "system", "user_rotation", "1") | Out-Null
+        Start-Sleep -Seconds 2
+        Invoke-Adb @("shell", "input", "keyevent", "KEYCODE_HOME") | Out-Null
+        Start-Sleep -Seconds 1
+        Invoke-Adb @("shell", "am", "start", "-W", "-n", "$package/com.stasislang.workshop.MainActivity") | Out-Null
+        Start-Sleep -Seconds 2
+        Invoke-Adb @("shell", "settings", "put", "system", "user_rotation", "0") | Out-Null
+        Start-Sleep -Seconds 2
+        Invoke-Adb @("shell", "am", "start", "-S", "-W", "-n", "$package/com.stasislang.workshop.MainActivity") | Out-Null
+        Start-Sleep -Seconds 2
+        $appPid = (Invoke-Adb @("shell", "pidof", $package) | Select-Object -First 1).Trim()
+        if (-not $appPid) { throw "Android package did not survive lifecycle acceptance: $package" }
+        $lifecycleLog = @(Invoke-Adb @("logcat", "-d", "-s", "StasisRenderer:I", "*:S"))
+        $restoreCount = @($lifecycleLog | Select-String -SimpleMatch "resources restored").Count
+        if ($restoreCount -lt 2) {
+            throw "renderer lifecycle emitted only $restoreCount successful restoration markers"
+        }
+        if ($lifecycleLog | Select-String -SimpleMatch "resource restore failed") {
+            throw "renderer lifecycle reported a restoration failure"
+        }
+    }
 
     Write-Report @{
         status = "passed"
@@ -99,6 +131,9 @@ try {
         pid = $appPid
         version = $versionName
         launch = @($launchOutput)
+        lifecycle = [bool]$Lifecycle
+        restoration_markers = $restoreCount
+        lifecycle_log = $lifecycleLog
     }
 } catch {
     Write-Report @{
@@ -108,4 +143,14 @@ try {
         reason = $_.Exception.Message
     }
     exit 1
+} finally {
+    if ($serial) {
+        if ($null -ne $originalAutoRotation) {
+            & $adb -s $serial shell settings put system accelerometer_rotation $originalAutoRotation | Out-Null
+        }
+        if ($null -ne $originalRotation) {
+            & $adb -s $serial shell settings put system user_rotation $originalRotation | Out-Null
+        }
+        & $adb -s $serial shell am force-stop $package | Out-Null
+    }
 }

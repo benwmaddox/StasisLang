@@ -119,7 +119,7 @@ Then build, install, launch, and record the normal Workshop acceptance check wit
 .\test_emulator.ps1
 ```
 
-Pass `-Headless` for unattended runs or `-SkipBuild` to relaunch and validate an APK that is already installed. `start_emulator.ps1` can also be used independently. Workshop validation prefers an attached emulator when both an emulator and phone are connected; pass `-Serial` to `validate_device.ps1` to select explicitly.
+Pass `-Headless` for unattended runs or `-SkipBuild` to relaunch and validate an APK that is already installed. The emulator gate rotates, backgrounds/resumes, and force-recreates Workshop, requires successful `StasisRenderer` resource restoration markers, and force-stops the app when finished. Pass `-Lifecycle` to `validate_device.ps1` for the same lifecycle matrix on an attached device. `start_emulator.ps1` can also be used independently. Workshop validation prefers an attached emulator when both an emulator and phone are connected; pass `-Serial` to `validate_device.ps1` to select explicitly.
 
 ## Host AI Run Review
 

@@ -440,6 +440,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (gamePreview != null) gamePreview.onHostResume();
         codexLoginLifecycle.onResume();
         refreshPhoneNativeCodexStatus();
         startNextQueuedAiIfIdle();
@@ -450,6 +451,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (gamePreview != null) gamePreview.onHostPause();
         codexLoginLifecycle.onPause();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
         gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
@@ -11586,6 +11588,17 @@ public final class MainActivity extends Activity {
 
         int touchActive() {
             return touchActive ? 1 : 0;
+        }
+
+        void onHostPause() {
+            renderer.onHostPaused();
+            onPause();
+        }
+
+        void onHostResume() {
+            onResume();
+            queueEvent(renderer::onHostResumed);
+            requestRender();
         }
 
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,

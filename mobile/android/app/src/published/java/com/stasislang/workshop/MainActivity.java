@@ -92,12 +92,25 @@ public final class MainActivity extends Activity {
         root.addView(runtimeError, errorParams);
 
         setContentView(root);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (gameSurface != null) gameSurface.onHostResume();
         startFrameLoop();
     }
 
     @Override
+    protected void onPause() {
+        stopFrameLoop();
+        if (gameSurface != null) gameSurface.onHostPause();
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
-        if (frameLoop != null) frameHandler.removeCallbacks(frameLoop);
+        stopFrameLoop();
         super.onDestroy();
     }
 
@@ -134,6 +147,12 @@ public final class MainActivity extends Activity {
             }
         };
         frameHandler.post(frameLoop);
+    }
+
+    private void stopFrameLoop() {
+        if (frameLoop == null) return;
+        frameHandler.removeCallbacks(frameLoop);
+        frameLoop = null;
     }
 
     private void runFrame() {
@@ -246,6 +265,17 @@ public final class MainActivity extends Activity {
         int touchX() { return touchX; }
         int touchY() { return touchY; }
         int touchActive() { return touchActive ? 1 : 0; }
+
+        void onHostPause() {
+            renderer.onHostPaused();
+            onPause();
+        }
+
+        void onHostResume() {
+            onResume();
+            queueEvent(renderer::onHostResumed);
+            requestRender();
+        }
 
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
                 int screenWidth, int screenHeight) {
