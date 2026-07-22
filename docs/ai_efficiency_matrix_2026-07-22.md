@@ -26,6 +26,8 @@ estimates.
 | Generalist | non-mutating format + geometry checks | small | 3/4 | 211.6 | 0.1 | 211.7 | 633,800 | 579,328 | 8,188 | 0.808 |
 | Generalist | explicit equality and adjacent threshold checks | small | 4/4 | 278.0 | 0.1 | 278.1 | 782,492 | 727,040 | 10,493 | 0.956 |
 | Generalist | explicit equality and adjacent threshold checks | medium | 4/4 | 201.0 | 0.1 | 201.1 | 652,734 | 596,480 | 8,670 | 0.840 |
+| Generalist | equality checks, one-word discovery | large | 4/4 | 261.1 | 0.1 | 261.2 | 969,217 | 907,008 | 10,163 | 1.069 |
+| Generalist | consolidated file-scoped discovery | large | 4/4 | 204.1 | 0.1 | 204.2 | 685,771 | 623,872 | 8,368 | 0.872 |
 | Built-in Stasis AI | current | small | 4/4 | 182.1 | 0.1 | 182.2 | 139,196 | 0 | 8,757 | 0.959 |
 | Built-in Stasis AI | current | medium | 2/4 | 127.2 | 0.1 | 127.3 | 140,125 | 12,032 | 5,726 | 0.818 |
 
@@ -40,6 +42,11 @@ gate.
 The guide now also uses `stasis fmt --check` instead of mutating whole-project formatting. In the
 original run, `stasis fmt` rewrote comment-only placeholder files unrelated to the request. The
 refined runs left those files unchanged and required a final changed-file audit.
+
+On the large fixture, replacing a series of one-word queries with one file-scoped function
+inventory preserved 4/4 acceptance while reducing agent time by 57.0 seconds, actions from 52 to
+34, input tokens by 29.2%, and estimated weighted cost by 18.4%. The trace also eliminated an
+invalid `--kind global` attempt by documenting the exact `globals` spelling.
 
 ## Next provider target
 

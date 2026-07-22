@@ -7,12 +7,17 @@ for normal project work.
 
 1. Start a code task with `stasis --json symbol list`. Without `--file`, this returns a compact,
    source-free index for the manifest entry file and its direct imports, plus their import map.
-2. Narrow follow-up discovery with `--query`, `--kind`, `--owner`, and repeated `--file` options.
-   Do not enumerate every project symbol or read whole source files by default.
-3. Read only likely targets with `stasis --json symbol read NAME` and disambiguate with `--file`,
+2. If that page is truncated or dominated by unrelated imports, use the import map to select the
+   likely implementation file. Prefer one file-scoped function inventory, for example
+   `stasis --json symbol list --file src/main.stasis --kind function`, over a series of one-word
+   queries. Request globals separately with the exact kind `--kind globals` only when state fields
+   matter. The accepted kinds are `imports`, `globals`, `struct`, `function`, and `test`.
+3. Otherwise, narrow follow-up discovery with `--query`, `--kind`, `--owner`, and repeated `--file`
+   options. Do not enumerate every project symbol or read whole source files by default.
+4. Read only likely targets with `stasis --json symbol read NAME` and disambiguate with `--file`,
    `--kind`, `--owner`, or `--signature`. Batch independent reads when the agent environment
    supports parallel tool calls; up to 50 deliberate reads in one turn is reasonable.
-4. Before changing behavior, run `stasis --json symbol references SYMBOL` for the relevant
+5. Before changing behavior, run `stasis --json symbol references SYMBOL` for the relevant
    function, global, or qualified field such as `GameState.paddle_y`. Inspect related callers,
    reads, and writes before editing.
 
