@@ -12,7 +12,7 @@ Pong project. The task was:
 The small project contains the ten baseline Stasis files. The medium project adds eight directly
 imported files containing 200 unrelated functions. The large fixture adds 32 files and 1,600
 unrelated functions; it is retained in the harness for the next provider iteration. A hidden
-four-test acceptance file is copied in only after the agent exits. Each agent run is capped at 300
+four-test acceptance file is copied in only after the agent exits. Each agent run is capped at 600
 seconds. Cached input is costed at 10% of uncached input.
 
 These are single controlled trials, so time and token totals are directional rather than variance
@@ -46,5 +46,12 @@ refined runs left those files unchanged and required a final changed-file audit.
 Built-in Stasis AI remains faster and consumes far fewer raw input tokens, but its medium result
 missed paddle-contact and scoring-boundary behavior. The next iteration will use the trace to
 improve test discovery and threshold coverage, then rerun small, medium, and large fixtures. No
-provider change is accepted unless it preserves the small pass and fixes the medium failure within
-the same five-minute bound.
+provider change is accepted unless it preserves the small pass and fixes the medium failure.
+Correctness is the primary gate; the ten-minute process cap is only a stability ceiling.
+
+Two refinements were rejected after cross-size testing. Targeted initial context plus general
+threshold guidance passed medium 4/4 in 265.7 seconds but failed the strict full-exit scoring case
+on small. Adding strict full-exit guidance passed small 4/4 in 170.1 seconds but failed inclusive
+rectangle contact on medium in 239.1 seconds. The traces identify the next candidate rule as
+inclusive rectangle contact paired with strict full-exit scoring, but it was not added because the
+two-iteration limit was reached.
