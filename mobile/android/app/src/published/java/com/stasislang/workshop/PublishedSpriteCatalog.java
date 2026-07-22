@@ -10,7 +10,6 @@ import android.opengl.GLES20;
 import android.opengl.GLUtils;
 import android.util.SparseArray;
 import android.util.SparseBooleanArray;
-import android.util.SparseIntArray;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -35,7 +34,7 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
     private final AssetManager assets;
     private final MainActivity activity;
     private final SparseArray<SpriteAsset> sprites = new SparseArray<>();
-    private final SparseIntArray textures = new SparseIntArray();
+    private final SparseArray<SpriteTexture> textures = new SparseArray<>();
     private final SparseBooleanArray failedHandles = new SparseBooleanArray();
     private final SparseArray<TextTexture> textTextures = new SparseArray<>();
     private final SparseArray<FontInfo> fonts = new SparseArray<>();
@@ -46,6 +45,12 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
     private float rasterScale = 1.0f;
     private int densityGeneration = -1;
     private final int[] deletedTexture = new int[1];
+    private int surfaceGeneration;
+    private int rendererGeneration;
+    private int fallbackSurfaceGeneration;
+    private int fallbackRendererGeneration;
+    private String lastFailure;
+    private String transitionReason = "none";
 
     PublishedSpriteCatalog(MainActivity activity, AssetManager assets) {
         this.activity = activity;
@@ -53,32 +58,49 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
     }
 
     @Override
-    public void onSurfaceCreated() {
-        textures.clear();
+    public void onResourceGenerationChanged(int nextSurfaceGeneration,
+            int nextRendererGeneration, boolean discardGpuHandles,
+            String nextTransitionReason) {
+        clearDensityTextures(!discardGpuHandles);
+        surfaceGeneration = nextSurfaceGeneration;
+        rendererGeneration = nextRendererGeneration;
+        transitionReason = nextTransitionReason;
+    }
+
+    @Override
+    public void beginRestoreAttempt() {
+        lastFailure = null;
         failedHandles.clear();
-        textTextures.clear();
-        fonts.clear();
-        dynamicTextTextures.clear();
-        fallbackTexture = createFallbackTexture();
+    }
+
+    @Override
+    public String consumeFailure() {
+        String failure = lastFailure;
+        lastFailure = null;
+        return failure;
     }
 
     @Override
     public void onDisplayMetricsChanged(float nextRasterScale, int nextDensityGeneration) {
         if (densityGeneration == nextDensityGeneration
                 && Math.abs(rasterScale - nextRasterScale) < 0.001f) return;
-        clearDensityTextures();
+        clearDensityTextures(true);
         rasterScale = nextRasterScale;
         densityGeneration = nextDensityGeneration;
     }
 
     @Override
     public int textureFor(int handle) {
-        int cached = textures.get(handle, 0);
-        if (cached != 0) return cached;
-        if (failedHandles.get(handle)) return fallbackTexture;
+        SpriteTexture cached = textures.get(handle);
+        if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)) {
+            return cached.texture;
+        }
+        if (cached != null) textures.remove(handle);
+        if (failedHandles.get(handle)) return fallbackTexture();
+        SpriteAsset sprite = null;
         try {
             ensureManifest();
-            SpriteAsset sprite = sprites.get(handle);
+            sprite = sprites.get(handle);
             if (!manifestValid || sprite == null) throw new IOException("sprite handle is not packaged");
             byte[] bytes = readAsset(ROOT + sprite.path, MAX_ASSET_BYTES);
             if (!sprite.sha256.equals(sha256(bytes))) throw new IOException("sprite content hash mismatch");
@@ -89,25 +111,44 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
             } finally {
                 bitmap.recycle();
             }
-            textures.put(handle, texture);
+            textures.put(handle, new SpriteTexture(
+                    texture, surfaceGeneration, rendererGeneration));
             return texture;
         } catch (Exception error) {
             failedHandles.put(handle, true);
-            activity.reportPreviewResourceError("sprite " + handle + ": " + error.getMessage());
-            return fallbackTexture;
+            recordFailure("sprite", handle,
+                    sprite == null ? ROOT : ROOT + sprite.path,
+                    sprite == null ? 0 : sprite.width,
+                    sprite == null ? 0 : sprite.height, error);
+            return fallbackTexture();
         }
     }
 
     @Override
     public int fallbackTexture() {
+        if (fallbackTexture == 0 || fallbackSurfaceGeneration != surfaceGeneration
+                || fallbackRendererGeneration != rendererGeneration) {
+            try {
+                fallbackTexture = createFallbackTexture();
+            } catch (IOException error) {
+                fallbackTexture = 0;
+                recordFailure("fallback", 0, "<procedural>", 2, 2, error);
+                return 0;
+            }
+            fallbackSurfaceGeneration = surfaceGeneration;
+            fallbackRendererGeneration = rendererGeneration;
+        }
         return fallbackTexture;
     }
 
     @Override
     public long cachedTextTextureFor(int runHandle) {
         TextTexture cached = textTextures.get(runHandle);
-        if (cached != null) return StasisPreviewRenderer.packTexture(
+        if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)) {
+            return StasisPreviewRenderer.packTexture(
                 cached.texture, cached.width, cached.height);
+        }
+        if (cached != null) textTextures.remove(runHandle);
         try {
             JSONObject resolved = new JSONObject(MainActivity.nativeResolveCachedText("", runHandle));
             if (!"ok".equals(resolved.optString("status"))) {
@@ -131,11 +172,12 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
             }
             cached = new TextTexture(texture,
                     Math.max(1, Math.round(width / rasterScale)),
-                    Math.max(1, Math.round(height / rasterScale)));
+                    Math.max(1, Math.round(height / rasterScale)),
+                    surfaceGeneration, rendererGeneration);
             textTextures.put(runHandle, cached);
             return StasisPreviewRenderer.packTexture(texture, cached.width, cached.height);
         } catch (Exception error) {
-            activity.reportPreviewResourceError("cached text " + runHandle + ": " + error.getMessage());
+            recordFailure("cached_text", runHandle, ROOT + "manifest.json", 0, 0, error);
             return 0L;
         }
     }
@@ -144,7 +186,8 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
     public long textTextureFor(int font, ByteBuffer utf8, int offset, int length) {
         for (int index = 0; index < dynamicTextTextures.size(); index += 1) {
             DynamicTextTexture cached = dynamicTextTextures.get(index);
-            if (cached.matches(font, utf8, offset, length)) {
+            if (cached.texture.matches(surfaceGeneration, rendererGeneration)
+                    && cached.matches(font, utf8, offset, length)) {
                 return StasisPreviewRenderer.packTexture(
                         cached.texture.texture, cached.texture.width, cached.texture.height);
             }
@@ -155,11 +198,12 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
             for (int index = 0; index < length; index += 1) bytes[index] = utf8.get(offset + index);
             FontInfo fontInfo = fontInfo(font);
             TextTexture texture = rasterText(
-                    fontInfo, new String(bytes, StandardCharsets.UTF_8), rasterScale);
+                    fontInfo, new String(bytes, StandardCharsets.UTF_8), rasterScale,
+                    surfaceGeneration, rendererGeneration);
             dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
             return StasisPreviewRenderer.packTexture(texture.texture, texture.width, texture.height);
         } catch (Exception error) {
-            activity.reportPreviewResourceError("text font " + font + ": " + error.getMessage());
+            recordFailure("text", font, ROOT + "manifest.json", 0, 0, error);
             return 0L;
         }
     }
@@ -178,7 +222,8 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
     }
 
     private static TextTexture rasterText(
-            FontInfo font, String text, float rasterScale) throws IOException {
+            FontInfo font, String text, float rasterScale,
+            int surfaceGeneration, int rendererGeneration) throws IOException {
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         paint.setColor(0xffffffff);
         paint.setTextSize(font.size * rasterScale);
@@ -196,24 +241,38 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
         }
         return new TextTexture(texture,
                 Math.max(1, Math.round(width / rasterScale)),
-                Math.max(1, Math.round(height / rasterScale)));
+                Math.max(1, Math.round(height / rasterScale)),
+                surfaceGeneration, rendererGeneration);
     }
 
-    private void clearDensityTextures() {
+    private void clearDensityTextures(boolean deleteGpuHandles) {
         for (int index = 0; index < textures.size(); index += 1) {
-            deleteTexture(textures.valueAt(index));
+            if (deleteGpuHandles) deleteTexture(textures.valueAt(index).texture);
         }
         textures.clear();
         failedHandles.clear();
         for (int index = 0; index < textTextures.size(); index += 1) {
-            deleteTexture(textTextures.valueAt(index).texture);
+            if (deleteGpuHandles) deleteTexture(textTextures.valueAt(index).texture);
         }
         textTextures.clear();
         for (DynamicTextTexture texture : dynamicTextTextures) {
-            deleteTexture(texture.texture.texture);
+            if (deleteGpuHandles) deleteTexture(texture.texture.texture);
         }
         dynamicTextTextures.clear();
-        fonts.clear();
+        if (fallbackTexture != 0 && deleteGpuHandles) deleteTexture(fallbackTexture);
+        fallbackTexture = 0;
+        fallbackSurfaceGeneration = 0;
+        fallbackRendererGeneration = 0;
+    }
+
+    private void recordFailure(String stage, int handle, String path,
+            int logicalWidth, int logicalHeight, Exception error) {
+        lastFailure = StasisPreviewRenderer.formatResourceFailure(stage, handle, path,
+                logicalWidth, logicalHeight,
+                Math.max(0, Math.round(logicalWidth * rasterScale)),
+                Math.max(0, Math.round(logicalHeight * rasterScale)),
+                surfaceGeneration, rendererGeneration, transitionReason, error.getMessage());
+        activity.reportPreviewResourceError(lastFailure);
     }
 
     private void deleteTexture(int texture) {
@@ -301,7 +360,7 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
         return names[0];
     }
 
-    private static int createFallbackTexture() {
+    private static int createFallbackTexture() throws IOException {
         ByteBuffer pixels = ByteBuffer.allocateDirect(16);
         pixels.put(new byte[]{(byte)255, 0, (byte)255, (byte)255, 35, 35, 35, (byte)255,
                 35, 35, 35, (byte)255, (byte)255, 0, (byte)255, (byte)255});
@@ -315,7 +374,12 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 2, 2, 0,
                 GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels);
+        int error = GLES20.glGetError();
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        if (!StasisPreviewRenderer.textureCreationSucceeded(names[0], error)) {
+            if (names[0] != 0) GLES20.glDeleteTextures(1, names, 0);
+            throw new IOException("fallback texture upload failed with GL error " + error);
+        }
         return names[0];
     }
 
@@ -388,15 +452,40 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
         }
     }
 
+    private static final class SpriteTexture {
+        final int texture;
+        final int surfaceGeneration;
+        final int rendererGeneration;
+
+        SpriteTexture(int texture, int surfaceGeneration, int rendererGeneration) {
+            this.texture = texture;
+            this.surfaceGeneration = surfaceGeneration;
+            this.rendererGeneration = rendererGeneration;
+        }
+
+        boolean matches(int surface, int renderer) {
+            return surfaceGeneration == surface && rendererGeneration == renderer;
+        }
+    }
+
     private static final class TextTexture {
         final int texture;
         final int width;
         final int height;
+        final int surfaceGeneration;
+        final int rendererGeneration;
 
-        TextTexture(int texture, int width, int height) {
+        TextTexture(int texture, int width, int height,
+                int surfaceGeneration, int rendererGeneration) {
             this.texture = texture;
             this.width = width;
             this.height = height;
+            this.surfaceGeneration = surfaceGeneration;
+            this.rendererGeneration = rendererGeneration;
+        }
+
+        boolean matches(int surface, int renderer) {
+            return surfaceGeneration == surface && rendererGeneration == renderer;
         }
     }
 

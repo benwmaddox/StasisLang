@@ -171,6 +171,12 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     endif()
     add_test(NAME stasis_display_scale_contract COMMAND stasis_display_scale_test)
     add_executable(
+        stasis_renderer_lifecycle_test
+        tests/stasis_renderer_lifecycle_test.c
+    )
+    target_include_directories(stasis_renderer_lifecycle_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME stasis_renderer_lifecycle_contract COMMAND stasis_renderer_lifecycle_test)
+    add_executable(
         stasis_asset_path_test
         tests/stasis_asset_path_test.c
     )

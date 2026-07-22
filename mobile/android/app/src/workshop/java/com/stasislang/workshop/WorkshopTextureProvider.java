@@ -30,21 +30,40 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private long nextManifestCheckNanos;
     private float rasterScale = 1.0f;
     private int densityGeneration = -1;
+    private int surfaceGeneration;
+    private int rendererGeneration;
+    private int fallbackSurfaceGeneration;
+    private int fallbackRendererGeneration;
+    private String lastFailure;
+    private String transitionReason = "none";
 
     WorkshopTextureProvider(MainActivity activity) {
         this.activity = activity;
     }
 
     @Override
-    public void onSurfaceCreated() {
-        textures.clear();
-        textTextures.clear();
-        fonts.clear();
-        dynamicTextTextures.clear();
+    public void onResourceGenerationChanged(int nextSurfaceGeneration,
+            int nextRendererGeneration, boolean discardGpuHandles,
+            String nextTransitionReason) {
+        clearTextures(!discardGpuHandles);
+        surfaceGeneration = nextSurfaceGeneration;
+        rendererGeneration = nextRendererGeneration;
+        transitionReason = nextTransitionReason;
         setProjectRoot(activity.projectRootPath());
         manifestStamp = Long.MIN_VALUE;
         nextManifestCheckNanos = 0L;
-        fallbackTexture = createFallbackTexture();
+    }
+
+    @Override
+    public void beginRestoreAttempt() {
+        lastFailure = null;
+    }
+
+    @Override
+    public String consumeFailure() {
+        String failure = lastFailure;
+        lastFailure = null;
+        return failure;
     }
 
     @Override
@@ -70,11 +89,17 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     @Override
     public int textureFor(int handle) {
         SpriteTexture cached = textures.get(handle);
-        if (cached != null && cached.checkedManifestStamp == manifestStamp) {
+        if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)
+                && cached.checkedManifestStamp == manifestStamp) {
             return cached.texture;
         }
+        if (cached != null && !cached.matches(surfaceGeneration, rendererGeneration)) {
+            textures.remove(handle);
+            cached = null;
+        }
+        JSONObject resolved = null;
         try {
-            JSONObject resolved = new JSONObject(MainActivity.nativeResolveSpriteAsset(
+            resolved = new JSONObject(MainActivity.nativeResolveSpriteAsset(
                     projectRootPath, handle));
             if (!"ok".equals(resolved.optString("status"))) {
                 throw new IOException(resolved.optString("error", "sprite resolution failed"));
@@ -91,21 +116,37 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             } finally {
                 bitmap.recycle();
             }
-            textures.put(handle, new SpriteTexture(uploaded, hash, manifestStamp));
+            textures.put(handle, new SpriteTexture(uploaded, hash, manifestStamp,
+                    surfaceGeneration, rendererGeneration));
             if (cached != null) deleteTexture(cached.texture);
             return uploaded;
         } catch (Exception error) {
-            activity.reportPreviewResourceError("sprite " + handle + ": " + error.getMessage());
+            recordFailure("sprite", handle,
+                    resolved == null ? "<unresolved>" : resolved.optString("path", "<unresolved>"),
+                    resolved == null ? 0 : resolved.optInt("width"),
+                    resolved == null ? 0 : resolved.optInt("height"), error);
             if (cached != null) {
                 cached.checkedManifestStamp = manifestStamp;
                 return cached.texture;
             }
-            return fallbackTexture;
+            return fallbackTexture();
         }
     }
 
     @Override
     public int fallbackTexture() {
+        if (fallbackTexture == 0 || fallbackSurfaceGeneration != surfaceGeneration
+                || fallbackRendererGeneration != rendererGeneration) {
+            try {
+                fallbackTexture = createFallbackTexture();
+            } catch (IOException error) {
+                fallbackTexture = 0;
+                recordFailure("fallback", 0, "<procedural>", 2, 2, error);
+                return 0;
+            }
+            fallbackSurfaceGeneration = surfaceGeneration;
+            fallbackRendererGeneration = rendererGeneration;
+        }
         return fallbackTexture;
     }
 
@@ -113,8 +154,11 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     public long cachedTextTextureFor(int runHandle) {
         ensureCurrentProject();
         TextTexture cached = textTextures.get(runHandle);
-        if (cached != null) return StasisPreviewRenderer.packTexture(
+        if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)) {
+            return StasisPreviewRenderer.packTexture(
                 cached.texture, cached.width, cached.height);
+        }
+        if (cached != null) textTextures.remove(runHandle);
         try {
             JSONObject resolved = new JSONObject(MainActivity.nativeResolveCachedText(
                     activity.projectRootPath(), runHandle));
@@ -139,11 +183,12 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             }
             cached = new TextTexture(texture,
                     Math.max(1, Math.round(width / rasterScale)),
-                    Math.max(1, Math.round(height / rasterScale)));
+                    Math.max(1, Math.round(height / rasterScale)),
+                    surfaceGeneration, rendererGeneration);
             textTextures.put(runHandle, cached);
             return StasisPreviewRenderer.packTexture(texture, cached.width, cached.height);
         } catch (Exception error) {
-            activity.reportPreviewResourceError("cached text " + runHandle + ": " + error.getMessage());
+            recordFailure("cached_text", runHandle, "<resolved-cached-text>", 0, 0, error);
             return 0L;
         }
     }
@@ -153,7 +198,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         ensureCurrentProject();
         for (int index = 0; index < dynamicTextTextures.size(); index += 1) {
             DynamicTextTexture cached = dynamicTextTextures.get(index);
-            if (cached.matches(font, utf8, offset, length)) {
+            if (cached.texture.matches(surfaceGeneration, rendererGeneration)
+                    && cached.matches(font, utf8, offset, length)) {
                 return StasisPreviewRenderer.packTexture(
                         cached.texture.texture, cached.texture.width, cached.texture.height);
             }
@@ -164,11 +210,12 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             for (int index = 0; index < length; index += 1) bytes[index] = utf8.get(offset + index);
             FontInfo fontInfo = fontInfo(font);
             TextTexture texture = rasterText(
-                    fontInfo, new String(bytes, StandardCharsets.UTF_8), rasterScale);
+                    fontInfo, new String(bytes, StandardCharsets.UTF_8), rasterScale,
+                    surfaceGeneration, rendererGeneration);
             dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
             return StasisPreviewRenderer.packTexture(texture.texture, texture.width, texture.height);
         } catch (Exception error) {
-            activity.reportPreviewResourceError("text font " + font + ": " + error.getMessage());
+            recordFailure("text", font, "<resolved-font>", 0, 0, error);
             return 0L;
         }
     }
@@ -195,7 +242,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         return cached;
     }
 
-    private static TextTexture rasterText(FontInfo font, String text, float rasterScale) {
+    private static TextTexture rasterText(FontInfo font, String text, float rasterScale,
+            int surfaceGeneration, int rendererGeneration) {
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         paint.setColor(0xffffffff);
         paint.setTextSize(font.size * rasterScale);
@@ -215,7 +263,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         }
         return new TextTexture(texture,
                 Math.max(1, Math.round(width / rasterScale)),
-                Math.max(1, Math.round(height / rasterScale)));
+                Math.max(1, Math.round(height / rasterScale)),
+                surfaceGeneration, rendererGeneration);
     }
 
     static boolean projectChanged(String boundRoot, String currentRoot) {
@@ -230,19 +279,37 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     }
 
     private void clearTextures() {
+        clearTextures(true);
+    }
+
+    private void clearTextures(boolean deleteGpuHandles) {
         for (int index = 0; index < textures.size(); index++) {
-            deleteTexture(textures.valueAt(index).texture);
+            if (deleteGpuHandles) deleteTexture(textures.valueAt(index).texture);
         }
         textures.clear();
         for (int index = 0; index < textTextures.size(); index++) {
-            deleteTexture(textTextures.valueAt(index).texture);
+            if (deleteGpuHandles) deleteTexture(textTextures.valueAt(index).texture);
         }
         textTextures.clear();
         for (DynamicTextTexture texture : dynamicTextTextures) {
-            deleteTexture(texture.texture.texture);
+            if (deleteGpuHandles) deleteTexture(texture.texture.texture);
         }
         dynamicTextTextures.clear();
         fonts.clear();
+        if (fallbackTexture != 0 && deleteGpuHandles) deleteTexture(fallbackTexture);
+        fallbackTexture = 0;
+        fallbackSurfaceGeneration = 0;
+        fallbackRendererGeneration = 0;
+    }
+
+    private void recordFailure(String stage, int handle, String path,
+            int logicalWidth, int logicalHeight, Exception error) {
+        lastFailure = StasisPreviewRenderer.formatResourceFailure(stage, handle, path,
+                logicalWidth, logicalHeight,
+                Math.max(0, Math.round(logicalWidth * rasterScale)),
+                Math.max(0, Math.round(logicalHeight * rasterScale)),
+                surfaceGeneration, rendererGeneration, transitionReason, error.getMessage());
+        activity.reportPreviewResourceError(lastFailure);
     }
 
     private void deleteTexture(int texture) {
@@ -310,7 +377,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         return names[0];
     }
 
-    private static int createFallbackTexture() {
+    private static int createFallbackTexture() throws IOException {
         ByteBuffer pixels = ByteBuffer.allocateDirect(16);
         pixels.put(new byte[]{
                 (byte)255, 0, (byte)255, (byte)255,
@@ -327,7 +394,12 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 2, 2, 0,
                 GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels);
+        int error = GLES20.glGetError();
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        if (!StasisPreviewRenderer.textureCreationSucceeded(names[0], error)) {
+            if (names[0] != 0) GLES20.glDeleteTextures(1, names, 0);
+            throw new IOException("fallback texture upload failed with GL error " + error);
+        }
         return names[0];
     }
 
@@ -336,10 +408,20 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         final String contentHash;
         long checkedManifestStamp;
 
-        SpriteTexture(int texture, String contentHash, long checkedManifestStamp) {
+        final int surfaceGeneration;
+        final int rendererGeneration;
+
+        SpriteTexture(int texture, String contentHash, long checkedManifestStamp,
+                int surfaceGeneration, int rendererGeneration) {
             this.texture = texture;
             this.contentHash = contentHash;
             this.checkedManifestStamp = checkedManifestStamp;
+            this.surfaceGeneration = surfaceGeneration;
+            this.rendererGeneration = rendererGeneration;
+        }
+
+        boolean matches(int surface, int renderer) {
+            return surfaceGeneration == surface && rendererGeneration == renderer;
         }
     }
 
@@ -347,11 +429,20 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         final int texture;
         final int width;
         final int height;
+        final int surfaceGeneration;
+        final int rendererGeneration;
 
-        TextTexture(int texture, int width, int height) {
+        TextTexture(int texture, int width, int height,
+                int surfaceGeneration, int rendererGeneration) {
             this.texture = texture;
             this.width = width;
             this.height = height;
+            this.surfaceGeneration = surfaceGeneration;
+            this.rendererGeneration = rendererGeneration;
+        }
+
+        boolean matches(int surface, int renderer) {
+            return surfaceGeneration == surface && rendererGeneration == renderer;
         }
     }
 

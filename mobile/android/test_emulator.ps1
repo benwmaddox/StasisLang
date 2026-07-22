@@ -17,7 +17,7 @@ try {
         & (Join-Path $scriptRoot "build_debug.ps1") -Install
         if ($LASTEXITCODE -ne 0) { throw "Workshop emulator build/install failed with exit code $LASTEXITCODE" }
     }
-    & (Join-Path $scriptRoot "validate_device.ps1") -RequireDevice -Serial $serial
+    & (Join-Path $scriptRoot "validate_device.ps1") -RequireDevice -Serial $serial -Lifecycle
     if ($LASTEXITCODE -ne 0) { throw "Workshop emulator acceptance failed with exit code $LASTEXITCODE" }
 } finally {
     $env:ANDROID_SERIAL = $previousSerial

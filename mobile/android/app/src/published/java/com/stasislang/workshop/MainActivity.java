@@ -92,7 +92,20 @@ public final class MainActivity extends Activity {
         root.addView(runtimeError, errorParams);
 
         setContentView(root);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (gameSurface != null) gameSurface.onHostResume();
         startFrameLoop();
+    }
+
+    @Override
+    protected void onPause() {
+        if (frameLoop != null) frameHandler.removeCallbacks(frameLoop);
+        if (gameSurface != null) gameSurface.onHostPause();
+        super.onPause();
     }
 
     @Override
@@ -246,6 +259,17 @@ public final class MainActivity extends Activity {
         int touchX() { return touchX; }
         int touchY() { return touchY; }
         int touchActive() { return touchActive ? 1 : 0; }
+
+        void onHostPause() {
+            renderer.onHostPaused();
+            onPause();
+        }
+
+        void onHostResume() {
+            onResume();
+            queueEvent(renderer::onHostResumed);
+            requestRender();
+        }
 
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
                 int screenWidth, int screenHeight) {

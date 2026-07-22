@@ -28,6 +28,7 @@
 #endif
 #include "stasis_render_contract.h"
 #include "stasis_display_scale.h"
+#include "stasis_renderer_lifecycle.h"
 #if defined(_WIN32)
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -99,6 +100,8 @@ static StasisDisplayMetrics g_display_metrics;
 static int g_display_generation = 0;
 static int g_density_generation = 0;
 static bool g_window_resized = false;
+static StasisRendererLifecycle g_resource_lifecycle;
+static bool g_resource_frame_ready = false;
 static bool g_postfx_enabled = false;
 static bool g_postfx_applied_this_frame = false;
 static bool g_screenshot_taken = false;
@@ -173,6 +176,8 @@ static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_cou
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h);
 static void stasis_sync_display_metrics(void);
 static void stasis_reset_text_cache(void);
+static void stasis_invalidate_renderer_resources(int discard_gpu_handles);
+static int stasis_restore_renderer_resources(void);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -208,6 +213,8 @@ typedef struct SpriteEntry {
     int needs_reraster;  /* flag for window resize */
     int reload_pending;  /* set when the asset watcher reloads this sprite */
     uint32_t generation;
+    uint32_t surface_generation;
+    uint32_t renderer_generation;
     int retired;         /* generation wrapped; never reuse this slot */
 } SpriteEntry;
 
@@ -243,9 +250,46 @@ typedef struct {
     int atlas_size;
     float pixel_scale;
     int needs_reraster;
+    uint32_t surface_generation;
+    uint32_t renderer_generation;
 } StasisFont;
 
 static StasisFont g_fonts[MAX_FONTS];
+
+static const char* stasis_renderer_reason_name(StasisRendererResourceReason reason) {
+    switch (reason) {
+        case STASIS_RENDERER_REASON_SURFACE_CHANGED: return "surface_changed";
+        case STASIS_RENDERER_REASON_TARGETS_RESET: return "targets_reset";
+        case STASIS_RENDERER_REASON_DEVICE_RESET: return "device_reset";
+        case STASIS_RENDERER_REASON_BACKGROUND: return "background";
+        case STASIS_RENDERER_REASON_FOREGROUND: return "foreground";
+        default: return "none";
+    }
+}
+
+static void stasis_invalidate_renderer_resources(int discard_gpu_handles) {
+    if (!g_use_sdl_renderer) return;
+    for (int i = 0; i < g_sprite_capacity; i++) {
+        SpriteEntry* entry = &g_sprites[i];
+        if (!entry->used) continue;
+        if (entry->sdl_tex && !discard_gpu_handles) SDL_DestroyTexture(entry->sdl_tex);
+        entry->sdl_tex = NULL;
+        entry->needs_reraster = 1;
+    }
+    if (g_sprite_fallback.sdl_tex && !discard_gpu_handles) {
+        SDL_DestroyTexture(g_sprite_fallback.sdl_tex);
+    }
+    memset(&g_sprite_fallback, 0, sizeof(g_sprite_fallback));
+    g_sprite_fallback.page_index = -1;
+    for (int i = 0; i < MAX_FONTS; i++) {
+        StasisFont* font = &g_fonts[i];
+        if (!font->active) continue;
+        if (font->sdl_texture && !discard_gpu_handles) SDL_DestroyTexture(font->sdl_texture);
+        font->sdl_texture = NULL;
+        font->needs_reraster = 1;
+    }
+    g_resource_frame_ready = false;
+}
 
 static int stasis_input_valid_index(int idx) {
     return idx >= 0 && idx < STASIS_MAX_POINTERS;
@@ -311,6 +355,11 @@ static void stasis_sync_display_metrics(void) {
     if (g_display_generation == 0 || dimensions_changed) {
         g_display_generation++;
         g_window_resized = true;
+    }
+    if (dimensions_changed && g_use_sdl_renderer &&
+        g_resource_lifecycle.state != STASIS_RENDERER_UNAVAILABLE) {
+        stasis_renderer_lifecycle_surface_changed(&g_resource_lifecycle);
+        stasis_invalidate_renderer_resources(0);
     }
     g_display_metrics = next;
     g_drawable_width = drawable_w;
@@ -516,6 +565,34 @@ static void stasis_pump_events(void) {
                     g_input_frame.viewport_w_px = g_window_width;
                     g_input_frame.viewport_h_px = g_window_height;
                     stasis_update_safe_viewport();
+                }
+                break;
+#if SDL_VERSION_ATLEAST(2,0,2)
+            case SDL_RENDER_TARGETS_RESET:
+                stasis_renderer_lifecycle_renderer_reset(
+                    &g_resource_lifecycle, STASIS_RENDERER_REASON_TARGETS_RESET);
+                stasis_invalidate_renderer_resources(0);
+                SDL_Log("Stasis renderer resources invalidated: backend=sdl reason=targets_reset surface_generation=%u renderer_generation=%u",
+                    g_resource_lifecycle.surface_generation,
+                    g_resource_lifecycle.renderer_generation);
+                break;
+            case SDL_RENDER_DEVICE_RESET:
+                stasis_renderer_lifecycle_renderer_reset(
+                    &g_resource_lifecycle, STASIS_RENDERER_REASON_DEVICE_RESET);
+                stasis_invalidate_renderer_resources(0);
+                SDL_Log("Stasis renderer resources invalidated: backend=sdl reason=device_reset surface_generation=%u renderer_generation=%u",
+                    g_resource_lifecycle.surface_generation,
+                    g_resource_lifecycle.renderer_generation);
+                break;
+#endif
+            case SDL_APP_WILLENTERBACKGROUND:
+                stasis_renderer_lifecycle_pause(&g_resource_lifecycle);
+                g_resource_frame_ready = false;
+                break;
+            case SDL_APP_DIDENTERFOREGROUND:
+                if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED) {
+                    stasis_renderer_lifecycle_resume(&g_resource_lifecycle);
+                    stasis_invalidate_renderer_resources(0);
                 }
                 break;
             case SDL_MOUSEBUTTONDOWN:
@@ -3613,6 +3690,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     }
 
     stasis_sync_display_metrics();
+    stasis_renderer_lifecycle_initialize(&g_resource_lifecycle);
+    g_resource_frame_ready = true;
     SDL_Log("Stasis display metrics: logical=%dx%d native=%dx%d drawable=%dx%d scale=%.2f",
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
@@ -3860,6 +3939,7 @@ STASIS_EXPORT void stasis_begin_frame(void) {
         stasis_pump_events();
         g_events_pumped_this_frame = 1;
     }
+    g_resource_frame_ready = stasis_restore_renderer_resources() != 0;
     g_line_count = 0;
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
@@ -3877,6 +3957,11 @@ STASIS_EXPORT void stasis_begin_frame(void) {
  * End frame: flush lines, swap buffers, poll events
  */
 STASIS_EXPORT void stasis_end_frame(void) {
+    if (!g_resource_frame_ready) {
+        g_line_count = 0;
+        g_events_pumped_this_frame = 0;
+        return;
+    }
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
         SDL_Color color;
@@ -4339,6 +4424,8 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
         e->sdl_tex = tex;
         e->mtime = get_file_mtime(path);
         e->needs_reraster = 0;
+        e->surface_generation = g_resource_lifecycle.surface_generation;
+        e->renderer_generation = g_resource_lifecycle.renderer_generation;
         if (previous) SDL_DestroyTexture(previous);
         return 1;
     }
@@ -4388,6 +4475,8 @@ static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int m
     sprite_set_gl_region(e, page_index, sprite_x, sprite_y, alloc_x, alloc_y, alloc_w, alloc_h, w, h);
     e->mtime = get_file_mtime(path);
     e->needs_reraster = 0;
+    e->surface_generation = g_resource_lifecycle.surface_generation;
+    e->renderer_generation = g_resource_lifecycle.renderer_generation;
     return 1;
 #else
     free(pixels);
@@ -4565,6 +4654,8 @@ static SpriteEntry* sprite_fallback_get(void) {
 #endif
     }
     next.used = 1;
+    next.surface_generation = g_resource_lifecycle.surface_generation;
+    next.renderer_generation = g_resource_lifecycle.renderer_generation;
     g_sprite_fallback = next;
     return &g_sprite_fallback;
 }
@@ -4634,6 +4725,15 @@ static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int
      */
     if (e->needs_reraster) {
         if (e->path) sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h);
+    }
+    if (e->surface_generation != g_resource_lifecycle.surface_generation ||
+        e->renderer_generation != g_resource_lifecycle.renderer_generation) {
+        SDL_Log("Stasis renderer rejected stale sprite: handle=%d path=%s logical=%dx%d raster=%dx%d backend=%s surface_generation=%u resource_surface_generation=%u renderer_generation=%u resource_renderer_generation=%u",
+            handle, e->path ? e->path : "<fallback>", e->max_w, e->max_h, e->w, e->h,
+            g_use_sdl_renderer ? "sdl" : "gl",
+            g_resource_lifecycle.surface_generation, e->surface_generation,
+            g_resource_lifecycle.renderer_generation, e->renderer_generation);
+        return;
     }
 
     /* Convert degrees to radians */
@@ -4929,6 +5029,24 @@ STASIS_EXPORT void stasis_mobile_set_paused(int paused) {
     if (g_audio_device != 0) {
         SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0);
     }
+    if (paused) {
+        stasis_renderer_lifecycle_pause(&g_resource_lifecycle);
+        g_resource_frame_ready = false;
+    } else if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED) {
+        stasis_renderer_lifecycle_resume(&g_resource_lifecycle);
+        stasis_invalidate_renderer_resources(0);
+    }
+}
+
+STASIS_EXPORT int stasis_gfx_get_resource_lifecycle(int32_t* out_i32, int count) {
+    if (!out_i32 || count < 6) return 0;
+    out_i32[0] = (int32_t)g_resource_lifecycle.state;
+    out_i32[1] = (int32_t)g_resource_lifecycle.surface_generation;
+    out_i32[2] = (int32_t)g_resource_lifecycle.renderer_generation;
+    out_i32[3] = (int32_t)g_resource_lifecycle.restore_attempts;
+    out_i32[4] = (int32_t)g_resource_lifecycle.restore_failures;
+    out_i32[5] = (int32_t)g_resource_lifecycle.reason;
+    return 1;
 }
 
 /*
@@ -5054,6 +5172,8 @@ STASIS_EXPORT void stasis_shutdown(void) {
         g_window = NULL;
     }
     SDL_Quit();
+    memset(&g_resource_lifecycle, 0, sizeof(g_resource_lifecycle));
+    g_resource_frame_ready = false;
     SDL_Log("Stasis graphics shutdown");
 }
 
@@ -5364,6 +5484,8 @@ static int stasis_build_font_atlas(StasisFont* font) {
     font->pixel_scale = pixel_scale;
     font->scale = stbtt_ScaleForPixelHeight(&font->font_info, (float)raster_size);
     font->needs_reraster = 0;
+    font->surface_generation = g_resource_lifecycle.surface_generation;
+    font->renderer_generation = g_resource_lifecycle.renderer_generation;
     return 1;
 }
 
@@ -5442,6 +5564,71 @@ static int stasis_ensure_font_ready(int font_handle) {
         rebuilt_density_fonts = 1;
     }
     return !rebuilt_density_fonts || stasis_rebuild_text_runs();
+}
+
+static int stasis_restore_renderer_resources(void) {
+    if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED ||
+        g_resource_lifecycle.state == STASIS_RENDERER_UNAVAILABLE) {
+        return 0;
+    }
+    if (!stasis_renderer_lifecycle_begin_restore(&g_resource_lifecycle)) {
+        return stasis_renderer_lifecycle_can_present(&g_resource_lifecycle);
+    }
+
+    int restored = g_use_sdl_renderer ? g_renderer != NULL : g_gl_context != NULL;
+    for (int i = 0; i < g_sprite_capacity; i++) {
+        SpriteEntry* entry = &g_sprites[i];
+        if (!entry->used || !entry->path) continue;
+        if (!sprite_build_into_entry_sized(entry, entry->path, entry->max_w, entry->max_h)) {
+            SDL_Log("Stasis renderer restore failed: stage=sprite handle=%d path=%s logical=%dx%d raster=%dx%d backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=texture_rebuild_failed",
+                sprite_handle_for_slot(i), entry->path, entry->max_w, entry->max_h,
+                entry->w, entry->h, g_use_sdl_renderer ? "sdl" : "gl",
+                g_resource_lifecycle.surface_generation,
+                g_resource_lifecycle.renderer_generation,
+                stasis_renderer_reason_name(g_resource_lifecycle.reason));
+            restored = 0;
+        }
+    }
+    if (!sprite_fallback_get()) {
+        SDL_Log("Stasis renderer restore failed: stage=fallback handle=0 path=<procedural> logical=2x2 raster=2x2 backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=texture_rebuild_failed",
+            g_use_sdl_renderer ? "sdl" : "gl",
+            g_resource_lifecycle.surface_generation,
+            g_resource_lifecycle.renderer_generation,
+            stasis_renderer_reason_name(g_resource_lifecycle.reason));
+        restored = 0;
+    }
+    for (int i = 0; i < MAX_FONTS; i++) {
+        StasisFont* font = &g_fonts[i];
+        if (!font->active) continue;
+        if (!stasis_build_font_atlas(font)) {
+            SDL_Log("Stasis renderer restore failed: stage=font handle=%d path=<retained-font-bytes> logical=%dx%d raster=%dx%d backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=atlas_rebuild_failed",
+                i + 1, font->font_size, font->font_size, font->raster_size,
+                font->raster_size, g_use_sdl_renderer ? "sdl" : "gl",
+                g_resource_lifecycle.surface_generation,
+                g_resource_lifecycle.renderer_generation,
+                stasis_renderer_reason_name(g_resource_lifecycle.reason));
+            restored = 0;
+        }
+    }
+    if (restored && !stasis_rebuild_text_runs()) {
+        SDL_Log("Stasis renderer restore failed: stage=cached_text handle=0 path=<retained-text-runs> logical=0x0 raster=0x0 backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=quad_rebuild_failed",
+            g_use_sdl_renderer ? "sdl" : "gl",
+            g_resource_lifecycle.surface_generation,
+            g_resource_lifecycle.renderer_generation,
+            stasis_renderer_reason_name(g_resource_lifecycle.reason));
+        restored = 0;
+    }
+
+    stasis_renderer_lifecycle_finish_restore(&g_resource_lifecycle, restored);
+    if (restored) {
+        SDL_Log("Stasis renderer resources restored: backend=%s surface_generation=%u renderer_generation=%u reason=%s sprites=%d",
+            g_use_sdl_renderer ? "sdl" : "gl",
+            g_resource_lifecycle.surface_generation,
+            g_resource_lifecycle.renderer_generation,
+            stasis_renderer_reason_name(g_resource_lifecycle.reason),
+            g_sprite_count);
+    }
+    return stasis_renderer_lifecycle_can_present(&g_resource_lifecycle);
 }
 
 static int stasis_find_or_alloc_text_run_slot(int font_handle, uint32_t hash, const char* text, int len) {

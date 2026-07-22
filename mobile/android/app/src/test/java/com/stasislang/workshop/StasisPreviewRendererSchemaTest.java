@@ -1,5 +1,7 @@
 package com.stasislang.workshop;
 
+import android.opengl.GLES20;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -17,6 +19,24 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(34_848, StasisPreviewRenderer.FRAME_I32_CAPACITY);
         assertEquals(92_292, StasisPreviewRenderer.FRAME_F32_CAPACITY);
         assertEquals(65_536, StasisPreviewRenderer.TEXT_U8_CAPACITY);
+    }
+
+    @Test
+    public void resourceFailureDiagnosticIncludesLifecycleContext() {
+        String diagnostic = StasisPreviewRenderer.formatResourceFailure(
+                "sprite", 7, "sprites/ball.svg", 24, 16, 72, 48,
+                3, 4, "surface_changed", "upload_failed");
+        assertTrue(diagnostic.contains("stage=sprite handle=7 path=sprites/ball.svg"));
+        assertTrue(diagnostic.contains("logical=24x16 raster=72x48 backend=gles"));
+        assertTrue(diagnostic.contains("surface_generation=3 renderer_generation=4"));
+        assertTrue(diagnostic.contains("reason=surface_changed failure=upload_failed"));
+    }
+
+    @Test
+    public void failedTextureCreationCannotBecomeCachedRestoreSuccess() {
+        assertFalse(StasisPreviewRenderer.textureCreationSucceeded(0, GLES20.GL_NO_ERROR));
+        assertFalse(StasisPreviewRenderer.textureCreationSucceeded(23, GLES20.GL_OUT_OF_MEMORY));
+        assertTrue(StasisPreviewRenderer.textureCreationSucceeded(23, GLES20.GL_NO_ERROR));
     }
 
     @Test
@@ -123,7 +143,9 @@ public final class StasisPreviewRendererSchemaTest {
     public void logicalSnapshotCopiesOnlyActiveProductionSpans() {
         StasisPreviewRenderer renderer = new StasisPreviewRenderer(
                 new StasisPreviewRenderer.TextureProvider() {
-                    @Override public void onSurfaceCreated() {}
+                    @Override public void onResourceGenerationChanged(
+                            int surfaceGeneration, int rendererGeneration,
+                            boolean discardGpuHandles, String transitionReason) {}
                     @Override public int textureFor(int handle) { return 0; }
                 }, ignored -> {});
         renderer.frameI32Bytes().asIntBuffer().put(0, StasisPreviewRenderer.RENDER_MAGIC);
