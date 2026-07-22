@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -230,6 +230,32 @@ fn semantic_symbol_cli_previews_applies_runs_and_reverts() {
     assert!(listed_items
         .iter()
         .any(|item| item["name"] == "tick" && item["file"] == "src/main.stasis"));
+    assert_eq!(listed_json["result"]["files"], json!(["src/main.stasis"]));
+    assert!(!listed_items.iter().any(|item| item["name"] == "old_value"));
+
+    let widened = stasis(
+        &[
+            "--json",
+            "symbol",
+            "list",
+            "--file",
+            "src/main.stasis",
+            "--file",
+            "src/old.stasis",
+        ],
+        &project,
+    );
+    assert_eq!(widened.status.code(), Some(0));
+    let widened_json = json_stdout(&widened);
+    assert_eq!(
+        widened_json["result"]["files"],
+        json!(["src/main.stasis", "src/old.stasis"])
+    );
+    assert!(widened_json["result"]["items"]
+        .as_array()
+        .expect("widened items")
+        .iter()
+        .any(|item| item["name"] == "old_value"));
 
     let preview = stasis(
         &[

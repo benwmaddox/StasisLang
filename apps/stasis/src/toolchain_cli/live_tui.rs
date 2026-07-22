@@ -1942,7 +1942,10 @@ impl LiveAiTools {
             "list_symbols" => LiveCommand::Symbols {
                 query: string_arg(args, "query"),
                 kind: string_arg(args, "kind"),
-                file: string_arg(args, "file"),
+                files: match string_array_arg(args, "files") {
+                    Ok(files) => files,
+                    Err(error) => return ToolObservation::error(&call.tool, error),
+                },
                 owner: string_arg(args, "owner"),
                 page: usize_arg(args, "page").unwrap_or(0).min(u32::MAX as usize) as u32,
                 limit: usize_arg(args, "limit").unwrap_or(32).min(64),
@@ -2460,6 +2463,29 @@ fn usize_arg(args: &serde_json::Map<String, Value>, name: &str) -> Option<usize>
     args.get(name)
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
+}
+
+fn string_array_arg(
+    args: &serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<Vec<String>, String> {
+    let Some(value) = args.get(name) else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{name} must be an array of project-relative paths"))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| format!("{name} must contain non-empty strings"))
+        })
+        .collect()
 }
 
 fn read_bounded_process_output(mut reader: impl Read) -> Result<String, String> {

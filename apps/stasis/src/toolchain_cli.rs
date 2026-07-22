@@ -18,6 +18,7 @@ use stasis_runner::live::{
     compare_live_validation_values, live_session, LiveCommand, LiveRequest, LiveResponse,
     TerminalBuffer, TerminalInput,
 };
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -208,7 +209,7 @@ enum SymbolCommand {
         #[arg(long, value_enum)]
         kind: Option<SymbolKindArg>,
         #[arg(long)]
-        file: Option<String>,
+        file: Vec<String>,
         #[arg(long)]
         owner: Option<String>,
         #[arg(long, default_value_t = 0)]
@@ -2262,13 +2263,34 @@ fn symbol_workspace(
         SymbolCommand::List {
             query,
             kind,
-            file,
+            file: files,
             owner,
             page,
             limit,
         } => {
             let limit = limit.clamp(1, 200);
             let mut items = workshop_source_items(&editable_files)?;
+            if files.len() > 16 {
+                return Err("symbol list accepts at most 16 --file values".to_string());
+            }
+            let scope_files = if files.is_empty() {
+                vec![normalize_symbol_file(&workspace.manifest.entry)]
+            } else {
+                files
+                    .iter()
+                    .map(|file| normalize_symbol_file(file))
+                    .collect::<Vec<_>>()
+            };
+            let available_files = items
+                .iter()
+                .map(|item| normalize_symbol_file(&item.file))
+                .collect::<BTreeSet<_>>();
+            for file in &scope_files {
+                if !available_files.contains(file) {
+                    return Err(format!("symbol list file is not in the project: {file}"));
+                }
+            }
+            let scope_files = scope_files.into_iter().collect::<BTreeSet<_>>();
             items.retain(|item| {
                 item.kind != WorkshopSourceItemKind::Imports
                     && !(item.kind == WorkshopSourceItemKind::Globals
@@ -2279,9 +2301,7 @@ fn symbol_workspace(
                             || item.signature.to_ascii_lowercase().contains(&query)
                     })
                     && kind.is_none_or(|kind| item.kind == kind.into())
-                    && file.as_deref().is_none_or(|file| {
-                        normalize_symbol_file(&item.file) == normalize_symbol_file(file)
-                    })
+                    && scope_files.contains(&normalize_symbol_file(&item.file))
                     && owner
                         .as_deref()
                         .is_none_or(|owner| item.owner.as_deref() == Some(owner))
@@ -2322,7 +2342,7 @@ fn symbol_workspace(
                 .collect::<Vec<_>>();
             Ok(CommandResult::success(
                 human,
-                json!({"schema_version": 1, "page": page, "limit": limit, "total": total, "items": metadata}),
+                json!({"schema_version": 1, "files": scope_files, "page": page, "limit": limit, "total": total, "items": metadata}),
             ))
         }
         SymbolCommand::Find(args) => {

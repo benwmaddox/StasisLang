@@ -282,7 +282,7 @@ pub fn model_response_schema() -> Value {
 
 pub fn workshop_tool_specs() -> Vec<ToolSpec> {
     vec![
-        spec("list_symbols", "Search compact editable Stasis symbols. Results exclude imports and empty global groups, default to 32 items, and never include source or source hashes.", &[], &["query", "kind", "file", "owner", "page", "limit"]),
+        spec("list_symbols", "Search compact editable Stasis symbols within explicit starting files. Without files, only the project entry file is searched. Pass files as an array of up to 16 project-relative paths to widen the scope. Results exclude imports and empty global groups, default to 32 items, and never include source or source hashes.", &[], &["files", "query", "kind", "owner", "page", "limit"]),
         spec("find_references", "Find compact compiler-owned definitions, reads, writes, and calls for a function, global, or dot-qualified field.", &["symbol"], &["limit"]),
         spec("list_owner_symbols", "List compact symbols owned by one type or group.", &["owner"], &[]),
         spec("read_symbol", "Read one Stasis symbol.", &["name"], &["kind", "file", "owner", "signature"]),

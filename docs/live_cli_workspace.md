@@ -84,11 +84,13 @@ Provider-reported token usage is written separately to
 Codex `turn.completed` event; Stasis does not estimate or add missing token categories. The Codex
 JSON event stream is consumed in memory and all non-usage transport events are discarded.
 
-AI `list_symbols` calls return at most 32 entries by default and accept `query`, `kind`, `file`,
-`owner`, `page`, and `limit` filters. Listings omit imports, empty global groups, source bodies, and
-source hashes. Each item contains only its name, kind, signature, file, and owner when applicable.
-`read_symbol` returns the selected source and its hash so a later write can use that hash solely as
-a stale-write guard.
+AI `list_symbols` calls search only the project entry file by default. The agent can pass `files` as
+an array of up to 16 project-relative paths to widen that starting scope, and can further narrow it
+with `query`, `kind`, `owner`, `page`, and `limit`. Human `stasis symbol list` and TUI `:symbols`
+accept repeated `--file` options and use the same entry-file default. Listings return at most 32
+entries by default and omit imports, empty global groups, source bodies, and source hashes. Each
+item contains only its name, kind, signature, file, and owner when applicable. `read_symbol` returns
+the selected source and its hash so a later write can use that hash solely as a stale-write guard.
 
 The current key map is:
 

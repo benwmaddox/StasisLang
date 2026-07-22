@@ -77,7 +77,7 @@ pub enum LiveCommand {
         #[serde(default)]
         kind: Option<String>,
         #[serde(default)]
-        file: Option<String>,
+        files: Vec<String>,
         #[serde(default)]
         owner: Option<String>,
         #[serde(default)]
@@ -1114,7 +1114,7 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         ":symbols" | ":find" => ready(LiveCommand::Symbols {
             query: args.get(1).filter(|arg| !arg.starts_with("--")).cloned(),
             kind: terminal_selector_value(&args, "--kind"),
-            file: terminal_selector_value(&args, "--file"),
+            files: terminal_selector_values(&args, "--file"),
             owner: terminal_selector_value(&args, "--owner"),
             page: terminal_selector_value(&args, "--page")
                 .map(|value| parse_u32("page", &value))
@@ -1291,6 +1291,13 @@ fn terminal_selector_value(args: &[String], option: &str) -> Option<String> {
     args.windows(2)
         .find(|pair| pair[0] == option)
         .map(|pair| pair[1].clone())
+}
+
+fn terminal_selector_values(args: &[String], option: &str) -> Vec<String> {
+    args.windows(2)
+        .filter(|pair| pair[0] == option)
+        .map(|pair| pair[1].clone())
+        .collect()
 }
 
 fn required_arg<'a>(args: &'a [String], index: usize, name: &str) -> Result<&'a str, String> {
@@ -1951,7 +1958,7 @@ mod tests {
         assert_eq!(signature.as_deref(), Some("update(i32): void"));
 
         let TerminalInput::Request(request) = terminal
-            .feed_line(":symbols update --kind function --file src/game.stasis --owner Enemy --page 2 --limit 10")
+            .feed_line(":symbols update --kind function --file src/game.stasis --file src/enemy.stasis --owner Enemy --page 2 --limit 10")
             .expect("page")
         else {
             panic!("expected request")
@@ -1961,13 +1968,13 @@ mod tests {
             LiveCommand::Symbols {
                 query: Some(ref query),
                 kind: Some(ref kind),
-                file: Some(ref file),
+                ref files,
                 owner: Some(ref owner),
                 page: 2,
                 limit: 10,
             } if query == "update"
                 && kind == "function"
-                && file == "src/game.stasis"
+                && files == &["src/game.stasis", "src/enemy.stasis"]
                 && owner == "Enemy"
         ));
     }
