@@ -64,3 +64,10 @@ from the rendered paddle rectangle. One generic refinement required public-path 
 for earlier state transitions and derive boundaries from observed output. It failed the same case
 while increasing time, tools, tokens, and cost, so it was reverted. No built-in prompt change from
 this rerun was retained.
+
+A final built-in attempt added bounded scalar initial state to runtime validation so transition
+boundaries could be exercised before and after an edit. Deterministic tool, fresh-runtime, CLI, and
+red/green replay tests passed, but the model used the capability only for render validation. The
+task still scored 3/4 with the same paddle-center failure, while rising to 342.4 seconds, 50 tool
+calls, 308,626 input tokens, and an estimated $1.849. The capability and its prompt instruction
+were therefore reverted rather than adding unproven surface area.
