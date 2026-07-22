@@ -29,6 +29,9 @@ jobs:
       - name: Check Stasis src layout
         run: python tools/ci/check_stasis_src_layout.py
 
+      - name: Test AI efficiency matrix
+        run: python -m unittest tools.ci.test_stasis_ai_efficiency_matrix
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
