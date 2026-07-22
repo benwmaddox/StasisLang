@@ -16,6 +16,13 @@ for normal project work.
    function, global, or qualified field such as `GameState.paddle_y`. Inspect related callers,
    reads, and writes before editing.
 
+For geometry or collision work, treat the rendered rectangle as the observable contract. Read the
+render, movement, collision, scoring/reset, and existing test symbols together. Test the exact
+contact boundary plus one value inside and outside it; do not infer physics extents from a name or
+an old collision constant alone. For every changed inequality or threshold—including walls,
+collision, scoring, clamping, and reset conditions—test equality and the adjacent value on each
+side so `<` versus `<=` behavior is explicit.
+
 ## Edit semantically
 
 Prefer `stasis symbol add`, `update`, `delete`, or `apply` over text-range edits. `symbol read`
@@ -48,8 +55,12 @@ rolls every touched file back on failure. Do not use `--no-tests` unless the use
   after the edit.
 - For observable runtime state, use `stasis validate PATH OP VALUE --frames N`. It starts a fresh,
   isolated runtime, so it is suitable for an integration-style red/green check without depending
-  on a currently running game's state.
-- Finish with `stasis fmt`, `stasis check`, and `stasis test`.
+  on a currently running game's state. Do not report an observable change complete without a
+  passing fresh validation or an equivalent focused integration test.
+- Finish with `stasis fmt --check`, `stasis check`, and `stasis test`. Semantic symbol edits already
+  preserve untouched formatting; do not run mutating whole-project formatting as routine cleanup.
+- Inspect the final changed-file list. Restore only unrelated changes created during the task and
+  do not accept broad rewrites or empty placeholder files as incidental cleanup.
 
 Use `stasis ai "PROMPT"` only when the user explicitly wants Stasis's subscription-backed nested
 AI turn. An agent already performing the task should use the commands above directly.
