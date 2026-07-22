@@ -22,12 +22,17 @@ without the TUI.
 
 ### Subscription-backed AI
 
+`stasis ai "PROMPT"` starts the live runtime, executes one AI change, and exits after the atomic
+result. It is the simplest form for automation and repeatable evaluations.
+
 `:ai PROMPT` runs a bounded coding turn through the locally installed `codex` executable and its
 existing ChatGPT/Codex subscription sign-in. Stasis does not request, store, or infer an API key.
 On Windows, the provider prefers the current npm-installed native Codex binary over older desktop
 shims on `PATH`. It defaults to `gpt-5.6-sol` with medium reasoning. Set `STASIS_CODEX_EXE`,
 `STASIS_AI_MODEL`, or `STASIS_AI_REASONING_EFFORT` to override those selections. `:ai status`,
 `:ai cancel`, and Ctrl+C expose status and cancellation without stopping the live runtime.
+Deterministic `--live-script` files may also contain `:ai PROMPT`; each line runs through the same
+provider, live tools, atomic transaction boundary, and trace policy as the interactive TUI.
 
 Each model turn runs ephemerally in an empty read-only temporary directory. The project is not
 mounted into that directory. Codex receives only the user request, bounded Stasis tool catalog,

@@ -35,6 +35,7 @@ const COMMANDS: &[&str] = &[
     "fmt",
     "check",
     "test",
+    "ai",
     "run",
     "build",
     "package",
@@ -101,6 +102,11 @@ enum ToolchainCommand {
     Test {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+    },
+    /// Run one subscription-backed AI change against the live workspace.
+    Ai {
+        #[arg(value_name = "PROMPT")]
+        prompt: String,
     },
     /// JIT-compile and run main() in the headless toolchain runtime.
     Run {
@@ -490,6 +496,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Fmt { .. } => "fmt",
         ToolchainCommand::Check => "check",
         ToolchainCommand::Test { .. } => "test",
+        ToolchainCommand::Ai { .. } => "ai",
         ToolchainCommand::Run { .. } => "run",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
@@ -538,6 +545,7 @@ fn execute(
                     validate_optional_workspace_path(&workspace, "test path", path.as_deref())?;
                     test_workspace(&workspace, path.as_deref())
                 }
+                ToolchainCommand::Ai { prompt } => run_workspace_ai(&workspace, &prompt),
                 ToolchainCommand::Run {
                     watch,
                     headless,
@@ -838,6 +846,41 @@ fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
     ))
 }
 
+fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("AI prompt must not be empty".to_string());
+    }
+    let entry = workspace.root.join(&workspace.manifest.entry);
+    let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
+    let ai_root = workspace.root.clone();
+    let prompt = prompt.to_string();
+    let ai = thread::spawn(move || {
+        let result = live_tui::run_scripted_ai(&client, &ai_root, &prompt);
+        let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
+        result
+    });
+    let config = LiveRunConfig::new(
+        workspace.root.clone(),
+        PathBuf::from(&workspace.manifest.entry),
+        PathBuf::from(&workspace.manifest.output),
+    );
+    let run_result =
+        run_live_in_process(&entry, Some(&workspace.root), 16_000, None, server, config);
+    let (summary, trace) = ai
+        .join()
+        .map_err(|_| "live AI thread panicked".to_string())??;
+    run_result?;
+    Ok(CommandResult::success(
+        format!("AI complete: {summary}\nAI trace: {}", trace.display()),
+        json!({
+            "backend": "jit",
+            "provider": "installed_codex_subscription",
+            "summary": summary,
+            "trace": trace,
+        }),
+    ))
+}
+
 fn run_workspace_live(
     workspace: &Workspace,
     script: Option<&Path>,
@@ -901,6 +944,28 @@ fn run_live_terminal_inner(
             .map_err(|error| format!("failed to open live script {}: {error}", script.display()))?;
         for line in io::BufReader::new(file).lines() {
             let line = line.map_err(|error| format!("failed reading live script: {error}"))?;
+            if let Some(prompt) = line.trim().strip_prefix(":ai ") {
+                let (summary, trace) = live_tui::run_scripted_ai(client, project_root, prompt)?;
+                if json_lines {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "schema_version": 1,
+                            "kind": "ai_completed",
+                            "ok": true,
+                            "summary": summary,
+                            "trace": trace,
+                        })
+                    );
+                } else {
+                    println!("AI complete: {summary}");
+                    println!("AI trace: {}", trace.display());
+                }
+                continue;
+            }
+            if line.trim() == ":ai" {
+                return Err("live script :ai requires a prompt".to_string());
+            }
             if let TerminalInput::Request(request) = terminal.feed_line(&line)? {
                 saw_quit |= matches!(&request.command, LiveCommand::Quit);
                 let request_id = request.request_id;
@@ -2843,6 +2908,23 @@ mod tests {
                 headless: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn ai_command_accepts_one_prompt() {
+        let parsed = ToolchainCli::try_parse_from([
+            "stasis",
+            "--workspace",
+            "demo",
+            "ai",
+            "make the paddle twice as long",
+        ])
+        .expect("parse AI command");
+        assert!(matches!(
+            parsed.command,
+            ToolchainCommand::Ai { ref prompt }
+                if prompt == "make the paddle twice as long"
         ));
     }
 

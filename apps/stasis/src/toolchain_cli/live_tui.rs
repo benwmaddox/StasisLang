@@ -42,6 +42,84 @@ enum AiUiEvent {
     Finished(Result<String, String>),
 }
 
+pub(super) fn run_scripted_ai(
+    client: &LiveSessionClient,
+    project_root: &Path,
+    prompt: &str,
+) -> Result<(String, PathBuf), String> {
+    let mut audit = AiAuditLog::create(project_root, prompt)?;
+    let trace_path = audit.path.clone();
+    let canceled = AtomicBool::new(false);
+    let mut provider = CodexExecProvider::default();
+    let mut tools = LiveAiTools::new(client.clone());
+    let mut audit_error = None;
+    let result = run_agent(
+        &mut provider,
+        &mut tools,
+        prompt,
+        ai_initial_context(),
+        live_tool_specs(),
+        &canceled,
+        |event| {
+            if audit_error.is_none() {
+                audit_error = audit.write(audit_agent_event(&event)).err();
+            }
+        },
+    );
+    if let Some(error) = audit_error {
+        return Err(error);
+    }
+    match result {
+        Ok(summary) => {
+            audit.write(serde_json::json!({
+                "event": "finished",
+                "ok": true,
+                "summary": summary,
+            }))?;
+            Ok((summary, trace_path))
+        }
+        Err(error) => {
+            audit.write(serde_json::json!({
+                "event": "finished",
+                "ok": false,
+                "error": error,
+            }))?;
+            Err(error)
+        }
+    }
+}
+
+fn ai_initial_context() -> Value {
+    serde_json::json!({
+        "language": "Stasis",
+        "runtime": "live in-process JIT",
+        "commit_boundary": "between deterministic ticks",
+        "write_policy": "all writes in one model batch compile, test, and commit atomically",
+    })
+}
+
+fn audit_agent_event(event: &AgentEvent) -> Value {
+    match event {
+        AgentEvent::Turn { current, maximum } => {
+            serde_json::json!({"event": "turn", "current": current, "maximum": maximum})
+        }
+        AgentEvent::WorkingNotes(notes) => {
+            serde_json::json!({"event": "working_notes", "text": notes})
+        }
+        AgentEvent::ToolBatch(calls) => serde_json::json!({
+            "event": "tool_calls",
+            "calls": calls.iter().map(audit_tool_call).collect::<Vec<_>>(),
+        }),
+        AgentEvent::Observations(observations) => serde_json::json!({
+            "event": "tool_observations",
+            "observations": observations.iter().map(audit_observation).collect::<Vec<_>>(),
+        }),
+        AgentEvent::Completed(summary) => {
+            serde_json::json!({"event": "model_completed", "summary": summary})
+        }
+    }
+}
+
 struct AiRun {
     canceled: Arc<AtomicBool>,
     events: mpsc::Receiver<AiUiEvent>,
@@ -1095,12 +1173,7 @@ impl LiveTui {
                 &mut provider,
                 &mut tools,
                 &prompt,
-                serde_json::json!({
-                    "language": "Stasis",
-                    "runtime": "live in-process JIT",
-                    "commit_boundary": "between deterministic ticks",
-                    "write_policy": "all writes in one model batch compile, test, and commit atomically",
-                }),
+                ai_initial_context(),
                 live_tool_specs(),
                 &worker_canceled,
                 move |event| {
