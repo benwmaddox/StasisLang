@@ -80,6 +80,55 @@ static size_t code_ptr_count;
 static StasisStringLiteral strings[STASIS_MOBILE_MAX_STRINGS];
 static size_t string_count;
 
+int stasis_mobile_json_escape(const char *input, char *output, size_t capacity) {
+    static const char hex[] = "0123456789abcdef";
+    size_t out = 0;
+    if (input == NULL || output == NULL || capacity == 0) return 0;
+    output[0] = '\0';
+    while (*input != '\0') {
+        unsigned char value = (unsigned char)*input++;
+        const char *escape = NULL;
+        size_t escape_length = 0;
+        switch (value) {
+            case '"': escape = "\\\""; escape_length = 2; break;
+            case '\\': escape = "\\\\"; escape_length = 2; break;
+            case '\b': escape = "\\b"; escape_length = 2; break;
+            case '\f': escape = "\\f"; escape_length = 2; break;
+            case '\n': escape = "\\n"; escape_length = 2; break;
+            case '\r': escape = "\\r"; escape_length = 2; break;
+            case '\t': escape = "\\t"; escape_length = 2; break;
+            default: break;
+        }
+        if (escape != NULL) {
+            if (out + escape_length >= capacity) {
+                output[0] = '\0';
+                return 0;
+            }
+            memcpy(output + out, escape, escape_length);
+            out += escape_length;
+        } else if (value < 0x20) {
+            if (out + 6 >= capacity) {
+                output[0] = '\0';
+                return 0;
+            }
+            output[out++] = '\\';
+            output[out++] = 'u';
+            output[out++] = '0';
+            output[out++] = '0';
+            output[out++] = hex[value >> 4];
+            output[out++] = hex[value & 0x0f];
+        } else {
+            if (out + 1 >= capacity) {
+                output[0] = '\0';
+                return 0;
+            }
+            output[out++] = (char)value;
+        }
+    }
+    output[out] = '\0';
+    return 1;
+}
+
 static size_t value_size(int kind) {
     if (kind == STASIS_VALUE_I32) return sizeof(int32_t);
     if (kind == STASIS_VALUE_F32) return sizeof(float);

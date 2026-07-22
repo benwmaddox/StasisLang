@@ -1,6 +1,7 @@
 #ifndef STASIS_MOBILE_AOT_RUNTIME_H
 #define STASIS_MOBILE_AOT_RUNTIME_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -91,6 +92,7 @@ float stasis_jit_gfx_measure_text_cached(int32_t handle);
 int stasis_jit_load_font(int32_t path, int32_t size);
 float stasis_jit_measure_text(int32_t font, int32_t text);
 void stasis_jit_sleep_ms(int32_t ms);
+int stasis_mobile_json_escape(const char *input, char *output, size_t capacity);
 void stasis_mobile_aot_reset(void);
 
 #ifdef __cplusplus

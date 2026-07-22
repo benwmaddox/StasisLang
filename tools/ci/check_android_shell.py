@@ -19,6 +19,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTemplateCatalog.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopFrameBudget.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPongAssetManifestMigration.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingPolicy.java",
@@ -60,6 +62,7 @@ REQUIRED_FILES = [
     "mobile/android/codex_native/src/lib.rs",
     "mobile/android/app/src/main/res/values/styles.xml",
     "mobile/android/app/src/main/assets/workshop_sample/src/main.stasis",
+    "mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/root.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/game_state.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/player.stasis",
@@ -68,6 +71,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/workshop_sample/src/assets.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/assets/ball.svg",
+    "mobile/android/app/src/main/assets/workshop_sample/assets/paddle.svg",
+    "mobile/android/app/src/main/assets/workshop_sample/assets/center_line.svg",
     "mobile/android/app/src/main/assets/workshop_sample/assets/manifest.json",
     "mobile/android/app/src/main/assets/exploration_sample/src/main.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/host.stasis",
@@ -355,7 +360,10 @@ def main() -> int:
     assert "MAX_TOOL_CALLS_PER_BATCH = 12" in host_agent
     assert 'DEFAULT_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")' in host_comparison
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
-    assert "private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues)" in activity
+    assert "private static native int nativeRunFrameInto(String projectRoot" in activity
+    assert "ByteBuffer frameI32" in activity
+    assert "ByteBuffer frameF32" in activity
+    assert "ByteBuffer frameU8" in activity
     assert 'assetRoot = "workshop_sample/"' not in template_catalog
     assert '"workshop_sample/"' in template_catalog
     assert "activeWorkshopTemplate" in activity
@@ -371,16 +379,17 @@ def main() -> int:
     assert "GLSurfaceView" in activity
     assert "new StasisPreviewRenderer(" in activity
     assert "onDrawFrame" in preview_renderer
-    assert "drawCommands" in preview_renderer
-    draw_loop = preview_renderer.split("private void drawCommands()", 1)[1].split(
-        "private void appendRect", 1
+    assert "drawFrame" in preview_renderer
+    draw_loop = preview_renderer.split("private void drawFrame()", 1)[1].split(
+        "private void drawLines", 1
     )[0]
     assert "new " not in draw_loop
     assert "allocate" not in draw_loop
-    assert "appendSprite(base);" in draw_loop
-    assert "int runEnd = index + 1;" in draw_loop
+    assert "drawLines" in draw_loop
+    assert "drawSprites" in draw_loop
+    assert "drawText" in draw_loop
     assert "GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)" in preview_renderer
-    assert "GLES20.glScissor" in preview_renderer
+    assert "GLES20.glDisable(GLES20.GL_SCISSOR_TEST)" in preview_renderer
     assert "WorkshopTextureProvider" in activity
     assert "implements StasisPreviewRenderer.TextureProvider" in workshop_textures
     assert "SparseArray<SpriteTexture>" in workshop_textures
@@ -388,9 +397,9 @@ def main() -> int:
     assert "clearTextures();" in workshop_textures
     assert "private final int[] deletedTexture = new int[1]" in workshop_textures
     assert "extractIntField" in activity
-    assert "private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY]" in activity
-    assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in activity
-    assert "budget=--%" in activity
+    assert "private final int[] nativeFrameValues = new int[RENDER_FRAME_HEADER_SIZE]" in activity
+    assert "WorkshopFrameBudget.percent" in activity
+    assert "budget tick=--% render=--% sync=--% total=--%" in activity
     assert "debugColorForBudget" in activity
     assert "appendExplorationProgress(debugTextBuilder)" in activity
     assert '"GameState.collected_count"' in activity
@@ -399,7 +408,7 @@ def main() -> int:
     assert "String projectRootPath" in activity
     assert "nativeCompileProject(projectRootPath())" in activity
     assert "String.format" not in activity
-    assert "gamePreview.setRenderFrameValues(nativeFrameValues)" in activity
+    assert "gamePreview.runNativeFrame(" in activity
     assert "RenderFrame.fromNativeFrame" not in activity
     assert "new RenderCommand" not in activity
     assert "ProjectSnapshot.from" in activity
@@ -522,7 +531,7 @@ def main() -> int:
     assert "Attach logical render/runtime/input snapshot" in activity
     assert "Nothing is sent until selected here and Queue AI Change is pressed" in activity
     assert "GLES20.glReadPixels" in preview_renderer
-    assert "capturedFrame = capture == null ? null : frame.clone()" in preview_renderer
+    assert "capturedFrame = capture == null ? null : captureLogicalFrame()" in preview_renderer
     assert "lastDrawnFrame" not in preview_renderer
     assert "MAX_CAPTURE_PIXELS = 8_000_000" in preview_renderer
     assert "preview framebuffer exceeds the 8 megapixel capture limit" in preview_renderer
@@ -1244,13 +1253,14 @@ def main() -> int:
     assert "gamePreview.touchY()" in activity
     assert "gamePreview.touchActive()" in activity
     assert "MotionEvent" in activity
-    assert "COMMAND_STRIDE = 13" in preview_renderer
-    assert "drawRectBatch((runEnd - index) * RECT_VERTICES)" in preview_renderer
-    assert "drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture)" in preview_renderer
-    assert "GLES20.glScissor" in preview_renderer
-    assert "sameClip(base, runBase)" in preview_renderer
-    assert "frame[5]" in preview_renderer
-    assert "frame[base + 6]" in preview_renderer
+    assert "LINE_F32_STRIDE = 8" in preview_renderer
+    assert "SPRITE_I32_STRIDE = 7" in preview_renderer
+    assert "TEXT_I32_STRIDE = 3" in preview_renderer
+    assert "drawColorBatch" in preview_renderer
+    assert "drawPreparedTextureBatch" in preview_renderer
+    assert "frameI32" in preview_renderer
+    assert "frameF32" in preview_renderer
+    assert "frameU8Bytes" in preview_renderer
     assert "GLES20.glDrawArrays" in preview_renderer
     assert "GL_TRIANGLES" in preview_renderer
     assert "glUniform4f" not in preview_renderer
@@ -1295,7 +1305,7 @@ def main() -> int:
     assert "gameLoopHandler.postDelayed(this, DEFAULT_TICK_INTERVAL_MS)" in activity
     assert "compileReady = isRunnableCompile(compileResult)" in activity
     assert "compileAttempted = true" in activity
-    assert "RunError: native frame tick failed" in activity
+    assert 'String frameError = "RunError: " + nativeLastFrameError()' in activity
     assert "!compileReady && !compileAttempted" in activity
     assert "compileResult.contains(\"status=0\")" in activity
     assert "if (resetProject)" in activity
@@ -1328,7 +1338,7 @@ def main() -> int:
     assert "event.getPointerCount() >= 3" in published_activity
     assert "PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID" in published_activity
     assert "PublishedSpriteCatalog" in published_activity
-    assert "drawSpriteBatch" in preview_renderer
+    assert "drawSprites" in preview_renderer
     assert "nativeDecodeSvgSpriteBytes" in published_activity
     assert 'MANIFEST = ROOT + "assets/manifest.json"' in published_sprites
     assert "MessageDigest.getInstance(\"SHA-256\")" in published_sprites
@@ -1368,7 +1378,8 @@ def main() -> int:
     assert "stasis_android_bridge_free_string" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
-    assert "const int frame_len = STASIS_RENDER_FRAME_I32_CAPACITY" in native
+    assert "bytes_i32 < (jlong)(STASIS_RENDER_I32_COUNT * sizeof(int32_t))" in native
+    assert 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v1")' in native
     assert "#define STASIS_RENDER_COMMAND_STRIDE 13" in native
     assert '"Render.command_schema_version"' in native
     assert '"Render.command" #index "_rotation_degrees"' in native
@@ -1446,6 +1457,10 @@ def main() -> int:
     assert "Render.command3_clip_w = GameState.screen_w" in sample_main
     pong_manifest = read("mobile/android/app/src/main/assets/workshop_sample/assets/manifest.json")
     assert '"id": "ball"' in pong_manifest
+    assert '"id": "paddle"' in pong_manifest
+    assert '"id": "center_line"' in pong_manifest
+    preview_adapter = read("mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis")
+    assert "function on_code_swap(): void { pong_game_on_code_swap(); pong_host_render(); }" in preview_adapter
     assert '"encoding": "svg"' in pong_manifest
 
     collision = read("mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis")

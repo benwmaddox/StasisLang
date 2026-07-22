@@ -73,6 +73,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -99,6 +102,7 @@ public final class MainActivity extends Activity {
     private static final String PROJECT_BASELINE_READY = ".ready";
     private static final String SAMPLE_MIGRATION_PREFS = "workshop_sample_migrations";
     private static final String PONG_SLOW_BALL_MIGRATION = "pong_slow_ball_v1";
+    private static final String PONG_GFX_CMD_MIGRATION = "pong_gfx_cmd_v6";
     private static final String AI_PREFS = "ai_settings";
     private static final String ONBOARDING_PREFS = "onboarding_settings";
     private static final String EXPLORATION_LESSON_PREFS = "exploration_lesson_progress";
@@ -139,7 +143,6 @@ public final class MainActivity extends Activity {
     private static final long AI_TRACE_RETENTION_MS = 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
-    private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final int MAX_AI_AGENT_TURNS = 25;
     private static final int MAX_AI_TOOL_CALLS_PER_BATCH = 12;
     private static final int MAX_AI_READ_ONLY_BATCHES = 2;
@@ -276,6 +279,8 @@ public final class MainActivity extends Activity {
     private AndroidEditRecoveryStore.Entry selectedRecoveryEntry;
     private TextView changeSummary;
     private TextView gameStatus;
+    private LinearLayout blockingErrorPanel;
+    private TextView blockingErrorBody;
     private GamePreviewView gamePreview;
     private boolean previewFocusabilityCaptured;
     private boolean previewFocusableWhenUncovered;
@@ -306,9 +311,11 @@ public final class MainActivity extends Activity {
     private final int[] nativeFrameValues = new int[RENDER_FRAME_HEADER_SIZE];
     private final StringBuilder debugTextBuilder = new StringBuilder(64);
     private final RollingMetric tickMetric = new RollingMetric();
+    private final RollingMetric syncMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
     private boolean compileReady;
     private boolean compileAttempted;
+    private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private int aiSimTouchX;
     private int aiSimTouchY;
@@ -389,6 +396,7 @@ public final class MainActivity extends Activity {
         ProjectSnapshot project = loadBundledProject();
         try {
             if (migrateBundledPongBallSpeed()) project = loadBundledProject();
+            if (migrateBundledPongProductionRenderer()) project = loadBundledProject();
             ensureActiveProjectBaseline(project);
         } catch (IOException error) {
             projectRegistryError = "baseline: " + error.getMessage();
@@ -734,6 +742,7 @@ public final class MainActivity extends Activity {
 
         installGameStatusOverlay(root, true);
         installAiGameProgressOverlay(root);
+        installBlockingErrorPanel(root);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(14), dp(12), dp(14), dp(12));
@@ -922,7 +931,10 @@ public final class MainActivity extends Activity {
 
     private void installGameStatusOverlay(FrameLayout root, boolean visible) {
         gameStatus = new TextView(this);
-        gameStatus.setText("tick avg=-- p50=-- p95=-- ms\nrender avg=-- p50=-- p95=-- ms  budget=--%");
+        gameStatus.setText("tick avg=-- p50=-- p95=-- ms\n"
+                + "render avg=-- p50=-- p95=-- ms\n"
+                + "sync avg=-- p95=-- ms\n"
+                + "budget tick=--% render=--% sync=--% total=--%");
         gameStatus.setTextColor(Color.WHITE);
         gameStatus.setTextSize(12.0f);
         gameStatus.setSingleLine(false);
@@ -935,6 +947,60 @@ public final class MainActivity extends Activity {
                 Gravity.TOP | Gravity.START);
         statusParams.setMargins(dp(8), dp(8), dp(68), 0);
         root.addView(gameStatus, statusParams);
+    }
+
+    private void installBlockingErrorPanel(FrameLayout root) {
+        blockingErrorPanel = new LinearLayout(this);
+        blockingErrorPanel.setOrientation(LinearLayout.VERTICAL);
+        blockingErrorPanel.setPadding(dp(18), dp(16), dp(18), dp(16));
+        blockingErrorPanel.setBackground(createPanelBackground(
+                Color.rgb(66, 24, 30), Color.rgb(235, 105, 115)));
+        blockingErrorPanel.setElevation(dp(12));
+        blockingErrorPanel.setVisibility(View.GONE);
+
+        TextView title = new TextView(this);
+        title.setText("Game is not running");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(20.0f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
+        blockingErrorPanel.addView(title, fullWidth());
+
+        blockingErrorBody = new TextView(this);
+        blockingErrorBody.setTextColor(Color.WHITE);
+        blockingErrorBody.setTextSize(14.0f);
+        blockingErrorBody.setTypeface(Typeface.MONOSPACE);
+        blockingErrorBody.setPadding(0, dp(10), 0, dp(12));
+        blockingErrorBody.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE);
+        blockingErrorPanel.addView(blockingErrorBody, fullWidth());
+
+        LinearLayout actions = new LinearLayout(this);
+        configureActionRow(actions, adaptiveLayoutProfile());
+        Button openDiagnostics = new Button(this);
+        openDiagnostics.setText("Open Diagnostics");
+        openDiagnostics.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (editorPanel != null && editorPanel.getVisibility() != View.VISIBLE) {
+                    toggleEditorPanel();
+                }
+                if (diagnosticBody != null) diagnosticBody.setVisibility(View.VISIBLE);
+            }
+        });
+        actions.addView(openDiagnostics, actionWidth(adaptiveLayoutProfile()));
+        Button retryCompile = new Button(this);
+        retryCompile.setText("Retry Compile");
+        retryCompile.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { runNativeCompile(); }
+        });
+        actions.addView(retryCompile, actionWidth(adaptiveLayoutProfile()));
+        blockingErrorPanel.addView(actions, fullWidth());
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER);
+        params.setMargins(dp(24), dp(96), dp(24), dp(96));
+        root.addView(blockingErrorPanel, params);
     }
 
     private void installAiGameProgressOverlay(FrameLayout root) {
@@ -1261,7 +1327,7 @@ public final class MainActivity extends Activity {
                     compileAttempted = true;
                     setStatusText(compileResult);
                 }
-                if (compileReady) {
+                if (compileReady || gameRuntimeActive) {
                     runNativeTick();
                 }
                 gameLoopHandler.postDelayed(this, DEFAULT_TICK_INTERVAL_MS);
@@ -1277,6 +1343,16 @@ public final class MainActivity extends Activity {
     private void setStatusText(String status) {
         if (reloadStatus != null) {
             reloadStatus.setText(compactStatusText(status));
+        }
+        if (blockingErrorPanel != null) {
+            boolean visible = WorkshopBlockingErrorPolicy.shouldShow(gameRuntimeActive, status);
+            blockingErrorPanel.setVisibility(visible ? View.VISIBLE : View.GONE);
+            if (visible && blockingErrorBody != null) {
+                blockingErrorBody.setText(WorkshopBlockingErrorPolicy.summary(
+                        status, projectRootPath));
+                blockingErrorPanel.bringToFront();
+                if (editorToggle != null) editorToggle.bringToFront();
+            }
         }
     }
 
@@ -1448,12 +1524,17 @@ public final class MainActivity extends Activity {
         }
         lastDebugUpdateNanos = now;
         double tickMillis = tickMetric.averageMillis();
+        double syncMillis = syncMetric.averageMillis();
         double renderMillis = renderMetric.averageMillis();
         double tickP50Millis = tickMetric.percentileMillis(50);
         double tickP95Millis = tickMetric.percentileMillis(95);
+        double syncP95Millis = syncMetric.percentileMillis(95);
         double renderP50Millis = renderMetric.percentileMillis(50);
         double renderP95Millis = renderMetric.percentileMillis(95);
-        int budgetPercent = Math.max(0, (int)(((tickMillis + renderMillis) * 100.0 / FRAME_BUDGET_MILLIS) + 0.5));
+        int tickBudgetPercent = WorkshopFrameBudget.percent(tickMillis);
+        int syncBudgetPercent = WorkshopFrameBudget.percent(syncMillis);
+        int renderBudgetPercent = WorkshopFrameBudget.percent(renderMillis);
+        int totalBudgetPercent = WorkshopFrameBudget.percent(tickMillis + syncMillis + renderMillis);
         debugTextBuilder.setLength(0);
         debugTextBuilder.append("tick avg=");
         appendMillis(debugTextBuilder, tickMillis);
@@ -1467,10 +1548,20 @@ public final class MainActivity extends Activity {
         appendMillis(debugTextBuilder, renderP50Millis);
         debugTextBuilder.append(" p95=");
         appendMillis(debugTextBuilder, renderP95Millis);
-        debugTextBuilder.append(" ms  budget=");
-        appendPercent(debugTextBuilder, budgetPercent);
+        debugTextBuilder.append(" ms\nsync avg=");
+        appendMillis(debugTextBuilder, syncMillis);
+        debugTextBuilder.append(" p95=");
+        appendMillis(debugTextBuilder, syncP95Millis);
+        debugTextBuilder.append(" ms\nbudget tick=");
+        appendPercent(debugTextBuilder, tickBudgetPercent);
+        debugTextBuilder.append(" render=");
+        appendPercent(debugTextBuilder, renderBudgetPercent);
+        debugTextBuilder.append(" sync=");
+        appendPercent(debugTextBuilder, syncBudgetPercent);
+        debugTextBuilder.append(" total=");
+        appendPercent(debugTextBuilder, totalBudgetPercent);
         appendExplorationProgress(debugTextBuilder);
-        gameStatus.setTextColor(debugColorForBudget(budgetPercent));
+        gameStatus.setTextColor(debugColorForBudget(totalBudgetPercent));
         gameStatus.setText(debugTextBuilder.toString());
         updateAiGameProgressOverlay();
     }
@@ -2626,6 +2717,7 @@ public final class MainActivity extends Activity {
             diagnosticSymbol = "";
             compileAttempted = false;
             compileReady = false;
+            gameRuntimeActive = false;
             lastCompileResult = "CompileNotRun";
             reviewedGitHubChangeFingerprint = "";
             ProjectSnapshot snapshot = loadBundledProject();
@@ -4787,19 +4879,26 @@ public final class MainActivity extends Activity {
         int touchActive = gamePreview == null ? 0 : gamePreview.touchActive();
         int screenWidth = gamePreview == null ? 0 : gamePreview.getWidth();
         int screenHeight = gamePreview == null ? 0 : gamePreview.getHeight();
-        long tickStartNanos = System.nanoTime();
         int frameStatus = gamePreview == null ? -1 : gamePreview.runNativeFrame(
                 projectRootPath(), touchX, touchY, touchActive, screenWidth, screenHeight,
                 nativeFrameValues);
         long tickEndNanos = System.nanoTime();
-        tickMetric.add(tickEndNanos, tickEndNanos - tickStartNanos);
+        tickMetric.add(tickEndNanos,
+                gamePreview == null ? 0L : gamePreview.lastNativeFrameDurationNanos());
+        syncMetric.add(tickEndNanos,
+                gamePreview == null ? 0L : gamePreview.lastRendererSyncWaitNanos());
         if (frameStatus != 0 || nativeFrameValues[0] != StasisPreviewRenderer.RENDER_MAGIC
                 || nativeFrameValues[1] != StasisPreviewRenderer.RENDER_VERSION) {
             compileReady = false;
             compileAttempted = true;
-            setStatusText("RunError: " + nativeLastFrameError());
+            gameRuntimeActive = false;
+            String frameError = "RunError: " + nativeLastFrameError();
+            setStatusText(frameError);
+            if (gameStatus != null) gameStatus.setText(frameError);
+            android.util.Log.e("StasisWorkshop", frameError);
             return;
         }
+        gameRuntimeActive = true;
         recordOnboardingProjectStep(WorkshopOnboardingPolicy.Step.PROJECT_RAN);
         updateGameDebugText();
     }
@@ -9715,7 +9814,8 @@ public final class MainActivity extends Activity {
         File readyFile = new File(baselineRoot, PROJECT_BASELINE_READY);
         String templateId = activeProject == null ? WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID
                 : activeProject.templateId;
-        String expectedReady = "format=3\ntemplate_id=" + templateId + "\n";
+        String expectedReady = "format=3\ntemplate_id=" + templateId
+                + "\nrenderer=gfx_cmd_v1\n";
         if (readyFile.isFile() && expectedReady.equals(readTextFile(readyFile))) return;
         ProjectSnapshot baseline = activeProject != null && "import".equals(activeProject.origin)
                 ? current : loadBundledAssetSnapshot();
@@ -10356,6 +10456,99 @@ public final class MainActivity extends Activity {
         return !after.equals(before);
     }
 
+    private boolean migrateBundledPongProductionRenderer() throws IOException {
+        if (activeProject == null || !"bundled-workshop".equals(activeProject.id)
+                || !"sample".equals(activeProject.origin)
+                || !WorkshopTemplateCatalog.LEGACY_TEMPLATE_ID.equals(activeProject.templateId)) {
+            return false;
+        }
+        SharedPreferences preferences = getSharedPreferences(SAMPLE_MIGRATION_PREFS, MODE_PRIVATE);
+        String key = activeProject.id + ":" + PONG_GFX_CMD_MIGRATION;
+        if (preferences.getBoolean(key, false)) return false;
+
+        File sourceFile = new File(projectRoot(), "src/main.stasis");
+        if (!sourceFile.isFile()) return false;
+        String before = readTextFile(sourceFile);
+        String after = before;
+        boolean sourceChanged = !WorkshopPongRendererMigration.isProductionSource(before);
+        if (sourceChanged) {
+            try {
+                after = WorkshopPongRendererMigration.migrateSource(before);
+            } catch (IllegalArgumentException error) {
+                throw new IOException("bundled Pong lifecycle could not be migrated safely", error);
+            }
+        }
+        File adapterFile = new File(projectRoot(), "src/preview_adapter.stasis");
+        boolean adapterExisted = adapterFile.isFile();
+        String previousAdapter = adapterExisted ? readTextFile(adapterFile) : "";
+        String packagedAdapter = readAsset(getAssets(),
+                "workshop_sample/src/preview_adapter.stasis");
+        boolean adapterChanged = !packagedAdapter.equals(previousAdapter);
+        File manifestFile = new File(projectRoot(), "assets/manifest.json");
+        boolean manifestExisted = manifestFile.isFile();
+        String previousManifest = manifestExisted ? readTextFile(manifestFile) : "";
+        String packagedManifest = readAsset(getAssets(),
+                "workshop_sample/assets/manifest.json");
+        String migratedManifest;
+        try {
+            migratedManifest = manifestExisted
+                    ? WorkshopPongAssetManifestMigration.mergeRequiredSprites(
+                            previousManifest, packagedManifest)
+                    : packagedManifest;
+        } catch (org.json.JSONException error) {
+            throw new IOException("bundled Pong asset manifest could not be migrated safely", error);
+        }
+        boolean manifestChanged = !migratedManifest.equals(previousManifest);
+        if (!sourceChanged && !adapterChanged && !manifestChanged) {
+            if (!preferences.edit().putBoolean(key, true).commit()) {
+                throw new IOException("unable to record bundled Pong renderer migration");
+            }
+            return false;
+        }
+
+        File backup = new File(projectRoot(),
+                "build/migrations/pong_gfx_cmd_v6/main.stasis");
+        File adapterBackup = new File(projectRoot(),
+                "build/migrations/pong_gfx_cmd_v6/preview_adapter.stasis");
+        File manifestBackup = new File(projectRoot(),
+                "build/migrations/pong_gfx_cmd_v6/manifest.json");
+        if (sourceChanged && !backup.isFile()) writeSyncedTextFile(backup, before);
+        if (adapterChanged && adapterExisted && !adapterBackup.isFile()) {
+            writeSyncedTextFile(adapterBackup, previousAdapter);
+        }
+        if (manifestChanged && manifestExisted && !manifestBackup.isFile()) {
+            writeSyncedTextFile(manifestBackup, previousManifest);
+        }
+        try {
+            if (sourceChanged) replaceTextFileAtomically(sourceFile, after);
+            if (adapterChanged) replaceTextFileAtomically(adapterFile, packagedAdapter);
+            if (manifestChanged) replaceTextFileAtomically(manifestFile, migratedManifest);
+            if (!preferences.edit().putBoolean(key, true).commit()) {
+                throw new IOException("unable to record bundled Pong renderer migration");
+            }
+        } catch (IOException error) {
+            try {
+                if (sourceChanged) replaceTextFileAtomically(sourceFile, before);
+                if (adapterChanged) {
+                    if (adapterExisted) replaceTextFileAtomically(adapterFile, previousAdapter);
+                    else if (!adapterFile.delete() && adapterFile.exists()) {
+                        throw new IOException("unable to remove migrated Pong renderer adapter");
+                    }
+                }
+                if (manifestChanged) {
+                    if (manifestExisted) replaceTextFileAtomically(manifestFile, previousManifest);
+                    else if (!manifestFile.delete() && manifestFile.exists()) {
+                        throw new IOException("unable to remove migrated Pong asset manifest");
+                    }
+                }
+            } catch (IOException rollback) {
+                error.addSuppressed(rollback);
+            }
+            throw error;
+        }
+        return true;
+    }
+
     private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile) throws IOException {
         if (diskFile.isFile()) {
             return;
@@ -10459,6 +10652,35 @@ public final class MainActivity extends Activity {
             output.write(source.getBytes(StandardCharsets.UTF_8));
         } finally {
             output.close();
+        }
+    }
+
+    private void writeSyncedTextFile(File file, String source) throws IOException {
+        File parent = file.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+            throw new IOException("failed to create " + parent.getAbsolutePath());
+        }
+        FileOutputStream output = new FileOutputStream(file, false);
+        try {
+            output.write(source.getBytes(StandardCharsets.UTF_8));
+            output.getFD().sync();
+        } finally {
+            output.close();
+        }
+    }
+
+    private void replaceTextFileAtomically(File file, String source) throws IOException {
+        File temporary = new File(file.getParentFile(), file.getName() + ".gfx-cmd.tmp");
+        writeSyncedTextFile(temporary, source);
+        try {
+            try {
+                Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException unsupported) {
+                Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            if (temporary.exists()) temporary.delete();
         }
     }
 
@@ -11281,6 +11503,8 @@ public final class MainActivity extends Activity {
         private int touchX;
         private int touchY;
         private boolean touchActive;
+        private long lastNativeFrameDurationNanos;
+        private long lastRendererSyncWaitNanos;
 
         GamePreviewView(MainActivity activity) {
             super(activity);
@@ -11309,14 +11533,26 @@ public final class MainActivity extends Activity {
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
                 int screenWidth, int screenHeight, int[] header) {
             int status;
+            long requested = System.nanoTime();
             synchronized (renderer) {
+                long started = System.nanoTime();
+                lastRendererSyncWaitNanos = started - requested;
                 status = nativeRunFrameInto(projectRoot, inputX, inputY, inputActive,
                         screenWidth, screenHeight, renderer.frameI32Bytes(),
                         renderer.frameF32Bytes(), renderer.frameU8Bytes());
+                lastNativeFrameDurationNanos = System.nanoTime() - started;
                 renderer.copyFrameHeaderInto(header);
             }
             if (status == 0) requestRender();
             return status;
+        }
+
+        long lastNativeFrameDurationNanos() {
+            return lastNativeFrameDurationNanos;
+        }
+
+        long lastRendererSyncWaitNanos() {
+            return lastRendererSyncWaitNanos;
         }
 
         void captureFrame(CaptureCallback callback) {

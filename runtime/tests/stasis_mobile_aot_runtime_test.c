@@ -57,6 +57,13 @@ int main(void) {
     uint8_t external_u8[4] = {1, 2, 3, 4};
     uint8_t dynamic_path[] = "sprite.bmp";
     int32_t *owned;
+    char escaped_json[64];
+    const char json_controls[] = {'"', '\\', '\b', '\f', '\n', '\r', '\t', 1, 'A', 0};
+
+    CHECK(stasis_mobile_json_escape(json_controls, escaped_json, sizeof(escaped_json)) == 1);
+    CHECK(strcmp(escaped_json, "\\\"\\\\\\b\\f\\n\\r\\t\\u0001A") == 0);
+    CHECK(stasis_mobile_json_escape("too long", escaped_json, 2) == 0);
+    CHECK(escaped_json[0] == '\0');
 
     stasis_mobile_aot_reset();
     stasis_jit_global_i32_store(10, 42);

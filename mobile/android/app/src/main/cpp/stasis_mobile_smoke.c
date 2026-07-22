@@ -1571,14 +1571,12 @@ Java_com_stasislang_workshop_MainActivity_nativeResolveCachedText(
     PublishedFontResource *font = &published_fonts[run->font - 1];
     const char *asset_path = strstr(font->path, "assets/");
     if (asset_path == NULL) asset_path = font->path;
-    char escaped_text[2050];
-    size_t out = 0;
-    for (const char *cursor = run->text; *cursor != '\0' && out + 2 < sizeof(escaped_text); cursor += 1) {
-        if (*cursor == '"' || *cursor == '\\') escaped_text[out++] = '\\';
-        escaped_text[out++] = *cursor;
+    char escaped_text[(sizeof(run->text) - 1) * 6 + 1];
+    if (!stasis_mobile_json_escape(run->text, escaped_text, sizeof(escaped_text))) {
+        return (*env)->NewStringUTF(env,
+                "{\"status\":\"error\",\"error\":\"cached text could not be JSON encoded\"}");
     }
-    escaped_text[out] = '\0';
-    char response[3072];
+    char response[sizeof(escaped_text) + 1024];
     snprintf(response, sizeof(response),
             "{\"status\":\"ok\",\"handle\":%d,\"font\":%d,\"font_asset\":\"stasis_game/%s\",\"font_size\":%d,\"text\":\"%s\",\"measured_width\":%.3f}",
             (int)handle, (int)run->font, asset_path, (int)font->size,

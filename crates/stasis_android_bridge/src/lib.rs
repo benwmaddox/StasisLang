@@ -413,8 +413,6 @@ pub fn compile_android_workshop_project(
     };
     let previous = read_previous_android_plan(project_root)?;
     let mut plan = build_workshop_compile_plan(&files, &compile, previous.as_ref())?;
-    warm_or_reload_runtime_session(project_root, &files, fingerprint_workshop_sources(&files))?;
-
     // The legacy artifact analyzer does not understand every production extern and can
     // report detector errors for programs the real JIT has compiled successfully. The
     // executable pipeline above is authoritative for Workshop; retain the artifact
@@ -497,6 +495,8 @@ pub fn compile_android_workshop_project(
             )
         })?;
     }
+
+    warm_or_reload_runtime_session(project_root, &files, fingerprint_workshop_sources(&files))?;
 
     Ok(AndroidBridgeCompileResult {
         status: plan.status,
@@ -882,21 +882,23 @@ fn run_android_workshop_tick_internal(
             session.initialized = true;
             true
         };
-        session
-            .jit
-            .write_i32_global_path("Input.touch_x", input.touch_x);
-        session
-            .jit
-            .write_i32_global_path("Input.touch_y", input.touch_y);
-        session
-            .jit
-            .write_i32_global_path("Input.touch_active", input.touch_active);
-        session
-            .jit
-            .write_i32_global_path("Input.screen_w", input.screen_w);
-        session
-            .jit
-            .write_i32_global_path("Input.screen_h", input.screen_h);
+        if read_legacy_render_commands {
+            session
+                .jit
+                .write_i32_global_path("Input.touch_x", input.touch_x);
+            session
+                .jit
+                .write_i32_global_path("Input.touch_y", input.touch_y);
+            session
+                .jit
+                .write_i32_global_path("Input.touch_active", input.touch_active);
+            session
+                .jit
+                .write_i32_global_path("Input.screen_w", input.screen_w);
+            session
+                .jit
+                .write_i32_global_path("Input.screen_h", input.screen_h);
+        }
         execute_lifecycle_noarg(&session.jit, "tick")?;
         session.tick_count = session.tick_count.saturating_add(1);
         execute_optional_lifecycle_noarg(&session.jit, "render")?;
@@ -2224,6 +2226,54 @@ mod tests {
             .expect("read manifest");
         assert!(manifest.contains("errors=0"));
 
+        fs::remove_dir_all(root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn artifact_write_failure_does_not_stage_runtime_candidate() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("artifact_write_rejection");
+        let source = root.join("src/main.stasis");
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 1; }\n",
+        )
+        .expect("write initial source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("initial compile");
+        let initial =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("initial tick");
+        assert_eq!(initial.observed_game_tick_count, 11);
+
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 100; }\n",
+        )
+        .expect("write changed source");
+        fs::remove_dir_all(root.join("build/functions")).expect("remove artifact directory");
+        fs::write(root.join("build/functions"), b"blocks artifact directory")
+            .expect("block artifact directory");
+
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("artifact write must fail");
+        assert!(error.contains("function artifact directory"), "{error}");
+        RUNTIME_SESSION.with(|session| {
+            let session = session.borrow();
+            let session = session.as_ref().expect("active runtime preserved");
+            assert!(session.pending_candidate.is_none());
+            assert!(session.pending_resource_catalog.is_none());
+        });
+
+        let after_failure =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("old runtime tick");
+        assert!(!after_failure.recompiled);
+        assert_eq!(after_failure.observed_game_tick_count, 12);
+
+        fs::remove_file(root.join("build/functions")).ok();
         fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();
     }
