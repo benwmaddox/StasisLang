@@ -12,7 +12,7 @@ Pong project. The task was:
 The small project contains the ten baseline Stasis files. The medium project adds eight directly
 imported files containing 200 unrelated functions. The large fixture adds 32 files and 1,600
 unrelated functions; it is retained in the harness for the next provider iteration. A hidden
-four-test acceptance file is copied in only after the agent exits. Each agent run is capped at 600
+four-test acceptance file is copied in only after the agent exits. Each agent run is capped at 300
 seconds. Cached input is costed at 10% of uncached input.
 
 These are single controlled trials, so time and token totals are directional rather than variance
@@ -28,8 +28,6 @@ estimates.
 | Generalist | explicit equality and adjacent threshold checks | medium | 4/4 | 201.0 | 0.1 | 201.1 | 652,734 | 596,480 | 8,670 | 0.840 |
 | Built-in Stasis AI | current | small | 4/4 | 182.1 | 0.1 | 182.2 | 139,196 | 0 | 8,757 | 0.959 |
 | Built-in Stasis AI | current | medium | 2/4 | 127.2 | 0.1 | 127.3 | 140,125 | 12,032 | 5,726 | 0.818 |
-| Built-in Stasis AI | threshold guidance only | medium | 4/4 | 294.1 | 0.1 | 294.3 | 251,328 | 22,016 | 14,575 | 1.595 |
-| Built-in Stasis AI | targeted initial context + threshold guidance | medium | 4/4 | 265.7 | 0.1 | 265.8 | 225,996 | 92,672 | 12,403 | 1.085 |
 
 ## Retained instruction changes
 
@@ -43,14 +41,10 @@ The guide now also uses `stasis fmt --check` instead of mutating whole-project f
 original run, `stasis fmt` rewrote comment-only placeholder files unrelated to the request. The
 refined runs left those files unchanged and required a final changed-file audit.
 
-## Retained built-in changes
+## Next provider target
 
-The original built-in run was fast but missed paddle-contact and scoring boundaries. Explicit
-geometry and public-update threshold guidance restored 4/4 acceptance. When the default starting
-inventory is truncated, adding at most 32 deduplicated prompt-matched symbols to initial context
-then reduced that correct run from 294.1 to 265.7 seconds, from 63 to 42 tool calls, and from an
-estimated $1.595 to $1.085. The refined run reported 92,672 cached input tokens (41.0% of input),
-so there is no cache regression in this comparison.
-
-Correctness is the primary gate. The ten-minute cap is a stability ceiling, not a reason to retain
-a faster incorrect result. Small and large fixture runs remain the next regression checks.
+Built-in Stasis AI remains faster and consumes far fewer raw input tokens, but its medium result
+missed paddle-contact and scoring-boundary behavior. The next iteration will use the trace to
+improve test discovery and threshold coverage, then rerun small, medium, and large fixtures. No
+provider change is accepted unless it preserves the small pass and fixes the medium failure within
+the same five-minute bound.
