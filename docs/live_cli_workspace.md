@@ -74,10 +74,10 @@ and `--render`. TUI `:validate` uses a snapshot of the live game, runs the reque
 PASS/FAIL with expected and actual values, and restores the snapshot before returning.
 
 Every run creates `build/ai-traces/tui-ai-<timestamp>.jsonl`. The trace records the user request,
-turns, user-visible working notes, tool calls, and bounded observation/outcome summaries. It never
-stores the complete provider payload. Source-bearing fields and before/after source snapshots are
-replaced by their byte count and SHA-256 digest before writing; long strings and arrays are also
-bounded.
+turns, user-visible working notes, and the exact tool calls and bounded tool observations exchanged
+with the agent. Tool source arguments and results therefore appear verbatim when they were sent to
+or received from the agent. The trace does not store the complete Codex transport request, response
+schema, tool catalog, repeated conversation envelope, or CLI transport output.
 
 The current key map is:
 

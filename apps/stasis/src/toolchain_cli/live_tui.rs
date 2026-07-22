@@ -9,7 +9,6 @@ use crossterm::terminal::{
     EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use stasis_ai::{
     live_tool_specs, run_agent, AgentEvent, CodexExecProvider, ToolCall, ToolExecutor,
     ToolObservation, DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT,
@@ -165,7 +164,7 @@ impl AiAuditLog {
             "reasoning_effort": std::env::var("STASIS_AI_REASONING_EFFORT")
                 .unwrap_or_else(|_| DEFAULT_REASONING_EFFORT.to_string()),
             "prompt": prompt,
-            "payload_logging": "bounded meaningful fields; source bodies hashed",
+            "payload_logging": "exact agent tool calls and observations; Codex transport envelope omitted",
         }))?;
         Ok(log)
     }
@@ -2441,61 +2440,11 @@ fn read_bounded_process_output(mut reader: impl Read) -> Result<String, String> 
 }
 
 fn audit_tool_call(call: &ToolCall) -> Value {
-    serde_json::json!({
-        "tool": call.tool,
-        "args": audit_value(&call.args, None),
-    })
+    serde_json::to_value(call).expect("tool calls serialize")
 }
 
 fn audit_observation(observation: &ToolObservation) -> Value {
-    serde_json::json!({
-        "tool": observation.tool,
-        "result": observation.result.as_ref().map(|value| audit_value(value, None)),
-        "error": observation.error.as_deref().map(bounded_audit_text),
-    })
-}
-
-fn audit_value(value: &Value, key: Option<&str>) -> Value {
-    let sensitive = key.is_some_and(|key| {
-        matches!(
-            key,
-            "source" | "new_source" | "before_source" | "after_source" | "request_json" | "payload"
-        )
-    });
-    if sensitive {
-        let text = value.as_str().unwrap_or_default();
-        let hash = Sha256::digest(text.as_bytes());
-        return serde_json::json!({
-            "redacted": true,
-            "bytes": text.len(),
-            "sha256": format!("{hash:x}"),
-        });
-    }
-    match value {
-        Value::Object(object) => Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| (key.clone(), audit_value(value, Some(key))))
-                .collect(),
-        ),
-        Value::Array(values) => Value::Array(
-            values
-                .iter()
-                .take(64)
-                .map(|value| audit_value(value, key))
-                .collect(),
-        ),
-        Value::String(text) => Value::String(bounded_audit_text(text)),
-        other => other.clone(),
-    }
-}
-
-fn bounded_audit_text(text: &str) -> String {
-    const MAX: usize = 1_000;
-    if text.chars().count() <= MAX {
-        return text.to_string();
-    }
-    text.chars().take(MAX).collect::<String>() + "..."
+    serde_json::to_value(observation).expect("tool observations serialize")
 }
 
 fn edit_target_from_completion(symbol: &str, completion: &CompletionState) -> LiveSymbolTarget {
@@ -3142,7 +3091,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_audit_redacts_source_bodies_but_keeps_action_identity() {
+    fn ai_audit_records_the_exact_tool_payload_seen_by_the_agent() {
         let call = ToolCall {
             tool: "write_symbol".into(),
             args: serde_json::json!({
@@ -3152,19 +3101,29 @@ mod tests {
             }),
         };
         let logged = audit_tool_call(&call);
-        assert_eq!(logged["tool"], "write_symbol");
-        assert_eq!(logged["args"]["file"], "src/main.stasis");
-        assert_eq!(logged["args"]["name"], "tick");
-        assert_eq!(logged["args"]["new_source"]["redacted"], true);
-        assert_eq!(logged["args"]["new_source"]["bytes"], 33);
         assert_eq!(
-            logged["args"]["new_source"]["sha256"]
-                .as_str()
-                .unwrap()
-                .len(),
-            64
+            logged,
+            serde_json::json!({
+                "tool": "write_symbol",
+                "args": {
+                    "file": "src/main.stasis",
+                    "name": "tick",
+                    "new_source": "function tick(): void { return; }"
+                }
+            })
         );
-        assert!(!logged.to_string().contains("function tick"));
+
+        let observation = ToolObservation::result(
+            "read_symbol",
+            serde_json::json!({
+                "name": "tick",
+                "source": "function tick(): void { return; }"
+            }),
+        );
+        assert_eq!(
+            audit_observation(&observation),
+            serde_json::to_value(observation).unwrap()
+        );
     }
 
     #[test]
