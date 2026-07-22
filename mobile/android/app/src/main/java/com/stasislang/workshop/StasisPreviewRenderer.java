@@ -49,7 +49,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int FRAME_I32_CAPACITY = I_TEXT_BASE + MAX_TEXT * TEXT_I32_STRIDE;
     static final int FRAME_F32_CAPACITY = F_TEXT_BASE + MAX_TEXT * TEXT_F32_STRIDE;
 
-    private static final int CAPTURE_HEADER_I32S = 10;
+    private static final int CAPTURE_HEADER_I32S = I_DENSITY_GENERATION + 1;
     private static final int LINE_CHUNK_SIZE = 256;
     private static final int SPRITE_CHUNK_SIZE = 128;
     private static final int VERTICES_PER_QUAD = 6;

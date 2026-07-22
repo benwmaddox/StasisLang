@@ -132,6 +132,9 @@ public final class StasisPreviewRendererSchemaTest {
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_BYTES_USED, 4);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_LOGICAL_W, 360);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_DRAWABLE_H, 2400);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_DENSITY_GENERATION, 7);
         renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_LINE_BASE, 12.5f);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_BASE, 77);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_BASE, 5);
@@ -143,6 +146,10 @@ public final class StasisPreviewRendererSchemaTest {
 
         StasisPreviewRenderer.LogicalFrameSnapshot snapshot = renderer.captureLogicalFrame();
 
+        assertEquals(StasisPreviewRenderer.I_DENSITY_GENERATION + 1, snapshot.header.length);
+        assertEquals(360, snapshot.header[StasisPreviewRenderer.I_LOGICAL_W]);
+        assertEquals(2400, snapshot.header[StasisPreviewRenderer.I_DRAWABLE_H]);
+        assertEquals(7, snapshot.header[StasisPreviewRenderer.I_DENSITY_GENERATION]);
         assertEquals(StasisPreviewRenderer.LINE_F32_STRIDE, snapshot.lines.length);
         assertEquals(12.5f, snapshot.lines[0], 0.0f);
         assertEquals(StasisPreviewRenderer.SPRITE_I32_STRIDE, snapshot.sprites.length);

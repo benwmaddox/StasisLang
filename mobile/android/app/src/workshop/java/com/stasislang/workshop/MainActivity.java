@@ -172,7 +172,7 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
     private static final double GPT_IMAGE_2_LOW_1024_USD = 0.006;
-    private static final int RENDER_FRAME_HEADER_SIZE = 10;
+    private static final int RENDER_FRAME_HEADER_SIZE = 22;
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
     private LinearLayout manualEditBody;

@@ -525,11 +525,12 @@ static void stasis_published_write_host_frame(
     StasisDisplayViewport safe = {0.0f, 0.0f, (float)screen_w, (float)screen_h};
     StasisDisplayMetrics next = stasis_display_metrics(
             logical_w, logical_h, screen_w, screen_h, screen_w, screen_h, safe);
-    if (published_display_generation == 0 ||
+    int32_t display_changed = published_display_generation == 0 ||
             next.logical_w != published_display_metrics.logical_w ||
             next.logical_h != published_display_metrics.logical_h ||
             next.native_w != published_display_metrics.native_w ||
-            next.native_h != published_display_metrics.native_h) {
+            next.native_h != published_display_metrics.native_h;
+    if (display_changed) {
         published_display_generation++;
     }
     if (published_density_generation == 0 ||
@@ -565,6 +566,7 @@ static void stasis_published_write_host_frame(
     published_host_i32[5] = logical_w;
     published_host_i32[6] = logical_h;
     published_host_i32[7] = 1;
+    published_host_i32[11] = display_changed;
     published_host_i32[12] = screen_w;
     published_host_i32[13] = screen_h;
     published_host_i32[14] = 2;
