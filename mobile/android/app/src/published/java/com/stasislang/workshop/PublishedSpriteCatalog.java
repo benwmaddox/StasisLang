@@ -43,6 +43,9 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
     private boolean manifestRead;
     private boolean manifestValid;
     private int fallbackTexture;
+    private float rasterScale = 1.0f;
+    private int densityGeneration = -1;
+    private final int[] deletedTexture = new int[1];
 
     PublishedSpriteCatalog(MainActivity activity, AssetManager assets) {
         this.activity = activity;
@@ -60,6 +63,15 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
     }
 
     @Override
+    public void onDisplayMetricsChanged(float nextRasterScale, int nextDensityGeneration) {
+        if (densityGeneration == nextDensityGeneration
+                && Math.abs(rasterScale - nextRasterScale) < 0.001f) return;
+        clearDensityTextures();
+        rasterScale = nextRasterScale;
+        densityGeneration = nextDensityGeneration;
+    }
+
+    @Override
     public int textureFor(int handle) {
         int cached = textures.get(handle, 0);
         if (cached != 0) return cached;
@@ -70,7 +82,7 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
             if (!manifestValid || sprite == null) throw new IOException("sprite handle is not packaged");
             byte[] bytes = readAsset(ROOT + sprite.path, MAX_ASSET_BYTES);
             if (!sprite.sha256.equals(sha256(bytes))) throw new IOException("sprite content hash mismatch");
-            Bitmap bitmap = decode(sprite, bytes);
+            Bitmap bitmap = decode(sprite, bytes, rasterScale);
             int texture;
             try {
                 texture = upload(bitmap);
@@ -103,7 +115,7 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
             }
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
             paint.setColor(0xffffffff);
-            paint.setTextSize(resolved.getInt("font_size"));
+            paint.setTextSize(resolved.getInt("font_size") * rasterScale);
             paint.setTypeface(Typeface.createFromAsset(assets, resolved.getString("font_asset")));
             String text = resolved.getString("text");
             Paint.FontMetrics metrics = paint.getFontMetrics();
@@ -117,9 +129,11 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
             } finally {
                 bitmap.recycle();
             }
-            cached = new TextTexture(texture, width, height);
+            cached = new TextTexture(texture,
+                    Math.max(1, Math.round(width / rasterScale)),
+                    Math.max(1, Math.round(height / rasterScale)));
             textTextures.put(runHandle, cached);
-            return StasisPreviewRenderer.packTexture(texture, width, height);
+            return StasisPreviewRenderer.packTexture(texture, cached.width, cached.height);
         } catch (Exception error) {
             activity.reportPreviewResourceError("cached text " + runHandle + ": " + error.getMessage());
             return 0L;
@@ -140,7 +154,8 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
             byte[] bytes = new byte[length];
             for (int index = 0; index < length; index += 1) bytes[index] = utf8.get(offset + index);
             FontInfo fontInfo = fontInfo(font);
-            TextTexture texture = rasterText(fontInfo, new String(bytes, StandardCharsets.UTF_8));
+            TextTexture texture = rasterText(
+                    fontInfo, new String(bytes, StandardCharsets.UTF_8), rasterScale);
             dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
             return StasisPreviewRenderer.packTexture(texture.texture, texture.width, texture.height);
         } catch (Exception error) {
@@ -162,10 +177,11 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
         return cached;
     }
 
-    private static TextTexture rasterText(FontInfo font, String text) throws IOException {
+    private static TextTexture rasterText(
+            FontInfo font, String text, float rasterScale) throws IOException {
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         paint.setColor(0xffffffff);
-        paint.setTextSize(font.size);
+        paint.setTextSize(font.size * rasterScale);
         paint.setTypeface(font.typeface);
         Paint.FontMetrics metrics = paint.getFontMetrics();
         int width = Math.max(1, (int)Math.ceil(paint.measureText(text)));
@@ -178,7 +194,31 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
         } finally {
             bitmap.recycle();
         }
-        return new TextTexture(texture, width, height);
+        return new TextTexture(texture,
+                Math.max(1, Math.round(width / rasterScale)),
+                Math.max(1, Math.round(height / rasterScale)));
+    }
+
+    private void clearDensityTextures() {
+        for (int index = 0; index < textures.size(); index += 1) {
+            deleteTexture(textures.valueAt(index));
+        }
+        textures.clear();
+        failedHandles.clear();
+        for (int index = 0; index < textTextures.size(); index += 1) {
+            deleteTexture(textTextures.valueAt(index).texture);
+        }
+        textTextures.clear();
+        for (DynamicTextTexture texture : dynamicTextTextures) {
+            deleteTexture(texture.texture.texture);
+        }
+        dynamicTextTextures.clear();
+        fonts.clear();
+    }
+
+    private void deleteTexture(int texture) {
+        deletedTexture[0] = texture;
+        GLES20.glDeleteTextures(1, deletedTexture, 0);
     }
 
     private void ensureManifest() throws Exception {
@@ -214,13 +254,19 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
         manifestValid = true;
     }
 
-    private Bitmap decode(SpriteAsset sprite, byte[] bytes) throws IOException {
+    private Bitmap decode(SpriteAsset sprite, byte[] bytes, float rasterScale) throws IOException {
         if ("svg".equals(sprite.encoding)) {
-            int[] argb = MainActivity.nativeDecodeSvgSpriteBytes(bytes, sprite.width, sprite.height);
-            if (argb == null || argb.length != sprite.width * sprite.height) {
+            int width = Math.max(1, (int)Math.ceil(sprite.width * rasterScale));
+            int height = Math.max(1, (int)Math.ceil(sprite.height * rasterScale));
+            if (width > MAX_DIMENSION || height > MAX_DIMENSION
+                    || (long)width * height > MAX_PIXELS) {
+                throw new IOException("density-scaled SVG exceeds packaged decode limits");
+            }
+            int[] argb = MainActivity.nativeDecodeSvgSpriteBytes(bytes, width, height);
+            if (argb == null || argb.length != width * height) {
                 throw new IOException("could not decode packaged SVG sprite");
             }
-            return Bitmap.createBitmap(argb, sprite.width, sprite.height, Bitmap.Config.ARGB_8888);
+            return Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_8888);
         }
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;

@@ -15,37 +15,111 @@ static int close_enough(float left, float right) {
     return fabsf(left - right) < 0.001f;
 }
 
-static void test_phone_scale_uses_uniform_letterbox_factor(void) {
-    float scale = stasis_display_pixel_scale(360, 720, 1080, 2400);
-    CHECK(close_enough(scale, 3.0f));
-    CHECK(stasis_display_scaled_extent(96, scale) == 288);
-    CHECK(stasis_display_scaled_extent(128, scale) == 384);
-    CHECK(stasis_display_font_atlas_extent(scale) == 1024);
+static StasisDisplayMetrics metrics_for(
+    int logical_w,
+    int logical_h,
+    int native_w,
+    int native_h,
+    int drawable_w,
+    int drawable_h
+) {
+    StasisDisplayViewport safe = {0.0f, 0.0f, (float)native_w, (float)native_h};
+    return stasis_display_metrics(
+        logical_w, logical_h, native_w, native_h, drawable_w, drawable_h, safe);
 }
 
-static void test_native_coordinates_map_to_logical_space(void) {
-    CHECK(close_enough(stasis_display_native_to_logical(540.0f, 1080, 360), 180.0f));
-    CHECK(close_enough(stasis_display_native_to_logical(1200.0f, 2400, 720), 360.0f));
+static void test_phone_scale_preserves_logical_canvas(void) {
+    StasisDisplayMetrics metrics = metrics_for(360, 720, 1080, 2400, 1080, 2400);
+    CHECK(metrics.logical_w == 360);
+    CHECK(metrics.logical_h == 720);
+    CHECK(metrics.native_w == 1080);
+    CHECK(metrics.drawable_h == 2400);
+    CHECK(close_enough(metrics.content_scale, 3.0f));
+    CHECK(close_enough(metrics.raster_scale, 3.0f));
+    CHECK(close_enough(metrics.native_viewport.x, 0.0f));
+    CHECK(close_enough(metrics.native_viewport.y, 120.0f));
+    CHECK(close_enough(metrics.native_viewport.w, 1080.0f));
+    CHECK(close_enough(metrics.native_viewport.h, 2160.0f));
+    CHECK(stasis_display_scaled_extent(96, metrics.raster_scale) == 288);
+    CHECK(stasis_display_font_atlas_extent(metrics.raster_scale) == 1024);
 }
 
-static void test_low_resolution_never_downsamples_asset_bakes(void) {
-    float scale = stasis_display_pixel_scale(800, 600, 640, 480);
-    CHECK(close_enough(scale, 1.0f));
-    CHECK(stasis_display_scaled_extent(96, scale) == 96);
-    CHECK(stasis_display_font_atlas_extent(scale) == 512);
+static void test_pointer_mapping_round_trips_through_letterbox(void) {
+    StasisDisplayMetrics metrics = metrics_for(360, 720, 1080, 2400, 1080, 2400);
+    float logical_x = 0.0f;
+    float logical_y = 0.0f;
+    float native_x = 0.0f;
+    float native_y = 0.0f;
+    stasis_display_native_to_logical_xy(
+        &metrics, 540.0f, 1200.0f, &logical_x, &logical_y);
+    CHECK(close_enough(logical_x, 180.0f));
+    CHECK(close_enough(logical_y, 360.0f));
+    stasis_display_logical_to_native_xy(
+        &metrics, logical_x, logical_y, &native_x, &native_y);
+    CHECK(close_enough(native_x, 540.0f));
+    CHECK(close_enough(native_y, 1200.0f));
 }
 
-static void test_extreme_density_is_bounded(void) {
-    float scale = stasis_display_pixel_scale(1, 1, 32768, 32768);
-    CHECK(close_enough(scale, 8.0f));
-    CHECK(stasis_display_scaled_extent(10000, scale) == 65536);
-    CHECK(stasis_display_font_atlas_extent(scale) == 2048);
+static void test_fractional_and_downscale_metrics_are_distinct(void) {
+    StasisDisplayMetrics fractional = metrics_for(800, 600, 1200, 900, 1200, 900);
+    CHECK(close_enough(fractional.content_scale, 1.5f));
+    CHECK(close_enough(fractional.raster_scale, 1.5f));
+
+    StasisDisplayMetrics downscale = metrics_for(800, 600, 640, 480, 640, 480);
+    CHECK(close_enough(downscale.content_scale, 0.8f));
+    CHECK(close_enough(downscale.raster_scale, 1.0f));
+    CHECK(stasis_display_scaled_extent(96, downscale.raster_scale) == 96);
+}
+
+static void test_orientation_change_keeps_logical_dimensions(void) {
+    StasisDisplayMetrics portrait = metrics_for(360, 720, 1080, 2400, 1080, 2400);
+    StasisDisplayMetrics landscape = metrics_for(360, 720, 2400, 1080, 2400, 1080);
+    CHECK(portrait.logical_w == landscape.logical_w);
+    CHECK(portrait.logical_h == landscape.logical_h);
+    CHECK(close_enough(landscape.content_scale, 1.5f));
+    CHECK(close_enough(landscape.native_viewport.x, 930.0f));
+    CHECK(close_enough(landscape.native_viewport.y, 0.0f));
+}
+
+static void test_odd_fractional_viewport_uses_renderer_rounding(void) {
+    StasisDisplayMetrics metrics = metrics_for(360, 720, 2400, 1081, 2400, 1081);
+    CHECK(close_enough(metrics.native_viewport.x, 929.0f));
+    CHECK(close_enough(metrics.native_viewport.y, 0.0f));
+    CHECK(close_enough(metrics.native_viewport.w, 541.0f));
+    CHECK(close_enough(metrics.native_viewport.h, 1081.0f));
+
+    float logical_x = -1.0f;
+    float logical_y = -1.0f;
+    stasis_display_native_to_logical_xy(
+        &metrics, 1470.0f, 1081.0f, &logical_x, &logical_y);
+    CHECK(close_enough(logical_x, 360.0f));
+    CHECK(close_enough(logical_y, 720.0f));
+}
+
+static void test_safe_native_area_maps_to_logical_viewport(void) {
+    StasisDisplayViewport safe = {0.0f, 180.0f, 1080.0f, 2040.0f};
+    StasisDisplayMetrics metrics = stasis_display_metrics(
+        360, 720, 1080, 2400, 1080, 2400, safe);
+    CHECK(close_enough(metrics.safe_logical_viewport.x, 0.0f));
+    CHECK(close_enough(metrics.safe_logical_viewport.y, 20.0f));
+    CHECK(close_enough(metrics.safe_logical_viewport.w, 360.0f));
+    CHECK(close_enough(metrics.safe_logical_viewport.h, 680.0f));
+}
+
+static void test_extreme_density_and_extent_are_bounded(void) {
+    StasisDisplayMetrics metrics = metrics_for(1, 1, 32768, 32768, 32768, 32768);
+    CHECK(close_enough(metrics.raster_scale, 8.0f));
+    CHECK(stasis_display_scaled_extent(10000, metrics.raster_scale) == 65536);
+    CHECK(stasis_display_font_atlas_extent(metrics.raster_scale) == 2048);
 }
 
 int main(void) {
-    test_phone_scale_uses_uniform_letterbox_factor();
-    test_native_coordinates_map_to_logical_space();
-    test_low_resolution_never_downsamples_asset_bakes();
-    test_extreme_density_is_bounded();
+    test_phone_scale_preserves_logical_canvas();
+    test_pointer_mapping_round_trips_through_letterbox();
+    test_fractional_and_downscale_metrics_are_distinct();
+    test_orientation_change_keeps_logical_dimensions();
+    test_odd_fractional_viewport_uses_renderer_rounding();
+    test_safe_native_area_maps_to_logical_viewport();
+    test_extreme_density_and_extent_are_bounded();
     return 0;
 }

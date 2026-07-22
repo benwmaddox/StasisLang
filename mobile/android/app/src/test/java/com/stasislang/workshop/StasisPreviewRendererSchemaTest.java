@@ -20,6 +20,30 @@ public final class StasisPreviewRendererSchemaTest {
     }
 
     @Test
+    public void displayViewportPreservesLogicalCanvasAcrossDensityAndOrientation() {
+        StasisPreviewRenderer.DisplayViewport phone =
+                StasisPreviewRenderer.fitViewport(360, 720, 1080, 2400);
+        assertEquals(0, phone.x);
+        assertEquals(120, phone.y);
+        assertEquals(1080, phone.width);
+        assertEquals(2160, phone.height);
+        assertEquals(3.0f, phone.contentScale, 0.001f);
+        assertEquals(3.0f, phone.rasterScale, 0.001f);
+
+        StasisPreviewRenderer.DisplayViewport fractional =
+                StasisPreviewRenderer.fitViewport(800, 600, 1200, 900);
+        assertEquals(1.5f, fractional.contentScale, 0.001f);
+
+        StasisPreviewRenderer.DisplayViewport landscape =
+                StasisPreviewRenderer.fitViewport(360, 720, 2400, 1080);
+        assertEquals(930, landscape.x);
+        assertEquals(0, landscape.y);
+        assertEquals(540, landscape.width);
+        assertEquals(1080, landscape.height);
+        assertEquals(1.5f, landscape.rasterScale, 0.001f);
+    }
+
+    @Test
     public void validationRequiresProductionMagicAndVersion() {
         IntBuffer frame = IntBuffer.allocate(StasisPreviewRenderer.FRAME_I32_CAPACITY);
         assertFalse(StasisPreviewRenderer.isValidFrame(frame));
@@ -70,6 +94,17 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(72, (int)((packed >>> 48) & 0xffffL));
         assertEquals(0L, StasisPreviewRenderer.packTexture(17, 65_536, 1));
         assertEquals(0L, StasisPreviewRenderer.packTexture(0, 1, 1));
+    }
+
+    @Test
+    public void oddFractionalViewportMatchesNativeInputRounding() {
+        StasisPreviewRenderer.DisplayViewport viewport =
+                StasisPreviewRenderer.fitViewport(360, 720, 2400, 1081);
+        assertEquals(929, viewport.x);
+        assertEquals(0, viewport.y);
+        assertEquals(541, viewport.width);
+        assertEquals(1081, viewport.height);
+        assertEquals(1081.0f / 720.0f, viewport.contentScale, 0.0001f);
     }
 
     @Test

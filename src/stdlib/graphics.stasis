@@ -110,6 +110,20 @@ function draw_text_cached(font: i32, run_handle: i32, x: f32, y: f32, r: f32, g:
 function gfx_window_width(): i32 { return host_window_w_px(); }
 function gfx_window_height(): i32 { return host_window_h_px(); }
 function gfx_window_resized(): bool { return host_resized(); }
+function gfx_logical_width(): i32 { return host_logical_w_px(); }
+function gfx_logical_height(): i32 { return host_logical_h_px(); }
+function gfx_native_width(): i32 { return host_native_w_px(); }
+function gfx_native_height(): i32 { return host_native_h_px(); }
+function gfx_drawable_width(): i32 { return host_drawable_w_px(); }
+function gfx_drawable_height(): i32 { return host_drawable_h_px(); }
+function gfx_safe_viewport_x(): i32 { return host_safe_x_px(); }
+function gfx_safe_viewport_y(): i32 { return host_safe_y_px(); }
+function gfx_safe_viewport_width(): i32 { return host_safe_w_px(); }
+function gfx_safe_viewport_height(): i32 { return host_safe_h_px(); }
+function gfx_content_scale(): f32 { return host_content_scale(); }
+function gfx_raster_scale(): f32 { return host_raster_scale(); }
+function gfx_display_generation(): i32 { return host_display_generation(); }
+function gfx_density_generation(): i32 { return host_density_generation(); }
 
 function is_key_down(scancode: i32): bool { return host_key_down(scancode); }
 function should_quit(): bool { return host_quit_requested(); }

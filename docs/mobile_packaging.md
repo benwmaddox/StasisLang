@@ -59,6 +59,10 @@ refreshes density-dependent caches after surface-size changes. Games should
 author layout in logical coordinates rather than applying Android density
 multipliers themselves.
 
+The exact metric fields, aspect-fit input transform, safe viewport, cache keys,
+and generation rules are documented in `display_metrics.md` and are shared with
+desktop, Workshop JIT preview, and bundled Published AOT preview.
+
 ## iOS arm64
 
 On macOS install Xcode and obtain device-capable `SDL2.xcframework` and
