@@ -90,8 +90,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -346,6 +350,7 @@ public final class MainActivity extends Activity {
             int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
     private static native String nativeLastFrameError();
+    private static native String nativeInspectRuntimeState(String projectRoot);
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
     private static native String nativeGetRuntimeI32(String projectRoot, String path);
     static native String nativeResolveSpriteAsset(String projectRoot, int handle);
@@ -7108,16 +7113,38 @@ public final class MainActivity extends Activity {
     }
     private JSONObject aiToolRunFrame() throws Exception {
         ensureAiTestCompileReady();
-        int status = gamePreview == null ? -1 : gamePreview.runNativeFrame(
-                projectRootPath(), aiSimTouchX, aiSimTouchY, aiSimTouchActive,
-                currentAiScreenWidth(), currentAiScreenHeight(), nativeFrameValues);
+        AiFrameResult frameResult = callOnGameThread(() -> {
+            int status = gamePreview == null ? -1 : gamePreview.runNativeFrame(
+                    projectRootPath(), aiSimTouchX, aiSimTouchY, aiSimTouchActive,
+                    currentAiScreenWidth(), currentAiScreenHeight(), nativeFrameValues);
+            String rawState = nativeInspectRuntimeState(projectRootPath());
+            JSONObject runtimeState = new JSONObject(rawState == null ? "{}" : rawState);
+            runtimeState.put("live", "live_session".equals(runtimeState.optString("source")));
+            String error = status == 0 ? null : nativeLastFrameError();
+            return new AiFrameResult(status, runtimeState, currentLogicalFrame(), error);
+        });
         JSONObject result = new JSONObject()
-                .put("status", status)
+                .put("status", frameResult.status)
                 .put("input", currentInputStateJson())
-                .put("frame", frameValuesToJson(currentLogicalFrame()))
-                .put("runtime_state", runtimeStateJson());
-        if (status != 0) result.put("error", nativeLastFrameError());
+                .put("frame", frameValuesToJson(frameResult.frame))
+                .put("runtime_state", frameResult.runtimeState);
+        if (frameResult.error != null) result.put("error", frameResult.error);
         return result;
+    }
+
+    private static final class AiFrameResult {
+        final int status;
+        final JSONObject runtimeState;
+        final StasisPreviewRenderer.LogicalFrameSnapshot frame;
+        final String error;
+
+        AiFrameResult(int status, JSONObject runtimeState,
+                StasisPreviewRenderer.LogicalFrameSnapshot frame, String error) {
+            this.status = status;
+            this.runtimeState = runtimeState;
+            this.frame = frame;
+            this.error = error;
+        }
     }
 
     private JSONObject aiToolInspectRuntimeState() throws Exception {
@@ -7163,24 +7190,32 @@ public final class MainActivity extends Activity {
     }
 
     private JSONObject runtimeStateJson() throws Exception {
-        File stateFile = new File(projectRoot(), "build/runtime_state.txt");
-        JSONObject values = new JSONObject();
-        String raw = "";
-        if (stateFile.isFile()) {
-            raw = readTextFile(stateFile);
-            String[] lines = raw.split("\\r?\\n");
-            for (String line : lines) {
-                int equals = line.indexOf('=');
-                if (equals > 0) {
-                    values.put(line.substring(0, equals), line.substring(equals + 1));
-                }
-            }
+        String raw = callOnGameThread(() -> nativeInspectRuntimeState(projectRootPath()));
+        JSONObject state = new JSONObject(raw == null ? "{}" : raw);
+        state.put("live", "live_session".equals(state.optString("source")));
+        return state;
+    }
+
+    private <T> T callOnGameThread(Callable<T> operation) throws Exception {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return operation.call();
         }
-        return new JSONObject()
-                .put("file", "build/runtime_state.txt")
-                .put("exists", stateFile.isFile())
-                .put("raw", raw)
-                .put("values", values);
+        FutureTask<T> task = new FutureTask<>(operation);
+        if (!gameLoopHandler.post(task)) {
+            throw new IOException("game thread is unavailable");
+        }
+        try {
+            return task.get(5, TimeUnit.SECONDS);
+        } catch (TimeoutException error) {
+            gameLoopHandler.removeCallbacks(task);
+            task.cancel(false);
+            throw new IOException("game thread operation timed out", error);
+        } catch (InterruptedException error) {
+            gameLoopHandler.removeCallbacks(task);
+            task.cancel(false);
+            Thread.currentThread().interrupt();
+            throw new IOException("game thread operation was interrupted", error);
+        }
     }
 
     private StasisPreviewRenderer.LogicalFrameSnapshot currentLogicalFrame() {

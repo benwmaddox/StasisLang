@@ -1908,6 +1908,53 @@ pub extern "C" fn stasis_android_bridge_last_frame_error() -> *mut c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn stasis_android_bridge_inspect_runtime_state(
+    project_root: *const c_char,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        if project_root.is_null() {
+            return Err("null project root".to_string());
+        }
+        let project_root = Path::new(
+            CStr::from_ptr(project_root)
+                .to_str()
+                .map_err(|error| format!("project root was not UTF-8: {error}"))?,
+        );
+        inspect_android_runtime_state(project_root)
+    }));
+    let value = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => serde_json::json!({"status": "RuntimeStateError", "error": error}),
+        Err(_) => serde_json::json!({
+            "status": "RuntimeStateError",
+            "error": "panic while inspecting Android runtime state",
+        }),
+    };
+    CString::new(value.to_string())
+        .unwrap_or_else(|_| CString::new("{\"status\":\"RuntimeStateError\"}").unwrap())
+        .into_raw()
+}
+
+fn inspect_android_runtime_state(project_root: &Path) -> Result<serde_json::Value, String> {
+    RUNTIME_SESSION.with(|session_cell| {
+        let session_slot = session_cell.borrow();
+        let session = session_slot
+            .as_ref()
+            .filter(|session| session.project_root == project_root)
+            .ok_or_else(|| "Android runtime session was not initialized".to_string())?;
+        Ok(serde_json::json!({
+            "status": "RuntimeStateReady",
+            "mode": "JitExecuted",
+            "source": "live_session",
+            "tick_count": session.tick_count,
+            "game_tick_count": session.jit.read_i32_global_path("GameState.tick_count"),
+            "initialized": session.initialized,
+            "pending_candidate": session.pending_candidate.is_some(),
+        }))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn stasis_android_bridge_run_tick(
     project_root: *const c_char,
     entry_file: *const c_char,
@@ -2411,6 +2458,11 @@ mod tests {
         assert!(!second.recompiled);
         assert!(!second.initialized);
         assert_eq!(second.observed_game_tick_count, 12);
+
+        let live_state = inspect_android_runtime_state(&root).expect("inspect live runtime state");
+        assert_eq!(live_state["source"], "live_session");
+        assert_eq!(live_state["tick_count"], 2);
+        assert_eq!(live_state["game_tick_count"], 12);
 
         let state = fs::read_to_string(root.join("build/runtime_state.txt"))
             .expect("read JIT runtime state");

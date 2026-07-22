@@ -31,6 +31,7 @@ typedef char *(*stasis_android_bridge_run_tests_fn)(const char *project_root);
 typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h);
 typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len);
 typedef char *(*stasis_android_bridge_last_frame_error_fn)(void);
+typedef char *(*stasis_android_bridge_inspect_runtime_state_fn)(const char *project_root);
 typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_root, const char *entry_file, const char *path, int value);
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
 typedef char *(*stasis_android_bridge_resolve_sprite_asset_fn)(const char *project_root, int handle);
@@ -72,6 +73,7 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_run_tick_fn run_tick;
     stasis_android_bridge_run_tick_frame_fn run_tick_frame;
     stasis_android_bridge_last_frame_error_fn last_frame_error;
+    stasis_android_bridge_inspect_runtime_state_fn inspect_runtime_state;
     stasis_android_bridge_set_i32_global_fn set_i32_global;
     stasis_android_bridge_get_i32_global_fn get_i32_global;
     stasis_android_bridge_resolve_sprite_asset_fn resolve_sprite_asset;
@@ -1233,6 +1235,8 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v1");
     rust_bridge_api.last_frame_error =
             (stasis_android_bridge_last_frame_error_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_last_frame_error");
+    rust_bridge_api.inspect_runtime_state =
+            (stasis_android_bridge_inspect_runtime_state_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_inspect_runtime_state");
     rust_bridge_api.set_i32_global =
             (stasis_android_bridge_set_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_set_i32_global");
     rust_bridge_api.get_i32_global =
@@ -1885,6 +1889,28 @@ Java_com_stasislang_workshop_MainActivity_nativeLastFrameError(
     return result;
 #endif
 }
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeInspectRuntimeState(
+        JNIEnv *env, jclass activity_class, jstring project_root) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->inspect_runtime_state == NULL || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"RuntimeStateError\",\"error\":\"live runtime inspection unavailable\"}");
+    }
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    if (root == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"RuntimeStateError\",\"error\":\"unable to read project root\"}");
+    }
+    char *result = bridge->inspect_runtime_state(root);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (result == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"RuntimeStateError\",\"error\":\"live runtime inspection returned null\"}");
+    }
+    jstring response = (*env)->NewStringUTF(env, result);
+    bridge->free_string(result);
+    return response;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunTick(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h) {
     (void)activity_class;
