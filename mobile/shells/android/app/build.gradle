@@ -1,0 +1,41 @@
+plugins {
+    id 'com.android.application'
+}
+
+def sdl2Source = providers.gradleProperty('stasisSdl2Source')
+        .orElse(providers.environmentVariable('STASIS_SDL2_SOURCE'))
+def sdl2ImageSource = providers.gradleProperty('stasisSdl2ImageSource')
+        .orElse(providers.environmentVariable('STASIS_SDL2_IMAGE_SOURCE'))
+if (!sdl2Source.isPresent() || !sdl2ImageSource.isPresent()) {
+    throw new GradleException('Set STASIS_SDL2_SOURCE and STASIS_SDL2_IMAGE_SOURCE to SDL2 and SDL2_image source trees')
+}
+
+android {
+    namespace '@STASIS_PACKAGE_ID@'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId '@STASIS_PACKAGE_ID@'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments '-DSTASIS_SDL2_SOURCE=' + sdl2Source.get(),
+                        '-DSTASIS_SDL2_IMAGE_SOURCE=' + sdl2ImageSource.get()
+            }
+        }
+    }
+
+    sourceSets.main.java.srcDir(new File(sdl2Source.get(), 'android-project/app/src/main/java'))
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+}

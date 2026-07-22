@@ -115,31 +115,33 @@ if (-not (Test-Path $graphicsDllPath)) {
     throw "Extracted bundle does not contain stasis_graphics.dll at $graphicsDllPath"
 }
 
-$runFile = Join-Path $extractDir "smoke_run.stasis"
-$testFile = Join-Path $extractDir "smoke_test.stasis"
-$buildOut = Join-Path $extractDir "smoke_run.exe"
+$projectRoot = Join-Path $extractDir "smoke_project"
+$runFile = Join-Path $projectRoot "src/main.stasis"
+$buildOut = Join-Path $projectRoot "build/smoke_project.exe"
 
 $runContent = @'
 function main(): i32 {
     return 7;
 }
 '@
-Set-Content -Path $runFile -Value $runContent -Encoding ASCII
-
-$testContent = @'
-test `one equals one`(): bool {
-    return 1 == 1;
-}
-'@
-Set-Content -Path $testFile -Value $testContent -Encoding ASCII
 
 Push-Location $extractDir
 try {
-    Invoke-CheckedCommand -Description "Running stasis run smoke_run.stasis" -ExpectedExitCode 7 -Action {
-        & $stasisExePath run $runFile --backend cranelift --no-cranelift-runner
+    Invoke-CheckedCommand -Description "Creating a project with stasis new" -Action {
+        & $stasisExePath new smoke_project --dir $projectRoot
     }
-    Invoke-CheckedCommand -Description "Running stasis build smoke_run.stasis" -Action {
-        & $stasisExePath build $runFile --backend cranelift --out $buildOut
+    Set-Content -Path $runFile -Value $runContent -Encoding ASCII
+    Invoke-CheckedCommand -Description "Checking from a project subdirectory" -Action {
+        & $stasisExePath --workspace (Join-Path $projectRoot "src") check --json
+    }
+    Invoke-CheckedCommand -Description "Running project tests" -Action {
+        & $stasisExePath --workspace $projectRoot test --json
+    }
+    Invoke-CheckedCommand -Description "Running project main through JIT" -ExpectedExitCode 7 -Action {
+        & $stasisExePath --workspace $projectRoot run
+    }
+    Invoke-CheckedCommand -Description "Building an offline AOT executable" -Action {
+        & $stasisExePath --workspace $projectRoot build --mode release
     }
     if (-not (Test-Path $buildOut)) {
         throw "stasis build did not produce expected output: $buildOut"
@@ -147,9 +149,6 @@ try {
     Invoke-CheckedCommand -Description "Running stasis.exe probe-graphics-runtime" -Action {
         Remove-Item Env:STASIS_RUNTIME_DLL_PATH -ErrorAction SilentlyContinue
         & $stasisExePath probe-graphics-runtime
-    }
-    Invoke-CheckedCommand -Description "Running stasis test smoke_test.stasis" -Action {
-        & $stasisExePath test $testFile --backend cranelift --no-cranelift-runner
     }
 }
 finally {

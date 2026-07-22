@@ -13,6 +13,30 @@
         "height": 32
       },
       "dependencies": []
+    },
+    {
+      "id": "paddle",
+      "path": "assets/paddle.svg",
+      "content_sha256": "ffa8fd1dbbea0d4fccdb3dfff9d25cb0340a65b635f1081ea281b1b457a95177",
+      "format": {
+        "kind": "sprite",
+        "encoding": "svg",
+        "width": 1,
+        "height": 1
+      },
+      "dependencies": []
+    },
+    {
+      "id": "center_line",
+      "path": "assets/center_line.svg",
+      "content_sha256": "261f2e95d72e0d6cd08cb7414be56fe1212a27a5e4ddcffae8ec774b4611a5f3",
+      "format": {
+        "kind": "sprite",
+        "encoding": "svg",
+        "width": 1,
+        "height": 1
+      },
+      "dependencies": []
     }
   ]
 }

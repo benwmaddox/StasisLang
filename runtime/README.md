@@ -1,6 +1,38 @@
 # Stasis Graphics Runtime
 
-Native SDL2+OpenGL graphics library for Stasis programs.
+Native SDL2 graphics library for Stasis programs. Shipping desktop, Android,
+and iOS builds compile the same `stasis_graphics.c` command interpreter and SDL
+resource lifecycle. See `docs/shared_renderer_process.md` for the contract.
+
+## Framebuffer capture
+
+`stasis_gfx_dump_png(path)` writes the current framebuffer as an RGBA PNG and
+returns `1` on success or `0` on failure. `stasis_gfx_dump_bmp(path)` provides
+the existing BMP equivalent. Relative runtime paths resolve through the asset
+root; callers that need a specific output location should pass an absolute path.
+
+For automated captures, set `STASIS_SCREENSHOT_ONCE` to an output path and
+optionally set the 1-based `STASIS_SCREENSHOT_FRAME` and
+`STASIS_EXIT_AFTER_SCREENSHOT=1`. Scheduled capture occurs after queued drawing
+and post-effects and before the frame is presented. A `.png` suffix selects PNG;
+other suffixes use BMP. PNG bytes are deterministic for identical framebuffer
+pixels, though pixels can vary across backends, drivers, and platforms.
+
+## High-density displays
+
+`init_window(width, height, title)` defines the game's logical coordinate space.
+Stasis keeps that space stable when a mobile or high-DPI desktop surface has a
+larger drawable framebuffer. SDL maps logical drawing commands to the drawable,
+while pointer positions and safe viewports are converted back to logical pixels.
+
+SVG sources remain packaged as SVG files. On the device, sized SVG and raster
+assets are baked at the drawable-to-logical pixel scale. Rasterized GPU entries
+are shared in memory by source path and logical target size; a density change
+replaces their device raster while preserving the game-facing sprite handle.
+TrueType atlases use the same scale, but text measurement and glyph placement
+remain in logical pixels. A drawable-density change invalidates the affected
+sprite and font caches so they are rebuilt before their next draw. Framebuffer
+captures use the drawable resolution.
 
 ## Prerequisites
 
@@ -35,13 +67,18 @@ Native SDL2+OpenGL graphics library for Stasis programs.
 
 ## Android (NDK)
 
-Android builds currently use the SDL_Renderer backend only (no OpenGL 2.1/GLEW path):
-
-- Configure `runtime/CMakeLists.txt` with `-DSTASIS_GRAPHICS_SDL_ONLY=ON`
-- Use an NDK toolchain (direct CMake toolchain or vcpkg Android triplets)
+Android uses the canonical SDL renderer process. `STASIS_GRAPHICS_SDL_ONLY`
+defaults to `ON` on every platform; release automation passes it explicitly.
+Use an NDK toolchain through direct CMake or vcpkg Android triplets.
 
 Build helper:
 - `runtime/build_android.ps1` (requires `ANDROID_NDK_HOME` and vcpkg via `VCPKG_ROOT` or `C:\vcpkg`)
+
+## Shared mobile core
+
+Android and iOS release shells link the `stasis_mobile_runtime` static target.
+It forces the SDL-only backend and excludes the desktop runner and SDL main
+shim. See `docs/mobile_runtime_core.md` for the lifecycle ABI and CMake setup.
 
 Brickout Revenge debug APK workflow:
 - See `docs/brickout-android-debug-plan.md` and use `android/build_brickout_android_debug.ps1` + `android/install_brickout_android_debug.ps1`.
@@ -59,9 +96,15 @@ If you prefer to build manually or vcpkg is unavailable:
    cmake --build . --config Release
    ```
 
-## Sprite Atlas Runtime Settings
+## Legacy GL conformance
 
-The OpenGL sprite path now uses a multi-page atlas instead of one fixed texture.
+`-DSTASIS_GRAPHICS_SDL_ONLY=OFF` retains the old desktop GL adapter for bounded
+conformance investigation. It is not a shipping renderer. `STASIS_USE_SDL=1`
+selects the canonical path in such a legacy build.
+
+## Legacy GL atlas settings
+
+The opt-in GL adapter uses a multi-page atlas instead of one fixed texture.
 
 - `STASIS_GFX_ATLAS_W` and `STASIS_GFX_ATLAS_H` set the per-page atlas size.
 - The default page size is `2048x2048`, clamped to the runtime `GL_MAX_TEXTURE_SIZE`.
@@ -75,7 +118,7 @@ The library exports these functions for Stasis programs:
 
 | Function | Description |
 |----------|-------------|
-| `stasis_init_window(w, h, title)` | Create window with OpenGL context |
+| `stasis_init_window(w, h, title)` | Create the SDL window and renderer |
 | `stasis_begin_frame()` | Start a new frame |
 | `stasis_end_frame()` | Render queued lines, swap buffers |
 | `stasis_clear(r, g, b, a)` | Clear screen with color |
@@ -107,9 +150,9 @@ Guest code should read keyboard/pointer/quit state through `src/runtime/host_fra
 directly or via the HostFrame-backed stdlib wrappers in `src/stdlib/graphics.stasis` and
 `src/stdlib/game_input.stasis`.
 
-## Sprite Atlas Configuration
+## Legacy GL atlas configuration
 
-The OpenGL sprite path now uses paged atlases with region reuse instead of one fixed compile-time atlas.
+The opt-in GL adapter uses paged atlases with region reuse instead of one fixed compile-time atlas.
 The runtime creates new atlas pages on demand, reuses freed regions on reload/resize, and keeps sprite
 handles in a growable table.
 

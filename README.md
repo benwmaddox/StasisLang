@@ -31,10 +31,17 @@ Direct influences:
 
 Most users will:
 
-1. Write a `.stasis` game with `main()`, `tick()`, `render()`.
-2. Run it in dev with `play` (watch + hot swap).
-3. Write `.stasis` tests and run them with `test`.
-4. Later: build production artifacts with AOT (WIP).
+1. Install one release archive and put its `stasis` executable on `PATH`.
+2. Run `stasis new my_game`, then work from the project root or any subdirectory.
+3. Use `stasis fmt`, `stasis check`, `stasis test`, and `stasis run` during development.
+4. Use `stasis build --mode release`, `stasis package --target desktop`, or
+   `stasis package-mobile --target android-arm64|ios-arm64` to ship.
+
+The integrated CLI, `stasis.json` workspace contract, JSON output, offline behavior, and
+installation layout are documented in `docs/toolchain_cli.md`.
+
+Lean Android/iOS app packaging is documented in `docs/mobile_packaging.md`;
+the lower-level AOT artifact contract is in `docs/mobile_aot_artifacts.md`.
 
 Nightly releases are published from `main`:
 
@@ -45,13 +52,68 @@ Windows release zip layout:
 
 - `stasis.exe` at the archive root
 - `stasis_graphics.dll` at the archive root
-- `src/` and `samples/` at the archive root
+- `lld-link.exe`, `clang-cl.exe`, `stasis_dynload.dll`, and `stasis_dynload.dll.lib` for offline AOT builds
+- `stasis_runner.exe` and `stasis_graphics.dll` for packaged desktop games
+- `src/`, `samples/`, `mobile/shells/`, and `runtime/` at the archive root
 
 That keeps the common Windows command simple:
 
 ```powershell
 .\stasis.exe play samples\bucket_catcher.stasis
 ```
+
+## Project Data
+
+Put editable runtime data in the project-level `data/` directory. Every JSON or
+CSV file with a matching `<name>.struct-meta.json` mapping is bound
+automatically; normal development commands do not need `--data-bind`.
+
+JSON supports nested metadata paths. CSV headers are deliberately flat. The
+basic form maps one row to scalar/string fields or an exact number of rows to
+primitive arrays. The table form maps variable rows into a fixed-capacity struct
+array, writes `row_count` automatically, clears unused slots, and requires one
+or more non-blank unique key columns. For example:
+
+```json
+{
+  "version": 1,
+  "globalName": "level",
+  "csvTable": {
+    "rowsPath": "waves",
+    "rowCountPath": "wave_count",
+    "capacity": 64,
+    "keyColumns": ["id"]
+  },
+  "fields": [
+    { "jsonPath": "waves.id", "csvColumn": "id", "type": "i32", "arrayCount": 64 },
+    { "jsonPath": "waves.tick", "csvColumn": "tick", "type": "i32", "arrayCount": 64 },
+    { "jsonPath": "waves.enemy_kind", "csvColumn": "enemy", "type": "i32", "arrayCount": 64 }
+  ]
+}
+```
+
+This binds `id,tick,enemy` rows to the fields of `level.waves: Wave[64]`
+and maintains `level.wave_count`. Row fields are flat primitive values; CSV does
+not represent nested row properties. Quoted fields, escaped quotes, commas,
+CRLF, and embedded newlines are supported. A JSON and CSV file cannot share the
+same stem because their metadata mapping would be ambiguous.
+
+Binding is schema-strict in both directions. Every JSON property or CSV column
+must exist in the metadata, every metadata path must exist in the data file, and
+development binding fails if the resulting global path is absent from the
+compiled program. Misspellings never create fallback globals or disappear
+silently. Table CSV additionally rejects row counts above capacity, mismatched
+field capacities, blank keys, and duplicate (including composite) keys.
+
+While `stasis play` is running, changes to either file are validated and rebound
+between ticks. An invalid edit is rejected without partially applying the set.
+For AOT output, the same files are staged with the package and their values are
+compiled into the runtime bridge, so mobile and desktop builds start with the
+data even when no loose development data file is available.
+
+The older entry-specific `<entry-name>/data/` layout remains supported for
+existing projects. `--data-bind` is reserved for intentionally overriding the
+project convention with an external pair.
 
 On Windows, SmartScreen may warn on unsigned binaries.
 
@@ -147,6 +209,54 @@ Notes:
 - `play` is currently Windows-focused (graphics runtime integration).
 - If `--watch-dir` is omitted, `play` watches the entry file's parent directory by default.
 - You can cap runtime for smoke testing with `--ticks N`.
+- Drive deterministic pointer snapshots with `--input-script path\to\input.json`.
+  Script frames are 1-based and are applied after the host snapshot and before the
+  guest tick. While a script is active, physical pointer input is ignored; pointer
+  positions and button state carry forward, while `wentDown`/`wentUp` clear on the
+  next unscripted frame.
+- Capture the rendered framebuffer with `--screenshot artifacts\frame.png`. PNG is
+  selected by the `.png` extension; other extensions preserve the existing BMP output.
+  `--screenshot-frame N` selects a 1-based frame (default `1`). The capture happens
+  after queued drawing and post-effects, immediately before present. PNG bytes are
+  deterministic for identical input pixels, but rasterization can differ between
+  graphics backends, drivers, and platforms.
+- The CLI creates missing parent directories and replaces an existing output file.
+  With `--exit-after-screenshot`, a write failure also stops the game and returns a
+  nonzero exit code instead of leaving screenshot automation running indefinitely.
+
+For example:
+
+```powershell
+cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis --screenshot artifacts\frame-12.png --screenshot-frame 12 --exit-after-screenshot
+```
+
+The equivalent runtime environment variables are `STASIS_SCREENSHOT_ONCE`,
+`STASIS_SCREENSHOT_FRAME`, and `STASIS_EXIT_AFTER_SCREENSHOT=1`.
+
+Input scripts use a bounded versioned JSON format. Frames must be strictly increasing,
+each frame contains the complete active pointer list, coordinates are viewport pixels,
+and at most eight pointers are allowed. Files larger than 16 MiB are rejected before
+parsing. Use an empty `pointers` list to release and remove every active pointer:
+
+```json
+{
+  "version": 1,
+  "frames": [
+    {
+      "frame": 1,
+      "pointers": [
+        { "id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 266, "y": 660 }
+      ]
+    },
+    {
+      "frame": 2,
+      "pointers": [
+        { "id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 266, "y": 660 }
+      ]
+    }
+  ]
+}
+```
 
 ## Tests (In Stasis, Run via JIT)
 
@@ -213,3 +323,5 @@ After the runtime exists under the repo (`runtime/build/...` or `runtime/build_c
 - `docs/spec.md`: canonical language spec
 - `docs/live-compilation-prd.md`: hot swap + product/architecture requirements
 - `docs/build_checklist.md`: execution plan and slice ordering
+- `docs/mobile_packaging_abi.md`: v1 Android/iOS AOT packaging ABI
+- `docs/mobile_packaging.md`: one-command lean Android/iOS app packaging

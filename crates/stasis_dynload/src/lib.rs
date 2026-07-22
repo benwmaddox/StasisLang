@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_char;
 use std::io::Write;
@@ -135,6 +136,23 @@ pub fn invoke_noarg_void(address: usize) -> Result<(), String> {
     }
 }
 
+thread_local! {
+    static CODE_SWAP_REJECTION: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+pub fn invoke_code_swap_hook(address: usize) -> Result<(), String> {
+    let _ = CODE_SWAP_REJECTION.with(|rejection| rejection.borrow_mut().take());
+    invoke_noarg_void(address)?;
+    CODE_SWAP_REJECTION.with(|rejection| rejection.borrow_mut().take().map_or(Ok(()), Err))
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_reject_code_swap() {
+    CODE_SWAP_REJECTION.with(|rejection| {
+        *rejection.borrow_mut() = Some("hook requested rejection".to_string());
+    });
+}
+
 pub fn invoke_i32_to_void(address: usize, arg0: i32) -> Result<(), String> {
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
@@ -239,6 +257,8 @@ pub struct StasisGraphicsApi {
     #[cfg(windows)]
     stasis_host_get_frame: usize,
     #[cfg(windows)]
+    stasis_host_bulk_init: usize,
+    #[cfg(windows)]
     stasis_host_bulk_apply_requests: usize,
     #[cfg(windows)]
     stasis_gfx_submit_u8: usize,
@@ -276,6 +296,7 @@ impl StasisGraphicsApi {
             let lib = Library::load(path)?;
             let stasis_init_window = lib.symbol_address("stasis_init_window")?;
             let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
+            let stasis_host_bulk_init = lib.symbol_address("stasis_host_bulk_init")?;
             let stasis_host_bulk_apply_requests =
                 lib.symbol_address("stasis_host_bulk_apply_requests")?;
             let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
@@ -284,6 +305,7 @@ impl StasisGraphicsApi {
                 _lib: lib,
                 stasis_init_window,
                 stasis_host_get_frame,
+                stasis_host_bulk_init,
                 stasis_host_bulk_apply_requests,
                 stasis_gfx_submit_u8,
                 stasis_sleep_ms,
@@ -336,6 +358,24 @@ impl StasisGraphicsApi {
             let _ = out_f32;
             Err(
                 "stasis_graphics host_get_frame is only supported on windows in stasis_dynload"
+                    .to_string(),
+            )
+        }
+    }
+
+    pub fn host_bulk_init(&self, host_req_seq: &i32) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*const i32) =
+                unsafe { std::mem::transmute(self.stasis_host_bulk_init) };
+            callback(host_req_seq as *const i32);
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = host_req_seq;
+            Err(
+                "stasis_graphics host_bulk_init is only supported on windows in stasis_dynload"
                     .to_string(),
             )
         }
@@ -424,6 +464,7 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_load_sprite: usize,
     stasis_gfx_release_sprite: usize,
     stasis_gfx_dump_bmp: usize,
+    stasis_gfx_dump_png: Option<usize>,
     stasis_gfx_poll_reload: usize,
     stasis_load_font: usize,
     stasis_measure_text: usize,
@@ -451,6 +492,9 @@ impl StasisGraphicsAssetsApi {
             stasis_gfx_load_sprite: lib.symbol_address("stasis_gfx_load_sprite")?,
             stasis_gfx_release_sprite: lib.symbol_address("stasis_gfx_release_sprite")?,
             stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
+            // PNG capture was added after the original asset ABI. Keep older runtime
+            // DLLs usable for all pre-existing calls and report PNG as unsupported.
+            stasis_gfx_dump_png: lib.symbol_address("stasis_gfx_dump_png").ok(),
             stasis_gfx_poll_reload: lib.symbol_address("stasis_gfx_poll_reload")?,
             stasis_load_font: lib.symbol_address("stasis_load_font")?,
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
@@ -588,7 +632,60 @@ pub fn clear_jit_string_literal_table() {
     guard.clear();
 }
 
+pub fn begin_jit_string_literal_staging() -> Result<(), String> {
+    JIT_STRING_LITERAL_STAGE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return Err("JIT string literal staging is already active on this thread".to_string());
+        }
+        *slot = Some(JitStringLiteralStage::default());
+        Ok(())
+    })
+}
+
+pub fn finish_jit_string_literal_staging() -> Result<HashMap<i32, String>, String> {
+    JIT_STRING_LITERAL_STAGE.with(|slot| {
+        let stage = slot
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| "JIT string literal staging is not active".to_string())?;
+        if let Some(error) = stage.collision {
+            Err(error)
+        } else {
+            Ok(stage.literals)
+        }
+    })
+}
+
+pub fn replace_jit_string_literal_table(literals: &HashMap<i32, String>) {
+    let table = jit_string_literal_table();
+    let mut guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    guard.clear();
+    guard.extend(literals.iter().map(|(id, value)| (*id, value.clone())));
+}
+
 pub fn upsert_jit_string_literal(id: i32, value: &str) {
+    let staged = JIT_STRING_LITERAL_STAGE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(stage) = slot.as_mut() else {
+            return false;
+        };
+        if let Some(previous) = stage.literals.get(&id) {
+            if previous != value && stage.collision.is_none() {
+                stage.collision = Some(format!(
+                    "JIT string literal hash collision for id {id}: '{previous}' vs '{value}'"
+                ));
+            }
+        } else {
+            stage.literals.insert(id, value.to_string());
+        }
+        true
+    });
+    if staged {
+        return;
+    }
     let table = jit_string_literal_table();
     let mut guard = table
         .lock()
@@ -674,9 +771,210 @@ fn owned_i32_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<i32>>> {
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn owned_u8_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<u8>>> {
+    static TABLE: OnceLock<Mutex<HashMap<ArrayKey, Vec<u8>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn owned_f64_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<f64>>> {
     static TABLE: OnceLock<Mutex<HashMap<ArrayKey, Vec<f64>>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn ensure_owned_array_capacity<T: Copy>(
+    key: ArrayKey,
+    requested_len: usize,
+    default: T,
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
+    registered: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+) -> Result<(), String> {
+    let mut owned_guard = owned.lock().expect("owned array table mutex poisoned");
+    if let Some(array) = owned_guard.get_mut(&key) {
+        if let Some((registered_ptr, registered_len)) = registered
+            .lock()
+            .expect("registered array table mutex poisoned")
+            .get(&key)
+            .copied()
+        {
+            if registered_ptr != array.as_mut_ptr() as usize {
+                return (registered_len >= requested_len)
+                    .then_some(())
+                    .ok_or_else(|| {
+                        format!(
+                            "cannot grow host-owned collection storage from {registered_len} to {requested_len}"
+                        )
+                    });
+            }
+        }
+        array.resize(array.len().max(requested_len), default);
+        let mut registered_guard = registered
+            .lock()
+            .expect("registered array table mutex poisoned");
+        registered_guard.insert(key, (array.as_mut_ptr() as usize, array.len()));
+        return Ok(());
+    }
+    if let Some((_, registered_len)) = registered
+        .lock()
+        .expect("registered array table mutex poisoned")
+        .get(&key)
+        .copied()
+    {
+        return (registered_len >= requested_len)
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                "cannot grow host-owned collection storage from {registered_len} to {requested_len}"
+            )
+            });
+    }
+    let mut array = vec![default; requested_len];
+    let ptr = array.as_mut_ptr() as usize;
+    owned_guard.insert(key, array);
+    registered
+        .lock()
+        .expect("registered array table mutex poisoned")
+        .insert(key, (ptr, requested_len));
+    Ok(())
+}
+
+fn preflight_owned_array_capacity<T>(
+    key: ArrayKey,
+    requested_len: usize,
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
+    registered: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+) -> Result<(), String> {
+    let owned_guard = owned.lock().expect("owned array table mutex poisoned");
+    let registered_entry = registered
+        .lock()
+        .expect("registered array table mutex poisoned")
+        .get(&key)
+        .copied();
+    if let Some(array) = owned_guard.get(&key) {
+        if registered_entry
+            .is_none_or(|(registered_ptr, _)| registered_ptr == array.as_ptr() as usize)
+        {
+            return Ok(());
+        }
+    }
+    if let Some((_, registered_len)) = registered_entry {
+        return (registered_len >= requested_len)
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                    "cannot grow host-owned collection storage from {registered_len} to {requested_len}"
+                )
+            });
+    }
+    Ok(())
+}
+
+pub fn preflight_jit_i32_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    preflight_owned_array_capacity(
+        (collection_hash, field_hash),
+        requested_len,
+        owned_i32_arrays(),
+        registered_i32_arrays(),
+    )
+}
+
+pub fn preflight_jit_f32_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    preflight_owned_array_capacity(
+        (collection_hash, field_hash),
+        requested_len,
+        owned_f32_arrays(),
+        registered_f32_arrays(),
+    )
+}
+
+pub fn preflight_jit_f64_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    preflight_owned_array_capacity(
+        (collection_hash, field_hash),
+        requested_len,
+        owned_f64_arrays(),
+        registered_f64_arrays(),
+    )
+}
+
+fn migrate_fallback_array<T: Copy>(
+    key: ArrayKey,
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
+    fallback: &Mutex<HashMap<(i32, i32, i32), T>>,
+) {
+    let mut owned_guard = owned.lock().expect("owned array table mutex poisoned");
+    let Some(array) = owned_guard.get_mut(&key) else {
+        return;
+    };
+    let mut fallback = fallback
+        .lock()
+        .expect("fallback array table mutex poisoned");
+    for (index, slot) in array.iter_mut().enumerate() {
+        if let Some(value) = fallback.remove(&(key.0, key.1, index as i32)) {
+            *slot = value;
+        }
+    }
+}
+
+pub fn ensure_jit_i32_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    let key = (collection_hash, field_hash);
+    ensure_owned_array_capacity(
+        key,
+        requested_len,
+        0,
+        owned_i32_arrays(),
+        registered_i32_arrays(),
+    )?;
+    migrate_fallback_array(key, owned_i32_arrays(), jit_i32_array_global_table());
+    Ok(())
+}
+
+pub fn ensure_jit_f32_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    let key = (collection_hash, field_hash);
+    ensure_owned_array_capacity(
+        key,
+        requested_len,
+        0.0,
+        owned_f32_arrays(),
+        registered_f32_arrays(),
+    )?;
+    migrate_fallback_array(key, owned_f32_arrays(), jit_f32_array_global_table());
+    Ok(())
+}
+
+pub fn ensure_jit_f64_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    let key = (collection_hash, field_hash);
+    ensure_owned_array_capacity(
+        key,
+        requested_len,
+        0.0,
+        owned_f64_arrays(),
+        registered_f64_arrays(),
+    )?;
+    migrate_fallback_array(key, owned_f64_arrays(), jit_f64_array_global_table());
+    Ok(())
 }
 
 pub fn clear_registered_global_memory() {
@@ -721,9 +1019,329 @@ pub fn clear_registered_global_memory() {
         .lock()
         .expect("owned f64 array table mutex poisoned")
         .clear();
+    owned_u8_arrays()
+        .lock()
+        .expect("owned u8 array table mutex poisoned")
+        .clear();
+}
+
+#[derive(Debug, Clone)]
+pub struct JitRuntimeStateSnapshot {
+    i32_globals: JitI32GlobalMap,
+    f32_globals: JitF32GlobalMap,
+    f64_globals: JitF64GlobalMap,
+    i32_array_globals: JitI32ArrayGlobalMap,
+    f32_array_globals: JitF32ArrayGlobalMap,
+    f64_array_globals: JitF64ArrayGlobalMap,
+    i32_ptrs: Vec<(usize, i32)>,
+    f32_ptrs: Vec<(usize, f32)>,
+    f64_ptrs: Vec<(usize, f64)>,
+    i32_arrays: Vec<RegisteredArraySnapshot<i32>>,
+    f32_arrays: Vec<RegisteredArraySnapshot<f32>>,
+    f64_arrays: Vec<RegisteredArraySnapshot<f64>>,
+    u8_arrays: Vec<RegisteredArraySnapshot<u8>>,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredArraySnapshot<T> {
+    key: ArrayKey,
+    address: usize,
+    values: Vec<T>,
+    owned: bool,
+}
+
+pub fn snapshot_jit_runtime_state() -> JitRuntimeStateSnapshot {
+    snapshot_jit_runtime_state_bounded(usize::MAX)
+        .expect("unbounded JIT runtime snapshot cannot exceed usize")
+}
+
+pub fn snapshot_jit_runtime_state_bounded(
+    max_bytes: usize,
+) -> Result<JitRuntimeStateSnapshot, String> {
+    let snapshot_bytes = runtime_snapshot_bytes()?;
+    if snapshot_bytes > max_bytes {
+        return Err(format!(
+            "live runtime snapshot requires {snapshot_bytes} bytes; limit is {max_bytes} bytes"
+        ));
+    }
+    Ok(JitRuntimeStateSnapshot {
+        i32_globals: jit_i32_global_table()
+            .lock()
+            .expect("jit i32 global table mutex poisoned")
+            .clone(),
+        f32_globals: jit_f32_global_table()
+            .lock()
+            .expect("jit f32 global table mutex poisoned")
+            .clone(),
+        f64_globals: jit_f64_global_table()
+            .lock()
+            .expect("jit f64 global table mutex poisoned")
+            .clone(),
+        i32_array_globals: jit_i32_array_global_table()
+            .lock()
+            .expect("jit i32 array global table mutex poisoned")
+            .clone(),
+        f32_array_globals: jit_f32_array_global_table()
+            .lock()
+            .expect("jit f32 array global table mutex poisoned")
+            .clone(),
+        f64_array_globals: jit_f64_array_global_table()
+            .lock()
+            .expect("jit f64 array global table mutex poisoned")
+            .clone(),
+        i32_ptrs: snapshot_registered_ptrs(registered_i32_ptrs()),
+        f32_ptrs: snapshot_registered_ptrs(registered_f32_ptrs()),
+        f64_ptrs: snapshot_registered_ptrs(registered_f64_ptrs()),
+        i32_arrays: snapshot_registered_arrays(registered_i32_arrays(), Some(owned_i32_arrays())),
+        f32_arrays: snapshot_registered_arrays(registered_f32_arrays(), Some(owned_f32_arrays())),
+        f64_arrays: snapshot_registered_arrays(registered_f64_arrays(), Some(owned_f64_arrays())),
+        u8_arrays: snapshot_registered_arrays(registered_u8_arrays(), Some(owned_u8_arrays())),
+    })
+}
+
+fn runtime_snapshot_bytes() -> Result<usize, String> {
+    let mut bytes = 0usize;
+    let mut add = |count: usize, item_bytes: usize| -> Result<(), String> {
+        bytes = bytes
+            .checked_add(
+                count
+                    .checked_mul(item_bytes)
+                    .ok_or_else(|| "live runtime snapshot size overflow".to_string())?,
+            )
+            .ok_or_else(|| "live runtime snapshot size overflow".to_string())?;
+        Ok(())
+    };
+    add(
+        jit_i32_global_table()
+            .lock()
+            .expect("jit i32 global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<(i32, i32)>(),
+    )?;
+    add(
+        jit_f32_global_table()
+            .lock()
+            .expect("jit f32 global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<(i32, f32)>(),
+    )?;
+    add(
+        jit_f64_global_table()
+            .lock()
+            .expect("jit f64 global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<(i32, f64)>(),
+    )?;
+    add(
+        jit_i32_array_global_table()
+            .lock()
+            .expect("jit i32 array global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<((i32, i32, i32), i32)>(),
+    )?;
+    add(
+        jit_f32_array_global_table()
+            .lock()
+            .expect("jit f32 array global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<((i32, i32, i32), f32)>(),
+    )?;
+    add(
+        jit_f64_array_global_table()
+            .lock()
+            .expect("jit f64 array global table mutex poisoned")
+            .len(),
+        std::mem::size_of::<((i32, i32, i32), f64)>(),
+    )?;
+    add_registered_ptr_bytes(&mut add, registered_i32_ptrs(), std::mem::size_of::<i32>())?;
+    add_registered_ptr_bytes(&mut add, registered_f32_ptrs(), std::mem::size_of::<f32>())?;
+    add_registered_ptr_bytes(&mut add, registered_f64_ptrs(), std::mem::size_of::<f64>())?;
+    add_registered_array_bytes(
+        &mut add,
+        registered_i32_arrays(),
+        std::mem::size_of::<i32>(),
+    )?;
+    add_registered_array_bytes(
+        &mut add,
+        registered_f32_arrays(),
+        std::mem::size_of::<f32>(),
+    )?;
+    add_registered_array_bytes(
+        &mut add,
+        registered_f64_arrays(),
+        std::mem::size_of::<f64>(),
+    )?;
+    add_registered_array_bytes(&mut add, registered_u8_arrays(), std::mem::size_of::<u8>())?;
+    Ok(bytes)
+}
+
+fn add_registered_ptr_bytes(
+    add: &mut impl FnMut(usize, usize) -> Result<(), String>,
+    table: &Mutex<HashMap<i32, usize>>,
+    item_bytes: usize,
+) -> Result<(), String> {
+    add(
+        table
+            .lock()
+            .expect("registered global pointer table mutex poisoned")
+            .len(),
+        item_bytes,
+    )
+}
+
+fn add_registered_array_bytes(
+    add: &mut impl FnMut(usize, usize) -> Result<(), String>,
+    table: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+    item_bytes: usize,
+) -> Result<(), String> {
+    let elements = table
+        .lock()
+        .expect("registered global array table mutex poisoned")
+        .values()
+        .try_fold(0usize, |total, (_, len)| {
+            total
+                .checked_add(*len)
+                .ok_or_else(|| "live runtime snapshot size overflow".to_string())
+        })?;
+    add(elements, item_bytes)
+}
+
+pub fn restore_jit_runtime_state(snapshot: &JitRuntimeStateSnapshot) {
+    *jit_i32_global_table()
+        .lock()
+        .expect("jit i32 global table mutex poisoned") = snapshot.i32_globals.clone();
+    *jit_f32_global_table()
+        .lock()
+        .expect("jit f32 global table mutex poisoned") = snapshot.f32_globals.clone();
+    *jit_f64_global_table()
+        .lock()
+        .expect("jit f64 global table mutex poisoned") = snapshot.f64_globals.clone();
+    *jit_i32_array_global_table()
+        .lock()
+        .expect("jit i32 array global table mutex poisoned") = snapshot.i32_array_globals.clone();
+    *jit_f32_array_global_table()
+        .lock()
+        .expect("jit f32 array global table mutex poisoned") = snapshot.f32_array_globals.clone();
+    *jit_f64_array_global_table()
+        .lock()
+        .expect("jit f64 array global table mutex poisoned") = snapshot.f64_array_globals.clone();
+    restore_registered_ptrs(&snapshot.i32_ptrs);
+    restore_registered_ptrs(&snapshot.f32_ptrs);
+    restore_registered_ptrs(&snapshot.f64_ptrs);
+    restore_registered_arrays(
+        &snapshot.i32_arrays,
+        registered_i32_arrays(),
+        Some(owned_i32_arrays()),
+    );
+    restore_registered_arrays(
+        &snapshot.f32_arrays,
+        registered_f32_arrays(),
+        Some(owned_f32_arrays()),
+    );
+    restore_registered_arrays(
+        &snapshot.f64_arrays,
+        registered_f64_arrays(),
+        Some(owned_f64_arrays()),
+    );
+    restore_registered_arrays(
+        &snapshot.u8_arrays,
+        registered_u8_arrays(),
+        Some(owned_u8_arrays()),
+    );
+}
+
+fn snapshot_registered_ptrs<T: Copy>(table: &Mutex<HashMap<i32, usize>>) -> Vec<(usize, T)> {
+    table
+        .lock()
+        .expect("registered global pointer table mutex poisoned")
+        .values()
+        .copied()
+        .map(|address| {
+            // Registered pointers remain host-owned and stable for the in-process runtime.
+            let value = unsafe { *(address as *const T) };
+            (address, value)
+        })
+        .collect()
+}
+
+fn restore_registered_ptrs<T: Copy>(values: &[(usize, T)]) {
+    for (address, value) in values {
+        // Restoration runs at a main-thread tick boundary while the registered owner is alive.
+        unsafe { *(*address as *mut T) = *value };
+    }
+}
+
+fn snapshot_registered_arrays<T: Copy>(
+    table: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+    owned: Option<&Mutex<HashMap<ArrayKey, Vec<T>>>>,
+) -> Vec<RegisteredArraySnapshot<T>> {
+    let owned_addresses = owned
+        .map(|owned| {
+            owned
+                .lock()
+                .expect("owned array table mutex poisoned")
+                .iter()
+                .map(|(key, values)| (*key, values.as_ptr() as usize))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    table
+        .lock()
+        .expect("registered global array table mutex poisoned")
+        .iter()
+        .map(|(key, (address, len))| {
+            // Registered array memory remains valid until the in-process runner unregisters it.
+            let values = unsafe { std::slice::from_raw_parts(*address as *const T, *len) }.to_vec();
+            RegisteredArraySnapshot {
+                key: *key,
+                address: *address,
+                values,
+                owned: owned_addresses.contains_key(key),
+            }
+        })
+        .collect()
+}
+
+fn restore_registered_arrays<T: Copy + Default>(
+    arrays: &[RegisteredArraySnapshot<T>],
+    registered: &Mutex<HashMap<ArrayKey, (usize, usize)>>,
+    owned: Option<&Mutex<HashMap<ArrayKey, Vec<T>>>>,
+) {
+    let mut restored = HashMap::new();
+    let mut owned_guard =
+        owned.map(|owned| owned.lock().expect("owned array table mutex poisoned"));
+    if let Some(owned) = owned_guard.as_mut() {
+        owned.retain(|key, _| arrays.iter().any(|array| array.owned && array.key == *key));
+    }
+    for array in arrays {
+        let address = if array.owned {
+            let values = owned_guard
+                .as_mut()
+                .expect("owned snapshot requires owned storage")
+                .entry(array.key)
+                .or_default();
+            values.clear();
+            values.extend_from_slice(&array.values);
+            values.as_mut_ptr() as usize
+        } else {
+            // Restoration is serialized with guest execution at the between-tick boundary.
+            unsafe {
+                std::slice::from_raw_parts_mut(array.address as *mut T, array.values.len())
+                    .copy_from_slice(&array.values)
+            };
+            array.address
+        };
+        restored.insert(array.key, (address, array.values.len()));
+    }
+    *registered
+        .lock()
+        .expect("registered array table mutex poisoned") = restored;
 }
 
 pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_i32_ptrs();
     let mut guard = table
         .lock()
@@ -732,6 +1350,9 @@ pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
 }
 
 pub fn register_global_f32_ptr(path_hash: i32, ptr: *mut f32) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_f32_ptrs();
     let mut guard = table
         .lock()
@@ -740,6 +1361,9 @@ pub fn register_global_f32_ptr(path_hash: i32, ptr: *mut f32) {
 }
 
 pub fn register_global_f64_ptr(path_hash: i32, ptr: *mut f64) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_f64_ptrs();
     let mut guard = table
         .lock()
@@ -748,30 +1372,62 @@ pub fn register_global_f64_ptr(path_hash: i32, ptr: *mut f64) {
 }
 
 pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mut i32, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    let key = (collection_hash, field_hash);
+    remove_replaced_owned_array(key, ptr as usize, owned_i32_arrays());
     let table = registered_i32_arrays();
     let mut guard = table
         .lock()
         .expect("registered i32 array table mutex poisoned");
-    guard.insert((collection_hash, field_hash), (ptr as usize, len));
+    guard.insert(key, (ptr as usize, len));
 }
 
 pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mut f32, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    let key = (collection_hash, field_hash);
+    remove_replaced_owned_array(key, ptr as usize, owned_f32_arrays());
     let table = registered_f32_arrays();
     let mut guard = table
         .lock()
         .expect("registered f32 array table mutex poisoned");
-    guard.insert((collection_hash, field_hash), (ptr as usize, len));
+    guard.insert(key, (ptr as usize, len));
 }
 
 pub fn register_global_f64_array(collection_hash: i32, field_hash: i32, ptr: *mut f64, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    let key = (collection_hash, field_hash);
+    remove_replaced_owned_array(key, ptr as usize, owned_f64_arrays());
     let table = registered_f64_arrays();
     let mut guard = table
         .lock()
         .expect("registered f64 array table mutex poisoned");
-    guard.insert((collection_hash, field_hash), (ptr as usize, len));
+    guard.insert(key, (ptr as usize, len));
+}
+
+fn remove_replaced_owned_array<T>(
+    key: ArrayKey,
+    registered_ptr: usize,
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
+) {
+    let mut guard = owned.lock().expect("owned array table mutex poisoned");
+    if guard
+        .get(&key)
+        .is_some_and(|values| values.as_ptr() as usize != registered_ptr)
+    {
+        guard.remove(&key);
+    }
 }
 
 pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut u8, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
     let table = registered_u8_arrays();
     let mut guard = table
         .lock()
@@ -857,14 +1513,30 @@ pub extern "C" fn stasis_jit_global_i32_array_ptr(
     }
 
     // Fast path: already registered (host-owned or previously allocated).
-    {
+    let registered_len = {
         let table = registered_i32_arrays();
         let guard = table
             .lock()
             .expect("registered i32 array table mutex poisoned");
-        if let Some((ptr, _)) = guard.get(&(collection_hash, field_hash)).copied() {
-            return ptr as *mut i32;
+        if let Some((ptr, registered_len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if registered_len >= len as usize {
+                return ptr as *mut i32;
+            }
+            Some(registered_len)
+        } else {
+            None
         }
+    };
+
+    if registered_len.is_some() {
+        if ensure_jit_i32_array_capacity(collection_hash, field_hash, len as usize).is_err() {
+            return std::ptr::null_mut();
+        }
+        return registered_i32_arrays()
+            .lock()
+            .expect("registered i32 array table mutex poisoned")
+            .get(&(collection_hash, field_hash))
+            .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut i32);
     }
 
     let requested_len = len as usize;
@@ -918,14 +1590,30 @@ pub extern "C" fn stasis_jit_global_f32_array_ptr(
     }
 
     // Fast path: already registered (host-owned or previously allocated).
-    {
+    let registered_len = {
         let table = registered_f32_arrays();
         let guard = table
             .lock()
             .expect("registered f32 array table mutex poisoned");
-        if let Some((ptr, _)) = guard.get(&(collection_hash, field_hash)).copied() {
-            return ptr as *mut f32;
+        if let Some((ptr, registered_len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if registered_len >= len as usize {
+                return ptr as *mut f32;
+            }
+            Some(registered_len)
+        } else {
+            None
         }
+    };
+
+    if registered_len.is_some() {
+        if ensure_jit_f32_array_capacity(collection_hash, field_hash, len as usize).is_err() {
+            return std::ptr::null_mut();
+        }
+        return registered_f32_arrays()
+            .lock()
+            .expect("registered f32 array table mutex poisoned")
+            .get(&(collection_hash, field_hash))
+            .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut f32);
     }
 
     let requested_len = len as usize;
@@ -971,6 +1659,53 @@ pub extern "C" fn stasis_jit_global_f32_array_ptr(
     ptr
 }
 
+fn global_u8_array_ptr(collection_hash: i32, field_hash: i32, len: i32) -> *mut u8 {
+    if len <= 0 {
+        return std::ptr::null_mut();
+    }
+
+    let requested_len = len as usize;
+    let key = (collection_hash, field_hash);
+    if let Some((ptr, registered_len)) = registered_u8_arrays()
+        .lock()
+        .expect("registered u8 array table mutex poisoned")
+        .get(&key)
+        .copied()
+    {
+        return if registered_len >= requested_len {
+            ptr as *mut u8
+        } else {
+            std::ptr::null_mut()
+        };
+    }
+
+    let ptr = {
+        let mut owned_guard = owned_u8_arrays()
+            .lock()
+            .expect("owned u8 array table mutex poisoned");
+        let array = owned_guard
+            .entry(key)
+            .or_insert_with(|| vec![0; requested_len]);
+        if array.len() < requested_len {
+            array.resize(requested_len, 0);
+        }
+        let mut fallback = jit_i32_array_global_table()
+            .lock()
+            .expect("jit global table mutex poisoned");
+        for (index, value) in array.iter_mut().enumerate() {
+            if let Some(stored) = fallback.remove(&(collection_hash, field_hash, index as i32)) {
+                *value = stored as u8;
+            }
+        }
+        array.as_mut_ptr()
+    };
+    registered_u8_arrays()
+        .lock()
+        .expect("registered u8 array table mutex poisoned")
+        .insert(key, (ptr as usize, requested_len));
+    ptr
+}
+
 #[no_mangle]
 pub extern "C" fn stasis_jit_global_f64_array_ptr(
     collection_hash: i32,
@@ -982,14 +1717,30 @@ pub extern "C" fn stasis_jit_global_f64_array_ptr(
     }
 
     // Fast path: already registered (host-owned or previously allocated).
-    {
+    let registered_len = {
         let table = registered_f64_arrays();
         let guard = table
             .lock()
             .expect("registered f64 array table mutex poisoned");
-        if let Some((ptr, _)) = guard.get(&(collection_hash, field_hash)).copied() {
-            return ptr as *mut f64;
+        if let Some((ptr, registered_len)) = guard.get(&(collection_hash, field_hash)).copied() {
+            if registered_len >= len as usize {
+                return ptr as *mut f64;
+            }
+            Some(registered_len)
+        } else {
+            None
         }
+    };
+
+    if registered_len.is_some() {
+        if ensure_jit_f64_array_capacity(collection_hash, field_hash, len as usize).is_err() {
+            return std::ptr::null_mut();
+        }
+        return registered_f64_arrays()
+            .lock()
+            .expect("registered f64 array table mutex poisoned")
+            .get(&(collection_hash, field_hash))
+            .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut f64);
     }
 
     let requested_len = len as usize;
@@ -1056,6 +1807,137 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     }
 }
 
+pub const STASIS_RENDER_I32_COUNT: usize = 34_848;
+pub const STASIS_RENDER_F32_COUNT: usize = 92_292;
+pub const STASIS_RENDER_U8_COUNT: usize = 65_536;
+const STASIS_RENDER_MAGIC: i32 = 0x4758_4631;
+const STASIS_RENDER_VERSION: i32 = 1;
+const STASIS_RENDER_HEADER_I32_COUNT: usize = 10;
+const STASIS_RENDER_SPRITE_BASE: usize = 32;
+const STASIS_RENDER_MAX_LINES: usize = 10_000;
+const STASIS_RENDER_LINE_STRIDE: usize = 8;
+const STASIS_RENDER_MAX_SPRITES: usize = 4_096;
+const STASIS_RENDER_SPRITE_STRIDE: usize = 7;
+const STASIS_RENDER_TEXT_BASE_I32: usize = 28_704;
+const STASIS_RENDER_TEXT_BASE_F32: usize = 80_004;
+const STASIS_RENDER_MAX_TEXT: usize = 2_048;
+const STASIS_RENDER_TEXT_STRIDE_I32: usize = 3;
+const STASIS_RENDER_TEXT_STRIDE_F32: usize = 6;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderV1ActiveCounts {
+    pub lines: usize,
+    pub sprites: usize,
+    pub text: usize,
+    pub text_bytes: usize,
+}
+
+fn global_path_hash(path: &str) -> i32 {
+    let mut hash = 2_166_136_261u32;
+    for byte in path.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash as i32
+}
+
+/// Copies only the active spans of the canonical JIT render buffers.
+///
+/// The destination retains production offsets so the Android GLES adapter consumes the exact
+/// same ABI as the SDL renderer without copying unused command capacity.
+pub fn copy_jit_render_v1_active(
+    out_i32: &mut [i32],
+    out_f32: &mut [f32],
+    out_u8: &mut [u8],
+) -> Result<RenderV1ActiveCounts, String> {
+    if out_i32.len() < STASIS_RENDER_I32_COUNT
+        || out_f32.len() < STASIS_RENDER_F32_COUNT
+        || out_u8.len() < STASIS_RENDER_U8_COUNT
+    {
+        return Err("production render destination has the wrong capacity".to_string());
+    }
+    let i32_ptr = stasis_jit_global_i32_array_ptr(
+        global_path_hash("gfx_cmd_i32"),
+        0,
+        STASIS_RENDER_I32_COUNT as i32,
+    );
+    let f32_ptr = stasis_jit_global_f32_array_ptr(
+        global_path_hash("gfx_cmd_f32"),
+        0,
+        STASIS_RENDER_F32_COUNT as i32,
+    );
+    let u8_ptr = global_u8_array_ptr(
+        global_path_hash("gfx_cmd_u8"),
+        0,
+        STASIS_RENDER_U8_COUNT as i32,
+    );
+    if i32_ptr.is_null() || f32_ptr.is_null() || u8_ptr.is_null() {
+        return Err("production render buffers were not registered by the JIT".to_string());
+    }
+    let source_i32 = unsafe { std::slice::from_raw_parts(i32_ptr, STASIS_RENDER_I32_COUNT) };
+    let source_f32 = unsafe { std::slice::from_raw_parts(f32_ptr, STASIS_RENDER_F32_COUNT) };
+    let source_u8 = unsafe { std::slice::from_raw_parts(u8_ptr, STASIS_RENDER_U8_COUNT) };
+    if source_i32[0] != STASIS_RENDER_MAGIC || source_i32[1] != STASIS_RENDER_VERSION {
+        return Err("JIT frame is not production gfx_cmd v1".to_string());
+    }
+
+    let counts = RenderV1ActiveCounts {
+        lines: source_i32[3].clamp(0, STASIS_RENDER_MAX_LINES as i32) as usize,
+        sprites: source_i32[4].clamp(0, STASIS_RENDER_MAX_SPRITES as i32) as usize,
+        text: source_i32[7].clamp(0, STASIS_RENDER_MAX_TEXT as i32) as usize,
+        text_bytes: source_i32[9].clamp(0, STASIS_RENDER_U8_COUNT as i32) as usize,
+    };
+    out_i32[..STASIS_RENDER_HEADER_I32_COUNT]
+        .copy_from_slice(&source_i32[..STASIS_RENDER_HEADER_I32_COUNT]);
+    let sprite_end = STASIS_RENDER_SPRITE_BASE + counts.sprites * STASIS_RENDER_SPRITE_STRIDE;
+    out_i32[STASIS_RENDER_SPRITE_BASE..sprite_end]
+        .copy_from_slice(&source_i32[STASIS_RENDER_SPRITE_BASE..sprite_end]);
+    let text_i32_end = STASIS_RENDER_TEXT_BASE_I32 + counts.text * STASIS_RENDER_TEXT_STRIDE_I32;
+    out_i32[STASIS_RENDER_TEXT_BASE_I32..text_i32_end]
+        .copy_from_slice(&source_i32[STASIS_RENDER_TEXT_BASE_I32..text_i32_end]);
+
+    out_f32[..4].copy_from_slice(&source_f32[..4]);
+    let line_end = 4 + counts.lines * STASIS_RENDER_LINE_STRIDE;
+    out_f32[4..line_end].copy_from_slice(&source_f32[4..line_end]);
+    let text_f32_end = STASIS_RENDER_TEXT_BASE_F32 + counts.text * STASIS_RENDER_TEXT_STRIDE_F32;
+    out_f32[STASIS_RENDER_TEXT_BASE_F32..text_f32_end]
+        .copy_from_slice(&source_f32[STASIS_RENDER_TEXT_BASE_F32..text_f32_end]);
+    out_u8[..counts.text_bytes].copy_from_slice(&source_u8[..counts.text_bytes]);
+    Ok(counts)
+}
+
+unsafe extern "C" {
+    fn stasis_render_v1_trace_native(
+        cmd_i32: *const i32,
+        cmd_f32: *const f32,
+        cmd_u8: *const u8,
+    ) -> u32;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn stasis_jit_render_v1_trace(
+    cmd_i32_id: i32,
+    cmd_i32_len: i32,
+    cmd_f32_id: i32,
+    cmd_f32_len: i32,
+    cmd_u8_id: i32,
+    cmd_u8_len: i32,
+) -> i32 {
+    if cmd_i32_len != STASIS_RENDER_I32_COUNT as i32
+        || cmd_f32_len != STASIS_RENDER_F32_COUNT as i32
+        || cmd_u8_len != STASIS_RENDER_U8_COUNT as i32
+    {
+        return 0;
+    }
+    let cmd_i32 = stasis_jit_global_i32_array_ptr(cmd_i32_id, 0, STASIS_RENDER_I32_COUNT as i32);
+    let cmd_f32 = stasis_jit_global_f32_array_ptr(cmd_f32_id, 0, STASIS_RENDER_F32_COUNT as i32);
+    let cmd_u8 = global_u8_array_ptr(cmd_u8_id, 0, STASIS_RENDER_U8_COUNT as i32);
+    if cmd_i32.is_null() || cmd_f32.is_null() || cmd_u8.is_null() {
+        return 0;
+    }
+    stasis_render_v1_trace_native(cmd_i32, cmd_f32, cmd_u8) as i32
+}
+
 fn jit_text_buffer_is_registered(value_id: i32) -> bool {
     if stasis_jit_collection_i32_load(value_id, 2) > 0 {
         return true;
@@ -1113,6 +1995,61 @@ fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
     guard.get(&value_id).map(|text| text.as_bytes().to_vec())
 }
 
+thread_local! {
+    static JIT_TEXT_SCRATCH: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn with_jit_text_arg_bytes<R>(value_id: i32, mut callback: impl FnMut(&[u8]) -> R) -> Option<R> {
+    if jit_text_buffer_is_registered(value_id) {
+        let byte_len = usize::try_from(stasis_jit_collection_i32_load(value_id, 1)).ok()?;
+        return JIT_TEXT_SCRATCH.with(|scratch| {
+            let mut bytes = scratch.borrow_mut();
+            bytes.clear();
+            bytes.try_reserve(byte_len).ok()?;
+            for index in 0..byte_len {
+                let byte = stasis_jit_global_i32_array_load(value_id, 0, index as i32);
+                bytes.push(u8::try_from(byte).ok()?);
+            }
+            Some(callback(&bytes))
+        });
+    }
+
+    let table = jit_string_literal_table();
+    let guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    guard.get(&value_id).map(|text| callback(text.as_bytes()))
+}
+
+#[derive(Clone, Copy)]
+pub struct EmbeddedGraphicsHost {
+    pub load_sprite: fn(&[u8], i32, i32) -> i32,
+    pub release_sprite: fn(i32),
+    pub load_font: fn(&[u8], i32) -> i32,
+    pub measure_text: fn(i32, &[u8]) -> f32,
+    pub cache_text: fn(i32, &[u8]) -> i32,
+    pub measure_text_cached: fn(i32) -> f32,
+    pub poll_reload: fn(i32) -> i32,
+}
+
+thread_local! {
+    static EMBEDDED_GRAPHICS_HOST: std::cell::Cell<Option<EmbeddedGraphicsHost>> =
+        const { std::cell::Cell::new(None) };
+}
+
+pub fn set_embedded_graphics_host(host: Option<EmbeddedGraphicsHost>) {
+    EMBEDDED_GRAPHICS_HOST.with(|slot| slot.set(host));
+}
+
+pub fn embedded_graphics_host_is_set() -> bool {
+    EMBEDDED_GRAPHICS_HOST.with(|slot| slot.get().is_some())
+}
+
+fn embedded_graphics_host() -> Option<EmbeddedGraphicsHost> {
+    EMBEDDED_GRAPHICS_HOST.with(|slot| slot.get())
+}
+
 #[cfg(windows)]
 fn jit_text_arg_to_cstring(value_id: i32) -> Result<CString, String> {
     let bytes = jit_text_arg_bytes(value_id).ok_or_else(|| {
@@ -1127,6 +2064,9 @@ fn jit_text_arg_to_cstring(value_id: i32) -> Result<CString, String> {
 // translate that into a stable `const char*` when calling the C runtime.
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
+    if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
+        return (host.load_sprite)(&path, max_w, max_h);
+    }
     #[cfg(windows)]
     {
         let Ok(path) = jit_text_arg_to_cstring(path_id) else {
@@ -1150,6 +2090,10 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_release_sprite(handle: i32) {
+    if let Some(host) = embedded_graphics_host() {
+        (host.release_sprite)(handle);
+        return;
+    }
     #[cfg(windows)]
     {
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -1187,7 +2131,34 @@ pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn stasis_jit_gfx_dump_png(path_id: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let Some(address) = api.stasis_gfx_dump_png else {
+            return 0;
+        };
+        let callback: extern "system" fn(*const c_char) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        return callback(path.as_ptr());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path_id;
+        0
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
+    if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
+        return (host.load_font)(&path, size);
+    }
     #[cfg(windows)]
     {
         let Ok(path) = jit_text_arg_to_cstring(path_id) else {
@@ -1210,6 +2181,13 @@ pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
+    if let Some(host) = embedded_graphics_host() {
+        if let Some(width) =
+            with_jit_text_arg_bytes(text_id, |text| (host.measure_text)(font, text))
+        {
+            return width;
+        }
+    }
     #[cfg(windows)]
     {
         let Ok(text) = jit_text_arg_to_cstring(text_id) else {
@@ -1232,6 +2210,9 @@ pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
+    if let (Some(host), Some(text)) = (embedded_graphics_host(), jit_text_arg_bytes(text_id)) {
+        return (host.cache_text)(font, &text);
+    }
     #[cfg(windows)]
     {
         let Ok(text) = jit_text_arg_to_cstring(text_id) else {
@@ -1254,6 +2235,9 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
+    if let Some(host) = embedded_graphics_host() {
+        return (host.poll_reload)(handle);
+    }
     #[cfg(windows)]
     {
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -1272,6 +2256,9 @@ pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
+    if let Some(host) = embedded_graphics_host() {
+        return (host.measure_text_cached)(run_handle);
+    }
     #[cfg(windows)]
     {
         let Ok(api) = stasis_graphics_assets_api() else {
@@ -2599,6 +3586,16 @@ type JitF32ArrayGlobalMap = std::collections::HashMap<(i32, i32, i32), f32>;
 type JitF64ArrayGlobalMap = std::collections::HashMap<(i32, i32, i32), f64>;
 type JitStringLiteralMap = std::collections::HashMap<i32, String>;
 
+#[derive(Default)]
+struct JitStringLiteralStage {
+    literals: JitStringLiteralMap,
+    collision: Option<String>,
+}
+
+thread_local! {
+    static JIT_STRING_LITERAL_STAGE: RefCell<Option<JitStringLiteralStage>> = const { RefCell::new(None) };
+}
+
 fn jit_i32_dispatch_table() -> &'static Mutex<JitDispatchMap> {
     static TABLE: OnceLock<Mutex<JitDispatchMap>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
@@ -2736,6 +3733,76 @@ mod tests {
     }
 
     #[test]
+    fn render_trace_rejects_non_contract_lengths_before_allocating() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+
+        // Safety: invalid lengths must be rejected before any pointer is resolved.
+        let trace = unsafe {
+            stasis_jit_render_v1_trace(
+                101,
+                i32::MAX,
+                102,
+                STASIS_RENDER_F32_COUNT as i32,
+                103,
+                STASIS_RENDER_U8_COUNT as i32,
+            )
+        };
+
+        assert_eq!(trace, 0);
+        assert!(registered_i32_arrays()
+            .lock()
+            .expect("registered i32 array table mutex poisoned")
+            .is_empty());
+        assert!(registered_f32_arrays()
+            .lock()
+            .expect("registered f32 array table mutex poisoned")
+            .is_empty());
+        assert!(registered_u8_arrays()
+            .lock()
+            .expect("registered u8 array table mutex poisoned")
+            .is_empty());
+    }
+
+    #[test]
+    fn runtime_state_snapshot_restores_registered_and_fallback_memory() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_f32_global_table();
+        clear_jit_f64_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_f32_array_global_table();
+        clear_jit_f64_array_global_table();
+
+        register_global_i32_ptr(1, std::ptr::null_mut());
+        register_global_u8_array(2, 0, std::ptr::null_mut(), 4);
+        let mut scalar = 7i32;
+        let mut bytes = vec![1u8, 2, 3, 4];
+        register_global_i32_ptr(10, &mut scalar);
+        register_global_u8_array(20, 0, bytes.as_mut_ptr(), bytes.len());
+        stasis_jit_global_i32_store(30, 9);
+        stasis_jit_global_f32_array_store(40, 2, 0, 1.5);
+        assert!(snapshot_jit_runtime_state_bounded(1)
+            .expect_err("snapshot should be bounded")
+            .contains("limit"));
+        let snapshot = snapshot_jit_runtime_state();
+
+        scalar = 70;
+        bytes.copy_from_slice(&[9, 9, 9, 9]);
+        stasis_jit_global_i32_store(30, 90);
+        stasis_jit_global_i32_store(31, 100);
+        stasis_jit_global_f32_array_store(40, 2, 0, 8.5);
+        restore_jit_runtime_state(&snapshot);
+
+        assert_eq!(scalar, 7);
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+        assert_eq!(stasis_jit_global_i32_load(30), 9);
+        assert_eq!(stasis_jit_global_i32_load(31), 0);
+        assert_eq!(stasis_jit_global_f32_array_load(40, 2, 0), 1.5);
+    }
+
+    #[test]
     fn jit_text_arg_bytes_reads_string_literals() {
         let _lock = test_lock();
         clear_registered_global_memory();
@@ -2746,6 +3813,31 @@ mod tests {
         upsert_jit_string_literal(1234, "hello");
 
         assert_eq!(jit_text_arg_bytes(1234), Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn staged_string_literals_do_not_mutate_live_table_before_publish() {
+        let _lock = test_lock();
+        clear_jit_string_literal_table();
+        upsert_jit_string_literal(1, "live");
+
+        begin_jit_string_literal_staging().expect("begin staging");
+        upsert_jit_string_literal(2, "candidate");
+        assert_eq!(jit_string_literal_value(1).as_deref(), Some("live"));
+        assert_eq!(jit_string_literal_value(2), None);
+        let staged = finish_jit_string_literal_staging().expect("finish staging");
+
+        replace_jit_string_literal_table(&staged);
+        assert_eq!(jit_string_literal_value(1), None);
+        assert_eq!(jit_string_literal_value(2).as_deref(), Some("candidate"));
+
+        begin_jit_string_literal_staging().expect("begin collision staging");
+        upsert_jit_string_literal(3, "first");
+        upsert_jit_string_literal(3, "second");
+        assert!(finish_jit_string_literal_staging()
+            .expect_err("hash collision")
+            .contains("collision"));
+        assert_eq!(jit_string_literal_value(3), None);
     }
 
     #[test]

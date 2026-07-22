@@ -168,6 +168,13 @@ Implemented on `codex/android-workshop-next`:
   retaining full failed attempts for repair.
 - Trace fields for verification ratio, reviewer calls, repair cycles, failed
   write batches, and restored writes.
+- File-backed queue acceptance for durable pending work, one-at-a-time FIFO
+  claims, project isolation, cancellation before execution, and safe versus
+  unsafe process recovery.
+- A shared connectivity claim policy that leaves work pending offline and is
+  re-evaluated by the default-network callback when validated access returns.
+- Truthful process-death cancellation recovery: an item is marked cancelled
+  only after its original project transaction was restored.
 
 Device acceptance completed on a Galaxy S21 over wireless ADB:
 
@@ -185,6 +192,7 @@ Device acceptance completed on a Galaxy S21 over wireless ADB:
 
 The device run exposed and prompted fixes for verification ratio accounting,
 the final `verified` phase label, live queue-row phase refresh, and keyboard
-dismissal when work starts. Process-kill recovery remains covered by the atomic
-transaction unit tests and should be exercised again during broader queue and
-cancellation acceptance.
+dismissal when work starts. Process-kill recovery is covered by the atomic
+transaction and file-backed queue tests; physical-device offline transitions,
+API/Codex cancellation, and force-stop recovery should still be exercised as
+one acceptance matrix when a device is available.

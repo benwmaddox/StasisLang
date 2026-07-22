@@ -1,3 +1,5 @@
+import "preview_adapter.stasis";
+
 global Input {
     touch_x: i32;
     touch_y: i32;
@@ -77,7 +79,7 @@ global Render {
     command4_clip_x: i32; command4_clip_y: i32; command4_clip_w: i32; command4_clip_h: i32;
 }
 
-function main(): void {
+function pong_game_main(): void {
     init();
 }
 
@@ -97,7 +99,7 @@ function init(): void {
     GameState.ai_score = 0;
 }
 
-function tick(): void {
+function pong_game_tick(): void {
     GameState.tick_count += 1;
 
     update_input();
@@ -212,7 +214,7 @@ function reset_ball(): void {
     GameState.enemy_paddle_speed_x100 = 1500;
 }
 
-function render(): void {
+function pong_game_render(): void {
     Render.command_schema_version = 3;
     Render.command_count = 5;
 
@@ -273,6 +275,6 @@ function render(): void {
     Render.command4_clip_x = 0; Render.command4_clip_y = 0; Render.command4_clip_w = GameState.screen_w; Render.command4_clip_h = GameState.screen_h;
 }
 
-function on_code_swap(): void {
-    render();
+function pong_game_on_code_swap(): void {
+    pong_game_render();
 }

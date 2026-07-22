@@ -99,6 +99,8 @@ pub(crate) struct ForeachCollectionInfo {
     pub(crate) len: i32,
     pub(crate) element_type: Option<TypeId>,
     pub(crate) field_types: BTreeMap<String, TypeId>,
+    pub(crate) element_shape: String,
+    pub(crate) fully_migratable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,12 +313,15 @@ pub(crate) fn build_extern_call_signature(
         params.push(type_id);
     }
     let return_type = type_table.resolve_or_intern(&declaration.return_type_name)?;
+    let symbol_name = match declaration.symbol_name.as_str() {
+        // Stasis strings are stable integer IDs. Keep legacy stdlib declarations on the
+        // adapter that resolves the ID before entering the native renderer.
+        "stasis_gfx_cache_text" => "stasis_jit_gfx_cache_text",
+        symbol_name => symbol_name,
+    };
     Ok(ExternCallSignature {
         name: declaration.name,
-        symbol_candidates: build_extern_symbol_candidates(
-            &declaration.symbol_name,
-            declaration.explicit_symbol,
-        ),
+        symbol_candidates: build_extern_symbol_candidates(symbol_name, declaration.explicit_symbol),
         params,
         return_type,
     })
@@ -403,6 +408,9 @@ pub(crate) fn are_assignment_types_compatible(
 ) -> bool {
     if target_type == expression_type {
         return true;
+    }
+    if target_type == TYPE_ID_BOOL || expression_type == TYPE_ID_BOOL {
+        return false;
     }
     is_i32_abi_compatible_type(target_type, type_table)
         && is_i32_abi_compatible_type(expression_type, type_table)
@@ -1039,12 +1047,15 @@ pub(crate) fn collect_foreach_collections_from_type(
             element_type_name,
             struct_fields_by_name,
             type_table,
+            constant_values,
             visiting_structs,
         )?;
         let info = ForeachCollectionInfo {
             len,
             element_type: collection.element_type,
             field_types: collection.field_types,
+            element_shape: collection.element_shape,
+            fully_migratable: collection.fully_migratable,
         };
         if let Some(existing) = out.get(path) {
             if existing != &info {
@@ -1091,13 +1102,22 @@ pub(crate) fn build_collection_info_for_element_type(
     element_type_name: &str,
     struct_fields_by_name: &BTreeMap<String, Vec<ParsedField>>,
     type_table: &mut TypeTable,
+    constant_values: &ConstantValueMap,
     visiting_structs: &mut Vec<String>,
 ) -> Result<ForeachCollectionInfo, String> {
+    let (element_shape, fully_migratable) = collection_element_shape(
+        element_type_name,
+        struct_fields_by_name,
+        constant_values,
+        visiting_structs,
+    )?;
     if let Some(type_id) = resolve_primitive_scalar_type_id(element_type_name, type_table) {
         return Ok(ForeachCollectionInfo {
             len: 0,
             element_type: Some(type_id),
             field_types: BTreeMap::new(),
+            element_shape,
+            fully_migratable,
         });
     }
     if !struct_fields_by_name.contains_key(element_type_name) {
@@ -1106,6 +1126,8 @@ pub(crate) fn build_collection_info_for_element_type(
             len: 0,
             element_type: Some(element_type),
             field_types: BTreeMap::new(),
+            element_shape,
+            fully_migratable,
         });
     }
     let mut field_types = BTreeMap::new();
@@ -1121,7 +1143,77 @@ pub(crate) fn build_collection_info_for_element_type(
         len: 0,
         element_type: None,
         field_types,
+        element_shape,
+        fully_migratable,
     })
+}
+
+fn collection_element_shape(
+    type_name: &str,
+    struct_fields_by_name: &BTreeMap<String, Vec<ParsedField>>,
+    constant_values: &ConstantValueMap,
+    visiting_structs: &mut Vec<String>,
+) -> Result<(String, bool), String> {
+    let type_name = type_name.trim();
+    if matches!(
+        type_name,
+        "i32" | "f32" | "f64" | "bool" | "u8" | "ascii" | "utf8"
+    ) {
+        return Ok((type_name.to_string(), true));
+    }
+    let Some(fields) = struct_fields_by_name.get(type_name) else {
+        return Ok((type_name.to_string(), false));
+    };
+    if visiting_structs
+        .iter()
+        .any(|existing| existing == type_name)
+    {
+        return Err(format!(
+            "recursive collection element shape is unsupported for '{type_name}'"
+        ));
+    }
+    visiting_structs.push(type_name.to_string());
+    let mut shape = String::from("{");
+    let mut fully_migratable = true;
+    for field in fields {
+        if shape.len() > 1 {
+            shape.push(',');
+        }
+        shape.push_str(&field.name);
+        shape.push(':');
+        let field_type = field.type_name.trim();
+        if let Some((element, extent)) = parse_array_type_parts(field_type) {
+            let (element_shape, _) = collection_element_shape(
+                element,
+                struct_fields_by_name,
+                constant_values,
+                visiting_structs,
+            )?;
+            let extent = resolve_fixed_array_extent(extent, constant_values).ok_or_else(|| {
+                format!(
+                    "collection element field '{}.{}' has unresolved fixed extent '{}'",
+                    type_name, field.name, extent
+                )
+            })?;
+            shape.push_str(&element_shape);
+            shape.push('[');
+            shape.push_str(&extent.to_string());
+            shape.push(']');
+            fully_migratable = false;
+        } else {
+            let (field_shape, field_migratable) = collection_element_shape(
+                field_type,
+                struct_fields_by_name,
+                constant_values,
+                visiting_structs,
+            )?;
+            shape.push_str(&field_shape);
+            fully_migratable &= field_migratable;
+        }
+    }
+    shape.push('}');
+    visiting_structs.pop();
+    Ok((shape, fully_migratable))
 }
 
 pub(crate) fn collect_struct_primitive_leaf_fields(
@@ -1719,8 +1811,12 @@ pub(crate) fn declare_runtime_helper(
                 return Err(format!("missing runtime helper address for {symbol}"));
             }
             let local_symbol = format!("__stasis_runtime_helper_{symbol}");
+            // Preemptible deliberately marks the helper as non-colocated. On AArch64,
+            // Cranelift then emits an address load plus an indirect call instead of a
+            // range-limited BL relocation. The helper is still defined in this private
+            // JIT module; the linkage only controls the generated call sequence.
             module
-                .declare_function(&local_symbol, Linkage::Local, &signature)
+                .declare_function(&local_symbol, Linkage::Preemptible, &signature)
                 .map_err(|error| {
                     format!("failed to declare runtime helper trampoline {symbol}: {error}")
                 })
@@ -2089,6 +2185,7 @@ pub(crate) fn declare_extern_call_imports(
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    linkage: RuntimeHelperLinkage<'_>,
 ) -> Result<BTreeMap<ExternImportKey, FuncId>, String> {
     let mut out = BTreeMap::new();
     for signatures in call_signatures.values() {
@@ -2121,14 +2218,14 @@ pub(crate) fn declare_extern_call_imports(
                         type_table,
                     )?));
             }
-            let func_id = module
-                .declare_function(symbol, Linkage::Import, &clif_signature)
-                .map_err(|error| {
+            let func_id = declare_runtime_helper(module, symbol, clif_signature, linkage).map_err(
+                |error| {
                     format!(
                         "failed to declare extern import '{}' with params {:?} return {}: {}",
                         symbol, signature.params, signature.return_type, error
                     )
-                })?;
+                },
+            )?;
             out.insert(key, func_id);
         }
     }
@@ -2470,7 +2567,9 @@ pub(crate) fn parse_let_statement(
             })?;
             let expression = if let Some(expression_text) = initializer {
                 parse_value_expression(expression_text)?
-            } else if resolved_type_id == TYPE_ID_I32 || resolved_type_id == TYPE_ID_BOOL {
+            } else if resolved_type_id == TYPE_ID_BOOL {
+                SimpleExpr::Bool(false)
+            } else if resolved_type_id == TYPE_ID_I32 {
                 SimpleExpr::Int(0)
             } else {
                 SimpleExpr::Float(0.0)
@@ -4772,9 +4871,14 @@ pub(crate) fn emit_simple_statements(
                         binding.type_id,
                         type_table,
                     ) {
+                        let expected = type_table
+                            .type_info(declared_type_id)
+                            .map_or_else(|| declared_type_id.to_string(), |info| info.name.clone());
+                        let found = type_table
+                            .type_info(binding.type_id)
+                            .map_or_else(|| binding.type_id.to_string(), |info| info.name.clone());
                         return Err(format!(
-                            "let binding '{}' expected type {} expression but found {}",
-                            name, declared_type_id, binding.type_id
+                            "let binding '{name}' expected {expected} expression but found {found}"
                         ));
                     }
                     declared_type_id
@@ -5704,9 +5808,15 @@ pub(crate) fn emit_simple_statements(
                     binding.type_id,
                     type_table,
                 ) {
+                    let expected = type_table.type_info(expected_return_type).map_or_else(
+                        || expected_return_type.to_string(),
+                        |info| info.name.clone(),
+                    );
+                    let found = type_table
+                        .type_info(binding.type_id)
+                        .map_or_else(|| binding.type_id.to_string(), |info| info.name.clone());
                     return Err(format!(
-                        "return expression expected type {} but found {}",
-                        expected_return_type, binding.type_id
+                        "return expression expected {expected} but found {found}"
                     ));
                 }
                 builder.ins().return_(&[binding.value]);
@@ -7613,12 +7723,20 @@ pub(crate) fn build_local_foreach_collection_info(
             len,
             element_type: None,
             field_types: field_types.clone(),
+            element_shape: type_table
+                .type_info(element_type)
+                .map_or_else(|| format!("type#{element_type}"), |info| info.name.clone()),
+            fully_migratable: true,
         });
     }
     Ok(ForeachCollectionInfo {
         len,
         element_type: Some(element_type),
         field_types: BTreeMap::new(),
+        element_shape: type_table
+            .type_info(element_type)
+            .map_or_else(|| format!("type#{element_type}"), |info| info.name.clone()),
+        fully_migratable: true,
     })
 }
 
@@ -9727,6 +9845,7 @@ pub(crate) fn build_runtime_call_import_ids(
             call_signatures,
             type_table,
             named_struct_field_types,
+            linkage,
         )?,
     })
 }

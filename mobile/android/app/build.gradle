@@ -97,6 +97,7 @@ android {
 
 dependencies {
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20250517'
     def rustlsVerifier = file('src/workshop/libs/rustls-platform-verifier.aar')
     if (rustlsVerifier.isFile()) {
         workshopImplementation files(rustlsVerifier)
@@ -119,6 +120,7 @@ tasks.register('generatePublishedAotBundle', Exec) {
     workingDir repoRootDir
     commandLine 'cargo', 'run', '-p', 'stasis', '--', 'android-aot-bundle',
             '--project-dir', publishedGame.projectDirectory.absolutePath,
+            '--entry-file', publishedGame.entrySource,
             '--out-dir', outputDir.absolutePath
 }
 

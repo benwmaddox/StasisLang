@@ -15,6 +15,7 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 final class AndroidAiQueue {
@@ -35,6 +36,13 @@ final class AndroidAiQueue {
     static synchronized Entry enqueue(Context context, String projectId, String source, String prompt,
             JSONArray imageAttachments, JSONObject logicalSnapshot, boolean imageGeneration,
             byte[] previewPng, int previewWidth, int previewHeight) throws Exception {
+        return enqueue(context.getFilesDir(), projectId, source, prompt, imageAttachments,
+                logicalSnapshot, imageGeneration, previewPng, previewWidth, previewHeight);
+    }
+
+    static synchronized Entry enqueue(File filesDir, String projectId, String source, String prompt,
+            JSONArray imageAttachments, JSONObject logicalSnapshot, boolean imageGeneration,
+            byte[] previewPng, int previewWidth, int previewHeight) throws Exception {
         requireProjectId(projectId);
         if (!AiQueuePolicy.validSource(source)) {
             throw new IllegalArgumentException("AI queue source must be text or voice");
@@ -43,7 +51,7 @@ final class AndroidAiQueue {
         if (cleanPrompt.isEmpty() || cleanPrompt.getBytes(StandardCharsets.UTF_8).length > 64 * 1024) {
             throw new IllegalArgumentException("AI queue prompt is empty or too large");
         }
-        JSONObject document = loadDocument(context, projectId);
+        JSONObject document = loadDocument(filesDir, projectId);
         JSONArray items = document.getJSONArray("items");
         while (items.length() >= MAX_ITEMS && removeOldestTerminal(items)) {
             // Never prune pending or active work; one terminal record makes room for this submission.
@@ -76,11 +84,11 @@ final class AndroidAiQueue {
         File savedPreview = null;
         try {
             if (previewPng != null) {
-                savedPreview = previewFile(context, entry);
+                savedPreview = previewFile(filesDir, entry);
                 writeSyncedAtomic(savedPreview, previewPng);
             }
             items.put(entry.toJson());
-            writeDocument(context, projectId, document);
+            writeDocument(filesDir, projectId, document);
         } catch (Exception error) {
             if (savedPreview != null) savedPreview.delete();
             throw error;
@@ -112,8 +120,12 @@ final class AndroidAiQueue {
     }
 
     static synchronized byte[] loadPreview(Context context, Entry entry) throws Exception {
+        return loadPreview(context.getFilesDir(), entry);
+    }
+
+    static synchronized byte[] loadPreview(File filesDir, Entry entry) throws Exception {
         if (entry.previewFile.isEmpty()) return null;
-        File file = previewFile(context, entry);
+        File file = previewFile(filesDir, entry);
         if (!file.isFile() || file.length() != entry.previewBytes || file.length() > MAX_PREVIEW_BYTES) {
             throw new IllegalStateException("queued preview snapshot is missing or changed");
         }
@@ -125,7 +137,11 @@ final class AndroidAiQueue {
     }
 
     static synchronized List<Entry> list(Context context, String projectId) throws Exception {
-        JSONArray items = loadDocument(context, projectId).getJSONArray("items");
+        return list(context.getFilesDir(), projectId);
+    }
+
+    static synchronized List<Entry> list(File filesDir, String projectId) throws Exception {
+        JSONArray items = loadDocument(filesDir, projectId).getJSONArray("items");
         ArrayList<Entry> result = new ArrayList<>();
         for (int index = 0; index < items.length(); index += 1) {
             result.add(Entry.fromJson(items.getJSONObject(index), projectId));
@@ -134,33 +150,78 @@ final class AndroidAiQueue {
     }
 
     static synchronized Entry claimNext(Context context, String projectId) throws Exception {
-        JSONObject document = loadDocument(context, projectId);
+        return claimNext(context.getFilesDir(), projectId);
+    }
+
+    static synchronized Entry claimNext(File filesDir, String projectId) throws Exception {
+        JSONObject document = loadDocument(filesDir, projectId);
         JSONArray items = document.getJSONArray("items");
+        for (int index = 0; index < items.length(); index += 1) {
+            if (IN_PROGRESS.equals(items.getJSONObject(index).optString("state", ""))) return null;
+        }
         for (int index = 0; index < items.length(); index += 1) {
             Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
             if (!PENDING.equals(entry.state)) continue;
             Entry claimed = entry.withState(IN_PROGRESS, "");
             items.put(index, claimed.toJson());
-            writeDocument(context, projectId, document);
+            writeDocument(filesDir, projectId, document);
             return claimed;
         }
         return null;
     }
 
     static synchronized boolean cancelPending(Context context, String projectId, String itemId) throws Exception {
-        return transition(context, projectId, itemId, PENDING, CANCELLED,
+        return cancelPending(context.getFilesDir(), projectId, itemId);
+    }
+
+    static synchronized boolean cancelPending(File filesDir, String projectId, String itemId) throws Exception {
+        return transition(filesDir, projectId, itemId, PENDING, CANCELLED,
                 WorkshopAiRunPhase.CANCELLED, "Cancelled before execution");
+    }
+
+    static synchronized Entry retryTerminal(Context context, Entry terminal) throws Exception {
+        if (terminal == null || !AiQueuePolicy.terminal(terminal.state)) {
+            throw new IllegalArgumentException("only a terminal AI queue item can be retried");
+        }
+        if (AiQueuePolicy.retryNeedsNewPreview(!terminal.previewFile.isEmpty())) {
+            throw new IllegalStateException("Fresh Retry requires a new preview because the original consented pixels were deleted at terminal cleanup");
+        }
+        Entry retried = enqueue(context, terminal.projectId, terminal.source, terminal.prompt,
+                terminal.imageAttachments, terminal.logicalSnapshot, terminal.imageGeneration,
+                null, 0, 0);
+        JSONObject document = loadDocument(context.getFilesDir(), terminal.projectId);
+        JSONArray items = document.getJSONArray("items");
+        for (int index = 0; index < items.length(); index += 1) {
+            Entry item = Entry.fromJson(items.getJSONObject(index), terminal.projectId);
+            if (!retried.id.equals(item.id)) continue;
+            retried = item.withPhase(WorkshopAiRunPhase.QUEUED.wireValue(),
+                    "Fresh retry of " + terminal.id + "; project, attachments, provider, and budget will be revalidated");
+            items.put(index, retried.toJson());
+            writeDocument(context.getFilesDir(), terminal.projectId, document);
+            return retried;
+        }
+        throw new IllegalStateException("fresh retry could not be recorded");
     }
 
     static synchronized boolean finish(Context context, String projectId, String itemId,
             String terminalState, String detail) throws Exception {
+        return finish(context.getFilesDir(), projectId, itemId, terminalState, detail);
+    }
+
+    static synchronized boolean finish(File filesDir, String projectId, String itemId,
+            String terminalState, String detail) throws Exception {
         WorkshopAiRunPhase phase = COMPLETED.equals(terminalState) ? WorkshopAiRunPhase.VERIFIED
                 : (CANCELLED.equals(terminalState) ? WorkshopAiRunPhase.CANCELLED
                         : WorkshopAiRunPhase.FAILED);
-        return finish(context, projectId, itemId, terminalState, phase, detail);
+        return finish(filesDir, projectId, itemId, terminalState, phase, detail);
     }
 
     static synchronized boolean finish(Context context, String projectId, String itemId,
+            String terminalState, WorkshopAiRunPhase terminalPhase, String detail) throws Exception {
+        return finish(context.getFilesDir(), projectId, itemId, terminalState, terminalPhase, detail);
+    }
+
+    static synchronized boolean finish(File filesDir, String projectId, String itemId,
             String terminalState, WorkshopAiRunPhase terminalPhase, String detail) throws Exception {
         if (!COMPLETED.equals(terminalState) && !FAILED.equals(terminalState) && !CANCELLED.equals(terminalState)) {
             throw new IllegalArgumentException("AI queue terminal state is invalid");
@@ -168,7 +229,7 @@ final class AndroidAiQueue {
         if (terminalPhase == null || !terminalPhase.terminal()) {
             throw new IllegalArgumentException("AI queue terminal phase is invalid");
         }
-        return transition(context, projectId, itemId, IN_PROGRESS, terminalState, terminalPhase, detail);
+        return transition(filesDir, projectId, itemId, IN_PROGRESS, terminalState, terminalPhase, detail);
     }
 
     static synchronized boolean updatePhase(Context context, String projectId, String itemId,
@@ -176,36 +237,45 @@ final class AndroidAiQueue {
         if (phase == null || phase.terminal()) {
             throw new IllegalArgumentException("active AI queue phase is invalid");
         }
-        JSONObject document = loadDocument(context, projectId);
+        JSONObject document = loadDocument(context.getFilesDir(), projectId);
         JSONArray items = document.getJSONArray("items");
         for (int index = 0; index < items.length(); index += 1) {
             Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
             if (!entry.id.equals(itemId)) continue;
             if (!IN_PROGRESS.equals(entry.state)) return false;
             items.put(index, entry.withPhase(phase.wireValue(), detail).toJson());
-            writeDocument(context, projectId, document);
+            writeDocument(context.getFilesDir(), projectId, document);
             return true;
         }
         return false;
     }
 
-    static synchronized int recoverInterrupted(Context context, String projectId) throws Exception {
-        JSONObject document = loadDocument(context, projectId);
+    static synchronized int recoverInterrupted(Context context, String projectId,
+            Set<String> resumableItemIds) throws Exception {
+        return recoverInterrupted(context.getFilesDir(), projectId, resumableItemIds);
+    }
+
+    static synchronized int recoverInterrupted(File filesDir, String projectId,
+            Set<String> resumableItemIds) throws Exception {
+        JSONObject document = loadDocument(filesDir, projectId);
         JSONArray items = document.getJSONArray("items");
         int recovered = 0;
         for (int index = 0; index < items.length(); index += 1) {
             Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
-            String recoveredState = AiQueuePolicy.recoveredState(entry.state);
+            String recoveredState = AiQueuePolicy.recoveredState(entry.state,
+                    resumableItemIds != null && resumableItemIds.contains(entry.id));
             if (entry.state.equals(recoveredState)) continue;
-            items.put(index, entry.withState(recoveredState,
-                    "Interrupted before the compile/test boundary completed; submit again to retry").toJson());
+            String detail = PENDING.equals(recoveredState)
+                    ? "Interrupted session has a safe checkpoint and will resume without replaying completed calls or tool batches"
+                    : "Continuation is unsafe; use Fresh Retry to start a new budget-checked run";
+            items.put(index, entry.withState(recoveredState, detail).toJson());
             recovered += 1;
         }
         if (recovered > 0) {
-            writeDocument(context, projectId, document);
+            writeDocument(filesDir, projectId, document);
             for (int index = 0; index < items.length(); index += 1) {
                 Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
-                if (FAILED.equals(entry.state)) deletePreview(context, entry);
+                if (FAILED.equals(entry.state)) deletePreview(filesDir, entry);
             }
         }
         return recovered;
@@ -227,7 +297,7 @@ final class AndroidAiQueue {
 
     static synchronized void clearProject(Context context, String projectId) throws Exception {
         requireProjectId(projectId);
-        File file = queueFile(context, projectId);
+        File file = queueFile(context.getFilesDir(), projectId);
         File temporary = new File(file.getParentFile(), file.getName() + ".tmp");
         if (!file.delete() && file.exists()) throw new IllegalStateException("project AI queue erase failed");
         if (!temporary.delete() && temporary.exists()) {
@@ -235,21 +305,29 @@ final class AndroidAiQueue {
         }
         File[] files = file.getParentFile().listFiles();
         if (files != null) for (File candidate : files) {
-            if (candidate.isFile() && candidate.getName().startsWith(projectId + "-")
-                    && (candidate.getName().endsWith(".png") || candidate.getName().endsWith(".png.tmp"))
+            if (candidate.isFile() && projectPreviewName(candidate.getName(), projectId)
                     && !candidate.delete() && candidate.exists()) {
                 throw new IllegalStateException("project AI preview queue erase failed");
             }
         }
     }
 
-    private static boolean transition(Context context, String projectId, String itemId,
+    private static boolean projectPreviewName(String name, String projectId) {
+        String prefix = projectId + "-";
+        String suffix = name.endsWith(".png.tmp") ? ".png.tmp"
+                : (name.endsWith(".png") ? ".png" : "");
+        if (suffix.isEmpty() || name.length() != prefix.length() + 36 + suffix.length()) return false;
+        return name.startsWith(prefix)
+                && name.substring(prefix.length(), prefix.length() + 36).matches("[0-9a-f-]{36}");
+    }
+
+    private static boolean transition(File filesDir, String projectId, String itemId,
             String expectedState, String nextState, WorkshopAiRunPhase nextPhase,
             String detail) throws Exception {
         if (!AiQueuePolicy.canTransition(expectedState, nextState)) {
             throw new IllegalArgumentException("AI queue state transition is invalid");
         }
-        JSONObject document = loadDocument(context, projectId);
+        JSONObject document = loadDocument(filesDir, projectId);
         JSONArray items = document.getJSONArray("items");
         for (int index = 0; index < items.length(); index += 1) {
             Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
@@ -257,21 +335,21 @@ final class AndroidAiQueue {
             if (!expectedState.equals(entry.state)) return false;
             items.put(index, entry.withState(nextState, detail)
                     .withPhase(nextPhase.wireValue(), detail).toJson());
-            writeDocument(context, projectId, document);
+            writeDocument(filesDir, projectId, document);
             if (CANCELLED.equals(nextState) || COMPLETED.equals(nextState) || FAILED.equals(nextState)) {
-                deletePreview(context, entry);
+                deletePreview(filesDir, entry);
             }
             return true;
         }
         return false;
     }
 
-    private static JSONObject loadDocument(Context context, String projectId) throws Exception {
+    private static JSONObject loadDocument(File filesDir, String projectId) throws Exception {
         requireProjectId(projectId);
-        File file = queueFile(context, projectId);
+        File file = queueFile(filesDir, projectId);
         if (!file.isFile()) {
             JSONObject empty = emptyDocument(projectId);
-            pruneOrphanPreviews(context, projectId, empty.getJSONArray("items"));
+            pruneOrphanPreviews(filesDir, projectId, empty.getJSONArray("items"));
             return empty;
         }
         if (file.length() > MAX_FILE_BYTES) throw new IllegalArgumentException("AI queue record exceeds size limit");
@@ -282,11 +360,11 @@ final class AndroidAiQueue {
         }
         JSONArray items = document.optJSONArray("items");
         if (items == null || items.length() > MAX_ITEMS) throw new IllegalArgumentException("AI queue item list is invalid");
-        pruneOrphanPreviews(context, projectId, items);
+        pruneOrphanPreviews(filesDir, projectId, items);
         return document;
     }
 
-    private static void pruneOrphanPreviews(Context context, String projectId, JSONArray items) throws Exception {
+    private static void pruneOrphanPreviews(File filesDir, String projectId, JSONArray items) throws Exception {
         HashSet<String> retained = new HashSet<>();
         for (int index = 0; index < items.length(); index += 1) {
             Entry entry = Entry.fromJson(items.getJSONObject(index), projectId);
@@ -294,7 +372,7 @@ final class AndroidAiQueue {
                 retained.add(entry.previewFile);
             }
         }
-        File root = new File(context.getFilesDir(), ROOT);
+        File root = new File(filesDir, ROOT);
         File[] files = root.listFiles();
         if (files == null) return;
         for (File candidate : files) {
@@ -312,8 +390,8 @@ final class AndroidAiQueue {
                 .put("items", new JSONArray());
     }
 
-    private static void writeDocument(Context context, String projectId, JSONObject document) throws Exception {
-        File file = queueFile(context, projectId);
+    private static void writeDocument(File filesDir, String projectId, JSONObject document) throws Exception {
+        File file = queueFile(filesDir, projectId);
         File parent = file.getParentFile();
         if (!parent.isDirectory() && !parent.mkdirs()) throw new IllegalStateException("AI queue directory create failed");
         byte[] bytes = document.toString().getBytes(StandardCharsets.UTF_8);
@@ -355,12 +433,12 @@ final class AndroidAiQueue {
         }
     }
 
-    private static File previewFile(Context context, Entry entry) throws Exception {
+    private static File previewFile(File filesDir, Entry entry) throws Exception {
         String expected = entry.projectId + "-" + entry.id + ".png";
         if (!expected.equals(entry.previewFile) || !entry.id.matches("[0-9a-f-]{36}")) {
             throw new IllegalArgumentException("AI queue preview identity is invalid");
         }
-        File root = new File(context.getFilesDir(), ROOT);
+        File root = new File(filesDir, ROOT);
         File file = new File(root, entry.previewFile);
         if (!file.getCanonicalPath().startsWith(root.getCanonicalPath() + File.separator)) {
             throw new IllegalArgumentException("AI queue preview path escaped root");
@@ -368,9 +446,9 @@ final class AndroidAiQueue {
         return file;
     }
 
-    private static void deletePreview(Context context, Entry entry) throws Exception {
+    private static void deletePreview(File filesDir, Entry entry) throws Exception {
         if (entry.previewFile.isEmpty()) return;
-        File file = previewFile(context, entry);
+        File file = previewFile(filesDir, entry);
         if (!file.delete() && file.exists()) throw new IllegalStateException("AI queue preview deletion failed");
     }
 
@@ -402,8 +480,8 @@ final class AndroidAiQueue {
         return hex.toString();
     }
 
-    private static File queueFile(Context context, String projectId) throws Exception {
-        File root = new File(context.getFilesDir(), ROOT);
+    private static File queueFile(File filesDir, String projectId) throws Exception {
+        File root = new File(filesDir, ROOT);
         File file = new File(root, projectId + ".json");
         if (!file.getCanonicalPath().startsWith(root.getCanonicalPath() + File.separator)) {
             throw new IllegalArgumentException("AI queue path escaped root");
@@ -474,11 +552,12 @@ final class AndroidAiQueue {
         }
 
         Entry withState(String nextState, String nextDetail) {
-            String nextPhase = IN_PROGRESS.equals(nextState)
-                    ? WorkshopAiRunPhase.PREPARING.wireValue()
+            String nextPhase = PENDING.equals(nextState)
+                    ? WorkshopAiRunPhase.QUEUED.wireValue()
+                    : (IN_PROGRESS.equals(nextState) ? WorkshopAiRunPhase.PREPARING.wireValue()
                     : (COMPLETED.equals(nextState) ? WorkshopAiRunPhase.VERIFIED.wireValue()
                             : (CANCELLED.equals(nextState) ? WorkshopAiRunPhase.CANCELLED.wireValue()
-                                    : WorkshopAiRunPhase.FAILED.wireValue()));
+                                    : WorkshopAiRunPhase.FAILED.wireValue())));
             return new Entry(id, projectId, source, prompt, createdAtMs, nextState, nextPhase, imageAttachments,
                     logicalSnapshot, imageGeneration, nextDetail == null ? "" : nextDetail,
                     previewFile, previewWidth, previewHeight, previewBytes, previewSha256);
@@ -543,6 +622,18 @@ final class AndroidAiQueue {
                             : new JSONObject(json.getJSONObject("logical_snapshot").toString()),
                     json.optBoolean("image_generation", false), json.optString("detail", ""),
                     previewFile, previewWidth, previewHeight, previewBytes, previewSha256);
+        }
+
+        String requestFingerprint() throws Exception {
+            JSONObject request = new JSONObject().put("project_id", projectId)
+                    .put("source", source).put("prompt", prompt)
+                    .put("image_attachments", new JSONArray(imageAttachments.toString()))
+                    .put("image_generation", imageGeneration)
+                    .put("preview_sha256", previewSha256);
+            if (logicalSnapshot != null) {
+                request.put("logical_snapshot", new JSONObject(logicalSnapshot.toString()));
+            }
+            return sha256(request.toString().getBytes(StandardCharsets.UTF_8));
         }
 
         private static String defaultPhaseForState(String state) {

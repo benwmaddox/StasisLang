@@ -5,6 +5,7 @@ EXPORTS
     stasis_host_bulk_step
     stasis_init_window
     stasis_get_window_size
+    stasis_get_display_metrics
     stasis_get_desktop_size
     stasis_set_window_size
     stasis_set_fullscreen
@@ -58,6 +59,7 @@ EXPORTS
     stasis_gfx_debug_enable_hash
     stasis_gfx_debug_get_frame_hash
     stasis_gfx_dump_bmp
+    stasis_gfx_dump_png
     stasis_load_font
     stasis_draw_text
     stasis_measure_text

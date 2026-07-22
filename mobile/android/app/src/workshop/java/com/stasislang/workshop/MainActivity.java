@@ -5,10 +5,14 @@ import android.app.AlertDialog;
 import android.Manifest;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
+import android.content.res.Configuration;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Bitmap;
@@ -16,16 +20,21 @@ import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
+import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
+import android.media.ToneGenerator;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
+import android.os.BatteryManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
@@ -60,14 +69,13 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.FloatBuffer;
-import java.nio.IntBuffer;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.net.URLEncoder;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -82,8 +90,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -94,10 +106,10 @@ public final class MainActivity extends Activity {
     private static final String PROJECT_BASELINE_READY = ".ready";
     private static final String SAMPLE_MIGRATION_PREFS = "workshop_sample_migrations";
     private static final String PONG_SLOW_BALL_MIGRATION = "pong_slow_ball_v1";
+    private static final String PONG_GFX_CMD_MIGRATION = "pong_gfx_cmd_v6";
     private static final String AI_PREFS = "ai_settings";
     private static final String ONBOARDING_PREFS = "onboarding_settings";
-    private static final String ONBOARDING_COMPLETE = "manual_tutorial_seen_v1";
-    private static final String AI_SETUP_COMPLETE = "ai_setup_complete_v1";
+    private static final String EXPLORATION_LESSON_PREFS = "exploration_lesson_progress";
     private static final String AI_PREF_API_KEY = "openai_api_key";
     private static final String AI_PREF_PROVIDER = "ai_provider";
     private static final String AI_PREF_CODEX_FAST_MODE = "codex_fast_mode";
@@ -122,7 +134,12 @@ public final class MainActivity extends Activity {
     private static final String GITHUB_PREF_OPERATION = "github_pending_operation";
     private static final String GITHUB_PREF_OPERATION_STATE = "github_operation_state";
     private static final String GITHUB_PREF_OPERATION_DETAIL = "github_operation_detail";
+    private static final String GITHUB_PREF_OPERATION_AUTOMATIC = "github_operation_automatic";
     private static final String GITHUB_PREF_REVIEW_FINGERPRINT = "github_review_fingerprint";
+    private static final String GITHUB_PREF_AUTO_SYNC = "github_auto_sync";
+    private static final String GITHUB_PREF_REMOTE_STATE = "github_remote_state";
+    private static final String GITHUB_PREF_LAST_SYNC_FINGERPRINT = "github_last_sync_fingerprint";
+    private static final String GITHUB_PREF_VALIDATED_TARGET = "github_validated_target_v1";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
     private static final String DEFAULT_AI_MODEL = "gpt-5.6-sol";
     private static final int DEFAULT_AI_MODEL_VERSION = 2;
@@ -130,8 +147,6 @@ public final class MainActivity extends Activity {
     private static final long AI_TRACE_RETENTION_MS = 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
-    private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
-    private static final int MAX_RENDER_COMMANDS = 8;
     private static final int MAX_AI_AGENT_TURNS = 25;
     private static final int MAX_AI_TOOL_CALLS_PER_BATCH = 12;
     private static final int MAX_AI_READ_ONLY_BATCHES = 2;
@@ -139,9 +154,8 @@ public final class MainActivity extends Activity {
     private static final int MAX_AI_IMAGE_ATTACHMENTS = 4;
     private static final int MAX_AI_IMAGE_ATTACHMENT_BYTES = 12 * 1024 * 1024;
     private static final int MAX_AI_GENERATED_BASE64_CHARS = ((8 * 1024 * 1024 + 2) / 3) * 4 + 16;
-    private static final long MAX_PREVIEW_CAPTURE_PIXELS = 8_000_000L;
     private static final int MAX_COMMAND_HISTORY = 20;
-    private static final int GITHUB_NETWORK_TIMEOUT_MS = 15_000;
+    private static final long GITHUB_AUTO_SYNC_DEBOUNCE_MS = 2_000L;
     private static final int MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024;
     private static final int TOP_CONTROL_END_MARGIN_DP = 10;
     private static final int VOICE_TOP_MARGIN_DP = 64;
@@ -158,22 +172,13 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
     private static final double GPT_IMAGE_2_LOW_1024_USD = 0.006;
-    private static final int RENDER_FRAME_HEADER_SIZE = 6;
-    private static final int RENDER_COMMAND_STRIDE = 13;
-    private static final int RENDER_FRAME_I32_CAPACITY =
-            RENDER_FRAME_HEADER_SIZE + MAX_RENDER_COMMANDS * RENDER_COMMAND_STRIDE;
-    private static final int RECT_VERTICES = 6;
-    private static final int RENDER_VERTEX_FLOATS = 6;
-    private static final int RENDER_VERTEX_BYTES = RENDER_VERTEX_FLOATS * 4;
-    private static final int RENDER_VERTEX_BUFFER_FLOATS =
-            MAX_RENDER_COMMANDS * RECT_VERTICES * RENDER_VERTEX_FLOATS;
-    private static final int SPRITE_VERTEX_FLOATS = 8;
-    private static final int SPRITE_VERTEX_BYTES = SPRITE_VERTEX_FLOATS * 4;
-    private static final int SPRITE_VERTEX_BUFFER_FLOATS =
-            MAX_RENDER_COMMANDS * RECT_VERTICES * SPRITE_VERTEX_FLOATS;
+    private static final int RENDER_FRAME_HEADER_SIZE = 22;
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
     private LinearLayout manualEditBody;
+    private LinearLayout diagnosticBody;
+    private LinearLayout contextBody;
+    private LinearLayout moreToolsBody;
     private EditText sourceEditor;
     private EditText aiPromptEditor;
     private EditText aiApiKeyEditor;
@@ -208,9 +213,12 @@ public final class MainActivity extends Activity {
     private LinearLayout githubSettingsBody;
     private LinearLayout privacySettingsBody;
     private LinearLayout onboardingBody;
+    private TextView onboardingSummary;
+    private WorkshopOnboardingPolicy.Progress onboardingState;
     private EditText githubTokenEditor;
     private EditText githubRepositoryEditor;
     private EditText githubBranchEditor;
+    private CheckBox githubAutoSync;
     private TextView githubSyncStatus;
     private LinearLayout projectSettingsBody;
     private EditText newProjectNameEditor;
@@ -230,7 +238,6 @@ public final class MainActivity extends Activity {
     private String projectRegistryError = "";
     private String reviewedGitHubChangeFingerprint = "";
     private String credentialStorageError = "";
-    private volatile boolean githubOperationActive;
     private volatile boolean projectIoActive;
     private volatile boolean aiRunActive;
     private volatile boolean activityDestroyed;
@@ -241,7 +248,6 @@ public final class MainActivity extends Activity {
     private TextView codexLoginDialogStatus;
     private String codexLoginUserCode = "";
     private String codexLoginVerificationUrl = "";
-    private boolean showProjectChooserAfterCodexLogin;
     private final WorkshopCodexLoginLifecycle codexLoginLifecycle = new WorkshopCodexLoginLifecycle();
     private final Runnable codexStatusPoll = new Runnable() {
         @Override public void run() { refreshPhoneNativeCodexStatus(); }
@@ -251,12 +257,16 @@ public final class MainActivity extends Activity {
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
     private boolean networkCallbackRegistered;
+    private BroadcastReceiver powerReceiver;
+    private boolean powerReceiverRegistered;
     private String activeAiPrompt = "";
     private AndroidAiQueue.Entry activeAiQueueEntry;
     private volatile List<AiImageAttachment> activeAiImageAttachments = Collections.emptyList();
     private Bitmap pendingPreviewScreenshot;
     private MediaPlayer activeAudioPreview;
     private MediaRecorder activeAudioRecorder;
+    private ToneGenerator explorationTone;
+    private int lastExplorationAudioSerial;
     private File activeAudioRecordingFile;
     private boolean audioRecordingActive;
     private JSONObject pendingPreviewLogicalSnapshot;
@@ -267,10 +277,18 @@ public final class MainActivity extends Activity {
     private String diagnosticFile = "";
     private String diagnosticSymbol = "";
     private int diagnosticLine;
+    private int diagnosticColumn;
+    private int diagnosticEndLine;
+    private int diagnosticEndColumn;
     private AndroidEditRecoveryStore.Entry selectedRecoveryEntry;
     private TextView changeSummary;
     private TextView gameStatus;
+    private LinearLayout blockingErrorPanel;
+    private TextView blockingErrorBody;
     private GamePreviewView gamePreview;
+    private boolean previewFocusabilityCaptured;
+    private boolean previewFocusableWhenUncovered;
+    private boolean previewFocusableInTouchModeWhenUncovered;
     private LinearLayout symbolList;
     private File projectRootFile;
     private String projectRootPath;
@@ -280,19 +298,28 @@ public final class MainActivity extends Activity {
     private LinearLayout voiceActionRow;
     private TextView voiceStatus;
     private Button voiceRunButton;
+    private WorkshopPaintView activePaintView;
+    private AlertDialog activePaintDialog;
+    private EditText activePaintName;
+    private boolean activePaintSuggestAiAttachment;
     private SpeechRecognizer voiceRecognizer;
     private String voiceTranscript = "";
     private final Handler gameLoopHandler = new Handler(Looper.getMainLooper());
+    private final Runnable githubAutoSyncRequest = new Runnable() {
+        @Override public void run() { scheduleGitHubAutoSync(); }
+    };
     private final ExecutorService githubSyncExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService projectIoExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService codexExecutor = Executors.newSingleThreadExecutor();
     private Runnable gameLoop;
-    private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY];
+    private final int[] nativeFrameValues = new int[RENDER_FRAME_HEADER_SIZE];
     private final StringBuilder debugTextBuilder = new StringBuilder(64);
     private final RollingMetric tickMetric = new RollingMetric();
+    private final RollingMetric syncMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
     private boolean compileReady;
     private boolean compileAttempted;
+    private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private int aiSimTouchX;
     private int aiSimTouchY;
@@ -315,12 +342,25 @@ public final class MainActivity extends Activity {
 
     private static native String nativeStatus();
     private static native String nativeCompileProject(String projectRoot);
+    private static native String nativeSourceItems(String projectRoot);
+    private static native String nativeSemanticEdit(String projectRoot, String requestJson,
+                                                    boolean dryRun, boolean validate, boolean runTests);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
-    private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues);
+    private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
+            int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
+            ByteBuffer frameF32, ByteBuffer frameU8);
+    private static native String nativeLastFrameError();
+    private static native String nativeInspectRuntimeState(String projectRoot);
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
     private static native String nativeGetRuntimeI32(String projectRoot, String path);
-    private static native String nativeResolveSpriteAsset(String projectRoot, int handle);
-    private static native int[] nativeDecodeSvgSprite(String path, int width, int height);
+    static native String nativeResolveSpriteAsset(String projectRoot, int handle);
+    static native String nativeResolveCachedText(String projectRoot, int handle);
+    static native String nativeResolveFont(String projectRoot, int handle);
+    static native int[] nativeDecodeSvgSprite(String path, int width, int height);
+
+    void reportPreviewResourceError(String message) {
+        runOnUiThread(() -> setStatusText("RenderResourceError: " + message));
+    }
     private static native String nativeRunTests(String projectRoot);
     private static native String nativeCodexBeginDeviceLogin(String codexHome);
     private static native String nativeCodexAccountStatus(String codexHome);
@@ -352,19 +392,27 @@ public final class MainActivity extends Activity {
         Window window = getWindow();
         window.setStatusBarColor(Color.BLACK);
         window.setNavigationBarColor(Color.BLACK);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            View decor = window.getDecorView();
+            decor.setSystemUiVisibility(decor.getSystemUiVisibility()
+                    & ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        }
 
         ProjectSnapshot project = loadBundledProject();
         try {
             if (migrateBundledPongBallSpeed()) project = loadBundledProject();
+            if (migrateBundledPongProductionRenderer()) project = loadBundledProject();
             ensureActiveProjectBaseline(project);
         } catch (IOException error) {
             projectRegistryError = "baseline: " + error.getMessage();
         }
         setContentView(createWorkshopView(project));
         registerNetworkMonitoring();
+        registerPowerMonitoring();
         markInterruptedAiOutcomeIfNeeded();
         restoreWorkshopUiState(savedInstanceState);
         restorePendingDraft();
+        restoreRetainedPaintSession();
         gameLoopHandler.post(new Runnable() {
             @Override public void run() { startNextQueuedAiIfIdle(); }
         });
@@ -379,8 +427,10 @@ public final class MainActivity extends Activity {
         if (savedInstanceState == null) {
             gameLoopHandler.post(new Runnable() {
                 @Override public void run() {
-                    if (needsFirstRunAiSetup()) showFirstRunAiSetup();
-                    else showProjectChooser();
+                    WorkshopOnboardingPolicy.Progress progress = onboardingProgress();
+                    if (!progress.isComplete() && !progress.deferred) {
+                        showOnboardingGuide(true);
+                    }
                 }
             });
         }
@@ -392,12 +442,17 @@ public final class MainActivity extends Activity {
         codexLoginLifecycle.onResume();
         refreshPhoneNativeCodexStatus();
         startNextQueuedAiIfIdle();
+        refreshGitHubSyncStatus();
+        resumeGitHubAfterNetworkChange();
+        requestGitHubAutoSync();
     }
 
     @Override
     protected void onPause() {
         codexLoginLifecycle.onPause();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
+        gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
+        scheduleGitHubAutoSync();
         persistPendingDraft();
         stopVoiceRecognition();
         stopAudioPreview();
@@ -412,6 +467,9 @@ public final class MainActivity extends Activity {
         outState.putString("voice_transcript", voiceTranscript);
         outState.putBoolean("editor_open", editorPanel != null && editorPanel.getVisibility() == View.VISIBLE);
         outState.putBoolean("manual_open", manualEditBody != null && manualEditBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("diagnostics_open", diagnosticBody != null && diagnosticBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("context_open", contextBody != null && contextBody.getVisibility() == View.VISIBLE);
+        outState.putBoolean("more_tools_open", moreToolsBody != null && moreToolsBody.getVisibility() == View.VISIBLE);
         outState.putBoolean("projects_open", projectSettingsBody != null && projectSettingsBody.getVisibility() == View.VISIBLE);
         outState.putBoolean("history_open", commandHistoryBody != null && commandHistoryBody.getVisibility() == View.VISIBLE);
         outState.putBoolean("ai_settings_open", aiSettingsBody != null && aiSettingsBody.getVisibility() == View.VISIBLE);
@@ -432,16 +490,28 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    public Object onRetainNonConfigurationInstance() {
+        if (activePaintView == null || activePaintDialog == null
+                || !activePaintDialog.isShowing()) return null;
+        return new RetainedPaintSession(activePaintView.snapshot(),
+                activePaintName == null ? "painted_image" : activePaintName.getText().toString(),
+                activePaintSuggestAiAttachment, activePaintView.brushColor(),
+                activePaintView.brushSize(), activePaintView.isErasing());
+    }
+
+    @Override
     protected void onDestroy() {
         activityDestroyed = true;
         stopVoiceRecognition();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
+        gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
         if (codexLoginDialog != null) codexLoginDialog.dismiss();
         if (!WorkshopLongWorkCoordinator.isAiActive()) {
             aiCancelRequested = true;
             nativeCodexCancelResponse();
         }
         unregisterNetworkMonitoring();
+        unregisterPowerMonitoring();
         if (!WorkshopLongWorkCoordinator.isAiActive()) {
             HttpURLConnection aiConnection = activeAiConnection;
             if (aiConnection != null) aiConnection.disconnect();
@@ -454,6 +524,10 @@ public final class MainActivity extends Activity {
         }
         stopAudioPreview();
         cancelAudioRecording(false);
+        if (explorationTone != null) {
+            explorationTone.release();
+            explorationTone = null;
+        }
         if (gameLoop != null) {
             gameLoopHandler.removeCallbacks(gameLoop);
         }
@@ -652,6 +726,7 @@ public final class MainActivity extends Activity {
     }
 
     private View createWorkshopView(ProjectSnapshot project) {
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(15, 20, 28));
         installSystemInsetGuard(root);
@@ -672,14 +747,16 @@ public final class MainActivity extends Activity {
 
         installGameStatusOverlay(root, true);
         installAiGameProgressOverlay(root);
+        installBlockingErrorPanel(root);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(14), dp(12), dp(14), dp(12));
-        content.setBackground(createPanelBackground(Color.rgb(247, 248, 251), Color.rgb(190, 199, 212)));
+        content.setBackground(createPanelBackground(WorkshopAccessibilityPolicy.PANEL_BACKGROUND,
+                Color.rgb(190, 199, 212)));
 
         TextView title = new TextView(this);
         title.setText("Stasis Workshop");
-        title.setTextColor(Color.rgb(22, 27, 34));
+        title.setTextColor(WorkshopAccessibilityPolicy.PRIMARY_TEXT);
         title.setTextSize(20.0f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
@@ -708,7 +785,7 @@ public final class MainActivity extends Activity {
         selectedSourcePanel.setPadding(0, 0, 0, dp(6));
 
         sourceTitle = new TextView(this);
-        sourceTitle.setTextColor(Color.rgb(22, 27, 34));
+        sourceTitle.setTextColor(WorkshopAccessibilityPolicy.PRIMARY_TEXT);
         sourceTitle.setTextSize(15.0f);
         sourceTitle.setTypeface(Typeface.DEFAULT_BOLD);
         sourceTitle.setPadding(0, dp(8), 0, dp(6));
@@ -733,7 +810,7 @@ public final class MainActivity extends Activity {
         manualEditBody.addView(symbolList, fullWidth());
         rebuildSymbolList(project);
         reloadStatus = new TextView(this);
-        reloadStatus.setTextColor(Color.rgb(73, 84, 100));
+        reloadStatus.setTextColor(WorkshopAccessibilityPolicy.SECONDARY_TEXT);
         reloadStatus.setTextSize(13.0f);
         reloadStatus.setPadding(0, dp(8), 0, dp(6));
         reloadStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
@@ -742,7 +819,7 @@ public final class MainActivity extends Activity {
         Button diagnosticToggle = new Button(this);
         diagnosticToggle.setText("Diagnostics & Recovery");
         content.addView(diagnosticToggle, fullWidth());
-        final LinearLayout diagnosticBody = new LinearLayout(this);
+        diagnosticBody = new LinearLayout(this);
         diagnosticBody.setOrientation(LinearLayout.VERTICAL);
         diagnosticBody.setVisibility(View.GONE);
         diagnosticToggle.setOnClickListener(new View.OnClickListener() {
@@ -754,39 +831,35 @@ public final class MainActivity extends Activity {
 
         diagnosticStatus = new TextView(this);
         diagnosticStatus.setTextSize(12.0f);
-        diagnosticStatus.setTextColor(Color.rgb(125, 55, 45));
+        diagnosticStatus.setTextColor(WorkshopAccessibilityPolicy.DIAGNOSTIC_TEXT);
         diagnosticStatus.setTypeface(Typeface.MONOSPACE);
         diagnosticStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE);
         diagnosticBody.addView(diagnosticStatus, fullWidth());
         LinearLayout diagnosticActions = new LinearLayout(this);
-        boolean narrowLayout = getResources().getConfiguration().screenWidthDp < 480;
-        diagnosticActions.setOrientation(narrowLayout ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        configureActionRow(diagnosticActions, layout);
         Button goToDiagnostic = new Button(this);
         goToDiagnostic.setText("Go to Diagnostic");
         goToDiagnostic.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { goToDiagnosticSource(); }
         });
-        diagnosticActions.addView(goToDiagnostic, narrowLayout ? fullWidth()
-                : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        diagnosticActions.addView(goToDiagnostic, actionWidth(layout));
         Button recoveryHistory = new Button(this);
         recoveryHistory.setText("Recovery History");
         recoveryHistory.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { showRecoveryHistory(); }
         });
-        diagnosticActions.addView(recoveryHistory, narrowLayout ? fullWidth()
-                : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        diagnosticActions.addView(recoveryHistory, actionWidth(layout));
         Button undoFailedApply = new Button(this);
         undoFailedApply.setText("Undo Failed Apply");
         undoFailedApply.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { undoSelectedFailedApply(); }
         });
-        diagnosticActions.addView(undoFailedApply, narrowLayout ? fullWidth()
-                : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        diagnosticActions.addView(undoFailedApply, actionWidth(layout));
         diagnosticBody.addView(diagnosticActions, fullWidth());
         refreshRecoveryStatus();
 
         changeSummary = new TextView(this);
-        changeSummary.setTextColor(Color.rgb(73, 84, 100));
+        changeSummary.setTextColor(WorkshopAccessibilityPolicy.SECONDARY_TEXT);
         changeSummary.setTextSize(12.0f);
         changeSummary.setTypeface(Typeface.MONOSPACE);
         changeSummary.setPadding(0, dp(6), 0, dp(6));
@@ -801,12 +874,15 @@ public final class MainActivity extends Activity {
 
         editorPanel = new ScrollView(this);
         editorPanel.setFillViewport(false);
+        editorPanel.setFocusable(true);
+        editorPanel.setFocusableInTouchMode(true);
         editorPanel.setVisibility(View.GONE);
         editorPanel.addView(content);
+        if (Build.VERSION.SDK_INT >= 28) editorPanel.setAccessibilityPaneTitle("Stasis Workshop");
         FrameLayout.LayoutParams editorParams = new FrameLayout.LayoutParams(
+                layout.fullWidthEditor ? FrameLayout.LayoutParams.MATCH_PARENT : dp(layout.editorWidthDp),
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                Gravity.TOP | Gravity.START);
+                Gravity.TOP | Gravity.END);
         editorParams.setMargins(dp(12), dp(64), dp(12), dp(18));
         root.addView(editorPanel, editorParams);
 
@@ -826,21 +902,27 @@ public final class MainActivity extends Activity {
         editorToggle = new Button(this);
         editorToggle.setText("\u2630");
         editorToggle.setTextSize(20.0f);
-        editorToggle.setTextColor(Color.WHITE);
+        editorToggle.setTextColor(WorkshopAccessibilityPolicy.ON_DARK_CONTROL);
         editorToggle.setContentDescription("Open Workshop menu");
-        editorToggle.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
+        editorToggle.setMinWidth(dp(52));
+        editorToggle.setMinHeight(dp(48));
+        editorToggle.setBackground(createFocusableControlBackground());
         editorToggle.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 toggleEditorPanel();
             }
         });
-        FrameLayout.LayoutParams toggleParams = new FrameLayout.LayoutParams(dp(52), dp(48), Gravity.TOP | Gravity.END);
+        FrameLayout.LayoutParams toggleParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.END);
         toggleParams.setMargins(0, dp(8), dp(TOP_CONTROL_END_MARGIN_DP), 0);
         root.addView(editorToggle, toggleParams);
         if (voiceToggle != null) {
             voiceToggle.bringToFront();
         }
+        chainAccessibilityTraversal(editorToggle, editorPanel, gamePreview,
+                aiGameProgressScroller, voiceToggle);
 
         if (!credentialStorageError.isEmpty()) {
             setStatusText("Credential storage error: " + credentialStorageError);
@@ -854,10 +936,13 @@ public final class MainActivity extends Activity {
 
     private void installGameStatusOverlay(FrameLayout root, boolean visible) {
         gameStatus = new TextView(this);
-        gameStatus.setText("tick=-- ms  render=-- ms  budget=--%");
+        gameStatus.setText("tick avg=-- p50=-- p95=-- ms\n"
+                + "render avg=-- p50=-- p95=-- ms\n"
+                + "sync avg=-- p95=-- ms\n"
+                + "budget tick=--% render=--% sync=--% total=--%");
         gameStatus.setTextColor(Color.WHITE);
         gameStatus.setTextSize(12.0f);
-        gameStatus.setSingleLine(true);
+        gameStatus.setSingleLine(false);
         gameStatus.setPadding(dp(10), dp(6), dp(10), dp(6));
         gameStatus.setBackgroundColor(Color.argb(150, 20, 28, 38));
         gameStatus.setVisibility(visible ? View.VISIBLE : View.GONE);
@@ -867,6 +952,60 @@ public final class MainActivity extends Activity {
                 Gravity.TOP | Gravity.START);
         statusParams.setMargins(dp(8), dp(8), dp(68), 0);
         root.addView(gameStatus, statusParams);
+    }
+
+    private void installBlockingErrorPanel(FrameLayout root) {
+        blockingErrorPanel = new LinearLayout(this);
+        blockingErrorPanel.setOrientation(LinearLayout.VERTICAL);
+        blockingErrorPanel.setPadding(dp(18), dp(16), dp(18), dp(16));
+        blockingErrorPanel.setBackground(createPanelBackground(
+                Color.rgb(66, 24, 30), Color.rgb(235, 105, 115)));
+        blockingErrorPanel.setElevation(dp(12));
+        blockingErrorPanel.setVisibility(View.GONE);
+
+        TextView title = new TextView(this);
+        title.setText("Game is not running");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(20.0f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
+        blockingErrorPanel.addView(title, fullWidth());
+
+        blockingErrorBody = new TextView(this);
+        blockingErrorBody.setTextColor(Color.WHITE);
+        blockingErrorBody.setTextSize(14.0f);
+        blockingErrorBody.setTypeface(Typeface.MONOSPACE);
+        blockingErrorBody.setPadding(0, dp(10), 0, dp(12));
+        blockingErrorBody.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE);
+        blockingErrorPanel.addView(blockingErrorBody, fullWidth());
+
+        LinearLayout actions = new LinearLayout(this);
+        configureActionRow(actions, adaptiveLayoutProfile());
+        Button openDiagnostics = new Button(this);
+        openDiagnostics.setText("Open Diagnostics");
+        openDiagnostics.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (editorPanel != null && editorPanel.getVisibility() != View.VISIBLE) {
+                    toggleEditorPanel();
+                }
+                if (diagnosticBody != null) diagnosticBody.setVisibility(View.VISIBLE);
+            }
+        });
+        actions.addView(openDiagnostics, actionWidth(adaptiveLayoutProfile()));
+        Button retryCompile = new Button(this);
+        retryCompile.setText("Retry Compile");
+        retryCompile.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { runNativeCompile(); }
+        });
+        actions.addView(retryCompile, actionWidth(adaptiveLayoutProfile()));
+        blockingErrorPanel.addView(actions, fullWidth());
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER);
+        params.setMargins(dp(24), dp(96), dp(24), dp(96));
+        root.addView(blockingErrorPanel, params);
     }
 
     private void installAiGameProgressOverlay(FrameLayout root) {
@@ -908,32 +1047,38 @@ public final class MainActivity extends Activity {
     }
 
     private void installVoiceChangeControls(FrameLayout root) {
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         voiceToggle = new Button(this);
         voiceToggle.setText("Voice");
         voiceToggle.setContentDescription("Start voice command recording");
-        voiceToggle.setTextColor(Color.WHITE);
-        voiceToggle.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
+        voiceToggle.setTextColor(WorkshopAccessibilityPolicy.ON_DARK_CONTROL);
+        voiceToggle.setMinWidth(dp(74));
+        voiceToggle.setMinHeight(dp(48));
+        voiceToggle.setBackground(createFocusableControlBackground());
         voiceToggle.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 startVoiceChange();
             }
         });
-        FrameLayout.LayoutParams voiceParams = new FrameLayout.LayoutParams(dp(74), dp(48), Gravity.TOP | Gravity.END);
+        FrameLayout.LayoutParams voiceParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.END);
         voiceParams.setMargins(0, dp(VOICE_TOP_MARGIN_DP), dp(TOP_CONTROL_END_MARGIN_DP), 0);
         root.addView(voiceToggle, voiceParams);
 
         voiceActionRow = new LinearLayout(this);
-        voiceActionRow.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(voiceActionRow, layout);
         voiceActionRow.setPadding(dp(8), dp(4), dp(8), dp(4));
-        voiceActionRow.setBackground(createPanelBackground(Color.rgb(35, 45, 60), Color.rgb(83, 96, 115)));
+        voiceActionRow.setBackground(createPanelBackground(WorkshopAccessibilityPolicy.DARK_CONTROL,
+                WorkshopAccessibilityPolicy.DARK_CONTROL_BORDER));
         voiceActionRow.setVisibility(View.GONE);
 
         voiceStatus = new TextView(this);
         voiceStatus.setTextColor(Color.WHITE);
         voiceStatus.setTextSize(12.0f);
         voiceStatus.setGravity(Gravity.CENTER_VERTICAL);
-        voiceActionRow.addView(voiceStatus, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        voiceActionRow.addView(voiceStatus, actionWidth(layout));
 
         Button voiceCancel = new Button(this);
         voiceCancel.setText("Cancel");
@@ -943,7 +1088,7 @@ public final class MainActivity extends Activity {
                 cancelVoiceChange();
             }
         });
-        voiceActionRow.addView(voiceCancel, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        voiceActionRow.addView(voiceCancel, actionWidth(layout));
 
         voiceRunButton = new Button(this);
         voiceRunButton.setText("Run");
@@ -954,7 +1099,7 @@ public final class MainActivity extends Activity {
                 runVoiceChange();
             }
         });
-        voiceActionRow.addView(voiceRunButton, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        voiceActionRow.addView(voiceRunButton, actionWidth(layout));
 
         FrameLayout.LayoutParams actionParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -1117,13 +1262,29 @@ public final class MainActivity extends Activity {
         }
         boolean opening = editorPanel.getVisibility() != View.VISIBLE;
         editorPanel.setVisibility(opening ? View.VISIBLE : View.GONE);
+        if (opening) recordExplorationLesson(WorkshopExplorationLessonPolicy.OPENED_EDITOR);
+        boolean coverPreview = opening && adaptiveLayoutProfile().fullWidthEditor;
+        setPreviewCovered(coverPreview);
+        updateAiGameProgressOverlay();
         if (opening) {
             editorPanel.bringToFront();
+            editorPanel.post(new Runnable() {
+                @Override public void run() {
+                    editorPanel.requestFocus();
+                    if (Build.VERSION.SDK_INT < 28) {
+                        editorPanel.announceForAccessibility("Workshop menu opened");
+                    }
+                }
+            });
         }
         if (editorToggle != null) {
             editorToggle.setText(opening ? "\u00D7" : "\u2630");
             editorToggle.setContentDescription(opening ? "Close Workshop menu" : "Open Workshop menu");
             editorToggle.bringToFront();
+            if (!opening) {
+                editorToggle.requestFocus();
+                editorToggle.announceForAccessibility("Workshop menu closed");
+            }
         }
         if (voiceActionRow != null && voiceActionRow.getVisibility() == View.VISIBLE) {
             voiceActionRow.bringToFront();
@@ -1132,7 +1293,28 @@ public final class MainActivity extends Activity {
             voiceToggle.setVisibility(opening ? View.GONE : View.VISIBLE);
             if (!opening) voiceToggle.bringToFront();
         }
-        updateAiGameProgressOverlay();
+    }
+
+    private void setPreviewCovered(boolean covered) {
+        int importance = covered ? View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                : View.IMPORTANT_FOR_ACCESSIBILITY_AUTO;
+        if (gamePreview != null) {
+            gamePreview.setImportantForAccessibility(importance);
+            if (covered && !previewFocusabilityCaptured) {
+                previewFocusableWhenUncovered = gamePreview.isFocusable();
+                previewFocusableInTouchModeWhenUncovered = gamePreview.isFocusableInTouchMode();
+                previewFocusabilityCaptured = true;
+            }
+            if (covered) {
+                gamePreview.setFocusable(false);
+                gamePreview.setFocusableInTouchMode(false);
+            } else if (previewFocusabilityCaptured) {
+                gamePreview.setFocusable(previewFocusableWhenUncovered);
+                gamePreview.setFocusableInTouchMode(previewFocusableInTouchModeWhenUncovered);
+                previewFocusabilityCaptured = false;
+            }
+        }
+        if (gameStatus != null) gameStatus.setImportantForAccessibility(importance);
     }
 
     private void startGameLoop() {
@@ -1150,7 +1332,7 @@ public final class MainActivity extends Activity {
                     compileAttempted = true;
                     setStatusText(compileResult);
                 }
-                if (compileReady) {
+                if (compileReady || gameRuntimeActive) {
                     runNativeTick();
                 }
                 gameLoopHandler.postDelayed(this, DEFAULT_TICK_INTERVAL_MS);
@@ -1166,6 +1348,16 @@ public final class MainActivity extends Activity {
     private void setStatusText(String status) {
         if (reloadStatus != null) {
             reloadStatus.setText(compactStatusText(status));
+        }
+        if (blockingErrorPanel != null) {
+            boolean visible = WorkshopBlockingErrorPolicy.shouldShow(gameRuntimeActive, status);
+            blockingErrorPanel.setVisibility(visible ? View.VISIBLE : View.GONE);
+            if (visible && blockingErrorBody != null) {
+                blockingErrorBody.setText(WorkshopBlockingErrorPolicy.summary(
+                        status, projectRootPath));
+                blockingErrorPanel.bringToFront();
+                if (editorToggle != null) editorToggle.bringToFront();
+            }
         }
     }
 
@@ -1337,36 +1529,109 @@ public final class MainActivity extends Activity {
         }
         lastDebugUpdateNanos = now;
         double tickMillis = tickMetric.averageMillis();
+        double syncMillis = syncMetric.averageMillis();
         double renderMillis = renderMetric.averageMillis();
-        int budgetPercent = Math.max(0, (int)(((tickMillis + renderMillis) * 100.0 / FRAME_BUDGET_MILLIS) + 0.5));
+        double tickP50Millis = tickMetric.percentileMillis(50);
+        double tickP95Millis = tickMetric.percentileMillis(95);
+        double syncP95Millis = syncMetric.percentileMillis(95);
+        double renderP50Millis = renderMetric.percentileMillis(50);
+        double renderP95Millis = renderMetric.percentileMillis(95);
+        int tickBudgetPercent = WorkshopFrameBudget.percent(tickMillis);
+        int syncBudgetPercent = WorkshopFrameBudget.percent(syncMillis);
+        int renderBudgetPercent = WorkshopFrameBudget.percent(renderMillis);
+        int totalBudgetPercent = WorkshopFrameBudget.percent(tickMillis + syncMillis + renderMillis);
         debugTextBuilder.setLength(0);
-        debugTextBuilder.append("tick=");
+        debugTextBuilder.append("tick avg=");
         appendMillis(debugTextBuilder, tickMillis);
-        debugTextBuilder.append(" ms  render=");
+        debugTextBuilder.append(" p50=");
+        appendMillis(debugTextBuilder, tickP50Millis);
+        debugTextBuilder.append(" p95=");
+        appendMillis(debugTextBuilder, tickP95Millis);
+        debugTextBuilder.append(" ms\nrender avg=");
         appendMillis(debugTextBuilder, renderMillis);
-        debugTextBuilder.append(" ms  budget=");
-        appendPercent(debugTextBuilder, budgetPercent);
+        debugTextBuilder.append(" p50=");
+        appendMillis(debugTextBuilder, renderP50Millis);
+        debugTextBuilder.append(" p95=");
+        appendMillis(debugTextBuilder, renderP95Millis);
+        debugTextBuilder.append(" ms\nsync avg=");
+        appendMillis(debugTextBuilder, syncMillis);
+        debugTextBuilder.append(" p95=");
+        appendMillis(debugTextBuilder, syncP95Millis);
+        debugTextBuilder.append(" ms\nbudget tick=");
+        appendPercent(debugTextBuilder, tickBudgetPercent);
+        debugTextBuilder.append(" render=");
+        appendPercent(debugTextBuilder, renderBudgetPercent);
+        debugTextBuilder.append(" sync=");
+        appendPercent(debugTextBuilder, syncBudgetPercent);
+        debugTextBuilder.append(" total=");
+        appendPercent(debugTextBuilder, totalBudgetPercent);
         appendExplorationProgress(debugTextBuilder);
-        gameStatus.setTextColor(debugColorForBudget(budgetPercent));
+        gameStatus.setTextColor(debugColorForBudget(totalBudgetPercent));
         gameStatus.setText(debugTextBuilder.toString());
         updateAiGameProgressOverlay();
     }
 
     private void appendExplorationProgress(StringBuilder text) {
         if (!compileReady || activeProject == null || !"exploration".equals(activeProject.templateId)) return;
+        String tapsResult = nativeGetRuntimeI32(projectRootPath(), "GameState.accepted_tap_count");
         String collectedResult = nativeGetRuntimeI32(projectRootPath(), "GameState.collected_count");
         String totalResult = nativeGetRuntimeI32(projectRootPath(), "GameState.total_collectibles");
         String stageResult = nativeGetRuntimeI32(projectRootPath(), "GameState.tutorial_stage");
+        String audioSerialResult = nativeGetRuntimeI32(projectRootPath(), "ExplorationAudio.event_serial");
+        String audioKindResult = nativeGetRuntimeI32(projectRootPath(), "ExplorationAudio.cue_kind");
         if (collectedResult == null || collectedResult.startsWith("StateError")
                 || totalResult == null || totalResult.startsWith("StateError")
                 || stageResult == null || stageResult.startsWith("StateError")) return;
         int collected = extractIntField(collectedResult, "value", 0);
         int total = extractIntField(totalResult, "value", 0);
         int stage = extractIntField(stageResult, "value", 0);
+        boolean tapCountAvailable = tapsResult != null && !tapsResult.startsWith("StateError");
+        int taps = WorkshopExplorationLessonPolicy.effectiveTapCount(tapCountAvailable,
+                tapCountAvailable ? extractIntField(tapsResult, "value", 0) : 0, stage);
+        int progress = explorationLessonProgress();
+        int observed = WorkshopExplorationLessonPolicy.observeGame(progress, taps, collected);
+        if (observed != progress) saveExplorationLessonProgress(observed);
         text.append('\n').append("keepsakes=").append(collected).append('/').append(total).append("  lesson=");
-        if (stage <= 0) text.append("tap to explore");
-        else if (stage == 1) text.append("find the rest");
-        else text.append("garden complete");
+        text.append(WorkshopExplorationLessonPolicy.prompt(observed));
+        if (stage >= 3) text.append("  garden complete");
+        if (audioSerialResult != null && !audioSerialResult.startsWith("StateError")
+                && audioKindResult != null && !audioKindResult.startsWith("StateError")) {
+            playExplorationCue(extractIntField(audioSerialResult, "value", 0),
+                    extractIntField(audioKindResult, "value", 0));
+        }
+    }
+
+    private String explorationLessonKey() {
+        return activeProject == null ? "legacy" : activeProject.id;
+    }
+
+    private int explorationLessonProgress() {
+        return getSharedPreferences(EXPLORATION_LESSON_PREFS, MODE_PRIVATE)
+                .getInt(explorationLessonKey(), 0);
+    }
+
+    private void saveExplorationLessonProgress(int progress) {
+        getSharedPreferences(EXPLORATION_LESSON_PREFS, MODE_PRIVATE).edit()
+                .putInt(explorationLessonKey(), progress).apply();
+    }
+
+    private void recordExplorationLesson(int event) {
+        if (activeProject == null || !"exploration".equals(activeProject.templateId)) return;
+        int progress = explorationLessonProgress();
+        saveExplorationLessonProgress(WorkshopExplorationLessonPolicy.record(progress, event));
+    }
+
+    private void playExplorationCue(int serial, int kind) {
+        if (serial <= 0 || serial == lastExplorationAudioSerial) return;
+        lastExplorationAudioSerial = serial;
+        try {
+            if (explorationTone == null) explorationTone = new ToneGenerator(AudioManager.STREAM_MUSIC, 45);
+            explorationTone.startTone(kind == 2 ? ToneGenerator.TONE_PROP_ACK
+                    : ToneGenerator.TONE_PROP_BEEP, 110);
+        } catch (RuntimeException error) {
+            if (explorationTone != null) explorationTone.release();
+            explorationTone = null;
+        }
     }
 
     private static int debugColorForBudget(int budgetPercent) {
@@ -1488,6 +1753,7 @@ public final class MainActivity extends Activity {
     }
 
     private LinearLayout createAiControls() {
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.VERTICAL);
         controls.setPadding(0, dp(8), 0, 0);
@@ -1504,7 +1770,7 @@ public final class MainActivity extends Activity {
 
         Button contextToggle = new Button(this);
         contextToggle.setText("Context & Images");
-        final LinearLayout contextBody = new LinearLayout(this);
+        contextBody = new LinearLayout(this);
         contextBody.setOrientation(LinearLayout.VERTICAL);
         contextBody.setVisibility(View.GONE);
         contextToggle.setOnClickListener(new View.OnClickListener() {
@@ -1559,7 +1825,7 @@ public final class MainActivity extends Activity {
         contextBody.addView(allowAiImageGeneration, fullWidth());
 
         LinearLayout aiActionRow = new LinearLayout(this);
-        aiActionRow.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(aiActionRow, layout);
         Button aiPatch = new Button(this);
         aiPatch.setText("Run");
         aiPatch.setContentDescription("Queue the requested AI change with current reviewed attachments and budget limits");
@@ -1569,15 +1835,14 @@ public final class MainActivity extends Activity {
                 runAiPatch();
             }
         });
-        aiActionRow.addView(aiPatch, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        aiActionRow.addView(aiPatch, actionWidth(layout));
         Button voiceCommand = new Button(this);
         voiceCommand.setText("Voice");
         voiceCommand.setContentDescription("Speak a game change or command");
         voiceCommand.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { startVoiceChange(); }
         });
-        aiActionRow.addView(voiceCommand, new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        aiActionRow.addView(voiceCommand, actionWidth(layout));
         aiCancelButton = new Button(this);
         aiCancelButton.setText("Stop");
         aiCancelButton.setVisibility(View.GONE);
@@ -1585,8 +1850,7 @@ public final class MainActivity extends Activity {
         aiCancelButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { cancelAiRun(); }
         });
-        aiActionRow.addView(aiCancelButton, new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        aiActionRow.addView(aiCancelButton, actionWidth(layout));
         controls.addView(aiActionRow, fullWidth());
 
         aiQueueSection = new LinearLayout(this);
@@ -1634,7 +1898,7 @@ public final class MainActivity extends Activity {
         Button moreToolsToggle = new Button(this);
         moreToolsToggle.setText("More Tools & Settings");
         controls.addView(moreToolsToggle, fullWidth());
-        final LinearLayout moreToolsBody = new LinearLayout(this);
+        moreToolsBody = new LinearLayout(this);
         moreToolsBody.setOrientation(LinearLayout.VERTICAL);
         moreToolsBody.setVisibility(View.GONE);
         moreToolsToggle.setOnClickListener(new View.OnClickListener() {
@@ -1768,8 +2032,7 @@ public final class MainActivity extends Activity {
         audioRecordingNameEditor.setText("recorded_audio");
         projectSettingsBody.addView(audioRecordingNameEditor, fullWidth());
         LinearLayout recordingActions = new LinearLayout(this);
-        recordingActions.setOrientation(getResources().getConfiguration().screenWidthDp < 480
-                ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        configureActionRow(recordingActions, layout);
         Button startRecording = new Button(this);
         startRecording.setText("Record Audio");
         startRecording.setContentDescription("Start a bounded microphone recording for the active project");
@@ -1786,13 +2049,9 @@ public final class MainActivity extends Activity {
         cancelRecording.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { cancelAudioRecording(true); }
         });
-        LinearLayout.LayoutParams recordingButtonParams = getResources().getConfiguration().screenWidthDp < 480
-                ? fullWidth() : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f);
-        recordingActions.addView(startRecording, recordingButtonParams);
-        recordingActions.addView(saveRecording, getResources().getConfiguration().screenWidthDp < 480
-                ? fullWidth() : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
-        recordingActions.addView(cancelRecording, getResources().getConfiguration().screenWidthDp < 480
-                ? fullWidth() : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f));
+        recordingActions.addView(startRecording, actionWidth(layout));
+        recordingActions.addView(saveRecording, actionWidth(layout));
+        recordingActions.addView(cancelRecording, actionWidth(layout));
         projectSettingsBody.addView(recordingActions, fullWidth());
         Button stopAudio = new Button(this);
         stopAudio.setText("Stop Audio Preview");
@@ -1970,6 +2229,20 @@ public final class MainActivity extends Activity {
         githubBranchEditor.setSingleLine(true);
         githubBranchEditor.setText(readGitHubProjectPreference(githubPrefs, GITHUB_PREF_BRANCH, "main"));
         githubSettingsBody.addView(githubBranchEditor, fullWidth());
+        githubAutoSync = new CheckBox(this);
+        githubAutoSync.setText("Automatically back up validated project changes");
+        githubAutoSync.setChecked(githubPrefs.getBoolean(
+                githubProjectPreferenceKey(GITHUB_PREF_AUTO_SYNC), false));
+        githubAutoSync.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(githubProjectPreferenceKey(GITHUB_PREF_AUTO_SYNC),
+                                githubAutoSync.isChecked())
+                        .apply();
+                if (githubAutoSync.isChecked()) requestGitHubAutoSync();
+            }
+        });
+        githubSettingsBody.addView(githubAutoSync, fullWidth());
         Button saveGitHubSettings = new Button(this);
         saveGitHubSettings.setText("Save GitHub Sync Settings");
         saveGitHubSettings.setOnClickListener(new View.OnClickListener() {
@@ -2020,7 +2293,8 @@ public final class MainActivity extends Activity {
         TextView privacyDisclosure = new TextView(this);
         privacyDisclosure.setText("On-device by default: project code, assets, drafts, recovery, and traces. "
                 + "Queue AI Change snapshots the command, workspace context, and only media explicitly selected in review. "
-                + "GitHub receives project files only when Sync or PR is pressed. Microphone access is used only for explicit voice or audio-recording actions.");
+                + "GitHub receives project files only when Sync or PR is pressed, or after you explicitly enable automatic backup. "
+                + "Microphone access is used only for explicit voice or audio-recording actions.");
         privacyDisclosure.setTextSize(12.0f);
         privacyDisclosure.setTextColor(Color.rgb(73, 84, 100));
         privacyDisclosure.setPadding(dp(8), dp(8), dp(8), dp(8));
@@ -2090,18 +2364,12 @@ public final class MainActivity extends Activity {
         onboardingBody = new LinearLayout(this);
         onboardingBody.setOrientation(LinearLayout.VERTICAL);
         onboardingBody.setVisibility(View.GONE);
-        TextView onboardingSummary = new TextView(this);
-        onboardingSummary.setText("Manual path (no API key):\n"
-                + "1. Tap the Exploration Garden, walk to a keepsake, then open the top-right menu.\n"
-                + "2. Open Manual Symbols & Source and choose a symbol.\n"
-                + "3. Edit, Apply, then Run Tests; use Changes before backup.\n"
-                + "4. Projects creates/switches workshops and exports portable archives.\n\n"
-                + "Optional: AI Settings stores an OpenAI key; GitHub Settings stores a token for explicit Sync/PR actions. "
-                + "Image/Audio Assets stay under Projects. Voice or audio recording asks for microphone permission only when started.");
+        onboardingSummary = new TextView(this);
         onboardingSummary.setTextSize(12.0f);
         onboardingSummary.setTextColor(Color.rgb(73, 84, 100));
         onboardingSummary.setPadding(dp(8), dp(8), dp(8), dp(8));
         onboardingBody.addView(onboardingSummary, fullWidth());
+        refreshOnboardingSummary();
         Button showWelcome = new Button(this);
         showWelcome.setText("Show Welcome Guide");
         showWelcome.setOnClickListener(new View.OnClickListener() {
@@ -2109,11 +2377,17 @@ public final class MainActivity extends Activity {
         });
         onboardingBody.addView(showWelcome, fullWidth());
         Button startManual = new Button(this);
-        startManual.setText("Start Zero-AI Manual Tutorial");
+        startManual.setText("Resume Zero-AI Manual Tutorial");
         startManual.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { startManualTutorial(); }
         });
         onboardingBody.addView(startManual, fullWidth());
+        Button restartManual = new Button(this);
+        restartManual.setText("Restart Manual Tutorial");
+        restartManual.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { restartManualTutorial(); }
+        });
+        onboardingBody.addView(restartManual, fullWidth());
         moreToolsBody.addView(onboardingBody, fullWidth());
         controls.addView(moreToolsBody, fullWidth());
         return controls;
@@ -2238,6 +2512,7 @@ public final class MainActivity extends Activity {
                 aiRunActive = false;
                 WorkshopLongWorkCoordinator.finishAi(this);
                 if (aiCancelButton != null) aiCancelButton.setVisibility(View.GONE);
+                requestGitHubAutoSync();
             }
         }
     }
@@ -2255,72 +2530,6 @@ public final class MainActivity extends Activity {
             }
         }
         setStatusText("No AI request is available to retry");
-    }
-
-    private boolean needsFirstRunAiSetup() {
-        SharedPreferences onboarding = getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE);
-        if (onboarding.getBoolean(AI_SETUP_COMPLETE, false)) return false;
-        SharedPreferences ai = getSharedPreferences(AI_PREFS, MODE_PRIVATE);
-        if (!ai.getString(AI_PREF_PROVIDER, "").isEmpty()
-                || !readSecretPreference(ai, AI_PREF_API_KEY).isEmpty()) {
-            onboarding.edit().putBoolean(AI_SETUP_COMPLETE, true).apply();
-            return false;
-        }
-        return true;
-    }
-
-    private void markAiSetupComplete() {
-        getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE).edit()
-                .putBoolean(AI_SETUP_COMPLETE, true).apply();
-    }
-
-    private void showFirstRunAiSetup() {
-        final EditText apiKey = new EditText(this);
-        apiKey.setHint("Optional OpenAI API key");
-        apiKey.setSingleLine(true);
-        apiKey.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        apiKey.setPadding(dp(20), dp(8), dp(20), dp(8));
-        new AlertDialog.Builder(this)
-                .setTitle("Set up AI")
-                .setMessage("Sign in with your ChatGPT subscription on this phone, or save an API key as the fallback. You can change both later in Settings.")
-                .setView(apiKey)
-                .setPositiveButton("ChatGPT Sign-in", new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
-                                .putString(AI_PREF_PROVIDER, AI_PROVIDER_CODEX).apply();
-                        if (aiProviderSelector != null) aiProviderSelector.setSelection(0);
-                        markAiSetupComplete();
-                        refreshAiBudgetStatus();
-                        showProjectChooserAfterCodexLogin = true;
-                        beginPhoneNativeCodexLogin();
-                    }
-                })
-                .setNeutralButton("Save API Key", new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        String key = apiKey.getText().toString().trim();
-                        if (key.isEmpty() || !saveAiSettings(key, DEFAULT_AI_MODEL)) {
-                            setStatusText("Enter a valid API key, or choose ChatGPT sign-in / without AI");
-                            gameLoopHandler.post(new Runnable() {
-                                @Override public void run() { showFirstRunAiSetup(); }
-                            });
-                            return;
-                        }
-                        getSharedPreferences(AI_PREFS, MODE_PRIVATE).edit()
-                                .putString(AI_PREF_PROVIDER, AI_PROVIDER_API).apply();
-                        if (aiProviderSelector != null) aiProviderSelector.setSelection(1);
-                        markAiSetupComplete();
-                        refreshAiBudgetStatus();
-                        showProjectChooser();
-                    }
-                })
-                .setNegativeButton("Without AI", new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        markAiSetupComplete();
-                        showProjectChooser();
-                    }
-                })
-                .setCancelable(false)
-                .show();
     }
 
     private void showProjectChooser() {
@@ -2356,6 +2565,7 @@ public final class MainActivity extends Activity {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
                         WorkshopProjectRegistry.ProjectInfo project = projects.get(selected[0]);
                         if (activeProject != null && activeProject.id.equals(project.id)) {
+                            recordOnboardingProjectOpened(project);
                             setStatusText("Working on " + project.name);
                         } else {
                             activateProject(project);
@@ -2369,6 +2579,9 @@ public final class MainActivity extends Activity {
                 })
                 .setNegativeButton("Current", new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        if (activeProject != null) {
+                            recordOnboardingProjectOpened(activeProject);
+                        }
                         setStatusText(activeProject == null ? "Using current workspace"
                                 : "Working on " + activeProject.name);
                     }
@@ -2392,6 +2605,8 @@ public final class MainActivity extends Activity {
         content.addView(templates, fullWidth());
         new AlertDialog.Builder(this)
                 .setTitle("New project")
+                .setMessage("Choose a bundled template and give the new app-private project a name. "
+                        + "You can switch or export it later under Projects.")
                 .setView(content)
                 .setPositiveButton("Create", new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
@@ -2457,7 +2672,7 @@ public final class MainActivity extends Activity {
     }
 
     private void createAndSwitchProject() {
-        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project creation blocked while AI, GitHub, or project I/O is active");
             return;
@@ -2484,7 +2699,7 @@ public final class MainActivity extends Activity {
     }
 
     private boolean activateProject(WorkshopProjectRegistry.ProjectInfo project) {
-        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project switch blocked while AI, GitHub, or project I/O is active");
             return false;
@@ -2496,6 +2711,7 @@ public final class MainActivity extends Activity {
         try {
             WorkshopProjectRegistry.setActive(this, project);
             activeProject = project;
+            lastExplorationAudioSerial = 0;
             projectRootFile = project.root;
             projectRootPath = project.root.getAbsolutePath();
             clearPendingPreviewCapture();
@@ -2506,6 +2722,7 @@ public final class MainActivity extends Activity {
             diagnosticSymbol = "";
             compileAttempted = false;
             compileReady = false;
+            gameRuntimeActive = false;
             lastCompileResult = "CompileNotRun";
             reviewedGitHubChangeFingerprint = "";
             ProjectSnapshot snapshot = loadBundledProject();
@@ -2525,6 +2742,7 @@ public final class MainActivity extends Activity {
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
+            recordOnboardingProjectOpened(project);
             setStatusText(compileReady ? "Working on " + project.name
                     : "Unable to run " + project.name + " - " + compileResult);
             gameLoopHandler.post(new Runnable() {
@@ -2547,7 +2765,7 @@ public final class MainActivity extends Activity {
             setStatusText("Project export needs a registered active project");
             return;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project export blocked while other background work is active");
             return;
@@ -2571,7 +2789,7 @@ public final class MainActivity extends Activity {
     }
 
     private void requestProjectImport() {
-        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project import blocked while other background work is active");
             return;
@@ -2608,6 +2826,10 @@ public final class MainActivity extends Activity {
         if (githubBranchEditor != null) {
             githubBranchEditor.setText(readGitHubProjectPreference(preferences, GITHUB_PREF_BRANCH, "main"));
         }
+        if (githubAutoSync != null) {
+            githubAutoSync.setChecked(preferences.getBoolean(
+                    githubProjectPreferenceKey(GITHUB_PREF_AUTO_SYNC), false));
+        }
     }
 
     private void toggleGitHubSettings() {
@@ -2640,21 +2862,58 @@ public final class MainActivity extends Activity {
     }
 
     private void saveGitHubSyncSettings() {
-        String token = githubTokenEditor == null ? "" : githubTokenEditor.getText().toString().trim();
-        String repository = githubRepositoryEditor == null ? "" : githubRepositoryEditor.getText().toString().trim();
-        String branch = githubBranchEditor == null ? "" : githubBranchEditor.getText().toString().trim();
+        final String token = githubTokenEditor == null ? "" : githubTokenEditor.getText().toString().trim();
+        final String repository = githubRepositoryEditor == null ? "" : githubRepositoryEditor.getText().toString().trim();
+        final String branchValue = githubBranchEditor == null ? "" : githubBranchEditor.getText().toString().trim();
+        final String branch = branchValue.isEmpty() ? "main" : branchValue;
         if (token.isEmpty() || repository.indexOf('/') <= 0 || repository.endsWith("/")) {
             setStatusText("GitHub sync settings need a token and owner/repository");
             return;
         }
-        SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
-        if (!writeSecretPreference(preferences, GITHUB_PREF_TOKEN, token)) return;
-        preferences.edit()
-                .putString(githubProjectPreferenceKey(GITHUB_PREF_REPOSITORY), repository)
-                .putString(githubProjectPreferenceKey(GITHUB_PREF_BRANCH), branch.isEmpty() ? "main" : branch)
-                .apply();
-        refreshGitHubSyncStatus();
-        setStatusText("GitHub sync settings saved; background sync is ready");
+        if (!WorkshopConnectivity.hasUsableNetwork(this)) {
+            setStatusText("GitHub settings need a usable network for authenticated validation");
+            return;
+        }
+        if (!beginGitHubOperation("validate", "GitHub sync: validating repository and branch")) return;
+        githubSyncExecutor.submit(new Runnable() {
+            @Override public void run() {
+                try {
+                    new WorkshopGitHubApi(token, repository).validateTarget(branch);
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+                            String previousRepository = readGitHubProjectPreference(
+                                    preferences, GITHUB_PREF_REPOSITORY, "");
+                            String previousBranch = readGitHubProjectPreference(
+                                    preferences, GITHUB_PREF_BRANCH, "main");
+                            if (!writeSecretPreference(preferences, GITHUB_PREF_TOKEN, token)) {
+                                postGitHubOperationState("", "error",
+                                        "GitHub sync: credential storage failed after validation");
+                                return;
+                            }
+                            SharedPreferences.Editor editor = preferences.edit()
+                                    .putString(githubProjectPreferenceKey(GITHUB_PREF_REPOSITORY), repository)
+                                    .putString(githubProjectPreferenceKey(GITHUB_PREF_BRANCH), branch)
+                                    .putString(githubProjectPreferenceKey(GITHUB_PREF_VALIDATED_TARGET),
+                                            WorkshopGitHubSyncPolicy.targetIdentity(repository, branch));
+                            if (!repository.equals(previousRepository) || !branch.equals(previousBranch)) {
+                                editor.remove(githubProjectPreferenceKey(GITHUB_PREF_REMOTE_STATE));
+                                editor.remove(githubProjectPreferenceKey(GITHUB_PREF_LAST_SYNC_FINGERPRINT));
+                                editor.remove(githubProjectPreferenceKey(GITHUB_PREF_REVIEW_FINGERPRINT));
+                                reviewedGitHubChangeFingerprint = "";
+                            }
+                            editor.apply();
+                            postGitHubOperationState("", "complete",
+                                    "GitHub sync: authenticated target ready for " + repository + ":" + branch);
+                            requestGitHubAutoSync();
+                        }
+                    });
+                } catch (Exception error) {
+                    postGitHubOperationState("", "error",
+                            "GitHub validation error: " + error.getMessage());
+                }
+            }
+        });
     }
 
     private void refreshGitHubSyncStatus() {
@@ -2672,12 +2931,29 @@ public final class MainActivity extends Activity {
             githubSyncStatus.setText("GitHub sync: not configured");
             return;
         }
+        String branch = readGitHubProjectPreference(prefs, GITHUB_PREF_BRANCH, "main").trim();
+        if (!githubTargetValidated(prefs, repository, branch)) {
+            githubSyncStatus.setText("GitHub sync: save settings to authenticate this target");
+            return;
+        }
         String operation = prefs.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
         String state = prefs.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
         String detail = prefs.getString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_DETAIL), "");
+        boolean inProcessOperationActive = WorkshopLongWorkCoordinator.isGitHubActive();
         if (("queued".equals(state) || "running".equals(state)) && !operation.isEmpty()) {
-            persistGitHubOperationState(operation, "interrupted", "app stopped before completion");
-            githubSyncStatus.setText("GitHub sync: interrupted; retry available");
+            if (inProcessOperationActive) {
+                githubSyncStatus.setText("GitHub sync: continues in background");
+                return;
+            }
+            if (WorkshopGitHubSyncPolicy.shouldMarkInterrupted(
+                    operation, state, inProcessOperationActive)) {
+                persistGitHubOperationState(operation, "interrupted", "app stopped before completion");
+                githubSyncStatus.setText("GitHub sync: interrupted; retry available");
+                return;
+            }
+        }
+        if (("waiting_network".equals(state) || "deferred".equals(state)) && !operation.isEmpty()) {
+            githubSyncStatus.setText(detail.isEmpty() ? "GitHub sync: waiting to retry" : detail);
             return;
         }
         if (("error".equals(state) || "interrupted".equals(state)) && !operation.isEmpty()) {
@@ -2688,6 +2964,10 @@ public final class MainActivity extends Activity {
     }
 
     private void queueGitHubSync() {
+        queueGitHubSync(true);
+    }
+
+    private void queueGitHubSync(boolean userInitiated) {
         if (audioRecordingActive) {
             setStatusText("Finish or cancel audio recording before GitHub sync");
             return;
@@ -2700,27 +2980,118 @@ public final class MainActivity extends Activity {
             setStatusText("GitHub sync needs configured settings");
             return;
         }
-        if (!beginGitHubOperation("sync", "GitHub sync: queued")) return;
+        if (!githubTargetValidated(prefs, repository, branch)) {
+            setStatusText("GitHub sync needs authenticated settings; save them again");
+            return;
+        }
+        WorkshopBackgroundWorkPolicy.Decision background = WorkshopBackgroundWorkPolicy.decide(
+                userInitiated, WorkshopConnectivity.hasUsableNetwork(this),
+                batterySaverEnabled(), deviceCharging());
+        if (background == WorkshopBackgroundWorkPolicy.Decision.WAIT_FOR_NETWORK) {
+            persistGitHubSyncOperationState("waiting_network",
+                    "GitHub sync: waiting for a usable network", !userInitiated);
+            refreshGitHubSyncStatus();
+            return;
+        }
+        if (background == WorkshopBackgroundWorkPolicy.Decision.DEFER_FOR_BATTERY) {
+            persistGitHubSyncOperationState("deferred",
+                    "GitHub sync: automatic backup deferred by battery saver", !userInitiated);
+            refreshGitHubSyncStatus();
+            return;
+        }
+        final String remoteStateKey = githubProjectPreferenceKey(GITHUB_PREF_REMOTE_STATE);
+        final String fingerprintKey = githubProjectPreferenceKey(GITHUB_PREF_LAST_SYNC_FINGERPRINT);
+        if (!beginGitHubOperation("sync", "GitHub sync: queued", !userInitiated)) return;
         githubSyncExecutor.submit(new Runnable() {
             @Override public void run() {
                 try {
                     Map<String, byte[]> files = githubBackupFiles();
-                    if (files.isEmpty()) {
-                        postGitHubOperationState("", "complete", "GitHub sync: no project files");
-                        return;
-                    }
+                    SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+                    Map<String, String> remoteState = WorkshopGitHubSyncPolicy.decodeRemoteState(
+                            preferences.getString(remoteStateKey, ""));
+                    List<WorkshopGitHubSyncPolicy.Change> plan =
+                            WorkshopGitHubSyncPolicy.backupPlan(files, remoteState);
+                    WorkshopGitHubApi api = new WorkshopGitHubApi(token, repository);
                     int completed = 0;
-                    for (Map.Entry<String, byte[]> entry : files.entrySet()) {
+                    int deleted = 0;
+                    for (WorkshopGitHubSyncPolicy.Change change : plan) {
                         completed += 1;
-                        postGitHubOperationState("sync", "running", "GitHub sync: " + completed + "/" + files.size());
-                        uploadGitHubFile(token, repository, branch, entry.getKey(), entry.getValue());
+                        postGitHubOperationState("sync", "running",
+                                "GitHub sync: " + completed + "/" + plan.size());
+                        String remoteSha = api.applyFileChange(
+                                branch, change.path, change.content, remoteState.get(change.path));
+                        if (change.deletesRemoteFile()) {
+                            remoteState.remove(change.path);
+                            deleted += 1;
+                        } else {
+                            remoteState.put(change.path, remoteSha);
+                        }
+                        preferences.edit().putString(remoteStateKey,
+                                WorkshopGitHubSyncPolicy.encodeRemoteState(remoteState)).apply();
                     }
-                    postGitHubOperationState("", "complete", "GitHub sync: complete (" + completed + " files)");
+                    preferences.edit()
+                            .putString(fingerprintKey, WorkshopGitHubSyncPolicy.fingerprint(files))
+                            .putString(remoteStateKey,
+                                    WorkshopGitHubSyncPolicy.encodeRemoteState(remoteState))
+                            .apply();
+                    postGitHubOperationState("", "complete", plan.isEmpty()
+                            ? "GitHub sync: no project files"
+                            : "GitHub sync: complete (" + (completed - deleted)
+                                    + " uploaded, " + deleted + " deleted)");
                 } catch (final Exception error) {
-                    postGitHubOperationState("sync", "error", "GitHub sync error: " + error.getMessage());
+                    postGitHubOperationFailure("sync", "GitHub sync", error);
                 }
             }
         });
+    }
+
+    private void requestGitHubAutoSync() {
+        gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
+        gameLoopHandler.postDelayed(githubAutoSyncRequest, GITHUB_AUTO_SYNC_DEBOUNCE_MS);
+    }
+
+    private void scheduleGitHubAutoSync() {
+        if (activityDestroyed || WorkshopLongWorkCoordinator.isAnyActive()
+                || audioRecordingActive || hasPendingSourceEdit() || !compileReady) return;
+        SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        boolean enabled = preferences.getBoolean(
+                githubProjectPreferenceKey(GITHUB_PREF_AUTO_SYNC), false);
+        String repository = readGitHubProjectPreference(
+                preferences, GITHUB_PREF_REPOSITORY, "").trim();
+        String branch = readGitHubProjectPreference(
+                preferences, GITHUB_PREF_BRANCH, "main").trim();
+        if (!githubTargetValidated(preferences, repository, branch)) return;
+        String operation = preferences.getString(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
+        String state = preferences.getString(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
+        if (!operation.isEmpty() && ("error".equals(state) || "interrupted".equals(state))
+                && !"sync".equals(operation)) return;
+        try {
+            Map<String, byte[]> files = githubBackupFiles();
+            String current = WorkshopGitHubSyncPolicy.fingerprint(files);
+            String previous = preferences.getString(
+                    githubProjectPreferenceKey(GITHUB_PREF_LAST_SYNC_FINGERPRINT), "");
+            WorkshopGitHubSyncPolicy.ScheduleDecision decision =
+                    WorkshopGitHubSyncPolicy.automaticSchedule(enabled, !current.equals(previous),
+                            WorkshopConnectivity.hasUsableNetwork(this),
+                            batterySaverEnabled(), deviceCharging());
+            if (decision == WorkshopGitHubSyncPolicy.ScheduleDecision.RUN) {
+                queueGitHubSync(false);
+            } else if (decision == WorkshopGitHubSyncPolicy.ScheduleDecision.WAIT_FOR_NETWORK) {
+                persistGitHubSyncOperationState("waiting_network",
+                        "GitHub sync: automatic backup waiting for a usable network", true);
+                refreshGitHubSyncStatus();
+            } else if (decision == WorkshopGitHubSyncPolicy.ScheduleDecision.DEFER_FOR_BATTERY) {
+                persistGitHubSyncOperationState("deferred",
+                        "GitHub sync: automatic backup deferred by battery saver", true);
+                refreshGitHubSyncStatus();
+            }
+        } catch (Exception error) {
+            persistGitHubOperationState("sync", "error",
+                    "GitHub automatic backup error: " + error.getMessage());
+            refreshGitHubSyncStatus();
+        }
     }
 
     private void enqueuePendingAiRequest(String source) {
@@ -2792,15 +3163,13 @@ public final class MainActivity extends Activity {
             }
             aiVisibleQueueCount = activeItems;
             updateAiGameProgressOverlay();
-            if (activeItems == 0) {
+            if (items.isEmpty()) {
                 if (aiQueueSection != null) aiQueueSection.setVisibility(View.GONE);
                 return;
             }
             if (aiQueueSection != null) aiQueueSection.setVisibility(View.VISIBLE);
             for (int index = 0; index < items.size(); index += 1) {
                 final AndroidAiQueue.Entry item = items.get(index);
-                if (!AndroidAiQueue.PENDING.equals(item.state)
-                        && !AndroidAiQueue.IN_PROGRESS.equals(item.state)) continue;
                 LinearLayout row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
                 TextView label = new TextView(this);
@@ -2820,6 +3189,15 @@ public final class MainActivity extends Activity {
                         @Override public void onClick(View view) { cancelPendingAiItem(item); }
                     });
                     row.addView(cancel, new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+                } else if (AiQueuePolicy.terminal(item.state)) {
+                    Button retry = new Button(this);
+                    retry.setText("Fresh Retry");
+                    retry.setContentDescription("Fresh retry AI request " + item.prompt);
+                    retry.setOnClickListener(new View.OnClickListener() {
+                        @Override public void onClick(View view) { retryTerminalAiItem(item); }
+                    });
+                    row.addView(retry, new LinearLayout.LayoutParams(
                             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
                 }
                 aiQueueBody.addView(row, fullWidth());
@@ -2848,6 +3226,20 @@ public final class MainActivity extends Activity {
         refreshAiQueue();
     }
 
+    private void retryTerminalAiItem(AndroidAiQueue.Entry item) {
+        try {
+            if (!item.projectId.equals(activeRecoveryProjectId())) {
+                throw new IOException("AI queue item belongs to a different project");
+            }
+            AndroidAiQueue.retryTerminal(this, item);
+            setStatusText("Fresh retry queued; project, attachments, provider, and budget will be revalidated");
+            refreshAiQueue();
+            startNextQueuedAiIfIdle();
+        } catch (Exception error) {
+            setStatusText("AI fresh retry failed: " + error.getMessage());
+        }
+    }
+
     private void finishActiveAiQueueItem(String outcomeStatus, String detail) {
         AndroidAiQueue.Entry item = activeAiQueueEntry;
         if (item == null || "started".equals(outcomeStatus)) return;
@@ -2867,6 +3259,7 @@ public final class MainActivity extends Activity {
         }
         try {
             AndroidAiTransactionStore.clear(this, item.projectId, item.id);
+            AndroidAiSessionCheckpointStore.clear(this, item.projectId, item.id);
         } catch (Exception error) {
             appendAiTraceFields("transaction_cleanup_failed", "item_id", item.id,
                     "error", error.getMessage(), null, null);
@@ -2879,9 +3272,6 @@ public final class MainActivity extends Activity {
     }
 
     private void startNextQueuedAiIfIdle() {
-        if (restartLoopRecoveryActive) return;
-        if (aiRunActive || WorkshopLongWorkCoordinator.isAnyActive()
-                || activeAiQueueEntry != null || audioRecordingActive) return;
         try {
             boolean hasPending = false;
             for (AndroidAiQueue.Entry item : AndroidAiQueue.list(this, activeRecoveryProjectId())) {
@@ -2890,13 +3280,15 @@ public final class MainActivity extends Activity {
                     break;
                 }
             }
-            if (!hasPending) {
-                refreshAiQueue();
+            WorkshopAiQueueRunPolicy.Decision decision = WorkshopAiQueueRunPolicy.decide(
+                    restartLoopRecoveryActive, aiRunActive,
+                    WorkshopLongWorkCoordinator.isAnyActive(), activeAiQueueEntry != null,
+                    audioRecordingActive, hasPending, WorkshopConnectivity.hasUsableNetwork(this));
+            if (decision == WorkshopAiQueueRunPolicy.Decision.IDLE) {
+                if (!hasPending) refreshAiQueue();
                 return;
             }
-            if (WorkshopBackgroundWorkPolicy.decide(true,
-                    WorkshopConnectivity.hasUsableNetwork(this), false, false)
-                    == WorkshopBackgroundWorkPolicy.Decision.WAIT_FOR_NETWORK) {
+            if (decision == WorkshopAiQueueRunPolicy.Decision.WAIT_FOR_NETWORK) {
                 setStatusText("AI work is waiting for an internet connection");
                 refreshAiQueue();
                 return;
@@ -2920,6 +3312,12 @@ public final class MainActivity extends Activity {
             AndroidAiQueue.finish(this, entry.projectId, entry.id, AndroidAiQueue.FAILED, detail);
         } catch (Exception ignored) {
             // The visible queue error remains available for recovery on the next app start.
+        }
+        try {
+            AndroidAiSessionCheckpointStore.clear(this, entry.projectId, entry.id);
+            AndroidAiTransactionStore.clear(this, entry.projectId, entry.id);
+        } catch (Exception ignored) {
+            // The terminal queue detail still explains that a fresh retry is required.
         }
         if (activeAiQueueEntry != null && activeAiQueueEntry.id.equals(entry.id)) activeAiQueueEntry = null;
         refreshAiQueue();
@@ -2949,7 +3347,7 @@ public final class MainActivity extends Activity {
     }
 
     private void revokeGitHubCredential() {
-        if (githubOperationActive) {
+        if (isGitHubOperationActive()) {
             setStatusText("GitHub token revocation blocked until the active operation finishes");
             return;
         }
@@ -3016,6 +3414,7 @@ public final class MainActivity extends Activity {
         }
         try {
             AndroidAiQueue.clearAll(this);
+            AndroidAiSessionCheckpointStore.clearAll(this);
         } catch (Exception error) {
             setStatusText("AI histories erased but queued work deletion failed: " + error.getMessage());
             return;
@@ -3033,7 +3432,7 @@ public final class MainActivity extends Activity {
     }
 
     private void requestSupportBundleExport() {
-        if (aiRunActive || githubOperationActive || projectIoActive) {
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive) {
             setStatusText("Support export blocked while background work is active");
             return;
         }
@@ -3108,7 +3507,7 @@ public final class MainActivity extends Activity {
             setStatusText("Bundled Workshop cannot be deleted");
             return;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || audioRecordingActive) {
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive) {
             setStatusText("Project deletion blocked while background work or recording is active");
             return;
         }
@@ -3156,6 +3555,7 @@ public final class MainActivity extends Activity {
             AndroidDraftStore.clear(this, target.id);
             AndroidEditRecoveryStore.clearProject(this, target.id);
             AndroidAiQueue.clearProject(this, target.id);
+            AndroidAiSessionCheckpointStore.clearProject(this, target.id);
             clearDeletedProjectPreferences(target);
             refreshProjectControls();
             setStatusText("Deleted project and scoped private data: " + target.name + "; Bundled Workshop is active");
@@ -3179,35 +3579,130 @@ public final class MainActivity extends Activity {
     }
 
     private void showOnboardingGuide(boolean firstRun) {
+        final WorkshopOnboardingPolicy.Progress progress = onboardingProgress();
         new AlertDialog.Builder(this)
                 .setTitle("Welcome to Stasis Workshop")
-                .setMessage("You can build and test a game entirely on-device without AI. In the Exploration Garden, tap a destination "
-                        + "and collect a keepsake, then open the menu, "
-                        + "expand Manual Symbols & Source, make a small edit, Apply it, and Run Tests. Projects and archive backup "
-                        + "work without accounts. OpenAI, GitHub, media, and voice are optional and activate only when you choose them.")
-                .setPositiveButton("Start Manual Tutorial", new android.content.DialogInterface.OnClickListener() {
+                .setMessage(WorkshopOnboardingPolicy.checklist(progress))
+                .setPositiveButton(progress.isComplete() ? "Restart Tutorial" : "Resume Tutorial",
+                        new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        markOnboardingSeen();
                         startManualTutorial();
                     }
                 })
-                .setNegativeButton("Got It", new android.content.DialogInterface.OnClickListener() {
+                .setNegativeButton(firstRun ? "Remind Me Later" : "Close",
+                        new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface dialog, int which) {
-                        markOnboardingSeen();
-                        setStatusText("Welcome guide completed; Help & Onboarding remains available");
+                        if (firstRun) {
+                            if (persistOnboardingProgress(WorkshopOnboardingPolicy.defer(progress))) {
+                                setStatusText("Manual tutorial deferred; resume it anytime under Help & Onboarding");
+                            }
+                        }
                     }
                 })
-                .setNeutralButton(firstRun ? "Remind Me Later" : "Close", null)
                 .show();
     }
 
-    private void markOnboardingSeen() {
-        getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE).edit()
-                .putBoolean(ONBOARDING_COMPLETE, true).apply();
+    private WorkshopOnboardingPolicy.Progress onboardingProgress() {
+        if (onboardingState != null) return onboardingState;
+        onboardingState = WorkshopOnboardingStore.load(
+                getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE));
+        return onboardingState;
+    }
+
+    private boolean persistOnboardingProgress(WorkshopOnboardingPolicy.Progress progress) {
+        boolean stored = WorkshopOnboardingStore.save(
+                getSharedPreferences(ONBOARDING_PREFS, MODE_PRIVATE), progress);
+        if (!stored) {
+            setStatusText("Tutorial progress could not be saved; the current step remains active");
+            return false;
+        }
+        onboardingState = progress;
+        refreshOnboardingSummary();
+        return true;
+    }
+
+    private void refreshOnboardingSummary() {
+        if (onboardingSummary != null) {
+            onboardingSummary.setText(WorkshopOnboardingPolicy.checklist(onboardingProgress()));
+        }
+    }
+
+    private void persistOnboardingAdvance(WorkshopOnboardingPolicy.Progress before,
+            WorkshopOnboardingPolicy.Progress after) {
+        if (after == before) return;
+        if (!persistOnboardingProgress(after)) return;
+        String message = after.isComplete()
+                ? "Zero-AI manual tutorial complete; Help & Onboarding can restart it anytime"
+                : "Tutorial progress saved. Next: " + after.nextStep().instruction;
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+    }
+
+    private void recordOnboardingProjectOpened(WorkshopProjectRegistry.ProjectInfo project) {
+        if (project != null && WorkshopTemplateCatalog.isKnown(project.templateId)) {
+            WorkshopOnboardingPolicy.Progress before = onboardingProgress();
+            persistOnboardingAdvance(before,
+                    WorkshopOnboardingPolicy.recordProjectOpened(before, project.id));
+        }
+    }
+
+    private void recordOnboardingProjectStep(WorkshopOnboardingPolicy.Step event) {
+        WorkshopOnboardingPolicy.Progress before = onboardingProgress();
+        String projectId = activeProject == null ? "" : activeProject.id;
+        persistOnboardingAdvance(before,
+                WorkshopOnboardingPolicy.recordProjectStep(before, event, projectId));
+    }
+
+    private void recordOnboardingChangeApplied(SymbolEntry symbol, String source) {
+        WorkshopOnboardingPolicy.Progress before = onboardingProgress();
+        String projectId = activeProject == null ? "" : activeProject.id;
+        persistOnboardingAdvance(before, WorkshopOnboardingPolicy.recordChangeApplied(
+                before, projectId, symbol.kind, symbol.identityKey(), onboardingSourceHash(source)));
+    }
+
+    private void recordOnboardingTrackedChangeStep(WorkshopOnboardingPolicy.Step event,
+            ProjectSnapshot currentProject) {
+        WorkshopOnboardingPolicy.Progress before = onboardingProgress();
+        SymbolEntry tracked = findSymbolByIdentityKey(currentProject, before.changeId);
+        if (tracked == null) return;
+        String projectId = activeProject == null ? "" : activeProject.id;
+        persistOnboardingAdvance(before, WorkshopOnboardingPolicy.recordChangeStep(
+                before, event, projectId, tracked.identityKey(), onboardingSourceHash(tracked.source)));
+    }
+
+    private void recordOnboardingRevert(String changeId, String changeHash) {
+        WorkshopOnboardingPolicy.Progress before = onboardingProgress();
+        String projectId = activeProject == null ? "" : activeProject.id;
+        persistOnboardingAdvance(before, WorkshopOnboardingPolicy.recordChangeStep(
+                before, WorkshopOnboardingPolicy.Step.CHANGE_REVERTED,
+                projectId, changeId, changeHash));
+    }
+
+    private static String onboardingSourceHash(String source) {
+        try {
+            return sha256Bytes((source == null ? "" : source.trim()).getBytes(StandardCharsets.UTF_8));
+        } catch (IOException error) {
+            return "";
+        }
     }
 
     private void startManualTutorial() {
-        markOnboardingSeen();
+        WorkshopOnboardingPolicy.Progress progress = onboardingProgress();
+        if (progress.isComplete()) progress = WorkshopOnboardingPolicy.restart();
+        progress = WorkshopOnboardingPolicy.resume(progress);
+        if (!persistOnboardingProgress(progress)) return;
+        if (progress.nextStep() == WorkshopOnboardingPolicy.Step.WELCOME) {
+            progress = WorkshopOnboardingPolicy.recordWelcome(progress);
+            if (!persistOnboardingProgress(progress)) return;
+        }
+        if (progress.nextStep() == WorkshopOnboardingPolicy.Step.PROJECT_OPENED) {
+            setStatusText("Tutorial: choose Open for the current template, or New to create from another template");
+            showProjectChooser();
+            return;
+        }
+        if (progress.nextStep() == WorkshopOnboardingPolicy.Step.PROJECT_RAN) {
+            setStatusText("Tutorial: watch the selected project run; the first successful frame completes this step");
+            return;
+        }
         if (editorPanel != null && editorPanel.getVisibility() != View.VISIBLE) toggleEditorPanel();
         if (manualEditBody != null) manualEditBody.setVisibility(View.VISIBLE);
         if (onboardingBody != null) onboardingBody.setVisibility(View.VISIBLE);
@@ -3215,7 +3710,18 @@ public final class MainActivity extends Activity {
             ProjectSnapshot project = loadBundledProject();
             if (project.firstSymbol != null) showSymbol(project.firstSymbol);
         }
-        setStatusText("Manual tutorial: try MOVE_SPEED in src/config.stasis, tap Apply, then Run Tests; no API key is required");
+        if (progress.nextStep() == WorkshopOnboardingPolicy.Step.CHANGE_APPLIED) {
+            setStatusText("Tutorial: select a function, make a small function-body edit, then Apply; no API key is required");
+        } else if (progress.nextStep() == WorkshopOnboardingPolicy.Step.TESTS_PASSED) {
+            setStatusText("Tutorial: choose Run Tests and continue when every runnable test passes");
+        } else if (progress.nextStep() == WorkshopOnboardingPolicy.Step.CHANGES_REVIEWED) {
+            if (diagnosticBody != null) diagnosticBody.setVisibility(View.VISIBLE);
+            setStatusText("Tutorial: choose Changes or Raw Diffs and inspect the saved edit");
+        } else if (progress.nextStep() == WorkshopOnboardingPolicy.Step.CHANGE_REVERTED) {
+            setStatusText("Tutorial: keep the changed baseline symbol selected and choose Revert Saved");
+        } else {
+            setStatusText("Zero-AI manual tutorial complete; Help & Onboarding remains available");
+        }
         if (editorPanel != null && sourceEditor != null) {
             editorPanel.post(new Runnable() {
                 @Override public void run() { editorPanel.smoothScrollTo(0, sourceEditor.getTop()); }
@@ -3223,10 +3729,18 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void restartManualTutorial() {
+        if (!persistOnboardingProgress(WorkshopOnboardingPolicy.restart())) return;
+        setStatusText("Manual tutorial restarted with previous project/change context cleared");
+        startManualTutorial();
+    }
+
     private void markInterruptedAiOutcomeIfNeeded() {
         try {
-            restoreInterruptedAiTransactions();
-            int recovered = AndroidAiQueue.recoverInterrupted(this, activeRecoveryProjectId());
+            HashSet<String> resumable = restoreInterruptedAiTransactions();
+            int recovered = AndroidAiQueue.recoverInterrupted(
+                    this, activeRecoveryProjectId(), resumable);
+            clearTerminalAiRecoveryArtifacts();
             if (recovered > 0) refreshAiQueue();
         } catch (Exception error) {
             setStatusText("AI queue recovery failed: " + error.getMessage());
@@ -3236,8 +3750,8 @@ public final class MainActivity extends Activity {
         if (latest == null || !"started".equals(latest.optString("status", ""))) return;
         String request = latest.optString("request", "");
         recordAiOutcome(request, "interrupted",
-                "App stopped before AI completion; Retry Last AI starts a new budget-checked run",
-                "A paid in-flight call may have completed remotely");
+                "App stopped before AI completion; safe per-item checkpoints resume automatically",
+                "Unsafe checkpoints remain terminal and expose Fresh Retry without replaying an uncertain paid call");
     }
 
     private void postAiVerificationMetrics(final WorkshopAiVerificationResult result,
@@ -3255,27 +3769,73 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void restoreInterruptedAiTransactions() throws Exception {
+    private HashSet<String> restoreInterruptedAiTransactions() throws Exception {
         String projectId = activeRecoveryProjectId();
+        HashSet<String> resumable = new HashSet<>();
         boolean restored = false;
-        ArrayList<String> restoredItemIds = new ArrayList<>();
         for (AndroidAiQueue.Entry entry : AndroidAiQueue.list(this, projectId)) {
             if (!AndroidAiQueue.IN_PROGRESS.equals(entry.state)) continue;
+            AndroidAiSessionCheckpointStore.Checkpoint checkpoint =
+                    AndroidAiSessionCheckpointStore.load(this, projectId, entry.id);
             WorkshopAiProjectTransaction.Snapshot snapshot = AndroidAiTransactionStore.load(
                     this, projectId, entry.id);
-            if (snapshot == null) continue;
-            WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);
-            restored = true;
-            restoredItemIds.add(entry.id);
+            if (WorkshopAiRunPhase.CANCELLING.wireValue().equals(entry.phase)
+                    || (checkpoint != null
+                            && WorkshopAiResumePolicy.CANCEL_REQUESTED.equals(checkpoint.stage))) {
+                if (snapshot != null) {
+                    WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);
+                    compileRestoredAiProject();
+                    if (!AndroidAiQueue.finish(this, projectId, entry.id,
+                            AndroidAiQueue.CANCELLED, WorkshopAiRunPhase.CANCELLED,
+                            "Cancellation completed during process recovery; the original project was restored")) {
+                        throw new IOException("restored AI cancellation could not be recorded");
+                    }
+                }
+                AndroidAiSessionCheckpointStore.clear(this, projectId, entry.id);
+                AndroidAiTransactionStore.clear(this, projectId, entry.id);
+                continue;
+            }
+            if (checkpoint != null && (WorkshopAiResumePolicy.READY.equals(checkpoint.stage)
+                    || WorkshopAiResumePolicy.RESPONSE_READY.equals(checkpoint.stage))) {
+                WorkshopAiProjectTransaction.Snapshot current =
+                        WorkshopAiProjectTransaction.capture(projectRoot());
+                boolean projectMatches = WorkshopAiProjectTransaction.fingerprint(current)
+                        .equals(WorkshopAiProjectTransaction.fingerprint(checkpoint.projectSnapshot));
+                if (!projectMatches && WorkshopAiResumePolicy.RESPONSE_READY.equals(checkpoint.stage)) {
+                    WorkshopAiProjectTransaction.restore(projectRoot(), checkpoint.projectSnapshot);
+                    restored = true;
+                    projectMatches = true;
+                }
+                if (projectMatches && snapshot != null) {
+                    resumable.add(entry.id);
+                    continue;
+                }
+            }
+            if (snapshot != null) {
+                WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);
+                restored = true;
+            }
+            AndroidAiSessionCheckpointStore.clear(this, projectId, entry.id);
+            AndroidAiTransactionStore.clear(this, projectId, entry.id);
         }
-        if (!restored) return;
+        if (restored) compileRestoredAiProject();
+        return resumable;
+    }
+
+    private void compileRestoredAiProject() throws IOException {
         String compileResult = nativeCompileProject(projectRootPath());
         lastCompileResult = compileResult;
         compileReady = isRunnableCompile(compileResult);
         compileAttempted = true;
-        if (!compileReady) throw new IOException("restored AI transaction did not compile");
-        for (String itemId : restoredItemIds) {
-            AndroidAiTransactionStore.clear(this, projectId, itemId);
+        if (!compileReady) throw new IOException("restored AI checkpoint did not compile");
+    }
+
+    private void clearTerminalAiRecoveryArtifacts() throws Exception {
+        String projectId = activeRecoveryProjectId();
+        for (AndroidAiQueue.Entry entry : AndroidAiQueue.list(this, projectId)) {
+            if (!AiQueuePolicy.terminal(entry.state)) continue;
+            AndroidAiSessionCheckpointStore.clear(this, projectId, entry.id);
+            AndroidAiTransactionStore.clear(this, projectId, entry.id);
         }
     }
 
@@ -3339,6 +3899,9 @@ public final class MainActivity extends Activity {
                 state.getString("selected_owner", ""), state.getString("selected_name", ""));
         if (restoredSymbol != null) showSymbol(restoredSymbol);
         restoreVisibility(manualEditBody, state.getBoolean("manual_open", false));
+        restoreVisibility(diagnosticBody, state.getBoolean("diagnostics_open", false));
+        restoreVisibility(contextBody, state.getBoolean("context_open", false));
+        restoreVisibility(moreToolsBody, state.getBoolean("more_tools_open", false));
         restoreVisibility(projectSettingsBody, state.getBoolean("projects_open", false));
         restoreVisibility(commandHistoryBody, state.getBoolean("history_open", false));
         restoreVisibility(aiSettingsBody, state.getBoolean("ai_settings_open", false));
@@ -3419,15 +3982,8 @@ public final class MainActivity extends Activity {
     }
 
     private static Map<String, String> changedProjectSources(ProjectSnapshot baseline, ProjectSnapshot current) {
-        Map<String, String> before = sourcesByFile(baseline);
-        Map<String, String> after = sourcesByFile(current);
-        Map<String, String> changed = new LinkedHashMap<>();
-        for (Map.Entry<String, String> entry : after.entrySet()) {
-            if (!entry.getValue().equals(before.get(entry.getKey()))) {
-                changed.put(entry.getKey(), entry.getValue());
-            }
-        }
-        return changed;
+        return WorkshopGitHubSyncPolicy.changedTextFiles(
+                sourcesByFile(baseline), sourcesByFile(current));
     }
 
     private void reviewGitHubPullRequestChanges() {
@@ -3465,6 +4021,16 @@ public final class MainActivity extends Activity {
             setStatusText("GitHub pull request needs configured settings");
             return;
         }
+        if (!githubTargetValidated(prefs, repository, baseBranch)) {
+            setStatusText("GitHub pull request needs authenticated settings; save them again");
+            return;
+        }
+        if (!WorkshopConnectivity.hasUsableNetwork(this)) {
+            persistGitHubOperationState("pull_request", "waiting_network",
+                    "GitHub pull request: waiting for a usable network");
+            refreshGitHubSyncStatus();
+            return;
+        }
         final Map<String, String> changes;
         try {
             changes = changedProjectSources(loadProjectBaselineSnapshot(), loadBundledProject());
@@ -3488,42 +4054,28 @@ public final class MainActivity extends Activity {
         githubSyncExecutor.submit(new Runnable() {
             @Override public void run() {
                 try {
-                    ensureGitHubReviewBranch(token, repository, baseBranch, reviewBranch);
+                    WorkshopGitHubApi api = new WorkshopGitHubApi(token, repository);
+                    api.ensureReviewBranch(baseBranch, reviewBranch);
                     int completed = 0;
                     for (Map.Entry<String, String> entry : changes.entrySet()) {
                         completed += 1;
                         postGitHubOperationState("pull_request", "running", "GitHub pull request: uploading " + completed + "/" + changes.size());
-                        uploadGitHubFile(token, repository, reviewBranch, entry.getKey(), entry.getValue());
+                        api.applyFileChange(reviewBranch, entry.getKey(),
+                                entry.getValue() == null ? null
+                                        : entry.getValue().getBytes(StandardCharsets.UTF_8), null);
                     }
-                    String url = createOrFindGitHubPullRequest(token, repository, baseBranch, reviewBranch,
-                            formatGitHubPullRequestBody(changes));
+                    String url = api.createOrFindPullRequest(
+                            baseBranch, reviewBranch, formatGitHubPullRequestBody(changes));
                     postGitHubOperationState("", "complete", "GitHub pull request: ready " + url);
                 } catch (Exception error) {
-                    postGitHubOperationState("pull_request", "error", "GitHub pull request error: " + error.getMessage());
+                    postGitHubOperationFailure("pull_request", "GitHub pull request", error);
                 }
             }
         });
     }
 
     private static String githubChangeFingerprint(Map<String, String> changes) {
-        StringBuilder fingerprint = new StringBuilder();
-        for (Map.Entry<String, String> entry : changes.entrySet()) {
-            fingerprint.append(entry.getKey()).append('\n').append(entry.getValue()).append('\n');
-        }
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(fingerprint.toString().getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder(digest.length * 2);
-            String digits = "0123456789abcdef";
-            for (byte value : digest) {
-                int unsigned = value & 0xff;
-                hex.append(digits.charAt(unsigned >>> 4));
-                hex.append(digits.charAt(unsigned & 0x0f));
-            }
-            return hex.toString();
-        } catch (NoSuchAlgorithmException unavailable) {
-            return fingerprint.toString();
-        }
+        return WorkshopGitHubSyncPolicy.reviewFingerprint(changes);
     }
 
     private String githubReviewBranchName() {
@@ -3534,99 +4086,11 @@ public final class MainActivity extends Activity {
 
     private static String formatGitHubPullRequestBody(Map<String, String> changes) {
         StringBuilder body = new StringBuilder("Updated from Stasis Workshop for Android.\n\nChanged files:");
-        for (String path : changes.keySet()) body.append("\n- `").append(path).append('`');
+        for (Map.Entry<String, String> change : changes.entrySet()) {
+            body.append("\n- `").append(change.getKey()).append('`');
+            if (change.getValue() == null) body.append(" (deleted)");
+        }
         return body.toString();
-    }
-
-    private static void ensureGitHubReviewBranch(String token, String repository, String baseBranch, String reviewBranch) throws Exception {
-        String reviewRefUrl = githubApiUrl(repository, "/git/ref/heads/" + encodeGitHubPath(reviewBranch));
-        int reviewCode = githubGetCode(token, reviewRefUrl);
-        if (reviewCode == 200) return;
-        if (reviewCode != 404) throw new IOException("review branch HTTP " + reviewCode);
-
-        JSONObject baseRef = githubGetJson(token,
-                githubApiUrl(repository, "/git/ref/heads/" + encodeGitHubPath(baseBranch)));
-        String baseSha = baseRef.optJSONObject("object") == null
-                ? "" : baseRef.optJSONObject("object").optString("sha", "");
-        if (baseSha.isEmpty()) throw new IOException("base branch has no commit SHA");
-        githubWriteJson(token, "POST", githubApiUrl(repository, "/git/refs"),
-                new JSONObject().put("ref", "refs/heads/" + reviewBranch).put("sha", baseSha), 201);
-    }
-
-    private static String createOrFindGitHubPullRequest(String token, String repository, String baseBranch,
-            String reviewBranch, String body) throws Exception {
-        String owner = repository.substring(0, repository.indexOf('/'));
-        String query = "?state=open&head=" + encodeGitHubQuery(owner + ":" + reviewBranch)
-                + "&base=" + encodeGitHubQuery(baseBranch);
-        JSONArray existing = githubGetArray(token, githubApiUrl(repository, "/pulls" + query));
-        if (existing.length() > 0) return existing.getJSONObject(0).optString("html_url", "existing PR");
-        JSONObject created = githubWriteJson(token, "POST", githubApiUrl(repository, "/pulls"),
-                new JSONObject().put("title", "Stasis Workshop Android changes")
-                        .put("head", reviewBranch).put("base", baseBranch).put("body", body), 201);
-        return created.optString("html_url", "created PR");
-    }
-
-    private static String githubApiUrl(String repository, String path) {
-        return "https://api.github.com/repos/" + repository + path;
-    }
-
-    private static String encodeGitHubPath(String value) throws Exception {
-        return encodeGitHubQuery(value).replace("%2F", "/");
-    }
-
-    private static String encodeGitHubQuery(String value) throws Exception {
-        return URLEncoder.encode(value, "UTF-8").replace("+", "%20");
-    }
-
-    private static void configureGitHubConnection(HttpURLConnection connection, String token) {
-        connection.setConnectTimeout(GITHUB_NETWORK_TIMEOUT_MS);
-        connection.setReadTimeout(GITHUB_NETWORK_TIMEOUT_MS);
-        connection.setRequestProperty("Accept", "application/vnd.github+json");
-        connection.setRequestProperty("Authorization", "Bearer " + token);
-        connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
-    }
-
-    private static int githubGetCode(String token, String url) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
-        configureGitHubConnection(connection, token);
-        int code = connection.getResponseCode();
-        connection.disconnect();
-        return code;
-    }
-
-    private static JSONObject githubGetJson(String token, String url) throws Exception {
-        return new JSONObject(githubRead(token, url));
-    }
-
-    private static JSONArray githubGetArray(String token, String url) throws Exception {
-        return new JSONArray(githubRead(token, url));
-    }
-
-    private static String githubRead(String token, String url) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
-        configureGitHubConnection(connection, token);
-        int code = connection.getResponseCode();
-        if (code != 200) throw new IOException("GitHub read HTTP " + code);
-        String response = readStreamStatic(connection.getInputStream());
-        connection.disconnect();
-        return response;
-    }
-
-    private static JSONObject githubWriteJson(String token, String method, String url, JSONObject body,
-            int expectedCode) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection)new URL(url).openConnection();
-        connection.setRequestMethod(method);
-        connection.setDoOutput(true);
-        configureGitHubConnection(connection, token);
-        connection.setRequestProperty("Content-Type", "application/json");
-        OutputStream output = connection.getOutputStream();
-        output.write(body.toString().getBytes(StandardCharsets.UTF_8));
-        output.close();
-        int code = connection.getResponseCode();
-        if (code != expectedCode) throw new IOException("GitHub write HTTP " + code);
-        String response = readStreamStatic(connection.getInputStream());
-        connection.disconnect();
-        return new JSONObject(response);
     }
 
     private void retryGitHubOperation() {
@@ -3641,11 +4105,54 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void resumeGitHubAfterNetworkChange() {
+        if (isGitHubOperationActive() || !WorkshopConnectivity.hasUsableNetwork(this)) return;
+        SharedPreferences preferences = getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE);
+        String state = preferences.getString(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), "");
+        String operation = preferences.getString(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "");
+        boolean automatic = preferences.getBoolean(
+                githubProjectPreferenceKey(GITHUB_PREF_OPERATION_AUTOMATIC), false);
+        WorkshopGitHubSyncPolicy.NetworkResumeDecision decision =
+                WorkshopGitHubSyncPolicy.networkResume(
+                        operation, state, WorkshopConnectivity.hasUsableNetwork(this), automatic);
+        if (decision == WorkshopGitHubSyncPolicy.NetworkResumeDecision.RECHECK_AUTOMATIC_SYNC) {
+            scheduleGitHubAutoSync();
+        } else if (decision == WorkshopGitHubSyncPolicy.NetworkResumeDecision.RETRY_USER_SYNC) {
+            queueGitHubSync(true);
+        } else if (decision == WorkshopGitHubSyncPolicy.NetworkResumeDecision.RETRY_PULL_REQUEST) {
+            queueGitHubPullRequest();
+        }
+    }
+
+    private boolean batterySaverEnabled() {
+        PowerManager manager = (PowerManager)getSystemService(POWER_SERVICE);
+        return manager != null && manager.isPowerSaveMode();
+    }
+
+    private boolean deviceCharging() {
+        Intent battery = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        if (battery == null) return false;
+        int status = battery.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+        return status == BatteryManager.BATTERY_STATUS_CHARGING
+                || status == BatteryManager.BATTERY_STATUS_FULL;
+    }
+
     private void persistGitHubOperationState(String operation, String state, String detail) {
         getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
                 .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), operation)
                 .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), state)
                 .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_DETAIL), detail)
+                .apply();
+    }
+
+    private void persistGitHubSyncOperationState(String state, String detail, boolean automatic) {
+        getSharedPreferences(GITHUB_PREFS, MODE_PRIVATE).edit()
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION), "sync")
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_STATE), state)
+                .putString(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_DETAIL), detail)
+                .putBoolean(githubProjectPreferenceKey(GITHUB_PREF_OPERATION_AUTOMATIC), automatic)
                 .apply();
     }
 
@@ -3664,6 +4171,14 @@ public final class MainActivity extends Activity {
         return legacy;
     }
 
+    private boolean githubTargetValidated(SharedPreferences preferences,
+            String repository, String branch) {
+        if (repository.isEmpty() || branch.isEmpty()) return false;
+        return WorkshopGitHubSyncPolicy.targetIdentity(repository, branch).equals(
+                preferences.getString(
+                        githubProjectPreferenceKey(GITHUB_PREF_VALIDATED_TARGET), ""));
+    }
+
     private synchronized boolean beginProjectIoWork(String detail) {
         if (projectIoActive || !WorkshopLongWorkCoordinator.beginProjectIo(this, detail)) {
             setStatusText("Project operation blocked while another foreground operation is active");
@@ -3677,57 +4192,52 @@ public final class MainActivity extends Activity {
         projectIoActive = false;
         WorkshopLongWorkCoordinator.finishProjectIo(this);
         if (activityDestroyed) projectIoExecutor.shutdown();
+        requestGitHubAutoSync();
+    }
+
+    private boolean isGitHubOperationActive() {
+        return WorkshopLongWorkCoordinator.isGitHubActive();
     }
 
     private synchronized boolean beginGitHubOperation(String operation, String status) {
-        if (githubOperationActive) {
+        return beginGitHubOperation(operation, status, null);
+    }
+
+    private synchronized boolean beginGitHubOperation(
+            String operation, String status, Boolean automaticSync) {
+        if (WorkshopLongWorkCoordinator.isGitHubActive()) {
             githubSyncStatus.setText("GitHub sync: another operation is already queued or running");
             return false;
         }
-        if (!WorkshopLongWorkCoordinator.beginGitHub(this, "Syncing reviewed project files")) {
+        String detail = "validate".equals(operation) ? "Validating the GitHub backup target"
+                : ("pull_request".equals(operation) ? "Publishing reviewed project files"
+                        : "Backing up project files to GitHub");
+        if (!WorkshopLongWorkCoordinator.beginGitHub(this, detail)) {
             githubSyncStatus.setText("GitHub sync: another foreground operation is active");
             return false;
         }
-        githubOperationActive = true;
-        postGitHubOperationState(operation, "queued", status);
+        if (automaticSync == null) {
+            postGitHubOperationState(operation, "queued", status);
+        } else {
+            persistGitHubSyncOperationState("queued", status, automaticSync.booleanValue());
+            if (githubSyncStatus != null) githubSyncStatus.setText(status);
+        }
         return true;
     }
 
     private void postGitHubOperationState(final String operation, final String state, final String status) {
         persistGitHubOperationState(operation, state, status);
-        if ("complete".equals(state) || "error".equals(state)) {
-            githubOperationActive = false;
+        if ("complete".equals(state) || "error".equals(state)
+                || "waiting_network".equals(state) || "deferred".equals(state)) {
             WorkshopLongWorkCoordinator.finishGitHub(this);
             if (activityDestroyed) githubSyncExecutor.shutdown();
         }
         runOnUiThread(new Runnable() {
-            @Override public void run() { if (githubSyncStatus != null) githubSyncStatus.setText(status); }
+            @Override public void run() {
+                if (githubSyncStatus != null) githubSyncStatus.setText(status);
+                if ("complete".equals(state)) requestGitHubAutoSync();
+            }
         });
-    }
-
-    private static void uploadGitHubFile(String token, String repository, String branch, String path, String source) throws Exception {
-        uploadGitHubFile(token, repository, branch, path, source.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static void uploadGitHubFile(String token, String repository, String branch, String path, byte[] content) throws Exception {
-        String base = githubApiUrl(repository, "/contents/" + encodeGitHubPath(path));
-        HttpURLConnection get = (HttpURLConnection)new URL(base + "?ref=" + encodeGitHubQuery(branch)).openConnection();
-        configureGitHubConnection(get, token);
-        String sha = "";
-        int getCode = get.getResponseCode();
-        if (getCode == 200) sha = new JSONObject(readStreamStatic(get.getInputStream())).optString("sha", "");
-        else if (getCode != 404) throw new IOException("read " + path + " HTTP " + getCode);
-        JSONObject body = new JSONObject().put("message", "stasis workshop sync: " + path)
-                .put("content", Base64.encodeToString(content, Base64.NO_WRAP))
-                .put("branch", branch);
-        if (!sha.isEmpty()) body.put("sha", sha);
-        HttpURLConnection put = (HttpURLConnection)new URL(base).openConnection();
-        put.setRequestMethod("PUT"); put.setDoOutput(true);
-        configureGitHubConnection(put, token);
-        put.setRequestProperty("Content-Type", "application/json");
-        OutputStream output = put.getOutputStream(); output.write(body.toString().getBytes(StandardCharsets.UTF_8)); output.close();
-        int putCode = put.getResponseCode();
-        if (putCode != 200 && putCode != 201) throw new IOException("write " + path + " HTTP " + putCode);
     }
 
     private void toggleAiSettings() {
@@ -3778,11 +4288,6 @@ public final class MainActivity extends Activity {
                                         status.optString("user_code", ""));
                             }
                             showPhoneNativeCodexStatus(status);
-                            if (!"awaiting_user".equals(status.optString("status", ""))
-                                    && showProjectChooserAfterCodexLogin) {
-                                showProjectChooserAfterCodexLogin = false;
-                                showProjectChooser();
-                            }
                         }
                     });
                 } catch (Exception error) {
@@ -3790,10 +4295,6 @@ public final class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             if (codexAccountStatus != null) codexAccountStatus.setText("Codex account error: " + message);
-                            if (showProjectChooserAfterCodexLogin) {
-                                showProjectChooserAfterCodexLogin = false;
-                                showProjectChooser();
-                            }
                         }
                     });
                 }
@@ -3847,10 +4348,6 @@ public final class MainActivity extends Activity {
                                            boolean openBrowserAutomatically) {
         if (!isOfficialCodexVerificationUrl(verificationUrl) || userCode.trim().isEmpty()) {
             setStatusText("Codex sign-in returned an invalid verification link or code; request a new code");
-            if (showProjectChooserAfterCodexLogin) {
-                showProjectChooserAfterCodexLogin = false;
-                showProjectChooser();
-            }
             return;
         }
         codexLoginVerificationUrl = verificationUrl;
@@ -3911,9 +4408,9 @@ public final class MainActivity extends Activity {
         connectivityManager = (ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
         if (connectivityManager == null || networkCallbackRegistered) return;
         networkCallback = new ConnectivityManager.NetworkCallback() {
-            @Override public void onAvailable(Network network) { resumeQueuedAiAfterNetworkChange(); }
+            @Override public void onAvailable(Network network) { resumeBackgroundWorkAfterNetworkChange(); }
             @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
-                resumeQueuedAiAfterNetworkChange();
+                resumeBackgroundWorkAfterNetworkChange();
             }
         };
         try {
@@ -3931,6 +4428,26 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void postGitHubOperationFailure(String operation, String label, Exception error) {
+        boolean networkAvailable = WorkshopConnectivity.hasUsableNetwork(this);
+        String state = WorkshopGitHubSyncPolicy.failureState(networkAvailable);
+        String status = networkAvailable
+                ? label + " error: " + error.getMessage()
+                : label + ": network lost; waiting to retry";
+        postGitHubOperationState(operation, state, status);
+    }
+
+    private void resumeBackgroundWorkAfterNetworkChange() {
+        resumeQueuedAiAfterNetworkChange();
+        if (!WorkshopConnectivity.hasUsableNetwork(this)) return;
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                resumeGitHubAfterNetworkChange();
+                requestGitHubAutoSync();
+            }
+        });
+    }
+
     private void unregisterNetworkMonitoring() {
         if (!networkCallbackRegistered || connectivityManager == null || networkCallback == null) return;
         try {
@@ -3940,6 +4457,36 @@ public final class MainActivity extends Activity {
         }
         networkCallbackRegistered = false;
         networkCallback = null;
+    }
+
+    private void registerPowerMonitoring() {
+        if (powerReceiverRegistered) return;
+        powerReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                requestGitHubAutoSync();
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_POWER_CONNECTED);
+        filter.addAction(Intent.ACTION_POWER_DISCONNECTED);
+        filter.addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED);
+        try {
+            registerReceiver(powerReceiver, filter);
+            powerReceiverRegistered = true;
+        } catch (RuntimeException error) {
+            powerReceiver = null;
+        }
+    }
+
+    private void unregisterPowerMonitoring() {
+        if (!powerReceiverRegistered || powerReceiver == null) return;
+        try {
+            unregisterReceiver(powerReceiver);
+        } catch (RuntimeException ignored) {
+            // Android may already have removed the receiver during process teardown.
+        }
+        powerReceiverRegistered = false;
+        powerReceiver = null;
     }
 
     private static boolean isOfficialCodexVerificationUrl(String value) {
@@ -4038,8 +4585,6 @@ public final class MainActivity extends Activity {
             clearCopiedCodexLoginCode();
             refreshAiBudgetStatus();
             if (!handleCompletion) return;
-            final boolean showProjects = showProjectChooserAfterCodexLogin;
-            showProjectChooserAfterCodexLogin = false;
             gameLoopHandler.postDelayed(new Runnable() {
                 @Override public void run() {
                     if (codexLoginDialog != null) codexLoginDialog.dismiss();
@@ -4047,7 +4592,6 @@ public final class MainActivity extends Activity {
                     codexLoginDialogStatus = null;
                     codexLoginUserCode = "";
                     codexLoginVerificationUrl = "";
-                    if (showProjects) showProjectChooser();
                 }
             }, 750L);
             return;
@@ -4234,7 +4778,13 @@ public final class MainActivity extends Activity {
         refreshChanges.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                refreshChangeSummary(loadBundledProject());
+                ProjectSnapshot current = loadBundledProject();
+                boolean reviewedChange = refreshChangeSummary(current);
+                if (diagnosticBody != null) diagnosticBody.setVisibility(View.VISIBLE);
+                if (reviewedChange) {
+                    recordOnboardingTrackedChangeStep(
+                            WorkshopOnboardingPolicy.Step.CHANGES_REVIEWED, current);
+                }
             }
         });
         controls.addView(refreshChanges, fullWidth());
@@ -4334,26 +4884,27 @@ public final class MainActivity extends Activity {
         int touchActive = gamePreview == null ? 0 : gamePreview.touchActive();
         int screenWidth = gamePreview == null ? 0 : gamePreview.getWidth();
         int screenHeight = gamePreview == null ? 0 : gamePreview.getHeight();
-        long tickStartNanos = System.nanoTime();
-        int frameStatus = nativeRunFrameInto(
-                projectRootPath(),
-                touchX,
-                touchY,
-                touchActive,
-                screenWidth,
-                screenHeight,
+        int frameStatus = gamePreview == null ? -1 : gamePreview.runNativeFrame(
+                projectRootPath(), touchX, touchY, touchActive, screenWidth, screenHeight,
                 nativeFrameValues);
         long tickEndNanos = System.nanoTime();
-        tickMetric.add(tickEndNanos, tickEndNanos - tickStartNanos);
-        if (frameStatus != 0 || nativeFrameValues[0] != 0) {
+        tickMetric.add(tickEndNanos,
+                gamePreview == null ? 0L : gamePreview.lastNativeFrameDurationNanos());
+        syncMetric.add(tickEndNanos,
+                gamePreview == null ? 0L : gamePreview.lastRendererSyncWaitNanos());
+        if (frameStatus != 0 || nativeFrameValues[0] != StasisPreviewRenderer.RENDER_MAGIC
+                || nativeFrameValues[1] != StasisPreviewRenderer.RENDER_VERSION) {
             compileReady = false;
             compileAttempted = true;
-            setStatusText("RunError: native frame tick failed");
+            gameRuntimeActive = false;
+            String frameError = "RunError: " + nativeLastFrameError();
+            setStatusText(frameError);
+            if (gameStatus != null) gameStatus.setText(frameError);
+            android.util.Log.e("StasisWorkshop", frameError);
             return;
         }
-        if (gamePreview != null) {
-            gamePreview.setRenderFrameValues(nativeFrameValues);
-        }
+        gameRuntimeActive = true;
+        recordOnboardingProjectStep(WorkshopOnboardingPolicy.Step.PROJECT_RAN);
         updateGameDebugText();
     }
 
@@ -4515,14 +5066,40 @@ public final class MainActivity extends Activity {
             failQueuedAiPreflight(queuedEntry, "Image generation reserve exceeded the device monthly AI limit");
             return;
         }
-        final String requestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
+        final String freshRequestJson = buildAiCodeRequestJson(prompt, symbol, selectedSource, aiProject,
                 requestImageMetadata, requestLogicalSnapshot);
+        final AndroidAiSessionCheckpointStore.Checkpoint resumeCheckpoint;
+        final String requestJson;
         final WorkshopAiProjectTransaction.Snapshot aiTransaction;
         try {
-            aiTransaction = WorkshopAiProjectTransaction.capture(projectRoot());
+            resumeCheckpoint = queuedEntry == null ? null
+                    : AndroidAiSessionCheckpointStore.load(this, queuedEntry.projectId, queuedEntry.id);
+            if (resumeCheckpoint == null) {
+                requestJson = freshRequestJson;
+                aiTransaction = WorkshopAiProjectTransaction.capture(projectRoot());
+            } else {
+                WorkshopAiProjectTransaction.Snapshot current =
+                        WorkshopAiProjectTransaction.capture(projectRoot());
+                String provider = useCodex ? "codex_subscription" : "openai_api";
+                WorkshopAiResumePolicy.Decision decision = WorkshopAiResumePolicy.decide(
+                        resumeCheckpoint.stage,
+                        WorkshopAiProjectTransaction.fingerprint(current).equals(
+                                WorkshopAiProjectTransaction.fingerprint(resumeCheckpoint.projectSnapshot)),
+                        queuedEntry.requestFingerprint().equals(resumeCheckpoint.attachmentFingerprint),
+                        provider.equals(resumeCheckpoint.provider)
+                                && model.equals(resumeCheckpoint.model),
+                        aiCancelRequested);
+                if (!decision.resumable) throw new IOException(decision.detail);
+                requestJson = resumeCheckpoint.payload.getString("initial_request_json");
+                aiTransaction = AndroidAiTransactionStore.load(
+                        this, queuedEntry.projectId, queuedEntry.id);
+                if (aiTransaction == null) {
+                    throw new IOException("Original project transaction is missing; use Fresh Retry");
+                }
+            }
         } catch (Exception error) {
-            setStatusText("AI run could not snapshot the project transaction: " + error.getMessage());
-            failQueuedAiPreflight(queuedEntry, "Project transaction snapshot failed");
+            setStatusText("AI run could not prepare a safe session: " + error.getMessage());
+            failQueuedAiPreflight(queuedEntry, "Session continuation failed: " + error.getMessage());
             return;
         }
         final String requestModel = model;
@@ -4559,8 +5136,10 @@ public final class MainActivity extends Activity {
                 activeAiQueueEntry = queuedEntry;
             }
             if (activeAiQueueEntry == null) throw new IOException("queued AI request could not be claimed");
-            AndroidAiTransactionStore.save(this, activeAiQueueEntry.projectId,
-                    activeAiQueueEntry.id, aiTransaction);
+            if (resumeCheckpoint == null) {
+                AndroidAiTransactionStore.save(this, activeAiQueueEntry.projectId,
+                        activeAiQueueEntry.id, aiTransaction);
+            }
         } catch (Exception error) {
             setStatusText("AI queue failed: " + error.getMessage());
             if (activeAiQueueEntry != null) {
@@ -4607,7 +5186,7 @@ public final class MainActivity extends Activity {
                             requestImageInfos, requestImageMetadata, requestPreviewPixels);
                     final AiAgentResult aiResult = runAiAgentLoop(
                             requestApiKey, requestModel, requestJson, requestImageGeneration, useCodex,
-                            aiTransaction);
+                            aiTransaction, resumeCheckpoint);
                     throwIfAiCancelled();
                     runOnUiThread(new Runnable() {
                         @Override
@@ -4686,6 +5265,27 @@ public final class MainActivity extends Activity {
             return;
         }
         aiCancelRequested = true;
+        AndroidAiQueue.Entry item = activeAiQueueEntry;
+        if (item != null) {
+            try {
+                AndroidAiQueue.updatePhase(this, item.projectId, item.id,
+                        WorkshopAiRunPhase.CANCELLING,
+                        "Cancellation requested; resume is disabled and the original project will be restored");
+                AndroidAiSessionCheckpointStore.Checkpoint checkpoint =
+                        AndroidAiSessionCheckpointStore.load(this, item.projectId, item.id);
+                if (checkpoint != null) {
+                    AndroidAiSessionCheckpointStore.save(this,
+                            new AndroidAiSessionCheckpointStore.Checkpoint(
+                                    checkpoint.projectId, checkpoint.itemId,
+                                    WorkshopAiResumePolicy.CANCEL_REQUESTED, checkpoint.provider,
+                                    checkpoint.model, checkpoint.attachmentFingerprint,
+                                    checkpoint.payload, checkpoint.projectSnapshot));
+                }
+            } catch (Exception error) {
+                appendAiTraceFields("cancel_checkpoint_failed", "error", error.getMessage(),
+                        "item_id", item.id, null, null);
+            }
+        }
         nativeCodexCancelResponse();
         HttpURLConnection connection = activeAiConnection;
         if (connection != null) connection.disconnect();
@@ -4785,6 +5385,11 @@ public final class MainActivity extends Activity {
         try {
             JSONObject result = aiToolRunTests(new AiAgentSession());
             captureFirstTestFailureDiagnostic(result);
+            if (result.optBoolean("all_runnable_tests_passed", false)) {
+                recordExplorationLesson(WorkshopExplorationLessonPolicy.PASSED_TESTS);
+                recordOnboardingTrackedChangeStep(
+                        WorkshopOnboardingPolicy.Step.TESTS_PASSED, loadBundledProject());
+            }
             setStatusText(testSummaryText(result));
         } catch (Exception error) {
             setStatusText("Tests failed: " + error.getMessage());
@@ -5013,15 +5618,66 @@ public final class MainActivity extends Activity {
         }
         return errors;
     }
+    private JSONObject aiCheckpointPayload(String initialRequestJson, String currentRequestJson,
+            int nextTurn, String pendingResponseJson, String previousToolCallBatch,
+            AiAgentSession session, AiUsageAccumulator usage) throws Exception {
+        return new JSONObject().put("initial_request_json", initialRequestJson)
+                .put("current_request_json", currentRequestJson).put("next_turn", nextTurn)
+                .put("pending_response_json", pendingResponseJson == null ? "" : pendingResponseJson)
+                .put("previous_tool_call_batch", previousToolCallBatch == null ? "" : previousToolCallBatch)
+                .put("session", session.checkpointJson()).put("usage", usage.checkpointJson());
+    }
+
+    private void saveActiveAiCheckpoint(String stage, String model, boolean useCodex,
+            JSONObject payload) throws Exception {
+        AndroidAiQueue.Entry item = activeAiQueueEntry;
+        if (item == null) throw new IOException("active AI queue item is missing");
+        AndroidAiSessionCheckpointStore.save(this,
+                new AndroidAiSessionCheckpointStore.Checkpoint(item.projectId, item.id, stage,
+                        useCodex ? "codex_subscription" : "openai_api", model,
+                        item.requestFingerprint(), payload,
+                        WorkshopAiProjectTransaction.capture(projectRoot())));
+    }
+
+    private void markActiveAiCheckpointProviderInFlight() throws Exception {
+        AndroidAiQueue.Entry item = activeAiQueueEntry;
+        if (item == null) throw new IOException("active AI queue item is missing");
+        AndroidAiSessionCheckpointStore.Checkpoint checkpoint =
+                AndroidAiSessionCheckpointStore.load(this, item.projectId, item.id);
+        if (checkpoint == null) throw new IOException("AI session checkpoint is missing");
+        AndroidAiSessionCheckpointStore.save(this,
+                new AndroidAiSessionCheckpointStore.Checkpoint(item.projectId, item.id,
+                        WorkshopAiResumePolicy.PROVIDER_IN_FLIGHT, checkpoint.provider,
+                        checkpoint.model, checkpoint.attachmentFingerprint,
+                        checkpoint.payload, checkpoint.projectSnapshot));
+    }
+
     private AiAgentResult runAiAgentLoop(String apiKey, String model, String initialRequestJson,
             boolean allowImageGeneration, boolean useCodex,
-            WorkshopAiProjectTransaction.Snapshot transaction) throws Exception {
-        String currentRequestJson = initialRequestJson;
+            WorkshopAiProjectTransaction.Snapshot transaction,
+            AndroidAiSessionCheckpointStore.Checkpoint resumeCheckpoint) throws Exception {
+        JSONObject resumed = resumeCheckpoint == null ? null : resumeCheckpoint.payload;
+        String currentRequestJson = resumed == null ? initialRequestJson
+                : resumed.getString("current_request_json");
         AiAgentSession session = new AiAgentSession();
         AiUsageAccumulator usage = new AiUsageAccumulator();
+        if (resumed != null) {
+            session.restoreCheckpoint(resumed.optJSONObject("session"));
+            usage.restoreCheckpoint(resumed.optJSONObject("usage"));
+        }
         ArrayList<AiGeneratedImageCandidate> generatedImages = new ArrayList<>();
-        String previousToolCallBatch = "";
-        for (int turn = 0; turn < MAX_AI_AGENT_TURNS; turn += 1) {
+        String previousToolCallBatch = resumed == null ? ""
+                : resumed.optString("previous_tool_call_batch", "");
+        String pendingResponseJson = resumed == null ? ""
+                : resumed.optString("pending_response_json", "");
+        int firstTurn = resumed == null ? 0 : resumed.optInt("next_turn", 0);
+        String resumedFinalResponse = resumed == null ? ""
+                : resumed.optString("final_response_json", "");
+        if (!resumedFinalResponse.isEmpty()) {
+            return finishAiAgentResult(resumedFinalResponse, usage, apiKey, model, useCodex,
+                    session, generatedImages, transaction, initialRequestJson);
+        }
+        for (int turn = firstTurn; turn < MAX_AI_AGENT_TURNS; turn += 1) {
             throwIfAiCancelled();
             double monthlyLimitUsd = configuredAiLimit(AI_PREF_MONTHLY_LIMIT_USD, "5.00");
             if (!useCodex && !WorkshopAiBudgetPolicy.canStart(monthlyLimitUsd, monthlyAiSpendUsd())) {
@@ -5030,49 +5686,67 @@ public final class MainActivity extends Activity {
             session.currentStep = turn + 1;
             postAiProgress(session.currentStep, session.actionCount,
                     WorkshopAiRunPhase.EDITING.wireValue());
-            appendAiTrace("llm_request", new JSONObject()
-                    .put("turn", session.currentStep)
-                    .put("provider", useCodex ? "codex_subscription" : "openai_api")
-                    .put("requested_model", model)
-                    .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
-            double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
-            boolean allowImageOnThisTurn = !useCodex && allowImageGeneration && turn == 0;
-            AiApiResponse apiResponse;
-            long llmStartedMs = SystemClock.elapsedRealtime();
-            if (useCodex) {
-                apiResponse = callCodexResponses(currentRequestJson);
-                usage.addUnpriced(apiResponse.model, apiResponse.usage);
+            String aiJson;
+            JSONObject response;
+            if (!pendingResponseJson.isEmpty()) {
+                aiJson = pendingResponseJson;
+                pendingResponseJson = "";
+                response = new JSONObject(aiJson);
+                appendAiTrace("session_resumed", new JSONObject()
+                        .put("turn", session.currentStep).put("stage", "response_ready")
+                        .put("replayed_provider_call", false));
             } else {
-                int maxOutputTokens = maxOutputTokensForBudget(
-                        model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
-                apiResponse = callOpenAiResponsesApi(
-                        apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
-                usage.add(model, apiResponse.usage);
-                if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+                appendAiTrace("llm_request", new JSONObject()
+                        .put("turn", session.currentStep)
+                        .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                        .put("requested_model", model)
+                        .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
+                saveActiveAiCheckpoint(WorkshopAiResumePolicy.PROVIDER_IN_FLIGHT, model, useCodex,
+                        aiCheckpointPayload(initialRequestJson, currentRequestJson, turn,
+                                "", previousToolCallBatch, session, usage));
+                double remainingUsd = WorkshopAiBudgetPolicy.remainingUsd(monthlyLimitUsd, monthlyAiSpendUsd());
+                boolean allowImageOnThisTurn = !useCodex && allowImageGeneration && turn == 0;
+                AiApiResponse apiResponse;
+                long llmStartedMs = SystemClock.elapsedRealtime();
+                if (useCodex) {
+                    apiResponse = callCodexResponses(currentRequestJson);
+                    usage.addUnpriced(apiResponse.model, apiResponse.usage);
+                } else {
+                    int maxOutputTokens = maxOutputTokensForBudget(
+                            model, currentRequestJson, remainingUsd, allowImageOnThisTurn);
+                    apiResponse = callOpenAiResponsesApi(
+                            apiKey, model, currentRequestJson, maxOutputTokens, allowImageOnThisTurn);
+                    usage.add(model, apiResponse.usage);
+                    if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
+                }
+                List<AiGeneratedImageCandidate> callImages = extractAiGeneratedImages(apiResponse.body);
+                if (!callImages.isEmpty()) {
+                    generatedImages.addAll(callImages);
+                    double imageCost = callImages.size() * GPT_IMAGE_2_LOW_1024_USD;
+                    usage.addImageGenerationCost(imageCost, callImages.size());
+                    recordMonthlyAiSpend(imageCost);
+                }
+                throwIfAiCancelled();
+                aiJson = extractAiJsonResponse(apiResponse.body);
+                response = new JSONObject(aiJson);
+                appendAiTrace("llm_response", new JSONObject()
+                        .put("turn", session.currentStep)
+                        .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                        .put("requested_model", model).put("response_model", apiResponse.model)
+                        .put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)
+                        .put("usage", apiResponse.usage)
+                        .put("cost_available", !useCodex && usage.lastCallCostAvailable)
+                        .put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable
+                                ? usage.lastCallEstimatedCostUsd : JSONObject.NULL)
+                        .put("cumulative_estimated_cost_usd", useCodex
+                                ? JSONObject.NULL : usage.estimatedCostUsd)
+                        .put("summary", summarizeAiResponseForTrace(apiResponse.body, response)));
+                if (callImages.isEmpty()) {
+                    saveActiveAiCheckpoint(WorkshopAiResumePolicy.RESPONSE_READY, model, useCodex,
+                            aiCheckpointPayload(initialRequestJson, currentRequestJson, turn,
+                                    aiJson, previousToolCallBatch, session, usage));
+                }
             }
-            List<AiGeneratedImageCandidate> callImages = extractAiGeneratedImages(apiResponse.body);
-            if (!callImages.isEmpty()) {
-                generatedImages.addAll(callImages);
-                double imageCost = callImages.size() * GPT_IMAGE_2_LOW_1024_USD;
-                usage.addImageGenerationCost(imageCost, callImages.size());
-                recordMonthlyAiSpend(imageCost);
-            }
-            throwIfAiCancelled();
-            String aiJson = extractAiJsonResponse(apiResponse.body);
-            JSONObject response = new JSONObject(aiJson);
-            appendAiTrace("llm_response", new JSONObject()
-                    .put("turn", session.currentStep)
-                    .put("provider", useCodex ? "codex_subscription" : "openai_api")
-                    .put("requested_model", model)
-                    .put("response_model", apiResponse.model)
-                    .put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)
-                    .put("usage", apiResponse.usage)
-                    .put("cost_available", !useCodex && usage.lastCallCostAvailable)
-                    .put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable
-                            ? usage.lastCallEstimatedCostUsd : JSONObject.NULL)
-                    .put("cumulative_estimated_cost_usd", useCodex
-                            ? JSONObject.NULL : usage.estimatedCostUsd)
-                    .put("summary", summarizeAiResponseForTrace(apiResponse.body, response)));
             appendAiTrace("llm_json", new JSONObject().put("turn", session.currentStep).put("response", response));
             JSONArray responseValidationErrors = validateAiResponseShape(response);
             if (responseValidationErrors.length() > 0) {
@@ -5090,6 +5764,9 @@ public final class MainActivity extends Activity {
                 }
                 followup.put("instruction", "Your previous JSON response shape was invalid. Return exactly one JSON object matching the stable request response_contract, including nonempty working_notes within 2000 characters. For tool use, use mode=tool_calls and a top-level tool_calls array. Each call must be {\"tool\":\"name\",\"args\":{...}} with no aliases such as calls, name, function, arguments, type, or source.");
                 currentRequestJson = followup.toString();
+                saveActiveAiCheckpoint(WorkshopAiResumePolicy.READY, model, useCodex,
+                        aiCheckpointPayload(initialRequestJson, currentRequestJson, turn + 1,
+                                "", previousToolCallBatch, session, usage));
                 continue;
             }
             session.workingNotes = WorkshopAiWorkingNotes.normalize(
@@ -5184,6 +5861,10 @@ public final class MainActivity extends Activity {
                         .put("applied_tool_writes", true)
                         .put("reason", "Successful tool writes compiled and all runnable tests passed; skipped a redundant final model call.");
                 appendAiTrace("auto_finalize_tested_writes", completed);
+                JSONObject finalPayload = aiCheckpointPayload(initialRequestJson, currentRequestJson,
+                        turn + 1, "", previousToolCallBatch, session, usage);
+                finalPayload.put("final_response_json", completed.toString());
+                saveActiveAiCheckpoint(WorkshopAiResumePolicy.READY, model, useCodex, finalPayload);
                 AiAgentResult candidate = finishAiAgentResult(completed.toString(), usage, apiKey,
                         model, useCodex, session, generatedImages, transaction, initialRequestJson);
                 if (candidate.verification.status == WorkshopAiVerificationResult.Status.FAILED
@@ -5207,6 +5888,9 @@ public final class MainActivity extends Activity {
                                     + "and rerun tests.");
                     currentRequestJson = verificationFollowup.toString();
                     previousToolCallBatch = "";
+                    saveActiveAiCheckpoint(WorkshopAiResumePolicy.READY, model, useCodex,
+                            aiCheckpointPayload(initialRequestJson, currentRequestJson, turn + 1,
+                                    "", previousToolCallBatch, session, usage));
                     continue;
                 }
                 return candidate;
@@ -5224,6 +5908,9 @@ public final class MainActivity extends Activity {
             }
             followup.put("instruction", instruction);
             currentRequestJson = followup.toString();
+            saveActiveAiCheckpoint(WorkshopAiResumePolicy.READY, model, useCodex,
+                    aiCheckpointPayload(initialRequestJson, currentRequestJson, turn + 1,
+                            "", previousToolCallBatch, session, usage));
         }
         postAiProgress(MAX_AI_AGENT_TURNS, session.actionCount, "limit hit");
         if (session.successfulWriteCount > 0 && compileReady && session.latestRunnableTestsPassed()) {
@@ -5262,6 +5949,8 @@ public final class MainActivity extends Activity {
         }
 
         Map<String, String> batchOriginalSources = batchHasWrites ? snapshotProjectSources(session.project()) : null;
+        boolean batchWriteFailed = false;
+        String batchWriteError = "";
         throwIfAiCancelled();
         session.deferBatchCompile = batchHasWrites;
         try {
@@ -5285,6 +5974,10 @@ public final class MainActivity extends Activity {
                     observation.put("error", session.lastToolError);
                     observation.put("validation", validationError);
                     observations.put(observation);
+                    if (batchHasWrites && isAiWriteTool(tool)) {
+                        batchWriteFailed = true;
+                        batchWriteError = session.lastToolError;
+                    }
                     continue;
                 }
                 if (batchHasWrites && "run_tests".equals(tool)) {
@@ -5302,6 +5995,10 @@ public final class MainActivity extends Activity {
                 } catch (Exception error) {
                     session.lastToolError = error.getMessage();
                     observation.put("error", error.getMessage());
+                    if (batchHasWrites && isAiWriteTool(tool)) {
+                        batchWriteFailed = true;
+                        batchWriteError = error.getMessage();
+                    }
                 }
                 observations.put(observation);
             }
@@ -5310,6 +6007,23 @@ public final class MainActivity extends Activity {
         }
 
         if (!batchHasWrites) {
+            return observations;
+        }
+
+        if (batchWriteFailed) {
+            restoreProjectSources(batchOriginalSources);
+            session.invalidateProject();
+            String restoredCompile = nativeCompileProject(projectRootPath());
+            lastCompileResult = restoredCompile;
+            compileReady = isRunnableCompile(restoredCompile);
+            compileAttempted = true;
+            JSONObject diagnostics = new JSONObject()
+                    .put("status", "batch_edit_failed")
+                    .put("error", batchWriteError);
+            JSONObject restoredDiagnostics = compileResultToJson(restoredCompile);
+            annotateAiBatchWriteResults(observations, "rolled_back", diagnostics, restoredDiagnostics, session);
+            session.failedWriteBatchCount += 1;
+            annotatePendingRunTestsBlocked(observations, pendingRunTestObservationIndexes, diagnostics);
             return observations;
         }
 
@@ -5455,6 +6169,7 @@ public final class MainActivity extends Activity {
                     .put("risk", policy.risk.name().toLowerCase()));
             AiApiResponse response;
             long llmStartedMs = SystemClock.elapsedRealtime();
+            markActiveAiCheckpointProviderInFlight();
             if (useCodex) {
                 response = callCodexResponses(request.toString());
                 usage.addUnpriced(response.model, response.usage);
@@ -5598,7 +6313,8 @@ public final class MainActivity extends Activity {
                 continue;
             }
             String status = result.optString("status", "");
-            if (!"written".equals(status) && !"created".equals(status)) {
+            if (!"written".equals(status) && !"created".equals(status)
+                    && !"deleted".equals(status)) {
                 continue;
             }
             result.put("diagnostics", diagnostics);
@@ -6178,66 +6894,35 @@ public final class MainActivity extends Activity {
     }
     private JSONObject aiToolDeleteSymbol(AiAgentSession session, JSONObject call) throws Exception {
         ProjectSnapshot project = session.project();
-        Map<String, String> originalSources = snapshotProjectSources(project);
         String kind = call.optString("kind", "");
         SymbolEntry target = kind.isEmpty()
                 ? findAnySymbolForAiLookup(project, call, selectedSymbol)
                 : findSymbolForAiEdit(project, aiLookupExpectedKind(kind), call, selectedSymbol);
-        try {
-            String before = target.sourceFile.source.substring(0, target.start).replaceFirst("\\s+$", "");
-            String after = target.sourceFile.source.substring(target.end).replaceFirst("^\\s+", "");
-            String updatedSource = before.isEmpty() ? after : after.isEmpty() ? before + "\n" : before + "\n\n" + after;
-            target.sourceFile.source = updatedSource;
-            writeTextFile(target.sourceFile.diskFile, updatedSource);
-            session.invalidateProject();
-
-            if (session.deferBatchCompile) {
-                return new JSONObject()
-                        .put("file", target.file)
-                        .put("kind", target.kind)
-                        .put("name", target.name)
-                        .put("owner", target.owner)
-                        .put("status", "deleted")
-                        .put("diagnostics", new JSONObject().put("status", "pending_batch_compile"));
-            }
-
-            String compileResult = nativeCompileProject(projectRootPath());
-            lastCompileResult = compileResult;
-            compileReady = isRunnableCompile(compileResult);
-            compileAttempted = true;
-            JSONObject diagnostics = compileResultToJson(compileResult);
-            if (!compileReady) {
-                restoreProjectSources(originalSources);
-                session.invalidateProject();
-                String restoredCompile = nativeCompileProject(projectRootPath());
-                lastCompileResult = restoredCompile;
-                compileReady = isRunnableCompile(restoredCompile);
-                compileAttempted = true;
-                return new JSONObject()
-                        .put("file", target.file)
-                        .put("kind", target.kind)
-                        .put("name", target.name)
-                        .put("owner", target.owner)
-                        .put("status", "rolled_back")
-                        .put("diagnostics", diagnostics)
-                        .put("restored_diagnostics", compileResultToJson(restoredCompile));
-            }
-            return new JSONObject()
-                    .put("file", target.file)
-                    .put("kind", target.kind)
-                    .put("name", target.name)
-                    .put("owner", target.owner)
-                    .put("status", "deleted")
-                    .put("diagnostics", diagnostics);
-        } catch (Exception error) {
-            restoreProjectSources(originalSources);
-            session.invalidateProject();
-            throw error;
+        String semanticKind = semanticItemKind(target.kind);
+        String semanticName = target.name;
+        String newSource = null;
+        String operation = "delete";
+        JSONObject rustItem;
+        if ("globals".equals(semanticKind)) {
+            rustItem = rustSourceItem(target.file, "globals", "globals", "");
+        } else {
+            rustItem = rustSourceItem(target.file, semanticKind, semanticName, target.signature);
         }
+        JSONObject result = runRustSemanticEdit(operation, semanticKind, semanticName,
+                target.file, rustItem.optString("owner"), rustItem.optString("signature"),
+                rustItem.optString("source_hash"),
+                newSource, !session.deferBatchCompile);
+        session.invalidateProject();
+        return new JSONObject()
+                .put("file", target.file)
+                .put("kind", target.kind)
+                .put("name", target.name)
+                .put("owner", target.owner)
+                .put("status", "deleted")
+                .put("diagnostics", result);
     }
     private JSONObject aiToolWriteSymbol(AiAgentSession session, JSONObject call) throws Exception {
         ProjectSnapshot project = session.project();
-        Map<String, String> originalSources = snapshotProjectSources(project);
         String kind = call.optString("kind", "replace_function");
         String expectedKind = "replace_struct".equals(kind) || "struct".equals(kind) ? "struct" : "function";
         String editKind = "struct".equals(expectedKind) ? "replace_struct" : "replace_function";
@@ -6245,57 +6930,80 @@ public final class MainActivity extends Activity {
         if (newSource.isEmpty()) {
             throw new IOException("No value for new_source");
         }
-        boolean existed = findSymbolForAiEditOrNull(project, expectedKind, call, selectedSymbol) != null;
-        try {
-            SymbolEntry target = resolveAiEditTarget(project, editKind, expectedKind, call, selectedSymbol, newSource);
-            validateAiReplacementSource(editKind, target.name, newSource);
-            persistSelectedEdit(target, newSource);
-            session.invalidateProject();
+        SymbolEntry existing = findSymbolForAiEditOrNull(project, expectedKind, call, selectedSymbol);
+        String name = call.optString("name", existing == null ? "" : existing.name).trim();
+        String file = call.optString("file", existing == null ? "" : existing.file).trim();
+        if (name.isEmpty() || file.isEmpty()) throw new IOException("write_symbol requires file and name");
+        validateAiReplacementSource(editKind, name, newSource);
+        JSONObject rustItem = existing == null ? null : rustSourceItem(file, expectedKind, name,
+                existing == null ? "" : existing.signature);
+        JSONObject result = runRustSemanticEdit(existing == null ? "add" : "update",
+                expectedKind, name, file, rustItem == null ? "" : rustItem.optString("owner"),
+                rustItem == null ? "" : rustItem.optString("signature"),
+                rustItem == null ? "" : rustItem.optString("source_hash"),
+                newSource, !session.deferBatchCompile);
+        session.invalidateProject();
+        return new JSONObject()
+                .put("file", file)
+                .put("kind", expectedKind)
+                .put("name", name)
+                .put("owner", existing == null ? call.optString("owner", "") : existing.owner)
+                .put("status", existing == null ? "created" : "written")
+                .put("diagnostics", result);
+    }
 
-            if (session.deferBatchCompile) {
-                return new JSONObject()
-                        .put("file", target.file)
-                        .put("kind", target.kind)
-                        .put("name", target.name)
-                        .put("owner", target.owner)
-                        .put("status", existed ? "written" : "created")
-                        .put("diagnostics", new JSONObject().put("status", "pending_batch_compile"));
-            }
+    private static String semanticItemKind(String androidKind) {
+        if ("global".equals(androidKind)) return "globals";
+        if ("struct".equals(androidKind)) return "struct";
+        if ("test".equals(androidKind)) return "test";
+        return "function";
+    }
 
-            String compileResult = nativeCompileProject(projectRootPath());
-            lastCompileResult = compileResult;
-            compileReady = isRunnableCompile(compileResult);
-            compileAttempted = true;
-            JSONObject diagnostics = compileResultToJson(compileResult);
-            if (!compileReady) {
-                restoreProjectSources(originalSources);
-                session.invalidateProject();
-                String restoredCompile = nativeCompileProject(projectRootPath());
-                lastCompileResult = restoredCompile;
-                compileReady = isRunnableCompile(restoredCompile);
-                compileAttempted = true;
-                return new JSONObject()
-                        .put("file", target.file)
-                        .put("kind", target.kind)
-                        .put("name", target.name)
-                        .put("owner", target.owner)
-                        .put("status", "rolled_back")
-                        .put("diagnostics", diagnostics)
-                        .put("restored_diagnostics", compileResultToJson(restoredCompile));
-            }
-
-            return new JSONObject()
-                    .put("file", target.file)
-                    .put("kind", target.kind)
-                    .put("name", target.name)
-                    .put("owner", target.owner)
-                    .put("status", existed ? "written" : "created")
-                    .put("diagnostics", diagnostics);
-        } catch (Exception error) {
-            restoreProjectSources(originalSources);
-            session.invalidateProject();
-            throw error;
+    private JSONObject rustSourceItem(String file, String kind, String name,
+                                      String signature) throws Exception {
+        JSONObject response = new JSONObject(nativeSourceItems(projectRootPath()));
+        if ("error".equals(response.optString("status"))) {
+            throw new IOException(response.optString("error", "Rust source item indexing failed"));
         }
+        JSONArray items = response.getJSONArray("items");
+        JSONObject match = null;
+        for (int index = 0; index < items.length(); index += 1) {
+            JSONObject item = items.getJSONObject(index);
+            if (file.equals(item.optString("file")) && kind.equals(item.optString("kind"))
+                    && name.equals(item.optString("name"))
+                    && (signature == null || signature.isEmpty()
+                    || signature.equals(item.optString("signature")))) {
+                if (match != null) throw new IOException(
+                        "Rust source item is ambiguous: " + kind + " " + file + " " + name);
+                match = item;
+            }
+        }
+        if (match != null) return match;
+        throw new IOException("Rust source item not found: " + kind + " " + file + " " + name);
+    }
+
+    private JSONObject runRustSemanticEdit(String operation, String kind, String name, String file,
+                                             String owner, String signature, String expectedSourceHash,
+                                             String newSource, boolean validate) throws Exception {
+        JSONObject target = new JSONObject().put("kind", kind).put("name", name).put("file", file);
+        if (owner != null && !owner.isEmpty()) target.put("owner", owner);
+        if (signature != null && !signature.isEmpty()) target.put("signature", signature);
+        JSONObject edit = new JSONObject().put("operation", operation).put("target", target);
+        if (newSource != null) edit.put("new_source", newSource);
+        if (expectedSourceHash != null && !expectedSourceHash.isEmpty()) {
+            edit.put("expected_source_hash", expectedSourceHash);
+        }
+        JSONObject request = new JSONObject().put("schema_version", 1)
+                .put("edits", new JSONArray().put(edit));
+        JSONObject result = new JSONObject(nativeSemanticEdit(
+                projectRootPath(), request.toString(), false, validate, false));
+        if ("error".equals(result.optString("status"))) {
+            throw new IOException(result.optString("error", "Rust semantic edit failed"));
+        }
+        lastCompileResult = validate ? "CompilePlanned: semantic_edit=RustValidated" : lastCompileResult;
+        compileReady = validate || compileReady;
+        compileAttempted = validate || compileAttempted;
+        return result;
     }
 
     private JSONObject writeSymbolTransaction(AiAgentSession session, SymbolEntry target, String newSource) throws Exception {
@@ -6354,10 +7062,22 @@ public final class MainActivity extends Activity {
 
     private static JSONObject compileResultToJson(String compileResult) throws Exception {
         String result = compileResult == null || compileResult.isEmpty() ? "CompileNotRun" : compileResult;
-        return new JSONObject()
+        JSONObject json = new JSONObject()
                 .put("ok", isRunnableCompile(result))
                 .put("raw", result)
                 .put("kind", result.startsWith("CompileError") ? "compile_error" : "compile_result");
+        WorkshopSourceDiagnostic diagnostic = WorkshopSourceDiagnostic.fromCompileResult(result);
+        if (diagnostic != null) {
+            json.put("diagnostic", new JSONObject()
+                    .put("file", diagnostic.file)
+                    .put("line", diagnostic.line)
+                    .put("column", diagnostic.column)
+                    .put("end_line", diagnostic.endLine)
+                    .put("end_column", diagnostic.endColumn)
+                    .put("symbol", diagnostic.symbol)
+                    .put("message", diagnostic.message));
+        }
+        return json;
     }
     private JSONObject aiToolSetInputState(JSONObject call) throws Exception {
         aiSimTouchX = call.optInt("x", aiSimTouchX);
@@ -6393,31 +7113,45 @@ public final class MainActivity extends Activity {
     }
     private JSONObject aiToolRunFrame() throws Exception {
         ensureAiTestCompileReady();
-        int[] frame = new int[RENDER_FRAME_I32_CAPACITY];
-        int status = nativeRunFrameInto(
-                projectRootPath(),
-                aiSimTouchX,
-                aiSimTouchY,
-                aiSimTouchActive,
-                currentAiScreenWidth(),
-                currentAiScreenHeight(),
-                frame);
-        System.arraycopy(frame, 0, nativeFrameValues, 0, RENDER_FRAME_I32_CAPACITY);
-        if (gamePreview != null) {
-            gamePreview.setRenderFrameValues(nativeFrameValues);
-        }
-        return new JSONObject()
-                .put("status", status)
+        AiFrameResult frameResult = callOnGameThread(() -> {
+            int status = gamePreview == null ? -1 : gamePreview.runNativeFrame(
+                    projectRootPath(), aiSimTouchX, aiSimTouchY, aiSimTouchActive,
+                    currentAiScreenWidth(), currentAiScreenHeight(), nativeFrameValues);
+            String rawState = nativeInspectRuntimeState(projectRootPath());
+            JSONObject runtimeState = new JSONObject(rawState == null ? "{}" : rawState);
+            runtimeState.put("live", "live_session".equals(runtimeState.optString("source")));
+            String error = status == 0 ? null : nativeLastFrameError();
+            return new AiFrameResult(status, runtimeState, currentLogicalFrame(), error);
+        });
+        JSONObject result = new JSONObject()
+                .put("status", frameResult.status)
                 .put("input", currentInputStateJson())
-                .put("frame", frameValuesToJson(frame))
-                .put("runtime_state", runtimeStateJson());
+                .put("frame", frameValuesToJson(frameResult.frame))
+                .put("runtime_state", frameResult.runtimeState);
+        if (frameResult.error != null) result.put("error", frameResult.error);
+        return result;
+    }
+
+    private static final class AiFrameResult {
+        final int status;
+        final JSONObject runtimeState;
+        final StasisPreviewRenderer.LogicalFrameSnapshot frame;
+        final String error;
+
+        AiFrameResult(int status, JSONObject runtimeState,
+                StasisPreviewRenderer.LogicalFrameSnapshot frame, String error) {
+            this.status = status;
+            this.runtimeState = runtimeState;
+            this.frame = frame;
+            this.error = error;
+        }
     }
 
     private JSONObject aiToolInspectRuntimeState() throws Exception {
         return new JSONObject()
                 .put("input", currentInputStateJson())
                 .put("runtime_state", runtimeStateJson())
-                .put("frame", frameValuesToJson(nativeFrameValues));
+                .put("frame", frameValuesToJson(currentLogicalFrame()));
     }
 
     private void ensureAiTestCompileReady() throws Exception {
@@ -6456,69 +7190,83 @@ public final class MainActivity extends Activity {
     }
 
     private JSONObject runtimeStateJson() throws Exception {
-        File stateFile = new File(projectRoot(), "build/runtime_state.txt");
-        JSONObject values = new JSONObject();
-        String raw = "";
-        if (stateFile.isFile()) {
-            raw = readTextFile(stateFile);
-            String[] lines = raw.split("\\r?\\n");
-            for (String line : lines) {
-                int equals = line.indexOf('=');
-                if (equals > 0) {
-                    values.put(line.substring(0, equals), line.substring(equals + 1));
-                }
-            }
-        }
-        return new JSONObject()
-                .put("file", "build/runtime_state.txt")
-                .put("exists", stateFile.isFile())
-                .put("raw", raw)
-                .put("values", values);
+        String raw = callOnGameThread(() -> nativeInspectRuntimeState(projectRootPath()));
+        JSONObject state = new JSONObject(raw == null ? "{}" : raw);
+        state.put("live", "live_session".equals(state.optString("source")));
+        return state;
     }
 
-    private static JSONObject frameValuesToJson(int[] frame) throws Exception {
-        JSONArray values = new JSONArray();
-        for (int index = 0; index < frame.length; index += 1) {
-            values.put(frame[index]);
+    private <T> T callOnGameThread(Callable<T> operation) throws Exception {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return operation.call();
         }
-        JSONArray commands = new JSONArray();
-        int commandCount = frame.length > 5 ? Math.max(0, Math.min(MAX_RENDER_COMMANDS, frame[5])) : 0;
-        for (int index = 0; index < commandCount; index += 1) {
-            int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
-            commands.put(new JSONObject()
-                    .put("kind", frame[base])
-                    .put("x", frame[base + 1])
-                    .put("y", frame[base + 2])
-                    .put("w", frame[base + 3])
-                    .put("h", frame[base + 4])
-                     .put("color", frame[base + 5])
-                    .put("asset", frame[base + 6])
-                    .put("rotation_degrees", frame[base + 7])
-                    .put("alpha", frame[base + 8])
-                    .put("clip_x", frame[base + 9])
-                    .put("clip_y", frame[base + 10])
-                    .put("clip_w", frame[base + 11])
-                    .put("clip_h", frame[base + 12]));
+        FutureTask<T> task = new FutureTask<>(operation);
+        if (!gameLoopHandler.post(task)) {
+            throw new IOException("game thread is unavailable");
         }
+        try {
+            return task.get(5, TimeUnit.SECONDS);
+        } catch (TimeoutException error) {
+            gameLoopHandler.removeCallbacks(task);
+            task.cancel(false);
+            throw new IOException("game thread operation timed out", error);
+        } catch (InterruptedException error) {
+            gameLoopHandler.removeCallbacks(task);
+            task.cancel(false);
+            Thread.currentThread().interrupt();
+            throw new IOException("game thread operation was interrupted", error);
+        }
+    }
+
+    private StasisPreviewRenderer.LogicalFrameSnapshot currentLogicalFrame() {
+        return gamePreview == null ? null : gamePreview.logicalFrameSnapshot();
+    }
+
+    private static JSONObject frameValuesToJson(
+            StasisPreviewRenderer.LogicalFrameSnapshot frame) throws Exception {
+        if (frame == null) return new JSONObject().put("status", "unavailable");
+        JSONArray header = jsonArray(frame.header);
+        JSONArray lines = jsonArray(frame.lines);
+        JSONArray sprites = jsonArray(frame.sprites);
+        JSONArray textMetadata = jsonArray(frame.textMetadata);
+        JSONArray textValues = jsonArray(frame.textValues);
+        JSONArray textBytes = new JSONArray();
+        for (byte value : frame.textBytes) textBytes.put(value & 255);
         return new JSONObject()
-                .put("status", frame.length > 0 ? frame[0] : -1)
-                .put("tick_count", frame.length > 1 ? frame[1] : 0)
-                .put("game_tick_count", frame.length > 2 ? frame[2] : 0)
-                .put("command_count", commandCount)
-                .put("commands", commands)
-                .put("raw_values", values);
+                .put("magic", frame.header[0])
+                .put("version", frame.header[1])
+                .put("flags", frame.header[2])
+                .put("line_count", frame.header[3])
+                .put("sprite_count", frame.header[4])
+                .put("text_count", frame.header[7])
+                .put("text_bytes_used", frame.header[9])
+                .put("header_i32", header)
+                .put("line_f32", lines)
+                .put("sprite_i32", sprites)
+                .put("text_i32", textMetadata)
+                .put("text_f32", textValues)
+                .put("text_u8", textBytes);
+    }
+
+    private static JSONArray jsonArray(int[] values) {
+        JSONArray out = new JSONArray();
+        for (int value : values) out.put(value);
+        return out;
+    }
+
+    private static JSONArray jsonArray(float[] values) throws Exception {
+        JSONArray out = new JSONArray();
+        for (float value : values) out.put(value);
+        return out;
     }
     private JSONObject aiToolTakeScreenshot() throws Exception {
-        return logicalRenderSnapshot(nativeFrameValues);
+        return logicalRenderSnapshot(currentLogicalFrame());
     }
 
-    private JSONObject logicalRenderSnapshot(int[] capturedFrame) throws Exception {
+    private JSONObject logicalRenderSnapshot(
+            StasisPreviewRenderer.LogicalFrameSnapshot capturedFrame) throws Exception {
         int width = gamePreview == null ? 0 : gamePreview.getWidth();
         int height = gamePreview == null ? 0 : gamePreview.getHeight();
-        JSONArray frame = new JSONArray();
-        for (int index = 0; index < capturedFrame.length; index += 1) {
-            frame.put(capturedFrame[index]);
-        }
         return new JSONObject()
                 .put("kind", "logical_render_snapshot")
                 .put("width", width)
@@ -6528,8 +7276,7 @@ public final class MainActivity extends Activity {
                 .put("touch_active", gamePreview != null && gamePreview.touchActive() == 1)
                 .put("input", currentInputStateJson())
                 .put("runtime_state", runtimeStateJson())
-                .put("frame", frameValuesToJson(capturedFrame))
-                .put("frame_values", frame);
+                .put("frame", frameValuesToJson(capturedFrame));
     }
 
     private static SourceFile findProjectFile(ProjectSnapshot project, String file) throws Exception {
@@ -7422,6 +8169,7 @@ public final class MainActivity extends Activity {
 
         SymbolEntry editedSymbol = selectedSymbol;
         String editedSource = sourceEditor.getText().toString().trim();
+        boolean sourceChanged = !editedSource.equals(editedSymbol.source.trim());
         String beforeFileSource = editedSymbol.sourceFile.source;
         String reload = classifySelectedReload(editedSymbol, editedSource);
         try {
@@ -7443,16 +8191,24 @@ public final class MainActivity extends Activity {
                 diagnosticFile = "";
                 diagnosticSymbol = "";
                 diagnosticLine = 0;
+                diagnosticColumn = 0;
+                diagnosticEndLine = 0;
+                diagnosticEndColumn = 0;
                 diagnosticStatus.setText("Compile passed - " + reload);
+                recordExplorationLesson(WorkshopExplorationLessonPolicy.APPLIED_EDIT);
+                if (sourceChanged && refreshedSymbol != null) {
+                    recordOnboardingChangeApplied(refreshedSymbol, refreshedSymbol.source);
+                }
                 setStatusText("Saved to .stasis file - " + reload + " - " + compileResult);
             } else {
-                diagnosticFile = editedSymbol.file;
-                diagnosticSymbol = editedSymbol.name;
-                diagnosticLine = 0;
+                WorkshopSourceDiagnostic location = WorkshopSourceDiagnostic.fromCompileResult(compileResult);
+                if (location == null) {
+                    location = new WorkshopSourceDiagnostic(editedSymbol.file, 0, 0, 0, 0,
+                            editedSymbol.name, compileResult);
+                }
+                applySourceDiagnostic(location, "Compile failed");
                 selectedRecoveryEntry = AndroidEditRecoveryStore.record(this, activeRecoveryProjectId(), editedSymbol.file,
-                        editedSymbol.name, beforeFileSource, editedSymbol.sourceFile.source, compileResult);
-                diagnosticStatus.setText("Compile failed\nfile=" + diagnosticFile
-                        + "\nsymbol=" + diagnosticSymbol + "\nreload=" + reload + "\n" + compileResult);
+                        editedSymbol.name, beforeFileSource, editedSymbol.sourceFile.source, compileResult, location);
                 setStatusText("Saved edit failed compile; use Go to Diagnostic or Undo Failed Apply");
             }
         } catch (IOException error) {
@@ -7485,12 +8241,17 @@ public final class MainActivity extends Activity {
                 entry = entries[0];
             }
             selectedRecoveryEntry = entry;
-            diagnosticFile = entry.path;
-            diagnosticSymbol = entry.symbol;
-            diagnosticLine = 0;
+            diagnosticFile = entry.diagnosticPath;
+            diagnosticSymbol = entry.diagnosticSymbol;
+            diagnosticLine = entry.diagnosticLine;
+            diagnosticColumn = entry.diagnosticColumn;
+            diagnosticEndLine = entry.diagnosticEndLine;
+            diagnosticEndColumn = entry.diagnosticEndColumn;
             diagnosticStatus.setText("Recoverable failed apply history: " + entries.length + " entries\nselected="
                     + (selectedIndex + 1) + "/" + entries.length + "\nfile=" + entry.path
-                    + "\nsymbol=" + entry.symbol + "\n" + entry.diagnostic);
+                    + "\ndiagnostic_file=" + entry.diagnosticPath
+                    + (entry.diagnosticLine > 0 ? ":" + entry.diagnosticLine : "")
+                    + "\nsymbol=" + entry.diagnosticSymbol + "\n" + entry.diagnostic);
         } catch (Exception error) {
             diagnosticStatus.setText("Recovery history unavailable: " + error.getMessage());
         }
@@ -7619,7 +8380,7 @@ public final class MainActivity extends Activity {
             setStatusText("Image import needs a registered active project");
             return;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || hasPendingSourceEdit()) {
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || hasPendingSourceEdit()) {
             setStatusText("Image import blocked by active work or a pending source edit");
             return;
         }
@@ -7763,6 +8524,7 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshAudioAssetList() {
+        requestGitHubAutoSync();
         if (audioAssetList == null) return;
         audioAssetList.removeAllViews();
         if (activeProject == null) return;
@@ -7919,7 +8681,7 @@ public final class MainActivity extends Activity {
             setStatusText("Audio changes need a registered active project");
             return false;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || hasPendingSourceEdit()) {
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || hasPendingSourceEdit()) {
             setStatusText("Audio change blocked by active work or a pending source edit");
             return false;
         }
@@ -8030,6 +8792,7 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshImageAssetList() {
+        requestGitHubAutoSync();
         if (imageAssetList == null) return;
         imageAssetList.removeAllViews();
         if (activeProject == null) return;
@@ -8098,20 +8861,35 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    private void restoreRetainedPaintSession() {
+        Object retained = getLastNonConfigurationInstance();
+        if (!(retained instanceof RetainedPaintSession)) return;
+        RetainedPaintSession session = (RetainedPaintSession)retained;
+        try {
+            showPaintEditor(session.bitmap.getWidth(), session.bitmap.getHeight(), session.bitmap,
+                    session.name, session.suggestAiAttachment, session);
+        } finally {
+            if (!session.bitmap.isRecycled()) session.bitmap.recycle();
+        }
+    }
+
     private void requestNewPaintedImage() {
         if (!canModifyImageAssets()) return;
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         final EditText width = new EditText(this);
         width.setHint("Width");
+        width.setContentDescription("Canvas width in pixels");
         width.setInputType(InputType.TYPE_CLASS_NUMBER);
         width.setText("256");
         final EditText height = new EditText(this);
         height.setHint("Height");
+        height.setContentDescription("Canvas height in pixels");
         height.setInputType(InputType.TYPE_CLASS_NUMBER);
         height.setText("256");
         LinearLayout dimensions = new LinearLayout(this);
-        dimensions.setOrientation(LinearLayout.HORIZONTAL);
-        dimensions.addView(width, weightedWidth());
-        dimensions.addView(height, weightedWidth());
+        configureActionRow(dimensions, layout);
+        dimensions.addView(width, actionWidth(layout));
+        dimensions.addView(height, actionWidth(layout));
         new AlertDialog.Builder(this)
                 .setTitle("New Paint Canvas")
                 .setMessage("Canvas dimensions must be 16-1024 pixels.")
@@ -8151,29 +8929,60 @@ public final class MainActivity extends Activity {
 
     private void showPaintEditor(int width, int height, Bitmap initial, String defaultName,
                                  boolean suggestAiAttachment) {
+        showPaintEditor(width, height, initial, defaultName, suggestAiAttachment, null);
+    }
+
+    private void showPaintEditor(int width, int height, Bitmap initial, String defaultName,
+                                 boolean suggestAiAttachment, RetainedPaintSession retained) {
+        final WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         final WorkshopPaintView paint = new WorkshopPaintView(this, width, height, initial);
+        if (retained != null) {
+            paint.setBrushColor(retained.brushColor);
+            paint.setBrushSize(retained.brushSize);
+            paint.setEraser(retained.erasing);
+        }
+        final ArrayList<View> paintTraversal = new ArrayList<>();
+        paintTraversal.add(paint);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(8), dp(8), dp(8), dp(8));
         content.addView(paint, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(360)));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(layout.paintCanvasHeightDp)));
 
         LinearLayout tools = new LinearLayout(this);
-        tools.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(tools, layout);
         Button brush = compactButton("Brush");
         Button eraser = compactButton("Eraser");
         Button undo = compactButton("Undo");
         Button redo = compactButton("Redo");
-        tools.addView(brush, weightedWidth());
-        tools.addView(eraser, weightedWidth());
-        tools.addView(undo, weightedWidth());
-        tools.addView(redo, weightedWidth());
+        brush.setSelected(!paint.isErasing());
+        eraser.setSelected(paint.isErasing());
+        tools.addView(brush, actionWidth(layout));
+        tools.addView(eraser, actionWidth(layout));
+        tools.addView(undo, actionWidth(layout));
+        tools.addView(redo, actionWidth(layout));
+        paintTraversal.add(brush);
+        paintTraversal.add(eraser);
+        paintTraversal.add(undo);
+        paintTraversal.add(redo);
         content.addView(tools, fullWidth());
         brush.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { paint.setEraser(false); setStatusText("Paint tool: brush"); }
+            @Override public void onClick(View view) {
+                paint.setEraser(false);
+                brush.setSelected(true);
+                eraser.setSelected(false);
+                paint.announceForAccessibility("Brush selected");
+                setStatusText("Paint tool: brush");
+            }
         });
         eraser.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { paint.setEraser(true); setStatusText("Paint tool: eraser"); }
+            @Override public void onClick(View view) {
+                paint.setEraser(true);
+                brush.setSelected(false);
+                eraser.setSelected(true);
+                paint.announceForAccessibility("Eraser selected");
+                setStatusText("Paint tool: eraser");
+            }
         });
         undo.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { paint.undo(); }
@@ -8183,43 +8992,68 @@ public final class MainActivity extends Activity {
         });
 
         LinearLayout sizes = new LinearLayout(this);
-        sizes.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(sizes, layout);
+        final ArrayList<Button> sizeChoices = new ArrayList<>();
         for (final int size : new int[] {2, 8, 24, 64}) {
-            Button choice = compactButton(Integer.toString(size) + "px");
+            final Button choice = compactButton(Integer.toString(size) + "px");
+            choice.setSelected(Math.round(paint.brushSize()) == size);
             choice.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View view) { paint.setBrushSize(size); }
+                @Override public void onClick(View view) {
+                    paint.setBrushSize(size);
+                    selectOnly(sizeChoices, choice);
+                    paint.announceForAccessibility("Brush size " + size + " pixels selected");
+                }
             });
-            sizes.addView(choice, weightedWidth());
+            sizes.addView(choice, actionWidth(layout));
+            sizeChoices.add(choice);
+            paintTraversal.add(choice);
         }
         content.addView(sizes, fullWidth());
 
         LinearLayout palette = new LinearLayout(this);
-        palette.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(palette, layout);
         final int[] colors = new int[] {Color.BLACK, Color.WHITE, Color.RED, Color.GREEN, Color.BLUE};
         final String[] colorNames = new String[] {"Black", "White", "Red", "Green", "Blue"};
+        final ArrayList<Button> colorChoices = new ArrayList<>();
         for (int index = 0; index < colors.length; index++) {
             final int color = colors[index];
-            Button choice = compactButton(colorNames[index]);
+            final String colorName = colorNames[index];
+            final Button choice = compactButton(colorName);
+            choice.setSelected(paint.brushColor() == color);
             choice.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View view) { paint.setBrushColor(color); }
+                @Override public void onClick(View view) {
+                    paint.setBrushColor(color);
+                    brush.setSelected(true);
+                    eraser.setSelected(false);
+                    selectOnly(colorChoices, choice);
+                    paint.announceForAccessibility(colorName + " paint color selected");
+                }
             });
-            palette.addView(choice, weightedWidth());
+            palette.addView(choice, actionWidth(layout));
+            colorChoices.add(choice);
+            paintTraversal.add(choice);
         }
         content.addView(palette, fullWidth());
 
         LinearLayout customColor = new LinearLayout(this);
-        customColor.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(customColor, layout);
         final EditText hex = new EditText(this);
         hex.setHint("#RRGGBB or #AARRGGBB");
         hex.setSingleLine(true);
         Button applyColor = compactButton("Set Color");
-        customColor.addView(hex, weightedWidth());
-        customColor.addView(applyColor, weightedWidth());
+        customColor.addView(hex, actionWidth(layout));
+        customColor.addView(applyColor, actionWidth(layout));
+        paintTraversal.add(hex);
+        paintTraversal.add(applyColor);
         content.addView(customColor, fullWidth());
         applyColor.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
                 try {
                     paint.setBrushColor(Color.parseColor(hex.getText().toString().trim()));
+                    brush.setSelected(true);
+                    eraser.setSelected(false);
+                    selectOnly(colorChoices, null);
+                    paint.announceForAccessibility("Custom paint color selected");
                     setStatusText("Paint color applied");
                 } catch (Exception error) {
                     setStatusText("Paint color needs #RRGGBB or #AARRGGBB");
@@ -8228,11 +9062,13 @@ public final class MainActivity extends Activity {
         });
 
         LinearLayout canvasActions = new LinearLayout(this);
-        canvasActions.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(canvasActions, layout);
         Button resize = compactButton("Resize / Crop");
         Button clear = compactButton("Clear");
-        canvasActions.addView(resize, weightedWidth());
-        canvasActions.addView(clear, weightedWidth());
+        canvasActions.addView(resize, actionWidth(layout));
+        canvasActions.addView(clear, actionWidth(layout));
+        paintTraversal.add(resize);
+        paintTraversal.add(clear);
         content.addView(canvasActions, fullWidth());
         resize.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { requestPaintResize(paint); }
@@ -8246,14 +9082,18 @@ public final class MainActivity extends Activity {
         name.setSingleLine(true);
         name.setText(defaultName);
         content.addView(name, fullWidth());
+        paintTraversal.add(name);
         LinearLayout finish = new LinearLayout(this);
-        finish.setOrientation(LinearLayout.HORIZONTAL);
+        configureActionRow(finish, layout);
         Button save = compactButton("Save as PNG");
         Button saveAndAttach = compactButton("Save + Attach to AI");
         Button cancel = compactButton("Cancel");
-        finish.addView(save, weightedWidth());
-        finish.addView(saveAndAttach, weightedWidth());
-        finish.addView(cancel, weightedWidth());
+        finish.addView(save, actionWidth(layout));
+        finish.addView(saveAndAttach, actionWidth(layout));
+        finish.addView(cancel, actionWidth(layout));
+        paintTraversal.add(save);
+        paintTraversal.add(saveAndAttach);
+        paintTraversal.add(cancel);
         content.addView(finish, fullWidth());
 
         ScrollView editorScroll = new ScrollView(this);
@@ -8262,6 +9102,10 @@ public final class MainActivity extends Activity {
                 .setTitle("Mini Paint - " + width + "x" + height)
                 .setView(editorScroll)
                 .create();
+        activePaintView = paint;
+        activePaintDialog = dialog;
+        activePaintName = name;
+        activePaintSuggestAiAttachment = suggestAiAttachment;
         save.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
                 savePaintedImage(paint, name.getText().toString(), dialog, false);
@@ -8280,9 +9124,18 @@ public final class MainActivity extends Activity {
             }
         });
         dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
-            @Override public void onDismiss(android.content.DialogInterface ignored) { paint.dispose(); }
+            @Override public void onDismiss(android.content.DialogInterface ignored) {
+                paint.dispose();
+                if (activePaintDialog == dialog) {
+                    activePaintView = null;
+                    activePaintDialog = null;
+                    activePaintName = null;
+                    activePaintSuggestAiAttachment = false;
+                }
+            }
         });
         dialog.show();
+        chainAccessibilityTraversal(paintTraversal.toArray(new View[paintTraversal.size()]));
     }
 
     private void savePaintedImage(WorkshopPaintView paint, String name, AlertDialog dialog,
@@ -8319,16 +9172,19 @@ public final class MainActivity extends Activity {
     }
 
     private void requestPaintResize(final WorkshopPaintView paint) {
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         final EditText width = new EditText(this);
         width.setInputType(InputType.TYPE_CLASS_NUMBER);
+        width.setContentDescription("Canvas width in pixels");
         width.setText(Integer.toString(paint.canvasWidth()));
         final EditText height = new EditText(this);
         height.setInputType(InputType.TYPE_CLASS_NUMBER);
+        height.setContentDescription("Canvas height in pixels");
         height.setText(Integer.toString(paint.canvasHeight()));
         LinearLayout dimensions = new LinearLayout(this);
-        dimensions.setOrientation(LinearLayout.HORIZONTAL);
-        dimensions.addView(width, weightedWidth());
-        dimensions.addView(height, weightedWidth());
+        configureActionRow(dimensions, layout);
+        dimensions.addView(width, actionWidth(layout));
+        dimensions.addView(height, actionWidth(layout));
         new AlertDialog.Builder(this)
                 .setTitle("Resize / Crop Canvas")
                 .setMessage("Pixels outside the new bottom/right edges are cropped; new space is transparent.")
@@ -8351,7 +9207,8 @@ public final class MainActivity extends Activity {
         Button button = new Button(this);
         button.setText(label);
         button.setAllCaps(false);
-        button.setTextSize(11.0f);
+        button.setTextSize(14.0f);
+        button.setMinHeight(dp(48));
         button.setPadding(dp(2), 0, dp(2), 0);
         return button;
     }
@@ -8396,6 +9253,7 @@ public final class MainActivity extends Activity {
     }
 
     private void reviewAiImageAttachments() {
+        WorkshopAdaptiveLayout.Profile layout = adaptiveLayoutProfile();
         final ArrayList<Bitmap> previews = new ArrayList<>();
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -8409,7 +9267,7 @@ public final class MainActivity extends Activity {
             }
             for (final WorkshopImageAssets.AssetInfo asset : selected) {
                 LinearLayout row = new LinearLayout(this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
+                configureActionRow(row, layout);
                 row.setGravity(Gravity.CENTER_VERTICAL);
                 Bitmap bitmap = WorkshopImageAssets.decodePreview(asset);
                 previews.add(bitmap);
@@ -8423,8 +9281,9 @@ public final class MainActivity extends Activity {
                 label.setText(asset.relativePath + "\n" + asset.width + "x" + asset.height
                         + " - original detail - " + WorkshopAiImageContext.reviewLabel(designSketch));
                 label.setPadding(dp(8), 0, dp(8), 0);
-                row.addView(label, weightedWidth());
+                row.addView(label, actionWidth(layout));
                 Button remove = compactButton("Remove");
+                remove.setMinWidth(dp(88));
                 remove.setOnClickListener(new View.OnClickListener() {
                     @Override public void onClick(View view) {
                         selectedImageAssets.remove(asset.relativePath);
@@ -8434,7 +9293,9 @@ public final class MainActivity extends Activity {
                         row.setVisibility(View.GONE);
                     }
                 });
-                row.addView(remove, new LinearLayout.LayoutParams(dp(88), LinearLayout.LayoutParams.WRAP_CONTENT));
+                row.addView(remove, layout.stackActions ? fullWidth()
+                        : new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT));
                 content.addView(row, fullWidth());
             }
         } catch (Exception error) {
@@ -8469,7 +9330,8 @@ public final class MainActivity extends Activity {
         }
         screenshotAttachmentStatus.setText("AI preview: capturing rendered pixels");
         gamePreview.captureFrame(new GamePreviewView.CaptureCallback() {
-            @Override public void onCaptured(final Bitmap bitmap, final String error, final int[] capturedFrame) {
+            @Override public void onCaptured(final Bitmap bitmap, final String error,
+                    final StasisPreviewRenderer.LogicalFrameSnapshot capturedFrame) {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         if (bitmap == null) {
@@ -8656,7 +9518,7 @@ public final class MainActivity extends Activity {
             setStatusText("Image changes need a registered active project");
             return false;
         }
-        if (aiRunActive || githubOperationActive || projectIoActive || hasPendingSourceEdit()) {
+        if (aiRunActive || isGitHubOperationActive() || projectIoActive || hasPendingSourceEdit()) {
             setStatusText("Image change blocked by active work or a pending source edit");
             return false;
         }
@@ -8724,9 +9586,12 @@ public final class MainActivity extends Activity {
                     .setItems(labels, new android.content.DialogInterface.OnClickListener() {
                         @Override public void onClick(android.content.DialogInterface dialog, int which) {
                             selectedRecoveryEntry = entries[which];
-                            diagnosticFile = selectedRecoveryEntry.path;
-                            diagnosticSymbol = selectedRecoveryEntry.symbol;
-                            diagnosticLine = 0;
+                            diagnosticFile = selectedRecoveryEntry.diagnosticPath;
+                            diagnosticSymbol = selectedRecoveryEntry.diagnosticSymbol;
+                            diagnosticLine = selectedRecoveryEntry.diagnosticLine;
+                            diagnosticColumn = selectedRecoveryEntry.diagnosticColumn;
+                            diagnosticEndLine = selectedRecoveryEntry.diagnosticEndLine;
+                            diagnosticEndColumn = selectedRecoveryEntry.diagnosticEndColumn;
                             diagnosticStatus.setText("Recovery history selection " + (which + 1) + "/"
                                     + entries.length + "\nfile=" + diagnosticFile + "\nsymbol="
                                     + diagnosticSymbol + "\n" + selectedRecoveryEntry.diagnostic);
@@ -8741,6 +9606,10 @@ public final class MainActivity extends Activity {
     }
 
     private void captureFirstTestFailureDiagnostic(JSONObject testRun) {
+        JSONObject compile = testRun.optJSONObject("compile");
+        WorkshopSourceDiagnostic compileDiagnostic = compile == null ? null
+                : WorkshopSourceDiagnostic.fromCompileResult(compile.optString("raw", ""));
+        if (compileDiagnostic != null) applySourceDiagnostic(compileDiagnostic, "Compile failure");
         JSONArray runs = testRun.optJSONArray("stasis_test_files");
         if (runs == null) return;
         for (int runIndex = 0; runIndex < runs.length(); runIndex += 1) {
@@ -8750,17 +9619,25 @@ public final class MainActivity extends Activity {
             for (int resultIndex = 0; resultIndex < results.length(); resultIndex += 1) {
                 JSONObject result = results.optJSONObject(resultIndex);
                 if (result == null || result.optBoolean("passed", false)) continue;
-                diagnosticFile = result.optString("file", "");
-                diagnosticSymbol = result.optString("name", "");
-                diagnosticLine = result.optInt("line", 0);
                 String error = result.optString("error", "");
-                diagnosticStatus.setText("Test failure\nfile=" + diagnosticFile
-                        + (diagnosticLine > 0 ? "\nline=" + diagnosticLine : "")
-                        + (diagnosticSymbol.isEmpty() ? "" : "\ntest=" + diagnosticSymbol)
-                        + (error.isEmpty() ? "" : "\n" + error));
+                WorkshopSourceDiagnostic diagnostic = WorkshopSourceDiagnostic.fromTestFailure(
+                        result.optString("file", ""), result.optInt("line", 0),
+                        result.optInt("column", 1),
+                        result.optString("name", ""), error);
+                if (diagnostic != null) applySourceDiagnostic(diagnostic, "Test failure");
                 return;
             }
         }
+    }
+
+    private void applySourceDiagnostic(WorkshopSourceDiagnostic diagnostic, String kind) {
+        diagnosticFile = diagnostic.file;
+        diagnosticSymbol = diagnostic.symbol;
+        diagnosticLine = diagnostic.line;
+        diagnosticColumn = diagnostic.column;
+        diagnosticEndLine = diagnostic.endLine;
+        diagnosticEndColumn = diagnostic.endColumn;
+        diagnosticStatus.setText(diagnostic.displayText(kind));
     }
 
     private void goToDiagnosticSource() {
@@ -8769,17 +9646,30 @@ public final class MainActivity extends Activity {
             return;
         }
         ProjectSnapshot project = loadBundledProject();
+        SymbolEntry fileFallback = null;
         for (SymbolSection section : project.sections) {
             for (SymbolGroup group : section.groups) {
                 for (SymbolEntry symbol : group.symbols) {
-                    if (symbol.file.equals(diagnosticFile)
-                            && (diagnosticSymbol.isEmpty() || symbol.name.equals(diagnosticSymbol))) {
+                    if (!symbol.file.equals(diagnosticFile)) continue;
+                    if (fileFallback == null || (diagnosticLine > 0
+                            && symbol.start <= WorkshopSourceDiagnostic.sourceOffset(
+                                    symbol.sourceFile.source, diagnosticLine, diagnosticColumn)
+                            && symbol.end >= WorkshopSourceDiagnostic.sourceOffset(
+                                    symbol.sourceFile.source, diagnosticLine, diagnosticColumn))) {
+                        fileFallback = symbol;
+                    }
+                    if (diagnosticSymbol.isEmpty() || symbol.name.equals(diagnosticSymbol)) {
                         showSymbol(symbol);
                         if (diagnosticLine > 0) {
-                            int absoluteOffset = sourceOffsetForLine(symbol.sourceFile.source, diagnosticLine);
+                            int absoluteOffset = WorkshopSourceDiagnostic.sourceOffset(
+                                    symbol.sourceFile.source, diagnosticLine, diagnosticColumn);
+                            int absoluteEnd = WorkshopSourceDiagnostic.sourceOffset(
+                                    symbol.sourceFile.source, diagnosticEndLine, diagnosticEndColumn);
                             int symbolOffset = Math.max(0,
                                     Math.min(symbol.source.length(), absoluteOffset - symbol.start));
-                            sourceEditor.setSelection(symbolOffset);
+                            int symbolEnd = Math.max(symbolOffset,
+                                    Math.min(symbol.source.length(), absoluteEnd - symbol.start));
+                            sourceEditor.setSelection(symbolOffset, symbolEnd);
                         }
                         manualEditBody.setVisibility(View.VISIBLE);
                         setStatusText("Opened diagnostic source " + diagnosticFile
@@ -8790,19 +9680,43 @@ public final class MainActivity extends Activity {
                 }
             }
         }
-        setStatusText("Diagnostic file is available but its symbol could not be parsed");
-    }
-
-    private static int sourceOffsetForLine(String source, int oneBasedLine) {
-        if (oneBasedLine <= 1) return 0;
-        int line = 1;
-        for (int index = 0; index < source.length(); index += 1) {
-            if (source.charAt(index) == '\n') {
-                line += 1;
-                if (line == oneBasedLine) return index + 1;
-            }
+        if (fileFallback != null) {
+            showSymbol(fileFallback);
+            int absoluteOffset = WorkshopSourceDiagnostic.sourceOffset(
+                    fileFallback.sourceFile.source, diagnosticLine, diagnosticColumn);
+            int absoluteEnd = WorkshopSourceDiagnostic.sourceOffset(
+                    fileFallback.sourceFile.source, diagnosticEndLine, diagnosticEndColumn);
+            int start = Math.max(0,
+                    Math.min(fileFallback.source.length(), absoluteOffset - fileFallback.start));
+            int end = Math.max(start,
+                    Math.min(fileFallback.source.length(), absoluteEnd - fileFallback.start));
+            sourceEditor.setSelection(start, end);
+            manualEditBody.setVisibility(View.VISIBLE);
+            setStatusText("Opened diagnostic file " + diagnosticFile
+                    + (diagnosticLine > 0 ? ":" + diagnosticLine : ""));
+            return;
         }
-        return source.length();
+        for (SourceFile file : project.files) {
+            if (!file.path.equals(diagnosticFile)) continue;
+            int absoluteOffset = WorkshopSourceDiagnostic.sourceOffset(
+                    file.source, diagnosticLine, diagnosticColumn);
+            int absoluteEnd = WorkshopSourceDiagnostic.sourceOffset(
+                    file.source, diagnosticEndLine, diagnosticEndColumn);
+            int lineStart = absoluteOffset;
+            while (lineStart > 0 && file.source.charAt(lineStart - 1) != '\n') lineStart -= 1;
+            SymbolEntry diagnosticFileEntry = new SymbolEntry("diagnostic",
+                    diagnosticSymbol.isEmpty() ? file.diskFile.getName() : diagnosticSymbol,
+                    "Diagnostics", "", file, file.path, file.source.substring(lineStart),
+                    lineStart, file.source.length());
+            showSymbol(diagnosticFileEntry);
+            sourceEditor.setSelection(Math.max(0, absoluteOffset - lineStart),
+                    Math.max(absoluteOffset - lineStart, absoluteEnd - lineStart));
+            manualEditBody.setVisibility(View.VISIBLE);
+            setStatusText("Opened diagnostic file " + diagnosticFile
+                    + (diagnosticLine > 0 ? ":" + diagnosticLine : ""));
+            return;
+        }
+        setStatusText("Diagnostic file is available but its symbol could not be parsed");
     }
 
     private void undoSelectedFailedApply() {
@@ -8830,6 +9744,9 @@ public final class MainActivity extends Activity {
             diagnosticFile = entry.path;
             diagnosticSymbol = entry.symbol;
             diagnosticLine = 0;
+            diagnosticColumn = 0;
+            diagnosticEndLine = 0;
+            diagnosticEndColumn = 0;
             goToDiagnosticSource();
             refreshChangeSummary(restored);
             String compileResult = nativeCompileProject(projectRootPath());
@@ -8853,15 +9770,18 @@ public final class MainActivity extends Activity {
         writeTextFile(sourceFile.diskFile, sourceFile.source);
     }
 
-    private void refreshChangeSummary(ProjectSnapshot currentProject) {
+    private boolean refreshChangeSummary(ProjectSnapshot currentProject) {
+        requestGitHubAutoSync();
         if (changeSummary == null) {
-            return;
+            return false;
         }
         try {
             ProjectSnapshot baseline = loadProjectBaselineSnapshot();
             changeSummary.setText(formatChangeSummary(baseline, currentProject));
+            return !sourcesByFile(baseline).equals(sourcesByFile(currentProject));
         } catch (IOException error) {
             changeSummary.setText("Changed symbols:\n  Unable to read project baseline: " + error.getMessage());
+            return false;
         }
     }
 
@@ -8870,7 +9790,14 @@ public final class MainActivity extends Activity {
             return;
         }
         try {
-            changeSummary.setText(formatRawFileDiffs(loadProjectBaselineSnapshot(), loadBundledProject()));
+            ProjectSnapshot baseline = loadProjectBaselineSnapshot();
+            ProjectSnapshot current = loadBundledProject();
+            changeSummary.setText(formatRawFileDiffs(baseline, current));
+            if (diagnosticBody != null) diagnosticBody.setVisibility(View.VISIBLE);
+            if (!sourcesByFile(baseline).equals(sourcesByFile(current))) {
+                recordOnboardingTrackedChangeStep(
+                        WorkshopOnboardingPolicy.Step.CHANGES_REVIEWED, current);
+            }
         } catch (IOException error) {
             changeSummary.setText("Raw file diffs:\n  Unable to read project baseline: " + error.getMessage());
         }
@@ -8922,7 +9849,8 @@ public final class MainActivity extends Activity {
         File readyFile = new File(baselineRoot, PROJECT_BASELINE_READY);
         String templateId = activeProject == null ? WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID
                 : activeProject.templateId;
-        String expectedReady = "format=3\ntemplate_id=" + templateId + "\n";
+        String expectedReady = "format=3\ntemplate_id=" + templateId
+                + "\nrenderer=gfx_cmd_v1\n";
         if (readyFile.isFile() && expectedReady.equals(readTextFile(readyFile))) return;
         ProjectSnapshot baseline = activeProject != null && "import".equals(activeProject.origin)
                 ? current : loadBundledAssetSnapshot();
@@ -9304,6 +10232,9 @@ public final class MainActivity extends Activity {
                 setStatusText("Revert unavailable: selected symbol is not in the project baseline");
                 return;
             }
+            boolean sourceChanged = !selectedSymbol.source.trim().equals(baseline.source.trim());
+            String revertedChangeId = selectedSymbol.identityKey();
+            String revertedChangeHash = onboardingSourceHash(selectedSymbol.source);
             persistSelectedEdit(selectedSymbol, baseline.source);
             clearPendingDraft();
             ProjectSnapshot refreshedProject = loadBundledProject();
@@ -9317,6 +10248,9 @@ public final class MainActivity extends Activity {
             lastCompileResult = compileResult;
             compileReady = isRunnableCompile(compileResult);
             compileAttempted = true;
+            if (compileReady && sourceChanged) {
+                recordOnboardingRevert(revertedChangeId, revertedChangeHash);
+            }
             setStatusText("Reverted saved symbol to project baseline - " + compileResult);
         } catch (IOException error) {
             setStatusText("Revert failed: " + error.getMessage());
@@ -9351,7 +10285,7 @@ public final class MainActivity extends Activity {
         return trimmed.substring("function ".length(), bodyStart).trim();
     }
 
-    private File projectRoot() {
+    File projectRoot() {
         return projectRootFile;
     }
 
@@ -9442,7 +10376,7 @@ public final class MainActivity extends Activity {
             out.add(new SourceFile(path, file, readTextFile(file)));
         }
     }
-    private String projectRootPath() {
+    String projectRootPath() {
         return projectRootPath;
     }
     private ProjectSnapshot loadBundledProject() {
@@ -9557,6 +10491,99 @@ public final class MainActivity extends Activity {
         return !after.equals(before);
     }
 
+    private boolean migrateBundledPongProductionRenderer() throws IOException {
+        if (activeProject == null || !"bundled-workshop".equals(activeProject.id)
+                || !"sample".equals(activeProject.origin)
+                || !WorkshopTemplateCatalog.LEGACY_TEMPLATE_ID.equals(activeProject.templateId)) {
+            return false;
+        }
+        SharedPreferences preferences = getSharedPreferences(SAMPLE_MIGRATION_PREFS, MODE_PRIVATE);
+        String key = activeProject.id + ":" + PONG_GFX_CMD_MIGRATION;
+        if (preferences.getBoolean(key, false)) return false;
+
+        File sourceFile = new File(projectRoot(), "src/main.stasis");
+        if (!sourceFile.isFile()) return false;
+        String before = readTextFile(sourceFile);
+        String after = before;
+        boolean sourceChanged = !WorkshopPongRendererMigration.isProductionSource(before);
+        if (sourceChanged) {
+            try {
+                after = WorkshopPongRendererMigration.migrateSource(before);
+            } catch (IllegalArgumentException error) {
+                throw new IOException("bundled Pong lifecycle could not be migrated safely", error);
+            }
+        }
+        File adapterFile = new File(projectRoot(), "src/preview_adapter.stasis");
+        boolean adapterExisted = adapterFile.isFile();
+        String previousAdapter = adapterExisted ? readTextFile(adapterFile) : "";
+        String packagedAdapter = readAsset(getAssets(),
+                "workshop_sample/src/preview_adapter.stasis");
+        boolean adapterChanged = !packagedAdapter.equals(previousAdapter);
+        File manifestFile = new File(projectRoot(), "assets/manifest.json");
+        boolean manifestExisted = manifestFile.isFile();
+        String previousManifest = manifestExisted ? readTextFile(manifestFile) : "";
+        String packagedManifest = readAsset(getAssets(),
+                "workshop_sample/assets/manifest.json");
+        String migratedManifest;
+        try {
+            migratedManifest = manifestExisted
+                    ? WorkshopPongAssetManifestMigration.mergeRequiredSprites(
+                            previousManifest, packagedManifest)
+                    : packagedManifest;
+        } catch (org.json.JSONException error) {
+            throw new IOException("bundled Pong asset manifest could not be migrated safely", error);
+        }
+        boolean manifestChanged = !migratedManifest.equals(previousManifest);
+        if (!sourceChanged && !adapterChanged && !manifestChanged) {
+            if (!preferences.edit().putBoolean(key, true).commit()) {
+                throw new IOException("unable to record bundled Pong renderer migration");
+            }
+            return false;
+        }
+
+        File backup = new File(projectRoot(),
+                "build/migrations/pong_gfx_cmd_v6/main.stasis");
+        File adapterBackup = new File(projectRoot(),
+                "build/migrations/pong_gfx_cmd_v6/preview_adapter.stasis");
+        File manifestBackup = new File(projectRoot(),
+                "build/migrations/pong_gfx_cmd_v6/manifest.json");
+        if (sourceChanged && !backup.isFile()) writeSyncedTextFile(backup, before);
+        if (adapterChanged && adapterExisted && !adapterBackup.isFile()) {
+            writeSyncedTextFile(adapterBackup, previousAdapter);
+        }
+        if (manifestChanged && manifestExisted && !manifestBackup.isFile()) {
+            writeSyncedTextFile(manifestBackup, previousManifest);
+        }
+        try {
+            if (sourceChanged) replaceTextFileAtomically(sourceFile, after);
+            if (adapterChanged) replaceTextFileAtomically(adapterFile, packagedAdapter);
+            if (manifestChanged) replaceTextFileAtomically(manifestFile, migratedManifest);
+            if (!preferences.edit().putBoolean(key, true).commit()) {
+                throw new IOException("unable to record bundled Pong renderer migration");
+            }
+        } catch (IOException error) {
+            try {
+                if (sourceChanged) replaceTextFileAtomically(sourceFile, before);
+                if (adapterChanged) {
+                    if (adapterExisted) replaceTextFileAtomically(adapterFile, previousAdapter);
+                    else if (!adapterFile.delete() && adapterFile.exists()) {
+                        throw new IOException("unable to remove migrated Pong renderer adapter");
+                    }
+                }
+                if (manifestChanged) {
+                    if (manifestExisted) replaceTextFileAtomically(manifestFile, previousManifest);
+                    else if (!manifestFile.delete() && manifestFile.exists()) {
+                        throw new IOException("unable to remove migrated Pong asset manifest");
+                    }
+                }
+            } catch (IOException rollback) {
+                error.addSuppressed(rollback);
+            }
+            throw error;
+        }
+        return true;
+    }
+
     private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile) throws IOException {
         if (diskFile.isFile()) {
             return;
@@ -9663,6 +10690,35 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void writeSyncedTextFile(File file, String source) throws IOException {
+        File parent = file.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+            throw new IOException("failed to create " + parent.getAbsolutePath());
+        }
+        FileOutputStream output = new FileOutputStream(file, false);
+        try {
+            output.write(source.getBytes(StandardCharsets.UTF_8));
+            output.getFD().sync();
+        } finally {
+            output.close();
+        }
+    }
+
+    private void replaceTextFileAtomically(File file, String source) throws IOException {
+        File temporary = new File(file.getParentFile(), file.getName() + ".gfx-cmd.tmp");
+        writeSyncedTextFile(temporary, source);
+        try {
+            try {
+                Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException unsupported) {
+                Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            if (temporary.exists()) temporary.delete();
+        }
+    }
+
     private String readAsset(AssetManager assets, String path) throws IOException {
         InputStream input = assets.open(path);
         try {
@@ -9692,6 +10748,34 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT);
     }
 
+    private WorkshopAdaptiveLayout.Profile adaptiveLayoutProfile() {
+        Configuration configuration = getResources().getConfiguration();
+        return WorkshopAdaptiveLayout.profile(configuration.screenWidthDp,
+                configuration.screenHeightDp, configuration.fontScale);
+    }
+
+    private static void configureActionRow(LinearLayout row,
+            WorkshopAdaptiveLayout.Profile layout) {
+        row.setOrientation(layout.stackActions ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+    }
+
+    private LinearLayout.LayoutParams actionWidth(WorkshopAdaptiveLayout.Profile layout) {
+        return layout.stackActions ? fullWidth() : weightedWidth();
+    }
+
+    private static void chainAccessibilityTraversal(View... views) {
+        View previous = null;
+        for (View view : views) {
+            if (view == null) continue;
+            if (view.getId() == View.NO_ID) view.setId(View.generateViewId());
+            if (previous != null) {
+                view.setAccessibilityTraversalAfter(previous.getId());
+                previous.setNextFocusForwardId(view.getId());
+            }
+            previous = view;
+        }
+    }
+
     private GradientDrawable createPanelBackground(int fill, int stroke) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(fill);
@@ -9700,8 +10784,47 @@ public final class MainActivity extends Activity {
         return drawable;
     }
 
+    private StateListDrawable createFocusableControlBackground() {
+        GradientDrawable focused = createPanelBackground(
+                WorkshopAccessibilityPolicy.DARK_CONTROL,
+                WorkshopAccessibilityPolicy.FOCUS_BORDER);
+        focused.setStroke(dp(3), WorkshopAccessibilityPolicy.FOCUS_BORDER);
+        GradientDrawable pressed = createPanelBackground(Color.rgb(38, 98, 217),
+                WorkshopAccessibilityPolicy.FOCUS_BORDER);
+        StateListDrawable background = new StateListDrawable();
+        background.addState(new int[] {android.R.attr.state_focused}, focused);
+        background.addState(new int[] {android.R.attr.state_pressed}, pressed);
+        background.addState(new int[] {}, createPanelBackground(
+                WorkshopAccessibilityPolicy.DARK_CONTROL,
+                WorkshopAccessibilityPolicy.DARK_CONTROL_BORDER));
+        return background;
+    }
+
+    private static void selectOnly(List<Button> choices, Button selected) {
+        for (Button choice : choices) choice.setSelected(choice == selected);
+    }
+
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private static final class RetainedPaintSession {
+        final Bitmap bitmap;
+        final String name;
+        final boolean suggestAiAttachment;
+        final int brushColor;
+        final float brushSize;
+        final boolean erasing;
+
+        RetainedPaintSession(Bitmap bitmap, String name, boolean suggestAiAttachment,
+                int brushColor, float brushSize, boolean erasing) {
+            this.bitmap = bitmap;
+            this.name = name;
+            this.suggestAiAttachment = suggestAiAttachment;
+            this.brushColor = brushColor;
+            this.brushSize = brushSize;
+            this.erasing = erasing;
+        }
     }
 
     private static final class AiApiResponse {
@@ -9849,6 +10972,35 @@ public final class MainActivity extends Activity {
             estimatedCostUsd += costUsd;
         }
 
+        JSONObject checkpointJson() throws Exception {
+            return new JSONObject().put("calls", new JSONArray(calls.toString()))
+                    .put("input_tokens", inputTokens).put("cached_input_tokens", cachedInputTokens)
+                    .put("cache_write_input_tokens", cacheWriteInputTokens)
+                    .put("output_tokens", outputTokens).put("estimated_cost_usd", estimatedCostUsd)
+                    .put("image_generation_cost_usd", imageGenerationCostUsd)
+                    .put("generated_image_count", generatedImageCount)
+                    .put("cost_available", costAvailable);
+        }
+
+        void restoreCheckpoint(JSONObject checkpoint) throws Exception {
+            if (checkpoint == null) return;
+            JSONArray restoredCalls = checkpoint.optJSONArray("calls");
+            if (restoredCalls == null || restoredCalls.length() > MAX_AI_AGENT_TURNS + 2) {
+                throw new IllegalArgumentException("AI usage checkpoint call list is invalid");
+            }
+            for (int index = 0; index < restoredCalls.length(); index += 1) {
+                calls.put(new JSONObject(restoredCalls.getJSONObject(index).toString()));
+            }
+            inputTokens = checkpoint.optLong("input_tokens", 0L);
+            cachedInputTokens = checkpoint.optLong("cached_input_tokens", 0L);
+            cacheWriteInputTokens = checkpoint.optLong("cache_write_input_tokens", 0L);
+            outputTokens = checkpoint.optLong("output_tokens", 0L);
+            estimatedCostUsd = checkpoint.optDouble("estimated_cost_usd", 0.0);
+            imageGenerationCostUsd = checkpoint.optDouble("image_generation_cost_usd", 0.0);
+            generatedImageCount = checkpoint.optInt("generated_image_count", 0);
+            costAvailable = checkpoint.optBoolean("cost_available", true);
+        }
+
         JSONObject toJson(String model) throws Exception {
             JSONObject json = new JSONObject();
             json.put("model", model);
@@ -9939,6 +11091,62 @@ public final class MainActivity extends Activity {
         void invalidateProject() {
             cachedProject = null;
         }
+
+        JSONObject checkpointJson() throws Exception {
+            JSONArray observations = new JSONArray();
+            for (String observation : observationMemory.snapshotNewestFirst()) observations.put(observation);
+            return new JSONObject().put("current_step", currentStep).put("action_count", actionCount)
+                    .put("successful_write_count", successfulWriteCount)
+                    .put("rolled_back_write_count", rolledBackWriteCount)
+                    .put("verification_repair_cycles", verificationRepairCycles)
+                    .put("failed_write_batch_count", failedWriteBatchCount)
+                    .put("verifier_call_count", verifierCallCount)
+                    .put("last_tool_summary", lastToolSummary).put("last_tool_error", lastToolError)
+                    .put("working_notes", workingNotes)
+                    .put("last_passing_test_keys", new JSONArray(lastPassingTestKeys))
+                    .put("latest_test_observation", latestTestObservation == null
+                            ? new JSONObject() : new JSONObject(latestTestObservation.toString()))
+                    .put("changed_symbols", new JSONArray(changedSymbols))
+                    .put("changed_test_files", new JSONArray(changedTestFiles))
+                    .put("observations", observations)
+                    .put("read_only_batches", toolLoopPolicy.consecutiveReadOnlyBatches());
+        }
+
+        void restoreCheckpoint(JSONObject checkpoint) throws Exception {
+            if (checkpoint == null) return;
+            currentStep = checkpoint.optInt("current_step", 0);
+            actionCount = checkpoint.optInt("action_count", 0);
+            successfulWriteCount = checkpoint.optInt("successful_write_count", 0);
+            rolledBackWriteCount = checkpoint.optInt("rolled_back_write_count", 0);
+            verificationRepairCycles = checkpoint.optInt("verification_repair_cycles", 0);
+            failedWriteBatchCount = checkpoint.optInt("failed_write_batch_count", 0);
+            verifierCallCount = checkpoint.optInt("verifier_call_count", 0);
+            lastToolSummary = checkpoint.optString("last_tool_summary", "none");
+            lastToolError = checkpoint.optString("last_tool_error", "");
+            workingNotes = WorkshopAiWorkingNotes.normalize(checkpoint.optString("working_notes", ""));
+            restoreStrings(checkpoint.optJSONArray("last_passing_test_keys"), lastPassingTestKeys);
+            JSONObject test = checkpoint.optJSONObject("latest_test_observation");
+            latestTestObservation = test == null ? new JSONObject() : new JSONObject(test.toString());
+            restoreStrings(checkpoint.optJSONArray("changed_symbols"), changedSymbols);
+            restoreStrings(checkpoint.optJSONArray("changed_test_files"), changedTestFiles);
+            JSONArray observations = checkpoint.optJSONArray("observations");
+            ArrayList<String> retained = new ArrayList<>();
+            if (observations != null) for (int index = 0; index < observations.length(); index += 1) {
+                retained.add(observations.getString(index));
+            }
+            observationMemory.restoreNewestFirst(retained);
+            toolLoopPolicy.restoreConsecutiveReadOnlyBatches(
+                    checkpoint.optInt("read_only_batches", 0));
+        }
+
+        private void restoreStrings(JSONArray values, TreeSet<String> target) throws Exception {
+            target.clear();
+            if (values == null || values.length() > 512) {
+                if (values == null) return;
+                throw new IllegalArgumentException("AI session checkpoint list is invalid");
+            }
+            for (int index = 0; index < values.length(); index += 1) target.add(values.getString(index));
+        }
     }
     private static final class ProjectSnapshot {
         final List<SourceFile> files;
@@ -9991,6 +11199,17 @@ public final class MainActivity extends Activity {
                             && symbol.owner.equals(owner) && symbol.name.equals(name)) {
                         return symbol;
                     }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static SymbolEntry findSymbolByIdentityKey(ProjectSnapshot project, String identityKey) {
+        for (SymbolSection section : project.sections) {
+            for (SymbolGroup group : section.groups) {
+                for (SymbolEntry symbol : group.symbols) {
+                    if (symbol.identityKey().equals(identityKey)) return symbol;
                 }
             }
         }
@@ -10310,20 +11529,25 @@ public final class MainActivity extends Activity {
 
     private static final class GamePreviewView extends GLSurfaceView {
         interface CaptureCallback {
-            void onCaptured(Bitmap bitmap, String error, int[] capturedFrame);
+            void onCaptured(Bitmap bitmap, String error,
+                    StasisPreviewRenderer.LogicalFrameSnapshot capturedFrame);
         }
 
         private final MainActivity activity;
-        private final PreviewRenderer renderer;
+        private final StasisPreviewRenderer renderer;
         private int touchX;
         private int touchY;
         private boolean touchActive;
+        private long lastNativeFrameDurationNanos;
+        private long lastRendererSyncWaitNanos;
 
         GamePreviewView(MainActivity activity) {
             super(activity);
             this.activity = activity;
             setEGLContextClientVersion(2);
-            renderer = new PreviewRenderer(activity);
+            renderer = new StasisPreviewRenderer(
+                    new WorkshopTextureProvider(activity),
+                    activity::recordRenderTimeNanos);
             setRenderer(renderer);
             setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
             setFocusable(true);
@@ -10341,14 +11565,38 @@ public final class MainActivity extends Activity {
             return touchActive ? 1 : 0;
         }
 
-        void setRenderFrameValues(int[] frameValues) {
-            renderer.setFrameValues(frameValues);
-            requestRender();
+        int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
+                int screenWidth, int screenHeight, int[] header) {
+            int status;
+            long requested = System.nanoTime();
+            synchronized (renderer) {
+                long started = System.nanoTime();
+                lastRendererSyncWaitNanos = started - requested;
+                status = nativeRunFrameInto(projectRoot, inputX, inputY, inputActive,
+                        screenWidth, screenHeight, renderer.frameI32Bytes(),
+                        renderer.frameF32Bytes(), renderer.frameU8Bytes());
+                lastNativeFrameDurationNanos = System.nanoTime() - started;
+                renderer.copyFrameHeaderInto(header);
+            }
+            if (status == 0) requestRender();
+            return status;
+        }
+
+        long lastNativeFrameDurationNanos() {
+            return lastNativeFrameDurationNanos;
+        }
+
+        long lastRendererSyncWaitNanos() {
+            return lastRendererSyncWaitNanos;
         }
 
         void captureFrame(CaptureCallback callback) {
-            renderer.requestCapture(callback);
+            renderer.requestCapture(callback::onCaptured);
             requestRender();
+        }
+
+        StasisPreviewRenderer.LogicalFrameSnapshot logicalFrameSnapshot() {
+            return renderer.captureLogicalFrame();
         }
 
         @Override
@@ -10356,505 +11604,12 @@ public final class MainActivity extends Activity {
             touchX = Math.round(event.getX());
             touchY = Math.round(event.getY());
             int action = event.getActionMasked();
-            if (BuildConfig.STASIS_PUBLISHED_BUILD && action == MotionEvent.ACTION_POINTER_DOWN && event.getPointerCount() >= 3) {
+            if (BuildConfig.STASIS_PUBLISHED_BUILD && action == MotionEvent.ACTION_POINTER_DOWN
+                    && event.getPointerCount() >= 3) {
                 activity.toggleBenchmarkHudFromPreview();
             }
             touchActive = action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL;
             return true;
-        }
-    }
-
-    private static final class PreviewRenderer implements GLSurfaceView.Renderer {
-        private static final String VERTEX_SHADER =
-                "attribute vec2 aPosition;" +
-                "attribute vec4 aColor;" +
-                "uniform vec2 uResolution;" +
-                "varying vec4 vColor;" +
-                "void main() {" +
-                "  vec2 zeroToOne = aPosition / uResolution;" +
-                "  vec2 clip = zeroToOne * 2.0 - 1.0;" +
-                "  vColor = aColor;" +
-                "  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);" +
-                "}";
-        private static final String FRAGMENT_SHADER =
-                "precision mediump float;" +
-                "varying vec4 vColor;" +
-                "void main() {" +
-                "  gl_FragColor = vColor;" +
-                "}";
-        private static final String TEXTURE_VERTEX_SHADER =
-                "attribute vec2 aPosition;" +
-                "attribute vec2 aTexCoord;" +
-                "attribute vec4 aColor;" +
-                "uniform vec2 uResolution;" +
-                "varying vec2 vTexCoord;" +
-                "varying vec4 vColor;" +
-                "void main() {" +
-                "  vec2 zeroToOne = aPosition / uResolution;" +
-                "  vec2 clip = zeroToOne * 2.0 - 1.0;" +
-                "  vTexCoord = aTexCoord;" +
-                "  vColor = aColor;" +
-                "  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);" +
-                "}";
-        private static final String TEXTURE_FRAGMENT_SHADER =
-                "precision mediump float;" +
-                "uniform sampler2D uTexture;" +
-                "varying vec2 vTexCoord;" +
-                "varying vec4 vColor;" +
-                "void main() {" +
-                "  gl_FragColor = texture2D(uTexture, vTexCoord) * vColor;" +
-                "}";
-
-        private final MainActivity activity;
-        private final FloatBuffer vertexBuffer = ByteBuffer
-                .allocateDirect(RENDER_VERTEX_BUFFER_FLOATS * 4)
-                .order(ByteOrder.nativeOrder())
-                .asFloatBuffer();
-        private final FloatBuffer spriteVertexBuffer = ByteBuffer
-                .allocateDirect(SPRITE_VERTEX_BUFFER_FLOATS * 4)
-                .order(ByteOrder.nativeOrder())
-                .asFloatBuffer();
-        private final int[] frameValues = new int[RENDER_FRAME_I32_CAPACITY];
-        private final int[] lastDrawnFrame = new int[RENDER_FRAME_I32_CAPACITY];
-        private int program;
-        private int positionHandle;
-        private int resolutionHandle;
-        private int colorHandle;
-        private int textureProgram;
-        private int texturePositionHandle;
-        private int textureCoordHandle;
-        private int textureColorHandle;
-        private int textureResolutionHandle;
-        private int textureSamplerHandle;
-        private final Map<Integer, SpriteTexture> spriteTextures = new LinkedHashMap<>();
-        private int fallbackTexture;
-        private long manifestStamp = Long.MIN_VALUE;
-        private int surfaceWidth = 1;
-        private int surfaceHeight = 1;
-        private GamePreviewView.CaptureCallback pendingCapture;
-
-        PreviewRenderer(MainActivity activity) {
-            this.activity = activity;
-        }
-
-        synchronized void setFrameValues(int[] values) {
-            System.arraycopy(values, 0, frameValues, 0, RENDER_FRAME_I32_CAPACITY);
-        }
-
-        synchronized void requestCapture(GamePreviewView.CaptureCallback callback) {
-            if (pendingCapture != null) {
-                pendingCapture.onCaptured(null, "a newer preview capture replaced this request", new int[0]);
-            }
-            pendingCapture = callback;
-        }
-
-        @Override
-        public void onSurfaceCreated(javax.microedition.khronos.opengles.GL10 gl, javax.microedition.khronos.egl.EGLConfig config) {
-            spriteTextures.clear();
-            manifestStamp = Long.MIN_VALUE;
-            program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER);
-            positionHandle = GLES20.glGetAttribLocation(program, "aPosition");
-            resolutionHandle = GLES20.glGetUniformLocation(program, "uResolution");
-            colorHandle = GLES20.glGetAttribLocation(program, "aColor");
-            textureProgram = createProgram(TEXTURE_VERTEX_SHADER, TEXTURE_FRAGMENT_SHADER);
-            texturePositionHandle = GLES20.glGetAttribLocation(textureProgram, "aPosition");
-            textureCoordHandle = GLES20.glGetAttribLocation(textureProgram, "aTexCoord");
-            textureColorHandle = GLES20.glGetAttribLocation(textureProgram, "aColor");
-            textureResolutionHandle = GLES20.glGetUniformLocation(textureProgram, "uResolution");
-            textureSamplerHandle = GLES20.glGetUniformLocation(textureProgram, "uTexture");
-            fallbackTexture = createFallbackTexture();
-            GLES20.glEnable(GLES20.GL_BLEND);
-            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-            GLES20.glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
-        }
-
-        @Override
-        public void onSurfaceChanged(javax.microedition.khronos.opengles.GL10 gl, int width, int height) {
-            surfaceWidth = Math.max(1, width);
-            surfaceHeight = Math.max(1, height);
-            GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
-        }
-
-        @Override
-        public void onDrawFrame(javax.microedition.khronos.opengles.GL10 gl) {
-            long renderStartNanos = System.nanoTime();
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-            synchronized (this) {
-                System.arraycopy(frameValues, 0, lastDrawnFrame, 0, lastDrawnFrame.length);
-                int commandCount = Math.max(0, Math.min(MAX_RENDER_COMMANDS, frameValues[5]));
-                int index = 0;
-                while (index < commandCount) {
-                    int base = RENDER_FRAME_HEADER_SIZE + index * RENDER_COMMAND_STRIDE;
-                    int kind = frameValues[base];
-                    if (kind == 1) {
-                        vertexBuffer.clear();
-                        int runEnd = index;
-                        while (runEnd < commandCount) {
-                            int runBase = RENDER_FRAME_HEADER_SIZE + runEnd * RENDER_COMMAND_STRIDE;
-                            if (frameValues[runBase] != 1 || !sameClip(base, runBase)) break;
-                            appendRect(runBase);
-                            runEnd += 1;
-                        }
-                        vertexBuffer.flip();
-                        applyClip(base);
-                        drawBatch((runEnd - index) * RECT_VERTICES);
-                        index = runEnd;
-                    } else if (kind == 2) {
-                        int texture = spriteTexture(frameValues[base + 6]);
-                        spriteVertexBuffer.clear();
-                        int runEnd = index;
-                        while (runEnd < commandCount) {
-                            int runBase = RENDER_FRAME_HEADER_SIZE + runEnd * RENDER_COMMAND_STRIDE;
-                            if (frameValues[runBase] != 2 || !sameClip(base, runBase)) break;
-                            int runTexture = spriteTexture(frameValues[runBase + 6]);
-                            if (runTexture != texture) break;
-                            appendSprite(runBase);
-                            runEnd += 1;
-                        }
-                        spriteVertexBuffer.flip();
-                        applyClip(base);
-                        drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture);
-                        index = runEnd;
-                    } else {
-                        index += 1;
-                    }
-                }
-                GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
-            }
-            captureRenderedPixelsIfRequested();
-            activity.recordRenderTimeNanos(System.nanoTime() - renderStartNanos);
-        }
-
-        private void captureRenderedPixelsIfRequested() {
-            GamePreviewView.CaptureCallback callback;
-            synchronized (this) {
-                callback = pendingCapture;
-                pendingCapture = null;
-            }
-            if (callback == null) return;
-            int[] capturedFrame = new int[RENDER_FRAME_I32_CAPACITY];
-            synchronized (this) {
-                System.arraycopy(lastDrawnFrame, 0, capturedFrame, 0, capturedFrame.length);
-            }
-            try {
-                long pixelCount = (long)surfaceWidth * (long)surfaceHeight;
-                if (pixelCount > MAX_PREVIEW_CAPTURE_PIXELS) {
-                    callback.onCaptured(null, "preview framebuffer exceeds the 8 megapixel capture limit", capturedFrame);
-                    return;
-                }
-                IntBuffer pixels = ByteBuffer.allocateDirect(surfaceWidth * surfaceHeight * 4)
-                        .order(ByteOrder.nativeOrder()).asIntBuffer();
-                GLES20.glReadPixels(0, 0, surfaceWidth, surfaceHeight, GLES20.GL_RGBA,
-                        GLES20.GL_UNSIGNED_BYTE, pixels);
-                int[] flipped = new int[surfaceWidth * surfaceHeight];
-                for (int y = 0; y < surfaceHeight; y++) {
-                    int sourceRow = y * surfaceWidth;
-                    int targetRow = (surfaceHeight - y - 1) * surfaceWidth;
-                    for (int x = 0; x < surfaceWidth; x++) {
-                        int rgba = pixels.get(sourceRow + x);
-                        int redBlueSwapped = (rgba & 0xff00ff00)
-                                | ((rgba << 16) & 0x00ff0000) | ((rgba >> 16) & 0x000000ff);
-                        flipped[targetRow + x] = redBlueSwapped;
-                    }
-                }
-                Bitmap full = Bitmap.createBitmap(flipped, surfaceWidth, surfaceHeight, Bitmap.Config.ARGB_8888);
-                int largest = Math.max(surfaceWidth, surfaceHeight);
-                if (largest <= 1024) {
-                    callback.onCaptured(full, "", capturedFrame);
-                    return;
-                }
-                float scale = 1024.0f / largest;
-                Bitmap bounded = Bitmap.createScaledBitmap(full, Math.max(1, Math.round(surfaceWidth * scale)),
-                        Math.max(1, Math.round(surfaceHeight * scale)), true);
-                full.recycle();
-                callback.onCaptured(bounded, "", capturedFrame);
-            } catch (OutOfMemoryError error) {
-                callback.onCaptured(null, "not enough memory for bounded pixel capture", capturedFrame);
-            } catch (RuntimeException error) {
-                callback.onCaptured(null, error.getMessage(), capturedFrame);
-            }
-        }
-
-        private void appendRect(int base) {
-            int color = frameValues[base + 5];
-            float red = ((color >> 16) & 255) / 255.0f;
-            float green = ((color >> 8) & 255) / 255.0f;
-            float blue = (color & 255) / 255.0f;
-            float alpha = Math.max(0, Math.min(255, frameValues[base + 8])) / 255.0f;
-            float left = frameValues[base + 1];
-            float top = frameValues[base + 2];
-            float right = frameValues[base + 1] + frameValues[base + 3];
-            float bottom = frameValues[base + 2] + frameValues[base + 4];
-            float centerX = (left + right) * 0.5f;
-            float centerY = (top + bottom) * 0.5f;
-            double radians = Math.toRadians(frameValues[base + 7] % 360);
-            float cosine = (float)Math.cos(radians);
-            float sine = (float)Math.sin(radians);
-            putVertex(left, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
-            putVertex(right, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
-            putVertex(left, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
-            putVertex(right, top, centerX, centerY, cosine, sine, red, green, blue, alpha);
-            putVertex(right, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
-            putVertex(left, bottom, centerX, centerY, cosine, sine, red, green, blue, alpha);
-        }
-
-        private boolean sameClip(int leftBase, int rightBase) {
-            return frameValues[leftBase + 9] == frameValues[rightBase + 9]
-                    && frameValues[leftBase + 10] == frameValues[rightBase + 10]
-                    && frameValues[leftBase + 11] == frameValues[rightBase + 11]
-                    && frameValues[leftBase + 12] == frameValues[rightBase + 12];
-        }
-
-        private void applyClip(int base) {
-            int width = frameValues[base + 11];
-            int height = frameValues[base + 12];
-            if (width <= 0 || height <= 0) {
-                GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
-                return;
-            }
-            long sourceRight = (long)frameValues[base + 9] + width;
-            long sourceBottom = (long)frameValues[base + 10] + height;
-            int left = Math.max(0, Math.min(surfaceWidth, frameValues[base + 9]));
-            int top = Math.max(0, Math.min(surfaceHeight, frameValues[base + 10]));
-            int right = Math.max(left, (int)Math.max(0L, Math.min((long)surfaceWidth, sourceRight)));
-            int bottom = Math.max(top, (int)Math.max(0L, Math.min((long)surfaceHeight, sourceBottom)));
-            GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
-            GLES20.glScissor(left, surfaceHeight - bottom, right - left, bottom - top);
-        }
-
-        private void putVertex(float x, float y, float centerX, float centerY,
-                float cosine, float sine, float red, float green, float blue, float alpha) {
-            float offsetX = x - centerX;
-            float offsetY = y - centerY;
-            float rotatedX = centerX + offsetX * cosine - offsetY * sine;
-            float rotatedY = centerY + offsetX * sine + offsetY * cosine;
-            vertexBuffer.put(rotatedX).put(rotatedY).put(red).put(green).put(blue).put(alpha);
-        }
-
-        private void appendSprite(int base) {
-            int color = frameValues[base + 5];
-            float red = ((color >> 16) & 255) / 255.0f;
-            float green = ((color >> 8) & 255) / 255.0f;
-            float blue = (color & 255) / 255.0f;
-            float alpha = Math.max(0, Math.min(255, frameValues[base + 8])) / 255.0f;
-            float left = frameValues[base + 1];
-            float top = frameValues[base + 2];
-            float right = frameValues[base + 1] + frameValues[base + 3];
-            float bottom = frameValues[base + 2] + frameValues[base + 4];
-            float centerX = (left + right) * 0.5f;
-            float centerY = (top + bottom) * 0.5f;
-            double radians = Math.toRadians(frameValues[base + 7] % 360);
-            float cosine = (float)Math.cos(radians);
-            float sine = (float)Math.sin(radians);
-            putRotatedSpriteVertex(left, top, centerX, centerY, cosine, sine, 0.0f, 0.0f, red, green, blue, alpha);
-            putRotatedSpriteVertex(right, top, centerX, centerY, cosine, sine, 1.0f, 0.0f, red, green, blue, alpha);
-            putRotatedSpriteVertex(left, bottom, centerX, centerY, cosine, sine, 0.0f, 1.0f, red, green, blue, alpha);
-            putRotatedSpriteVertex(right, top, centerX, centerY, cosine, sine, 1.0f, 0.0f, red, green, blue, alpha);
-            putRotatedSpriteVertex(right, bottom, centerX, centerY, cosine, sine, 1.0f, 1.0f, red, green, blue, alpha);
-            putRotatedSpriteVertex(left, bottom, centerX, centerY, cosine, sine, 0.0f, 1.0f, red, green, blue, alpha);
-        }
-
-        private void putRotatedSpriteVertex(float x, float y, float centerX, float centerY,
-                float cosine, float sine, float u, float v, float red, float green, float blue,
-                float alpha) {
-            float offsetX = x - centerX;
-            float offsetY = y - centerY;
-            float rotatedX = centerX + offsetX * cosine - offsetY * sine;
-            float rotatedY = centerY + offsetX * sine + offsetY * cosine;
-            spriteVertexBuffer.put(rotatedX).put(rotatedY).put(u).put(v)
-                    .put(red).put(green).put(blue).put(alpha);
-        }
-        private void drawBatch(int vertexCount) {
-            GLES20.glUseProgram(program);
-            GLES20.glUniform2f(resolutionHandle, (float)surfaceWidth, (float)surfaceHeight);
-            GLES20.glEnableVertexAttribArray(positionHandle);
-            GLES20.glEnableVertexAttribArray(colorHandle);
-            vertexBuffer.position(0);
-            GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, RENDER_VERTEX_BYTES, vertexBuffer);
-            vertexBuffer.position(2);
-            GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, RENDER_VERTEX_BYTES, vertexBuffer);
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
-            vertexBuffer.position(0);
-            GLES20.glDisableVertexAttribArray(colorHandle);
-            GLES20.glDisableVertexAttribArray(positionHandle);
-        }
-
-        private void drawSpriteBatch(int vertexCount, int texture) {
-            GLES20.glUseProgram(textureProgram);
-            GLES20.glUniform2f(textureResolutionHandle, (float)surfaceWidth, (float)surfaceHeight);
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
-            GLES20.glUniform1i(textureSamplerHandle, 0);
-            GLES20.glEnableVertexAttribArray(texturePositionHandle);
-            GLES20.glEnableVertexAttribArray(textureCoordHandle);
-            GLES20.glEnableVertexAttribArray(textureColorHandle);
-            spriteVertexBuffer.position(0);
-            GLES20.glVertexAttribPointer(texturePositionHandle, 2, GLES20.GL_FLOAT, false, SPRITE_VERTEX_BYTES, spriteVertexBuffer);
-            spriteVertexBuffer.position(2);
-            GLES20.glVertexAttribPointer(textureCoordHandle, 2, GLES20.GL_FLOAT, false, SPRITE_VERTEX_BYTES, spriteVertexBuffer);
-            spriteVertexBuffer.position(4);
-            GLES20.glVertexAttribPointer(textureColorHandle, 4, GLES20.GL_FLOAT, false, SPRITE_VERTEX_BYTES, spriteVertexBuffer);
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
-            spriteVertexBuffer.position(0);
-            GLES20.glDisableVertexAttribArray(textureColorHandle);
-            GLES20.glDisableVertexAttribArray(textureCoordHandle);
-            GLES20.glDisableVertexAttribArray(texturePositionHandle);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        }
-
-        private int spriteTexture(int handle) {
-            File manifest = new File(activity.projectRoot(), WorkshopAssetManifest.RELATIVE_PATH);
-            long currentStamp = manifest.isFile()
-                    ? manifest.lastModified() ^ (manifest.length() << 7) : 0L;
-            if (currentStamp != manifestStamp) manifestStamp = currentStamp;
-            SpriteTexture cached = spriteTextures.get(handle);
-            if (cached != null && cached.checkedManifestStamp == manifestStamp) return cached.texture;
-            try {
-                JSONObject resolved = new JSONObject(nativeResolveSpriteAsset(
-                        activity.projectRootPath(), handle));
-                if (!"ok".equals(resolved.optString("status"))) {
-                    throw new IOException(resolved.optString("error", "sprite resolution failed"));
-                }
-                String hash = resolved.getString("content_sha256");
-                if (cached != null && hash.equals(cached.contentHash)) {
-                    cached.checkedManifestStamp = manifestStamp;
-                    return cached.texture;
-                }
-                String encoding = resolved.getString("encoding");
-                int width = resolved.getInt("width");
-                int height = resolved.getInt("height");
-                long pixels = (long)width * (long)height;
-                if (width <= 0 || height <= 0 || width > 16384 || height > 16384
-                        || pixels > 16_000_000L) {
-                    throw new IOException("sprite dimensions exceed Android decode limits");
-                }
-                File file = new File(resolved.getString("path"));
-                if (!file.isFile() || file.length() > 64L * 1024L * 1024L) {
-                    throw new IOException("sprite file exceeds Android decode limits");
-                }
-                Bitmap bitmap;
-                if ("svg".equals(encoding)) {
-                    int[] argb = nativeDecodeSvgSprite(file.getAbsolutePath(), width, height);
-                    if (argb == null || argb.length != width * height) {
-                        throw new IOException("Android could not decode the SVG sprite");
-                    }
-                    bitmap = Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_8888);
-                } else if ("png".equals(encoding) || "jpeg".equals(encoding)
-                        || "webp".equals(encoding)) {
-                    android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
-                    bounds.inJustDecodeBounds = true;
-                    android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
-                    if (bounds.outWidth != width || bounds.outHeight != height) {
-                        throw new IOException("decoded sprite dimensions do not match the manifest");
-                    }
-                    android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
-                    options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-                    options.inScaled = false;
-                    bitmap = android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath(), options);
-                    if (bitmap == null) throw new IOException("Android could not decode the sprite");
-                } else {
-                    throw new IOException("unsupported Android sprite encoding " + encoding);
-                }
-                int uploaded;
-                try {
-                    uploaded = uploadBitmapTexture(bitmap);
-                } finally {
-                    bitmap.recycle();
-                }
-                SpriteTexture replacement = new SpriteTexture(uploaded, hash, manifestStamp);
-                spriteTextures.put(handle, replacement);
-                if (cached != null) GLES20.glDeleteTextures(1, new int[]{cached.texture}, 0);
-                return uploaded;
-            } catch (Exception error) {
-                if (cached != null) {
-                    cached.checkedManifestStamp = manifestStamp;
-                    return cached.texture;
-                }
-                return fallbackTexture;
-            }
-        }
-
-        private static int uploadBitmapTexture(Bitmap bitmap) throws IOException {
-            int[] textures = new int[1];
-            GLES20.glGenTextures(1, textures, 0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0]);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-            while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
-            android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0);
-            int error = GLES20.glGetError();
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-            if (error != GLES20.GL_NO_ERROR) {
-                GLES20.glDeleteTextures(1, textures, 0);
-                throw new IOException("Android texture upload failed with GL error " + error);
-            }
-            return textures[0];
-        }
-
-        private static int createFallbackTexture() {
-            ByteBuffer pixels = ByteBuffer.allocateDirect(16);
-            pixels.put(new byte[]{
-                    (byte)255, 0, (byte)255, (byte)255,
-                    35, 35, 35, (byte)255,
-                    35, 35, 35, (byte)255,
-                    (byte)255, 0, (byte)255, (byte)255});
-            pixels.flip();
-            int[] textures = new int[1];
-            GLES20.glGenTextures(1, textures, 0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0]);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 2, 2, 0,
-                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-            return textures[0];
-        }
-
-        private static final class SpriteTexture {
-            final int texture;
-            final String contentHash;
-            long checkedManifestStamp;
-
-            SpriteTexture(int texture, String contentHash, long checkedManifestStamp) {
-                this.texture = texture;
-                this.contentHash = contentHash;
-                this.checkedManifestStamp = checkedManifestStamp;
-            }
-        }
-
-        private static int createProgram(String vertexSource, String fragmentSource) {
-            int vertexShader = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource);
-            int fragmentShader = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource);
-            int program = GLES20.glCreateProgram();
-            GLES20.glAttachShader(program, vertexShader);
-            GLES20.glAttachShader(program, fragmentShader);
-            GLES20.glLinkProgram(program);
-            int[] linked = new int[1];
-            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0);
-            if (linked[0] == 0) {
-                String log = GLES20.glGetProgramInfoLog(program);
-                GLES20.glDeleteProgram(program);
-                throw new IllegalStateException("OpenGL program link failed: " + log);
-            }
-            return program;
-        }
-
-        private static int compileShader(int type, String source) {
-            int shader = GLES20.glCreateShader(type);
-            GLES20.glShaderSource(shader, source);
-            GLES20.glCompileShader(shader);
-            int[] compiled = new int[1];
-            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0);
-            if (compiled[0] == 0) {
-                String log = GLES20.glGetShaderInfoLog(shader);
-                GLES20.glDeleteShader(shader);
-                throw new IllegalStateException("OpenGL shader compile failed: " + log);
-            }
-            return shader;
         }
     }
 
@@ -10869,6 +11624,7 @@ public final class MainActivity extends Activity {
         private static final int CAPACITY = 600;
         private final long[] timestamps = new long[CAPACITY];
         private final long[] durations = new long[CAPACITY];
+        private final long[] orderedDurations = new long[CAPACITY];
         private int next;
         private int count;
 
@@ -10895,6 +11651,20 @@ public final class MainActivity extends Activity {
                 return 0.0;
             }
             return total / (samples * 1_000_000.0);
+        }
+
+        double percentileMillis(int percentile) {
+            long now = System.nanoTime();
+            int samples = 0;
+            for (int index = 0; index < count; index += 1) {
+                if (now - timestamps[index] <= WINDOW_NANOS) {
+                    orderedDurations[samples++] = durations[index];
+                }
+            }
+            if (samples == 0) return 0.0;
+            Arrays.sort(orderedDurations, 0, samples);
+            int rank = Math.min(samples - 1, (samples * percentile + 99) / 100 - 1);
+            return orderedDurations[Math.max(0, rank)] / 1_000_000.0;
         }
     }
 

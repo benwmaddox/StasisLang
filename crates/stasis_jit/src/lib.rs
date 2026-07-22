@@ -51,6 +51,7 @@ impl Default for AotCompileConfig {
 pub enum AotTarget {
     Native,
     AndroidArm64 { min_sdk: u32 },
+    IosArm64,
 }
 
 impl AotTarget {
@@ -58,10 +59,15 @@ impl AotTarget {
         Self::AndroidArm64 { min_sdk: 26 }
     }
 
+    pub fn ios_arm64_default() -> Self {
+        Self::IosArm64
+    }
+
     pub fn object_triple(&self) -> Option<&'static str> {
         match self {
             Self::Native => None,
             Self::AndroidArm64 { .. } => Some("aarch64-linux-android"),
+            Self::IosArm64 => Some("aarch64-apple-ios"),
         }
     }
 
@@ -69,6 +75,7 @@ impl AotTarget {
         match self {
             Self::Native => None,
             Self::AndroidArm64 { min_sdk } => Some(format!("aarch64-linux-android{min_sdk}")),
+            Self::IosArm64 => Some("aarch64-apple-ios".to_string()),
         }
     }
 
@@ -264,6 +271,7 @@ pub fn link_objects_to_dynamic_library(
     if uses_msvc_linker_syntax(config) {
         args.push("/NOLOGO".to_string());
         args.push("/DLL".to_string());
+        args.push("/NOENTRY".to_string());
         args.push(format!("/OUT:{}", output_library.display()));
         for symbol in export_symbols {
             args.push(format!("/EXPORT:{symbol}"));
@@ -272,30 +280,6 @@ pub fn link_objects_to_dynamic_library(
         for lib_path in &windows_lib_paths {
             args.push(format!("/LIBPATH:{}", lib_path.display()));
         }
-        if let Some(kernel32) = resolve_kernel32_lib_path(&windows_lib_paths) {
-            args.push(kernel32.display().to_string());
-        } else {
-            args.push("kernel32.lib".to_string());
-        }
-        // When linking against Rust `staticlib` runtime shims (e.g. `stasis_dynload.lib`),
-        // lld-link does not automatically pull in the CRT/system libraries that those objects
-        // depend on. Add the common MSVC + Windows SDK libraries so AOT bundles link cleanly.
-        args.push("ucrt.lib".to_string());
-        args.push("vcruntime.lib".to_string());
-        args.push("msvcrt.lib".to_string());
-        args.push("legacy_stdio_definitions.lib".to_string());
-        args.push("advapi32.lib".to_string());
-        args.push("bcrypt.lib".to_string());
-        args.push("dbghelp.lib".to_string());
-        args.push("ntdll.lib".to_string());
-        args.push("ole32.lib".to_string());
-        args.push("oleaut32.lib".to_string());
-        args.push("psapi.lib".to_string());
-        args.push("secur32.lib".to_string());
-        args.push("shell32.lib".to_string());
-        args.push("user32.lib".to_string());
-        args.push("userenv.lib".to_string());
-        args.push("ws2_32.lib".to_string());
     } else {
         args.push("-shared".to_string());
         args.push("-o".to_string());
@@ -350,6 +334,7 @@ pub fn link_objects_to_executable(
 
     let linker = resolve_linker_path(config);
     let mut args: Vec<String> = Vec::new();
+    let mut launcher_source = None;
     if uses_msvc_linker_syntax(config) {
         args.push("/NOLOGO".to_string());
         args.push(format!("/OUT:{}", output_executable.display()));
@@ -359,11 +344,22 @@ pub fn link_objects_to_executable(
         for lib_path in &windows_lib_paths {
             args.push(format!("/LIBPATH:{}", lib_path.display()));
         }
-        if let Some(kernel32) = resolve_kernel32_lib_path(&windows_lib_paths) {
-            args.push(kernel32.display().to_string());
-        } else {
-            args.push("kernel32.lib".to_string());
-        }
+    } else if matches!(config.target, AotTarget::Native) {
+        let source_path = output_executable.with_extension("entry.c");
+        fs::write(
+            &source_path,
+            native_unix_executable_launcher_source(entry_symbol)?,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to write native executable launcher {}: {error}",
+                source_path.display()
+            )
+        })?;
+        args.push("-o".to_string());
+        args.push(output_executable.display().to_string());
+        args.push(source_path.display().to_string());
+        launcher_source = Some(source_path);
     } else {
         args.push("-o".to_string());
         args.push(output_executable.display().to_string());
@@ -378,13 +374,20 @@ pub fn link_objects_to_executable(
     for runtime_lib in &config.runtime_lib_paths {
         args.push(runtime_lib.display().to_string());
     }
+    if matches!(config.target, AotTarget::Native) && !cfg!(windows) {
+        args.push("-lm".to_string());
+    }
 
-    run_link_command_with_args(
+    let link_result = run_link_command_with_args(
         &linker,
         &args,
         "executable link",
         &output_executable.with_extension("link.rsp"),
-    )?;
+    );
+    if let Some(source_path) = launcher_source {
+        let _ = fs::remove_file(source_path);
+    }
+    link_result?;
     if !output_executable.exists() {
         return Err(format!(
             "link step reported success but did not produce {}",
@@ -392,6 +395,19 @@ pub fn link_objects_to_executable(
         ));
     }
     Ok(())
+}
+
+fn native_unix_executable_launcher_source(entry_symbol: &str) -> Result<String, String> {
+    if !entry_symbol.bytes().enumerate().all(|(index, byte)| {
+        byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+    }) {
+        return Err(format!(
+            "native executable entry symbol is not a C identifier: {entry_symbol}"
+        ));
+    }
+    Ok(format!(
+        "#include <stdint.h>\nextern int32_t {entry_symbol}(void);\nint main(void) {{ return (int){entry_symbol}(); }}\n"
+    ))
 }
 
 fn resolve_linker_path(config: &AotLinkConfig) -> PathBuf {
@@ -413,104 +429,12 @@ fn uses_msvc_linker_syntax(config: &AotLinkConfig) -> bool {
 
 #[cfg(windows)]
 fn resolve_windows_link_lib_paths() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-
-    if let Ok(lib_env) = std::env::var("LIB") {
-        for raw in lib_env.split(';') {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let path = PathBuf::from(trimmed);
-            if path.exists() && !out.contains(&path) {
-                out.push(path);
-            }
-        }
-    }
-
-    if let Ok(vc_tools) = std::env::var("VCToolsInstallDir") {
-        let vc_lib = PathBuf::from(vc_tools).join("lib").join("x64");
-        if vc_lib.exists() && !out.contains(&vc_lib) {
-            out.push(vc_lib);
-        }
-    }
-
-    let msvc_roots = [
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
-        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
-    ];
-    for root in msvc_roots {
-        if let Some(version_dir) = latest_child_dir(Path::new(root)) {
-            let vc_lib = version_dir.join("lib").join("x64");
-            if vc_lib.exists() && !out.contains(&vc_lib) {
-                out.push(vc_lib);
-            }
-        }
-    }
-
-    let windows_kits_roots = [
-        r"C:\Program Files (x86)\Windows Kits\10\Lib",
-        r"C:\Program Files\Windows Kits\10\Lib",
-    ];
-    for root in windows_kits_roots {
-        if let Some(version_dir) = latest_child_dir(Path::new(root)) {
-            let um = version_dir.join("um").join("x64");
-            if um.exists() && !out.contains(&um) {
-                out.push(um);
-            }
-            let ucrt = version_dir.join("ucrt").join("x64");
-            if ucrt.exists() && !out.contains(&ucrt) {
-                out.push(ucrt);
-            }
-        }
-    }
-
-    out
+    Vec::new()
 }
 
 #[cfg(not(windows))]
 fn resolve_windows_link_lib_paths() -> Vec<PathBuf> {
     Vec::new()
-}
-
-#[cfg(windows)]
-fn resolve_kernel32_lib_path(lib_paths: &[PathBuf]) -> Option<PathBuf> {
-    for lib_path in lib_paths {
-        let candidate = lib_path.join("kernel32.lib");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-#[cfg(not(windows))]
-fn resolve_kernel32_lib_path(_lib_paths: &[PathBuf]) -> Option<PathBuf> {
-    None
-}
-
-#[cfg(windows)]
-fn latest_child_dir(root: &Path) -> Option<PathBuf> {
-    let entries = fs::read_dir(root).ok()?;
-    let mut dirs: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| entry.path())
-        .collect();
-    dirs.sort_by(|a, b| {
-        let an = a
-            .file_name()
-            .map(|value| value.to_string_lossy())
-            .unwrap_or_default();
-        let bn = b
-            .file_name()
-            .map(|value| value.to_string_lossy())
-            .unwrap_or_default();
-        bn.cmp(&an)
-    });
-    dirs.into_iter().next()
 }
 
 fn run_link_command(command: &mut Command, mode: &str, linker: &Path) -> Result<(), String> {
@@ -582,6 +506,21 @@ mod tests {
                 .map(|id| FunctionPatch { fn_id: FnId(id) })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn native_unix_launcher_calls_the_requested_entry_symbol() {
+        let source = native_unix_executable_launcher_source("aot_fn_0")
+            .expect("valid AOT symbol should produce launcher source");
+        assert!(source.contains("extern int32_t aot_fn_0(void);"));
+        assert!(source.contains("return (int)aot_fn_0();"));
+    }
+
+    #[test]
+    fn native_unix_launcher_rejects_non_identifier_entry_symbol() {
+        let error = native_unix_executable_launcher_source("aot_fn_0; injected")
+            .expect_err("invalid C symbol should be rejected");
+        assert!(error.contains("not a C identifier"));
     }
 
     #[test]
@@ -806,6 +745,14 @@ echo "fake-shared" > "$OUT"
     fn aot_target_reports_position_independent_code_requirement() {
         assert!(!AotTarget::Native.requires_position_independent_code());
         assert!(AotTarget::android_arm64_default().requires_position_independent_code());
+        assert!(AotTarget::ios_arm64_default().requires_position_independent_code());
+    }
+
+    #[test]
+    fn ios_aot_target_reports_apple_arm64_triple() {
+        let target = AotTarget::ios_arm64_default();
+        assert_eq!(target.object_triple(), Some("aarch64-apple-ios"));
+        assert_eq!(target.clang_target().as_deref(), Some("aarch64-apple-ios"));
     }
 
     #[test]

@@ -184,6 +184,7 @@ pub struct Compiler {
     symbols: SymbolTable,
     deps: DependencyGraph,
     types: TypeTable,
+    last_source_diagnostic: Option<crate::SourceDiagnostic>,
 }
 
 impl Compiler {
@@ -218,6 +219,7 @@ impl Compiler {
     }
 
     pub fn index_pass(&mut self) -> CompileResult<IndexPassResult> {
+        self.last_source_diagnostic = None;
         let previous_hashes = self.capture_previous_hashes();
         self.functions.clear();
         self.symbols.clear();
@@ -227,8 +229,20 @@ impl Compiler {
         let mut signature_changed_ids: Vec<FunctionId> = Vec::new();
 
         for file_id in 0..self.files.len() {
-            let indexed = index_file(&self.files[file_id].content, &mut self.types)
-                .map_err(CompileError::Frontend)?;
+            let indexed = match index_file(&self.files[file_id].content, &mut self.types) {
+                Ok(indexed) => indexed,
+                Err(message) => {
+                    let file = &self.files[file_id];
+                    self.last_source_diagnostic = Some(crate::SourceDiagnostic {
+                        path: file.path.clone(),
+                        start: 0,
+                        end: file.content.len(),
+                        symbol: String::new(),
+                        message: message.clone(),
+                    });
+                    return Err(CompileError::Frontend(message));
+                }
+            };
             self.files[file_id].functions.clear();
             for indexed_function in indexed {
                 let function_id = self.functions.len() as FunctionId;
@@ -327,8 +341,17 @@ impl Compiler {
                     CompileError::Invariant(format!("invalid function id {}", function_id))
                 })?
                 .clone();
-            let hir = self.lower_function_to_hir(&snapshot)?;
-            emit_function(&snapshot, &hir, &self.types).map_err(CompileError::Backend)?;
+            let hir = match self.lower_function_to_hir(&snapshot) {
+                Ok(hir) => hir,
+                Err(error) => {
+                    self.record_function_diagnostic(&snapshot, compile_error_message(&error));
+                    return Err(error);
+                }
+            };
+            if let Err(message) = emit_function(&snapshot, &hir, &self.types) {
+                self.record_function_diagnostic(&snapshot, &message);
+                return Err(CompileError::Backend(message));
+            }
             emitted_ids.push(*function_id);
             emitted_functions += 1;
         }
@@ -352,6 +375,23 @@ impl Compiler {
 
     pub fn types_mut(&mut self) -> &mut TypeTable {
         &mut self.types
+    }
+
+    pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
+        self.last_source_diagnostic.as_ref()
+    }
+
+    fn record_function_diagnostic(&mut self, function: &FunctionMeta, message: &str) {
+        let Some(file) = self.files.get(function.file_id as usize) else {
+            return;
+        };
+        self.last_source_diagnostic = Some(crate::SourceDiagnostic {
+            path: file.path.clone(),
+            start: function.source_range.start as usize,
+            end: function.source_range.end as usize,
+            symbol: function.name.clone(),
+            message: message.to_string(),
+        });
     }
 
     fn capture_previous_hashes(&self) -> HashMap<(u32, u64), PreviousFunctionHashes> {
@@ -401,6 +441,14 @@ impl Compiler {
             blocks: vec![Block { source: body }],
             statements,
         })
+    }
+}
+
+fn compile_error_message(error: &CompileError) -> &str {
+    match error {
+        CompileError::Frontend(message)
+        | CompileError::Backend(message)
+        | CompileError::Invariant(message) => message,
     }
 }
 

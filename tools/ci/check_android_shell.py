@@ -13,14 +13,21 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTemplateCatalog.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopFrameBudget.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPongAssetManifestMigration.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAccessibilityPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAdaptiveLayout.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java",
@@ -34,6 +41,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiInitialContextPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopConnectivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopBackgroundWorkPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopGitHubSyncPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopGitHubApi.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkCoordinator.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopLongWorkService.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSupportBundle.java",
@@ -41,14 +50,19 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopRestartLoopPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiQueueRunPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiSessionCheckpointStore.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiResumePolicy.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/published/java/com/stasislang/workshop/PublishedSpriteCatalog.java",
+    "mobile/android/app/src/main/java/com/stasislang/workshop/StasisPreviewRenderer.java",
     "mobile/android/app/src/main/cpp/CMakeLists.txt",
     "mobile/android/app/src/main/cpp/stasis_android_sprite.c",
     "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c",
     "mobile/android/codex_native/src/lib.rs",
     "mobile/android/app/src/main/res/values/styles.xml",
     "mobile/android/app/src/main/assets/workshop_sample/src/main.stasis",
+    "mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/root.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/game_state.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/player.stasis",
@@ -57,8 +71,14 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/workshop_sample/src/assets.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/assets/ball.svg",
+    "mobile/android/app/src/main/assets/workshop_sample/assets/paddle.svg",
+    "mobile/android/app/src/main/assets/workshop_sample/assets/center_line.svg",
     "mobile/android/app/src/main/assets/workshop_sample/assets/manifest.json",
     "mobile/android/app/src/main/assets/exploration_sample/src/main.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/host.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/host_aot.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/host_game.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/host_runtime.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/config.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/components.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/world_data.stasis",
@@ -66,10 +86,23 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/exploration_sample/src/assets.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/systems/movement.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/systems/collection.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/inventory.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/camera.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/systems/tutorial.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/audio.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/src/systems/render_extract.stasis",
+    "mobile/android/app/src/main/assets/exploration_sample/src/systems/schedule.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/tests/exploration_gameplay.test.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/assets/manifest.json",
+    "mobile/android/app/src/main/assets/exploration_sample/assets/player.svg",
+    "mobile/android/app/src/main/assets/exploration_sample/assets/sun_keepsake.svg",
+    "mobile/android/app/src/main/assets/exploration_sample/assets/moon_keepsake.svg",
+    "mobile/android/app/src/main/assets/exploration_sample/assets/destination.svg",
+    "mobile/android/app/src/main/assets/exploration_sample/stasis.json",
+    "mobile/android/app/src/main/assets/exploration_sample/qa/first_keepsake.json",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopExplorationLessonPolicy.java",
+    "mobile/android/app/src/test/java/com/stasislang/workshop/WorkshopExplorationLessonPolicyTest.java",
+    "mobile/android/app/src/test/java/com/stasislang/workshop/WorkshopTemplateCatalogTest.java",
     "mobile/android/README.md",
     "tools/android_ai_agent_host.py",
     "tools/ci/check_android_published_apk.py",
@@ -172,6 +205,7 @@ def main() -> int:
     assert "published.assets.setSrcDirs([publishedAotDir.map { it.dir('apk_assets') }.get().asFile])" in app_gradle
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
+    styles = read("mobile/android/app/src/main/res/values/styles.xml")
     workshop_manifest = read("mobile/android/app/src/workshop/AndroidManifest.xml")
     assert "android.permission.INTERNET" not in manifest
     assert "android.permission.RECORD_AUDIO" in workshop_manifest
@@ -184,10 +218,27 @@ def main() -> int:
     assert "android.intent.action.MAIN" in manifest
     assert "android.intent.category.LAUNCHER" in manifest
     assert 'android:exported="true"' in manifest
+    assert 'android:resizeableActivity="true"' in manifest
     assert 'android:windowSoftInputMode="adjustResize"' in manifest
+    assert '<item name="android:windowLightStatusBar">false</item>' in styles
+    assert '<item name="android:textColorPrimary">#161B22</item>' in styles
 
     activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
+    preview_renderer = read("mobile/android/app/src/main/java/com/stasislang/workshop/StasisPreviewRenderer.java")
+    workshop_textures = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java")
+    onboarding_policy = read(
+        "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingPolicy.java"
+    )
+    onboarding_store = read(
+        "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingStore.java"
+    )
     secret_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java")
+    github_sync_policy = read(
+        "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopGitHubSyncPolicy.java"
+    )
+    github_api = read(
+        "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopGitHubApi.java"
+    )
     recovery_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java")
     draft_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidDraftStore.java")
     project_registry = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectRegistry.java")
@@ -195,6 +246,8 @@ def main() -> int:
     project_format_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java")
     project_archive = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java")
     image_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopImageAssets.java")
+    accessibility_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAccessibilityPolicy.java")
+    adaptive_layout = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAdaptiveLayout.java")
     paint_view = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPaintView.java")
     audio_assets = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAudioAssets.java")
     asset_manifest = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAssetManifest.java")
@@ -234,11 +287,14 @@ def main() -> int:
     crash_store = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidCrashStore.java")
     ai_queue = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiQueue.java")
     ai_transaction = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiTransactionStore.java")
+    ai_checkpoint = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidAiSessionCheckpointStore.java")
+    ai_resume_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiResumePolicy.java")
     verification_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiVerificationPolicy.java")
     verification_runner = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiVerificationRunner.java")
     temporary_verification = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiTemporaryVerification.java")
     project_transaction = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiProjectTransaction.java")
     ai_queue_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/AiQueuePolicy.java")
+    ai_queue_run_policy = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopAiQueueRunPolicy.java")
     host_agent = read("tools/android_ai_agent_host.py")
     host_comparison = read("tools/run_android_ai_model_comparison.py")
     host_compile = read("crates/stasis_android_bridge/src/android_workshop_compile.rs")
@@ -315,7 +371,10 @@ def main() -> int:
     assert "MAX_TOOL_CALLS_PER_BATCH = 12" in host_agent
     assert 'DEFAULT_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")' in host_comparison
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
-    assert "private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight, int[] frameValues)" in activity
+    assert "private static native int nativeRunFrameInto(String projectRoot" in activity
+    assert "ByteBuffer frameI32" in activity
+    assert "ByteBuffer frameF32" in activity
+    assert "ByteBuffer frameU8" in activity
     assert 'assetRoot = "workshop_sample/"' not in template_catalog
     assert '"workshop_sample/"' in template_catalog
     assert "activeWorkshopTemplate" in activity
@@ -329,20 +388,38 @@ def main() -> int:
     assert "startGameLoop();" in activity
     assert "GamePreviewView" in activity
     assert "GLSurfaceView" in activity
-    assert "onDrawFrame" in activity
+    assert "new StasisPreviewRenderer(" in activity
+    assert "onDrawFrame" in preview_renderer
+    assert "drawFrame" in preview_renderer
+    draw_loop = preview_renderer.split("private void drawFrame()", 1)[1].split(
+        "private void drawLines", 1
+    )[0]
+    assert "new " not in draw_loop
+    assert "allocate" not in draw_loop
+    assert "drawLines" in draw_loop
+    assert "drawSprites" in draw_loop
+    assert "drawText" in draw_loop
+    assert "GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)" in preview_renderer
+    assert "GLES20.glDisable(GLES20.GL_SCISSOR_TEST)" in preview_renderer
+    assert "WorkshopTextureProvider" in activity
+    assert "implements StasisPreviewRenderer.TextureProvider" in workshop_textures
+    assert "SparseArray<SpriteTexture>" in workshop_textures
+    assert "projectChanged(projectRootPath, currentProjectRoot)" in workshop_textures
+    assert "clearTextures();" in workshop_textures
+    assert "private final int[] deletedTexture = new int[1]" in workshop_textures
     assert "extractIntField" in activity
-    assert "private final int[] nativeFrameValues = new int[RENDER_FRAME_I32_CAPACITY]" in activity
-    assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in activity
-    assert "budget=--%" in activity
+    assert "private final int[] nativeFrameValues = new int[RENDER_FRAME_HEADER_SIZE]" in activity
+    assert "WorkshopFrameBudget.percent" in activity
+    assert "budget tick=--% render=--% sync=--% total=--%" in activity
     assert "debugColorForBudget" in activity
     assert "appendExplorationProgress(debugTextBuilder)" in activity
     assert '"GameState.collected_count"' in activity
     assert '"keepsakes="' in activity
-    assert '"garden complete"' in activity
-    assert "private String projectRootPath" in activity
+    assert "garden complete" in activity
+    assert "String projectRootPath" in activity
     assert "nativeCompileProject(projectRootPath())" in activity
     assert "String.format" not in activity
-    assert "gamePreview.setRenderFrameValues(nativeFrameValues)" in activity
+    assert "gamePreview.runNativeFrame(" in activity
     assert "RenderFrame.fromNativeFrame" not in activity
     assert "new RenderCommand" not in activity
     assert "ProjectSnapshot.from" in activity
@@ -374,6 +451,9 @@ def main() -> int:
     assert "writeSyncedAtomic" not in ai_queue or "getFD().sync()" in ai_queue
     assert "StandardCopyOption.ATOMIC_MOVE" in ai_queue
     assert "recoverInterrupted" in ai_queue
+    assert "restored AI cancellation could not be recorded" in activity
+    assert "clearTerminalAiRecoveryArtifacts" in activity
+    assert "retryTerminal" in ai_queue
     assert 'put("phase", phase)' in ai_queue
     assert "AndroidAiQueue.updatePhase" in activity
     assert "AndroidAiTransactionStore.save" in activity
@@ -396,15 +476,28 @@ def main() -> int:
     assert 'MAX_PREVIEW_BYTES = 12 * 1024 * 1024' in ai_queue
     assert 'MessageDigest.getInstance("SHA-256")' in ai_queue
     assert "writeSyncedAtomic(savedPreview, previewPng)" in ai_queue
-    assert "deletePreview(context, entry)" in ai_queue
+    assert "deletePreview(filesDir, entry)" in ai_queue
     assert "pruneOrphanPreviews" in ai_queue
     assert "removeOldestTerminal" in ai_queue
     assert "AiQueuePolicy.terminal(state)" in ai_queue
-    assert "!AndroidAiQueue.PENDING.equals(item.state)" in activity
-    assert "&& !AndroidAiQueue.IN_PROGRESS.equals(item.state)" in activity
+    assert 'retry.setText("Fresh Retry")' in activity
+    assert "retryTerminalAiItem" in activity
+    assert "AndroidAiSessionCheckpointStore.save" in activity
+    assert "WorkshopAiResumePolicy.PROVIDER_IN_FLIGHT" in activity
+    assert "if (checkpoint == null && snapshot != null)" not in activity
+    assert "if (snapshot != null) {\n                WorkshopAiProjectTransaction.restore(projectRoot(), snapshot);" in activity
+    assert 'put("usage", usage.checkpointJson())' in activity
+    assert 'ROOT = "workshop_ai_sessions"' in ai_checkpoint
+    assert "MAX_BYTES = 8 * 1024 * 1024" in ai_checkpoint
+    assert "StandardCopyOption.ATOMIC_MOVE" in ai_checkpoint
+    assert "paid provider call may have completed" in ai_resume_policy
+    assert "will not be replayed" in ai_resume_policy
     assert "encodeBitmapPng" in activity
     assert "queuedEntry.previewFile" in activity
     assert "nextPendingIndex" in ai_queue_policy
+    assert "WorkshopAiQueueRunPolicy.decide" in activity
+    assert "WAIT_FOR_NETWORK" in ai_queue_run_policy
+    assert "CLAIM_NEXT" in ai_queue_run_policy
     assert "AI Settings" in activity
     assert "aiSettingsBody.setVisibility(View.GONE)" in activity
     assert "AI run started: preparing workspace and command context" in activity
@@ -448,11 +541,12 @@ def main() -> int:
     assert "Attach these rendered pixels" in activity
     assert "Attach logical render/runtime/input snapshot" in activity
     assert "Nothing is sent until selected here and Queue AI Change is pressed" in activity
-    assert "GLES20.glReadPixels" in activity
-    assert "lastDrawnFrame" in activity
-    assert "MAX_PREVIEW_CAPTURE_PIXELS = 8_000_000L" in activity
-    assert "preview framebuffer exceeds the 8 megapixel capture limit" in activity
-    assert "Bitmap.createScaledBitmap" in activity
+    assert "GLES20.glReadPixels" in preview_renderer
+    assert "capturedFrame = capture == null ? null : captureLogicalFrame()" in preview_renderer
+    assert "lastDrawnFrame" not in preview_renderer
+    assert "MAX_CAPTURE_PIXELS = 8_000_000" in preview_renderer
+    assert "preview framebuffer exceeds the 8 megapixel capture limit" in preview_renderer
+    assert "Bitmap.createScaledBitmap" in preview_renderer
     assert "selected_preview_logical_snapshot" in activity
     assert '"captured-preview.png"' in activity
     assert "clearPendingPreviewCapture();" in activity
@@ -531,14 +625,38 @@ def main() -> int:
     assert "project directory deletion did not complete" in project_registry
     assert "clearProject" in recovery_store
     assert 'ONBOARDING_PREFS = "onboarding_settings"' in activity
-    assert 'ONBOARDING_COMPLETE = "manual_tutorial_seen_v1"' in activity
+    assert 'VERSION = "manual_tutorial_version"' in onboarding_store
+    assert 'COMPLETED_STEPS = "manual_tutorial_completed_steps"' in onboarding_store
+    assert 'PROJECT_ID = "manual_tutorial_project_id"' in onboarding_store
+    assert 'CHANGE_HASH = "manual_tutorial_change_hash"' in onboarding_store
+    assert "WorkshopOnboardingStore.load" in activity
+    assert "WorkshopOnboardingStore.save" in activity
+    assert "showFirstRunAiSetup" not in activity
+    assert "showOnboardingGuide(true)" in activity
+    assert "recordOnboardingProjectOpened" in activity
+    assert "recordOnboardingProjectStep(WorkshopOnboardingPolicy.Step.PROJECT_RAN)" in activity
+    assert "recordOnboardingChangeApplied(refreshedSymbol, refreshedSymbol.source)" in activity
+    assert 'result.optBoolean("all_runnable_tests_passed", false)' in activity
+    assert "WorkshopOnboardingPolicy.Step.TESTS_PASSED, loadBundledProject()" in activity
+    assert "recordOnboardingTrackedChangeStep" in activity
+    assert "recordOnboardingRevert" in activity
+    assert ".putInt(COMPLETED_STEPS, progress.completedSteps)" in onboarding_store
+    assert ".commit();" in onboarding_store
+    assert "CURRENT_VERSION = 2" in onboarding_policy
+    assert "PROJECT_OPENED" in onboarding_policy
+    assert "PROJECT_RAN" in onboarding_policy
+    assert "CHANGE_APPLIED" in onboarding_policy
+    assert "TESTS_PASSED" in onboarding_policy
+    assert "CHANGES_REVIEWED" in onboarding_policy
+    assert "CHANGE_REVERTED" in onboarding_policy
     assert "Welcome to Stasis Workshop" in activity
-    assert "You can build and test a game entirely on-device without AI" in activity
     assert "Remind Me Later" in activity
     assert "Help & Onboarding" in activity
-    assert "Start Zero-AI Manual Tutorial" in activity
+    assert "Resume Zero-AI Manual Tutorial" in activity
+    assert "Restart Manual Tutorial" in activity
+    assert "previous project/change context cleared" in activity
     assert "no API key is required" in activity
-    assert "Voice or audio recording asks for microphone permission only when started" in activity
+    assert "permissions are requested only when you start" in onboarding_policy
     assert "toggleEditorPanel();" in activity
     assert "Interactive Stasis game preview" in activity
     assert "Open Workshop menu" in activity
@@ -550,11 +668,39 @@ def main() -> int:
     assert "ACCESSIBILITY_LIVE_REGION_POLITE" in activity
     assert "ACCESSIBILITY_LIVE_REGION_ASSERTIVE" in activity
     assert "setAccessibilityHeading(true)" in activity
-    assert "screenWidthDp < 480" in activity
+    assert "chainAccessibilityTraversal" in activity
+    assert "setAccessibilityTraversalAfter" in activity
+    assert "setNextFocusForwardId" in activity
+    assert "setAccessibilityPaneTitle" in activity
+    assert "SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR" in activity
+    assert 'announceForAccessibility("Workshop menu opened")' in activity
+    assert "createFocusableControlBackground" in activity
+    assert "setPreviewCovered(coverPreview)" in activity
+    assert "gamePreview.setFocusable(false)" in activity
+    assert "gamePreview.setFocusable(previewFocusableWhenUncovered)" in activity
+    assert "voiceActionRow, layout" in activity
+    assert "configuration.fontScale" in activity
+    assert "MEDIUM_WIDTH_DP = 600" in adaptive_layout
+    assert "EXPANDED_WIDTH_DP = 840" in adaptive_layout
+    assert "LARGE_TEXT_SCALE = 1.3f" in adaptive_layout
+    assert "contrastRatio" in accessibility_policy
     assert "Selected image asset" in activity
     assert "Audio asset " in activity
-    assert "Touch paint canvas" in paint_view
-    assert "setFocusable(true)" in paint_view
+    assert "use arrow keys to move the paint cursor" in paint_view
+    assert "R.id.paint_at_cursor" in paint_view
+    assert "onKeyDown" in paint_view
+    assert "performAccessibilityAction" in paint_view
+    assert "setFocusableInTouchMode(true)" in paint_view
+    assert "isAccessibilityFocused()" in paint_view
+    assert "RetainedPaintSession" in activity
+    assert "onRetainNonConfigurationInstance" in activity
+    assert "Brush size " in activity
+    assert "paint color selected" in activity
+    assert "Canvas width in pixels" in activity
+    assert "Canvas height in pixels" in activity
+    assert 'outState.putBoolean("diagnostics_open"' in activity
+    assert 'outState.putBoolean("context_open"' in activity
+    assert 'outState.putBoolean("more_tools_open"' in activity
     assert "Export Redacted Support Bundle" in activity
     assert "Excludes credentials, source, prompts" in activity
     assert 'intent.setType("application/json")' in activity
@@ -637,20 +783,33 @@ def main() -> int:
     assert "Save GitHub Sync Settings" in activity
     assert "Sync GitHub Now" in activity
     assert "queueGitHubSync" in activity
-    assert "uploadGitHubFile" in activity
+    assert "applyFileChange" in github_api
+    assert "WorkshopGitHubSyncPolicy.backupPlan" in activity
+    assert 'writeJson("DELETE"' in github_api
+    assert "changedTextFiles" in github_sync_policy
+    assert "priorRemoteState" in github_sync_policy
+    assert "Automatically back up validated project changes" in activity
+    assert "automaticSchedule" in activity
+    assert "automatic backup deferred by battery saver" in activity
+    assert "automatic backup waiting for a usable network" in activity
+    assert "validateTarget" in github_api
+    assert "GITHUB_PREF_VALIDATED_TARGET" in activity
+    assert "githubTargetValidated" in activity
+    assert "authenticated target ready" in activity
+    assert "changed remotely since the last backup" in github_sync_policy
     assert "GitHub sync: queued" in activity
-    assert "GitHub sync error:" in activity
+    assert "postGitHubOperationFailure" in activity
     assert "Review GitHub Changes" in activity
     assert "Create / Update Pull Request" in activity
     assert "reviewedGitHubChangeFingerprint" in activity
-    assert 'MessageDigest.getInstance("SHA-256")' in activity
-    assert "GITHUB_NETWORK_TIMEOUT_MS" in activity
+    assert 'MessageDigest.getInstance("SHA-256")' in github_sync_policy
+    assert "NETWORK_TIMEOUT_MS" in github_api
     assert "GitHub pull request: review current changes first" in activity
-    assert "ensureGitHubReviewBranch" in activity
+    assert "ensureReviewBranch" in github_api
     assert "stasis-workshop-" in activity
-    assert "createOrFindGitHubPullRequest" in activity
-    assert 'githubApiUrl(repository, "/git/refs")' in activity
-    assert 'githubApiUrl(repository, "/pulls")' in activity
+    assert "createOrFindPullRequest" in github_api
+    assert 'apiUrl("/git/refs")' in github_api
+    assert 'apiUrl("/pulls"' in github_api
     assert "GitHub pull request: ready " in activity
     assert "AndroidSecretStore.readAndMigrate" in activity
     assert "AndroidSecretStore.write" in activity
@@ -669,15 +828,28 @@ def main() -> int:
     assert "Executors.newSingleThreadExecutor()" in activity
     assert "githubSyncExecutor.submit" in activity
     assert "githubSyncExecutor.shutdownNow()" in activity
-    assert "githubOperationActive" in activity
+    assert "isGitHubOperationActive" in activity
     assert "beginGitHubOperation" in activity
     assert "another operation is already queued or running" in activity
     assert "GITHUB_PREF_OPERATION_STATE" in activity
     assert "GITHUB_PREF_OPERATION_DETAIL" in activity
+    assert "GITHUB_PREF_OPERATION_AUTOMATIC" in activity
+    assert "NetworkResumeDecision.RECHECK_AUTOMATIC_SYNC" in activity
+    assert 'queueGitHubSync(!detail.contains("automatic"))' not in activity
+    assert "persistGitHubSyncOrigin" not in activity
+    assert activity.count("persistGitHubSyncOperationState(") == 6
+    assert "GITHUB_PREF_OPERATION_AUTOMATIC), false" in activity
+    assert 'automatic backup waiting for a usable network", true' in activity
+    assert 'automatic backup deferred by battery saver", true' in activity
     assert "GITHUB_PREF_REVIEW_FINGERPRINT" in activity
     assert "Retry GitHub Operation" in activity
     assert "persistGitHubOperationState" in activity
     assert '"interrupted", "app stopped before completion"' in activity
+    assert "continues in background" in activity
+    assert '"waiting_network".equals(state)' in activity
+    assert "resumeGitHubAfterNetworkChange" in activity
+    assert "registerPowerMonitoring" in activity
+    assert "ACTION_POWER_SAVE_MODE_CHANGED" in activity
     assert '"sync".equals(operation)' in activity
     assert '"pull_request".equals(operation)' in activity
     assert "WorkshopProjectRegistry.initialize(this," in activity
@@ -730,20 +902,32 @@ def main() -> int:
     assert '"exploration_sample/"' in template_catalog
     assert '"Exploration Garden"' in template_catalog
     exploration_main = read("mobile/android/app/src/main/assets/exploration_sample/src/main.stasis")
+    exploration_config = read("mobile/android/app/src/main/assets/exploration_sample/src/config.stasis")
     exploration_components = read("mobile/android/app/src/main/assets/exploration_sample/src/components.stasis")
+    exploration_schedule = read("mobile/android/app/src/main/assets/exploration_sample/src/systems/schedule.stasis")
+    exploration_inventory = read("mobile/android/app/src/main/assets/exploration_sample/src/systems/inventory.stasis")
+    exploration_render = read("mobile/android/app/src/main/assets/exploration_sample/src/systems/render_extract.stasis")
+    exploration_assets = read("mobile/android/app/src/main/assets/exploration_sample/src/assets.stasis")
+    exploration_manifest = read("mobile/android/app/src/main/assets/exploration_sample/assets/manifest.json")
+    exploration_host = read("mobile/android/app/src/main/assets/exploration_sample/src/host_game.stasis")
     exploration_tests = read("mobile/android/app/src/main/assets/exploration_sample/tests/exploration_gameplay.test.stasis")
-    assert "exploration_input_target_system();" in exploration_main
-    assert "exploration_movement_system();" in exploration_main
-    assert "exploration_collection_system();" in exploration_main
-    assert "exploration_camera_follow_system();" in exploration_main
-    assert "Input.touch_x + GameState.camera_x" in exploration_main
-    assert "WORLD_WIDTH: i32 = 720" in exploration_main
+    assert 'import "systems/schedule.stasis";' in exploration_main
+    assert "exploration_input_target_system();" in exploration_schedule
+    assert "exploration_movement_system();" in exploration_schedule
+    assert "exploration_collection_system();" in exploration_schedule
+    assert "exploration_inventory_system();" in exploration_schedule
+    assert "exploration_camera_follow_system();" in exploration_schedule
+    assert "WORLD_WIDTH: i32 = 720" in exploration_config
     assert "test `camera follow is deterministic and bounded`(): bool" in exploration_tests
     assert "test `spawn capacity rejects player occupied and out of range slots`(): bool" in exploration_tests
     assert "test `overlapping collectibles resolve in ascending entity order`(): bool" in exploration_tests
-    assert "last_collected_entity_id" in exploration_main
-    assert "entity_alive: i32[8]" in exploration_main
-    assert "Lesson map:" in exploration_components
+    assert "last_collected_entity_id" in exploration_components
+    assert "entity_alive: i32[8]" in exploration_components
+    assert "exploration_audio_collect(kind);" in exploration_inventory
+    assert "EXPLORATION_PLAYER_ASSET" in exploration_assets
+    assert "World.sprite_handle[0]" in exploration_render
+    assert '"id": "player"' in exploration_manifest
+    assert "exploration_host_sync_input();" in exploration_host
     assert "test `new touch edge sets one clamped destination`(): bool" in exploration_tests
     assert "assert_runtime" not in exploration_tests
     assert '"sample".equals(origin)' in project_registry
@@ -794,10 +978,10 @@ def main() -> int:
     assert "Manual Symbols and Source" in activity
     assert "Go to Diagnostic" in activity
     assert "captureFirstTestFailureDiagnostic" in activity
-    assert "sourceOffsetForLine" in activity
-    assert 'diagnosticStatus.setText("Test failure' in activity
+    assert "WorkshopSourceDiagnostic.sourceOffset" in activity
+    assert 'applySourceDiagnostic(diagnostic, "Test failure")' in activity
     assert 'result.optInt("line", 0)' in activity
-    assert "sourceEditor.setSelection(symbolOffset)" in activity
+    assert "sourceEditor.setSelection(symbolOffset, symbolEnd)" in activity
     assert "Undo Failed Apply" in activity
     assert "Recovery History" in activity
     assert "Failed Apply History" in activity
@@ -1080,23 +1264,24 @@ def main() -> int:
     assert "gamePreview.touchY()" in activity
     assert "gamePreview.touchActive()" in activity
     assert "MotionEvent" in activity
-    assert "RENDER_COMMAND_STRIDE = 13" in activity
-    assert "drawBatch((runEnd - index) * RECT_VERTICES)" in activity
-    assert "drawSpriteBatch((runEnd - index) * RECT_VERTICES, texture)" in activity
-    assert "GLES20.glScissor" in activity
-    assert "sameClip(base, runBase)" in activity
-    assert "frameValues[5]" in activity
-    assert "frameValues[base + 6]" in activity
-    assert "GLES20.glDrawArrays" in activity
-    assert "GL_TRIANGLES" in activity
-    assert "glUniform4f" not in activity
-    assert "attribute vec4 aColor" in activity
-    assert "TEXTURE_FRAGMENT_SHADER" in activity
-    assert "nativeResolveSpriteAsset" in activity
-    assert "nativeDecodeSvgSprite" in activity
-    assert "createFallbackTexture" in activity
-    assert "decoded sprite dimensions do not match the manifest" in activity
-    assert "glTexImage2D" in activity
+    assert "LINE_F32_STRIDE = 8" in preview_renderer
+    assert "SPRITE_I32_STRIDE = 7" in preview_renderer
+    assert "TEXT_I32_STRIDE = 3" in preview_renderer
+    assert "drawColorBatch" in preview_renderer
+    assert "drawPreparedTextureBatch" in preview_renderer
+    assert "frameI32" in preview_renderer
+    assert "frameF32" in preview_renderer
+    assert "frameU8Bytes" in preview_renderer
+    assert "GLES20.glDrawArrays" in preview_renderer
+    assert "GL_TRIANGLES" in preview_renderer
+    assert "glUniform4f" not in preview_renderer
+    assert "attribute vec4 aColor" in preview_renderer
+    assert "TEXTURE_FRAGMENT_SHADER" in preview_renderer
+    assert "nativeResolveSpriteAsset" in workshop_textures
+    assert "nativeDecodeSvgSprite" in workshop_textures
+    assert "createFallbackTexture" in workshop_textures
+    assert "decoded sprite dimensions do not match the manifest" in workshop_textures
+    assert "glTexImage2D" in workshop_textures
     assert "applySelectedEdit" in activity
     assert "persistSelectedEdit" in activity
     assert "getFilesDir()" in activity
@@ -1131,7 +1316,7 @@ def main() -> int:
     assert "gameLoopHandler.postDelayed(this, DEFAULT_TICK_INTERVAL_MS)" in activity
     assert "compileReady = isRunnableCompile(compileResult)" in activity
     assert "compileAttempted = true" in activity
-    assert "RunError: native frame tick failed" in activity
+    assert 'String frameError = "RunError: " + nativeLastFrameError()' in activity
     assert "!compileReady && !compileAttempted" in activity
     assert "compileResult.contains(\"status=0\")" in activity
     assert "if (resetProject)" in activity
@@ -1158,16 +1343,20 @@ def main() -> int:
     assert "Manual Symbols and Source" not in published_activity
     assert "GameSurfaceView" in published_activity
     assert "GLSurfaceView" in published_activity
-    assert "onDrawFrame" in published_activity
+    assert "new StasisPreviewRenderer(" in published_activity
+    assert "onDrawFrame" not in published_activity
     assert "FRAME_BUDGET_MILLIS = 1000.0 / 60.0" in published_activity
     assert "event.getPointerCount() >= 3" in published_activity
     assert "PUBLISHED_RUNTIME_ID = BuildConfig.STASIS_RUNTIME_ID" in published_activity
     assert "PublishedSpriteCatalog" in published_activity
-    assert "drawSpriteBatch" in published_activity
+    assert "drawSprites" in preview_renderer
     assert "nativeDecodeSvgSpriteBytes" in published_activity
     assert 'MANIFEST = ROOT + "assets/manifest.json"' in published_sprites
     assert "MessageDigest.getInstance(\"SHA-256\")" in published_sprites
-    assert "spriteCatalog.textureFor" in published_activity
+    assert "implements StasisPreviewRenderer.TextureProvider" in published_sprites
+    assert "textureFor(int handle)" in published_sprites
+    assert "SparseIntArray textures" in published_sprites
+    assert "SparseBooleanArray failedHandles" in published_sprites
     assert '"com.stasislang.pong"' in device_script
     assert "ensureBundledProject" not in published_activity
     workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")
@@ -1200,7 +1389,8 @@ def main() -> int:
     assert "stasis_android_bridge_free_string" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
-    assert "const int frame_len = STASIS_RENDER_FRAME_I32_CAPACITY" in native
+    assert "bytes_i32 < (jlong)(STASIS_RENDER_I32_COUNT * sizeof(int32_t))" in native
+    assert 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v1")' in native
     assert "#define STASIS_RENDER_COMMAND_STRIDE 13" in native
     assert '"Render.command_schema_version"' in native
     assert '"Render.command" #index "_rotation_degrees"' in native
@@ -1278,6 +1468,10 @@ def main() -> int:
     assert "Render.command3_clip_w = GameState.screen_w" in sample_main
     pong_manifest = read("mobile/android/app/src/main/assets/workshop_sample/assets/manifest.json")
     assert '"id": "ball"' in pong_manifest
+    assert '"id": "paddle"' in pong_manifest
+    assert '"id": "center_line"' in pong_manifest
+    preview_adapter = read("mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis")
+    assert "function on_code_swap(): void { pong_game_on_code_swap(); pong_host_render(); }" in preview_adapter
     assert '"encoding": "svg"' in pong_manifest
 
     collision = read("mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis")

@@ -38,7 +38,11 @@ final class AiQueuePolicy {
         return -1;
     }
 
-    static String recoveredState(String state) {
-        return "in_progress".equals(state) ? "failed" : state;
+    static String recoveredState(String state, boolean resumable) {
+        return "in_progress".equals(state) ? (resumable ? "pending" : "failed") : state;
+    }
+
+    static boolean retryNeedsNewPreview(boolean hadPreview) {
+        return hadPreview;
     }
 }

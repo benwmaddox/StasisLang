@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
+use stasis_compiler::backend::state_layout::{state_layout_digest, StateLayout};
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
-use stasis_compiler::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
+use stasis_compiler::frontend::parser::parse_top_level_functions;
 #[cfg(test)]
 use stasis_compiler::{SimpleI32Condition, SimpleI32ReturnExpr};
 use stasis_jit::{
@@ -11,12 +12,18 @@ use stasis_jit::{
 };
 use stasis_runner::swap::contracts::{
     AotFunctionSymbol, CompileRequest, CompileResult, Diagnostic, DiagnosticSeverity, FnId,
-    FunctionPatch, FunctionPatchSet, JitCodePtrOverride, LayoutHash, StateMapEntry, TargetMode,
+    FunctionPatch, FunctionPatchSet, JitCodePtrOverride, LayoutHash, RequestId, TargetMode,
 };
 use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::SyncSender;
+
+pub(crate) struct PreparedJitSwap {
+    pub(crate) request_id: stasis_runner::swap::contracts::RequestId,
+    pub(crate) candidate: JitProcess,
+}
 
 pub struct IncrementalCompilerBackend {
     source_by_path: BTreeMap<String, String>,
@@ -30,6 +37,9 @@ pub struct IncrementalCompilerBackend {
     enable_aot_link_step: bool,
     last_jit_engine_package: Option<JitEnginePackage>,
     last_aot_engine_bundle: Option<AotEngineBundle>,
+    prepared_jit_swap_tx: Option<SyncSender<PreparedJitSwap>>,
+    pending_jit_candidate: Option<JitProcess>,
+    last_state_layout: Option<StateLayout>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,12 +84,6 @@ struct EngineFunctionEntry {
     name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StructFieldType {
-    field_name: String,
-    type_name: String,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifestFunctionRow {
     name: String,
@@ -111,7 +115,12 @@ struct EngineBundleManifest {
 
 #[derive(Debug, Clone, Deserialize)]
 struct StructMetaFieldExportRow {
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "jsonPath")]
+    json_path: String,
+    #[serde(default, rename = "csvColumn")]
+    csv_column: Option<String>,
     size: usize,
     #[serde(rename = "type")]
     field_type: String,
@@ -121,6 +130,10 @@ struct StructMetaFieldExportRow {
 
 #[derive(Debug, Clone, Deserialize)]
 struct StructMetaExportFile {
+    #[serde(default, rename = "globalName")]
+    global_name: String,
+    #[serde(default, rename = "csvTable")]
+    csv_table: Option<crate::CsvTableMetadata>,
     fields: Vec<StructMetaFieldExportRow>,
 }
 
@@ -139,12 +152,15 @@ struct PackagedFunctionAlias {
     returns_i32: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct PackagedRuntimeField {
     name: String,
     size: usize,
     field_type: String,
     array_count: usize,
+    initial_value: Option<serde_json::Value>,
+    collection_path: Option<String>,
+    collection_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -201,12 +217,27 @@ impl IncrementalCompilerBackend {
                 .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
             last_jit_engine_package: None,
             last_aot_engine_bundle: None,
+            prepared_jit_swap_tx: None,
+            pending_jit_candidate: None,
+            last_state_layout: None,
         }
+    }
+
+    pub(crate) fn new_with_prepared_jit_swaps(
+        prepared_jit_swap_tx: SyncSender<PreparedJitSwap>,
+    ) -> Self {
+        let mut backend = Self::new();
+        backend.prepared_jit_swap_tx = Some(prepared_jit_swap_tx);
+        backend
     }
 
     pub fn new_self_host_aot_cli(aot_artifact_root: PathBuf) -> Self {
         let mut backend = Self::new();
         backend.aot_artifact_root = aot_artifact_root;
+        if cfg!(windows) && backend.aot_link_config.linker_path.is_none() {
+            backend.aot_link_config.linker_path = resolve_installed_lld_link()
+                .or_else(|| ensure_rust_lld_link_wrapper(&backend.aot_artifact_root));
+        }
         backend.enable_aot_link_step = false;
         backend
     }
@@ -228,6 +259,9 @@ impl IncrementalCompilerBackend {
             enable_aot_link_step: false,
             last_jit_engine_package: None,
             last_aot_engine_bundle: None,
+            prepared_jit_swap_tx: None,
+            pending_jit_candidate: None,
+            last_state_layout: None,
         }
     }
 
@@ -250,6 +284,9 @@ impl IncrementalCompilerBackend {
             enable_aot_link_step,
             last_jit_engine_package: None,
             last_aot_engine_bundle: None,
+            prepared_jit_swap_tx: None,
+            pending_jit_candidate: None,
+            last_state_layout: None,
         }
     }
 
@@ -275,8 +312,34 @@ impl Default for IncrementalCompilerBackend {
 
 impl CompilerBackend for IncrementalCompilerBackend {
     fn compile(&mut self, request: CompileRequest) -> CompileResult {
+        let request_id = request.request_id;
+        let mut result = self.compile_request(request);
+        if result.status == stasis_runner::swap::contracts::CompileStatus::Success {
+            if let Err(message) = self.publish_prepared_jit_candidate(request_id) {
+                result = CompileResult::failed(
+                    request_id,
+                    vec![Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message,
+                        path: None,
+                        line: None,
+                        column: None,
+                    }],
+                );
+            }
+        } else {
+            self.pending_jit_candidate = None;
+        }
+        result
+    }
+}
+
+impl IncrementalCompilerBackend {
+    fn compile_request(&mut self, request: CompileRequest) -> CompileResult {
         self.last_jit_engine_package = None;
         self.last_aot_engine_bundle = None;
+        self.pending_jit_candidate = None;
+        self.last_state_layout = None;
         let source_delta = match self.refresh_cached_sources(&request.changed_files) {
             Ok(delta) => delta,
             Err(message) => {
@@ -624,7 +687,7 @@ impl IncrementalCompilerBackend {
 
         let mut result = CompileResult::success_with_host_set_metadata(
             request.request_id,
-            self.layout_hash_from_source_cache(),
+            self.layout_hash_from_state_layout(),
             FunctionPatchSet { functions },
             request.host_set_id.clone(),
             request.host_set_hash,
@@ -636,22 +699,6 @@ impl IncrementalCompilerBackend {
             aot_function_symbols,
         );
         result.jit_code_ptr_overrides = jit_code_ptr_overrides;
-        let state_map = match self.state_map_from_source_cache() {
-            Ok(map) => map,
-            Err(message) => {
-                return CompileResult::failed(
-                    request.request_id,
-                    vec![Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message,
-                        path: request.changed_files.first().cloned(),
-                        line: None,
-                        column: None,
-                    }],
-                );
-            }
-        };
-        result.state_map = Some(state_map);
         result
     }
 
@@ -711,7 +758,7 @@ impl IncrementalCompilerBackend {
 
         let mut result = CompileResult::success_with_host_set_metadata(
             request.request_id,
-            self.layout_hash_from_source_cache(),
+            self.layout_hash_from_state_layout(),
             FunctionPatchSet { functions },
             request.host_set_id.clone(),
             request.host_set_hash,
@@ -723,7 +770,6 @@ impl IncrementalCompilerBackend {
             None,
         );
         result.jit_code_ptr_overrides = Some(jit_code_ptr_overrides);
-        result.state_map = Some(self.state_map_from_source_cache()?);
         Ok(result)
     }
 
@@ -768,9 +814,9 @@ impl IncrementalCompilerBackend {
             );
         }
 
-        let mut result = CompileResult::success_with_host_set_metadata(
+        let result = CompileResult::success_with_host_set_metadata(
             request.request_id,
-            self.layout_hash_from_source_cache(),
+            self.layout_hash_from_state_layout(),
             FunctionPatchSet { functions },
             request.host_set_id.clone(),
             request.host_set_hash,
@@ -781,7 +827,6 @@ impl IncrementalCompilerBackend {
             compile.linked_image_sha256,
             Some(aot_function_symbols),
         );
-        result.state_map = Some(self.state_map_from_source_cache()?);
         Ok(result)
     }
 
@@ -831,6 +876,28 @@ impl IncrementalCompilerBackend {
         }
     }
 
+    fn publish_prepared_jit_candidate(&mut self, request_id: RequestId) -> Result<(), String> {
+        let Some(candidate) = self.pending_jit_candidate.take() else {
+            return Ok(());
+        };
+        let Some(sender) = self.prepared_jit_swap_tx.as_ref() else {
+            self.jit_process = candidate;
+            return Ok(());
+        };
+        self.jit_process = candidate.staged_candidate();
+        sender
+            .send(PreparedJitSwap {
+                request_id,
+                candidate,
+            })
+            .map_err(|_| {
+                format!(
+                    "failed publishing staged JIT candidate for request {}",
+                    request_id.0
+                )
+            })
+    }
+
     fn source_cache_has_function(&self, function_name: &str) -> bool {
         let needle = format!("function {function_name}(");
         self.source_by_path
@@ -875,113 +942,15 @@ impl IncrementalCompilerBackend {
         })
     }
 
-    fn layout_hash_from_source_cache(&self) -> LayoutHash {
-        let mut hasher = Sha256::new();
-        for (path, source) in &self.source_by_path {
-            hasher.update(path.as_bytes());
-            hasher.update([0u8]);
-            hasher.update(source.as_bytes());
-            hasher.update([0xffu8]);
-        }
-        let digest = hasher.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&digest);
-        LayoutHash(bytes)
-    }
-
-    fn state_map_from_source_cache(&self) -> Result<Vec<StateMapEntry>, String> {
-        let mut struct_fields_by_name: BTreeMap<String, Vec<StructFieldType>> = BTreeMap::new();
-        for (path, source) in &self.source_by_path {
-            let parsed = parse_top_level_type_layout(source).map_err(|error| {
-                format!(
-                    "failed parsing top-level type layout in {} for state map extraction: {error}",
-                    path
-                )
-            })?;
-            for struct_def in parsed.structs {
-                let mut fields = Vec::new();
-                for field in struct_def.fields {
-                    fields.push(StructFieldType {
-                        field_name: field.name,
-                        type_name: field.type_name,
-                    });
-                }
-                struct_fields_by_name.insert(struct_def.name, fields);
-            }
-        }
-
-        let mut leaf_by_path: BTreeMap<String, StateMapEntry> = BTreeMap::new();
-        for (path, source) in &self.source_by_path {
-            let parsed = parse_top_level_type_layout(source).map_err(|error| {
-                format!(
-                    "failed parsing top-level type layout in {} for state map extraction: {error}",
-                    path
-                )
-            })?;
-            for global in parsed.globals {
-                Self::collect_state_map_leaf_entries(
-                    &global.name,
-                    &global.type_name,
-                    &struct_fields_by_name,
-                    &mut Vec::new(),
-                    &mut leaf_by_path,
-                )?;
-            }
-            for block in parsed.global_blocks {
-                for field in block.fields {
-                    let field_path = format!("{}.{}", block.name, field.name);
-                    Self::collect_state_map_leaf_entries(
-                        &field_path,
-                        &field.type_name,
-                        &struct_fields_by_name,
-                        &mut Vec::new(),
-                        &mut leaf_by_path,
-                    )?;
-                }
-            }
-        }
-
-        Ok(leaf_by_path.into_values().collect())
-    }
-
-    fn collect_state_map_leaf_entries(
-        path: &str,
-        type_name: &str,
-        struct_fields_by_name: &BTreeMap<String, Vec<StructFieldType>>,
-        struct_stack: &mut Vec<String>,
-        leaf_by_path: &mut BTreeMap<String, StateMapEntry>,
-    ) -> Result<(), String> {
-        if let Some(fields) = struct_fields_by_name.get(type_name) {
-            if struct_stack.iter().any(|name| name == type_name) {
-                return Err(format!(
-                    "state-map extraction rejected recursive struct '{}' in path '{}'",
-                    type_name, path
-                ));
-            }
-            struct_stack.push(type_name.to_string());
-            for field in fields {
-                let child_path = format!("{}.{}", path, field.field_name);
-                Self::collect_state_map_leaf_entries(
-                    &child_path,
-                    &field.type_name,
-                    struct_fields_by_name,
-                    struct_stack,
-                    leaf_by_path,
-                )?;
-            }
-            struct_stack.pop();
-            return Ok(());
-        }
-
-        leaf_by_path.insert(
-            path.to_string(),
-            StateMapEntry {
-                path: path.to_string(),
-                path_hash: crate::hash_global_path(path),
-                type_name: type_name.to_string(),
-            },
-        );
-        Ok(())
+    fn layout_hash_from_state_layout(&self) -> LayoutHash {
+        LayoutHash(
+            state_layout_digest(
+                self.last_state_layout
+                    .as_ref()
+                    .expect("successful compiler result must have canonical state layout"),
+            )
+            .expect("canonical state layout serialization is infallible"),
+        )
     }
 
     fn compile_jit_engine_package_from_cache(
@@ -990,15 +959,24 @@ impl IncrementalCompilerBackend {
         source_delta: &SourceCacheDelta,
     ) -> Result<(), String> {
         self.sync_jit_process_sources(source_delta);
-        self.jit_process
-            .compile()
-            .map_err(|error| format!("rust-native JIT engine compile failed: {error:?}"))?;
-        self.jit_process.validate_on_code_swap_signature()?;
-        let package = self
-            .jit_process
+        let mut candidate = if self.prepared_jit_swap_tx.is_some() {
+            self.jit_process.staged_candidate()
+        } else {
+            std::mem::take(&mut self.jit_process)
+        };
+        if let Err(error) = candidate.compile_staged() {
+            if self.prepared_jit_swap_tx.is_none() {
+                self.jit_process = candidate;
+            }
+            return Err(format!("rust-native JIT engine compile failed: {error:?}"));
+        }
+        candidate.validate_on_code_swap_signature()?;
+        let package = candidate
             .build_engine_package(&Self::engine_entrypoints(include_on_code_swap))
             .map_err(|error| format!("failed to build JIT engine package: {error}"))?;
+        self.last_state_layout = Some(candidate.state_layout());
         self.last_jit_engine_package = Some(package);
+        self.pending_jit_candidate = Some(candidate);
         Ok(())
     }
 
@@ -1007,11 +985,22 @@ impl IncrementalCompilerBackend {
         source_delta: &SourceCacheDelta,
     ) -> Result<BTreeMap<String, u64>, String> {
         self.sync_jit_process_sources(source_delta);
-        self.jit_process
-            .compile()
-            .map_err(|error| format!("rust-native JIT compile failed: {error:?}"))?;
-        self.jit_process.validate_on_code_swap_signature()?;
-        Ok(self.jit_process.symbol_code_ptrs())
+        let mut candidate = if self.prepared_jit_swap_tx.is_some() {
+            self.jit_process.staged_candidate()
+        } else {
+            std::mem::take(&mut self.jit_process)
+        };
+        if let Err(error) = candidate.compile_staged() {
+            if self.prepared_jit_swap_tx.is_none() {
+                self.jit_process = candidate;
+            }
+            return Err(format!("rust-native JIT compile failed: {error:?}"));
+        }
+        candidate.validate_on_code_swap_signature()?;
+        let symbol_code_ptrs = candidate.symbol_code_ptrs();
+        self.last_state_layout = Some(candidate.state_layout());
+        self.pending_jit_candidate = Some(candidate);
+        Ok(symbol_code_ptrs)
     }
 
     fn compile_aot_engine_bundle_from_cache(
@@ -1020,6 +1009,7 @@ impl IncrementalCompilerBackend {
         include_on_code_swap: bool,
     ) -> Result<AotEngineBundle, String> {
         let process = self.compile_aot_process_from_source_cache()?;
+        self.last_state_layout = Some(process.state_layout());
 
         let bundle_output_dir = self
             .aot_artifact_root
@@ -1057,10 +1047,11 @@ impl IncrementalCompilerBackend {
     }
 
     fn compile_aot_non_engine_artifacts_from_cache(
-        &self,
+        &mut self,
         request_id: u64,
     ) -> Result<DirectAotArtifactBundle, String> {
         let process = self.compile_aot_process_from_source_cache()?;
+        self.last_state_layout = Some(process.state_layout());
         let output_dir = self
             .aot_artifact_root
             .join("non_engine")
@@ -2069,19 +2060,31 @@ fn resolve_latest_existing_path(candidates: Vec<PathBuf>) -> Option<PathBuf> {
 }
 
 fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
+    let installed_name = if cfg!(windows) {
+        "stasis_dynload.dll.lib"
+    } else {
+        "libstasis_dynload.a"
+    };
+    if let Some(installed) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(installed_name)))
+        .filter(|path| path.is_file())
+    {
+        return Some(installed);
+    }
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| self_host_repo_root().join("target"));
     let mut candidates: Vec<PathBuf> = Vec::new();
-    let static_lib_names: &[&str] = if cfg!(windows) {
-        &["stasis_dynload.lib"]
+    let link_lib_names: &[&str] = if cfg!(windows) {
+        &["stasis_dynload.dll.lib"]
     } else {
         &["libstasis_dynload.a", "stasis_dynload.a"]
     };
 
     for profile in ["debug", "release"] {
         let base = target_dir.join(profile);
-        for name in static_lib_names {
+        for name in link_lib_names {
             let direct = base.join(name);
             if direct.exists() {
                 candidates.push(direct);
@@ -2098,7 +2101,7 @@ fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
                 continue;
             };
             if cfg!(windows) {
-                if name.starts_with("stasis_dynload-") && name.ends_with(".lib") {
+                if name.starts_with("stasis_dynload-") && name.ends_with(".dll.lib") {
                     candidates.push(path);
                 }
             } else if (name.starts_with("libstasis_dynload-")
@@ -2149,7 +2152,7 @@ fn runtime_bridge_object_extension(target: &stasis_jit::AotTarget) -> &'static s
     }
 }
 
-fn should_link_stasis_dynload_staticlib(target: &stasis_jit::AotTarget) -> bool {
+fn should_link_stasis_dynload(target: &stasis_jit::AotTarget) -> bool {
     matches!(target, stasis_jit::AotTarget::Native)
 }
 
@@ -2157,48 +2160,115 @@ fn default_runtime_bridge_compiler(target: &stasis_jit::AotTarget) -> PathBuf {
     if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
         PathBuf::from("clang")
     } else if cfg!(windows) {
-        PathBuf::from("clang-cl.exe")
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join("clang-cl.exe")))
+            .filter(|path| path.is_file())
+            .or_else(resolve_host_clang_cl)
+            .unwrap_or_else(|| PathBuf::from("clang-cl.exe"))
     } else {
         PathBuf::from("cc")
     }
 }
 
-fn ensure_stasis_dynload_staticlib() -> Result<PathBuf, String> {
+#[cfg(windows)]
+fn resolve_host_clang_cl() -> Option<PathBuf> {
+    ["BuildTools", "Enterprise", "Community", "Professional"]
+        .into_iter()
+        .map(|edition| {
+            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\2022")
+                .join(edition)
+                .join("VC/Tools/Llvm/x64/bin/clang-cl.exe")
+        })
+        .find(|path| path.is_file())
+}
+
+#[cfg(not(windows))]
+fn resolve_host_clang_cl() -> Option<PathBuf> {
+    None
+}
+
+fn ensure_stasis_dynload_link_library() -> Result<PathBuf, String> {
+    if let Some(existing) = resolve_stasis_dynload_lib() {
+        return Ok(existing);
+    }
     let repo_root = self_host_repo_root();
     let mut command = std::process::Command::new("cargo");
-    command.arg("rustc").arg("-p").arg("stasis_dynload");
+    if cfg!(windows) {
+        command.arg("build").arg("-p").arg("stasis_dynload");
+    } else {
+        command.arg("rustc").arg("-p").arg("stasis_dynload");
+    }
     if !cfg!(debug_assertions) {
         command.arg("--release");
     }
-    command
-        .arg("--")
-        .arg("--crate-type")
-        .arg("staticlib")
-        .current_dir(&repo_root);
+    if !cfg!(windows) {
+        command.arg("--").arg("--crate-type").arg("staticlib");
+    }
+    command.current_dir(&repo_root);
     if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
         command.env("CARGO_TARGET_DIR", target_dir);
     }
 
     let output = command.output().map_err(|error| {
-        format!("failed to spawn cargo rustc -p stasis_dynload --crate-type staticlib: {error}")
+        format!("failed to spawn Cargo for the stasis_dynload link library: {error}")
     })?;
     if !output.status.success() {
         return Err(format!(
-            "failed to build stasis_dynload staticlib\nstdout:\n{}\nstderr:\n{}",
+            "failed to build stasis_dynload link library\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
 
     resolve_stasis_dynload_lib().ok_or_else(|| {
-        "stasis_dynload staticlib build reported success but no static library was found"
-            .to_string()
+        "stasis_dynload build reported success but no link library was found".to_string()
     })
+}
+
+#[cfg(windows)]
+fn stage_stasis_dynload_runtime(link_library: &Path, output: &Path) -> Result<(), String> {
+    let file_name = link_library
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "invalid stasis_dynload link library {}",
+                link_library.display()
+            )
+        })?;
+    let dll_name = file_name
+        .strip_suffix(".lib")
+        .ok_or_else(|| format!("expected a .lib import library, got {file_name}"))?;
+    let dll = link_library.with_file_name(dll_name);
+    if !dll.is_file() {
+        return Err(format!(
+            "stasis_dynload runtime DLL is missing: {}",
+            dll.display()
+        ));
+    }
+    let destination = output
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(dll_name);
+    copy_file_creating_parent(&dll, &destination)
+}
+
+#[cfg(not(windows))]
+fn stage_stasis_dynload_runtime(_link_library: &Path, _output: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
     let runner_name = runtime_runner_file_name();
-    resolve_latest_existing_path(vec![
+    let mut candidates = Vec::new();
+    if let Some(installed) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(runner_name)))
+    {
+        candidates.push(installed);
+    }
+    candidates.extend([
         repo_root.join(runner_name),
         repo_root.join("build").join(runner_name),
         repo_root
@@ -2212,12 +2282,19 @@ fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
             .join("build")
             .join("bin")
             .join(runner_name),
-    ])
+    ]);
+    resolve_latest_existing_path(candidates)
 }
 
 fn resolve_runtime_graphics_path(repo_root: &Path) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     for name in runtime_graphics_file_names() {
+        if let Some(installed) = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join(name)))
+        {
+            candidates.push(installed);
+        }
         candidates.push(repo_root.join(name));
         candidates.push(repo_root.join("build").join(name));
         candidates.push(
@@ -2281,8 +2358,14 @@ fn resolve_rust_lld_exe() -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
+fn resolve_installed_lld_link() -> Option<PathBuf> {
+    let path = std::env::current_exe().ok()?.parent()?.join("lld-link.exe");
+    path.is_file().then_some(path)
+}
+
 fn ensure_rust_lld_link_wrapper(artifact_root: &Path) -> Option<PathBuf> {
     let rust_lld = resolve_rust_lld_exe()?;
+    std::fs::create_dir_all(artifact_root).ok()?;
     let wrapper_path = artifact_root.join("rust-lld-link.cmd");
     let script = format!(
         "@echo off\r\n\"{}\" -flavor link %*\r\n",
@@ -2410,6 +2493,20 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, String> {
+    fn json_value_by_path<'a>(
+        root: &'a serde_json::Value,
+        path: &str,
+    ) -> Option<&'a serde_json::Value> {
+        if path.is_empty() {
+            return Some(root);
+        }
+        let mut value = root;
+        for segment in path.split('.') {
+            value = value.get(segment)?;
+        }
+        Some(value)
+    }
+
     fn walk(dir: &Path, out: &mut BTreeMap<String, PackagedRuntimeField>) -> Result<(), String> {
         let entries = std::fs::read_dir(dir)
             .map_err(|error| format!("failed to read directory {}: {error}", dir.display()))?;
@@ -2438,14 +2535,240 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
                 .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
             let meta: StructMetaExportFile = serde_json::from_str(&text)
                 .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+            if let Some(table) = &meta.csv_table {
+                if table.rows_path.is_empty()
+                    || table.row_count_path.is_empty()
+                    || table.rows_path.contains('.')
+                    || table.row_count_path.contains('.')
+                    || table.capacity == 0
+                    || table.key_columns.is_empty()
+                {
+                    return Err(format!("invalid csvTable schema in {}", path.display()));
+                }
+                let prefix = format!("{}.", table.rows_path);
+                let mut columns = BTreeSet::new();
+                for field in &meta.fields {
+                    let suffix = field.json_path.strip_prefix(&prefix).ok_or_else(|| {
+                        format!(
+                            "CSV table target {} in {} must be below rowsPath {}",
+                            field.json_path,
+                            path.display(),
+                            table.rows_path
+                        )
+                    })?;
+                    if suffix.is_empty()
+                        || suffix.contains('.')
+                        || field.array_count != table.capacity
+                    {
+                        return Err(format!(
+                            "invalid CSV table target {} in {}",
+                            field.json_path,
+                            path.display()
+                        ));
+                    }
+                    let column = field.csv_column.as_deref().unwrap_or(&field.json_path);
+                    if column.is_empty() || column.contains('.') || !columns.insert(column) {
+                        return Err(format!(
+                            "invalid or duplicate CSV table column {column} in {}",
+                            path.display()
+                        ));
+                    }
+                }
+                let mut keys = BTreeSet::new();
+                for key in &table.key_columns {
+                    if !keys.insert(key) {
+                        return Err(format!(
+                            "duplicate CSV table key column {key} in {}",
+                            path.display()
+                        ));
+                    }
+                    if !columns.contains(key.as_str()) {
+                        return Err(format!(
+                            "CSV table key column {key} in {} has no target field",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+            let data_name = name
+                .strip_suffix(".struct-meta.json")
+                .expect("metadata suffix checked");
+            let json_path = path.with_file_name(format!("{data_name}.json"));
+            let csv_path = path.with_file_name(format!("{data_name}.csv"));
+            if json_path.is_file() && csv_path.is_file() {
+                return Err(format!(
+                    "data files {} and {} cannot share metadata {}",
+                    json_path.display(),
+                    csv_path.display(),
+                    path.display()
+                ));
+            }
+            let data_path = if json_path.is_file() {
+                Some(json_path)
+            } else if csv_path.is_file() {
+                Some(csv_path)
+            } else {
+                None
+            };
+            let data_root = if let Some(data_path) = data_path.as_ref() {
+                let data_text = std::fs::read_to_string(&data_path)
+                    .map_err(|error| format!("failed to read {}: {error}", data_path.display()))?;
+                if data_path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"))
+                {
+                    let fields: Vec<crate::CsvBindingField> = meta
+                        .fields
+                        .iter()
+                        .map(|field| crate::CsvBindingField {
+                            path: field.json_path.clone(),
+                            csv_column: field.csv_column.clone(),
+                            type_name: field.field_type.clone(),
+                            array_count: field.array_count,
+                        })
+                        .collect();
+                    Some(
+                        if let Some(table) = &meta.csv_table {
+                            crate::parse_csv_table_binding(&data_text, &fields, table)
+                        } else {
+                            crate::parse_flat_csv_binding(&data_text, &fields)
+                        }
+                        .map_err(|error| {
+                            format!("failed to parse {}: {error}", data_path.display())
+                        })?,
+                    )
+                } else {
+                    if meta.csv_table.is_some() {
+                        return Err(format!(
+                            "csvTable metadata requires a CSV data file: {}",
+                            data_path.display()
+                        ));
+                    }
+                    Some(
+                        serde_json::from_str::<serde_json::Value>(&data_text).map_err(|error| {
+                            format!("failed to parse {}: {error}", data_path.display())
+                        })?,
+                    )
+                }
+            } else {
+                None
+            };
+            if let Some(root) = data_root.as_ref() {
+                let mut paths: Vec<String> = meta
+                    .fields
+                    .iter()
+                    .map(|field| field.json_path.clone())
+                    .collect();
+                if let Some(table) = &meta.csv_table {
+                    paths.push(table.row_count_path.clone());
+                }
+                crate::validate_binding_source_paths(root, &paths).map_err(|error| {
+                    format!(
+                        "data file {} does not match target metadata: {error}",
+                        data_path
+                            .as_ref()
+                            .expect("data root requires data path")
+                            .display()
+                    )
+                })?;
+            }
+            let csv_table = meta.csv_table.clone();
             for field in meta.fields {
-                out.entry(field.name.clone())
-                    .or_insert(PackagedRuntimeField {
-                        name: field.name,
-                        size: field.size,
-                        field_type: field.field_type,
-                        array_count: field.array_count,
-                    });
+                let field_name = match field.name {
+                    Some(name) if !name.is_empty() => name,
+                    _ if !meta.global_name.is_empty() => {
+                        let path_suffix = field.json_path.replace('.', "__");
+                        if path_suffix.is_empty() {
+                            meta.global_name.clone()
+                        } else {
+                            format!("{}__{path_suffix}", meta.global_name)
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "metadata field in {} requires name or globalName",
+                            path.display()
+                        ));
+                    }
+                };
+                let initial_value = data_root
+                    .as_ref()
+                    .and_then(|root| json_value_by_path(root, &field.json_path))
+                    .cloned();
+                if data_root.is_some() && initial_value.is_none() {
+                    return Err(format!(
+                        "data file {} is missing metadata path {}",
+                        data_path
+                            .as_ref()
+                            .expect("data root requires data path")
+                            .display(),
+                        field.json_path
+                    ));
+                }
+                let collection_field = if let Some(table) = &csv_table {
+                    Some(
+                        field
+                            .json_path
+                            .strip_prefix(&format!("{}.", table.rows_path))
+                            .ok_or_else(|| {
+                                format!(
+                                    "CSV table target {} in {} must be below rowsPath {}",
+                                    field.json_path,
+                                    path.display(),
+                                    table.rows_path
+                                )
+                            })?
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                let next = PackagedRuntimeField {
+                    name: field_name.clone(),
+                    size: field.size,
+                    field_type: field.field_type,
+                    array_count: field.array_count,
+                    initial_value,
+                    collection_path: csv_table
+                        .as_ref()
+                        .map(|table| format!("{}.{}", meta.global_name, table.rows_path)),
+                    collection_field,
+                };
+                if let Some(existing) = out.get(&field_name) {
+                    if existing != &next {
+                        return Err(format!(
+                            "conflicting packaged data values for runtime field {field_name}"
+                        ));
+                    }
+                } else {
+                    out.insert(field_name, next);
+                }
+            }
+            if let Some(table) = csv_table {
+                let path_suffix = table.row_count_path.replace('.', "__");
+                let field_name = format!("{}__{path_suffix}", meta.global_name);
+                let initial_value = data_root
+                    .as_ref()
+                    .and_then(|root| json_value_by_path(root, &table.row_count_path))
+                    .cloned();
+                let next = PackagedRuntimeField {
+                    name: field_name.clone(),
+                    size: 4,
+                    field_type: "i32".to_string(),
+                    array_count: 1,
+                    initial_value,
+                    collection_path: None,
+                    collection_field: None,
+                };
+                if let Some(existing) = out.get(&field_name) {
+                    if existing != &next {
+                        return Err(format!(
+                            "conflicting packaged data values for runtime field {field_name}"
+                        ));
+                    }
+                } else {
+                    out.insert(field_name, next);
+                }
             }
         }
         Ok(())
@@ -2464,7 +2787,7 @@ fn is_bundleable_asset_extension(path: &Path) -> bool {
     };
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "json" | "svg" | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+        "json" | "csv" | "svg" | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
     )
 }
 
@@ -2640,23 +2963,64 @@ fn stage_entry_support_files(
         .ok_or_else(|| format!("invalid entry file name {}", entry_file.display()))?
         .to_string();
     let source_bundle_dir = entry_root.join(&package_dir_name);
-    if !source_bundle_dir.exists() {
-        return Ok(PackagedAotSupportFiles::default());
-    }
-
     let staged_bundle_dir = output_root.join(&package_dir_name);
-    if staged_bundle_dir.exists() {
-        std::fs::remove_dir_all(&staged_bundle_dir).map_err(|error| {
-            format!(
-                "failed to clear existing staged asset directory {}: {error}",
-                staged_bundle_dir.display()
-            )
-        })?;
+    let mut staged_roots = Vec::new();
+    if source_bundle_dir.exists() {
+        if staged_bundle_dir.exists() {
+            std::fs::remove_dir_all(&staged_bundle_dir).map_err(|error| {
+                format!(
+                    "failed to clear existing staged asset directory {}: {error}",
+                    staged_bundle_dir.display()
+                )
+            })?;
+        }
+        copy_dir_recursive(&source_bundle_dir, &staged_bundle_dir)?;
+        rewrite_packaged_json_asset_paths(&staged_bundle_dir, &package_dir_name)?;
+        staged_roots.push(staged_bundle_dir.clone());
     }
-    copy_dir_recursive(&source_bundle_dir, &staged_bundle_dir)?;
-    rewrite_packaged_json_asset_paths(&staged_bundle_dir, &package_dir_name)?;
 
-    let runtime_fields = collect_struct_meta_fields(&staged_bundle_dir)?;
+    let project_data_dir = project_dir.join("data");
+    let staged_data_dir = output_root.join("data");
+    if project_data_dir.exists() {
+        let source_data_abs = project_data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| project_data_dir.clone());
+        let staged_data_abs = staged_data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| staged_data_dir.clone());
+        if source_data_abs == staged_data_abs {
+            staged_roots.push(project_data_dir);
+        } else {
+            if staged_data_dir.exists() {
+                std::fs::remove_dir_all(&staged_data_dir).map_err(|error| {
+                    format!(
+                        "failed to clear existing staged data directory {}: {error}",
+                        staged_data_dir.display()
+                    )
+                })?;
+            }
+            copy_dir_recursive(&project_data_dir, &staged_data_dir)?;
+            rewrite_packaged_json_asset_paths(&staged_data_dir, "data")?;
+            staged_roots.push(staged_data_dir);
+        }
+    }
+
+    let mut fields_by_name: BTreeMap<String, PackagedRuntimeField> = BTreeMap::new();
+    for root in staged_roots {
+        for field in collect_struct_meta_fields(&root)? {
+            if let Some(existing) = fields_by_name.get(&field.name) {
+                if existing != &field {
+                    return Err(format!(
+                        "conflicting packaged data values for runtime field {}",
+                        field.name
+                    ));
+                }
+            } else {
+                fields_by_name.insert(field.name.clone(), field);
+            }
+        }
+    }
+    let runtime_fields: Vec<_> = fields_by_name.into_values().collect();
     let mut support = PackagedAotSupportFiles {
         export_symbols: runtime_fields
             .iter()
@@ -2684,62 +3048,176 @@ fn append_runtime_bridge_field_source(
     register_lines: &mut Vec<String>,
     field: &PackagedRuntimeField,
 ) -> Result<(), String> {
+    fn values_for_field<'a>(
+        field: &'a PackagedRuntimeField,
+    ) -> Result<Vec<&'a serde_json::Value>, String> {
+        let Some(value) = field.initial_value.as_ref() else {
+            return Ok(Vec::new());
+        };
+        if field.array_count > 1 {
+            let values = value.as_array().ok_or_else(|| {
+                format!("packaged data field {} must be a JSON array", field.name)
+            })?;
+            if values.len() != field.array_count {
+                return Err(format!(
+                    "packaged data field {} requires {} values, found {}",
+                    field.name,
+                    field.array_count,
+                    values.len()
+                ));
+            }
+            Ok(values.iter().collect())
+        } else {
+            Ok(vec![value])
+        }
+    }
+
+    fn i32_literal(value: &serde_json::Value, field_name: &str) -> Result<String, String> {
+        if let Some(value) = value.as_bool() {
+            return Ok(if value { "1" } else { "0" }.to_string());
+        }
+        let value = value.as_i64().ok_or_else(|| {
+            format!("packaged data field {field_name} requires an integer or boolean")
+        })?;
+        i32::try_from(value)
+            .map(|value| value.to_string())
+            .map_err(|_| format!("packaged data field {field_name} is outside i32 range"))
+    }
+
+    fn float_literal(
+        value: &serde_json::Value,
+        field_name: &str,
+        suffix: &str,
+    ) -> Result<String, String> {
+        let value = value
+            .as_f64()
+            .ok_or_else(|| format!("packaged data field {field_name} requires a number"))?;
+        if !value.is_finite() {
+            return Err(format!("packaged data field {field_name} must be finite"));
+        }
+        Ok(format!("{value:.17}{suffix}"))
+    }
+
     let runtime_path = field.name.replace("__", ".");
-    let field_hash = crate::hash_global_path(&runtime_path);
+    let scalar_hash = crate::hash_global_path(&runtime_path);
+    let collection_hash = field
+        .collection_path
+        .as_deref()
+        .map(crate::hash_global_path)
+        .unwrap_or_else(|| crate::hash_global_path(&runtime_path));
+    let field_hash = field
+        .collection_field
+        .as_deref()
+        .map(crate::hash_global_path)
+        .unwrap_or(0);
     match field.field_type.as_str() {
         "bool" | "u8" | "u16" | "u32" | "i32" => {
+            let values = values_for_field(field)?;
             if field.array_count > 1 {
+                let initializer = if values.is_empty() {
+                    "0".to_string()
+                } else {
+                    values
+                        .iter()
+                        .map(|value| i32_literal(value, &field.name))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .join(", ")
+                };
                 source.push_str(&format!(
-                    "STASIS_EXPORT int32_t {}[{}] = {{0}};\n",
-                    field.name, field.array_count
+                    "STASIS_EXPORT int32_t {}[{}] = {{{initializer}}};\n",
+                    field.name, field.array_count,
                 ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_i32_array({field_hash}, 0, {name}, {len});",
+                    "stasis_jit_register_global_i32_array({collection_hash}, {field_hash}, {name}, {len});",
                     name = field.name,
                     len = field.array_count
                 ));
             } else {
-                source.push_str(&format!("STASIS_EXPORT int32_t {} = 0;\n", field.name));
+                let initializer = values
+                    .first()
+                    .map(|value| i32_literal(value, &field.name))
+                    .transpose()?
+                    .unwrap_or_else(|| "0".to_string());
+                source.push_str(&format!(
+                    "STASIS_EXPORT int32_t {} = {initializer};\n",
+                    field.name
+                ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_i32_ptr({field_hash}, &{name});",
+                    "stasis_jit_register_global_i32_ptr({scalar_hash}, &{name});",
                     name = field.name
                 ));
             }
         }
         "f32" => {
+            let values = values_for_field(field)?;
             if field.array_count > 1 {
+                let initializer = if values.is_empty() {
+                    "0.0f".to_string()
+                } else {
+                    values
+                        .iter()
+                        .map(|value| float_literal(value, &field.name, "f"))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .join(", ")
+                };
                 source.push_str(&format!(
-                    "STASIS_EXPORT float {}[{}] = {{0}};\n",
-                    field.name, field.array_count
+                    "STASIS_EXPORT float {}[{}] = {{{initializer}}};\n",
+                    field.name, field.array_count,
                 ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_f32_array({field_hash}, 0, {name}, {len});",
+                    "stasis_jit_register_global_f32_array({collection_hash}, {field_hash}, {name}, {len});",
                     name = field.name,
                     len = field.array_count
                 ));
             } else {
-                source.push_str(&format!("STASIS_EXPORT float {} = 0.0f;\n", field.name));
+                let initializer = values
+                    .first()
+                    .map(|value| float_literal(value, &field.name, "f"))
+                    .transpose()?
+                    .unwrap_or_else(|| "0.0f".to_string());
+                source.push_str(&format!(
+                    "STASIS_EXPORT float {} = {initializer};\n",
+                    field.name
+                ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_f32_ptr({field_hash}, &{name});",
+                    "stasis_jit_register_global_f32_ptr({scalar_hash}, &{name});",
                     name = field.name
                 ));
             }
         }
         "f64" => {
+            let values = values_for_field(field)?;
             if field.array_count > 1 {
+                let initializer = if values.is_empty() {
+                    "0.0".to_string()
+                } else {
+                    values
+                        .iter()
+                        .map(|value| float_literal(value, &field.name, ""))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .join(", ")
+                };
                 source.push_str(&format!(
-                    "STASIS_EXPORT double {}[{}] = {{0}};\n",
-                    field.name, field.array_count
+                    "STASIS_EXPORT double {}[{}] = {{{initializer}}};\n",
+                    field.name, field.array_count,
                 ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_f64_array({field_hash}, 0, {name}, {len});",
+                    "stasis_jit_register_global_f64_array({collection_hash}, {field_hash}, {name}, {len});",
                     name = field.name,
                     len = field.array_count
                 ));
             } else {
-                source.push_str(&format!("STASIS_EXPORT double {} = 0.0;\n", field.name));
+                let initializer = values
+                    .first()
+                    .map(|value| float_literal(value, &field.name, ""))
+                    .transpose()?
+                    .unwrap_or_else(|| "0.0".to_string());
+                source.push_str(&format!(
+                    "STASIS_EXPORT double {} = {initializer};\n",
+                    field.name
+                ));
                 register_lines.push(format!(
-                    "stasis_jit_register_global_f64_ptr({field_hash}, &{name});",
+                    "stasis_jit_register_global_f64_ptr({scalar_hash}, &{name});",
                     name = field.name
                 ));
             }
@@ -2752,6 +3230,39 @@ fn append_runtime_bridge_field_source(
                 "STASIS_EXPORT uint8_t {}[{}] = {{0}};\n",
                 field.name, len
             ));
+            if let Some(value) = field.initial_value.as_ref() {
+                let text = value.as_str().ok_or_else(|| {
+                    format!("packaged data field {} requires a string", field.name)
+                })?;
+                let bytes = text.as_bytes();
+                if bytes.len() > payload_len {
+                    return Err(format!(
+                        "packaged data field {} exceeds string capacity {}",
+                        field.name, payload_len
+                    ));
+                }
+                if header_bytes >= 8 {
+                    register_lines.push(format!(
+                        "*((int32_t*){name}) = {len};",
+                        name = field.name,
+                        len = bytes.len()
+                    ));
+                }
+                if header_bytes >= 12 {
+                    register_lines.push(format!(
+                        "*((int32_t*)({name} + 8)) = {len};",
+                        name = field.name,
+                        len = text.chars().count()
+                    ));
+                }
+                for (index, byte) in bytes.iter().enumerate() {
+                    register_lines.push(format!(
+                        "{name}[{offset}] = {byte};",
+                        name = field.name,
+                        offset = header_bytes + index
+                    ));
+                }
+            }
             if header_bytes >= 8 {
                 let max_length_hash =
                     crate::hash_global_path(&format!("{}.max_length", runtime_path));
@@ -2780,7 +3291,7 @@ fn append_runtime_bridge_field_source(
                 ));
             }
             register_lines.push(format!(
-                "stasis_jit_register_global_u8_array({field_hash}, 0, {name} + {header_bytes}, {payload_len});",
+                "stasis_jit_register_global_u8_array({scalar_hash}, 0, {name} + {header_bytes}, {payload_len});",
                 name = field.name,
                 header_bytes = header_bytes,
                 payload_len = payload_len
@@ -2830,7 +3341,16 @@ fn build_engine_bundle_runtime_bridge_source(
     let host_req_window_h_px_hash = crate::hash_global_path("host_req_window_h_px");
 
     let mut source = String::new();
-    source.push_str("#include <stdint.h>\n");
+    source.push_str(
+        "#if defined(_WIN32)\n\
+typedef signed int int32_t;\n\
+typedef signed long long int64_t;\n\
+typedef unsigned char uint8_t;\n\
+typedef unsigned long long uintptr_t;\n\
+#else\n\
+#include <stdint.h>\n\
+#endif\n",
+    );
     source.push_str(
         "#if defined(_WIN32)\n\
 #define STASIS_EXPORT __declspec(dllexport)\n\
@@ -2949,6 +3469,19 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
     host_i32[6] = height;\n\
     host_i32[12] = width;\n\
     host_i32[13] = height;\n\
+    host_i32[14] = 2;\n\
+    host_i32[20] = width;\n\
+    host_i32[21] = height;\n\
+    host_i32[22] = width;\n\
+    host_i32[23] = height;\n\
+    host_i32[24] = width;\n\
+    host_i32[25] = height;\n\
+    host_i32[28] = width;\n\
+    host_i32[29] = height;\n\
+    host_i32[30] = 1;\n\
+    host_i32[31] = 1;\n\
+    host_f32[48] = 1.0f;\n\
+    host_f32[49] = 1.0f;\n\
     host_req_window_w_px = width;\n\
     host_req_window_h_px = height;\n\
     main();\n\
@@ -3029,6 +3562,9 @@ fn emit_engine_bundle_runtime_bridge_object(
             .arg("/c")
             .arg("/O2")
             .arg("/TC")
+            .arg("/Zl")
+            .arg("/GS-")
+            .arg("/X")
             .arg(format!("/Fo{}", object_path.display()))
             .arg(&source_path);
     } else {
@@ -3191,15 +3727,17 @@ fn package_engine_bundle_release(
 
     let mut link_config = backend.aot_link_config.clone();
     link_config.target = backend.aot_compile_config.target.clone();
-    if should_link_stasis_dynload_staticlib(&link_config.target) {
-        let dynload_lib = ensure_stasis_dynload_staticlib()?;
+    let mut dynload_link_library = None;
+    if should_link_stasis_dynload(&link_config.target) {
+        let dynload_lib = ensure_stasis_dynload_link_library()?;
         if !link_config
             .runtime_lib_paths
             .iter()
             .any(|path| path == &dynload_lib)
         {
-            link_config.runtime_lib_paths.push(dynload_lib);
+            link_config.runtime_lib_paths.push(dynload_lib.clone());
         }
+        dynload_link_library = Some(dynload_lib);
     }
     if cfg!(windows) {
         if let Some(wrapper) = ensure_rust_lld_link_wrapper(&backend.aot_artifact_root) {
@@ -3253,6 +3791,9 @@ fn package_engine_bundle_release(
         } else {
             return Err(initial_error);
         }
+    }
+    if let Some(link_library) = dynload_link_library.as_deref() {
+        stage_stasis_dynload_runtime(link_library, &linked_library_path)?;
     }
 
     let (runner_src, graphics_src) = ensure_runtime_release_artifacts()?;
@@ -3352,7 +3893,7 @@ fn aot_call_conv() -> &'static str {
 mod tests {
     use super::*;
     #[cfg(windows)]
-    use object::Object;
+    use object::{Object, ObjectSection};
     #[cfg(windows)]
     use stasis_compiler::IncrementalCompilerHost;
     #[cfg(windows)]
@@ -3374,6 +3915,103 @@ mod tests {
     #[test]
     fn identifier_hash_matches_incremental_function() {
         assert_eq!(hash_identifier("on_code_swap"), -663_287_521);
+    }
+
+    #[test]
+    fn project_data_is_staged_and_embedded_in_aot_runtime_fields() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_project_data_{stamp}"));
+        let project_dir = temp_root.join("project");
+        let output_dir = temp_root.join("output");
+        let entry_file = project_dir.join("src").join("main.stasis");
+        let data_dir = project_dir.join("data");
+        fs::create_dir_all(entry_file.parent().expect("entry parent")).expect("create src");
+        fs::create_dir_all(&data_dir).expect("create data");
+        fs::create_dir_all(&output_dir).expect("create output");
+        fs::write(&entry_file, "function main(): i32 { return 0; }\n").expect("write entry");
+        fs::write(
+            data_dir.join("balance.json"),
+            r#"{"hp":[70,110,85],"enabled":true}"#,
+        )
+        .expect("write data");
+        fs::write(
+            data_dir.join("balance.struct-meta.json"),
+            r#"{
+                "globalName":"balance",
+                "fields":[
+                    {"jsonPath":"hp","size":12,"type":"i32","arrayCount":3},
+                    {"jsonPath":"enabled","size":1,"type":"bool","arrayCount":1}
+                ]
+            }"#,
+        )
+        .expect("write metadata");
+        fs::write(
+            data_dir.join("enemy.csv"),
+            "cadence,damage\n90,9\n60,6\n120,18\n",
+        )
+        .expect("write CSV data");
+        fs::write(
+            data_dir.join("enemy.struct-meta.json"),
+            r#"{
+                "globalName":"enemy",
+                "fields":[
+                    {"jsonPath":"cadence","size":12,"type":"i32","arrayCount":3},
+                    {"jsonPath":"damage","size":12,"type":"i32","arrayCount":3}
+                ]
+            }"#,
+        )
+        .expect("write CSV metadata");
+        fs::write(data_dir.join("waves.csv"), "id,hp\n10,70\n20,110\n")
+            .expect("write table CSV data");
+        fs::write(
+            data_dir.join("waves.struct-meta.json"),
+            r#"{
+                "globalName":"level",
+                "csvTable":{
+                    "rowsPath":"rows",
+                    "rowCountPath":"row_count",
+                    "capacity":4,
+                    "keyColumns":["id"]
+                },
+                "fields":[
+                    {"jsonPath":"rows.id","csvColumn":"id","size":16,"type":"i32","arrayCount":4},
+                    {"jsonPath":"rows.hp","csvColumn":"hp","size":16,"type":"i32","arrayCount":4}
+                ]
+            }"#,
+        )
+        .expect("write table CSV metadata");
+
+        let support = stage_entry_support_files(&project_dir, Some(&entry_file), &output_dir)
+            .expect("stage project data");
+        assert!(output_dir.join("data").join("balance.json").is_file());
+        assert!(output_dir.join("data").join("enemy.csv").is_file());
+        assert_eq!(support.runtime_fields.len(), 7);
+
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::Native,
+            &support.runtime_fields,
+            &[],
+            &[],
+            &[],
+        )
+        .expect("build embedded data bridge");
+        assert!(source.contains("int32_t balance__hp[3] = {70, 110, 85};"));
+        assert!(source.contains("int32_t balance__enabled = 1;"));
+        assert!(source.contains("int32_t enemy__cadence[3] = {90, 60, 120};"));
+        assert!(source.contains("int32_t enemy__damage[3] = {9, 6, 18};"));
+        assert!(source.contains("int32_t level__rows__id[4] = {10, 20, 0, 0};"));
+        assert!(source.contains("int32_t level__rows__hp[4] = {70, 110, 0, 0};"));
+        assert!(source.contains("int32_t level__row_count = 2;"));
+        let rows_hash = crate::hash_global_path("level.rows");
+        let id_hash = crate::hash_global_path("id");
+        assert!(source.contains(&format!(
+            "stasis_jit_register_global_i32_array({rows_hash}, {id_hash}, level__rows__id, 4);"
+        )));
+
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]
@@ -3415,9 +4053,67 @@ mod tests {
         assert!(source.contains("STASIS_EXPORT void stasis_on_input(int type, int a, int b)"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_runtime_bridge_object_has_no_default_library_directives() {
+        let runtime_fields = vec![PackagedRuntimeField {
+            name: "balance__hp".to_string(),
+            size: 12,
+            field_type: "i32".to_string(),
+            array_count: 3,
+            initial_value: Some(serde_json::json!([70, 110, 85])),
+            collection_path: None,
+            collection_field: None,
+        }];
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::Native,
+            &runtime_fields,
+            &["aot_fn_1".to_string()],
+            &[PackagedFunctionAlias {
+                alias: "main",
+                target_symbol: "aot_fn_1".to_string(),
+                returns_i32: true,
+            }],
+            &[],
+        )
+        .expect("build bridge source");
+        assert!(source.contains("typedef signed int int32_t;"));
+        assert!(source.contains("int32_t balance__hp[3] = {70, 110, 85};"));
+        assert!(!source.starts_with("#include <stdint.h>"));
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_bridge_directives_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source_path = temp_root.join("bridge.c");
+        let object_path = temp_root.join("bridge.obj");
+        fs::write(&source_path, source).expect("write bridge source");
+        let compiler = default_runtime_bridge_compiler(&stasis_jit::AotTarget::Native);
+        let output = Command::new(compiler)
+            .args(["/nologo", "/c", "/O2", "/TC", "/Zl", "/GS-", "/X"])
+            .arg(format!("/Fo{}", object_path.display()))
+            .arg(&source_path)
+            .output()
+            .expect("compile bridge object");
+        assert!(
+            output.status.success(),
+            "bridge compile failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = fs::read(&object_path).expect("read bridge object");
+        let object = object::File::parse(&*bytes).expect("parse bridge object");
+        if let Some(section) = object.section_by_name(".drectve") {
+            let directives = String::from_utf8_lossy(section.data().expect("read directives"));
+            assert!(!directives.to_ascii_uppercase().contains("DEFAULTLIB"));
+        }
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
     #[test]
     fn android_engine_bundle_skips_host_dynload_staticlib() {
-        assert!(!should_link_stasis_dynload_staticlib(
+        assert!(!should_link_stasis_dynload(
             &stasis_jit::AotTarget::android_arm64_default()
         ));
     }
@@ -6572,6 +7268,48 @@ mod tests {
     }
 
     #[test]
+    fn jit_layout_hash_ignores_function_body_only_edits() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_layout_hash_body_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("main.stasis");
+        fs::write(
+            &source,
+            "global score: i32;\nfunction main(): i32 { return score + 1; }\n",
+        )
+        .expect("write source");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let first = backend.compile(CompileRequest::new(
+            RequestId(9_113),
+            vec![source.clone()],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(first.status, CompileStatus::Success);
+
+        fs::write(
+            &source,
+            "global score: i32;\nfunction main(): i32 { return score + 2; }\n",
+        )
+        .expect("rewrite source");
+        let second = backend.compile(CompileRequest::new(
+            RequestId(9_114),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(second.status, CompileStatus::Success);
+        assert_eq!(
+            first.layout_hash, second.layout_hash,
+            "function body changes must not create a parallel layout identity"
+        );
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn jit_dev_non_engine_source_emits_jit_code_ptr_overrides() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -6622,70 +7360,6 @@ mod tests {
         assert!(backend.last_jit_engine_package().is_none());
         assert!(backend.last_aot_engine_bundle().is_none());
         fs::remove_dir_all(&temp_root).ok();
-    }
-
-    #[test]
-    fn jit_dev_non_engine_result_includes_flattened_state_map_entries() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("stasis_jit_state_map_{stamp}"));
-        fs::create_dir_all(&temp_root).expect("create temp root");
-        let source = temp_root.join("game_logic.stasis");
-        fs::write(
-            &source,
-            "struct Enemy { hp: i32; speed: f32; }\nglobal Game { score: i32; first_enemy: Enemy; }\nfunction main(): i32 { return Game.score; }\n",
-        )
-        .expect("write source");
-
-        let mut backend = IncrementalCompilerBackend::new();
-        let result = backend.compile(CompileRequest::new(
-            RequestId(9_103),
-            vec![source],
-            TargetMode::JitDev,
-        ));
-        assert_eq!(result.status, CompileStatus::Success);
-        let state_map = result
-            .state_map
-            .as_ref()
-            .expect("state map should be populated on successful compile");
-        assert!(
-            state_map
-                .iter()
-                .any(|entry| entry.path == "Game.score" && entry.type_name == "i32"),
-            "expected scalar global block entry in state map"
-        );
-        assert!(
-            state_map
-                .iter()
-                .any(|entry| entry.path == "Game.first_enemy.hp" && entry.type_name == "i32"),
-            "expected flattened struct field entry in state map"
-        );
-        assert!(
-            state_map
-                .iter()
-                .any(|entry| entry.path == "Game.first_enemy.speed" && entry.type_name == "f32"),
-            "expected flattened struct field entry in state map"
-        );
-        fs::remove_dir_all(&temp_root).ok();
-    }
-
-    #[test]
-    fn state_map_extraction_rejects_recursive_structs() {
-        let mut backend = IncrementalCompilerBackend::new();
-        backend.source_by_path.insert(
-            "recursive.stasis".to_string(),
-            "struct Node { next: Node; }\nglobal root: Node;\nfunction main(): i32 { return 0; }\n"
-                .to_string(),
-        );
-        let result = backend.state_map_from_source_cache();
-        assert!(
-            result.is_err(),
-            "recursive struct layout should be rejected"
-        );
-        let message = result.expect_err("state map extraction should fail");
-        assert!(message.contains("recursive struct"));
     }
 
     #[test]
@@ -7771,12 +8445,17 @@ fn run_self_host_aot_cli_with_backend_and_options(
             .values()
             .map(|(_, path)| path.clone())
             .collect();
-        link_objects_to_executable(
-            &object_paths,
-            output_exe,
-            &entry_symbol,
-            &backend.aot_link_config,
-        )?;
+        let mut link_config = backend.aot_link_config.clone();
+        let mut dynload_link_library = None;
+        if should_link_stasis_dynload(&link_config.target) {
+            let link_library = ensure_stasis_dynload_link_library()?;
+            link_config.runtime_lib_paths.push(link_library.clone());
+            dynload_link_library = Some(link_library);
+        }
+        link_objects_to_executable(&object_paths, output_exe, &entry_symbol, &link_config)?;
+        if let Some(link_library) = dynload_link_library.as_deref() {
+            stage_stasis_dynload_runtime(link_library, output_exe)?;
+        }
         maybe_sign_output_executable(output_exe)?;
         let object_bundle_path =
             write_object_bundle_manifest(&compile.output_dir, &entry_symbol, &object_paths)?;

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "frames": [
+    {
+      "frame": 1,
+      "pointers": [
+        { "id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 80, "y": 200 }
+      ]
+    },
+    {
+      "frame": 2,
+      "pointers": [
+        { "id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 80, "y": 200 }
+      ]
+    }
+  ]
+}

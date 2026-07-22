@@ -1,19 +1,51 @@
 use crate::backend::emit::RuntimeHelperLinkage;
+use crate::backend::state_layout::build_state_layout;
 use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::indexer::hash_text;
+use crate::frontend::lexer::{lex, TokenKind};
+use crate::frontend::parser::parse_string_literal_text;
 use crate::frontend::types::{
-    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_I32, TYPE_ID_VOID,
+    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_VOID,
 };
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Module};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::SystemTime;
+
+pub use crate::backend::state_layout::{
+    StateCollectionFieldLayout as JitStateCollectionFieldLayout,
+    StateCollectionLayout as JitStateCollectionLayout, StateLayout as JitStateLayout,
+    StateOpaqueLayout as JitStateOpaqueLayout, StateScalarLayout as JitStateScalarLayout,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum JitScalarValue {
+    I32(i32),
+    F32(f32),
+    F64(f64),
+    Bool(bool),
+    U8(u8),
+}
+
+impl JitScalarValue {
+    pub fn type_name(self) -> &'static str {
+        match self {
+            Self::I32(_) => "i32",
+            Self::F32(_) => "f32",
+            Self::F64(_) => "f64",
+            Self::Bool(_) => "bool",
+            Self::U8(_) => "u8",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitArtifact {
@@ -35,10 +67,11 @@ pub struct JitProcess {
     source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
     import_parse_cache: BTreeMap<String, ImportParseCacheEntry>,
     compile_analysis_cache: Option<CompileAnalysisCache>,
+    staged_string_literals: HashMap<i32, String>,
     required_emit_roots: Vec<String>,
     local_runtime_helper_trampolines: bool,
     #[cfg(test)]
-    _test_guard: MutexGuard<'static, ()>,
+    _test_guard: Option<MutexGuard<'static, ()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +100,13 @@ impl JitProcess {
             stasis_dynload::clear_registered_global_memory();
         }
 
+        Self::new_inner(
+            #[cfg(test)]
+            Some(_test_guard),
+        )
+    }
+
+    fn new_inner(#[cfg(test)] _test_guard: Option<MutexGuard<'static, ()>>) -> Self {
         Self {
             compiler: Compiler::new(),
             next_slot: 0,
@@ -79,11 +119,35 @@ impl JitProcess {
             source_disk_probe_cache: BTreeMap::new(),
             import_parse_cache: BTreeMap::new(),
             compile_analysis_cache: None,
+            staged_string_literals: HashMap::new(),
             required_emit_roots: Vec::new(),
             local_runtime_helper_trampolines: false,
             #[cfg(test)]
             _test_guard,
         }
+    }
+
+    pub fn staged_candidate(&self) -> Self {
+        let mut candidate = Self::new_inner(
+            #[cfg(test)]
+            None,
+        );
+        for file in self.compiler.files() {
+            candidate.upsert_file(file.path.clone(), file.content.clone());
+        }
+        candidate.required_emit_roots = self.required_emit_roots.clone();
+        candidate.local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
+        candidate
+    }
+
+    pub fn accept_staged_candidate(&mut self, candidate: Self) {
+        #[cfg(test)]
+        let candidate = {
+            let mut candidate = candidate;
+            candidate._test_guard = self._test_guard.take();
+            candidate
+        };
+        *self = candidate;
     }
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
@@ -136,7 +200,30 @@ impl JitProcess {
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
-        stasis_dynload::clear_jit_string_literal_table();
+        let report = self.compile_staged()?;
+        self.activate_staged_runtime()
+            .map_err(crate::compiler::CompileError::Backend)?;
+        Ok(report)
+    }
+
+    pub fn compile_staged(&mut self) -> CompileResult<CompileReport> {
+        stasis_dynload::begin_jit_string_literal_staging()
+            .map_err(crate::compiler::CompileError::Backend)?;
+        let result = self.compile_internal();
+        let literals = stasis_dynload::finish_jit_string_literal_staging()
+            .map_err(crate::compiler::CompileError::Backend);
+        match result {
+            Err(error) => Err(error),
+            Ok(report) => {
+                literals?;
+                self.staged_string_literals = collect_current_string_literals(&self.compiler)
+                    .map_err(crate::compiler::CompileError::Backend)?;
+                Ok(report)
+            }
+        }
+    }
+
+    fn compile_internal(&mut self) -> CompileResult<CompileReport> {
         self.load_import_graph_sources()
             .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
@@ -185,8 +272,6 @@ impl JitProcess {
                 "jit compile analysis cache missing after refresh".to_string(),
             )
         })?;
-        seed_fixed_collection_max_length_headers(&analysis.global_path_types, &analysis_type_table)
-            .map_err(crate::compiler::CompileError::Backend)?;
         let emit_function_ids = select_emit_function_ids(
             self.compiler.functions(),
             self.artifacts(),
@@ -206,19 +291,35 @@ impl JitProcess {
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
-                let (module, code_ptr) = compile_function_to_jit_module(
-                    meta,
-                    hir,
-                    &symbol,
-                    &analysis.call_signatures,
-                    &mut type_table,
-                    &analysis.global_path_types,
-                    &analysis.constant_values,
-                    &analysis.collection_infos,
-                    &analysis.named_struct_field_types,
-                    &analysis.extern_symbol_addresses,
-                    local_runtime_helper_trampolines,
-                )?;
+                let compiled = catch_unwind(AssertUnwindSafe(|| {
+                    compile_function_to_jit_module(
+                        meta,
+                        hir,
+                        &symbol,
+                        &analysis.call_signatures,
+                        &mut type_table,
+                        &analysis.global_path_types,
+                        &analysis.constant_values,
+                        &analysis.collection_infos,
+                        &analysis.named_struct_field_types,
+                        &analysis.extern_symbol_addresses,
+                        local_runtime_helper_trampolines,
+                    )
+                }));
+                let (module, code_ptr) = match compiled {
+                    Ok(result) => result?,
+                    Err(payload) => {
+                        let message = payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                            .unwrap_or("unknown panic");
+                        return Err(format!(
+                            "JIT backend panicked while compiling '{}': {message}",
+                            meta.name
+                        ));
+                    }
+                };
                 let slot = next_slot;
                 next_slot = next_slot.saturating_add(1);
                 staged_modules.push(module);
@@ -244,7 +345,6 @@ impl JitProcess {
             .retain(|artifact| reachable.contains(&artifact.function_id));
         let report = CompileReport { index, emit };
         self.rebuild_artifact_index();
-        self.refresh_runtime_dispatch_table();
         Ok(report)
     }
 
@@ -252,8 +352,27 @@ impl JitProcess {
         &self.artifacts
     }
 
+    pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
+        self.compiler.last_source_diagnostic()
+    }
+
     pub fn activate_runtime_dispatch_table(&self) {
+        stasis_dynload::replace_jit_string_literal_table(&self.staged_string_literals);
         self.refresh_runtime_dispatch_table();
+    }
+
+    pub fn activate_staged_runtime(&self) -> Result<(), String> {
+        let analysis = self
+            .compile_analysis_cache
+            .as_ref()
+            .ok_or_else(|| "cannot activate an uncompiled JIT process".to_string())?;
+        seed_fixed_collection_max_length_headers(
+            &analysis.global_path_types,
+            self.compiler.types(),
+        )?;
+        stasis_dynload::replace_jit_string_literal_table(&self.staged_string_literals);
+        self.refresh_runtime_dispatch_table();
+        Ok(())
     }
 
     pub fn artifact_slot_for_function_name(&self, name: &str) -> Option<u32> {
@@ -319,6 +438,418 @@ impl JitProcess {
         self.compile_analysis_cache
             .as_ref()
             .is_some_and(|analysis| analysis.global_path_types.contains_key(path))
+    }
+
+    pub fn global_scalar_type(&self, path: &str) -> Option<&'static str> {
+        let type_id = self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        scalar_type_name(*type_id)
+    }
+
+    pub fn global_binding_type(&self, path: &str) -> Option<&'static str> {
+        let type_id = *self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        if let Some(type_name) = scalar_type_name(type_id) {
+            return Some(type_name);
+        }
+        let type_table = self.compiler.types();
+        match type_table.type_info(type_id)?.category {
+            TypeCategory::AsciiFixed
+            | TypeCategory::AsciiView
+            | TypeCategory::Utf8Fixed
+            | TypeCategory::Utf8View => Some("string"),
+            TypeCategory::ArrayFixed | TypeCategory::ArrayView => {
+                scalar_type_name(type_table.indexed_element_type_id(type_id)?)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn global_binding_capacity(&self, path: &str) -> Option<i32> {
+        let type_id = *self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        self.compiler.types().fixed_collection_len(type_id)
+    }
+
+    pub fn global_collection_capacity(&self, path: &str) -> Option<i32> {
+        self.compile_analysis_cache
+            .as_ref()?
+            .collection_infos
+            .get(path)
+            .map(|info| info.len)
+    }
+
+    pub fn global_collection_field_type(&self, path: &str, field: &str) -> Option<&'static str> {
+        let type_id = self
+            .compile_analysis_cache
+            .as_ref()?
+            .collection_infos
+            .get(path)?
+            .field_types
+            .get(field)?;
+        scalar_type_name(*type_id)
+    }
+
+    pub fn global_scalar_paths(&self) -> Vec<(String, &'static str)> {
+        let Some(analysis) = self.compile_analysis_cache.as_ref() else {
+            return Vec::new();
+        };
+        analysis
+            .global_path_types
+            .iter()
+            .filter_map(|(path, type_id)| {
+                scalar_type_name(*type_id).map(|type_name| (path.clone(), type_name))
+            })
+            .collect()
+    }
+
+    pub fn state_layout(&self) -> JitStateLayout {
+        self.compile_analysis_cache
+            .as_ref()
+            .map_or_else(JitStateLayout::default, |analysis| {
+                build_state_layout(
+                    &analysis.global_path_types,
+                    &analysis.collection_infos,
+                    self.compiler.types(),
+                )
+            })
+    }
+
+    pub fn read_global_collection_scalar(
+        &self,
+        path: &str,
+        field: &str,
+        index: i32,
+    ) -> Result<JitScalarValue, String> {
+        let (type_id, capacity) = self.global_collection_value_type(path, field)?;
+        if index < 0 || index >= capacity {
+            return Err(format!(
+                "global collection path '{path}' index {index} is outside capacity {capacity}"
+            ));
+        }
+        let collection_hash = hash_global_path(path);
+        let field_hash = hash_foreach_field_suffix(field);
+        if field.is_empty() && self.global_fixed_text_capacity(path).is_some() {
+            return Ok(JitScalarValue::U8(
+                stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
+                    as u8,
+            ));
+        }
+        match type_id {
+            TYPE_ID_I32 => Ok(JitScalarValue::I32(
+                stasis_dynload::stasis_jit_global_i32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
+            TYPE_ID_F32 => Ok(JitScalarValue::F32(
+                stasis_dynload::stasis_jit_global_f32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
+            TYPE_ID_F64 => Ok(JitScalarValue::F64(
+                stasis_dynload::stasis_jit_global_f64_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
+            TYPE_ID_BOOL => Ok(JitScalarValue::Bool(
+                stasis_dynload::stasis_jit_global_i32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ) != 0,
+            )),
+            type_id if is_u8_type(self.compiler.types(), type_id) => Ok(JitScalarValue::U8(
+                stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
+                    as u8,
+            )),
+            _ => Err(format!(
+                "global collection path '{path}' field '{field}' is not a supported scalar"
+            )),
+        }
+    }
+
+    pub fn write_global_collection_scalar(
+        &self,
+        path: &str,
+        field: &str,
+        index: i32,
+        value: JitScalarValue,
+    ) -> Result<(), String> {
+        let (type_id, capacity) = self.global_collection_value_type(path, field)?;
+        if index < 0 || index >= capacity {
+            return Err(format!(
+                "global collection path '{path}' index {index} is outside capacity {capacity}"
+            ));
+        }
+        let collection_hash = hash_global_path(path);
+        let field_hash = hash_foreach_field_suffix(field);
+        if field.is_empty() && self.global_fixed_text_capacity(path).is_some() {
+            let JitScalarValue::U8(value) = value else {
+                return Err(format!(
+                    "global text path '{path}' does not accept {}",
+                    value.type_name()
+                ));
+            };
+            stasis_dynload::stasis_jit_global_i32_array_store(
+                collection_hash,
+                field_hash,
+                index,
+                i32::from(value),
+            );
+            return Ok(());
+        }
+        match (type_id, value) {
+            (TYPE_ID_I32, JitScalarValue::I32(value)) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
+                )
+            }
+            (TYPE_ID_F32, JitScalarValue::F32(value)) => {
+                stasis_dynload::stasis_jit_global_f32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
+                )
+            }
+            (TYPE_ID_F64, JitScalarValue::F64(value)) => {
+                stasis_dynload::stasis_jit_global_f64_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
+                )
+            }
+            (TYPE_ID_BOOL, JitScalarValue::Bool(value)) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    i32::from(value),
+                )
+            }
+            (type_id, JitScalarValue::U8(value)) if is_u8_type(self.compiler.types(), type_id) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    i32::from(value),
+                )
+            }
+            (_, value) => {
+                return Err(format!(
+                    "global collection path '{path}' field '{field}' does not accept {}",
+                    value.type_name()
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    pub fn read_global_scalar(&self, path: &str) -> Result<JitScalarValue, String> {
+        let type_id = self.global_path_type(path)?;
+        let path_hash = hash_global_path(path);
+        match type_id {
+            TYPE_ID_I32 => Ok(JitScalarValue::I32(
+                stasis_dynload::stasis_jit_global_i32_load(path_hash),
+            )),
+            TYPE_ID_F32 => Ok(JitScalarValue::F32(
+                stasis_dynload::stasis_jit_global_f32_load(path_hash),
+            )),
+            TYPE_ID_F64 => Ok(JitScalarValue::F64(
+                stasis_dynload::stasis_jit_global_f64_load(path_hash),
+            )),
+            TYPE_ID_BOOL => Ok(JitScalarValue::Bool(
+                stasis_dynload::stasis_jit_global_i32_load(path_hash) != 0,
+            )),
+            _ => Err(format!("global path '{path}' is not a supported scalar")),
+        }
+    }
+
+    pub fn write_global_scalar(&self, path: &str, value: JitScalarValue) -> Result<(), String> {
+        let type_id = self.global_path_type(path)?;
+        let path_hash = hash_global_path(path);
+        match (type_id, value) {
+            (TYPE_ID_I32, JitScalarValue::I32(value)) => {
+                stasis_dynload::stasis_jit_global_i32_store(path_hash, value)
+            }
+            (TYPE_ID_F32, JitScalarValue::F32(value)) => {
+                stasis_dynload::stasis_jit_global_f32_store(path_hash, value)
+            }
+            (TYPE_ID_F64, JitScalarValue::F64(value)) => {
+                stasis_dynload::stasis_jit_global_f64_store(path_hash, value)
+            }
+            (TYPE_ID_BOOL, JitScalarValue::Bool(value)) => {
+                stasis_dynload::stasis_jit_global_i32_store(path_hash, i32::from(value))
+            }
+            (_, value) => {
+                return Err(format!(
+                    "global path '{path}' does not accept {}",
+                    value.type_name()
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    pub fn snapshot_global_scalars(&self) -> Vec<(String, JitScalarValue)> {
+        self.global_scalar_paths()
+            .into_iter()
+            .filter_map(|(path, _)| {
+                self.read_global_scalar(&path)
+                    .ok()
+                    .map(|value| (path, value))
+            })
+            .collect()
+    }
+
+    pub fn restore_global_scalars(
+        &self,
+        snapshot: &[(String, JitScalarValue)],
+    ) -> Result<(), String> {
+        for (path, value) in snapshot {
+            self.write_global_scalar(path, *value)?;
+        }
+        Ok(())
+    }
+
+    fn global_path_type(&self, path: &str) -> Result<u16, String> {
+        self.compile_analysis_cache
+            .as_ref()
+            .and_then(|analysis| analysis.global_path_types.get(path).copied())
+            .ok_or_else(|| format!("global path '{path}' was not found in compiler metadata"))
+    }
+
+    fn global_collection_value_type(&self, path: &str, field: &str) -> Result<(u16, i32), String> {
+        let analysis = self
+            .compile_analysis_cache
+            .as_ref()
+            .ok_or_else(|| "JIT collection metadata is unavailable".to_string())?;
+        if let Some(info) = analysis.collection_infos.get(path) {
+            let type_id = if field.is_empty() {
+                info.element_type
+            } else {
+                info.field_types.get(field).copied()
+            }
+            .ok_or_else(|| {
+                format!("global collection path '{path}' field '{field}' was not found")
+            })?;
+            return Ok((type_id, info.len));
+        }
+        if field.is_empty() {
+            if let Some(capacity) = self.global_fixed_text_capacity(path) {
+                let type_id = analysis
+                    .global_path_types
+                    .get(path)
+                    .and_then(|type_id| self.compiler.types().indexed_element_type_id(*type_id))
+                    .ok_or_else(|| format!("global text path '{path}' has no payload type"))?;
+                return Ok((type_id, capacity));
+            }
+        }
+        Err(format!("global collection path '{path}' was not found"))
+    }
+
+    fn global_fixed_text_capacity(&self, path: &str) -> Option<i32> {
+        let type_id = self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        let category = self.compiler.types().type_info(*type_id)?.category;
+        matches!(category, TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed)
+            .then(|| self.compiler.types().fixed_collection_len(*type_id))
+            .flatten()
+    }
+
+    pub fn global_fixed_text_encoding(&self, path: &str) -> Option<&'static str> {
+        let type_id = self
+            .compile_analysis_cache
+            .as_ref()?
+            .global_path_types
+            .get(path)?;
+        match self.compiler.types().type_info(*type_id)?.category {
+            TypeCategory::AsciiFixed => Some("ascii"),
+            TypeCategory::Utf8Fixed => Some("utf8"),
+            _ => None,
+        }
+    }
+
+    pub fn preflight_global_collection_capacity(
+        &self,
+        path: &str,
+        field: &str,
+        capacity: u32,
+    ) -> Result<(), String> {
+        self.collection_capacity_operation(path, field, capacity, false)
+    }
+
+    pub fn ensure_global_collection_capacity(
+        &self,
+        path: &str,
+        field: &str,
+        capacity: u32,
+    ) -> Result<(), String> {
+        self.collection_capacity_operation(path, field, capacity, true)
+    }
+
+    fn collection_capacity_operation(
+        &self,
+        path: &str,
+        field: &str,
+        capacity: u32,
+        grow: bool,
+    ) -> Result<(), String> {
+        let (type_id, _) = self.global_collection_value_type(path, field)?;
+        let capacity = capacity as usize;
+        let collection_hash = hash_global_path(path);
+        let field_hash = hash_foreach_field_suffix(field);
+        let i32_capacity = if grow {
+            stasis_dynload::ensure_jit_i32_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_i32_array_capacity
+        };
+        let f32_capacity = if grow {
+            stasis_dynload::ensure_jit_f32_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_f32_array_capacity
+        };
+        let f64_capacity = if grow {
+            stasis_dynload::ensure_jit_f64_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_f64_array_capacity
+        };
+        if field.is_empty() && self.global_fixed_text_capacity(path).is_some() {
+            return i32_capacity(collection_hash, field_hash, capacity);
+        }
+        match type_id {
+            TYPE_ID_I32 | TYPE_ID_BOOL => i32_capacity(collection_hash, field_hash, capacity),
+            TYPE_ID_F32 => f32_capacity(collection_hash, field_hash, capacity),
+            TYPE_ID_F64 => f64_capacity(collection_hash, field_hash, capacity),
+            type_id if is_u8_type(self.compiler.types(), type_id) => {
+                i32_capacity(collection_hash, field_hash, capacity)
+            }
+            _ => Err(format!(
+                "global collection path '{path}' field '{field}' is not resizable"
+            )),
+        }
     }
 
     pub fn write_i32_global_path(&self, path: &str, value: i32) {
@@ -414,6 +945,29 @@ impl JitProcess {
             );
         }
         Ok(())
+    }
+
+    pub fn execute_optional_on_code_swap(&self) -> Result<(), String> {
+        self.validate_on_code_swap_signature()?;
+        let Some(function) = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "on_code_swap")
+        else {
+            return Ok(());
+        };
+        let artifact = self
+            .artifact_for_function_id(function.id)
+            .ok_or_else(|| "compiled artifact missing for function 'on_code_swap'".to_string())?;
+        stasis_dynload::invoke_code_swap_hook(artifact.code_ptr as usize)
+    }
+
+    pub fn has_on_code_swap(&self) -> bool {
+        self.compiler
+            .functions()
+            .iter()
+            .any(|function| function.name == "on_code_swap")
     }
 
     pub fn build_engine_package(
@@ -635,6 +1189,45 @@ impl JitProcess {
     }
 }
 
+fn scalar_type_name(type_id: u16) -> Option<&'static str> {
+    match type_id {
+        TYPE_ID_I32 => Some("i32"),
+        TYPE_ID_F32 => Some("f32"),
+        TYPE_ID_F64 => Some("f64"),
+        TYPE_ID_BOOL => Some("bool"),
+        _ => None,
+    }
+}
+
+fn is_u8_type(type_table: &TypeTable, type_id: u16) -> bool {
+    type_table
+        .type_info(type_id)
+        .is_some_and(|info| info.name == "u8")
+}
+
+fn collect_current_string_literals(compiler: &Compiler) -> Result<HashMap<i32, String>, String> {
+    let mut literals = HashMap::new();
+    for file in compiler.files() {
+        for token in lex(&file.content)? {
+            if token.kind != TokenKind::StringLiteral {
+                continue;
+            }
+            let value = parse_string_literal_text(&file.content[token.start..token.end])?;
+            let id = crate::backend::emit::hash_string_literal(&value);
+            if let Some(previous) = literals.get(&id) {
+                if previous != &value {
+                    return Err(format!(
+                        "JIT string literal hash collision for id {id}: '{previous}' vs '{value}'"
+                    ));
+                }
+            } else {
+                literals.insert(id, value);
+            }
+        }
+    }
+    Ok(literals)
+}
+
 impl Default for JitProcess {
     fn default() -> Self {
         Self::new()
@@ -711,17 +1304,55 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => {
             function_address(stasis_dynload::stasis_jit_gfx_dump_bmp as *const ())
         }
+        "gfx_dump_png" | "stasis_gfx_dump_png" => {
+            function_address(stasis_dynload::stasis_jit_gfx_dump_png as *const ())
+        }
+        "gfx_poll_reload" | "stasis_gfx_poll_reload" | "stasis_jit_gfx_poll_reload" => {
+            function_address(stasis_dynload::stasis_jit_gfx_poll_reload as *const ())
+        }
         "load_font" | "stasis_load_font" => {
             function_address(stasis_dynload::stasis_jit_load_font as *const ())
         }
         "measure_text" | "stasis_measure_text" => {
             function_address(stasis_dynload::stasis_jit_measure_text as *const ())
         }
-        "gfx_cache_text" | "stasis_gfx_cache_text" => {
+        "gfx_cache_text" | "stasis_gfx_cache_text" | "stasis_jit_gfx_cache_text" => {
             function_address(stasis_dynload::stasis_jit_gfx_cache_text as *const ())
+        }
+        "gfx_measure_text_cached"
+        | "stasis_gfx_measure_text_cached"
+        | "stasis_jit_gfx_measure_text_cached" => {
+            function_address(stasis_dynload::stasis_jit_gfx_measure_text_cached as *const ())
+        }
+        "time" | "stasis_time" | "stasis_jit_time" | "stasis_get_time_ms" => {
+            function_address(stasis_dynload::stasis_get_time_ms as *const ())
+        }
+        "time_us" | "stasis_time_us" | "stasis_jit_time_us" | "stasis_get_time_us" => {
+            function_address(stasis_dynload::stasis_get_time_us as *const ())
+        }
+        "sleep_ms" | "stasis_sleep_ms" | "stasis_jit_sleep_ms" => {
+            function_address(stasis_dynload::stasis_jit_sleep_ms as *const ())
+        }
+        "audio_init" | "stasis_audio_init" => {
+            function_address(stasis_dynload::stasis_jit_audio_init as *const ())
+        }
+        "audio_shutdown" | "stasis_audio_shutdown" => {
+            function_address(stasis_dynload::stasis_jit_audio_shutdown as *const ())
         }
         "audio_is_available" | "stasis_audio_is_available" => {
             function_address(stasis_dynload::stasis_jit_audio_is_available as *const ())
+        }
+        "audio_get_sample_rate" | "stasis_audio_get_sample_rate" => {
+            function_address(stasis_dynload::stasis_jit_audio_get_sample_rate as *const ())
+        }
+        "audio_get_channels" | "stasis_audio_get_channels" => {
+            function_address(stasis_dynload::stasis_jit_audio_get_channels as *const ())
+        }
+        "audio_get_queued_frames" | "stasis_audio_get_queued_frames" => {
+            function_address(stasis_dynload::stasis_jit_audio_get_queued_frames as *const ())
+        }
+        "audio_get_underruns" | "stasis_audio_get_underruns" => {
+            function_address(stasis_dynload::stasis_jit_audio_get_underruns as *const ())
         }
         "audio_push_f32_interleaved" | "stasis_audio_push_f32_interleaved" => {
             function_address(stasis_dynload::stasis_jit_audio_push_f32_interleaved as *const ())
@@ -774,6 +1405,12 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "sys_memmove_f32" | "stasis_jit_sys_memmove_f32" => {
             function_address(stasis_dynload::stasis_jit_sys_memmove_f32 as *const ())
         }
+        "reject_code_swap" | "stasis_jit_reject_code_swap" => {
+            function_address(stasis_dynload::stasis_jit_reject_code_swap as *const ())
+        }
+        "stasis_jit_render_v1_trace" => {
+            function_address(stasis_dynload::stasis_jit_render_v1_trace as *const ())
+        }
         _ => return None,
     };
     Some(address)
@@ -783,6 +1420,7 @@ fn seed_fixed_collection_max_length_headers(
     global_path_types: &GlobalPathTypeMap,
     type_table: &TypeTable,
 ) -> Result<(), String> {
+    let mut headers = Vec::new();
     for (path, type_id) in global_path_types {
         let Some(type_info) = type_table.type_info(*type_id) else {
             continue;
@@ -798,7 +1436,7 @@ fn seed_fixed_collection_max_length_headers(
                         path, payload_bytes
                     )
                 })?;
-                seed_collection_max_length(path, max_length);
+                headers.push((path, max_length));
             }
             TypeCategory::Utf8Fixed => {
                 let Some(payload_bytes) = type_info.layout.payload_size_bytes else {
@@ -810,16 +1448,19 @@ fn seed_fixed_collection_max_length_headers(
                         path, payload_bytes
                     )
                 })?;
-                seed_collection_max_length(path, max_length);
+                headers.push((path, max_length));
             }
             TypeCategory::ArrayFixed => {
                 let Some(max_length) = type_table.fixed_collection_len(*type_id) else {
                     continue;
                 };
-                seed_collection_max_length(path, max_length);
+                headers.push((path, max_length));
             }
             _ => {}
         }
+    }
+    for (path, max_length) in headers {
+        seed_collection_max_length(path, max_length);
     }
     Ok(())
 }
@@ -833,7 +1474,7 @@ fn new_stasis_jit_builder() -> Result<JITBuilder, String> {
     let mut flag_builder = settings::builder();
     flag_builder
         .set("is_pic", "false")
-        .map_err(|error| format!("failed to configure non-PIC JIT: {error}"))?;
+        .map_err(|error| format!("failed to configure JIT relocation model: {error}"))?;
     let isa_builder = cranelift_native::builder()
         .map_err(|message| format!("host machine is not supported by Cranelift: {message}"))?;
     let isa = isa_builder
@@ -843,201 +1484,67 @@ fn new_stasis_jit_builder() -> Result<JITBuilder, String> {
 }
 fn runtime_helper_addresses() -> BTreeMap<String, usize> {
     let mut out = BTreeMap::new();
-    out.insert(
-        "stasis_jit_call_i32_0".to_string(),
-        stasis_dynload::stasis_jit_call_i32_0 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_1".to_string(),
-        stasis_dynload::stasis_jit_call_i32_1 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_2".to_string(),
-        stasis_dynload::stasis_jit_call_i32_2 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_3".to_string(),
-        stasis_dynload::stasis_jit_call_i32_3 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_4".to_string(),
-        stasis_dynload::stasis_jit_call_i32_4 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_5".to_string(),
-        stasis_dynload::stasis_jit_call_i32_5 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_6".to_string(),
-        stasis_dynload::stasis_jit_call_i32_6 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_7".to_string(),
-        stasis_dynload::stasis_jit_call_i32_7 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_8".to_string(),
-        stasis_dynload::stasis_jit_call_i32_8 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_1".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_1 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_2".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_2 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_3".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_3 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_4".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_4 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_5".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_5 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_6".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_6 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_7".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_7 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_i32_f32_8".to_string(),
-        stasis_dynload::stasis_jit_call_i32_f32_8 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_0".to_string(),
-        stasis_dynload::stasis_jit_call_f32_0 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_1".to_string(),
-        stasis_dynload::stasis_jit_call_f32_1 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_2".to_string(),
-        stasis_dynload::stasis_jit_call_f32_2 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_3".to_string(),
-        stasis_dynload::stasis_jit_call_f32_3 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_4".to_string(),
-        stasis_dynload::stasis_jit_call_f32_4 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_5".to_string(),
-        stasis_dynload::stasis_jit_call_f32_5 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_6".to_string(),
-        stasis_dynload::stasis_jit_call_f32_6 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_7".to_string(),
-        stasis_dynload::stasis_jit_call_f32_7 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_8".to_string(),
-        stasis_dynload::stasis_jit_call_f32_8 as usize,
-    );
-    out.insert(
-        "stasis_jit_call_f32_i32_1".to_string(),
-        stasis_dynload::stasis_jit_call_f32_i32_1 as usize,
-    );
-    out.insert(
-        "stasis_jit_print_i32".to_string(),
-        stasis_dynload::stasis_jit_print_i32 as usize,
-    );
-    out.insert(
-        "stasis_jit_print_string".to_string(),
-        stasis_dynload::stasis_jit_print_string as usize,
-    );
-    out.insert(
-        "stasis_jit_lookup_code_ptr".to_string(),
-        stasis_dynload::stasis_jit_lookup_code_ptr as usize,
-    );
-    out.insert(
-        "stasis_jit_sin_fast".to_string(),
-        stasis_dynload::stasis_jit_sin_fast as usize,
-    );
-    out.insert(
-        "stasis_jit_cos_fast".to_string(),
-        stasis_dynload::stasis_jit_cos_fast as usize,
-    );
-    out.insert(
-        "stasis_jit_global_i32_load".to_string(),
-        stasis_dynload::stasis_jit_global_i32_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_i32_store".to_string(),
-        stasis_dynload::stasis_jit_global_i32_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f32_load".to_string(),
-        stasis_dynload::stasis_jit_global_f32_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f32_store".to_string(),
-        stasis_dynload::stasis_jit_global_f32_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f64_load".to_string(),
-        stasis_dynload::stasis_jit_global_f64_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f64_store".to_string(),
-        stasis_dynload::stasis_jit_global_f64_store as usize,
-    );
-    out.insert(
-        "stasis_jit_collection_i32_load".to_string(),
-        stasis_dynload::stasis_jit_collection_i32_load as usize,
-    );
-    out.insert(
-        "stasis_jit_collection_i32_store".to_string(),
-        stasis_dynload::stasis_jit_collection_i32_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_i32_array_load".to_string(),
-        stasis_dynload::stasis_jit_global_i32_array_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_i32_array_store".to_string(),
-        stasis_dynload::stasis_jit_global_i32_array_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_i32_array_ptr".to_string(),
-        stasis_dynload::stasis_jit_global_i32_array_ptr as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f32_array_load".to_string(),
-        stasis_dynload::stasis_jit_global_f32_array_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f32_array_store".to_string(),
-        stasis_dynload::stasis_jit_global_f32_array_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f32_array_ptr".to_string(),
-        stasis_dynload::stasis_jit_global_f32_array_ptr as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f64_array_load".to_string(),
-        stasis_dynload::stasis_jit_global_f64_array_load as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f64_array_store".to_string(),
-        stasis_dynload::stasis_jit_global_f64_array_store as usize,
-    );
-    out.insert(
-        "stasis_jit_global_f64_array_ptr".to_string(),
-        stasis_dynload::stasis_jit_global_f64_array_ptr as usize,
+    macro_rules! insert_helpers {
+        ($($name:ident),+ $(,)?) => {
+            $(
+                out.insert(
+                    stringify!($name).to_string(),
+                    function_address(stasis_dynload::$name as *const ()),
+                );
+            )+
+        };
+    }
+    insert_helpers!(
+        stasis_jit_call_i32_0,
+        stasis_jit_call_i32_1,
+        stasis_jit_call_i32_2,
+        stasis_jit_call_i32_3,
+        stasis_jit_call_i32_4,
+        stasis_jit_call_i32_5,
+        stasis_jit_call_i32_6,
+        stasis_jit_call_i32_7,
+        stasis_jit_call_i32_8,
+        stasis_jit_call_i32_f32_1,
+        stasis_jit_call_i32_f32_2,
+        stasis_jit_call_i32_f32_3,
+        stasis_jit_call_i32_f32_4,
+        stasis_jit_call_i32_f32_5,
+        stasis_jit_call_i32_f32_6,
+        stasis_jit_call_i32_f32_7,
+        stasis_jit_call_i32_f32_8,
+        stasis_jit_call_f32_0,
+        stasis_jit_call_f32_1,
+        stasis_jit_call_f32_2,
+        stasis_jit_call_f32_3,
+        stasis_jit_call_f32_4,
+        stasis_jit_call_f32_5,
+        stasis_jit_call_f32_6,
+        stasis_jit_call_f32_7,
+        stasis_jit_call_f32_8,
+        stasis_jit_call_f32_i32_1,
+        stasis_jit_print_i32,
+        stasis_jit_print_string,
+        stasis_jit_lookup_code_ptr,
+        stasis_jit_sin_fast,
+        stasis_jit_cos_fast,
+        stasis_jit_global_i32_load,
+        stasis_jit_global_i32_store,
+        stasis_jit_global_f32_load,
+        stasis_jit_global_f32_store,
+        stasis_jit_global_f64_load,
+        stasis_jit_global_f64_store,
+        stasis_jit_collection_i32_load,
+        stasis_jit_collection_i32_store,
+        stasis_jit_global_i32_array_load,
+        stasis_jit_global_i32_array_store,
+        stasis_jit_global_i32_array_ptr,
+        stasis_jit_global_f32_array_load,
+        stasis_jit_global_f32_array_store,
+        stasis_jit_global_f32_array_ptr,
+        stasis_jit_global_f64_array_load,
+        stasis_jit_global_f64_array_store,
+        stasis_jit_global_f64_array_ptr,
+        stasis_jit_reject_code_swap,
     );
     out
 }
@@ -1257,7 +1764,15 @@ fn compile_function_to_jit_module(
         }
         jit_builder.symbol(extern_symbol, *address as *const u8);
     }
-    let runtime_helper_addresses = local_runtime_helper_trampolines.then(runtime_helper_addresses);
+    let runtime_helper_addresses = local_runtime_helper_trampolines.then(|| {
+        let mut addresses = runtime_helper_addresses();
+        addresses.extend(
+            extern_symbol_addresses
+                .iter()
+                .map(|(symbol, address)| (symbol.clone(), *address)),
+        );
+        addresses
+    });
     let runtime_helper_linkage = runtime_helper_addresses
         .as_ref()
         .map_or(RuntimeHelperLinkage::Imported, |addresses| {
@@ -1344,6 +1859,22 @@ mod tests {
     }
 
     #[test]
+    fn local_runtime_resolves_production_preview_externs() {
+        crate::backend::emit::reset_runtime_helper_trampoline_count_for_test();
+        let mut process = JitProcess::new();
+        process.set_local_runtime_helper_trampolines(true);
+        process.upsert_file(
+            "sample.stasis",
+            "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let width: f32 = gfx_measure_text_cached(0); if (gfx_poll_reload(0) || audio_is_available() || width != 0.0) { return 2; } if (ms == 0 && us == 0) { return 0; } return 1; }\n",
+        );
+        process
+            .compile()
+            .expect("compile production preview externs");
+        assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 1);
+        assert!(crate::backend::emit::runtime_helper_trampoline_count_for_test() >= 5);
+    }
+
+    #[test]
     fn jit_process_rejects_non_literal_i32_return() {
         let mut process = JitProcess::new();
         process.upsert_file(
@@ -1391,6 +1922,46 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 7);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_exposes_typed_scalar_state_for_live_transactions() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global score: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ready: bool;\nfunction main(): i32 { score = 4; ratio = 1.5; precise = 2.25; ready = true; return 0; }\n",
+        );
+        process.compile().expect("compile");
+        process.execute_i32_noarg_by_name("main").expect("main");
+
+        let paths = process.global_scalar_paths();
+        assert!(paths.contains(&("score".to_string(), "i32")));
+        assert!(paths.contains(&("ratio".to_string(), "f32")));
+        assert!(paths.contains(&("precise".to_string(), "f64")));
+        assert!(paths.contains(&("ready".to_string(), "bool")));
+        assert_eq!(
+            process.read_global_scalar("score"),
+            Ok(JitScalarValue::I32(4))
+        );
+
+        let snapshot = process.snapshot_global_scalars();
+        process
+            .write_global_scalar("score", JitScalarValue::I32(99))
+            .expect("write score");
+        assert_eq!(
+            process.read_global_scalar("score"),
+            Ok(JitScalarValue::I32(99))
+        );
+        process.restore_global_scalars(&snapshot).expect("restore");
+        assert_eq!(
+            process.read_global_scalar("score"),
+            Ok(JitScalarValue::I32(4))
+        );
+        assert!(process
+            .write_global_scalar("score", JitScalarValue::Bool(true))
+            .expect_err("type mismatch")
+            .contains("does not accept bool"));
     }
 
     #[cfg(windows)]
@@ -1451,6 +2022,41 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 1);
+    }
+
+    #[test]
+    fn jit_process_stages_string_literals_until_runtime_activation() {
+        let mut process = JitProcess::new();
+        let live_id = crate::backend::emit::hash_string_literal("live");
+        let candidate_id = crate::backend::emit::hash_string_literal("candidate");
+        stasis_dynload::upsert_jit_string_literal(live_id, "live");
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { print_string(\"candidate\"); return 0; }\n",
+        );
+
+        process.compile_staged().expect("staged compile");
+        assert_eq!(
+            stasis_dynload::jit_string_literal_value(live_id).as_deref(),
+            Some("live")
+        );
+        assert_eq!(stasis_dynload::jit_string_literal_value(candidate_id), None);
+
+        process
+            .activate_staged_runtime()
+            .expect("runtime activation");
+        assert_eq!(stasis_dynload::jit_string_literal_value(live_id), None);
+        assert_eq!(
+            stasis_dynload::jit_string_literal_value(candidate_id).as_deref(),
+            Some("candidate")
+        );
+
+        process.upsert_file("sample.stasis", "function main(): i32 { return 1; }\n");
+        process.compile_staged().expect("replacement compile");
+        process
+            .activate_staged_runtime()
+            .expect("replacement activation");
+        assert_eq!(stasis_dynload::jit_string_literal_value(candidate_id), None);
     }
 
     #[cfg(windows)]
@@ -3032,6 +3638,46 @@ mod tests {
             crate::compiler::CompileError::Backend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jit_process_rejects_i32_return_from_bool_function() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function enabled(): bool { return 1; }\nfunction main(): i32 { if (enabled()) { return 1; } return 0; }\n",
+        );
+        let error = process.compile().expect_err("expected return type error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("return expression expected bool but found i32"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jit_process_rejects_i32_initializer_for_bool_binding() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let ready: bool = 1; if (ready) { return 1; } return 0; }\n",
+        );
+        let error = process
+            .compile()
+            .expect_err("expected assignment type error");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("let binding 'ready' expected bool expression but found i32"),
                     "unexpected message: {message}"
                 );
             }

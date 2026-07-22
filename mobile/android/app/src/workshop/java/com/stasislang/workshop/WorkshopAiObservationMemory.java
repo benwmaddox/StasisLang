@@ -1,5 +1,7 @@
 package com.stasislang.workshop;
 
+import org.json.JSONObject;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,5 +39,21 @@ final class WorkshopAiObservationMemory {
 
     int size() {
         return observations.size();
+    }
+
+    void restoreNewestFirst(List<String> snapshot) {
+        observations.clear();
+        if (snapshot == null) return;
+        for (int index = snapshot.size() - 1; index >= 0; index -= 1) {
+            String value = snapshot.get(index);
+            try {
+                JSONObject observation = new JSONObject(value);
+                JSONObject args = observation.optJSONObject("args");
+                remember(observation.optString("tool", "observation") + "|"
+                        + (args == null ? "{}" : args.toString()), value);
+            } catch (Exception error) {
+                remember("checkpoint-" + index, value);
+            }
+        }
     }
 }

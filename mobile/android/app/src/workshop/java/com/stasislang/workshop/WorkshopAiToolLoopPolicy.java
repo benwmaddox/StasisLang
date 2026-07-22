@@ -20,4 +20,15 @@ final class WorkshopAiToolLoopPolicy {
     boolean requiresWriteOrDone() {
         return consecutiveReadOnlyBatches >= maxReadOnlyBatches;
     }
+
+    int consecutiveReadOnlyBatches() {
+        return consecutiveReadOnlyBatches;
+    }
+
+    void restoreConsecutiveReadOnlyBatches(int count) {
+        if (count < 0 || count > maxReadOnlyBatches) {
+            throw new IllegalArgumentException("read-only checkpoint count is invalid");
+        }
+        consecutiveReadOnlyBatches = count;
+    }
 }

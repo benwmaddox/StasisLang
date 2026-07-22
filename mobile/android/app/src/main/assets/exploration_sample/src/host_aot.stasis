@@ -1,0 +1,6 @@
+import "host_game.stasis";
+
+function main(): i32 {
+    exploration_host_start();
+    return 0;
+}

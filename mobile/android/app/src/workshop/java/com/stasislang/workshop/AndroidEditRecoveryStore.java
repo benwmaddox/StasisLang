@@ -19,7 +19,8 @@ final class AndroidEditRecoveryStore {
     private AndroidEditRecoveryStore() {}
 
     static Entry record(Context context, String projectId, String path, String symbol,
-            String beforeSource, String failedSource, String diagnostic) throws Exception {
+            String beforeSource, String failedSource, String diagnostic,
+            WorkshopSourceDiagnostic location) throws Exception {
         File directory = projectDirectory(context, projectId);
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IllegalStateException("recovery directory create failed");
         long timestamp = System.currentTimeMillis();
@@ -36,10 +37,19 @@ final class AndroidEditRecoveryStore {
                 .put("symbol", symbol)
                 .put("before_source", beforeSource)
                 .put("failed_source", failedSource)
-                .put("diagnostic", diagnostic);
+                .put("diagnostic", diagnostic)
+                .put("diagnostic_path", location == null ? path : location.file)
+                .put("diagnostic_symbol", location == null ? symbol : location.symbol)
+                .put("diagnostic_line", location == null ? 0 : location.line)
+                .put("diagnostic_column", location == null ? 0 : location.column)
+                .put("diagnostic_end_line", location == null ? 0 : location.endLine)
+                .put("diagnostic_end_column", location == null ? 0 : location.endColumn);
         writeSyncedAtomic(target, json.toString());
         trim(directory);
-        return new Entry(target, timestamp, path, symbol, beforeSource, failedSource, diagnostic);
+        return new Entry(target, timestamp, path, symbol, beforeSource, failedSource, diagnostic,
+                location == null ? path : location.file, location == null ? symbol : location.symbol,
+                location == null ? 0 : location.line, location == null ? 0 : location.column,
+                location == null ? 0 : location.endLine, location == null ? 0 : location.endColumn);
     }
 
     static Entry latest(Context context, String projectId) throws Exception {
@@ -71,9 +81,14 @@ final class AndroidEditRecoveryStore {
 
     private static Entry read(File file) throws Exception {
         JSONObject json = new JSONObject(readText(file));
-        return new Entry(file, json.getLong("timestamp_ms"), json.getString("path"),
-                json.optString("symbol", ""), json.getString("before_source"),
-                json.getString("failed_source"), json.optString("diagnostic", ""));
+        String path = json.getString("path");
+        String symbol = json.optString("symbol", "");
+        return new Entry(file, json.getLong("timestamp_ms"), path, symbol,
+                json.getString("before_source"), json.getString("failed_source"),
+                json.optString("diagnostic", ""), json.optString("diagnostic_path", path),
+                json.optString("diagnostic_symbol", symbol), json.optInt("diagnostic_line", 0),
+                json.optInt("diagnostic_column", 0), json.optInt("diagnostic_end_line", 0),
+                json.optInt("diagnostic_end_column", 0));
     }
 
     private static File projectDirectory(Context context, String projectId) throws Exception {
@@ -148,9 +163,17 @@ final class AndroidEditRecoveryStore {
         final String beforeSource;
         final String failedSource;
         final String diagnostic;
+        final String diagnosticPath;
+        final String diagnosticSymbol;
+        final int diagnosticLine;
+        final int diagnosticColumn;
+        final int diagnosticEndLine;
+        final int diagnosticEndColumn;
 
         Entry(File file, long timestampMs, String path, String symbol, String beforeSource,
-                String failedSource, String diagnostic) {
+                String failedSource, String diagnostic, String diagnosticPath,
+                String diagnosticSymbol, int diagnosticLine, int diagnosticColumn,
+                int diagnosticEndLine, int diagnosticEndColumn) {
             this.file = file;
             this.timestampMs = timestampMs;
             this.path = path;
@@ -158,6 +181,12 @@ final class AndroidEditRecoveryStore {
             this.beforeSource = beforeSource;
             this.failedSource = failedSource;
             this.diagnostic = diagnostic;
+            this.diagnosticPath = diagnosticPath;
+            this.diagnosticSymbol = diagnosticSymbol;
+            this.diagnosticLine = diagnosticLine;
+            this.diagnosticColumn = diagnosticColumn;
+            this.diagnosticEndLine = diagnosticEndLine;
+            this.diagnosticEndColumn = diagnosticEndColumn;
         }
     }
 }

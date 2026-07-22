@@ -4,6 +4,7 @@
 mod compiler_backend;
 mod events;
 mod host_set_registry;
+mod live_workspace;
 mod runtime_exec;
 mod stasis_test_runner;
 mod watch;
@@ -12,28 +13,35 @@ mod window_config;
 pub use compiler_backend::run_self_host_aot_cli;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use events::RunnerEvent;
+pub use live_workspace::LiveRunConfig;
 pub use stasis_test_runner::{
     run_jit_tests_in_directory, run_jit_tests_in_directory_with_session, StasisTestRunSession,
     StasisTestRunSummary,
 };
 pub use window_config::WindowConfig;
 
-use compiler_backend::IncrementalCompilerBackend;
+use compiler_backend::{IncrementalCompilerBackend, PreparedJitSwap};
+use live_workspace::LiveWorkspace;
 use runtime_exec::RuntimeLauncher;
 use serde::Deserialize;
 use serde_json::Value;
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::state_migration::{
+    activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
+    MAX_STATE_SNAPSHOT_BYTES,
+};
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_jit::FunctionPointerTable;
 use stasis_runner::swap::contracts::{
     AotFunctionSymbol, CompileRequest, CompileResult, CompileStatus, Diagnostic,
     DiagnosticSeverity, FileChangeEvent, FileChangeKind, FnId, FunctionPatch, FunctionPatchSet,
-    JitCodePtrOverride, LayoutHash, RequestId, StateMapEntry, SwapCommitResult, SwapCommitStatus,
-    TargetMode, TextSource,
+    JitCodePtrOverride, LayoutHash, RequestId, SwapCommitResult, SwapCommitStatus, TargetMode,
+    TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -215,17 +223,400 @@ struct PlayStructMetadata {
     version: i32,
     #[serde(rename = "globalName")]
     global_name: String,
+    #[serde(default, rename = "csvTable")]
+    csv_table: Option<CsvTableMetadata>,
     fields: Vec<PlayStructFieldMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct CsvTableMetadata {
+    #[serde(rename = "rowsPath")]
+    pub(crate) rows_path: String,
+    #[serde(rename = "rowCountPath")]
+    pub(crate) row_count_path: String,
+    pub(crate) capacity: usize,
+    #[serde(rename = "keyColumns")]
+    pub(crate) key_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct PlayStructFieldMetadata {
     #[serde(rename = "jsonPath")]
     json_path: String,
+    #[serde(default, rename = "csvColumn")]
+    csv_column: Option<String>,
     #[serde(rename = "type")]
     type_name: String,
     #[serde(rename = "arrayCount")]
     array_count: i32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CsvBindingField {
+    pub(crate) path: String,
+    pub(crate) csv_column: Option<String>,
+    pub(crate) type_name: String,
+    pub(crate) array_count: usize,
+}
+
+fn csv_column_name<'a>(field: &'a CsvBindingField) -> &'a str {
+    field.csv_column.as_deref().unwrap_or(&field.path)
+}
+
+fn parse_csv_records(source: &str) -> Result<Vec<Vec<String>>, String> {
+    let mut records = Vec::new();
+    let mut row = Vec::new();
+    let mut field = String::new();
+    let mut chars = source.chars().peekable();
+    let mut in_quotes = false;
+    let mut closed_quote = false;
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                    closed_quote = true;
+                }
+            } else {
+                field.push(ch);
+            }
+            continue;
+        }
+        if closed_quote && !matches!(ch, ',' | '\r' | '\n') {
+            return Err("unexpected character after closing quote".to_string());
+        }
+        match ch {
+            '"' if field.is_empty() && !closed_quote => in_quotes = true,
+            '"' => return Err("quote must begin a CSV field".to_string()),
+            ',' => {
+                row.push(std::mem::take(&mut field));
+                closed_quote = false;
+            }
+            '\n' => {
+                row.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut row));
+                closed_quote = false;
+            }
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                row.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut row));
+                closed_quote = false;
+            }
+            _ => field.push(ch),
+        }
+    }
+    if in_quotes {
+        return Err("unterminated quoted CSV field".to_string());
+    }
+    if !field.is_empty() || !row.is_empty() || closed_quote {
+        row.push(field);
+        records.push(row);
+    }
+    Ok(records)
+}
+
+fn parse_csv_cell(value: &str, field: &CsvBindingField) -> Result<Value, String> {
+    let trimmed = value.trim();
+    match field.type_name.as_str() {
+        "string" => Ok(Value::String(value.to_string())),
+        "bool" => match trimmed.to_ascii_lowercase().as_str() {
+            "true" | "1" => Ok(Value::Bool(true)),
+            "false" | "0" => Ok(Value::Bool(false)),
+            _ => Err(format!(
+                "field {} requires true, false, 1, or 0",
+                field.path
+            )),
+        },
+        "u8" | "u16" | "u32" | "i32" => {
+            let number = trimmed
+                .parse::<i64>()
+                .map_err(|error| format!("field {} requires an integer: {error}", field.path))?;
+            i32::try_from(number)
+                .map_err(|_| format!("field {} is outside i32 range", field.path))?;
+            Ok(Value::Number(number.into()))
+        }
+        "f32" | "f64" => {
+            let number = trimmed
+                .parse::<f64>()
+                .map_err(|error| format!("field {} requires a number: {error}", field.path))?;
+            let number = serde_json::Number::from_f64(number)
+                .ok_or_else(|| format!("field {} must be finite", field.path))?;
+            Ok(Value::Number(number))
+        }
+        other => Err(format!(
+            "field {} has unsupported CSV type {other}",
+            field.path
+        )),
+    }
+}
+
+pub(crate) fn parse_flat_csv_binding(
+    source: &str,
+    fields: &[CsvBindingField],
+) -> Result<Value, String> {
+    let mut metadata_paths = BTreeSet::new();
+    for field in fields {
+        if field.csv_column.is_some() {
+            return Err("csvColumn metadata requires csvTable".to_string());
+        }
+        if field.path.is_empty() || field.path.contains('.') {
+            return Err(format!(
+                "CSV metadata path {} must name one flat column",
+                field.path
+            ));
+        }
+        if !metadata_paths.insert(field.path.as_str()) {
+            return Err(format!("duplicate CSV metadata path {}", field.path));
+        }
+    }
+    let records = parse_csv_records(source)?;
+    let Some(headers) = records.first() else {
+        return Err("CSV data requires a header row".to_string());
+    };
+    if records.len() == 1 {
+        return Err("CSV data requires at least one data row".to_string());
+    }
+    let mut header_indices = BTreeMap::new();
+    for (index, header) in headers.iter().enumerate() {
+        let header = if index == 0 {
+            header.strip_prefix('\u{feff}').unwrap_or(header)
+        } else {
+            header
+        };
+        if header.is_empty() {
+            return Err("CSV headers must not be empty".to_string());
+        }
+        if header.contains('.') {
+            return Err(format!(
+                "CSV header {header} cannot contain nested path separators"
+            ));
+        }
+        if !metadata_paths.contains(header) {
+            return Err(format!(
+                "CSV column {header} does not exist in target metadata"
+            ));
+        }
+        if header_indices.insert(header.to_string(), index).is_some() {
+            return Err(format!("duplicate CSV header {header}"));
+        }
+    }
+    for (row_index, row) in records.iter().enumerate().skip(1) {
+        if row.len() != headers.len() {
+            return Err(format!(
+                "CSV row {} has {} columns; expected {}",
+                row_index + 1,
+                row.len(),
+                headers.len()
+            ));
+        }
+    }
+
+    let data_rows = &records[1..];
+    let mut object = serde_json::Map::new();
+    for field in fields {
+        let column = header_indices
+            .get(&field.path)
+            .copied()
+            .ok_or_else(|| format!("CSV is missing metadata column {}", field.path))?;
+        let is_array = field.type_name != "string" && field.array_count > 1;
+        let value = if is_array {
+            if data_rows.len() != field.array_count {
+                return Err(format!(
+                    "CSV column {} requires {} rows, found {}",
+                    field.path,
+                    field.array_count,
+                    data_rows.len()
+                ));
+            }
+            Value::Array(
+                data_rows
+                    .iter()
+                    .map(|row| parse_csv_cell(&row[column], field))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else {
+            if data_rows.len() != 1 {
+                return Err(format!(
+                    "scalar CSV column {} requires exactly one data row",
+                    field.path
+                ));
+            }
+            parse_csv_cell(&data_rows[0][column], field)?
+        };
+        object.insert(field.path.clone(), value);
+    }
+    Ok(Value::Object(object))
+}
+
+pub(crate) fn parse_csv_table_binding(
+    source: &str,
+    fields: &[CsvBindingField],
+    table: &CsvTableMetadata,
+) -> Result<Value, String> {
+    if table.rows_path.is_empty()
+        || table.row_count_path.is_empty()
+        || table.rows_path.contains('.')
+        || table.row_count_path.contains('.')
+    {
+        return Err("CSV table rowsPath and rowCountPath must be flat properties".to_string());
+    }
+    if table.capacity == 0 {
+        return Err("CSV table capacity must be greater than zero".to_string());
+    }
+    if table.key_columns.is_empty() {
+        return Err("CSV table requires at least one stable key column".to_string());
+    }
+
+    let prefix = format!("{}.", table.rows_path);
+    let mut columns = BTreeMap::new();
+    for field in fields {
+        let suffix = field.path.strip_prefix(&prefix).ok_or_else(|| {
+            format!(
+                "CSV table target {} must be below rowsPath {}",
+                field.path, table.rows_path
+            )
+        })?;
+        if suffix.is_empty() {
+            return Err(format!("CSV table target {} has no row field", field.path));
+        }
+        if suffix.contains('.') {
+            return Err(format!(
+                "CSV table target {} must name one flat row field",
+                field.path
+            ));
+        }
+        if field.array_count != table.capacity {
+            return Err(format!(
+                "CSV table target {} capacity {} does not match table capacity {}",
+                field.path, field.array_count, table.capacity
+            ));
+        }
+        let column = csv_column_name(field);
+        if column.is_empty() || column.contains('.') {
+            return Err(format!("CSV table column {column} must be a flat header"));
+        }
+        if columns.insert(column.to_string(), field).is_some() {
+            return Err(format!("duplicate CSV table column {column}"));
+        }
+    }
+    let mut key_columns = BTreeSet::new();
+    for key in &table.key_columns {
+        if !key_columns.insert(key) {
+            return Err(format!("duplicate CSV table key column {key}"));
+        }
+        if !columns.contains_key(key) {
+            return Err(format!("CSV table key column {key} has no target field"));
+        }
+    }
+
+    let records = parse_csv_records(source)?;
+    let Some(headers) = records.first() else {
+        return Err("CSV table requires a header row".to_string());
+    };
+    let mut header_indices = BTreeMap::new();
+    for (index, raw_header) in headers.iter().enumerate() {
+        let header = if index == 0 {
+            raw_header.strip_prefix('\u{feff}').unwrap_or(raw_header)
+        } else {
+            raw_header
+        };
+        if header.is_empty() || header.contains('.') {
+            return Err(format!(
+                "CSV table header {header} must be flat and non-empty"
+            ));
+        }
+        if !columns.contains_key(header) {
+            return Err(format!(
+                "CSV column {header} does not exist in target metadata"
+            ));
+        }
+        if header_indices.insert(header.to_string(), index).is_some() {
+            return Err(format!("duplicate CSV header {header}"));
+        }
+    }
+    for column in columns.keys() {
+        if !header_indices.contains_key(column) {
+            return Err(format!("CSV is missing metadata column {column}"));
+        }
+    }
+
+    let data_rows = &records[1..];
+    if data_rows.len() > table.capacity {
+        return Err(format!(
+            "CSV table has {} rows; capacity is {}",
+            data_rows.len(),
+            table.capacity
+        ));
+    }
+    let mut stable_keys = BTreeSet::new();
+    for (row_index, row) in data_rows.iter().enumerate() {
+        if row.len() != headers.len() {
+            return Err(format!(
+                "CSV row {} has {} columns; expected {}",
+                row_index + 2,
+                row.len(),
+                headers.len()
+            ));
+        }
+        let mut parts = Vec::new();
+        for key in &table.key_columns {
+            let raw_value = &row[*header_indices.get(key).expect("key header validated")];
+            if raw_value.trim().is_empty() {
+                return Err(format!(
+                    "CSV table key column {key} is blank on row {}",
+                    row_index + 2
+                ));
+            }
+            let field = columns.get(key).expect("key target validated");
+            parts.push(parse_csv_cell(raw_value, field)?.to_string());
+        }
+        let stable_key = parts.join("\u{1f}");
+        if !stable_keys.insert(stable_key) {
+            return Err(format!("duplicate CSV table key on row {}", row_index + 2));
+        }
+    }
+
+    let mut rows = serde_json::Map::new();
+    for (column, field) in columns {
+        let column_index = *header_indices
+            .get(&column)
+            .expect("column header validated");
+        let mut values = data_rows
+            .iter()
+            .map(|row| parse_csv_cell(&row[column_index], field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let default = match field.type_name.as_str() {
+            "bool" => Value::Bool(false),
+            "u8" | "u16" | "u32" | "i32" => Value::Number(0.into()),
+            "f32" | "f64" => serde_json::json!(0.0),
+            other => {
+                return Err(format!(
+                    "CSV table target {} has unsupported column type {other}",
+                    field.path
+                ));
+            }
+        };
+        values.resize(table.capacity, default);
+        let suffix = field
+            .path
+            .strip_prefix(&prefix)
+            .expect("field prefix validated");
+        rows.insert(suffix.to_string(), Value::Array(values));
+    }
+    let mut root = serde_json::Map::new();
+    root.insert(table.rows_path.clone(), Value::Object(rows));
+    root.insert(
+        table.row_count_path.clone(),
+        Value::Number((data_rows.len() as u64).into()),
+    );
+    Ok(Value::Object(root))
 }
 
 fn resolve_play_sidecar_path(path: &Path, launch_dir: &Path) -> PathBuf {
@@ -240,38 +631,96 @@ fn resolve_play_data_binding_paths(
     launch_dir: &Path,
     data_bind_json: Option<&Path>,
     data_bind_struct_meta: Option<&Path>,
-) -> Result<Option<(PathBuf, PathBuf)>, String> {
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     match (data_bind_json, data_bind_struct_meta) {
         (Some(json_path), Some(struct_meta_path)) => {
-            return Ok(Some((
+            return Ok(vec![(
                 resolve_play_sidecar_path(json_path, launch_dir),
                 resolve_play_sidecar_path(struct_meta_path, launch_dir),
-            )));
+            )]);
         }
         (None, None) => {}
         _ => return Err("play data binding requires both json and struct-meta paths".to_string()),
     }
 
+    fn discover_pairs(data_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+        fn collect_data_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+            for entry in fs::read_dir(dir).map_err(|error| {
+                format!("failed to read data directory {}: {error}", dir.display())
+            })? {
+                let entry = entry.map_err(|error| {
+                    format!("failed to read data directory {}: {error}", dir.display())
+                })?;
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_data_paths(&path, out)?;
+                } else if path.is_file()
+                    && path.extension().is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("csv")
+                    })
+                    && !path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.ends_with(".struct-meta.json"))
+                {
+                    out.push(path);
+                }
+            }
+            Ok(())
+        }
+
+        if !data_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut data_paths = Vec::new();
+        collect_data_paths(data_dir, &mut data_paths)?;
+        data_paths.sort();
+        let mut out = Vec::new();
+        let mut metadata_owners = BTreeMap::new();
+        for data_path in data_paths {
+            let stem = data_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| format!("invalid data file name {}", data_path.display()))?;
+            let meta_path = data_path.with_file_name(format!("{stem}.struct-meta.json"));
+            if !meta_path.is_file() {
+                return Err(format!(
+                    "data file {} requires matching metadata {}",
+                    data_path.display(),
+                    meta_path.display()
+                ));
+            }
+            if let Some(owner) = metadata_owners.insert(meta_path.clone(), data_path.clone()) {
+                return Err(format!(
+                    "data files {} and {} cannot share metadata {}",
+                    owner.display(),
+                    data_path.display(),
+                    meta_path.display()
+                ));
+            }
+            out.push((data_path, meta_path));
+        }
+        Ok(out)
+    }
+
     let watch_file_path = resolve_play_sidecar_path(watch_file, launch_dir);
+    let mut roots = vec![launch_dir.join("data")];
     let Some(file_stem) = watch_file_path.file_stem() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let base_dir = watch_file_path.parent().unwrap_or(launch_dir);
-    let auto_root = base_dir.join(file_stem);
-    let json_path = auto_root.join("data").join("config.json");
-    let struct_meta_path = auto_root.join("data").join("config.struct-meta.json");
-
-    if json_path.exists() && struct_meta_path.exists() {
-        return Ok(Some((json_path, struct_meta_path)));
+    roots.push(base_dir.join(file_stem).join("data"));
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for root in roots {
+        for pair in discover_pairs(&root)? {
+            let key = normalize_watch_path_for_log(&pair.0);
+            if seen.insert(key) {
+                out.push(pair);
+            }
+        }
     }
-    if !json_path.exists() && !struct_meta_path.exists() {
-        return Ok(None);
-    }
-    Err(format!(
-        "play auto data binding requires both sidecars; looked for {} and {}",
-        json_path.display(),
-        struct_meta_path.display()
-    ))
+    Ok(out)
 }
 fn json_value_by_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
     if path.is_empty() {
@@ -283,6 +732,255 @@ fn json_value_by_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
         current = current.get(segment)?;
     }
     Some(current)
+}
+
+fn validate_play_binding_source(root: &Value, metadata: &PlayStructMetadata) -> Result<(), String> {
+    let mut paths: Vec<String> = metadata
+        .fields
+        .iter()
+        .map(|field| field.json_path.clone())
+        .collect();
+    if let Some(table) = &metadata.csv_table {
+        paths.push(table.row_count_path.clone());
+    }
+    validate_binding_source_paths(root, &paths)
+}
+
+pub(crate) fn validate_binding_source_paths(root: &Value, paths: &[String]) -> Result<(), String> {
+    let mut field_paths = BTreeSet::new();
+    for path in paths {
+        if path.is_empty() {
+            return Err("binding metadata paths must not be empty".to_string());
+        }
+        if !field_paths.insert(path.as_str()) {
+            return Err(format!("duplicate binding metadata path {path}"));
+        }
+        if json_value_by_path(root, path).is_none() {
+            return Err(format!("binding source is missing target property {path}"));
+        }
+    }
+
+    fn walk(value: &Value, path: &str, field_paths: &BTreeSet<&str>) -> Result<(), String> {
+        let Value::Object(properties) = value else {
+            return Ok(());
+        };
+        for (name, child) in properties {
+            let child_path = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}.{name}")
+            };
+            let exact = field_paths.contains(child_path.as_str());
+            let prefix = field_paths
+                .iter()
+                .any(|field| field.starts_with(&format!("{child_path}.")));
+            if !exact && !prefix {
+                return Err(format!(
+                    "binding source property {child_path} does not exist in target metadata"
+                ));
+            }
+            if prefix {
+                walk(child, &child_path, field_paths)?;
+            }
+        }
+        Ok(())
+    }
+
+    walk(root, "", &field_paths)
+}
+
+fn validate_play_binding_targets(
+    metadata: &PlayStructMetadata,
+    jit: &JitProcess,
+) -> Result<(), String> {
+    if let Some(table) = &metadata.csv_table {
+        let collection_path = format!("{}.{}", metadata.global_name, table.rows_path);
+        let capacity = jit
+            .global_collection_capacity(&collection_path)
+            .ok_or_else(|| {
+                format!(
+                    "binding target property {collection_path} does not exist in compiled globals"
+                )
+            })?;
+        if usize::try_from(capacity).ok() != Some(table.capacity) {
+            return Err(format!(
+                "binding target collection {collection_path} has capacity {capacity}; metadata requires {}",
+                table.capacity
+            ));
+        }
+        let row_count_path = format!("{}.{}", metadata.global_name, table.row_count_path);
+        let row_count_type = jit.global_scalar_type(&row_count_path).ok_or_else(|| {
+            format!("binding target property {row_count_path} does not exist in compiled globals")
+        })?;
+        if row_count_type != "i32" {
+            return Err(format!(
+                "binding target property {row_count_path} has type {row_count_type}; CSV row count requires i32"
+            ));
+        }
+        let prefix = format!("{}.", table.rows_path);
+        for field in &metadata.fields {
+            let suffix = field.json_path.strip_prefix(&prefix).ok_or_else(|| {
+                format!(
+                    "CSV table target {} must be below rowsPath {}",
+                    field.json_path, table.rows_path
+                )
+            })?;
+            let target_type = jit
+                .global_collection_field_type(&collection_path, suffix)
+                .ok_or_else(|| {
+                    format!(
+                        "binding target property {collection_path}[].{suffix} does not exist in compiled globals"
+                    )
+                })?;
+            if target_type != field.type_name {
+                return Err(format!(
+                    "binding target property {collection_path}[].{suffix} has type {target_type}; metadata requires {}",
+                    field.type_name
+                ));
+            }
+        }
+        return Ok(());
+    }
+    for field in &metadata.fields {
+        let full_path = format!("{}.{}", metadata.global_name, field.json_path);
+        let target_type = jit.global_binding_type(&full_path).ok_or_else(|| {
+            format!("binding target property {full_path} does not exist in compiled globals")
+        })?;
+        if target_type != field.type_name {
+            return Err(format!(
+                "binding target property {full_path} has type {target_type}; metadata requires {}",
+                field.type_name
+            ));
+        }
+        let metadata_capacity =
+            (field.type_name == "string" || field.array_count > 1).then_some(field.array_count);
+        let target_capacity = jit.global_binding_capacity(&full_path);
+        if target_capacity != metadata_capacity {
+            return Err(format!(
+                "binding target property {full_path} has capacity {}; metadata requires {}",
+                target_capacity
+                    .map(|capacity| capacity.to_string())
+                    .unwrap_or_else(|| "scalar".to_string()),
+                metadata_capacity
+                    .map(|capacity| capacity.to_string())
+                    .unwrap_or_else(|| "scalar".to_string())
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_play_binding_targets(
+    loaded: &[(PathBuf, Value, PlayStructMetadata)],
+) -> Result<(), String> {
+    let mut owners = BTreeMap::new();
+    for (data_path, _, metadata) in loaded {
+        let targets = metadata
+            .fields
+            .iter()
+            .map(|field| &field.json_path)
+            .chain(metadata.csv_table.iter().map(|table| &table.row_count_path));
+        for target in targets {
+            let full_path = format!("{}.{}", metadata.global_name, target);
+            if let Some(previous_path) = owners.insert(full_path.clone(), data_path) {
+                return Err(format!(
+                    "binding target property {full_path} is mapped by both {} and {}",
+                    previous_path.display(),
+                    data_path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_play_bound_table_array(
+    field: &PlayStructFieldMetadata,
+    collection_hash: i32,
+    field_hash: i32,
+    value: &Value,
+) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    match field.type_name.as_str() {
+        "bool" | "u8" | "u16" | "u32" | "i32" => {
+            for (index, item) in items.iter().enumerate() {
+                let value = if field.type_name == "bool" {
+                    item.as_bool().map(|flag| i32::from(flag))
+                } else {
+                    item.as_i64().and_then(|number| i32::try_from(number).ok())
+                };
+                if let Some(value) = value {
+                    stasis_dynload::stasis_jit_global_i32_array_store(
+                        collection_hash,
+                        field_hash,
+                        index as i32,
+                        value,
+                    );
+                }
+            }
+        }
+        "f32" => {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(value) = item.as_f64() {
+                    stasis_dynload::stasis_jit_global_f32_array_store(
+                        collection_hash,
+                        field_hash,
+                        index as i32,
+                        value as f32,
+                    );
+                }
+            }
+        }
+        "f64" => {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(value) = item.as_f64() {
+                    stasis_dynload::stasis_jit_global_f64_array_store(
+                        collection_hash,
+                        field_hash,
+                        index as i32,
+                        value,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_play_csv_table_value(
+    root: &Value,
+    metadata: &PlayStructMetadata,
+    table: &CsvTableMetadata,
+) -> Result<(), String> {
+    let collection_path = format!("{}.{}", metadata.global_name, table.rows_path);
+    let collection_hash = hash_global_path(&collection_path);
+    let prefix = format!("{}.", table.rows_path);
+    for field in &metadata.fields {
+        let suffix = field.json_path.strip_prefix(&prefix).ok_or_else(|| {
+            format!(
+                "CSV table target {} must be below rowsPath {}",
+                field.json_path, table.rows_path
+            )
+        })?;
+        let value = json_value_by_path(root, &field.json_path)
+            .ok_or_else(|| format!("CSV table is missing target {}", field.json_path))?;
+        apply_play_bound_table_array(field, collection_hash, hash_global_path(suffix), value);
+    }
+    let row_count = json_value_by_path(root, &table.row_count_path)
+        .and_then(Value::as_u64)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| "CSV table row_count is invalid".to_string())?;
+    stasis_dynload::stasis_jit_collection_i32_store(collection_hash, 1, row_count);
+    stasis_dynload::stasis_jit_collection_i32_store(
+        collection_hash,
+        2,
+        i32::try_from(table.capacity).map_err(|_| "CSV table capacity exceeds i32".to_string())?,
+    );
+    let row_count_path = format!("{}.{}", metadata.global_name, table.row_count_path);
+    stasis_dynload::stasis_jit_global_i32_store(hash_global_path(&row_count_path), row_count);
+    Ok(())
 }
 
 fn truncate_utf8_to_capacity(value: &str, max_bytes: usize) -> (Vec<u8>, i32) {
@@ -449,6 +1147,10 @@ fn apply_play_data_binding_value(
         ));
     }
 
+    if let Some(table) = &metadata.csv_table {
+        return apply_play_csv_table_value(root, metadata, table);
+    }
+
     for field in &metadata.fields {
         let Some(value) = json_value_by_path(root, &field.json_path) else {
             continue;
@@ -464,37 +1166,81 @@ fn apply_play_data_binding_value(
     Ok(())
 }
 
-fn load_and_apply_play_data_binding(
-    json_path: &Path,
-    struct_meta_path: &Path,
+fn load_and_apply_play_data_bindings(
+    paths: &[(PathBuf, PathBuf)],
+    jit: Option<&JitProcess>,
 ) -> Result<(), String> {
-    let json_source = fs::read_to_string(json_path).map_err(|error| {
-        format!(
-            "failed to read data-bind json {}: {error}",
-            json_path.display()
-        )
-    })?;
-    let json_root: Value = serde_json::from_str(&json_source).map_err(|error| {
-        format!(
-            "failed to parse data-bind json {}: {error}",
-            json_path.display()
-        )
-    })?;
-
-    let meta_source = fs::read_to_string(struct_meta_path).map_err(|error| {
-        format!(
-            "failed to read data-bind struct-meta {}: {error}",
-            struct_meta_path.display()
-        )
-    })?;
-    let metadata: PlayStructMetadata = serde_json::from_str(&meta_source).map_err(|error| {
-        format!(
-            "failed to parse data-bind struct-meta {}: {error}",
-            struct_meta_path.display()
-        )
-    })?;
-
-    apply_play_data_binding_value(&json_root, &metadata)
+    let mut loaded = Vec::new();
+    for (data_path, meta_path) in paths {
+        let meta_source = fs::read_to_string(meta_path).map_err(|error| {
+            format!(
+                "failed to read data-bind struct-meta {}: {error}",
+                meta_path.display()
+            )
+        })?;
+        let metadata: PlayStructMetadata = serde_json::from_str(&meta_source).map_err(|error| {
+            format!(
+                "failed to parse data-bind struct-meta {}: {error}",
+                meta_path.display()
+            )
+        })?;
+        let data_source = fs::read_to_string(data_path).map_err(|error| {
+            format!("failed to read data file {}: {error}", data_path.display())
+        })?;
+        let is_csv = data_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"));
+        let data_root = if is_csv {
+            let fields: Vec<CsvBindingField> = metadata
+                .fields
+                .iter()
+                .map(|field| CsvBindingField {
+                    path: field.json_path.clone(),
+                    csv_column: field.csv_column.clone(),
+                    type_name: field.type_name.clone(),
+                    array_count: usize::try_from(field.array_count.max(0)).unwrap_or(0),
+                })
+                .collect();
+            let parsed = if let Some(table) = &metadata.csv_table {
+                parse_csv_table_binding(&data_source, &fields, table)
+            } else {
+                parse_flat_csv_binding(&data_source, &fields)
+            };
+            parsed.map_err(|error| {
+                format!("failed to parse data CSV {}: {error}", data_path.display())
+            })?
+        } else {
+            if metadata.csv_table.is_some() {
+                return Err(format!(
+                    "csvTable metadata requires a CSV data file: {}",
+                    data_path.display()
+                ));
+            }
+            serde_json::from_str(&data_source).map_err(|error| {
+                format!("failed to parse data JSON {}: {error}", data_path.display())
+            })?
+        };
+        loaded.push((data_path.clone(), data_root, metadata));
+    }
+    for (_, _, metadata) in &loaded {
+        if metadata.version != 1 {
+            return Err(format!(
+                "unsupported struct-meta version {}; expected 1",
+                metadata.version
+            ));
+        }
+    }
+    validate_unique_play_binding_targets(&loaded)?;
+    for (_, data_root, metadata) in &loaded {
+        validate_play_binding_source(data_root, metadata)?;
+        if let Some(jit) = jit {
+            validate_play_binding_targets(metadata, jit)?;
+        }
+    }
+    for (_, json_root, metadata) in loaded {
+        apply_play_data_binding_value(&json_root, &metadata)?;
+    }
+    Ok(())
 }
 
 fn resolve_play_watch_dir(watch_file: &Path, watch_dir: Option<&Path>) -> PathBuf {
@@ -515,6 +1261,282 @@ fn resolve_play_watch_dir(watch_file: &Path, watch_dir: Option<&Path>) -> PathBu
     PathBuf::from(".")
 }
 
+const PLAY_INPUT_MAX_FRAMES: usize = 10_000;
+const PLAY_INPUT_MAX_POINTERS: usize = 8;
+const PLAY_INPUT_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const HOST_I_POINTER_COUNT: usize = 7;
+const HOST_I_DROPPED_POINTERS: usize = 8;
+const HOST_I_WINDOW_W_PX: usize = 1;
+const HOST_I_WINDOW_H_PX: usize = 2;
+const HOST_I_VIEWPORT_W_PX: usize = 5;
+const HOST_I_VIEWPORT_H_PX: usize = 6;
+const HOST_I_POINTER_BASE: usize = 544;
+const HOST_I_POINTER_STRIDE: usize = 4;
+const HOST_F_POINTER_STRIDE: usize = 6;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayInputScriptDocument {
+    version: u32,
+    frames: Vec<PlayInputFrame>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayInputFrame {
+    frame: u64,
+    pointers: Vec<PlayInputPointer>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlayInputPointer {
+    id: i32,
+    is_down: bool,
+    went_down: bool,
+    went_up: bool,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug)]
+struct PlayInputTimeline {
+    frames: Vec<PlayInputFrame>,
+    next_frame: usize,
+    pointers: Vec<PlayInputPointer>,
+}
+
+fn validate_play_input_script(
+    document: PlayInputScriptDocument,
+) -> Result<PlayInputTimeline, String> {
+    if document.version != 1 {
+        return Err(format!(
+            "unsupported input-script version {} (expected 1)",
+            document.version
+        ));
+    }
+    if document.frames.len() > PLAY_INPUT_MAX_FRAMES {
+        return Err(format!(
+            "input-script has too many frames (maximum {PLAY_INPUT_MAX_FRAMES})"
+        ));
+    }
+    let mut previous_frame = 0u64;
+    for frame in &document.frames {
+        if frame.frame == 0 || frame.frame > i32::MAX as u64 {
+            return Err("input-script frame must be between 1 and 2147483647".to_string());
+        }
+        if frame.frame <= previous_frame {
+            return Err("input-script frames must be strictly increasing".to_string());
+        }
+        previous_frame = frame.frame;
+        if frame.pointers.len() > PLAY_INPUT_MAX_POINTERS {
+            return Err(format!(
+                "input-script frame {} has too many pointers (maximum {PLAY_INPUT_MAX_POINTERS})",
+                frame.frame
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        for pointer in &frame.pointers {
+            if pointer.id < 0 {
+                return Err(format!(
+                    "input-script frame {} pointer id must be non-negative",
+                    frame.frame
+                ));
+            }
+            if !ids.insert(pointer.id) {
+                return Err(format!(
+                    "input-script frame {} contains duplicate pointer id {}",
+                    frame.frame, pointer.id
+                ));
+            }
+            if !pointer.x.is_finite()
+                || !pointer.y.is_finite()
+                || pointer.x < 0.0
+                || pointer.y < 0.0
+            {
+                return Err(format!(
+                    "input-script frame {} pointer coordinates must be finite and non-negative",
+                    frame.frame
+                ));
+            }
+            if pointer.went_down && pointer.went_up {
+                return Err(format!(
+                    "input-script frame {} pointer cannot go down and up together",
+                    frame.frame
+                ));
+            }
+            if pointer.went_down && !pointer.is_down {
+                return Err(format!(
+                    "input-script frame {} wentDown requires isDown=true",
+                    frame.frame
+                ));
+            }
+            if pointer.went_up && pointer.is_down {
+                return Err(format!(
+                    "input-script frame {} wentUp requires isDown=false",
+                    frame.frame
+                ));
+            }
+        }
+    }
+    Ok(PlayInputTimeline {
+        frames: document.frames,
+        next_frame: 0,
+        pointers: Vec::new(),
+    })
+}
+
+fn load_play_input_script(path: &Path, launch_dir: &Path) -> Result<PlayInputTimeline, String> {
+    let resolved = resolve_play_sidecar_path(path, launch_dir);
+    let metadata = fs::metadata(&resolved).map_err(|error| {
+        format!(
+            "failed to inspect input-script {}: {error}",
+            resolved.display()
+        )
+    })?;
+    validate_play_input_script_size(metadata.len())?;
+    let file = fs::File::open(&resolved).map_err(|error| {
+        format!(
+            "failed to open input-script {}: {error}",
+            resolved.display()
+        )
+    })?;
+    let mut source = String::with_capacity(metadata.len() as usize);
+    file.take(PLAY_INPUT_MAX_FILE_BYTES + 1)
+        .read_to_string(&mut source)
+        .map_err(|error| {
+            format!(
+                "failed to read input-script {}: {error}",
+                resolved.display()
+            )
+        })?;
+    validate_play_input_script_size(source.len() as u64)?;
+    let document: PlayInputScriptDocument = serde_json::from_str(&source).map_err(|error| {
+        format!(
+            "failed to parse input-script {}: {error}",
+            resolved.display()
+        )
+    })?;
+    validate_play_input_script(document)
+}
+
+fn validate_play_input_script_size(byte_len: u64) -> Result<(), String> {
+    if byte_len > PLAY_INPUT_MAX_FILE_BYTES {
+        return Err(format!(
+            "input-script is too large ({byte_len} bytes; maximum {PLAY_INPUT_MAX_FILE_BYTES})"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_play_input_script_ticks(
+    max_ticks: Option<u64>,
+    timeline: &PlayInputTimeline,
+) -> Result<(), String> {
+    if let Some(limit) = max_ticks {
+        if timeline
+            .frames
+            .last()
+            .is_some_and(|frame| frame.frame > limit)
+        {
+            return Err("max_ticks must reach the final input-script frame".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn apply_play_input_frame(
+    timeline: &mut PlayInputTimeline,
+    frame: u64,
+    host_i32: &mut [i32],
+    host_f32: &mut [f32],
+) -> Result<(), String> {
+    if host_i32.len() < HOST_I_POINTER_BASE + PLAY_INPUT_MAX_POINTERS * HOST_I_POINTER_STRIDE
+        || host_f32.len() < PLAY_INPUT_MAX_POINTERS * HOST_F_POINTER_STRIDE
+    {
+        return Err("host frame buffers are too small for input-script pointers".to_string());
+    }
+    // The graphics runtime pumps its first event snapshot while servicing the
+    // first host frame, after the viewport fields have already been copied.
+    // On that one Windows frame, the window dimensions are the exact viewport.
+    let mut viewport_w = host_i32[HOST_I_VIEWPORT_W_PX];
+    let mut viewport_h = host_i32[HOST_I_VIEWPORT_H_PX];
+    if viewport_w <= 0 {
+        viewport_w = host_i32[HOST_I_WINDOW_W_PX];
+    }
+    if viewport_h <= 0 {
+        viewport_h = host_i32[HOST_I_WINDOW_H_PX];
+    }
+    if viewport_w <= 0 || viewport_h <= 0 {
+        return Err("input-script requires positive host viewport dimensions".to_string());
+    }
+
+    let previous = timeline.pointers.clone();
+    let scripted = timeline
+        .frames
+        .get(timeline.next_frame)
+        .is_some_and(|event| event.frame == frame);
+    if scripted {
+        timeline.pointers = timeline.frames[timeline.next_frame].pointers.clone();
+        timeline.next_frame += 1;
+    } else {
+        for pointer in &mut timeline.pointers {
+            pointer.went_down = false;
+            pointer.went_up = false;
+        }
+    }
+
+    host_i32[HOST_I_POINTER_COUNT] = timeline.pointers.len() as i32;
+    host_i32[HOST_I_DROPPED_POINTERS] = 0;
+    for slot in 0..PLAY_INPUT_MAX_POINTERS {
+        let i32_base = HOST_I_POINTER_BASE + slot * HOST_I_POINTER_STRIDE;
+        let f32_base = slot * HOST_F_POINTER_STRIDE;
+        for value in &mut host_i32[i32_base..i32_base + HOST_I_POINTER_STRIDE] {
+            *value = 0;
+        }
+        for value in &mut host_f32[f32_base..f32_base + HOST_F_POINTER_STRIDE] {
+            *value = 0.0;
+        }
+    }
+    for (slot, pointer) in timeline.pointers.iter().enumerate() {
+        if pointer.x > viewport_w as f32 || pointer.y > viewport_h as f32 {
+            return Err(format!(
+                "input-script frame {frame} pointer {} is outside the {}x{} viewport",
+                pointer.id, viewport_w, viewport_h
+            ));
+        }
+        let prior = previous.iter().find(|candidate| candidate.id == pointer.id);
+        let dx = prior.map_or(0.0, |value| pointer.x - value.x);
+        let dy = prior.map_or(0.0, |value| pointer.y - value.y);
+        let i32_base = HOST_I_POINTER_BASE + slot * HOST_I_POINTER_STRIDE;
+        let f32_base = slot * HOST_F_POINTER_STRIDE;
+        host_i32[i32_base] = pointer.id;
+        host_i32[i32_base + 1] = i32::from(pointer.is_down);
+        host_i32[i32_base + 2] = i32::from(pointer.went_down);
+        host_i32[i32_base + 3] = i32::from(pointer.went_up);
+        host_f32[f32_base] = pointer.x;
+        host_f32[f32_base + 1] = pointer.y;
+        host_f32[f32_base + 2] = dx;
+        host_f32[f32_base + 3] = dy;
+        host_f32[f32_base + 4] = (pointer.x / viewport_w as f32).clamp(0.0, 1.0);
+        host_f32[f32_base + 5] = (pointer.y / viewport_h as f32).clamp(0.0, 1.0);
+    }
+    Ok(())
+}
+
+fn run_guest_main_with_initial_host_requests(
+    initialize_requests: impl FnOnce() -> Result<(), String>,
+    run_main: impl FnOnce() -> Result<i32, String>,
+    apply_requests: impl FnOnce() -> Result<(), String>,
+) -> Result<i32, String> {
+    initialize_requests()?;
+    let result = run_main()?;
+    if result == 0 {
+        apply_requests()?;
+    }
+    Ok(result)
+}
+
 pub fn run_play_in_process(
     watch_file: &Path,
     watch_dir: Option<&Path>,
@@ -522,6 +1544,70 @@ pub fn run_play_in_process(
     data_bind_struct_meta: Option<&Path>,
     tick_sleep_micros: u64,
     max_ticks: Option<u64>,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        None,
+        tick_sleep_micros,
+        max_ticks,
+        None,
+    )
+}
+
+pub fn run_play_in_process_with_input_script(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        None,
+    )
+}
+
+pub fn run_live_in_process(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    server: stasis_runner::live::LiveSessionServer,
+    config: LiveRunConfig,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        None,
+        None,
+        None,
+        tick_sleep_micros,
+        max_ticks,
+        Some((server, config)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_play_in_process_inner(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    live: Option<(stasis_runner::live::LiveSessionServer, LiveRunConfig)>,
 ) -> Result<(), String> {
     if !cfg!(windows) {
         return Err("in-process play runner currently supports Windows only".to_string());
@@ -536,6 +1622,12 @@ pub fn run_play_in_process(
         data_bind_json,
         data_bind_struct_meta,
     )?;
+    let mut input_timeline = input_script
+        .map(|path| load_play_input_script(path, &launch_dir))
+        .transpose()?;
+    if let Some(timeline) = input_timeline.as_ref() {
+        validate_play_input_script_ticks(max_ticks, timeline)?;
+    }
 
     // Make relative asset paths (e.g. "assets/ball.svg") resolve against the game directory.
     // Use the watch dir so dev workflows stay consistent across `stasis.exe` launch locations.
@@ -549,6 +1641,28 @@ pub fn run_play_in_process(
             watch_dir.display()
         )
     })?;
+    let mut data_watchers = Vec::new();
+    let mut watched_data_dirs = BTreeSet::new();
+    for (json_path, _) in &data_binding_paths {
+        let Some(parent) = json_path.parent() else {
+            continue;
+        };
+        let parent_abs = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        if parent_abs.starts_with(&watch_dir_abs) {
+            continue;
+        }
+        let key = normalize_watch_path_for_log(&parent_abs);
+        if watched_data_dirs.insert(key) {
+            data_watchers.push(WatchService::start(&parent_abs).map_err(|error| {
+                format!(
+                    "failed to watch data directory {}: {error}",
+                    parent_abs.display()
+                )
+            })?);
+        }
+    }
 
     let root_path = watch_file
         .canonicalize()
@@ -637,28 +1751,31 @@ pub fn run_play_in_process(
     let _ = jit
         .compile()
         .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
-    if let Some((json_path, struct_meta_path)) = data_binding_paths.as_ref() {
-        load_and_apply_play_data_binding(json_path, struct_meta_path)?;
-    }
+    load_and_apply_play_data_bindings(&data_binding_paths, Some(&jit))?;
     let package = jit
         .build_engine_package(&EngineEntrypoints::runtime_default())
         .map_err(|error| format!("failed to build engine package: {error}"))?;
 
-    // Run guest startup once.
-    let main_rc = jit
-        .execute_i32_noarg_by_name("main")
-        .map_err(|error| format!("guest main() failed: {error}"))?;
+    // Establish the request sequence baseline before guest startup. Otherwise the
+    // runtime's first apply call treats main()'s request as its baseline and drops it.
+    let main_rc = run_guest_main_with_initial_host_requests(
+        || gfx.host_bulk_init(&host_req_seq),
+        || {
+            jit.execute_i32_noarg_by_name("main")
+                .map_err(|error| format!("guest main() failed: {error}"))
+        },
+        || {
+            gfx.host_bulk_apply_requests(
+                &host_req_seq,
+                &host_req_flags,
+                &host_req_window_w_px,
+                &host_req_window_h_px,
+            )
+        },
+    )?;
     if main_rc != 0 {
         return Err(format!("guest main() returned non-zero status {main_rc}"));
     }
-
-    // Apply any initial window requests emitted during guest main().
-    gfx.host_bulk_apply_requests(
-        &host_req_seq,
-        &host_req_flags,
-        &host_req_window_w_px,
-        &host_req_window_h_px,
-    )?;
 
     if max_ticks == Some(0) {
         return Ok(());
@@ -666,14 +1783,49 @@ pub fn run_play_in_process(
 
     let mut tick_code_ptr = package.tick_code_ptr;
     let mut render_code_ptr = package.render_code_ptr;
+    let mut live = live
+        .map(|(server, config)| LiveWorkspace::new(server, config, &jit))
+        .transpose()?;
 
     let mut ticks_executed: u64 = 0;
     loop {
+        if let Some(live) = live.as_mut() {
+            live.process_boundary(
+                ticks_executed,
+                &mut jit,
+                &mut tick_code_ptr,
+                &mut render_code_ptr,
+            );
+            if live.should_quit() {
+                break;
+            }
+        }
         // Drain file events and recompile at tick boundaries (all-or-nothing).
         let mut needs_recompile = false;
         let mut ignored_changes: u32 = 0;
         let mut triggered_paths: Vec<String> = Vec::new();
-        for event in watcher.drain_stasis_changes() {
+        let mut watch_events = watcher.drain_stasis_changes();
+        for data_watcher in &mut data_watchers {
+            watch_events.extend(data_watcher.drain_stasis_changes());
+        }
+        let mut needs_data_reload = false;
+        for event in watch_events {
+            if live
+                .as_mut()
+                .is_some_and(|workspace| workspace.consumes_self_write(&event.path))
+            {
+                ignored_changes = ignored_changes.saturating_add(1);
+                continue;
+            }
+            let event_path = normalize_watch_path_for_log(&event.path);
+            let is_data_event = data_binding_paths.iter().any(|(json_path, meta_path)| {
+                event_path == normalize_watch_path_for_log(json_path)
+                    || event_path == normalize_watch_path_for_log(meta_path)
+            });
+            if is_data_event {
+                needs_data_reload = true;
+                continue;
+            }
             let submit = should_submit_watch_event(
                 &event,
                 Some(&root_path),
@@ -684,6 +1836,12 @@ pub fn run_play_in_process(
                 triggered_paths.push(normalize_watch_path_for_log(&event.path));
             } else {
                 ignored_changes = ignored_changes.saturating_add(1);
+            }
+        }
+        if needs_data_reload {
+            match load_and_apply_play_data_bindings(&data_binding_paths, Some(&jit)) {
+                Ok(()) => println!("[data] rebound {} file(s)", data_binding_paths.len()),
+                Err(error) => println!("[data] reload rejected: {error}"),
             }
         }
         if ignored_changes > 0 && !needs_recompile {
@@ -697,19 +1855,20 @@ pub fn run_play_in_process(
             println!("[watch] change detected: {changed}");
 
             let t_total = Instant::now();
-            // Ensure the root file is refreshed (imports are pulled by the JIT process).
+            let mut candidate = jit.staged_candidate();
+            // Ensure the root file is refreshed (imports are pulled by the candidate process).
             if let Ok(next_root_source) = fs::read_to_string(&root_path) {
-                jit.upsert_file(root_path_str.clone(), next_root_source);
+                candidate.upsert_file(root_path_str.clone(), next_root_source);
             }
-            let _ = jit.refresh_imported_sources_from_disk(&root_path_str);
+            let _ = candidate.refresh_imported_sources_from_disk(&root_path_str);
 
             let t_compile = Instant::now();
-            match jit.compile() {
+            match candidate.compile_staged() {
                 Ok(_) => {
                     let compile_ms = t_compile.elapsed().as_millis();
 
                     let t_pkg = Instant::now();
-                    match jit.build_engine_package(&EngineEntrypoints::runtime_default()) {
+                    match candidate.build_engine_package(&EngineEntrypoints::runtime_default()) {
                         Ok(next_package) => {
                             let package_ms = t_pkg.elapsed().as_millis();
 
@@ -719,20 +1878,37 @@ pub fn run_play_in_process(
                             let candidate_on_code_swap_code_ptr =
                                 next_package.on_code_swap_code_ptr;
 
-                            let mut hook_ms: u128 = 0;
-                            let mut hook_failed: Option<String> = None;
-                            if let Some(hook) = candidate_on_code_swap_code_ptr {
-                                let t_hook = Instant::now();
-                                // Run the hook against the newly compiled code. If it fails, abort the swap attempt
-                                // and keep running last-known-good code/data.
-                                if let Err(error) = stasis_dynload::invoke_noarg_void(hook as usize)
-                                {
-                                    hook_ms = t_hook.elapsed().as_millis();
-                                    hook_failed = Some(error);
-                                } else {
-                                    hook_ms = t_hook.elapsed().as_millis();
+                            let mut migration_preview = match plan_state_migration(
+                                &jit.state_layout(),
+                                &candidate.state_layout(),
+                                next_package.symbol_code_ptrs.keys().cloned().collect(),
+                                false,
+                                None,
+                            ) {
+                                Ok(preview) => preview,
+                                Err(error) => {
+                                    println!("[swap] aborted before activation: {error}");
+                                    continue;
                                 }
-                            }
+                            };
+                            finalize_runtime_preview(&candidate, &mut migration_preview);
+                            let t_hook = Instant::now();
+                            let hook_failed = match activate_candidate_transactionally(
+                                Some(&jit),
+                                &candidate,
+                                &migration_preview,
+                                candidate_on_code_swap_code_ptr.is_some(),
+                                || {
+                                    candidate_on_code_swap_code_ptr.map_or(Ok(()), |code_ptr| {
+                                        stasis_dynload::invoke_code_swap_hook(code_ptr as usize)
+                                    })
+                                },
+                                Result::is_ok,
+                            ) {
+                                Ok(Ok(())) => None,
+                                Ok(Err(error)) | Err(error) => Some(error),
+                            };
+                            let hook_ms = t_hook.elapsed().as_millis();
 
                             let t_deps = Instant::now();
                             if let Ok(next_graph) = collect_watch_dependency_paths(&root_path) {
@@ -748,8 +1924,12 @@ pub fn run_play_in_process(
                                 );
                             } else {
                                 // Commit the swap (all-or-nothing).
+                                jit.accept_staged_candidate(candidate);
                                 tick_code_ptr = candidate_tick_code_ptr;
                                 render_code_ptr = candidate_render_code_ptr;
+                                if let Some(live) = live.as_mut() {
+                                    live.refresh_after_external_edit(&jit);
+                                }
                                 println!(
                                     "[swap] swapped ok total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms hook={hook_ms}ms deps={deps_ms}ms)"
                                 );
@@ -778,6 +1958,14 @@ pub fn run_play_in_process(
         if host_i32.get(9).copied().unwrap_or(0) != 0 {
             break;
         }
+        if let Some(timeline) = input_timeline.as_mut() {
+            apply_play_input_frame(
+                timeline,
+                ticks_executed.saturating_add(1),
+                &mut host_i32,
+                &mut host_f32,
+            )?;
+        }
         gfx.host_bulk_apply_requests(
             &host_req_seq,
             &host_req_flags,
@@ -785,9 +1973,12 @@ pub fn run_play_in_process(
             &host_req_window_h_px,
         )?;
 
-        let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
-        if tick_rc != 0 {
-            break;
+        let run_tick = live.as_ref().is_none_or(LiveWorkspace::should_run_tick);
+        if run_tick {
+            let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
+            if tick_rc != 0 {
+                break;
+            }
         }
         let render_rc = stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?;
         if render_rc != 0 {
@@ -802,7 +1993,15 @@ pub fn run_play_in_process(
             }
         }
 
-        ticks_executed = ticks_executed.saturating_add(1);
+        if let Some(live) = live.as_mut() {
+            if run_tick {
+                ticks_executed = ticks_executed.saturating_add(1);
+                live.after_tick();
+            }
+            live.publish_watches(ticks_executed, &jit);
+        } else {
+            ticks_executed = ticks_executed.saturating_add(1);
+        }
         if let Some(limit) = max_ticks {
             if ticks_executed >= limit {
                 break;
@@ -814,8 +2013,9 @@ pub fn run_play_in_process(
 }
 
 pub fn run_with_real_backend(config: RunnerConfig) -> RunnerSummary {
-    let backend = IncrementalCompilerBackend::new();
-    run_with_backend(config, backend)
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+    let backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(prepared_tx);
+    run_with_backend_and_prepared_swaps(config, backend, Some(prepared_rx))
 }
 
 fn is_stasis_source_file(path: &Path) -> bool {
@@ -1006,6 +2206,14 @@ fn resolve_initial_source_file(config: &RunnerConfig) -> Option<PathBuf> {
 }
 
 pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) -> RunnerSummary {
+    run_with_backend_and_prepared_swaps(config, backend, None)
+}
+
+fn run_with_backend_and_prepared_swaps<B: CompilerBackend>(
+    config: RunnerConfig,
+    backend: B,
+    prepared_jit_swap_rx: Option<std::sync::mpsc::Receiver<PreparedJitSwap>>,
+) -> RunnerSummary {
     let mut watcher = config
         .watch_directory
         .as_deref()
@@ -1081,8 +2289,10 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
     let mut pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
     let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
         BTreeMap::new();
+    let requires_prepared_jit = prepared_jit_swap_rx.is_some();
+    let mut pending_jit_candidates: BTreeMap<RequestId, JitProcess> = BTreeMap::new();
+    let mut active_jit_candidate: Option<JitProcess> = None;
     let mut active_layout_hash: Option<LayoutHash> = None;
-    let mut active_state_map: Option<Vec<StateMapEntry>> = None;
     let mut aot_linked_image_activations: u32 = 0;
     let mut active_aot_linked_image_path: Option<PathBuf> = None;
     let mut active_aot_linked_image_size_bytes: Option<u64> = None;
@@ -1140,59 +2350,68 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         pipeline.pump_coordinator();
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
+        capture_prepared_jit_swaps(prepared_jit_swap_rx.as_ref(), &mut pending_jit_candidates);
         pipeline.process_commits_at_safe_point(|request| {
+            let request_id = request.request_id;
             let request_layout_hash = request.layout_hash;
-            let request_state_map = request.state_map.clone();
-            if let Err(message) = validate_layout_transition(
-                active_layout_hash,
-                request_layout_hash,
-                active_state_map.as_deref(),
-                request_state_map.as_deref(),
-            ) {
-                record_swap_failure(
-                    &message,
-                    &mut swap_commit_failures,
-                    &mut swap_failure_reasons,
-                );
-                return SwapCommitResult::failed(request.request_id, message);
-            }
-            let layout_changed = active_layout_hash.is_some_and(|hash| hash != request_layout_hash);
-            if layout_changed {
-                if let (Some(from), Some(to)) =
-                    (active_state_map.as_deref(), request_state_map.as_deref())
-                {
-                    if let Err(message) = migrate_state_map_fields(from, to) {
-                        record_swap_failure(
-                            &message,
-                            &mut swap_commit_failures,
-                            &mut swap_failure_reasons,
-                        );
-                        return SwapCommitResult::failed(request.request_id, message);
-                    }
-                }
-            }
-            let result = apply_commit_request(
-                request,
-                &mut pointer_table,
+            let hook_may_mutate_state = commit_request_may_execute_runtime_hook(
+                &request,
                 &config,
-                &host_set_contract,
-                &mut hook_runs,
-                &mut hook_failures,
-                &mut hook_failure_reasons,
-                &mut swap_commit_successes,
-                &mut swap_commit_failures,
-                &mut swap_failure_reasons,
-                &mut events,
-                hook_failure_reason.as_ref(),
-                swap_failure_reason.as_ref(),
+                hook_failure_reason.is_some(),
                 &pending_aot_metadata,
                 &pending_jit_code_ptr_overrides,
             );
+            let prepared_candidate = pending_jit_candidates.remove(&request_id);
+            let commit = || {
+                apply_commit_request(
+                    request,
+                    &mut pointer_table,
+                    &config,
+                    &host_set_contract,
+                    &mut hook_runs,
+                    &mut hook_failures,
+                    &mut hook_failure_reasons,
+                    &mut swap_commit_successes,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                    &mut events,
+                    hook_failure_reason.as_ref(),
+                    swap_failure_reason.as_ref(),
+                    &pending_aot_metadata,
+                    &pending_jit_code_ptr_overrides,
+                )
+            };
+            let result = if config.target_mode == TargetMode::JitDev
+                && (requires_prepared_jit || prepared_candidate.is_some())
+            {
+                apply_prepared_jit_transaction(
+                    request_id,
+                    prepared_candidate,
+                    &mut active_jit_candidate,
+                    hook_may_mutate_state,
+                    commit,
+                )
+            } else {
+                apply_runtime_state_transaction(
+                    active_layout_hash,
+                    request_layout_hash,
+                    hook_may_mutate_state,
+                    commit,
+                )
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(message) => {
+                    record_swap_failure(
+                        &message,
+                        &mut swap_commit_failures,
+                        &mut swap_failure_reasons,
+                    );
+                    return SwapCommitResult::failed(request_id, message);
+                }
+            };
             if result.status == SwapCommitStatus::Success {
                 active_layout_hash = Some(request_layout_hash);
-                if let Some(state_map) = request_state_map {
-                    active_state_map = Some(state_map);
-                }
             }
             result
         });
@@ -1267,59 +2486,68 @@ pub fn run_with_backend<B: CompilerBackend>(config: RunnerConfig, backend: B) ->
         pipeline.pump_coordinator();
         capture_pending_aot_compile_metadata(&pipeline, &mut pending_aot_metadata);
         capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
+        capture_prepared_jit_swaps(prepared_jit_swap_rx.as_ref(), &mut pending_jit_candidates);
         pipeline.process_commits_at_safe_point(|request| {
+            let request_id = request.request_id;
             let request_layout_hash = request.layout_hash;
-            let request_state_map = request.state_map.clone();
-            if let Err(message) = validate_layout_transition(
-                active_layout_hash,
-                request_layout_hash,
-                active_state_map.as_deref(),
-                request_state_map.as_deref(),
-            ) {
-                record_swap_failure(
-                    &message,
-                    &mut swap_commit_failures,
-                    &mut swap_failure_reasons,
-                );
-                return SwapCommitResult::failed(request.request_id, message);
-            }
-            let layout_changed = active_layout_hash.is_some_and(|hash| hash != request_layout_hash);
-            if layout_changed {
-                if let (Some(from), Some(to)) =
-                    (active_state_map.as_deref(), request_state_map.as_deref())
-                {
-                    if let Err(message) = migrate_state_map_fields(from, to) {
-                        record_swap_failure(
-                            &message,
-                            &mut swap_commit_failures,
-                            &mut swap_failure_reasons,
-                        );
-                        return SwapCommitResult::failed(request.request_id, message);
-                    }
-                }
-            }
-            let result = apply_commit_request(
-                request,
-                &mut pointer_table,
+            let hook_may_mutate_state = commit_request_may_execute_runtime_hook(
+                &request,
                 &config,
-                &host_set_contract,
-                &mut hook_runs,
-                &mut hook_failures,
-                &mut hook_failure_reasons,
-                &mut swap_commit_successes,
-                &mut swap_commit_failures,
-                &mut swap_failure_reasons,
-                &mut events,
-                hook_failure_reason.as_ref(),
-                swap_failure_reason.as_ref(),
+                hook_failure_reason.is_some(),
                 &pending_aot_metadata,
                 &pending_jit_code_ptr_overrides,
             );
+            let prepared_candidate = pending_jit_candidates.remove(&request_id);
+            let commit = || {
+                apply_commit_request(
+                    request,
+                    &mut pointer_table,
+                    &config,
+                    &host_set_contract,
+                    &mut hook_runs,
+                    &mut hook_failures,
+                    &mut hook_failure_reasons,
+                    &mut swap_commit_successes,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                    &mut events,
+                    hook_failure_reason.as_ref(),
+                    swap_failure_reason.as_ref(),
+                    &pending_aot_metadata,
+                    &pending_jit_code_ptr_overrides,
+                )
+            };
+            let result = if config.target_mode == TargetMode::JitDev
+                && (requires_prepared_jit || prepared_candidate.is_some())
+            {
+                apply_prepared_jit_transaction(
+                    request_id,
+                    prepared_candidate,
+                    &mut active_jit_candidate,
+                    hook_may_mutate_state,
+                    commit,
+                )
+            } else {
+                apply_runtime_state_transaction(
+                    active_layout_hash,
+                    request_layout_hash,
+                    hook_may_mutate_state,
+                    commit,
+                )
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(message) => {
+                    record_swap_failure(
+                        &message,
+                        &mut swap_commit_failures,
+                        &mut swap_failure_reasons,
+                    );
+                    return SwapCommitResult::failed(request_id, message);
+                }
+            };
             if result.status == SwapCommitStatus::Success {
                 active_layout_hash = Some(request_layout_hash);
-                if let Some(state_map) = request_state_map {
-                    active_state_map = Some(state_map);
-                }
             }
             result
         });
@@ -1475,6 +2703,18 @@ fn capture_pending_jit_compile_metadata(
         .or_insert(overrides);
 }
 
+fn capture_prepared_jit_swaps(
+    receiver: Option<&std::sync::mpsc::Receiver<PreparedJitSwap>>,
+    pending: &mut BTreeMap<RequestId, JitProcess>,
+) {
+    let Some(receiver) = receiver else {
+        return;
+    };
+    while let Ok(prepared) = receiver.try_recv() {
+        pending.insert(prepared.request_id, prepared.candidate);
+    }
+}
+
 fn format_layout_hash_hex(layout_hash: LayoutHash) -> String {
     let mut out = String::with_capacity(64);
     for byte in layout_hash.0 {
@@ -1494,120 +2734,86 @@ fn record_swap_failure(
     swap_failure_reasons.push(message.to_string());
 }
 
-fn normalize_state_map(
-    entries: &[StateMapEntry],
-    label: &str,
-) -> Result<BTreeMap<String, StateMapEntry>, String> {
-    let mut by_path: BTreeMap<String, StateMapEntry> = BTreeMap::new();
-    for entry in entries {
-        if entry.path.trim().is_empty() {
-            return Err(format!(
-                "{label} state-map contains empty path entry (restart required)"
-            ));
-        }
-        if let Some(previous) = by_path.insert(entry.path.clone(), entry.clone()) {
-            if previous.type_name != entry.type_name || previous.path_hash != entry.path_hash {
-                return Err(format!(
-                    "{label} state-map contains conflicting duplicate path '{}' (restart required)",
-                    entry.path
-                ));
-            }
+fn commit_request_may_execute_runtime_hook(
+    request: &stasis_runner::swap::contracts::SwapCommitRequest,
+    config: &RunnerConfig,
+    has_forced_hook_failure: bool,
+    pending_aot_metadata: &BTreeMap<RequestId, PendingAotCompileMetadata>,
+    pending_jit_code_ptr_overrides: &BTreeMap<RequestId, Vec<JitCodePtrOverride>>,
+) -> bool {
+    if config.disable_on_code_swap_hook || has_forced_hook_failure || request.hook_symbol.is_none()
+    {
+        return false;
+    }
+    match config.target_mode {
+        TargetMode::JitDev => pending_jit_code_ptr_overrides.contains_key(&request.request_id),
+        TargetMode::AotProd => {
+            pending_aot_metadata.contains_key(&request.request_id)
+                && std::env::var("STASIS_AOT_EXECUTE_NATIVE_HOOK")
+                    .ok()
+                    .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         }
     }
-    Ok(by_path)
 }
 
-fn validate_layout_transition(
+fn apply_prepared_jit_transaction(
+    request_id: RequestId,
+    candidate: Option<JitProcess>,
+    active: &mut Option<JitProcess>,
+    hook_may_mutate_state: bool,
+    apply: impl FnOnce() -> SwapCommitResult,
+) -> Result<SwapCommitResult, String> {
+    let candidate = candidate.ok_or_else(|| {
+        format!(
+            "JIT commit {} is missing its staged runtime candidate",
+            request_id.0
+        )
+    })?;
+    let incoming_layout = candidate.state_layout();
+    let active_layout = active
+        .as_ref()
+        .map(JitProcess::state_layout)
+        .unwrap_or_else(|| incoming_layout.clone());
+    let mut preview =
+        plan_state_migration(&active_layout, &incoming_layout, Vec::new(), false, None)?;
+    finalize_runtime_preview(&candidate, &mut preview);
+    let result = activate_candidate_transactionally(
+        active.as_ref(),
+        &candidate,
+        &preview,
+        hook_may_mutate_state,
+        apply,
+        |result| result.status == SwapCommitStatus::Success,
+    )?;
+    if result.status == SwapCommitStatus::Success {
+        *active = Some(candidate);
+    }
+    Ok(result)
+}
+
+fn apply_runtime_state_transaction(
     active_layout_hash: Option<LayoutHash>,
     request_layout_hash: LayoutHash,
-    active_state_map: Option<&[StateMapEntry]>,
-    request_state_map: Option<&[StateMapEntry]>,
-) -> Result<(), String> {
-    let Some(active_layout_hash) = active_layout_hash else {
-        return Ok(());
-    };
-    if active_layout_hash == request_layout_hash {
-        return Ok(());
-    }
-    let Some(active_state_map) = active_state_map else {
+    hook_may_mutate_state: bool,
+    apply: impl FnOnce() -> SwapCommitResult,
+) -> Result<SwapCommitResult, String> {
+    let layout_changed = active_layout_hash.is_some_and(|hash| hash != request_layout_hash);
+    if layout_changed {
         return Err(format!(
-            "layout hash changed from {} to {}, but active state-map metadata is missing (restart required)",
-            format_layout_hash_hex(active_layout_hash),
+            "layout-changing commit from {} to {} requires a staged JIT candidate; restart required for this backend",
+            format_layout_hash_hex(active_layout_hash.expect("layout change has active hash")),
             format_layout_hash_hex(request_layout_hash)
         ));
-    };
-    let Some(request_state_map) = request_state_map else {
-        return Err(format!(
-            "layout hash changed from {} to {}, but incoming state-map metadata is missing (restart required)",
-            format_layout_hash_hex(active_layout_hash),
-            format_layout_hash_hex(request_layout_hash)
-        ));
-    };
-
-    let active_by_path = normalize_state_map(active_state_map, "active")?;
-    let request_by_path = normalize_state_map(request_state_map, "incoming")?;
-    for (path, request_entry) in &request_by_path {
-        if let Some(active_entry) = active_by_path.get(path) {
-            if active_entry.type_name != request_entry.type_name {
-                return Err(format!(
-                    "layout hash changed from {} to {} and state-map path '{}' changed type '{}' -> '{}' (restart required)",
-                    format_layout_hash_hex(active_layout_hash),
-                    format_layout_hash_hex(request_layout_hash),
-                    path,
-                    active_entry.type_name,
-                    request_entry.type_name
-                ));
-            }
-        }
     }
-    Ok(())
-}
-
-fn type_name_is_f32(type_name: &str) -> bool {
-    type_name.trim() == "f32"
-}
-
-fn type_name_is_f64(type_name: &str) -> bool {
-    type_name.trim() == "f64"
-}
-
-fn type_name_is_collection_like(type_name: &str) -> bool {
-    let normalized = type_name.trim();
-    normalized.contains('[') || normalized == "ascii" || normalized == "utf8"
-}
-
-fn migrate_state_map_fields(
-    active_state_map: &[StateMapEntry],
-    request_state_map: &[StateMapEntry],
-) -> Result<(), String> {
-    let active_by_path = normalize_state_map(active_state_map, "active")?;
-    let request_by_path = normalize_state_map(request_state_map, "incoming")?;
-
-    for (path, request_entry) in &request_by_path {
-        let Some(active_entry) = active_by_path.get(path) else {
-            continue;
-        };
-        if active_entry.type_name != request_entry.type_name {
-            continue;
-        }
-        if type_name_is_collection_like(&request_entry.type_name) {
-            continue;
-        }
-        if type_name_is_f32(&request_entry.type_name) {
-            let value = stasis_dynload::stasis_jit_global_f32_load(active_entry.path_hash);
-            stasis_dynload::stasis_jit_global_f32_store(request_entry.path_hash, value);
-            continue;
-        }
-        if type_name_is_f64(&request_entry.type_name) {
-            let value = stasis_dynload::stasis_jit_global_f64_load(active_entry.path_hash);
-            stasis_dynload::stasis_jit_global_f64_store(request_entry.path_hash, value);
-            continue;
-        }
-        let value = stasis_dynload::stasis_jit_global_i32_load(active_entry.path_hash);
-        stasis_dynload::stasis_jit_global_i32_store(request_entry.path_hash, value);
+    if !hook_may_mutate_state {
+        return Ok(apply());
     }
-
-    Ok(())
+    let snapshot = stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES)?;
+    let result = apply();
+    if result.status != SwapCommitStatus::Success {
+        stasis_dynload::restore_jit_runtime_state(&snapshot);
+    }
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1699,7 +2905,7 @@ fn apply_commit_request(
                     swap_failure_reasons.push(hook_error.clone());
                     return SwapCommitResult::failed(request.request_id, hook_error);
                 }
-                if let Err(error) = stasis_dynload::invoke_noarg_void(code_ptr as usize) {
+                if let Err(error) = stasis_dynload::invoke_code_swap_hook(code_ptr as usize) {
                     *hook_failures += 1;
                     let hook_error = format!("{hook_symbol} failed: {error}");
                     hook_failure_reasons.push(hook_error.clone());
@@ -1867,7 +3073,7 @@ fn apply_commit_request(
                 }
             };
 
-            if let Err(error) = stasis_dynload::invoke_noarg_void(address) {
+            if let Err(error) = stasis_dynload::invoke_code_swap_hook(address) {
                 *hook_failures += 1;
                 let hook_error = format!("{hook_symbol} failed: {error}");
                 hook_failure_reasons.push(hook_error.clone());
@@ -2085,12 +3291,39 @@ mod tests {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    const STASIS_GRAPHICS_SOURCE: &str =
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/stasis_graphics.c"));
+    const STASIS_GRAPHICS_SOURCE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_graphics.c"
+    ));
+    const STASIS_MOBILE_RUNTIME_SOURCE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_mobile_runtime.c"
+    ));
+    const STASIS_MOBILE_RUNTIME_HEADER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_mobile_runtime.h"
+    ));
+    const STASIS_RUNTIME_CMAKE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/CMakeLists.txt"
+    ));
+    const STASIS_RENDER_CONTRACT_HEADER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_render_contract.h"
+    ));
 
     fn jit_global_table_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    static REJECTING_HOOK_PATH_HASH: std::sync::atomic::AtomicI32 =
+        std::sync::atomic::AtomicI32::new(0);
+
+    extern "C" fn mutating_rejecting_hook() {
+        let path_hash = REJECTING_HOOK_PATH_HASH.load(std::sync::atomic::Ordering::Relaxed);
+        stasis_dynload::stasis_jit_global_i32_store(path_hash, 99);
+        stasis_dynload::stasis_jit_reject_code_swap();
     }
 
     fn process_env_lock() -> &'static std::sync::Mutex<()> {
@@ -2112,6 +3345,277 @@ mod tests {
         }
     }
 
+    fn input_pointer(
+        id: i32,
+        is_down: bool,
+        went_down: bool,
+        went_up: bool,
+        x: f32,
+        y: f32,
+    ) -> PlayInputPointer {
+        PlayInputPointer {
+            id,
+            is_down,
+            went_down,
+            went_up,
+            x,
+            y,
+        }
+    }
+
+    #[test]
+    fn initial_host_request_baseline_precedes_guest_main_and_apply() {
+        use std::cell::{Cell, RefCell};
+
+        let sequence = Cell::new(0);
+        let baseline = Cell::new(-1);
+        let phases = RefCell::new(Vec::new());
+        let result = run_guest_main_with_initial_host_requests(
+            || {
+                phases.borrow_mut().push("init");
+                baseline.set(sequence.get());
+                Ok(())
+            },
+            || {
+                phases.borrow_mut().push("main");
+                sequence.set(1);
+                Ok(0)
+            },
+            || {
+                phases.borrow_mut().push("apply");
+                assert_eq!(baseline.get(), 0);
+                assert_eq!(sequence.get(), 1);
+                Ok(())
+            },
+        )
+        .expect("startup should succeed");
+
+        assert_eq!(result, 0);
+        assert_eq!(&*phases.borrow(), &["init", "main", "apply"]);
+    }
+
+    #[test]
+    fn input_script_validates_order_pointer_bounds_and_transitions() {
+        let out_of_order = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![
+                PlayInputFrame {
+                    frame: 2,
+                    pointers: vec![],
+                },
+                PlayInputFrame {
+                    frame: 1,
+                    pointers: vec![],
+                },
+            ],
+        };
+        assert!(validate_play_input_script(out_of_order)
+            .expect_err("order should fail")
+            .contains("strictly increasing"));
+
+        let invalid_transition = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 1,
+                pointers: vec![input_pointer(0, false, true, false, 1.0, 1.0)],
+            }],
+        };
+        assert!(validate_play_input_script(invalid_transition)
+            .expect_err("transition should fail")
+            .contains("wentDown requires isDown=true"));
+    }
+
+    #[test]
+    fn input_script_parses_documented_camel_case_json() {
+        let source = r#"{
+            "version": 1,
+            "frames": [
+                {"frame": 1, "pointers": [
+                    {"id": 3, "isDown": true, "wentDown": true, "wentUp": false, "x": 90, "y": 60}
+                ]},
+                {"frame": 2, "pointers": [
+                    {"id": 3, "isDown": false, "wentDown": false, "wentUp": true, "x": 90, "y": 60}
+                ]}
+            ]
+        }"#;
+        let document: PlayInputScriptDocument =
+            serde_json::from_str(source).expect("documented JSON should parse");
+        let timeline = validate_play_input_script(document).expect("document should validate");
+        assert_eq!(timeline.frames.len(), 2);
+        assert!(timeline.frames[0].pointers[0].is_down);
+        assert!(timeline.frames[1].pointers[0].went_up);
+
+        let unknown = r#"{"version": 1, "frames": [], "extra": true}"#;
+        assert!(serde_json::from_str::<PlayInputScriptDocument>(unknown).is_err());
+    }
+
+    #[test]
+    fn input_script_rejects_resource_and_pointer_bounds() {
+        assert!(validate_play_input_script_size(PLAY_INPUT_MAX_FILE_BYTES).is_ok());
+        assert!(
+            validate_play_input_script_size(PLAY_INPUT_MAX_FILE_BYTES + 1)
+                .expect_err("oversized script should fail")
+                .contains("too large")
+        );
+
+        let too_many_frames = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![
+                PlayInputFrame {
+                    frame: 1,
+                    pointers: vec![],
+                };
+                PLAY_INPUT_MAX_FRAMES + 1
+            ],
+        };
+        assert!(validate_play_input_script(too_many_frames)
+            .expect_err("frame bound should fail")
+            .contains("too many frames"));
+
+        let too_many_pointers = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 1,
+                pointers: (0..=PLAY_INPUT_MAX_POINTERS)
+                    .map(|id| input_pointer(id as i32, false, false, false, 1.0, 1.0))
+                    .collect(),
+            }],
+        };
+        assert!(validate_play_input_script(too_many_pointers)
+            .expect_err("pointer bound should fail")
+            .contains("too many pointers"));
+    }
+
+    #[test]
+    fn input_script_rejects_duplicate_ids_bad_coordinates_and_short_tick_limits() {
+        let unsupported = PlayInputScriptDocument {
+            version: 2,
+            frames: vec![],
+        };
+        assert!(validate_play_input_script(unsupported)
+            .expect_err("version should fail")
+            .contains("unsupported input-script version"));
+
+        for (name, pointers, expected) in [
+            (
+                "duplicate",
+                vec![
+                    input_pointer(2, false, false, false, 1.0, 1.0),
+                    input_pointer(2, false, false, false, 2.0, 2.0),
+                ],
+                "duplicate pointer id",
+            ),
+            (
+                "negative id",
+                vec![input_pointer(-1, false, false, false, 1.0, 1.0)],
+                "id must be non-negative",
+            ),
+            (
+                "negative",
+                vec![input_pointer(2, false, false, false, -1.0, 1.0)],
+                "finite and non-negative",
+            ),
+            (
+                "nonfinite",
+                vec![input_pointer(2, false, false, false, f32::NAN, 1.0)],
+                "finite and non-negative",
+            ),
+        ] {
+            let document = PlayInputScriptDocument {
+                version: 1,
+                frames: vec![PlayInputFrame { frame: 3, pointers }],
+            };
+            let error = validate_play_input_script(document).expect_err(name);
+            assert!(error.contains(expected), "{name}: {error}");
+        }
+
+        let timeline = validate_play_input_script(PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 3,
+                pointers: vec![],
+            }],
+        })
+        .expect("timeline should validate");
+        assert!(validate_play_input_script_ticks(Some(2), &timeline)
+            .expect_err("short max_ticks should fail")
+            .contains("max_ticks"));
+    }
+
+    #[test]
+    fn input_script_rejects_pointer_outside_current_viewport() {
+        let document = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 1,
+                pointers: vec![input_pointer(0, false, false, false, 181.0, 60.0)],
+            }],
+        };
+        let mut timeline = validate_play_input_script(document).expect("valid static bounds");
+        let mut host_i32 = vec![0; 768];
+        let mut host_f32 = vec![0.0; 64];
+        host_i32[HOST_I_VIEWPORT_W_PX] = 180;
+        host_i32[HOST_I_VIEWPORT_H_PX] = 120;
+        assert!(
+            apply_play_input_frame(&mut timeline, 1, &mut host_i32, &mut host_f32)
+                .expect_err("viewport bound should fail")
+                .contains("outside the 180x120 viewport")
+        );
+    }
+
+    #[test]
+    fn input_script_uses_window_dimensions_before_first_viewport_snapshot() {
+        let document = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 1,
+                pointers: vec![input_pointer(0, true, true, false, 180.0, 360.0)],
+            }],
+        };
+        let mut timeline = validate_play_input_script(document).expect("valid script");
+        let mut host_i32 = vec![0; 768];
+        let mut host_f32 = vec![0.0; 64];
+        host_i32[HOST_I_WINDOW_W_PX] = 360;
+        host_i32[HOST_I_WINDOW_H_PX] = 720;
+
+        apply_play_input_frame(&mut timeline, 1, &mut host_i32, &mut host_f32)
+            .expect("window fallback should accept first-frame input");
+        assert_eq!(host_f32[4], 0.5);
+        assert_eq!(host_f32[5], 0.5);
+    }
+
+    #[test]
+    fn input_script_overrides_host_pointer_and_clears_edge_flags() {
+        let document = PlayInputScriptDocument {
+            version: 1,
+            frames: vec![PlayInputFrame {
+                frame: 1,
+                pointers: vec![input_pointer(7, true, true, false, 90.0, 60.0)],
+            }],
+        };
+        let mut timeline = validate_play_input_script(document).expect("valid script");
+        let mut host_i32 = vec![99; 768];
+        let mut host_f32 = vec![99.0; 64];
+        host_i32[HOST_I_VIEWPORT_W_PX] = 180;
+        host_i32[HOST_I_VIEWPORT_H_PX] = 120;
+
+        apply_play_input_frame(&mut timeline, 1, &mut host_i32, &mut host_f32).expect("frame one");
+        assert_eq!(host_i32[HOST_I_POINTER_COUNT], 1);
+        assert_eq!(host_i32[HOST_I_POINTER_BASE], 7);
+        assert_eq!(host_i32[HOST_I_POINTER_BASE + 1], 1);
+        assert_eq!(host_i32[HOST_I_POINTER_BASE + 2], 1);
+        assert_eq!(host_f32[4], 0.5);
+        assert_eq!(host_f32[5], 0.5);
+
+        apply_play_input_frame(&mut timeline, 2, &mut host_i32, &mut host_f32)
+            .expect("unscripted frame");
+        assert_eq!(host_i32[HOST_I_POINTER_BASE + 1], 1);
+        assert_eq!(host_i32[HOST_I_POINTER_BASE + 2], 0);
+        assert_eq!(host_i32[HOST_I_POINTER_BASE + 3], 0);
+        assert_eq!(host_f32[2], 0.0);
+        assert_eq!(host_f32[3], 0.0);
+    }
+
     #[test]
     fn sprite_runtime_clamps_initial_sprite_growth_to_configured_limit() {
         assert!(
@@ -2120,6 +3624,106 @@ mod tests {
                     "clamp_i32(SPRITE_TABLE_INITIAL_CAPACITY, 1, limit)"
                 ),
             "runtime sprite allocation should clamp the initial growth step to STASIS_GFX_MAX_SPRITES"
+        );
+    }
+
+    #[test]
+    fn mobile_runtime_uses_fixed_entries_and_sdl_only_static_target() {
+        for required in [
+            "typedef void (*StasisMobileBindEntry)(void)",
+            "typedef int32_t (*StasisMobileI32Entry)(void)",
+            "StasisMobileBindEntry bind_runtime_entry",
+            "StasisMobileI32Entry main_entry",
+            "StasisMobileI32Entry tick_entry",
+            "StasisMobileI32Entry render_entry",
+            "stasis_mobile_runtime_last_entry_result(void)",
+            "STASIS_MOBILE_RUNTIME_ABI_VERSION 1",
+        ] {
+            assert!(
+                STASIS_MOBILE_RUNTIME_HEADER.contains(required),
+                "mobile runtime ABI should contain {required}"
+            );
+        }
+        for required in [
+            "runtime_state.entries.bind_runtime_entry()",
+            "runtime_state.entries.main_entry()",
+            "runtime_state.entries.tick_entry()",
+            "runtime_state.entries.render_entry()",
+            "runtime_state.last_entry_result != 0",
+            "stasis_should_quit()",
+            "stasis_mobile_poll_events()",
+            "stasis_mobile_set_paused(runtime_state.paused)",
+            "void stasis_mobile_runtime_shutdown(void)",
+        ] {
+            assert!(
+                STASIS_MOBILE_RUNTIME_SOURCE.contains(required),
+                "mobile lifecycle should contain {required}"
+            );
+        }
+        assert!(
+            STASIS_RUNTIME_CMAKE
+                .contains("configure_stasis_target(stasis_mobile_runtime ON TRUE OFF)"),
+            "mobile target should be static, SDL-only, and exclude the SDL desktop main shim"
+        );
+        assert!(
+            !STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_dynload")
+                && !STASIS_MOBILE_RUNTIME_SOURCE.contains("on_code_swap")
+                && !STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_runner"),
+            "mobile runtime must not acquire desktop loader or hot-swap dependencies"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("SDL_DestroyRenderer(g_renderer);")
+                && STASIS_GRAPHICS_SOURCE.contains("g_renderer = NULL;")
+                && STASIS_GRAPHICS_SOURCE.contains("g_window = NULL;"),
+            "mobile lifecycle cleanup should support safe shutdown and initialization retry"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("STASIS_EXPORT int stasis_mobile_poll_events(void)")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0)"),
+            "mobile pause should continue polling events and pause the audio device"
+        );
+    }
+
+    #[test]
+    fn shipping_renderers_share_one_versioned_sdl_command_process() {
+        let runtime_cmake = STASIS_RUNTIME_CMAKE.replace("\r\n", "\n");
+        for required in [
+            "STASIS_RENDER_V1_MAGIC 0x47584631",
+            "STASIS_RENDER_V1_VERSION 1",
+            "STASIS_RENDER_V1_TRACE_VERSION 1",
+            "STASIS_RENDER_I32_COUNT",
+            "STASIS_RENDER_F32_COUNT",
+            "stasis_render_v1_is_valid",
+            "stasis_render_v1_trace",
+        ] {
+            assert!(
+                STASIS_RENDER_CONTRACT_HEADER.contains(required),
+                "shared renderer contract should contain {required}"
+            );
+        }
+        assert!(
+            runtime_cmake.contains(
+                "Build the canonical SDL_Renderer runtime (disable only for legacy GL conformance)"
+            ) && runtime_cmake.contains("    ON\n)"),
+            "shipping runtime should default to the canonical SDL backend"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("stasis_render_v1_is_valid(cmd_i32)")
+                && STASIS_GRAPHICS_SOURCE.contains("STASIS_RENDER_FLAG_PRESENT")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, \"linear\")")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_RenderSetClipRect(g_renderer, NULL)")
+                && STASIS_GRAPHICS_SOURCE.contains("if (a < 0) a = 0;")
+                && STASIS_GRAPHICS_SOURCE.contains("if (a > 255) a = 255;")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_BLENDMODE_BLEND")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_RenderCopyEx"),
+            "desktop and mobile should enter the shared versioned command interpreter"
+        );
+        assert!(
+            STASIS_MOBILE_RUNTIME_SOURCE.contains("STASIS_RENDER_I32_COUNT")
+                && STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_gfx_submit_u8("),
+            "mobile AOT should bind and submit the same command representation"
         );
     }
 
@@ -2147,7 +3751,7 @@ mod tests {
             "STASIS_GFX_MAX_SPRITE_DIMENSION",
             "STASIS_GFX_MAX_SPRITE_PIXELS",
             "STASIS_GFX_MAX_SPRITE_FILE_BYTES",
-            "sprite_source_within_limits(path, max_w, max_h)",
+            "sprite_source_within_limits(path, raster_w, raster_h)",
             "sprite_dimensions_exceeded",
             "sprite_pixels_exceeded",
             "sprite_file_too_large",
@@ -2157,6 +3761,19 @@ mod tests {
                 "runtime sprite decode should contain {required}"
             );
         }
+        let scaled_extent = STASIS_GRAPHICS_SOURCE
+            .find("const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);")
+            .expect("scaled sprite extent");
+        let bounds_check = STASIS_GRAPHICS_SOURCE
+            .find("sprite_source_within_limits(path, raster_w, raster_h)")
+            .expect("scaled sprite bounds check");
+        let image_bake = STASIS_GRAPHICS_SOURCE
+            .find("bake_image_to_rgba_sized(path, raster_w, raster_h, &pixels, &w, &h)")
+            .expect("scaled sprite image bake");
+        assert!(
+            scaled_extent < bounds_check && bounds_check < image_bake,
+            "runtime must scale and validate sprite bounds before image allocation"
+        );
     }
 
     #[test]
@@ -2224,30 +3841,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_layout_transition_rejects_type_change_for_existing_path() {
-        let active_map = vec![StateMapEntry {
-            path: "State.score".to_string(),
-            path_hash: 11,
-            type_name: "i32".to_string(),
-        }];
-        let incoming_map = vec![StateMapEntry {
-            path: "State.score".to_string(),
-            path_hash: 11,
-            type_name: "f32".to_string(),
-        }];
-        let result = validate_layout_transition(
-            Some(LayoutHash([1; 32])),
-            LayoutHash([2; 32]),
-            Some(active_map.as_slice()),
-            Some(incoming_map.as_slice()),
-        );
-        assert!(result.is_err());
-        let message = result.expect_err("transition should fail");
-        assert!(message.contains("changed type"));
-        assert!(message.contains("restart required"));
-    }
-
-    #[test]
     fn apply_play_data_binding_value_populates_registered_scalars_and_strings() {
         let _global_lock = jit_global_table_lock()
             .lock()
@@ -2280,24 +3873,29 @@ mod tests {
         let metadata = PlayStructMetadata {
             version: 1,
             global_name: "state".to_string(),
+            csv_table: None,
             fields: vec![
                 PlayStructFieldMetadata {
                     json_path: "config.json_loaded".to_string(),
+                    csv_column: None,
                     type_name: "bool".to_string(),
                     array_count: 1,
                 },
                 PlayStructFieldMetadata {
                     json_path: "config.screen_width".to_string(),
+                    csv_column: None,
                     type_name: "i32".to_string(),
                     array_count: 1,
                 },
                 PlayStructFieldMetadata {
                     json_path: "config.background_red".to_string(),
+                    csv_column: None,
                     type_name: "f32".to_string(),
                     array_count: 1,
                 },
                 PlayStructFieldMetadata {
                     json_path: "config.font_path".to_string(),
+                    csv_column: None,
                     type_name: "string".to_string(),
                     array_count: 64,
                 },
@@ -2341,6 +3939,7 @@ mod tests {
         let metadata = PlayStructMetadata {
             version: 2,
             global_name: "state".to_string(),
+            csv_table: None,
             fields: Vec::new(),
         };
         let root = serde_json::json!({});
@@ -2348,6 +3947,390 @@ mod tests {
         let error =
             apply_play_data_binding_value(&root, &metadata).expect_err("binding should fail");
         assert!(error.contains("unsupported struct-meta version"));
+    }
+
+    #[test]
+    fn parse_flat_csv_binding_supports_scalar_and_columnar_data() {
+        let scalar = parse_flat_csv_binding(
+            "enabled,label\r\ntrue,\"Fast, tough\"\r\n",
+            &[
+                CsvBindingField {
+                    path: "enabled".to_string(),
+                    csv_column: None,
+                    type_name: "bool".to_string(),
+                    array_count: 1,
+                },
+                CsvBindingField {
+                    path: "label".to_string(),
+                    csv_column: None,
+                    type_name: "string".to_string(),
+                    array_count: 32,
+                },
+            ],
+        )
+        .expect("scalar CSV should parse");
+        assert_eq!(
+            scalar,
+            serde_json::json!({"enabled": true, "label": "Fast, tough"})
+        );
+
+        let arrays = parse_flat_csv_binding(
+            "hp,speed\n70,1.5\n110,2.25\n85,3\n",
+            &[
+                CsvBindingField {
+                    path: "hp".to_string(),
+                    csv_column: None,
+                    type_name: "i32".to_string(),
+                    array_count: 3,
+                },
+                CsvBindingField {
+                    path: "speed".to_string(),
+                    csv_column: None,
+                    type_name: "f32".to_string(),
+                    array_count: 3,
+                },
+            ],
+        )
+        .expect("columnar CSV should parse");
+        assert_eq!(
+            arrays,
+            serde_json::json!({"hp": [70, 110, 85], "speed": [1.5, 2.25, 3.0]})
+        );
+    }
+
+    #[test]
+    fn parse_flat_csv_binding_rejects_nested_metadata_paths() {
+        let error = parse_flat_csv_binding(
+            "screen_width\n800\n",
+            &[CsvBindingField {
+                path: "config.screen_width".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        )
+        .expect_err("nested CSV metadata should fail");
+        assert!(error.contains("flat column"));
+    }
+
+    #[test]
+    fn parse_flat_csv_binding_rejects_columns_missing_from_target_metadata() {
+        let error = parse_flat_csv_binding(
+            "hp,typo\n70,99\n",
+            &[CsvBindingField {
+                path: "hp".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        )
+        .expect_err("extra CSV columns should fail");
+        assert!(error.contains("column typo does not exist in target metadata"));
+    }
+
+    #[test]
+    fn parse_csv_table_binding_tracks_count_pads_capacity_and_validates_keys() {
+        let fields = vec![
+            CsvBindingField {
+                path: "rows.id".to_string(),
+                csv_column: Some("id".to_string()),
+                type_name: "i32".to_string(),
+                array_count: 4,
+            },
+            CsvBindingField {
+                path: "rows.hp".to_string(),
+                csv_column: Some("health".to_string()),
+                type_name: "i32".to_string(),
+                array_count: 4,
+            },
+        ];
+        let table = CsvTableMetadata {
+            rows_path: "rows".to_string(),
+            row_count_path: "row_count".to_string(),
+            capacity: 4,
+            key_columns: vec!["id".to_string()],
+        };
+        let parsed = parse_csv_table_binding("id,health\n10,70\n20,110\n", &fields, &table)
+            .expect("table should parse");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "rows": {"id": [10, 20, 0, 0], "hp": [70, 110, 0, 0]},
+                "row_count": 2
+            })
+        );
+
+        let duplicate = parse_csv_table_binding("id,health\n10,70\n10,110\n", &fields, &table)
+            .expect_err("duplicate stable keys should fail");
+        assert!(duplicate.contains("duplicate CSV table key"));
+    }
+
+    #[test]
+    fn load_play_data_bindings_applies_struct_array_csv_table() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let collection_hash = hash_global_path("level.rows");
+        let mut ids = [99i32; 4];
+        let mut hp = [99i32; 4];
+        let mut row_count = 0i32;
+        stasis_dynload::register_global_i32_array(
+            collection_hash,
+            hash_global_path("id"),
+            ids.as_mut_ptr(),
+            ids.len(),
+        );
+        stasis_dynload::register_global_i32_array(
+            collection_hash,
+            hash_global_path("hp"),
+            hp.as_mut_ptr(),
+            hp.len(),
+        );
+        stasis_dynload::register_global_i32_ptr(
+            hash_global_path("level.row_count"),
+            &mut row_count,
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_table_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let data_path = temp_root.join("waves.csv");
+        let meta_path = temp_root.join("waves.struct-meta.json");
+        fs::write(&data_path, "id,hp\n10,70\n20,110\n").expect("write CSV");
+        fs::write(
+            &meta_path,
+            r#"{"version":1,"globalName":"level","csvTable":{"rowsPath":"rows","rowCountPath":"row_count","capacity":4,"keyColumns":["id"]},"fields":[{"jsonPath":"rows.id","csvColumn":"id","type":"i32","arrayCount":4},{"jsonPath":"rows.hp","csvColumn":"hp","type":"i32","arrayCount":4}]}"#,
+        )
+        .expect("write metadata");
+
+        load_and_apply_play_data_bindings(&[(data_path, meta_path)], None)
+            .expect("CSV table binding should apply");
+        assert_eq!(ids, [10, 20, 0, 0]);
+        assert_eq!(hp, [70, 110, 0, 0]);
+        assert_eq!(row_count, 2);
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn validate_play_binding_source_requires_an_exact_property_set() {
+        let metadata = PlayStructMetadata {
+            version: 1,
+            global_name: "state".to_string(),
+            csv_table: None,
+            fields: vec![PlayStructFieldMetadata {
+                json_path: "config.width".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        };
+        validate_play_binding_source(&serde_json::json!({"config": {"width": 800}}), &metadata)
+            .expect("exact JSON properties should pass");
+
+        let extra = validate_play_binding_source(
+            &serde_json::json!({"config": {"width": 800, "widht": 600}}),
+            &metadata,
+        )
+        .expect_err("extra JSON properties should fail");
+        assert!(extra.contains("config.widht does not exist in target metadata"));
+
+        let missing = validate_play_binding_source(&serde_json::json!({"config": {}}), &metadata)
+            .expect_err("missing JSON properties should fail");
+        assert!(missing.contains("missing target property config.width"));
+    }
+
+    #[test]
+    fn validate_play_binding_targets_rejects_missing_compiled_global() {
+        let jit = JitProcess::new();
+        let metadata = PlayStructMetadata {
+            version: 1,
+            global_name: "state".to_string(),
+            csv_table: None,
+            fields: vec![PlayStructFieldMetadata {
+                json_path: "typo".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        };
+        let error = validate_play_binding_targets(&metadata, &jit)
+            .expect_err("missing runtime targets should fail");
+        assert!(error.contains("state.typo does not exist in compiled globals"));
+    }
+
+    #[test]
+    fn validate_play_binding_targets_rejects_wrong_type_and_capacity() {
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            "binding-shape.stasis",
+            "global State { speed: f32; values: i32[2]; }\nfunction main(): i32 { return 0; }\n",
+        );
+        jit.compile().expect("binding shape fixture should compile");
+
+        let wrong_type = PlayStructMetadata {
+            version: 1,
+            global_name: "State".to_string(),
+            csv_table: None,
+            fields: vec![PlayStructFieldMetadata {
+                json_path: "speed".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 1,
+            }],
+        };
+        let error = validate_play_binding_targets(&wrong_type, &jit)
+            .expect_err("wrong scalar type should fail");
+        assert!(error.contains("State.speed has type f32; metadata requires i32"));
+
+        let wrong_capacity = PlayStructMetadata {
+            version: 1,
+            global_name: "State".to_string(),
+            csv_table: None,
+            fields: vec![PlayStructFieldMetadata {
+                json_path: "values".to_string(),
+                csv_column: None,
+                type_name: "i32".to_string(),
+                array_count: 3,
+            }],
+        };
+        let error = validate_play_binding_targets(&wrong_capacity, &jit)
+            .expect_err("wrong array capacity should fail");
+        assert!(error.contains("State.values has capacity 2; metadata requires 3"));
+    }
+
+    #[test]
+    fn load_play_data_bindings_applies_columnar_csv_arrays() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let mut hp = [0i32; 3];
+        stasis_dynload::register_global_i32_array(
+            hash_global_path("state.hp"),
+            0,
+            hp.as_mut_ptr(),
+            hp.len(),
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_csv_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let data_path = temp_root.join("balance.csv");
+        let meta_path = temp_root.join("balance.struct-meta.json");
+        fs::write(&data_path, "hp\n70\n110\n85\n").expect("write CSV");
+        fs::write(
+            &meta_path,
+            r#"{"version":1,"globalName":"state","fields":[{"jsonPath":"hp","type":"i32","arrayCount":3}]}"#,
+        )
+        .expect("write metadata");
+
+        load_and_apply_play_data_bindings(&[(data_path, meta_path)], None)
+            .expect("CSV binding should apply");
+        assert_eq!(hp, [70, 110, 85]);
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn load_play_data_bindings_rejects_set_before_mutating_runtime() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let mut value = 5i32;
+        stasis_dynload::register_global_i32_ptr(hash_global_path("state.value"), &mut value);
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_atomic_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let first_json = temp_root.join("first.json");
+        let first_meta = temp_root.join("first.struct-meta.json");
+        let second_json = temp_root.join("second.json");
+        let second_meta = temp_root.join("second.struct-meta.json");
+        fs::write(&first_json, r#"{"value":9}"#).expect("write first json");
+        fs::write(
+            &first_meta,
+            r#"{"version":1,"globalName":"state","fields":[{"jsonPath":"value","type":"i32","arrayCount":1}]}"#,
+        )
+        .expect("write first metadata");
+        fs::write(&second_json, "{invalid").expect("write invalid json");
+        fs::write(
+            &second_meta,
+            r#"{"version":1,"globalName":"other","fields":[]}"#,
+        )
+        .expect("write second metadata");
+
+        let error = load_and_apply_play_data_bindings(
+            &[(first_json, first_meta), (second_json, second_meta)],
+            None,
+        )
+        .expect_err("invalid set should be rejected");
+        assert!(error.contains("failed to parse data JSON"));
+        assert_eq!(
+            value, 5,
+            "the earlier valid file must not be partially applied"
+        );
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn load_play_data_bindings_rejects_duplicate_targets_before_mutating_runtime() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let mut value = 5i32;
+        stasis_dynload::register_global_i32_ptr(hash_global_path("state.value"), &mut value);
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_duplicate_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let first_json = temp_root.join("first.json");
+        let first_meta = temp_root.join("first.struct-meta.json");
+        let second_json = temp_root.join("second.json");
+        let second_meta = temp_root.join("second.struct-meta.json");
+        fs::write(&first_json, r#"{"value":9}"#).expect("write first json");
+        fs::write(&second_json, r#"{"value":10}"#).expect("write second json");
+        let metadata = r#"{"version":1,"globalName":"state","fields":[{"jsonPath":"value","type":"i32","arrayCount":1}]}"#;
+        fs::write(&first_meta, metadata).expect("write first metadata");
+        fs::write(&second_meta, metadata).expect("write second metadata");
+
+        let error = load_and_apply_play_data_bindings(
+            &[(first_json, first_meta), (second_json, second_meta)],
+            None,
+        )
+        .expect_err("duplicate targets should be rejected");
+        assert!(error.contains("binding target property state.value is mapped by both"));
+        assert_eq!(value, 5, "duplicate files must not partially apply");
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]
@@ -2366,11 +4349,62 @@ mod tests {
         fs::write(data_dir.join("config.struct-meta.json"), "{}\n").expect("write struct meta");
 
         let resolved = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
-            .expect("auto discovery should succeed")
-            .expect("expected auto binding paths");
+            .expect("auto discovery should succeed");
 
-        assert_eq!(resolved.0, data_dir.join("config.json"));
-        assert_eq!(resolved.1, data_dir.join("config.struct-meta.json"));
+        assert_eq!(
+            resolved,
+            vec![(
+                data_dir.join("config.json"),
+                data_dir.join("config.struct-meta.json")
+            )]
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn resolve_play_data_binding_paths_discovers_all_project_data_in_name_order() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_project_{stamp}"));
+        let data_dir = temp_root.join("data");
+        let watch_file = temp_root.join("src").join("main.stasis");
+        fs::create_dir_all(watch_file.parent().expect("source parent")).expect("create src");
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        fs::write(&watch_file, "function main(): i32 { return 0; }\n").expect("write entry");
+        for stem in ["pieces", "enemies"] {
+            fs::write(data_dir.join(format!("{stem}.json")), "{}\n").expect("write json");
+            fs::write(data_dir.join(format!("{stem}.struct-meta.json")), "{}\n")
+                .expect("write metadata");
+        }
+        let nested_data_dir = data_dir.join("tables");
+        fs::create_dir_all(&nested_data_dir).expect("create nested data dir");
+        fs::write(nested_data_dir.join("tuning.csv"), "hp\n70\n").expect("write CSV");
+        fs::write(nested_data_dir.join("tuning.struct-meta.json"), "{}\n")
+            .expect("write CSV metadata");
+
+        let resolved = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
+            .expect("project data discovery should succeed");
+
+        assert_eq!(
+            resolved,
+            vec![
+                (
+                    data_dir.join("enemies.json"),
+                    data_dir.join("enemies.struct-meta.json")
+                ),
+                (
+                    data_dir.join("pieces.json"),
+                    data_dir.join("pieces.struct-meta.json")
+                ),
+                (
+                    nested_data_dir.join("tuning.csv"),
+                    nested_data_dir.join("tuning.struct-meta.json")
+                )
+            ]
+        );
 
         let _ = fs::remove_dir_all(&temp_root);
     }
@@ -2391,69 +4425,423 @@ mod tests {
 
         let error = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
             .expect_err("partial sidecars should fail");
-        assert!(error.contains("play auto data binding requires both sidecars"));
+        assert!(error.contains("requires matching metadata"));
 
         let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]
-    fn validate_layout_transition_allows_added_and_removed_paths_when_types_match() {
-        let active_map = vec![
-            StateMapEntry {
-                path: "State.score".to_string(),
-                path_hash: 11,
-                type_name: "i32".to_string(),
-            },
-            StateMapEntry {
-                path: "State.removed".to_string(),
-                path_hash: 12,
-                type_name: "i32".to_string(),
-            },
-        ];
-        let incoming_map = vec![
-            StateMapEntry {
-                path: "State.score".to_string(),
-                path_hash: 21,
-                type_name: "i32".to_string(),
-            },
-            StateMapEntry {
-                path: "State.added".to_string(),
-                path_hash: 22,
-                type_name: "i32".to_string(),
-            },
-        ];
-        let result = validate_layout_transition(
-            Some(LayoutHash([3; 32])),
-            LayoutHash([4; 32]),
-            Some(active_map.as_slice()),
-            Some(incoming_map.as_slice()),
-        );
-        assert!(result.is_ok(), "expected migration-compatible transition");
+    fn resolve_play_data_binding_paths_rejects_json_csv_stem_collision() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_play_bind_collision_{stamp}"));
+        let data_dir = temp_root.join("data");
+        let watch_file = temp_root.join("main.stasis");
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        fs::write(&watch_file, "function main(): i32 { return 0; }\n").expect("write entry");
+        fs::write(data_dir.join("balance.json"), "{}\n").expect("write JSON");
+        fs::write(data_dir.join("balance.csv"), "hp\n70\n").expect("write CSV");
+        fs::write(data_dir.join("balance.struct-meta.json"), "{}\n").expect("write metadata");
+
+        let error = resolve_play_data_binding_paths(&watch_file, &temp_root, None, None)
+            .expect_err("shared JSON/CSV metadata should fail");
+        assert!(error.contains("cannot share metadata"));
+
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]
-    fn migrate_state_map_fields_copies_i32_for_matching_paths() {
+    fn compiler_thread_stages_jit_candidate_without_activating_runtime() {
         let _global_lock = jit_global_table_lock()
             .lock()
             .expect("jit global lock should be acquired");
         stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::stasis_jit_global_i32_store(11, 777);
-        stasis_dynload::stasis_jit_global_i32_store(22, 0);
 
-        let active_map = vec![StateMapEntry {
-            path: "State.score".to_string(),
-            path_hash: 11,
-            type_name: "i32".to_string(),
-        }];
-        let incoming_map = vec![StateMapEntry {
-            path: "State.score".to_string(),
-            path_hash: 22,
-            type_name: "i32".to_string(),
-        }];
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_staged_candidate_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("main.stasis");
+        fs::write(
+            &source,
+            "global values: i32[4];\nfunction main(): i32 { return values.max_length; }\n",
+        )
+        .expect("write source");
 
-        migrate_state_map_fields(&active_map, &incoming_map).expect("migration should succeed");
-        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(22), 777);
+        let max_length_hash = hash_global_path("values.max_length");
+        stasis_dynload::stasis_jit_global_i32_store(max_length_hash, 99);
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+        let mut backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(prepared_tx);
+        let result = backend.compile(CompileRequest::new(
+            RequestId(89),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+
+        assert_eq!(result.status, CompileStatus::Success);
+        assert_eq!(
+            stasis_dynload::stasis_jit_global_i32_load(max_length_hash),
+            99,
+            "background compilation must not seed the active runtime"
+        );
+        let prepared = prepared_rx
+            .try_recv()
+            .expect("successful compile should stage a candidate");
+        assert_eq!(prepared.request_id, RequestId(89));
+        prepared
+            .candidate
+            .activate_staged_runtime()
+            .expect("safe-point activation should succeed");
+        assert_eq!(
+            stasis_dynload::stasis_jit_global_i32_load(max_length_hash),
+            4
+        );
+
         stasis_dynload::clear_jit_i32_global_table();
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn runner_collection_growth_uses_shared_migration_transaction() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "runner_collection.stasis",
+            "global values: i32[2]; function main(): i32 { return values[0]; }",
+        );
+        active.compile().expect("active compile");
+        active
+            .write_global_collection_scalar(
+                "values",
+                "",
+                0,
+                stasis_compiler::backend::jit::JitScalarValue::I32(11),
+            )
+            .expect("seed first value");
+        active
+            .write_global_collection_scalar(
+                "values",
+                "",
+                1,
+                stasis_compiler::backend::jit::JitScalarValue::I32(22),
+            )
+            .expect("seed second value");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "runner_collection.stasis",
+            "global values: i32[4]; function main(): i32 { return values[0]; }",
+        );
+        candidate.compile_staged().expect("candidate compile");
+        let mut active_candidate = Some(active);
+        let result = apply_prepared_jit_transaction(
+            RequestId(90),
+            Some(candidate),
+            &mut active_candidate,
+            false,
+            || {
+                SwapCommitResult::success(
+                    RequestId(90),
+                    Vec::new(),
+                    stasis_runner::swap::contracts::CodeGeneration(1),
+                )
+            },
+        )
+        .expect("shared transaction should apply collection migration");
+
+        assert_eq!(result.status, SwapCommitStatus::Success);
+        let active = active_candidate.expect("candidate should become active");
+        assert_eq!(
+            active.read_global_collection_scalar("values", "", 0),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(11))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("values", "", 1),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(22))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("values", "", 2),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(0))
+        );
+
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+    }
+
+    #[test]
+    fn runner_rejects_missing_jit_candidate_without_mutating_state() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_jit_i32_global_table();
+        let score_hash = hash_global_path("score");
+        stasis_dynload::stasis_jit_global_i32_store(score_hash, 7);
+        let mut active = None;
+        let mut applied = false;
+
+        let error = apply_prepared_jit_transaction(RequestId(91), None, &mut active, false, || {
+            applied = true;
+            SwapCommitResult::success(
+                RequestId(91),
+                Vec::new(),
+                stasis_runner::swap::contracts::CodeGeneration(1),
+            )
+        })
+        .expect_err("missing candidate must reject");
+
+        assert!(error.contains("missing its staged runtime candidate"));
+        assert!(!applied, "commit callback must not run");
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(score_hash), 7);
+        stasis_dynload::clear_jit_i32_global_table();
+    }
+
+    #[test]
+    fn layout_change_without_jit_candidate_requires_restart() {
+        let mut applied = false;
+        let error = apply_runtime_state_transaction(
+            Some(LayoutHash([1; 32])),
+            LayoutHash([2; 32]),
+            false,
+            || {
+                applied = true;
+                SwapCommitResult::success(
+                    RequestId(92),
+                    Vec::new(),
+                    stasis_runner::swap::contracts::CodeGeneration(1),
+                )
+            },
+        )
+        .expect_err("layout-changing fallback backend must reject");
+
+        assert!(error.contains("requires a staged JIT candidate"));
+        assert!(!applied, "commit callback must not run");
+    }
+
+    #[test]
+    fn watched_hook_rejection_restores_mutated_runtime_state() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "watch_rollback.stasis",
+            "function main(): i32 { return 0; }",
+        );
+        active.compile().expect("active compile");
+        let mut candidate = active.staged_candidate();
+        candidate.compile_staged().expect("candidate compile");
+        stasis_dynload::clear_jit_i32_global_table();
+        let path_hash = hash_global_path("WatchRollback.score");
+        REJECTING_HOOK_PATH_HASH.store(path_hash, std::sync::atomic::Ordering::Relaxed);
+        stasis_dynload::stasis_jit_global_i32_store(path_hash, 7);
+
+        let preview = plan_state_migration(
+            &active.state_layout(),
+            &candidate.state_layout(),
+            Vec::new(),
+            false,
+            None,
+        )
+        .expect("plan");
+        let error = activate_candidate_transactionally(
+            Some(&active),
+            &candidate,
+            &preview,
+            true,
+            || stasis_dynload::invoke_code_swap_hook(mutating_rejecting_hook as usize),
+            Result::is_ok,
+        )
+        .expect("runtime transaction should execute")
+        .expect_err("hook should reject");
+
+        assert!(error.contains("rejection"));
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(path_hash), 7);
+        stasis_dynload::clear_jit_i32_global_table();
+    }
+
+    #[test]
+    fn watched_code_only_candidate_bypasses_state_snapshot_limit() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        let mut active = JitProcess::new();
+        active.upsert_file("watch_large.stasis", "function main(): i32 { return 0; }");
+        active.compile().expect("active compile");
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file("watch_large.stasis", "function main(): i32 { return 1; }");
+        candidate.compile_staged().expect("candidate compile");
+        let oversized_len = MAX_STATE_SNAPSHOT_BYTES / std::mem::size_of::<i32>() + 1;
+        stasis_dynload::ensure_jit_i32_array_capacity(9002, 0, oversized_len)
+            .expect("oversized test storage should allocate");
+        assert!(
+            stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES).is_err()
+        );
+
+        let preview = plan_state_migration(
+            &active.state_layout(),
+            &candidate.state_layout(),
+            Vec::new(),
+            false,
+            None,
+        )
+        .expect("plan");
+        activate_candidate_transactionally(
+            Some(&active),
+            &candidate,
+            &preview,
+            false,
+            || Ok::<(), String>(()),
+            Result::is_ok,
+        )
+        .expect("hook-free candidate activation should not snapshot state")
+        .expect("commit should succeed");
+
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_array_global_table();
+    }
+
+    #[test]
+    fn runner_commit_hook_rejection_restores_migrated_and_hook_state() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_jit_i32_global_table();
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "runner_rollback.stasis",
+            "global score: i32; function main(): i32 { return score; }",
+        );
+        active.compile().expect("active compile");
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "runner_rollback.stasis",
+            "global score: i32; global added: i32; function main(): i32 { return score + added; }",
+        );
+        candidate.compile_staged().expect("candidate compile");
+        active
+            .write_global_scalar(
+                "score",
+                stasis_compiler::backend::jit::JitScalarValue::I32(7),
+            )
+            .expect("seed active score");
+        let added_hash = hash_global_path("added");
+        stasis_dynload::stasis_jit_global_i32_store(added_hash, 3);
+        REJECTING_HOOK_PATH_HASH.store(added_hash, std::sync::atomic::Ordering::Relaxed);
+        let request_id = RequestId(90);
+        let hook_fn_id = FnId(2);
+        let mut request = stasis_runner::swap::contracts::SwapCommitRequest::new(
+            request_id,
+            LayoutHash([2; 32]),
+            FunctionPatchSet {
+                functions: vec![FunctionPatch { fn_id: FnId(1) }],
+            },
+            Some("on_code_swap".to_string()),
+        );
+        request.hook_fn_id = Some(hook_fn_id);
+        let config = RunnerConfig::default();
+        let host_set_contract = expected_host_set(&config);
+        attach_host_set(&mut request, &host_set_contract);
+        let mut pointer_table = FunctionPointerTable::new();
+        let mut hook_runs = 0;
+        let mut hook_failures = 0;
+        let mut hook_failure_reasons = Vec::new();
+        let mut swap_commit_successes = 0;
+        let mut swap_commit_failures = 0;
+        let mut swap_failure_reasons = Vec::new();
+        let mut events = Vec::new();
+        let pending_aot_metadata = BTreeMap::new();
+        let pending_jit_code_ptr_overrides = BTreeMap::from([(
+            request_id,
+            vec![JitCodePtrOverride {
+                fn_id: hook_fn_id,
+                code_ptr: mutating_rejecting_hook as usize as u64,
+            }],
+        )]);
+
+        let mut active_candidate = Some(active);
+        let result = apply_prepared_jit_transaction(
+            request_id,
+            Some(candidate),
+            &mut active_candidate,
+            true,
+            || {
+                apply_commit_request(
+                    request,
+                    &mut pointer_table,
+                    &config,
+                    &host_set_contract,
+                    &mut hook_runs,
+                    &mut hook_failures,
+                    &mut hook_failure_reasons,
+                    &mut swap_commit_successes,
+                    &mut swap_commit_failures,
+                    &mut swap_failure_reasons,
+                    &mut events,
+                    None,
+                    None,
+                    &pending_aot_metadata,
+                    &pending_jit_code_ptr_overrides,
+                )
+            },
+        )
+        .expect("runtime transaction should execute");
+
+        assert_eq!(result.status, SwapCommitStatus::Failed);
+        assert_eq!(
+            active_candidate
+                .as_ref()
+                .expect("active candidate retained")
+                .read_global_scalar("score"),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(7))
+        );
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(added_hash), 3);
+        assert_eq!(pointer_table.generation().0, 0);
+        assert_eq!(hook_runs, 1);
+        assert_eq!(hook_failures, 1);
+        assert_eq!(swap_commit_successes, 0);
+        assert_eq!(swap_commit_failures, 1);
+        stasis_dynload::clear_jit_i32_global_table();
+    }
+
+    #[test]
+    fn code_only_commit_without_hook_bypasses_state_snapshot_limit() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        let _jit = JitProcess::new();
+        let oversized_len = MAX_STATE_SNAPSHOT_BYTES / std::mem::size_of::<i32>() + 1;
+        stasis_dynload::ensure_jit_i32_array_capacity(9001, 0, oversized_len)
+            .expect("oversized test storage should allocate");
+        assert!(
+            stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES).is_err()
+        );
+
+        let result = apply_runtime_state_transaction(
+            Some(LayoutHash([1; 32])),
+            LayoutHash([1; 32]),
+            false,
+            || {
+                SwapCommitResult::success(
+                    RequestId(91),
+                    Vec::new(),
+                    stasis_runner::swap::contracts::CodeGeneration(1),
+                )
+            },
+        )
+        .expect("code-only transaction should not snapshot state");
+
+        assert_eq!(result.status, SwapCommitStatus::Success);
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_array_global_table();
     }
 
     #[test]
@@ -4228,7 +6616,8 @@ mod tests {
         let game = temp_root.join("game.stasis");
         fs::copy(&fixture, &game).expect("copy hook fixture");
 
-        let backend = IncrementalCompilerBackend::new();
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+        let backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(prepared_tx);
         let mut pipeline = DevHotSwapPipeline::with_target_mode(backend, TargetMode::JitDev);
         let mut pointer_table = FunctionPointerTable::new();
         let config = RunnerConfig {
@@ -4256,6 +6645,8 @@ mod tests {
         let pending_aot_metadata: BTreeMap<RequestId, PendingAotCompileMetadata> = BTreeMap::new();
         let mut pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
             BTreeMap::new();
+        let mut pending_jit_candidates = BTreeMap::new();
+        let mut active_jit_candidate = None;
 
         pipeline.submit_file_change(FileChangeEvent::new(
             game.clone(),
@@ -4270,24 +6661,36 @@ mod tests {
         while start.elapsed() < timeout {
             pipeline.pump_coordinator();
             capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
+            capture_prepared_jit_swaps(Some(&prepared_rx), &mut pending_jit_candidates);
             pipeline.process_commits_at_safe_point(|request| {
-                apply_commit_request(
-                    request,
-                    &mut pointer_table,
-                    &config,
-                    &host_set_contract,
-                    &mut hook_runs,
-                    &mut hook_failures,
-                    &mut hook_failure_reasons,
-                    &mut swap_commit_successes,
-                    &mut swap_commit_failures,
-                    &mut swap_failure_reasons,
-                    &mut events,
-                    None,
-                    None,
-                    &pending_aot_metadata,
-                    &pending_jit_code_ptr_overrides,
+                let request_id = request.request_id;
+                let candidate = pending_jit_candidates.remove(&request_id);
+                apply_prepared_jit_transaction(
+                    request_id,
+                    candidate,
+                    &mut active_jit_candidate,
+                    true,
+                    || {
+                        apply_commit_request(
+                            request,
+                            &mut pointer_table,
+                            &config,
+                            &host_set_contract,
+                            &mut hook_runs,
+                            &mut hook_failures,
+                            &mut hook_failure_reasons,
+                            &mut swap_commit_successes,
+                            &mut swap_commit_failures,
+                            &mut swap_failure_reasons,
+                            &mut events,
+                            None,
+                            None,
+                            &pending_aot_metadata,
+                            &pending_jit_code_ptr_overrides,
+                        )
+                    },
                 )
+                .unwrap_or_else(|error| SwapCommitResult::failed(request_id, error))
             });
             pipeline.pump_coordinator();
 
@@ -4326,24 +6729,36 @@ mod tests {
         while start.elapsed() < timeout {
             pipeline.pump_coordinator();
             capture_pending_jit_compile_metadata(&pipeline, &mut pending_jit_code_ptr_overrides);
+            capture_prepared_jit_swaps(Some(&prepared_rx), &mut pending_jit_candidates);
             pipeline.process_commits_at_safe_point(|request| {
-                apply_commit_request(
-                    request,
-                    &mut pointer_table,
-                    &config,
-                    &host_set_contract,
-                    &mut hook_runs,
-                    &mut hook_failures,
-                    &mut hook_failure_reasons,
-                    &mut swap_commit_successes,
-                    &mut swap_commit_failures,
-                    &mut swap_failure_reasons,
-                    &mut events,
-                    None,
-                    None,
-                    &pending_aot_metadata,
-                    &pending_jit_code_ptr_overrides,
+                let request_id = request.request_id;
+                let candidate = pending_jit_candidates.remove(&request_id);
+                apply_prepared_jit_transaction(
+                    request_id,
+                    candidate,
+                    &mut active_jit_candidate,
+                    true,
+                    || {
+                        apply_commit_request(
+                            request,
+                            &mut pointer_table,
+                            &config,
+                            &host_set_contract,
+                            &mut hook_runs,
+                            &mut hook_failures,
+                            &mut hook_failure_reasons,
+                            &mut swap_commit_successes,
+                            &mut swap_commit_failures,
+                            &mut swap_failure_reasons,
+                            &mut events,
+                            None,
+                            None,
+                            &pending_aot_metadata,
+                            &pending_jit_code_ptr_overrides,
+                        )
+                    },
                 )
+                .unwrap_or_else(|error| SwapCommitResult::failed(request_id, error))
             });
             pipeline.pump_coordinator();
 

@@ -58,8 +58,11 @@ foreach ($abi in $Abis) {
         throw "Rust target $rustTarget is not installed. Run: rustup target add $rustTarget"
     }
 
+    $targetEnvName = $rustTarget.Replace('-', '_')
     $linkerVariable = "CARGO_TARGET_$($rustTarget.ToUpperInvariant().Replace('-', '_'))_LINKER"
     Set-Item -Path "Env:$linkerVariable" -Value $linker
+    Set-Item -Path "Env:CC_$targetEnvName" -Value $linker
+    Set-Item -Path "Env:AR_$targetEnvName" -Value (Join-Path $prebuilt "bin\llvm-ar.exe")
 
     Push-Location $repoRoot
     try {

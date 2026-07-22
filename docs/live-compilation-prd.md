@@ -203,6 +203,17 @@ Examples:
 - rendering commands
 - audio events
 
+### First-Class Project Data
+
+- Editable runtime data lives under the project-level `data/` directory.
+- Every JSON or CSV file has a same-name `.struct-meta.json` mapping and is discovered automatically; ordinary development does not require binding flags or project-specific loader code.
+- JSON may map nested properties. CSV headers are flat and bind either scalar/primitive-array data or variable rows into a fixed-capacity struct array. Table mappings automatically expose `row_count`, clear unused slots, and validate non-blank unique key columns (including composite keys).
+- Binding rejects extra source properties/columns, missing metadata paths, duplicate mappings, and paths absent from compiled globals before mutating runtime data.
+- Development watches both files and applies a validated set between ticks. Rejected edits preserve the last accepted runtime data.
+- Production AOT packages stage the same data and compile its accepted values into the runtime bridge, so startup never depends on loose development files.
+- The JIT and AOT paths use the same global names, field types, array bounds, and JSON-path mapping.
+- Explicit binding paths are compatibility overrides, not the standard project workflow.
+
 ### First-Class Sprite and Audio Assets
 
 Sprite and audio support is a cross-platform runtime contract, not an editor-only feature.
@@ -387,7 +398,7 @@ Rules:
 When a source file changes during development, ownership is:
 
 - Runtime/Main Thread: owns tick loop, safe-point detection, and final swap commit; never performs parsing/semantic/codegen work inline with tick execution.
-- Compiler Service Thread: owns lex/parse/index/semantic/hash analysis for changed files and produces either diagnostics or a swap candidate patch.
+- Compiler Service Thread: owns lex/parse/index/semantic/hash analysis for changed files and produces either diagnostics or a staged swap candidate; it never activates candidate runtime state.
 - Codegen Service (Cranelift): owns JIT code emission for dev mode and AOT emission for prod mode; never mutates runtime state directly.
 - Swap Coordinator: owns two-phase commit transaction boundaries, all-or-nothing swap rules, and generation retirement scheduling after successful commit.
 
@@ -406,11 +417,11 @@ Interfaces are message-based and versioned. No cross-thread shared mutable compi
 1. Watcher emits `FileChangeEvent`.
 2. Swap coordinator coalesces pending events and emits `CompileRequest`.
 3. Compiler service runs full-file semantic pass.
-4. Compiler/codegen returns `CompileResult` with diagnostics or patch.
+4. Compiler/codegen returns `CompileResult` with diagnostics or a patch plus its staged JIT candidate.
 5. If diagnostics exist, patch is discarded and old code remains active.
 6. If eligible, coordinator waits for between-ticks safe point.
-7. Main thread runs `on_code_swap()` (if present) using old pointers.
-8. Main thread atomically applies pointer-table update and records new generation.
+7. Main thread runs the shared bounded state-migration transaction and `on_code_swap()` (if present).
+8. Main thread atomically activates the candidate runtime and pointer-table update, then records the new generation.
 9. Runtime publishes `SwapCommitResult`; debug UI updates swap indicator only on success.
 
 Failure at any sequence step aborts commit and preserves old code/data.
@@ -495,4 +506,3 @@ This system is intentionally:
 - developer-trust-focused
 
 It provides a robust, file-level hot reload pipeline with per-function efficiency, an explicit swap hook, and a deterministic tick-based UI confirmation mechanism.
-

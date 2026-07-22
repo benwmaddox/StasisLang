@@ -2,6 +2,7 @@ package com.stasislang.workshop;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
@@ -28,6 +29,22 @@ public final class WorkshopAiProjectTransactionTest {
         assertEquals("function main(): void {}\n", read(source));
         assertEquals("test `original`(): bool { return true; }\n", read(originalTest));
         assertFalse(added.exists());
+    }
+
+    @Test
+    public void fingerprintIsStableAndDetectsAcceptedWriteBoundaries() throws Exception {
+        File root = Files.createTempDirectory("workshop-ai-fingerprint").toFile();
+        File source = write(root, "src/main.stasis", "function main(): void {}\n");
+        WorkshopAiProjectTransaction.Snapshot before = WorkshopAiProjectTransaction.capture(root);
+
+        assertEquals(WorkshopAiProjectTransaction.fingerprint(before),
+                WorkshopAiProjectTransaction.fingerprint(
+                        WorkshopAiProjectTransaction.capture(root)));
+        Files.write(source.toPath(),
+                "function main(): void { print(1); }\n".getBytes(StandardCharsets.UTF_8));
+        assertNotEquals(WorkshopAiProjectTransaction.fingerprint(before),
+                WorkshopAiProjectTransaction.fingerprint(
+                        WorkshopAiProjectTransaction.capture(root)));
     }
 
     private static File write(File root, String relative, String source) throws Exception {

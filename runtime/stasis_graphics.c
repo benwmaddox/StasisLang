@@ -15,6 +15,7 @@
 #endif
 #include <stdbool.h>
 #include <string.h>
+#include "stasis_asset_path.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -22,6 +23,11 @@
 #include <limits.h>
 #include <ctype.h>
 #include <time.h>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
+#include "stasis_render_contract.h"
+#include "stasis_display_scale.h"
 #if defined(_WIN32)
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -53,8 +59,12 @@ static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority 
     (void)category;
     (void)priority;
     if (!message) return;
+#if defined(__ANDROID__)
+    __android_log_write(ANDROID_LOG_INFO, "Stasis", message);
+#else
     fprintf(stderr, "%s\n", message);
     fflush(stderr);
+#endif
 }
 
 #if defined(STASIS_GRAPHICS_STATIC)
@@ -80,14 +90,21 @@ static bool g_should_quit = false;
 static const Uint8* g_keyboard_state = NULL;
 static int g_window_width = 800;
 static int g_window_height = 600;
-static int g_window_prev_width = 800;
-static int g_window_prev_height = 600;
+static int g_native_window_width = 800;
+static int g_native_window_height = 600;
+static int g_drawable_width = 800;
+static int g_drawable_height = 600;
+static float g_pixel_scale = 1.0f;
+static StasisDisplayMetrics g_display_metrics;
+static int g_display_generation = 0;
+static int g_density_generation = 0;
 static bool g_window_resized = false;
 static bool g_postfx_enabled = false;
 static bool g_postfx_applied_this_frame = false;
 static bool g_screenshot_taken = false;
 static char g_screenshot_path[1024] = {0};
 static int g_screenshot_exit_after = 0;
+static int g_screenshot_frame = 1;
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static GLuint g_postfx_program = 0;
 static GLint g_postfx_time_loc = -1;
@@ -154,6 +171,8 @@ static SpriteEntry* sprite_fallback_get(void);
 static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int h, int rot_degrees, int a, int do_hash);
 static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_count);
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h);
+static void stasis_sync_display_metrics(void);
+static void stasis_reset_text_cache(void);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -185,6 +204,7 @@ typedef struct SpriteEntry {
     uint64_t mtime;
     SDL_Texture* sdl_tex;
     int used;
+    int ref_count;       /* callers sharing this raster cache entry */
     int needs_reraster;  /* flag for window resize */
     int reload_pending;  /* set when the asset watcher reloads this sprite */
     uint32_t generation;
@@ -202,7 +222,6 @@ static SpriteEntry g_sprite_fallback;
 
 /* Font rendering with stb_truetype. */
 #define MAX_FONTS 8
-#define FONT_ATLAS_SIZE 512
 #define FONT_FIRST_CHAR 32
 #define FONT_NUM_CHARS 95
 
@@ -219,24 +238,124 @@ typedef struct {
 #endif
     SDL_Texture* sdl_texture;
     stbtt_bakedchar char_data[FONT_NUM_CHARS];
-    int font_size;
+    int font_size;       /* requested logical pixel height */
+    int raster_size;     /* density-scaled pixel height */
+    int atlas_size;
+    float pixel_scale;
+    int needs_reraster;
 } StasisFont;
 
 static StasisFont g_fonts[MAX_FONTS];
 
-static float stasis_font_top_to_baseline(const StasisFont* font) {
-    if (!font) return 0.0f;
-    return (float)font->ascent * font->scale;
-}
-
-static float stasis_font_line_height(const StasisFont* font) {
-    if (!font) return 0.0f;
-    const float line_height = (float)(font->ascent - font->descent + font->line_gap) * font->scale;
-    return line_height > 0.0f ? line_height : (float)font->font_size;
-}
-
 static int stasis_input_valid_index(int idx) {
     return idx >= 0 && idx < STASIS_MAX_POINTERS;
+}
+
+static void stasis_mark_density_resources_dirty(void) {
+    g_density_generation++;
+    for (int i = 0; i < g_sprite_capacity; i++) {
+        if (g_sprites[i].used && g_sprites[i].max_w > 0 && g_sprites[i].max_h > 0) {
+            g_sprites[i].needs_reraster = 1;
+        }
+    }
+    for (int i = 0; i < MAX_FONTS; i++) {
+        if (g_fonts[i].active) g_fonts[i].needs_reraster = 1;
+    }
+}
+
+static void stasis_sync_display_metrics(void) {
+    if (!g_window) return;
+
+    int native_w = g_native_window_width;
+    int native_h = g_native_window_height;
+    SDL_GetWindowSize(g_window, &native_w, &native_h);
+    if (native_w > 0) g_native_window_width = native_w;
+    if (native_h > 0) g_native_window_height = native_h;
+
+    int drawable_w = native_w;
+    int drawable_h = native_h;
+    if (g_use_sdl_renderer && g_renderer) {
+        if (SDL_GetRendererOutputSize(g_renderer, &drawable_w, &drawable_h) != 0) {
+            drawable_w = native_w;
+            drawable_h = native_h;
+        }
+        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+    }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    else if (g_gl_context) {
+        SDL_GL_GetDrawableSize(g_window, &drawable_w, &drawable_h);
+    }
+#endif
+
+    if (drawable_w <= 0) drawable_w = g_window_width;
+    if (drawable_h <= 0) drawable_h = g_window_height;
+    StasisDisplayViewport safe_native = {
+        0.0f, 0.0f, (float)g_native_window_width, (float)g_native_window_height};
+    StasisDisplayMetrics next = stasis_display_metrics(
+        g_window_width, g_window_height,
+        g_native_window_width, g_native_window_height,
+        drawable_w, drawable_h, safe_native);
+    const int dimensions_changed =
+        next.native_w != g_display_metrics.native_w ||
+        next.native_h != g_display_metrics.native_h ||
+        next.drawable_w != g_display_metrics.drawable_w ||
+        next.drawable_h != g_display_metrics.drawable_h ||
+        next.logical_w != g_display_metrics.logical_w ||
+        next.logical_h != g_display_metrics.logical_h;
+    const int density_changed =
+        g_density_generation == 0 || fabsf(next.raster_scale - g_pixel_scale) > 0.001f;
+    if (density_changed) {
+        g_pixel_scale = next.raster_scale;
+        stasis_mark_density_resources_dirty();
+    }
+    if (g_display_generation == 0 || dimensions_changed) {
+        g_display_generation++;
+        g_window_resized = true;
+    }
+    g_display_metrics = next;
+    g_drawable_width = drawable_w;
+    g_drawable_height = drawable_h;
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (!g_use_sdl_renderer && g_gl_context) {
+        glViewport(
+            (int)floorf(next.drawable_viewport.x),
+            stasis_display_bottom_origin_y(
+                next.drawable_h, next.drawable_viewport),
+            (int)ceilf(next.drawable_viewport.w),
+            (int)ceilf(next.drawable_viewport.h));
+        setup_ortho();
+    }
+#endif
+}
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+static void stasis_gl_clear_rect(int x, int y, int width, int height) {
+    if (width <= 0 || height <= 0) return;
+    glScissor(x, y, width, height);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
+
+static void stasis_gl_clear_letterbox_bars(void) {
+    const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
+    const int left = (int)viewport.x;
+    const int bottom = stasis_display_bottom_origin_y(
+        g_drawable_height, viewport);
+    const int right = left + (int)viewport.w;
+    const int top = bottom + (int)viewport.h;
+    glEnable(GL_SCISSOR_TEST);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    stasis_gl_clear_rect(0, 0, left, g_drawable_height);
+    stasis_gl_clear_rect(right, 0, g_drawable_width - right, g_drawable_height);
+    stasis_gl_clear_rect(0, 0, g_drawable_width, bottom);
+    stasis_gl_clear_rect(0, top, g_drawable_width, g_drawable_height - top);
+    glDisable(GL_SCISSOR_TEST);
+}
+#endif
+
+static void stasis_window_to_logical(float native_x, float native_y, float* logical_x, float* logical_y) {
+    if (!logical_x || !logical_y) return;
+    stasis_display_native_to_logical_xy(
+        &g_display_metrics, native_x, native_y, logical_x, logical_y);
 }
 
 static float stasis_clampf(float v, float minv, float maxv) {
@@ -256,23 +375,21 @@ static void stasis_update_pointer_norm(int idx) {
         return;
     }
 
-    g_input_frame.pointers[idx].x_n = stasis_clampf(g_input_frame.pointers[idx].x_px / (float)vw, 0.0f, 1.0f);
-    g_input_frame.pointers[idx].y_n = stasis_clampf(g_input_frame.pointers[idx].y_px / (float)vh, 0.0f, 1.0f);
+    g_input_frame.pointers[idx].x_n = stasis_clampf(
+        (g_input_frame.pointers[idx].x_px - (float)g_input_frame.viewport_x_px) /
+            (float)vw,
+        0.0f, 1.0f);
+    g_input_frame.pointers[idx].y_n = stasis_clampf(
+        (g_input_frame.pointers[idx].y_px - (float)g_input_frame.viewport_y_px) /
+            (float)vh,
+        0.0f, 1.0f);
 }
 
 static void stasis_set_pointer_pos_px(int idx, float x, float y) {
     if (!stasis_input_valid_index(idx)) return;
 
-    float vx = (float)g_input_frame.viewport_x_px;
-    float vy = (float)g_input_frame.viewport_y_px;
-    float vw = (float)g_input_frame.viewport_w_px;
-    float vh = (float)g_input_frame.viewport_h_px;
-
-    x -= vx;
-    y -= vy;
-
-    if (vw > 0.0f) x = stasis_clampf(x, 0.0f, vw);
-    if (vh > 0.0f) y = stasis_clampf(y, 0.0f, vh);
+    x = stasis_clampf(x, 0.0f, (float)g_window_width);
+    y = stasis_clampf(y, 0.0f, (float)g_window_height);
 
     g_input_frame.pointers[idx].x_px = x;
     g_input_frame.pointers[idx].y_px = y;
@@ -282,20 +399,23 @@ static void stasis_set_pointer_pos_px(int idx, float x, float y) {
 static void stasis_update_safe_viewport(void) {
     if (!g_window) return;
 
+    StasisDisplayViewport safe_native = {
+        0.0f, 0.0f, (float)g_native_window_width, (float)g_native_window_height};
+
     int display = SDL_GetWindowDisplayIndex(g_window);
-    if (display < 0) return;
+    if (display < 0) goto publish;
 
     SDL_Rect usable;
     if (SDL_GetDisplayUsableBounds(display, &usable) != 0) {
-        return;
+        goto publish;
     }
 
     int win_x = 0;
     int win_y = 0;
     SDL_GetWindowPosition(g_window, &win_x, &win_y);
 
-    int win_right = win_x + g_window_width;
-    int win_bottom = win_y + g_window_height;
+    int win_right = win_x + g_native_window_width;
+    int win_bottom = win_y + g_native_window_height;
     int left = usable.x > win_x ? usable.x : win_x;
     int top = usable.y > win_y ? usable.y : win_y;
     int right = (usable.x + usable.w) < win_right ? (usable.x + usable.w) : win_right;
@@ -304,11 +424,21 @@ static void stasis_update_safe_viewport(void) {
     int h = bottom - top;
 
     if (w > 0 && h > 0) {
-        g_input_frame.viewport_x_px = left - win_x;
-        g_input_frame.viewport_y_px = top - win_y;
-        g_input_frame.viewport_w_px = w;
-        g_input_frame.viewport_h_px = h;
+        safe_native.x = (float)(left - win_x);
+        safe_native.y = (float)(top - win_y);
+        safe_native.w = (float)w;
+        safe_native.h = (float)h;
     }
+
+publish:
+    g_display_metrics = stasis_display_metrics(
+        g_window_width, g_window_height,
+        g_native_window_width, g_native_window_height,
+        g_drawable_width, g_drawable_height, safe_native);
+    g_input_frame.viewport_x_px = (int)floorf(g_display_metrics.safe_logical_viewport.x);
+    g_input_frame.viewport_y_px = (int)floorf(g_display_metrics.safe_logical_viewport.y);
+    g_input_frame.viewport_w_px = (int)ceilf(g_display_metrics.safe_logical_viewport.w);
+    g_input_frame.viewport_h_px = (int)ceilf(g_display_metrics.safe_logical_viewport.h);
 }
 
 static int stasis_find_finger_slot(SDL_FingerID fingerId) {
@@ -343,6 +473,7 @@ static void stasis_release_finger_slot(SDL_FingerID fingerId) {
 
 static void stasis_pump_events(void) {
     if (!g_window) return;
+    stasis_sync_display_metrics();
 
     /* Snapshot "previous tick" positions for deltas. */
     for (int i = 0; i < STASIS_MAX_POINTERS; i++) {
@@ -375,44 +506,16 @@ static void stasis_pump_events(void) {
                 break;
             case SDL_WINDOWEVENT:
                 if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                    int new_w, new_h;
-                    SDL_GetWindowSize(g_window, &new_w, &new_h);
-
-                    if (new_w != g_window_width || new_h != g_window_height) {
-                        g_window_prev_width = g_window_width;
-                        g_window_prev_height = g_window_height;
-                        g_window_width = new_w;
-                        g_window_height = new_h;
-                        g_window_resized = true;
-
-                        /* Mark all sized sprites for re-rasterization */
-                        for (int i = 0; i < g_sprite_capacity; i++) {
-                            if (g_sprites[i].used && g_sprites[i].max_w > 0 && g_sprites[i].max_h > 0) {
-                                g_sprites[i].needs_reraster = 1;
-                            }
-                        }
+                    stasis_sync_display_metrics();
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
-                        if (!g_use_sdl_renderer) {
-                            reset_line_program();
-                            reset_sprite_program();
-                        }
-#endif
+                    if (!g_use_sdl_renderer) {
+                        reset_line_program();
+                        reset_sprite_program();
                     }
-
+#endif
                     g_input_frame.viewport_w_px = g_window_width;
                     g_input_frame.viewport_h_px = g_window_height;
                     stasis_update_safe_viewport();
-
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-                    if (!g_use_sdl_renderer) {
-                        glViewport(0, 0, g_window_width, g_window_height);
-                        setup_ortho();
-                    } else {
-                        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
-                    }
-#else
-                    SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
-#endif
                 }
                 break;
             case SDL_MOUSEBUTTONDOWN:
@@ -435,7 +538,13 @@ static void stasis_pump_events(void) {
                     int idx = slot + 1;
                     g_input_frame.pointers[idx].is_down = 1;
                     g_input_frame.pointers[idx].went_down = 1;
-                    stasis_set_pointer_pos_px(idx, event.tfinger.x * (float)g_window_width, event.tfinger.y * (float)g_window_height);
+                    float logical_x = 0.0f;
+                    float logical_y = 0.0f;
+                    stasis_window_to_logical(
+                        event.tfinger.x * (float)g_native_window_width,
+                        event.tfinger.y * (float)g_native_window_height,
+                        &logical_x, &logical_y);
+                    stasis_set_pointer_pos_px(idx, logical_x, logical_y);
                 }
                 break;
             case SDL_FINGERMOTION:
@@ -443,7 +552,13 @@ static void stasis_pump_events(void) {
                     int slot = stasis_find_finger_slot(event.tfinger.fingerId);
                     if (slot < 0) break;
                     int idx = slot + 1;
-                    stasis_set_pointer_pos_px(idx, event.tfinger.x * (float)g_window_width, event.tfinger.y * (float)g_window_height);
+                    float logical_x = 0.0f;
+                    float logical_y = 0.0f;
+                    stasis_window_to_logical(
+                        event.tfinger.x * (float)g_native_window_width,
+                        event.tfinger.y * (float)g_native_window_height,
+                        &logical_x, &logical_y);
+                    stasis_set_pointer_pos_px(idx, logical_x, logical_y);
                 }
                 break;
             case SDL_FINGERUP:
@@ -454,7 +569,13 @@ static void stasis_pump_events(void) {
                     g_input_frame.pointers[idx].is_down = 0;
                     g_input_frame.pointers[idx].went_up = 1;
                     stasis_release_finger_slot(event.tfinger.fingerId);
-                    stasis_set_pointer_pos_px(idx, event.tfinger.x * (float)g_window_width, event.tfinger.y * (float)g_window_height);
+                    float logical_x = 0.0f;
+                    float logical_y = 0.0f;
+                    stasis_window_to_logical(
+                        event.tfinger.x * (float)g_native_window_width,
+                        event.tfinger.y * (float)g_native_window_height,
+                        &logical_x, &logical_y);
+                    stasis_set_pointer_pos_px(idx, logical_x, logical_y);
                 }
                 break;
             default:
@@ -465,7 +586,10 @@ static void stasis_pump_events(void) {
     /* Mouse position and button state (left button = primary). */
     int mx = 0, my = 0;
     Uint32 buttons = SDL_GetMouseState(&mx, &my);
-    stasis_set_pointer_pos_px(0, (float)mx, (float)my);
+    float logical_mouse_x = 0.0f;
+    float logical_mouse_y = 0.0f;
+    stasis_window_to_logical((float)mx, (float)my, &logical_mouse_x, &logical_mouse_y);
+    stasis_set_pointer_pos_px(0, logical_mouse_x, logical_mouse_y);
     g_input_frame.pointers[0].is_down = (buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) ? 1 : 0;
 
     /* Compute deltas from previous tick positions. */
@@ -673,7 +797,7 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     if (!out_i32 || !out_f32) return;
 
     static int32_t g_host_tick_index = 0;
-    const int32_t host_version = 1;
+    const int32_t host_version = 2;
     const int i32_key_base = 32;
     const int i32_key_count = 512;
 
@@ -723,8 +847,18 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_i32[18] = minimized;
     out_i32[19] = stasis_get_time_us();
 
-    /* Reserved */
-    for (int i = 20; i < 32; i++) out_i32[i] = 0;
+    out_i32[20] = g_display_metrics.logical_w;
+    out_i32[21] = g_display_metrics.logical_h;
+    out_i32[22] = g_display_metrics.native_w;
+    out_i32[23] = g_display_metrics.native_h;
+    out_i32[24] = g_display_metrics.drawable_w;
+    out_i32[25] = g_display_metrics.drawable_h;
+    out_i32[26] = (int32_t)floorf(g_display_metrics.safe_logical_viewport.x);
+    out_i32[27] = (int32_t)floorf(g_display_metrics.safe_logical_viewport.y);
+    out_i32[28] = (int32_t)ceilf(g_display_metrics.safe_logical_viewport.w);
+    out_i32[29] = (int32_t)ceilf(g_display_metrics.safe_logical_viewport.h);
+    out_i32[30] = g_display_generation;
+    out_i32[31] = g_density_generation;
 
     /* Keyboard state: one i32 per scancode (0/1). */
     int num_keys = 0;
@@ -754,6 +888,8 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
 
     for (int i = i32_base + STASIS_MAX_POINTERS * i32_stride; i < 768; i++) out_i32[i] = 0;
     for (int i = f32_base + STASIS_MAX_POINTERS * f32_stride; i < 64; i++) out_f32[i] = 0.0f;
+    out_f32[48] = g_display_metrics.content_scale;
+    out_f32[49] = g_display_metrics.raster_scale;
 }
 
 /* ============================================================
@@ -1194,10 +1330,19 @@ static int resolve_asset_path(const char* path, char* out, size_t out_size) {
     if (!out || out_size < 2 || !path || !*path) return 0;
     ensure_asset_base();
     if (is_absolute_path(path)) {
+        if (g_asset_env[0] != 0) return 0;
         strncpy(out, path, out_size - 1);
         out[out_size - 1] = 0;
     } else {
-        snprintf(out, out_size, "%s/%s", g_asset_base, path);
+        char normalized[1024];
+        const char* relative = path;
+        if (g_asset_env[0] != 0) {
+            if (!stasis_asset_normalize_relative_path(path, normalized, sizeof(normalized))) {
+                return 0;
+            }
+            relative = normalized;
+        }
+        snprintf(out, out_size, "%s/%s", g_asset_base, relative);
         out[out_size - 1] = 0;
     }
     for (char* p = out; *p; ++p) {
@@ -2536,10 +2681,142 @@ static int write_bmp_bgra32(const char* path, int w, int h, const uint8_t* bgra,
     return 1;
 }
 
-STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
+static void write_u32_be(uint8_t* out, uint32_t value) {
+    out[0] = (uint8_t)(value >> 24);
+    out[1] = (uint8_t)(value >> 16);
+    out[2] = (uint8_t)(value >> 8);
+    out[3] = (uint8_t)value;
+}
+
+static uint32_t png_crc32_update(uint32_t crc, const uint8_t* data, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; bit++) {
+            uint32_t mask = (uint32_t)(-(int32_t)(crc & 1u));
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
+        }
+    }
+    return crc;
+}
+
+static int write_png_chunk(FILE* f, const char type[4], const uint8_t* data, uint32_t length) {
+    uint8_t size_bytes[4];
+    uint8_t crc_bytes[4];
+    write_u32_be(size_bytes, length);
+    uint32_t crc = png_crc32_update(0xFFFFFFFFu, (const uint8_t*)type, 4);
+    if (length > 0) crc = png_crc32_update(crc, data, length);
+    write_u32_be(crc_bytes, crc ^ 0xFFFFFFFFu);
+    return fwrite(size_bytes, 1, 4, f) == 4 &&
+           fwrite(type, 1, 4, f) == 4 &&
+           (length == 0 || fwrite(data, 1, length, f) == length) &&
+           fwrite(crc_bytes, 1, 4, f) == 4;
+}
+
+static uint32_t png_adler32(const uint8_t* data, size_t length) {
+    uint32_t a = 1;
+    uint32_t b = 0;
+    for (size_t offset = 0; offset < length;) {
+        size_t block = length - offset;
+        if (block > 5552) block = 5552;
+        for (size_t i = 0; i < block; i++) {
+            a += data[offset + i];
+            b += a;
+        }
+        a %= 65521u;
+        b %= 65521u;
+        offset += block;
+    }
+    return (b << 16) | a;
+}
+
+/* Deterministic PNG writer using zlib's uncompressed DEFLATE blocks. */
+static int write_png_bgra32(const char* path, int w, int h, const uint8_t* bgra, int is_bottom_up) {
+    if (!path || !*path || w <= 0 || h <= 0 || !bgra) return 0;
+    if ((size_t)w > (SIZE_MAX - 1u) / 4u) return 0;
+    const size_t pixel_row_bytes = (size_t)w * 4u;
+    const size_t png_row_bytes = pixel_row_bytes + 1u;
+    if ((size_t)h > SIZE_MAX / png_row_bytes) return 0;
+    const size_t raw_size = png_row_bytes * (size_t)h;
+    if (raw_size > UINT32_MAX) return 0;
+
+    uint8_t* raw = (uint8_t*)malloc(raw_size);
+    if (!raw) return 0;
+    for (int y = 0; y < h; y++) {
+        const int source_y = is_bottom_up ? (h - 1 - y) : y;
+        const uint8_t* source = bgra + (size_t)source_y * pixel_row_bytes;
+        uint8_t* target = raw + (size_t)y * png_row_bytes;
+        target[0] = 0;
+        for (int x = 0; x < w; x++) {
+            target[1 + x * 4 + 0] = source[x * 4 + 2];
+            target[1 + x * 4 + 1] = source[x * 4 + 1];
+            target[1 + x * 4 + 2] = source[x * 4 + 0];
+            target[1 + x * 4 + 3] = source[x * 4 + 3];
+        }
+    }
+
+    const size_t block_count = (raw_size + 65534u) / 65535u;
+    if (raw_size > SIZE_MAX - 6u ||
+        block_count > (SIZE_MAX - raw_size - 6u) / 5u) {
+        free(raw);
+        return 0;
+    }
+    const size_t zlib_size = 2u + raw_size + block_count * 5u + 4u;
+    if (zlib_size > UINT32_MAX) {
+        free(raw);
+        return 0;
+    }
+    uint8_t* zlib = (uint8_t*)malloc(zlib_size);
+    if (!zlib) {
+        free(raw);
+        return 0;
+    }
+
+    size_t input_offset = 0;
+    size_t output_offset = 0;
+    zlib[output_offset++] = 0x78;
+    zlib[output_offset++] = 0x01;
+    while (input_offset < raw_size) {
+        size_t remaining = raw_size - input_offset;
+        uint16_t block_length = (uint16_t)(remaining > 65535u ? 65535u : remaining);
+        uint16_t inverse_length = (uint16_t)~block_length;
+        zlib[output_offset++] = remaining <= 65535u ? 1u : 0u;
+        zlib[output_offset++] = (uint8_t)block_length;
+        zlib[output_offset++] = (uint8_t)(block_length >> 8);
+        zlib[output_offset++] = (uint8_t)inverse_length;
+        zlib[output_offset++] = (uint8_t)(inverse_length >> 8);
+        memcpy(zlib + output_offset, raw + input_offset, block_length);
+        output_offset += block_length;
+        input_offset += block_length;
+    }
+    write_u32_be(zlib + output_offset, png_adler32(raw, raw_size));
+    output_offset += 4;
+
+    uint8_t ihdr[13];
+    write_u32_be(ihdr, (uint32_t)w);
+    write_u32_be(ihdr + 4, (uint32_t)h);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    ihdr[10] = 0;
+    ihdr[11] = 0;
+    ihdr[12] = 0;
+    static const uint8_t signature[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+
+    FILE* f = fopen(path, "wb");
+    int ok = f && fwrite(signature, 1, sizeof(signature), f) == sizeof(signature) &&
+             write_png_chunk(f, "IHDR", ihdr, sizeof(ihdr)) &&
+             write_png_chunk(f, "IDAT", zlib, (uint32_t)output_offset) &&
+             write_png_chunk(f, "IEND", NULL, 0);
+    if (f && fclose(f) != 0) ok = 0;
+    if (!ok) remove(path);
+    free(zlib);
+    free(raw);
+    return ok;
+}
+
+static int stasis_gfx_dump_image(const char* path, int png, int render_queued_lines) {
     if (!path || !*path) return 0;
     if (!g_window) return 0;
-    if (g_window_width <= 0 || g_window_height <= 0) return 0;
+    if (g_drawable_width <= 0 || g_drawable_height <= 0) return 0;
 
     char resolved[1024];
     const char* out_path = path;
@@ -2550,8 +2827,8 @@ STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
         out_path = resolved;
     }
 
-    const int w = g_window_width;
-    const int h = g_window_height;
+    const int w = g_drawable_width;
+    const int h = g_drawable_height;
     const size_t bytes = (size_t)w * (size_t)h * 4u;
 
     uint8_t* pixels = (uint8_t*)malloc(bytes);
@@ -2561,23 +2838,26 @@ STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
 
     if (g_use_sdl_renderer) {
         if (g_renderer) {
-            /* Match end_frame() behavior so the screenshot includes queued lines. */
-            SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-            SDL_Color color;
-            for (int i = 0; i < g_line_count; i++) {
-                color.r = (Uint8)(g_lines[i].r * 255.0f);
-                color.g = (Uint8)(g_lines[i].g * 255.0f);
-                color.b = (Uint8)(g_lines[i].b * 255.0f);
-                color.a = (Uint8)(g_lines[i].a * 255.0f);
-                SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
-                SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
+            if (render_queued_lines) {
+                /* Direct API calls may happen before end_frame(), so flush pending lines once. */
+                SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+                SDL_Color color;
+                for (int i = 0; i < g_line_count; i++) {
+                    color.r = (Uint8)(g_lines[i].r * 255.0f);
+                    color.g = (Uint8)(g_lines[i].g * 255.0f);
+                    color.b = (Uint8)(g_lines[i].b * 255.0f);
+                    color.a = (Uint8)(g_lines[i].a * 255.0f);
+                    SDL_SetRenderDrawColor(g_renderer, color.r, color.g, color.b, color.a);
+                    SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
+                }
+                g_line_count = 0;
             }
-            g_line_count = 0;
 
-            /* SDL_RenderReadPixels reads from the current render target. Call before stasis_end_frame(). */
+            /* SDL_RenderReadPixels reads from the current render target before present. */
             int rc = SDL_RenderReadPixels(g_renderer, NULL, SDL_PIXELFORMAT_BGRA32, pixels, w * 4);
             if (rc == 0) {
-                ok = write_bmp_bgra32(out_path, w, h, pixels, 0);
+                ok = png ? write_png_bgra32(out_path, w, h, pixels, 0)
+                         : write_bmp_bgra32(out_path, w, h, pixels, 0);
             }
         }
         free(pixels);
@@ -2603,8 +2883,9 @@ STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
         glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
         GLenum err = glGetError();
         if (err == GL_NO_ERROR) {
-            /* glReadPixels returns bottom-up; BMP header uses top-down (negative height). Flip by writing bottom-up rows and marking as bottom-up. */
-            ok = write_bmp_bgra32(out_path, w, h, pixels, 1);
+            /* glReadPixels returns rows from the bottom of the framebuffer first. */
+            ok = png ? write_png_bgra32(out_path, w, h, pixels, 1)
+                     : write_bmp_bgra32(out_path, w, h, pixels, 1);
         }
         free(pixels);
         return ok;
@@ -2613,6 +2894,32 @@ STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
 
     free(pixels);
     return 0;
+}
+
+STASIS_EXPORT int stasis_gfx_dump_bmp(const char* path) {
+    return stasis_gfx_dump_image(path, 0, 1);
+}
+
+STASIS_EXPORT int stasis_gfx_dump_png(const char* path) {
+    return stasis_gfx_dump_image(path, 1, 1);
+}
+
+static void capture_scheduled_screenshot(void) {
+    if (g_screenshot_taken || g_screenshot_path[0] == 0 ||
+        g_debug_frame_counter + 1 != g_screenshot_frame) {
+        return;
+    }
+    int ok = stasis_gfx_dump_image(
+        g_screenshot_path,
+        ends_with_ci(g_screenshot_path, ".png"),
+        0);
+    if (!ok) {
+        SDL_Log("failed to capture screenshot: %s", g_screenshot_path);
+        if (g_screenshot_exit_after) g_should_quit = true;
+        return;
+    }
+    g_screenshot_taken = true;
+    if (g_screenshot_exit_after) g_should_quit = true;
 }
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -3130,6 +3437,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 
     SDL_LogSetOutputFunction(stasis_sdl_log_output, NULL);
     SDL_LogSetAllPriority(SDL_LOG_PRIORITY_INFO);
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 0;
@@ -3147,6 +3455,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     /* Optional screenshot automation via environment variables. */
     g_screenshot_taken = false;
     g_screenshot_exit_after = 0;
+    g_screenshot_frame = 1;
+    g_debug_frame_counter = 0;
     g_screenshot_path[0] = 0;
     const char* screenshot = SDL_getenv("STASIS_SCREENSHOT_ONCE");
     if (screenshot && *screenshot) {
@@ -3156,6 +3466,15 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         if (exit_after && exit_after[0] == '1') {
             g_screenshot_exit_after = 1;
         }
+        const char* screenshot_frame = SDL_getenv("STASIS_SCREENSHOT_FRAME");
+        if (screenshot_frame && *screenshot_frame) {
+            char* end = NULL;
+            long parsed_frame = strtol(screenshot_frame, &end, 10);
+            if (end != screenshot_frame && *end == 0 &&
+                parsed_frame >= 1 && parsed_frame <= INT_MAX) {
+                g_screenshot_frame = (int)parsed_frame;
+            }
+        }
     }
 
     const char* force_sdl = SDL_getenv("STASIS_USE_SDL");
@@ -3163,6 +3482,14 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 #if defined(STASIS_GRAPHICS_SDL_ONLY)
     want_sdl = true;
 #endif
+
+    g_window_width = width;
+    g_window_height = height;
+    g_native_window_width = width;
+    g_native_window_height = height;
+    g_drawable_width = width;
+    g_drawable_height = height;
+    g_pixel_scale = 1.0f;
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!want_sdl) {
@@ -3175,13 +3502,27 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     }
 #endif
 
+    int native_request_width = width;
+    int native_request_height = height;
+    Uint32 window_flags = (want_sdl ? 0 : SDL_WINDOW_OPENGL) |
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    SDL_DisplayMode display_mode;
+    if (SDL_GetCurrentDisplayMode(0, &display_mode) == 0 &&
+        display_mode.w > 0 && display_mode.h > 0) {
+        native_request_width = display_mode.w;
+        native_request_height = display_mode.h;
+    }
+    window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+#endif
+
     g_window = SDL_CreateWindow(
         title ? title : "Stasis",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
-        width,
-        height,
-        (want_sdl ? 0 : SDL_WINDOW_OPENGL) | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+        native_request_width,
+        native_request_height,
+        window_flags
     );
 
     if (!g_window) {
@@ -3252,6 +3593,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         if (!g_renderer) {
             SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
             SDL_DestroyWindow(g_window);
+            g_window = NULL;
+            g_use_sdl_renderer = false;
             SDL_Quit();
             return 0;
         }
@@ -3269,8 +3612,11 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         g_use_sdl_renderer = false;
     }
 
-    g_window_width = width;
-    g_window_height = height;
+    stasis_sync_display_metrics();
+    SDL_Log("Stasis display metrics: logical=%dx%d native=%dx%d drawable=%dx%d scale=%.2f",
+        g_window_width, g_window_height,
+        g_native_window_width, g_native_window_height,
+        g_drawable_width, g_drawable_height, g_pixel_scale);
     g_keyboard_state = SDL_GetKeyboardState(NULL);
     g_should_quit = false;
     g_line_count = 0;
@@ -3381,6 +3727,38 @@ STASIS_EXPORT void stasis_get_window_size(int* width, int* height) {
     if (height) *height = g_window_height;
 }
 
+STASIS_EXPORT void stasis_get_display_metrics(
+    int* logical_w,
+    int* logical_h,
+    int* native_w,
+    int* native_h,
+    int* drawable_w,
+    int* drawable_h,
+    int* safe_x,
+    int* safe_y,
+    int* safe_w,
+    int* safe_h,
+    float* content_scale,
+    float* raster_scale,
+    int* display_generation,
+    int* density_generation
+) {
+    if (logical_w) *logical_w = g_display_metrics.logical_w;
+    if (logical_h) *logical_h = g_display_metrics.logical_h;
+    if (native_w) *native_w = g_display_metrics.native_w;
+    if (native_h) *native_h = g_display_metrics.native_h;
+    if (drawable_w) *drawable_w = g_display_metrics.drawable_w;
+    if (drawable_h) *drawable_h = g_display_metrics.drawable_h;
+    if (safe_x) *safe_x = (int)floorf(g_display_metrics.safe_logical_viewport.x);
+    if (safe_y) *safe_y = (int)floorf(g_display_metrics.safe_logical_viewport.y);
+    if (safe_w) *safe_w = (int)ceilf(g_display_metrics.safe_logical_viewport.w);
+    if (safe_h) *safe_h = (int)ceilf(g_display_metrics.safe_logical_viewport.h);
+    if (content_scale) *content_scale = g_display_metrics.content_scale;
+    if (raster_scale) *raster_scale = g_display_metrics.raster_scale;
+    if (display_generation) *display_generation = g_display_generation;
+    if (density_generation) *density_generation = g_density_generation;
+}
+
 /*
  * Get current desktop usable dimensions (excluding taskbar/docks when available).
  * Writes width and height to provided pointers.
@@ -3426,20 +3804,20 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
         return;
     }
 
+    g_window_width = width;
+    g_window_height = height;
+    g_window_resized = true;
+#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
     SDL_SetWindowSize(g_window, width, height);
-    SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
+#endif
+    stasis_sync_display_metrics();
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!g_use_sdl_renderer) {
-        glViewport(0, 0, g_window_width, g_window_height);
         setup_ortho();
         reset_line_program();
         reset_sprite_program();
-    } else {
-        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
     }
-#else
-    SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
 #endif
 }
 
@@ -3456,21 +3834,15 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
     Uint32 flags = fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
     int result = SDL_SetWindowFullscreen(g_window, flags);
 
-    if (result == 0 && fullscreen) {
-        /* Update window dimensions to match fullscreen size */
-        SDL_GetWindowSize(g_window, &g_window_width, &g_window_height);
+    if (result == 0) {
+        stasis_sync_display_metrics();
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
         if (!g_use_sdl_renderer) {
-            glViewport(0, 0, g_window_width, g_window_height);
             setup_ortho();
             reset_line_program();
             reset_sprite_program();
-        } else {
-            SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
         }
-#else
-        SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
 #endif
     }
 
@@ -3491,8 +3863,13 @@ STASIS_EXPORT void stasis_begin_frame(void) {
     g_line_count = 0;
     if (g_use_sdl_renderer) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        SDL_RenderSetClipRect(g_renderer, NULL);
     } else {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        stasis_gl_clear_letterbox_bars();
+#else
         (void)g_force_debug_overlay;
+#endif
     }
 }
 
@@ -3513,14 +3890,8 @@ STASIS_EXPORT void stasis_end_frame(void) {
             SDL_RenderDrawLineF(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
         }
 
-        if (!g_screenshot_taken && g_screenshot_path[0] != 0) {
-            /* Capture before present so we read the current render target. */
-            stasis_gfx_dump_bmp(g_screenshot_path);
-            g_screenshot_taken = true;
-            if (g_screenshot_exit_after) {
-                g_should_quit = true;
-            }
-        }
+        /* Capture before present so we read the current render target. */
+        capture_scheduled_screenshot();
         SDL_RenderPresent(g_renderer);
         g_line_count = 0;
     } else {
@@ -3531,14 +3902,8 @@ STASIS_EXPORT void stasis_end_frame(void) {
             render_postfx();
             g_postfx_applied_this_frame = true;
         }
-        if (!g_screenshot_taken && g_screenshot_path[0] != 0) {
-            /* Capture after all draws (including postfx) but before swap. */
-            stasis_gfx_dump_bmp(g_screenshot_path);
-            g_screenshot_taken = true;
-            if (g_screenshot_exit_after) {
-                g_should_quit = true;
-            }
-        }
+        /* Capture after all draws (including postfx) but before swap. */
+        capture_scheduled_screenshot();
         SDL_GL_SwapWindow(g_window);
 #else
         /* STASIS_GRAPHICS_SDL_ONLY should never create a GL context. */
@@ -3559,12 +3924,27 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
     gfx_debug_hash_f32(b);
     gfx_debug_hash_f32(a);
     if (g_use_sdl_renderer) {
-        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
         SDL_RenderClear(g_renderer);
+        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
+        SDL_FRect logical_canvas = {
+            0.0f, 0.0f, (float)g_window_width, (float)g_window_height};
+        SDL_RenderFillRectF(g_renderer, &logical_canvas);
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
     } else {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(
+            (int)viewport.x,
+            stasis_display_bottom_origin_y(
+                g_display_metrics.drawable_h, viewport),
+            (int)viewport.w,
+            (int)viewport.h);
         glClearColor(r, g, b, a);
         glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
 #else
         (void)r; (void)g; (void)b; (void)a;
 #endif
@@ -3646,22 +4026,60 @@ STASIS_EXPORT void stasis_draw_lines_f32(const float* lines, int line_count) {
  * Command-buffer submission (v1 prototype).
  *
  * Command coordinates are host pixels. Ordering is fixed by the buffer layout:
- * clear -> lines -> sprites -> present.
+ * clear -> lines -> sprites -> text -> present.
  */
+static void flush_lines_before_later_layers(void) {
+    if (g_line_count == 0) return;
+    if (g_use_sdl_renderer) {
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        for (int i = 0; i < g_line_count; i++) {
+            SDL_SetRenderDrawColor(
+                g_renderer,
+                (Uint8)(g_lines[i].r * 255.0f),
+                (Uint8)(g_lines[i].g * 255.0f),
+                (Uint8)(g_lines[i].b * 255.0f),
+                (Uint8)(g_lines[i].a * 255.0f));
+            SDL_RenderDrawLineF(
+                g_renderer,
+                g_lines[i].x1,
+                g_lines[i].y1,
+                g_lines[i].x2,
+                g_lines[i].y2);
+        }
+        g_line_count = 0;
+        return;
+    }
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    flush_lines();
+#endif
+}
+
+static void flush_sprites_before_text(void) {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (!g_use_sdl_renderer) flush_sprites();
+#endif
+}
+
 static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
+    static int contract_logged = 0;
     if (!cmd_i32 || !cmd_f32) return;
 
-    const int32_t magic = cmd_i32[0];
-    const int32_t version = cmd_i32[1];
-    if (magic != 0x47584631 || version != 1) {
+    if (!stasis_render_v1_is_valid(cmd_i32)) {
+        if (!contract_logged) {
+            SDL_Log(
+                "Stasis render contract rejected: magic=%d version=%d",
+                cmd_i32[STASIS_RENDER_I_MAGIC],
+                cmd_i32[STASIS_RENDER_I_VERSION]);
+            contract_logged = 1;
+        }
         return;
     }
 
-    const int32_t flags = cmd_i32[2];
-    const int32_t gfx_cmd_max_lines = MAX_LINES;
-    const int32_t gfx_cmd_max_sprites = 4096;  /* must match MAX_SPRITE_VERTS/6 */
-    const int32_t gfx_cmd_max_text = 2048;
-    const int32_t gfx_cmd_max_text_bytes = 65536;
+    const int32_t flags = cmd_i32[STASIS_RENDER_I_FLAGS];
+    const int32_t gfx_cmd_max_lines = STASIS_RENDER_MAX_LINES;
+    const int32_t gfx_cmd_max_sprites = STASIS_RENDER_MAX_SPRITES;
+    const int32_t gfx_cmd_max_text = STASIS_RENDER_MAX_TEXT;
+    const int32_t gfx_cmd_max_text_bytes = STASIS_RENDER_TEXT_MAX_BYTES;
 
     int32_t line_count = cmd_i32[3];
     int32_t sprite_count = cmd_i32[4];
@@ -3678,9 +4096,21 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
     if (text_count > gfx_cmd_max_text) text_count = gfx_cmd_max_text;
     if (text_bytes_used > gfx_cmd_max_text_bytes) text_bytes_used = gfx_cmd_max_text_bytes;
 
+    if (!contract_logged) {
+        SDL_Log(
+            "Stasis render contract v%d trace=%u flags=%d lines=%d sprites=%d text=%d",
+            STASIS_RENDER_V1_VERSION,
+            (unsigned int)stasis_render_v1_trace(cmd_i32, cmd_f32, cmd_u8),
+            flags,
+            line_count,
+            sprite_count,
+            text_count);
+        contract_logged = 1;
+    }
+
     stasis_begin_frame();
 
-    if ((flags & 1) != 0) {
+    if ((flags & STASIS_RENDER_FLAG_CLEAR) != 0) {
         stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
     }
 
@@ -3689,9 +4119,13 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
         stasis_draw_lines_f32(cmd_f32 + 4, line_count);
     }
 
+    /* Lines are buffered on both backends. Flush before sprites so later layers
+     * cannot cover text after text has already been drawn. */
+    flush_lines_before_later_layers();
+
     /* sprites: i32 header is 32, then sprite payload */
     if (sprite_count > 0) {
-        const int32_t* sprites = cmd_i32 + 32;
+        const int32_t* sprites = cmd_i32 + STASIS_RENDER_I_SPRITE_BASE;
         if (!g_debug_hash_enabled && !g_use_sdl_renderer) {
             stasis_gfx_draw_sprites_i32_fast(sprites, sprite_count);
         } else {
@@ -3710,11 +4144,15 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
         }
     }
 
+    /* OpenGL sprites are batched. Native text draws immediately, so commit the
+     * sprite batch first to preserve the documented line -> sprite -> text order. */
+    flush_sprites_before_text();
+
     /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
     /* byte_off < 0 encodes cached text run handle (no cmd_u8 access). */
     if (text_count > 0) {
-        const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
-        const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
+        const int32_t text_i32_base = STASIS_RENDER_I_TEXT_BASE;
+        const int32_t text_f32_base = STASIS_RENDER_F_TEXT_BASE;
         const int32_t* text_meta = cmd_i32 + text_i32_base;
 
         for (int i = 0; i < text_count; i++) {
@@ -3737,54 +4175,8 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
                 continue;
             }
             if (!cmd_u8 || text_bytes_used <= 0) continue;
-            if (byte_off >= text_bytes_used) continue;
-            if (byte_len < 0) continue;
-            if (byte_off + byte_len >= text_bytes_used) continue;
-
-            const char* text = (const char*)(cmd_u8 + byte_off);
-
-            const int base_f = text_f32_base + i * 6;
-            const float x = cmd_f32[base_f + 0];
-            const float y = cmd_f32[base_f + 1];
-            const float r = cmd_f32[base_f + 2];
-            const float g = cmd_f32[base_f + 3];
-            const float b = cmd_f32[base_f + 4];
-            const float a = cmd_f32[base_f + 5];
-
-            stasis_draw_text(font, text, x, y, r, g, b, a);
-        }
-    }
-
-    /* text: payload is split between i32 metadata + u8 bytes + f32 color/pos */
-    /* byte_off < 0 encodes cached text run handle (no cmd_u8 access). */
-    if (text_count > 0) {
-        const int32_t text_i32_base = 32 + gfx_cmd_max_sprites * 7;
-        const int32_t text_f32_base = 4 + gfx_cmd_max_lines * 8;
-        const int32_t* text_meta = cmd_i32 + text_i32_base;
-
-        for (int i = 0; i < text_count; i++) {
-            const int base_i = i * 3;
-            const int font = text_meta[base_i + 0];
-            const int byte_off = text_meta[base_i + 1];
-            const int byte_len = text_meta[base_i + 2];
-
-            if (font <= 0) continue;
-            if (byte_off < 0) {
-                const int run = -byte_off;
-                const int base_f = text_f32_base + i * 6;
-                const float x = cmd_f32[base_f + 0];
-                const float y = cmd_f32[base_f + 1];
-                const float r = cmd_f32[base_f + 2];
-                const float g = cmd_f32[base_f + 3];
-                const float b = cmd_f32[base_f + 4];
-                const float a = cmd_f32[base_f + 5];
-                stasis_gfx_draw_text_cached(run, x, y, r, g, b, a);
-                continue;
-            }
-            if (!cmd_u8 || text_bytes_used <= 0) continue;
-            if (byte_off >= text_bytes_used) continue;
-            if (byte_len < 0) continue;
-            if (byte_off + byte_len >= text_bytes_used) continue;
+            if (!stasis_render_v1_text_span_is_valid(
+                    byte_off, byte_len, text_bytes_used)) continue;
 
             const char* text = (const char*)(cmd_u8 + byte_off);
 
@@ -3801,7 +4193,7 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
     }
 
     /* Present only if requested (lets benchmarks exclude swap/vsync). */
-    if ((flags & 2) != 0) {
+    if ((flags & STASIS_RENDER_FLAG_PRESENT) != 0) {
         stasis_end_frame();
     }
 }
@@ -3882,13 +4274,16 @@ static void sprite_set_gl_region(SpriteEntry* e, int page_index, int sprite_x, i
  * Build sprite at specified max size. Used for sized loading and re-rasterization.
  */
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h) {
-    if (!sprite_source_within_limits(path, max_w, max_h)) {
+    const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);
+    const int raster_h = stasis_display_scaled_extent(max_h, g_pixel_scale);
+    if (!sprite_source_within_limits(path, raster_w, raster_h)) {
         return 0;
     }
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
-    if (!bake_image_to_rgba_sized(path, max_w, max_h, &pixels, &w, &h)) {
-        SDL_Log("gfx_load_sprite: failed to bake %s at %dx%d", path, max_w, max_h);
+    if (!bake_image_to_rgba_sized(path, raster_w, raster_h, &pixels, &w, &h)) {
+        SDL_Log("gfx_load_sprite: failed to bake %s at logical=%dx%d raster=%dx%d",
+            path, max_w, max_h, raster_w, raster_h);
         return 0;
     }
 
@@ -4041,9 +4436,30 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
         SDL_Log("gfx_load_sprite: could not resolve %s", path);
         return 0;
     }
+    const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);
+    const int raster_h = stasis_display_scaled_extent(max_h, g_pixel_scale);
 
-    /* Note: We don't check for existing sprites with same path because
-     * the same SVG might be loaded at different sizes */
+    /* Reuse the device-local raster/GPU texture for the same source and
+     * logical target size. Drawable-density changes mark the entry dirty and
+     * replace its raster before it is returned or drawn, so the effective key
+     * is source + logical extent + current drawable extent. */
+    for (int i = 0; i < g_sprite_capacity; i++) {
+        SpriteEntry* cached = &g_sprites[i];
+        if (!cached->used || !cached->path) continue;
+        if (cached->max_w != max_w || cached->max_h != max_h) continue;
+        if (strcmp(cached->path, resolved) != 0) continue;
+        if (cached->w != raster_w || cached->h != raster_h) {
+            cached->needs_reraster = 1;
+        }
+        if (cached->needs_reraster &&
+            !sprite_build_into_entry_sized(cached, resolved, max_w, max_h)) {
+            return 0;
+        }
+        if (cached->ref_count == INT_MAX) return 0;
+        cached->ref_count++;
+        return sprite_handle_for_slot(i);
+    }
+
     if (!ensure_sprite_table_capacity(1)) {
         SDL_Log("gfx_load_sprite: sprite table allocation failed for %s", resolved);
         return 0;
@@ -4076,6 +4492,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     e->path = stasis_strdup(resolved);
     if (!e->path) return 0;
     e->used = 1;
+    e->ref_count = 1;
     if (!sprite_build_into_entry_sized(e, resolved, max_w, max_h)) {
         free(e->path);
         memset(e, 0, sizeof(*e));
@@ -4156,6 +4573,11 @@ STASIS_EXPORT void stasis_gfx_release_sprite(int handle) {
     SpriteEntry* e = sprite_get(handle);
     if (!e) return;
 
+    if (e->ref_count > 1) {
+        e->ref_count--;
+        return;
+    }
+
     if (g_use_sdl_renderer) {
         if (e->sdl_tex) SDL_DestroyTexture(e->sdl_tex);
     } else {
@@ -4202,6 +4624,8 @@ static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int
     if (!e) return;
 
     if (w <= 0 || h <= 0) return;
+    if (a < 0) a = 0;
+    if (a > 255) a = 255;
 
     /* Re-rasterize only when explicitly invalidated (resize/reload).
      *
@@ -4494,6 +4918,19 @@ STASIS_EXPORT int stasis_should_quit(void) {
     return g_should_quit ? 1 : 0;
 }
 
+/* Mobile lifecycle polling remains responsive while no frame is presented. */
+STASIS_EXPORT int stasis_mobile_poll_events(void) {
+    stasis_pump_events();
+    g_events_pumped_this_frame = 0;
+    return g_should_quit ? 1 : 0;
+}
+
+STASIS_EXPORT void stasis_mobile_set_paused(int paused) {
+    if (g_audio_device != 0) {
+        SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0);
+    }
+}
+
 /*
  * Get current window width in pixels
  */
@@ -4602,6 +5039,12 @@ STASIS_EXPORT void stasis_shutdown(void) {
             g_fonts[i].active = false;
         }
     }
+    stasis_reset_text_cache();
+    if (g_renderer) {
+        SDL_DestroyRenderer(g_renderer);
+        g_renderer = NULL;
+    }
+    g_use_sdl_renderer = false;
     if (g_gl_context) {
         SDL_GL_DeleteContext(g_gl_context);
         g_gl_context = NULL;
@@ -4829,6 +5272,12 @@ static int g_text_run_bytes_used = 0;
 static StasisTextQuad g_text_run_quads[STASIS_TEXT_RUN_MAX_QUADS];
 static int g_text_run_quads_used = 0;
 
+static void stasis_reset_text_cache(void) {
+    memset(g_text_runs, 0, sizeof(g_text_runs));
+    g_text_run_bytes_used = 0;
+    g_text_run_quads_used = 0;
+}
+
 static uint32_t fnv1a_u32(const unsigned char* data, int len) {
     uint32_t h = 2166136261u;
     for (int i = 0; i < len; i++) {
@@ -4836,6 +5285,163 @@ static uint32_t fnv1a_u32(const unsigned char* data, int len) {
         h *= 16777619u;
     }
     return h;
+}
+
+static int stasis_build_font_atlas(StasisFont* font) {
+    if (!font || !font->ttf_buffer || font->font_size <= 0) return 0;
+
+    const float pixel_scale = g_pixel_scale < 1.0f ? 1.0f : g_pixel_scale;
+    const int raster_size = stasis_display_scaled_extent(font->font_size, pixel_scale);
+    const int atlas_size = stasis_display_font_atlas_extent(pixel_scale);
+    const size_t atlas_pixels = (size_t)atlas_size * (size_t)atlas_size;
+    unsigned char* atlas_bitmap = (unsigned char*)malloc(atlas_pixels);
+    if (!atlas_bitmap) return 0;
+
+    stbtt_bakedchar baked_chars[FONT_NUM_CHARS];
+    int result = stbtt_BakeFontBitmap(font->ttf_buffer, 0, (float)raster_size,
+        atlas_bitmap, atlas_size, atlas_size, FONT_FIRST_CHAR, FONT_NUM_CHARS, baked_chars);
+    if (result <= 0) {
+        free(atlas_bitmap);
+        SDL_Log("stasis_load_font: BakeFontBitmap failed size=%d atlas=%d", raster_size, atlas_size);
+        return 0;
+    }
+
+    if (g_use_sdl_renderer) {
+        if (!g_renderer) {
+            free(atlas_bitmap);
+            return 0;
+        }
+        const size_t rgba_size = atlas_pixels * 4u;
+        unsigned char* rgba = (unsigned char*)malloc(rgba_size);
+        if (!rgba) {
+            free(atlas_bitmap);
+            return 0;
+        }
+        for (size_t i = 0; i < atlas_pixels; i++) {
+            unsigned char alpha = atlas_bitmap[i];
+            rgba[i * 4 + 0] = 255;
+            rgba[i * 4 + 1] = 255;
+            rgba[i * 4 + 2] = 255;
+            rgba[i * 4 + 3] = alpha;
+        }
+        SDL_Texture* texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA32,
+            SDL_TEXTUREACCESS_STATIC, atlas_size, atlas_size);
+        if (!texture) {
+            free(rgba);
+            free(atlas_bitmap);
+            return 0;
+        }
+        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        if (SDL_UpdateTexture(texture, NULL, rgba, atlas_size * 4) != 0) {
+            SDL_DestroyTexture(texture);
+            free(rgba);
+            free(atlas_bitmap);
+            return 0;
+        }
+        free(rgba);
+        if (font->sdl_texture) SDL_DestroyTexture(font->sdl_texture);
+        font->sdl_texture = texture;
+    } else {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        GLuint texture = 0;
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, atlas_size, atlas_size,
+            0, GL_ALPHA, GL_UNSIGNED_BYTE, atlas_bitmap);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (font->atlas_texture) glDeleteTextures(1, &font->atlas_texture);
+        font->atlas_texture = texture;
+#endif
+    }
+
+    free(atlas_bitmap);
+    memcpy(font->char_data, baked_chars, sizeof(baked_chars));
+    font->raster_size = raster_size;
+    font->atlas_size = atlas_size;
+    font->pixel_scale = pixel_scale;
+    font->scale = stbtt_ScaleForPixelHeight(&font->font_info, (float)raster_size);
+    font->needs_reraster = 0;
+    return 1;
+}
+
+static int stasis_build_text_run_quads(StasisTextRun* run, StasisFont* font) {
+    if (!run || !font || run->text_off < 0 || run->text_len <= 0) return 0;
+    if (g_text_run_quads_used + run->text_len > STASIS_TEXT_RUN_MAX_QUADS) return 0;
+
+    const char* text = (const char*)g_text_run_bytes + run->text_off;
+    const float pixel_scale = font->pixel_scale;
+    float pos_x = 0.0f;
+    float pos_y = (float)font->ascent * font->scale;
+    float max_x = 0.0f;
+    float max_y = 0.0f;
+    const float line_height =
+        (float)(font->ascent - font->descent + font->line_gap) * font->scale;
+    const int quad_off = g_text_run_quads_used;
+    int quad_count = 0;
+
+    for (int i = 0; i < run->text_len; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        if (ch == '\r') continue;
+        if (ch == '\n') {
+            pos_x = 0.0f;
+            pos_y += line_height;
+            continue;
+        }
+        if (ch < FONT_FIRST_CHAR || ch >= FONT_FIRST_CHAR + FONT_NUM_CHARS) continue;
+
+        stbtt_aligned_quad quad;
+        stbtt_GetBakedQuad(font->char_data, font->atlas_size, font->atlas_size,
+            (int)ch - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, g_use_sdl_renderer ? 0 : 1);
+        StasisTextQuad* out = &g_text_run_quads[quad_off + quad_count];
+        out->x0 = quad.x0 / pixel_scale;
+        out->y0 = quad.y0 / pixel_scale;
+        out->x1 = quad.x1 / pixel_scale;
+        out->y1 = quad.y1 / pixel_scale;
+        out->s0 = quad.s0;
+        out->t0 = quad.t0;
+        out->s1 = quad.s1;
+        out->t1 = quad.t1;
+        if (quad.x1 > max_x) max_x = quad.x1;
+        if (quad.y1 > max_y) max_y = quad.y1;
+        quad_count++;
+    }
+
+    g_text_run_quads_used += quad_count;
+    run->quad_off = quad_off;
+    run->quad_count = quad_count;
+    run->width = max_x / pixel_scale;
+    run->height = max_y / pixel_scale;
+    return 1;
+}
+
+static int stasis_rebuild_text_runs(void) {
+    g_text_run_quads_used = 0;
+    for (int i = 0; i < STASIS_MAX_TEXT_RUNS; i++) {
+        StasisTextRun* run = &g_text_runs[i];
+        if (!run->active) continue;
+        if (run->font_handle <= 0 || run->font_handle > MAX_FONTS) return 0;
+        StasisFont* font = &g_fonts[run->font_handle - 1];
+        if (!font->active || !stasis_build_text_run_quads(run, font)) return 0;
+    }
+    return 1;
+}
+
+static int stasis_ensure_font_ready(int font_handle) {
+    if (font_handle <= 0 || font_handle > MAX_FONTS) return 0;
+    StasisFont* font = &g_fonts[font_handle - 1];
+    if (!font->active) return 0;
+
+    int rebuilt_density_fonts = 0;
+    for (int i = 0; i < MAX_FONTS; i++) {
+        StasisFont* candidate = &g_fonts[i];
+        if (!candidate->active || !candidate->needs_reraster) continue;
+        if (!stasis_build_font_atlas(candidate)) return 0;
+        rebuilt_density_fonts = 1;
+    }
+    return !rebuilt_density_fonts || stasis_rebuild_text_runs();
 }
 
 static int stasis_find_or_alloc_text_run_slot(int font_handle, uint32_t hash, const char* text, int len) {
@@ -4860,6 +5466,7 @@ static int stasis_find_or_alloc_text_run_slot(int font_handle, uint32_t hash, co
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
     if (font_handle <= 0 || font_handle > MAX_FONTS) return 0;
     if (!text) return 0;
+    if (!stasis_ensure_font_ready(font_handle)) return 0;
     StasisFont* font = &g_fonts[font_handle - 1];
     if (!font->active) return 0;
 
@@ -4882,61 +5489,16 @@ STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
     g_text_run_bytes[text_off + len] = 0;
     g_text_run_bytes_used += bytes_needed;
 
-    const int quad_off = g_text_run_quads_used;
-    int quad_count = 0;
-
-    float pos_x = 0.0f;
-    float pos_y = stasis_font_top_to_baseline(font);
-    float max_x = 0.0f;
-    float max_y = 0.0f;
-    const float start_x = 0.0f;
-    const float line_height = stasis_font_line_height(font);
-
-    for (int i = 0; i < len; i++) {
-        unsigned char ch = (unsigned char)text[i];
-        if (ch == '\r') continue;
-        if (ch == '\n') {
-            pos_x = start_x;
-            pos_y += line_height;
-            continue;
-        }
-        if (ch < FONT_FIRST_CHAR || ch >= FONT_FIRST_CHAR + FONT_NUM_CHARS) continue;
-
-        if (quad_off + quad_count >= STASIS_TEXT_RUN_MAX_QUADS) {
-            return 0;
-        }
-
-        stbtt_aligned_quad quad;
-        stbtt_GetBakedQuad(font->char_data, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
-            (int)ch - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, g_use_sdl_renderer ? 0 : 1);
-
-        StasisTextQuad* out = &g_text_run_quads[quad_off + quad_count];
-        out->x0 = quad.x0;
-        out->y0 = quad.y0;
-        out->x1 = quad.x1;
-        out->y1 = quad.y1;
-        out->s0 = quad.s0;
-        out->t0 = quad.t0;
-        out->s1 = quad.s1;
-        out->t1 = quad.t1;
-
-        if (quad.x1 > max_x) max_x = quad.x1;
-        if (quad.y1 > max_y) max_y = quad.y1;
-        quad_count++;
-    }
-
-    g_text_run_quads_used += quad_count;
-
     StasisTextRun* run = &g_text_runs[slot];
     run->active = 1;
     run->font_handle = font_handle;
     run->hash = hash;
     run->text_off = text_off;
     run->text_len = len;
-    run->quad_off = quad_off;
-    run->quad_count = quad_count;
-    run->width = max_x;
-    run->height = max_y;
+    if (!stasis_build_text_run_quads(run, font)) {
+        memset(run, 0, sizeof(*run));
+        return 0;
+    }
 
     return slot + 1;
 }
@@ -4946,6 +5508,7 @@ static void stasis_draw_text_cached_internal(int run_handle, float x, float y, f
     StasisTextRun* run = &g_text_runs[run_handle - 1];
     if (!run->active) return;
     if (run->font_handle <= 0 || run->font_handle > MAX_FONTS) return;
+    if (!stasis_ensure_font_ready(run->font_handle)) return;
 
     StasisFont* font = &g_fonts[run->font_handle - 1];
     if (!font->active) return;
@@ -4964,10 +5527,10 @@ static void stasis_draw_text_cached_internal(int run_handle, float x, float y, f
         for (int i = 0; i < run->quad_count; i++) {
             StasisTextQuad* q = &g_text_run_quads[run->quad_off + i];
             SDL_Rect src;
-            src.x = (int)(q->s0 * (float)FONT_ATLAS_SIZE);
-            src.y = (int)(q->t0 * (float)FONT_ATLAS_SIZE);
-            src.w = (int)((q->s1 - q->s0) * (float)FONT_ATLAS_SIZE);
-            src.h = (int)((q->t1 - q->t0) * (float)FONT_ATLAS_SIZE);
+            src.x = (int)(q->s0 * (float)font->atlas_size);
+            src.y = (int)(q->t0 * (float)font->atlas_size);
+            src.w = (int)((q->s1 - q->s0) * (float)font->atlas_size);
+            src.h = (int)((q->t1 - q->t0) * (float)font->atlas_size);
 
             SDL_FRect dst;
             dst.x = x + q->x0;
@@ -5015,6 +5578,7 @@ STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle) {
     if (run_handle <= 0 || run_handle > STASIS_MAX_TEXT_RUNS) return 0.0f;
     StasisTextRun* run = &g_text_runs[run_handle - 1];
     if (!run->active) return 0.0f;
+    if (!stasis_ensure_font_ready(run->font_handle)) return 0.0f;
     return run->width;
 }
 
@@ -5075,91 +5639,16 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
 
     font->ttf_buffer = ttf_buffer;
     font->font_size = font_size;
-    font->scale = stbtt_ScaleForPixelHeight(&font->font_info, (float)font_size);
     stbtt_GetFontVMetrics(&font->font_info, &font->ascent, &font->descent, &font->line_gap);
-
-    /* Bake font atlas */
-    unsigned char* atlas_bitmap = (unsigned char*)malloc(FONT_ATLAS_SIZE * FONT_ATLAS_SIZE);
-    if (!atlas_bitmap) {
-        free(ttf_buffer);
-        SDL_Log("stasis_load_font: atlas malloc failed");
-        return 0;
-    }
-
-    int result = stbtt_BakeFontBitmap(ttf_buffer, 0, (float)font_size,
-                                      atlas_bitmap, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
-                                      FONT_FIRST_CHAR, FONT_NUM_CHARS, font->char_data);
-
-    if (result <= 0) {
-        free(atlas_bitmap);
-        free(ttf_buffer);
-        SDL_Log("stasis_load_font: BakeFontBitmap failed");
-        return 0;
-    }
-
-    font->sdl_texture = NULL;
-
-    if (g_use_sdl_renderer) {
-        if (!g_renderer) {
-            free(atlas_bitmap);
-            free(ttf_buffer);
-            return 0;
-        }
-
-        const size_t rgba_size = (size_t)FONT_ATLAS_SIZE * (size_t)FONT_ATLAS_SIZE * 4u;
-        unsigned char* rgba = (unsigned char*)malloc(rgba_size);
-        if (!rgba) {
-            free(atlas_bitmap);
-            free(ttf_buffer);
-            return 0;
-        }
-
-        for (int i = 0; i < FONT_ATLAS_SIZE * FONT_ATLAS_SIZE; i++) {
-            unsigned char a = atlas_bitmap[i];
-            rgba[i * 4 + 0] = 255;
-            rgba[i * 4 + 1] = 255;
-            rgba[i * 4 + 2] = 255;
-            rgba[i * 4 + 3] = a;
-        }
-
-        SDL_Texture* tex = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC,
-            FONT_ATLAS_SIZE, FONT_ATLAS_SIZE);
-        if (!tex) {
-            free(rgba);
-            free(atlas_bitmap);
-            free(ttf_buffer);
-            return 0;
-        }
-
-        SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-        if (SDL_UpdateTexture(tex, NULL, rgba, FONT_ATLAS_SIZE * 4) != 0) {
-            SDL_DestroyTexture(tex);
-            free(rgba);
-            free(atlas_bitmap);
-            free(ttf_buffer);
-            return 0;
-        }
-
-        free(rgba);
-        font->sdl_texture = tex;
-    } else {
-#if !defined(STASIS_GRAPHICS_SDL_ONLY)
-        /* Upload to GPU (OpenGL path) */
-        glGenTextures(1, &font->atlas_texture);
-        glBindTexture(GL_TEXTURE_2D, font->atlas_texture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
-                     0, GL_ALPHA, GL_UNSIGNED_BYTE, atlas_bitmap);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-#endif
-    }
-
-    free(atlas_bitmap);
-
     font->active = true;
-    SDL_Log("stasis_load_font: loaded %s size=%d handle=%d", resolved, font_size, slot + 1);
+    if (!stasis_build_font_atlas(font)) {
+        font->active = false;
+        free(ttf_buffer);
+        memset(font, 0, sizeof(*font));
+        return 0;
+    }
+    SDL_Log("stasis_load_font: loaded %s logical_size=%d raster_size=%d scale=%.2f handle=%d",
+        resolved, font_size, font->raster_size, font->pixel_scale, slot + 1);
 
     return slot + 1; /* Return 1-based handle */
 }
@@ -5168,6 +5657,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y,
                                     float r, float g, float b, float a) {
     if (font_handle <= 0 || font_handle > MAX_FONTS) return;
+    if (!stasis_ensure_font_ready(font_handle)) return;
 
     StasisFont* font = &g_fonts[font_handle - 1];
     if (!font->active || !text) return;
@@ -5183,10 +5673,12 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
         SDL_SetTextureAlphaMod(font->sdl_texture,
             (Uint8)(a < 0.0f ? 0 : (a > 1.0f ? 255 : (int)(a * 255.0f))));
 
-        float pos_x = x;
-        float pos_y = y + stasis_font_top_to_baseline(font);
-        const float start_x = x;
-        const float line_height = stasis_font_line_height(font);
+        const float pixel_scale = font->pixel_scale;
+        float pos_x = x * pixel_scale;
+        float pos_y = y * pixel_scale + (float)font->ascent * font->scale;
+        const float start_x = pos_x;
+        const float line_height =
+            (float)(font->ascent - font->descent + font->line_gap) * font->scale;
 
         while (*text) {
             unsigned char ch = (unsigned char)*text;
@@ -5203,20 +5695,20 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
 
             if (ch >= FONT_FIRST_CHAR && ch < FONT_FIRST_CHAR + FONT_NUM_CHARS) {
                 stbtt_aligned_quad quad;
-                stbtt_GetBakedQuad(font->char_data, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
+                stbtt_GetBakedQuad(font->char_data, font->atlas_size, font->atlas_size,
                     (int)ch - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, 0);
 
                 SDL_Rect src;
-                src.x = (int)(quad.s0 * (float)FONT_ATLAS_SIZE);
-                src.y = (int)(quad.t0 * (float)FONT_ATLAS_SIZE);
-                src.w = (int)((quad.s1 - quad.s0) * (float)FONT_ATLAS_SIZE);
-                src.h = (int)((quad.t1 - quad.t0) * (float)FONT_ATLAS_SIZE);
+                src.x = (int)(quad.s0 * (float)font->atlas_size);
+                src.y = (int)(quad.t0 * (float)font->atlas_size);
+                src.w = (int)((quad.s1 - quad.s0) * (float)font->atlas_size);
+                src.h = (int)((quad.t1 - quad.t0) * (float)font->atlas_size);
 
                 SDL_FRect dst;
-                dst.x = quad.x0;
-                dst.y = quad.y0;
-                dst.w = quad.x1 - quad.x0;
-                dst.h = quad.y1 - quad.y0;
+                dst.x = quad.x0 / pixel_scale;
+                dst.y = quad.y0 / pixel_scale;
+                dst.w = (quad.x1 - quad.x0) / pixel_scale;
+                dst.h = (quad.y1 - quad.y0) / pixel_scale;
 
                 if (src.w > 0 && src.h > 0 && dst.w > 0.0f && dst.h > 0.0f) {
                     SDL_RenderCopyF(g_renderer, font->sdl_texture, &src, &dst);
@@ -5243,9 +5735,12 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
 
     glBegin(GL_QUADS);
 
-    float pos_x = x;
-    float pos_y = y + stasis_font_top_to_baseline(font);
-    const float line_height = stasis_font_line_height(font);
+    const float pixel_scale = font->pixel_scale;
+    float pos_x = x * pixel_scale;
+    float pos_y = y * pixel_scale + (float)font->ascent * font->scale;
+    const float start_x = pos_x;
+    const float line_height =
+        (float)(font->ascent - font->descent + font->line_gap) * font->scale;
 
     while (*text) {
         int c = (unsigned char)*text;
@@ -5254,20 +5749,20 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
             continue;
         }
         if (c == '\n') {
-            pos_x = x;
+            pos_x = start_x;
             pos_y += line_height;
             text++;
             continue;
         }
         if (c >= FONT_FIRST_CHAR && c < FONT_FIRST_CHAR + FONT_NUM_CHARS) {
             stbtt_aligned_quad quad;
-            stbtt_GetBakedQuad(font->char_data, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
+            stbtt_GetBakedQuad(font->char_data, font->atlas_size, font->atlas_size,
                               c - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, 1);
 
-            glTexCoord2f(quad.s0, quad.t0); glVertex2f(quad.x0, quad.y0);
-            glTexCoord2f(quad.s1, quad.t0); glVertex2f(quad.x1, quad.y0);
-            glTexCoord2f(quad.s1, quad.t1); glVertex2f(quad.x1, quad.y1);
-            glTexCoord2f(quad.s0, quad.t1); glVertex2f(quad.x0, quad.y1);
+            glTexCoord2f(quad.s0, quad.t0); glVertex2f(quad.x0 / pixel_scale, quad.y0 / pixel_scale);
+            glTexCoord2f(quad.s1, quad.t0); glVertex2f(quad.x1 / pixel_scale, quad.y0 / pixel_scale);
+            glTexCoord2f(quad.s1, quad.t1); glVertex2f(quad.x1 / pixel_scale, quad.y1 / pixel_scale);
+            glTexCoord2f(quad.s0, quad.t1); glVertex2f(quad.x0 / pixel_scale, quad.y1 / pixel_scale);
         }
         text++;
     }
@@ -5282,11 +5777,11 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
 /* Measure text width for layout */
 STASIS_EXPORT float stasis_measure_text(int font_handle, const char* text) {
     if (font_handle <= 0 || font_handle > MAX_FONTS || !text) return 0.0f;
+    if (!stasis_ensure_font_ready(font_handle)) return 0.0f;
 
     StasisFont* font = &g_fonts[font_handle - 1];
     if (!font->active) return 0.0f;
 
-    float width = 0.0f;
     float pos_x = 0.0f, pos_y = 0.0f;
 
     while (*text) {
@@ -5297,11 +5792,11 @@ STASIS_EXPORT float stasis_measure_text(int font_handle, const char* text) {
         }
         if (c >= FONT_FIRST_CHAR && c < FONT_FIRST_CHAR + FONT_NUM_CHARS) {
             stbtt_aligned_quad quad;
-            stbtt_GetBakedQuad(font->char_data, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE,
+            stbtt_GetBakedQuad(font->char_data, font->atlas_size, font->atlas_size,
                               c - FONT_FIRST_CHAR, &pos_x, &pos_y, &quad, g_use_sdl_renderer ? 0 : 1);
         }
         text++;
     }
 
-    return pos_x;
+    return pos_x / font->pixel_scale;
 }

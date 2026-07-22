@@ -41,9 +41,9 @@ if "%VCPKG_TRIPLET%"=="" (
     set VCPKG_TRIPLET=x64-windows-static
 )
 
-:: Install SDL2 + SDL2_image + GLEW for the chosen triplet
-echo Checking for SDL2/SDL2_image/GLEW with triplet %VCPKG_TRIPLET%...
-%VCPKG_ROOT%\vcpkg install sdl2:%VCPKG_TRIPLET% sdl2-image:%VCPKG_TRIPLET% glew:%VCPKG_TRIPLET% --recurse
+:: Shipping builds use the same SDL renderer process on desktop and mobile.
+echo Checking for SDL2/SDL2_image with triplet %VCPKG_TRIPLET%...
+%VCPKG_ROOT%\vcpkg install sdl2:%VCPKG_TRIPLET% sdl2-image:%VCPKG_TRIPLET% --recurse
 if %ERRORLEVEL% neq 0 (
     echo Error: vcpkg install failed.
     exit /b 1
@@ -129,7 +129,7 @@ echo.
 echo Copying static dependency libs to build\\Release for single-exe links...
 set "STATIC_LIB_DIR=%VCPKG_ROOT%\\installed\\%VCPKG_TRIPLET%\\lib"
 set "MANUAL_LIB_DIR=%STATIC_LIB_DIR%\\manual-link"
-for %%F in (SDL2-static.lib libglew32.lib OpenGL32.Lib GlU32.Lib) do (
+for %%F in (SDL2-static.lib) do (
     if exist "%STATIC_LIB_DIR%\\%%F" (
         copy /Y "%STATIC_LIB_DIR%\\%%F" "%BUILD_DIR%\\Release" >NUL
     ) else (

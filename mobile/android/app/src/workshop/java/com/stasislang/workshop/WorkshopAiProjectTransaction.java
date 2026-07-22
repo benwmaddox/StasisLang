@@ -5,6 +5,7 @@ import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -46,6 +47,20 @@ final class WorkshopAiProjectTransaction {
         for (Map.Entry<String, String> entry : snapshot.editableFiles.entrySet()) {
             writeAtomic(safeFile(projectRoot, entry.getKey()), entry.getValue());
         }
+    }
+
+    static String fingerprint(Snapshot snapshot) throws Exception {
+        if (snapshot == null) throw new IllegalArgumentException("AI transaction snapshot is missing");
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        for (Map.Entry<String, String> entry : snapshot.editableFiles.entrySet()) {
+            digest.update(entry.getKey().getBytes(StandardCharsets.UTF_8));
+            digest.update((byte)0);
+            digest.update(entry.getValue().getBytes(StandardCharsets.UTF_8));
+            digest.update((byte)0xff);
+        }
+        StringBuilder result = new StringBuilder(64);
+        for (byte value : digest.digest()) result.append(String.format("%02x", value & 0xff));
+        return result.toString();
     }
 
     private static List<File> editableFiles(File projectRoot) throws Exception {
