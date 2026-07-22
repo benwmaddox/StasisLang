@@ -28,6 +28,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private int fallbackTexture;
     private long manifestStamp = Long.MIN_VALUE;
     private long nextManifestCheckNanos;
+    private float rasterScale = 1.0f;
+    private int densityGeneration = -1;
 
     WorkshopTextureProvider(MainActivity activity) {
         this.activity = activity;
@@ -57,6 +59,15 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     }
 
     @Override
+    public void onDisplayMetricsChanged(float nextRasterScale, int nextDensityGeneration) {
+        if (densityGeneration == nextDensityGeneration
+                && Math.abs(rasterScale - nextRasterScale) < 0.001f) return;
+        clearTextures();
+        rasterScale = nextRasterScale;
+        densityGeneration = nextDensityGeneration;
+    }
+
+    @Override
     public int textureFor(int handle) {
         SpriteTexture cached = textures.get(handle);
         if (cached != null && cached.checkedManifestStamp == manifestStamp) {
@@ -73,7 +84,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                 cached.checkedManifestStamp = manifestStamp;
                 return cached.texture;
             }
-            Bitmap bitmap = decode(resolved);
+            Bitmap bitmap = decode(resolved, rasterScale);
             int uploaded;
             try {
                 uploaded = upload(bitmap);
@@ -112,7 +123,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             }
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
             paint.setColor(0xffffffff);
-            paint.setTextSize(resolved.getInt("font_size"));
+            paint.setTextSize(resolved.getInt("font_size") * rasterScale);
             paint.setTypeface(Typeface.createFromFile(resolved.getString("font_path")));
             String text = resolved.getString("text");
             Paint.FontMetrics metrics = paint.getFontMetrics();
@@ -126,9 +137,11 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             } finally {
                 bitmap.recycle();
             }
-            cached = new TextTexture(texture, width, height);
+            cached = new TextTexture(texture,
+                    Math.max(1, Math.round(width / rasterScale)),
+                    Math.max(1, Math.round(height / rasterScale)));
             textTextures.put(runHandle, cached);
-            return StasisPreviewRenderer.packTexture(texture, width, height);
+            return StasisPreviewRenderer.packTexture(texture, cached.width, cached.height);
         } catch (Exception error) {
             activity.reportPreviewResourceError("cached text " + runHandle + ": " + error.getMessage());
             return 0L;
@@ -150,7 +163,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             byte[] bytes = new byte[length];
             for (int index = 0; index < length; index += 1) bytes[index] = utf8.get(offset + index);
             FontInfo fontInfo = fontInfo(font);
-            TextTexture texture = rasterText(fontInfo, new String(bytes, StandardCharsets.UTF_8));
+            TextTexture texture = rasterText(
+                    fontInfo, new String(bytes, StandardCharsets.UTF_8), rasterScale);
             dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
             return StasisPreviewRenderer.packTexture(texture.texture, texture.width, texture.height);
         } catch (Exception error) {
@@ -181,10 +195,10 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         return cached;
     }
 
-    private static TextTexture rasterText(FontInfo font, String text) {
+    private static TextTexture rasterText(FontInfo font, String text, float rasterScale) {
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         paint.setColor(0xffffffff);
-        paint.setTextSize(font.size);
+        paint.setTextSize(font.size * rasterScale);
         paint.setTypeface(font.typeface);
         Paint.FontMetrics metrics = paint.getFontMetrics();
         int width = Math.max(1, (int)Math.ceil(paint.measureText(text)));
@@ -199,7 +213,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         } finally {
             bitmap.recycle();
         }
-        return new TextTexture(texture, width, height);
+        return new TextTexture(texture,
+                Math.max(1, Math.round(width / rasterScale)),
+                Math.max(1, Math.round(height / rasterScale)));
     }
 
     static boolean projectChanged(String boundRoot, String currentRoot) {
@@ -234,10 +250,14 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         GLES20.glDeleteTextures(1, deletedTexture, 0);
     }
 
-    private static Bitmap decode(JSONObject resolved) throws Exception {
+    private static Bitmap decode(JSONObject resolved, float rasterScale) throws Exception {
         String encoding = resolved.getString("encoding");
         int width = resolved.getInt("width");
         int height = resolved.getInt("height");
+        if ("svg".equals(encoding)) {
+            width = Math.max(1, (int)Math.ceil(width * rasterScale));
+            height = Math.max(1, (int)Math.ceil(height * rasterScale));
+        }
         long pixels = (long)width * height;
         if (width <= 0 || height <= 0 || width > 16384 || height > 16384
                 || pixels > 16_000_000L) {

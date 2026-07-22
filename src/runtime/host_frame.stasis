@@ -36,6 +36,21 @@ const HOST_I_WINDOW_FOCUSED: i32 = 17;
 const HOST_I_WINDOW_MINIMIZED: i32 = 18;
 const HOST_I_TIME_US: i32 = 19;
 
+// Display metrics. Window width/height remain compatibility aliases for the
+// logical canvas; native and drawable extents may change independently.
+const HOST_I_LOGICAL_W_PX: i32 = 20;
+const HOST_I_LOGICAL_H_PX: i32 = 21;
+const HOST_I_NATIVE_W_PX: i32 = 22;
+const HOST_I_NATIVE_H_PX: i32 = 23;
+const HOST_I_DRAWABLE_W_PX: i32 = 24;
+const HOST_I_DRAWABLE_H_PX: i32 = 25;
+const HOST_I_SAFE_X_PX: i32 = 26;
+const HOST_I_SAFE_Y_PX: i32 = 27;
+const HOST_I_SAFE_W_PX: i32 = 28;
+const HOST_I_SAFE_H_PX: i32 = 29;
+const HOST_I_DISPLAY_GENERATION: i32 = 30;
+const HOST_I_DENSITY_GENERATION: i32 = 31;
+
 // Keyboard state (SDL scancodes), one i32 per scancode (0/1).
 const HOST_I_KEY_BASE: i32 = 32;
 const HOST_I_KEY_COUNT: i32 = 512;
@@ -48,6 +63,8 @@ const HOST_I32_COUNT: i32 = 768;
 // f32 layout
 const HOST_F_POINTER_BASE: i32 = 0;
 const HOST_F_POINTER_STRIDE: i32 = 6; // x_px, y_px, dx_px, dy_px, x_n, y_n
+const HOST_F_CONTENT_SCALE: i32 = 48;
+const HOST_F_RASTER_SCALE: i32 = 49;
 const HOST_F32_COUNT: i32 = 64;
 
 global host_i32: i32[768];
@@ -77,6 +94,20 @@ function host_tick_hz(): i32 { return host_i32[HOST_I_TICK_HZ]; }
 function host_window_focused(): bool { return host_i32[HOST_I_WINDOW_FOCUSED] != 0; }
 function host_window_minimized(): bool { return host_i32[HOST_I_WINDOW_MINIMIZED] != 0; }
 function host_time_us(): i32 { return host_i32[HOST_I_TIME_US]; }
+function host_logical_w_px(): i32 { return host_i32[HOST_I_LOGICAL_W_PX]; }
+function host_logical_h_px(): i32 { return host_i32[HOST_I_LOGICAL_H_PX]; }
+function host_native_w_px(): i32 { return host_i32[HOST_I_NATIVE_W_PX]; }
+function host_native_h_px(): i32 { return host_i32[HOST_I_NATIVE_H_PX]; }
+function host_drawable_w_px(): i32 { return host_i32[HOST_I_DRAWABLE_W_PX]; }
+function host_drawable_h_px(): i32 { return host_i32[HOST_I_DRAWABLE_H_PX]; }
+function host_safe_x_px(): i32 { return host_i32[HOST_I_SAFE_X_PX]; }
+function host_safe_y_px(): i32 { return host_i32[HOST_I_SAFE_Y_PX]; }
+function host_safe_w_px(): i32 { return host_i32[HOST_I_SAFE_W_PX]; }
+function host_safe_h_px(): i32 { return host_i32[HOST_I_SAFE_H_PX]; }
+function host_display_generation(): i32 { return host_i32[HOST_I_DISPLAY_GENERATION]; }
+function host_density_generation(): i32 { return host_i32[HOST_I_DENSITY_GENERATION]; }
+function host_content_scale(): f32 { return host_f32[HOST_F_CONTENT_SCALE]; }
+function host_raster_scale(): f32 { return host_f32[HOST_F_RASTER_SCALE]; }
 
 function host_key_down(scancode: i32): bool {
     if (scancode < 0 || scancode >= 512) { return false; }

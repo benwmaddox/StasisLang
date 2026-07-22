@@ -5,7 +5,7 @@ import "../stdlib/stdlib.stasis";
 //
 // Policy:
 // - Ordering: fixed by field order in this layout: clear -> lines -> sprites -> present.
-// - Coordinates: host pixels.
+// - Coordinates: logical top-left pixels from the HostFrame display contract.
 
 const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
 const GFX_CMD_VERSION: i32 = 1;
@@ -21,6 +21,20 @@ const GFX_I_DROPPED_SPRITES: i32 = 6;
 const GFX_I_TEXT_COUNT: i32 = 7;
 const GFX_I_DROPPED_TEXT: i32 = 8;
 const GFX_I_TEXT_BYTES_USED: i32 = 9;
+// Host-populated display metadata. Guest frame construction leaves these
+// reserved slots untouched; they are not part of the command trace.
+const GFX_I_LOGICAL_W: i32 = 10;
+const GFX_I_LOGICAL_H: i32 = 11;
+const GFX_I_NATIVE_W: i32 = 12;
+const GFX_I_NATIVE_H: i32 = 13;
+const GFX_I_DRAWABLE_W: i32 = 14;
+const GFX_I_DRAWABLE_H: i32 = 15;
+const GFX_I_SAFE_X: i32 = 16;
+const GFX_I_SAFE_Y: i32 = 17;
+const GFX_I_SAFE_W: i32 = 18;
+const GFX_I_SAFE_H: i32 = 19;
+const GFX_I_DISPLAY_GENERATION: i32 = 20;
+const GFX_I_DENSITY_GENERATION: i32 = 21;
 const GFX_I_SPRITE_BASE: i32 = 32;
 
 // flags

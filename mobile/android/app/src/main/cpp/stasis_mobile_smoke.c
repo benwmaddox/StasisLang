@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include "stasis_display_scale.h"
 #include "stasis_render_contract.h"
 #include "stasis_mobile_aot_runtime.h"
 #if STASIS_ANDROID_PUBLISHED_AOT
@@ -499,6 +500,10 @@ static int32_t published_previous_touch_x;
 static int32_t published_previous_touch_y;
 static int32_t published_previous_touch_active;
 static int32_t published_has_previous_input;
+static StasisDisplayMetrics published_display_metrics;
+static int32_t published_display_generation;
+static int32_t published_density_generation;
+static float published_previous_raster_scale;
 
 static int32_t stasis_published_hash_path(const char *path) {
     uint32_t hash = 2166136261U;
@@ -511,32 +516,87 @@ static int32_t stasis_published_hash_path(const char *path) {
 
 static void stasis_published_write_host_frame(
         int touch_x, int touch_y, int touch_active, int screen_w, int screen_h) {
+    int logical_w = stasis_jit_global_i32_load(
+            stasis_published_hash_path("host_req_window_w_px"));
+    int logical_h = stasis_jit_global_i32_load(
+            stasis_published_hash_path("host_req_window_h_px"));
+    if (logical_w <= 0) logical_w = screen_w;
+    if (logical_h <= 0) logical_h = screen_h;
+    StasisDisplayViewport safe = {0.0f, 0.0f, (float)screen_w, (float)screen_h};
+    StasisDisplayMetrics next = stasis_display_metrics(
+            logical_w, logical_h, screen_w, screen_h, screen_w, screen_h, safe);
+    int32_t display_changed = published_display_generation == 0 ||
+            next.logical_w != published_display_metrics.logical_w ||
+            next.logical_h != published_display_metrics.logical_h ||
+            next.native_w != published_display_metrics.native_w ||
+            next.native_h != published_display_metrics.native_h;
+    if (display_changed) {
+        published_display_generation++;
+    }
+    if (published_density_generation == 0 ||
+            fabsf(next.raster_scale - published_previous_raster_scale) > 0.001f) {
+        published_density_generation++;
+        published_previous_raster_scale = next.raster_scale;
+    }
+    published_display_metrics = next;
+    float logical_touch_x = 0.0f;
+    float logical_touch_y = 0.0f;
+    stasis_display_native_to_logical_xy(
+            &published_display_metrics, (float)touch_x, (float)touch_y,
+            &logical_touch_x, &logical_touch_y);
+    logical_touch_x = stasis_display_clampf(logical_touch_x, 0.0f, (float)logical_w);
+    logical_touch_y = stasis_display_clampf(logical_touch_y, 0.0f, (float)logical_h);
+    float previous_logical_x = logical_touch_x;
+    float previous_logical_y = logical_touch_y;
+    if (published_has_previous_input) {
+        stasis_display_native_to_logical_xy(
+                &published_display_metrics,
+                (float)published_previous_touch_x, (float)published_previous_touch_y,
+                &previous_logical_x, &previous_logical_y);
+        previous_logical_x = stasis_display_clampf(
+                previous_logical_x, 0.0f, (float)logical_w);
+        previous_logical_y = stasis_display_clampf(
+                previous_logical_y, 0.0f, (float)logical_h);
+    }
     int32_t was_down = published_has_previous_input && published_previous_touch_active != 0;
     int32_t is_down = touch_active != 0;
     published_host_i32[0] = stasis_get_time_ms();
-    published_host_i32[1] = screen_w;
-    published_host_i32[2] = screen_h;
-    published_host_i32[5] = screen_w;
-    published_host_i32[6] = screen_h;
+    published_host_i32[1] = logical_w;
+    published_host_i32[2] = logical_h;
+    published_host_i32[5] = logical_w;
+    published_host_i32[6] = logical_h;
     published_host_i32[7] = 1;
+    published_host_i32[11] = display_changed;
     published_host_i32[12] = screen_w;
     published_host_i32[13] = screen_h;
-    published_host_i32[14] = 1;
+    published_host_i32[14] = 2;
     published_host_i32[16] = 60;
     published_host_i32[17] = 1;
     published_host_i32[19] = stasis_get_time_us();
+    published_host_i32[20] = logical_w;
+    published_host_i32[21] = logical_h;
+    published_host_i32[22] = screen_w;
+    published_host_i32[23] = screen_h;
+    published_host_i32[24] = screen_w;
+    published_host_i32[25] = screen_h;
+    published_host_i32[26] = 0;
+    published_host_i32[27] = 0;
+    published_host_i32[28] = logical_w;
+    published_host_i32[29] = logical_h;
+    published_host_i32[30] = published_display_generation;
+    published_host_i32[31] = published_density_generation;
     published_host_i32[544] = 0;
     published_host_i32[545] = is_down;
     published_host_i32[546] = is_down && !was_down;
     published_host_i32[547] = !is_down && was_down;
-    published_host_f32[0] = (float)touch_x;
-    published_host_f32[1] = (float)touch_y;
-    published_host_f32[2] = published_has_previous_input
-            ? (float)(touch_x - published_previous_touch_x) : 0.0f;
-    published_host_f32[3] = published_has_previous_input
-            ? (float)(touch_y - published_previous_touch_y) : 0.0f;
-    published_host_f32[4] = screen_w > 0 ? (float)touch_x / (float)screen_w : 0.0f;
-    published_host_f32[5] = screen_h > 0 ? (float)touch_y / (float)screen_h : 0.0f;
+    published_host_f32[0] = logical_touch_x;
+    published_host_f32[1] = logical_touch_y;
+    published_host_f32[2] = logical_touch_x - previous_logical_x;
+    published_host_f32[3] = logical_touch_y - previous_logical_y;
+    published_host_f32[4] = logical_w > 0 ? logical_touch_x / (float)logical_w : 0.0f;
+    published_host_f32[5] = logical_h > 0 ? logical_touch_y / (float)logical_h : 0.0f;
+    published_host_f32[48] = published_display_metrics.content_scale;
+    published_host_f32[49] = published_display_metrics.raster_scale;
     published_previous_touch_x = touch_x;
     published_previous_touch_y = touch_y;
     published_previous_touch_active = touch_active;
@@ -584,7 +644,20 @@ static int stasis_published_run_tick_frame_v1(
     if (STASIS_AOT_TICK() != 0 || STASIS_AOT_RENDER() != 0) return -1;
     if (published_resource_error[0] != '\0') return -1;
     published_host_i32[10] += 1;
-    return stasis_render_v1_is_valid(out_i32) ? 0 : -1;
+    if (!stasis_render_v1_is_valid(out_i32)) return -1;
+    out_i32[STASIS_RENDER_I_LOGICAL_W] = published_display_metrics.logical_w;
+    out_i32[STASIS_RENDER_I_LOGICAL_H] = published_display_metrics.logical_h;
+    out_i32[STASIS_RENDER_I_NATIVE_W] = published_display_metrics.native_w;
+    out_i32[STASIS_RENDER_I_NATIVE_H] = published_display_metrics.native_h;
+    out_i32[STASIS_RENDER_I_DRAWABLE_W] = published_display_metrics.drawable_w;
+    out_i32[STASIS_RENDER_I_DRAWABLE_H] = published_display_metrics.drawable_h;
+    out_i32[STASIS_RENDER_I_SAFE_X] = 0;
+    out_i32[STASIS_RENDER_I_SAFE_Y] = 0;
+    out_i32[STASIS_RENDER_I_SAFE_W] = published_display_metrics.logical_w;
+    out_i32[STASIS_RENDER_I_SAFE_H] = published_display_metrics.logical_h;
+    out_i32[STASIS_RENDER_I_DISPLAY_GENERATION] = published_display_generation;
+    out_i32[STASIS_RENDER_I_DENSITY_GENERATION] = published_density_generation;
+    return 0;
 }
 #endif
 static char *read_file_text(const char *path, long *size_out);
@@ -1853,15 +1926,30 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
         values_i32[0] = -1;
     } else {
         static int32_t *last_traced_frame;
-        if (last_traced_frame != values_i32) {
+        static int32_t last_display_generation = -1;
+        static int32_t last_density_generation = -1;
+        if (last_traced_frame != values_i32 ||
+                last_display_generation != values_i32[STASIS_RENDER_I_DISPLAY_GENERATION] ||
+                last_density_generation != values_i32[STASIS_RENDER_I_DENSITY_GENERATION]) {
             uint32_t trace = stasis_render_v1_trace(values_i32, values_f32, values_u8);
             __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG,
-                    "Stasis preview gfx_cmd v1 trace=%u flags=%d lines=%d sprites=%d text=%d",
+                    "Stasis preview gfx_cmd v1 trace=%u flags=%d lines=%d sprites=%d text=%d "
+                    "logical=%dx%d native=%dx%d drawable=%dx%d display_gen=%d density_gen=%d",
                     trace, values_i32[STASIS_RENDER_I_FLAGS],
                     values_i32[STASIS_RENDER_I_LINE_COUNT],
                     values_i32[STASIS_RENDER_I_SPRITE_COUNT],
-                    values_i32[STASIS_RENDER_I_TEXT_COUNT]);
+                    values_i32[STASIS_RENDER_I_TEXT_COUNT],
+                    values_i32[STASIS_RENDER_I_LOGICAL_W],
+                    values_i32[STASIS_RENDER_I_LOGICAL_H],
+                    values_i32[STASIS_RENDER_I_NATIVE_W],
+                    values_i32[STASIS_RENDER_I_NATIVE_H],
+                    values_i32[STASIS_RENDER_I_DRAWABLE_W],
+                    values_i32[STASIS_RENDER_I_DRAWABLE_H],
+                    values_i32[STASIS_RENDER_I_DISPLAY_GENERATION],
+                    values_i32[STASIS_RENDER_I_DENSITY_GENERATION]);
             last_traced_frame = values_i32;
+            last_display_generation = values_i32[STASIS_RENDER_I_DISPLAY_GENERATION];
+            last_density_generation = values_i32[STASIS_RENDER_I_DENSITY_GENERATION];
         }
     }
     return (jint)status;

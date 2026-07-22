@@ -47,6 +47,71 @@ pub struct AndroidBridgeTickInput {
     pub screen_h: i32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AndroidDisplayMetrics {
+    logical_w: i32,
+    logical_h: i32,
+    native_w: i32,
+    native_h: i32,
+    drawable_w: i32,
+    drawable_h: i32,
+    viewport_x: f32,
+    viewport_y: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+    content_scale: f32,
+    raster_scale: f32,
+}
+
+impl AndroidDisplayMetrics {
+    fn new(logical_w: i32, logical_h: i32, native_w: i32, native_h: i32) -> Self {
+        let logical_w = logical_w.max(1);
+        let logical_h = logical_h.max(1);
+        let native_w = native_w.max(1);
+        let native_h = native_h.max(1);
+        let fit_scale =
+            (native_w as f32 / logical_w as f32).min(native_h as f32 / logical_h as f32);
+        let viewport_w = (logical_w as f32 * fit_scale).round().max(1.0);
+        let viewport_h = (logical_h as f32 * fit_scale).round().max(1.0);
+        let viewport_x = ((native_w as i32 - viewport_w as i32) / 2) as f32;
+        let viewport_y = ((native_h as i32 - viewport_h as i32) / 2) as f32;
+        let content_scale = (viewport_w / logical_w as f32).min(viewport_h / logical_h as f32);
+        Self {
+            logical_w,
+            logical_h,
+            native_w,
+            native_h,
+            drawable_w: native_w,
+            drawable_h: native_h,
+            viewport_x,
+            viewport_y,
+            viewport_w,
+            viewport_h,
+            content_scale,
+            raster_scale: content_scale.clamp(1.0, 8.0),
+        }
+    }
+
+    fn native_to_logical(self, x: i32, y: i32) -> (f32, f32) {
+        let x = ((x as f32 - self.viewport_x) * self.logical_w as f32 / self.viewport_w)
+            .clamp(0.0, self.logical_w as f32);
+        let y = ((y as f32 - self.viewport_y) * self.logical_h as f32 / self.viewport_h)
+            .clamp(0.0, self.logical_h as f32);
+        (x, y)
+    }
+
+    fn signature(self) -> [i32; 6] {
+        [
+            self.logical_w,
+            self.logical_h,
+            self.native_w,
+            self.native_h,
+            self.drawable_w,
+            self.drawable_h,
+        ]
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AndroidBridgeRenderCommand {
     pub kind: i32,
@@ -83,6 +148,11 @@ struct AndroidRuntimeSession {
     pending_resource_catalog: Option<EmbeddedResourceCatalog>,
     tick_count: i32,
     previous_input: Option<AndroidBridgeTickInput>,
+    display_metrics: AndroidDisplayMetrics,
+    display_signature: [i32; 6],
+    display_generation: i32,
+    density_scale_bits: u32,
+    density_generation: i32,
 }
 
 thread_local! {
@@ -873,31 +943,36 @@ fn run_android_workshop_tick_internal(
         if swapped_code {
             recompiled = true;
         }
-        write_production_host_frame(session, input)?;
         let initialized = if session.initialized {
             false
         } else {
+            write_production_host_frame(session, input)?;
             execute_lifecycle_noarg(&session.jit, "main")?;
             take_embedded_resource_error()?;
             session.initialized = true;
+            session.previous_input = None;
+            session.display_generation = 0;
+            session.density_generation = 0;
             true
         };
+        let metrics = write_production_host_frame(session, input)?;
         if read_legacy_render_commands {
+            let (touch_x, touch_y) = metrics.native_to_logical(input.touch_x, input.touch_y);
             session
                 .jit
-                .write_i32_global_path("Input.touch_x", input.touch_x);
+                .write_i32_global_path("Input.touch_x", touch_x.round() as i32);
             session
                 .jit
-                .write_i32_global_path("Input.touch_y", input.touch_y);
+                .write_i32_global_path("Input.touch_y", touch_y.round() as i32);
             session
                 .jit
                 .write_i32_global_path("Input.touch_active", input.touch_active);
             session
                 .jit
-                .write_i32_global_path("Input.screen_w", input.screen_w);
+                .write_i32_global_path("Input.screen_w", metrics.logical_w);
             session
                 .jit
-                .write_i32_global_path("Input.screen_h", input.screen_h);
+                .write_i32_global_path("Input.screen_h", metrics.logical_h);
         }
         execute_lifecycle_noarg(&session.jit, "tick")?;
         session.tick_count = session.tick_count.saturating_add(1);
@@ -953,7 +1028,7 @@ fn hash_global_path(path: &str) -> i32 {
 fn write_production_host_frame(
     session: &mut AndroidRuntimeSession,
     input: AndroidBridgeTickInput,
-) -> Result<(), String> {
+) -> Result<AndroidDisplayMetrics, String> {
     const HOST_I32_COUNT: i32 = 768;
     const HOST_F32_COUNT: i32 = 64;
     const POINTER_I32_BASE: usize = 544;
@@ -972,50 +1047,117 @@ fn write_production_host_frame(
     }
     let host_i32 = unsafe { std::slice::from_raw_parts_mut(host_i32_ptr, HOST_I32_COUNT as usize) };
     let host_f32 = unsafe { std::slice::from_raw_parts_mut(host_f32_ptr, HOST_F32_COUNT as usize) };
+    let requested_w = session.jit.read_i32_global_path("host_req_window_w_px");
+    let requested_h = session.jit.read_i32_global_path("host_req_window_h_px");
+    let metrics = AndroidDisplayMetrics::new(
+        if requested_w > 0 {
+            requested_w
+        } else {
+            input.screen_w
+        },
+        if requested_h > 0 {
+            requested_h
+        } else {
+            input.screen_h
+        },
+        input.screen_w,
+        input.screen_h,
+    );
+    let signature = metrics.signature();
+    let resized = session.display_generation == 0 || signature != session.display_signature;
+    if resized {
+        session.display_generation = session.display_generation.saturating_add(1);
+        session.display_signature = signature;
+    }
+    let raster_scale_bits = metrics.raster_scale.to_bits();
+    if session.density_generation == 0 || raster_scale_bits != session.density_scale_bits {
+        session.density_generation = session.density_generation.saturating_add(1);
+        session.density_scale_bits = raster_scale_bits;
+    }
+    session.display_metrics = metrics;
+
     let previous = session.previous_input;
     let was_down = previous.is_some_and(|value| value.touch_active != 0);
     let is_down = input.touch_active != 0;
+    let (touch_x, touch_y) = metrics.native_to_logical(input.touch_x, input.touch_y);
+    let (previous_x, previous_y) = previous.map_or((touch_x, touch_y), |value| {
+        metrics.native_to_logical(value.touch_x, value.touch_y)
+    });
     host_i32[0] = stasis_dynload::stasis_get_time_ms();
-    host_i32[1] = input.screen_w;
-    host_i32[2] = input.screen_h;
+    host_i32[1] = metrics.logical_w;
+    host_i32[2] = metrics.logical_h;
     host_i32[3] = 0;
     host_i32[4] = 0;
-    host_i32[5] = input.screen_w;
-    host_i32[6] = input.screen_h;
+    host_i32[5] = metrics.logical_w;
+    host_i32[6] = metrics.logical_h;
     host_i32[7] = 1;
     host_i32[8] = 0;
     host_i32[9] = 0;
     host_i32[10] = session.tick_count;
-    host_i32[11] = 0;
-    host_i32[12] = input.screen_w;
-    host_i32[13] = input.screen_h;
-    host_i32[14] = 1;
+    host_i32[11] = i32::from(resized);
+    host_i32[12] = metrics.native_w;
+    host_i32[13] = metrics.native_h;
+    host_i32[14] = 2;
     host_i32[15] = 0;
     host_i32[16] = 60;
     host_i32[17] = 1;
     host_i32[18] = 0;
     host_i32[19] = stasis_dynload::stasis_get_time_us();
+    host_i32[20] = metrics.logical_w;
+    host_i32[21] = metrics.logical_h;
+    host_i32[22] = metrics.native_w;
+    host_i32[23] = metrics.native_h;
+    host_i32[24] = metrics.drawable_w;
+    host_i32[25] = metrics.drawable_h;
+    host_i32[26] = 0;
+    host_i32[27] = 0;
+    host_i32[28] = metrics.logical_w;
+    host_i32[29] = metrics.logical_h;
+    host_i32[30] = session.display_generation;
+    host_i32[31] = session.density_generation;
     host_i32[POINTER_I32_BASE] = 0;
     host_i32[POINTER_I32_BASE + 1] = i32::from(is_down);
     host_i32[POINTER_I32_BASE + 2] = i32::from(is_down && !was_down);
     host_i32[POINTER_I32_BASE + 3] = i32::from(!is_down && was_down);
-    let previous_x = previous.map_or(input.touch_x, |value| value.touch_x);
-    let previous_y = previous.map_or(input.touch_y, |value| value.touch_y);
-    host_f32[0] = input.touch_x as f32;
-    host_f32[1] = input.touch_y as f32;
-    host_f32[2] = (input.touch_x - previous_x) as f32;
-    host_f32[3] = (input.touch_y - previous_y) as f32;
-    host_f32[4] = if input.screen_w > 0 {
-        input.touch_x as f32 / input.screen_w as f32
-    } else {
-        0.0
-    };
-    host_f32[5] = if input.screen_h > 0 {
-        input.touch_y as f32 / input.screen_h as f32
-    } else {
-        0.0
-    };
+    host_f32[0] = touch_x;
+    host_f32[1] = touch_y;
+    host_f32[2] = touch_x - previous_x;
+    host_f32[3] = touch_y - previous_y;
+    host_f32[4] = touch_x / metrics.logical_w as f32;
+    host_f32[5] = touch_y / metrics.logical_h as f32;
+    host_f32[48] = metrics.content_scale;
+    host_f32[49] = metrics.raster_scale;
     session.previous_input = Some(input);
+    Ok(metrics)
+}
+
+fn write_android_display_metadata(out: &mut [i32]) -> Result<(), String> {
+    if out.len() < 22 {
+        return Err("render header is too small for display metadata".to_string());
+    }
+    let (metrics, display_generation, density_generation) = RUNTIME_SESSION.with(|slot| {
+        let slot = slot.borrow();
+        let session = slot
+            .as_ref()
+            .ok_or_else(|| "Android runtime session was not initialized".to_string())?;
+        Ok::<_, String>((
+            session.display_metrics,
+            session.display_generation,
+            session.density_generation,
+        ))
+    })?;
+    out[10] = metrics.logical_w;
+    out[11] = metrics.logical_h;
+    out[12] = metrics.native_w;
+    out[13] = metrics.native_h;
+    out[14] = metrics.drawable_w;
+    out[15] = metrics.drawable_h;
+    out[16] = 0;
+    out[17] = 0;
+    out[18] = metrics.logical_w;
+    out[19] = metrics.logical_h;
+    out[20] = display_generation;
+    out[21] = density_generation;
     Ok(())
 }
 
@@ -1087,6 +1229,7 @@ fn build_runtime_session(
             .map(|diagnostic| format_compiler_source_diagnostic(project_root, diagnostic))
             .unwrap_or_else(|| format!("Android JIT compile failed: {error:?}")));
     }
+    let display_metrics = AndroidDisplayMetrics::new(1, 1, 1, 1);
     Ok(AndroidRuntimeSession {
         project_root: project_root.to_path_buf(),
         source_fingerprint,
@@ -1096,6 +1239,11 @@ fn build_runtime_session(
         pending_resource_catalog: None,
         tick_count: 0,
         previous_input: None,
+        display_metrics,
+        display_signature: display_metrics.signature(),
+        display_generation: 0,
+        density_scale_bits: display_metrics.raster_scale.to_bits(),
+        density_generation: 0,
     })
 }
 
@@ -1869,7 +2017,8 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v1(
         let i32_values = std::slice::from_raw_parts_mut(out_i32, out_i32_len);
         let f32_values = std::slice::from_raw_parts_mut(out_f32, out_f32_len);
         let u8_values = std::slice::from_raw_parts_mut(out_u8, out_u8_len);
-        stasis_dynload::copy_jit_render_v1_active(i32_values, f32_values, u8_values).map(|_| ())
+        stasis_dynload::copy_jit_render_v1_active(i32_values, f32_values, u8_values)?;
+        write_android_display_metadata(i32_values)
     }));
     match result {
         Ok(Ok(())) => {
@@ -2110,6 +2259,46 @@ pub extern "C" fn stasis_android_bridge_free_string(value: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn android_display_metrics_preserve_logical_canvas_and_round_trip_letterbox() {
+        let metrics = AndroidDisplayMetrics::new(360, 720, 1080, 2400);
+        assert_eq!(metrics.logical_w, 360);
+        assert_eq!(metrics.logical_h, 720);
+        assert_eq!(metrics.native_w, 1080);
+        assert_eq!(metrics.drawable_h, 2400);
+        assert!((metrics.content_scale - 3.0).abs() < 0.001);
+        assert!((metrics.raster_scale - 3.0).abs() < 0.001);
+        assert!((metrics.viewport_y - 120.0).abs() < 0.001);
+        let (x, y) = metrics.native_to_logical(540, 1200);
+        assert!((x - 180.0).abs() < 0.001);
+        assert!((y - 360.0).abs() < 0.001);
+
+        let landscape = AndroidDisplayMetrics::new(360, 720, 2400, 1080);
+        assert!((landscape.content_scale - 1.5).abs() < 0.001);
+        assert!((landscape.viewport_x - 930.0).abs() < 0.001);
+        let (outside_x, outside_y) = landscape.native_to_logical(0, 540);
+        assert_eq!(outside_x, 0.0);
+        assert!((outside_y - 360.0).abs() < 0.001);
+
+        let odd = AndroidDisplayMetrics::new(360, 720, 2400, 1081);
+        assert_eq!(odd.viewport_x, 929.0);
+        assert_eq!(odd.viewport_y, 0.0);
+        assert_eq!(odd.viewport_w, 541.0);
+        assert_eq!(odd.viewport_h, 1081.0);
+        let (right, bottom) = odd.native_to_logical(1470, 1081);
+        assert_eq!(right, 360.0);
+        assert_eq!(bottom, 720.0);
+
+        let vertical = AndroidDisplayMetrics::new(360, 720, 1080, 2401);
+        assert_eq!(vertical.viewport_y, 120.0);
+        assert_eq!(vertical.viewport_h, 2160.0);
+
+        let narrow = AndroidDisplayMetrics::new(800, 200, 1, 100);
+        assert_eq!(narrow.viewport_w, 1.0);
+        assert_eq!(narrow.viewport_h, 1.0);
+        assert_eq!(narrow.viewport_y, 49.0);
+    }
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2586,6 +2775,11 @@ mod tests {
             pending_resource_catalog: None,
             tick_count: 0,
             previous_input: None,
+            display_metrics: AndroidDisplayMetrics::new(1, 1, 1, 1),
+            display_signature: [1, 1, 1, 1, 1, 1],
+            display_generation: 0,
+            density_scale_bits: 1.0f32.to_bits(),
+            density_generation: 0,
         };
 
         assert!(activate_pending_runtime_candidate(&mut session)
@@ -3052,10 +3246,12 @@ function render(): void { Render.command_count = 1; Render.command0_kind = 1; Re
             root.join("src/main.stasis"),
             "global host_i32: i32[768];
 global host_f32: f32[64];
+global host_req_window_w_px: i32;
+global host_req_window_h_px: i32;
 global gfx_cmd_i32: i32[34848];
 global gfx_cmd_f32: f32[92292];
 global gfx_cmd_u8: u8[65536];
-function main(): void {}
+function main(): void { host_req_window_w_px = 360; host_req_window_h_px = 720; }
 function tick(): void {}
 function render(): void {
   gfx_cmd_i32[0] = 1196967473;
@@ -3091,11 +3287,11 @@ function render(): void {
         let status = stasis_android_bridge_run_tick_frame_v1(
             root_c.as_ptr(),
             entry_c.as_ptr(),
-            17,
-            23,
+            540,
+            1200,
             1,
-            360,
-            640,
+            1080,
+            2400,
             frame_i32.as_mut_ptr(),
             frame_i32.len(),
             frame_f32.as_mut_ptr(),
@@ -3105,11 +3301,14 @@ function render(): void {
         );
         assert_eq!(status, 0);
         assert_eq!(&frame_i32[..5], &[1196967473, 1, 3, 1, 1]);
+        assert_eq!(&frame_i32[10..16], &[360, 720, 1080, 2400, 1080, 2400]);
+        assert_eq!(&frame_i32[16..20], &[0, 0, 360, 720]);
+        assert_eq!(&frame_i32[20..22], &[1, 1]);
         assert_eq!(frame_i32[32], 77);
         assert_eq!(frame_i32[33], 11);
         assert_eq!(&frame_i32[28704..28707], &[5, 0, 1]);
-        assert_eq!(frame_f32[4], 17.0);
-        assert_eq!(frame_f32[5], 23.0);
+        assert_eq!(frame_f32[4], 180.0);
+        assert_eq!(frame_f32[5], 360.0);
         assert_eq!(frame_f32[80004], 12.0);
         assert_eq!(&frame_u8[..2], &[65, 0]);
         fs::remove_dir_all(&root).ok();

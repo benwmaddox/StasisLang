@@ -20,6 +20,30 @@ public final class StasisPreviewRendererSchemaTest {
     }
 
     @Test
+    public void displayViewportPreservesLogicalCanvasAcrossDensityAndOrientation() {
+        StasisPreviewRenderer.DisplayViewport phone =
+                StasisPreviewRenderer.fitViewport(360, 720, 1080, 2400);
+        assertEquals(0, phone.x);
+        assertEquals(120, phone.y);
+        assertEquals(1080, phone.width);
+        assertEquals(2160, phone.height);
+        assertEquals(3.0f, phone.contentScale, 0.001f);
+        assertEquals(3.0f, phone.rasterScale, 0.001f);
+
+        StasisPreviewRenderer.DisplayViewport fractional =
+                StasisPreviewRenderer.fitViewport(800, 600, 1200, 900);
+        assertEquals(1.5f, fractional.contentScale, 0.001f);
+
+        StasisPreviewRenderer.DisplayViewport landscape =
+                StasisPreviewRenderer.fitViewport(360, 720, 2400, 1080);
+        assertEquals(930, landscape.x);
+        assertEquals(0, landscape.y);
+        assertEquals(540, landscape.width);
+        assertEquals(1080, landscape.height);
+        assertEquals(1.5f, landscape.rasterScale, 0.001f);
+    }
+
+    @Test
     public void validationRequiresProductionMagicAndVersion() {
         IntBuffer frame = IntBuffer.allocate(StasisPreviewRenderer.FRAME_I32_CAPACITY);
         assertFalse(StasisPreviewRenderer.isValidFrame(frame));
@@ -73,6 +97,29 @@ public final class StasisPreviewRendererSchemaTest {
     }
 
     @Test
+    public void oddFractionalViewportMatchesNativeInputRounding() {
+        StasisPreviewRenderer.DisplayViewport viewport =
+                StasisPreviewRenderer.fitViewport(360, 720, 2400, 1081);
+        assertEquals(929, viewport.x);
+        assertEquals(0, viewport.y);
+        assertEquals(541, viewport.width);
+        assertEquals(1081, viewport.height);
+        assertEquals(1081.0f / 720.0f, viewport.contentScale, 0.0001f);
+
+        StasisPreviewRenderer.DisplayViewport vertical =
+                StasisPreviewRenderer.fitViewport(360, 720, 1080, 2401);
+        assertEquals(120, vertical.y);
+        assertEquals(2160, vertical.height);
+        assertEquals(121, 2401 - vertical.y - vertical.height);
+
+        StasisPreviewRenderer.DisplayViewport narrow =
+                StasisPreviewRenderer.fitViewport(800, 200, 1, 100);
+        assertEquals(1, narrow.width);
+        assertEquals(1, narrow.height);
+        assertEquals(49, narrow.y);
+    }
+
+    @Test
     public void logicalSnapshotCopiesOnlyActiveProductionSpans() {
         StasisPreviewRenderer renderer = new StasisPreviewRenderer(
                 new StasisPreviewRenderer.TextureProvider() {
@@ -85,6 +132,9 @@ public final class StasisPreviewRendererSchemaTest {
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_BYTES_USED, 4);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_LOGICAL_W, 360);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_DRAWABLE_H, 2400);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_DENSITY_GENERATION, 7);
         renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_LINE_BASE, 12.5f);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_BASE, 77);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_BASE, 5);
@@ -96,6 +146,10 @@ public final class StasisPreviewRendererSchemaTest {
 
         StasisPreviewRenderer.LogicalFrameSnapshot snapshot = renderer.captureLogicalFrame();
 
+        assertEquals(StasisPreviewRenderer.I_DENSITY_GENERATION + 1, snapshot.header.length);
+        assertEquals(360, snapshot.header[StasisPreviewRenderer.I_LOGICAL_W]);
+        assertEquals(2400, snapshot.header[StasisPreviewRenderer.I_DRAWABLE_H]);
+        assertEquals(7, snapshot.header[StasisPreviewRenderer.I_DENSITY_GENERATION]);
         assertEquals(StasisPreviewRenderer.LINE_F32_STRIDE, snapshot.lines.length);
         assertEquals(12.5f, snapshot.lines[0], 0.0f);
         assertEquals(StasisPreviewRenderer.SPRITE_I32_STRIDE, snapshot.sprites.length);

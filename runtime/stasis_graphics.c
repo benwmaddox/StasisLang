@@ -95,8 +95,9 @@ static int g_native_window_height = 600;
 static int g_drawable_width = 800;
 static int g_drawable_height = 600;
 static float g_pixel_scale = 1.0f;
-static int g_window_prev_width = 800;
-static int g_window_prev_height = 600;
+static StasisDisplayMetrics g_display_metrics;
+static int g_display_generation = 0;
+static int g_density_generation = 0;
 static bool g_window_resized = false;
 static bool g_postfx_enabled = false;
 static bool g_postfx_applied_this_frame = false;
@@ -170,7 +171,7 @@ static SpriteEntry* sprite_fallback_get(void);
 static void stasis_gfx_draw_sprite_internal(int handle, int x, int y, int w, int h, int rot_degrees, int a, int do_hash);
 static void stasis_gfx_draw_sprites_i32_fast(const int32_t* cmds, int sprite_count);
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h);
-static void stasis_sync_display_metrics(int native_resize);
+static void stasis_sync_display_metrics(void);
 static void stasis_reset_text_cache(void);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
@@ -251,6 +252,7 @@ static int stasis_input_valid_index(int idx) {
 }
 
 static void stasis_mark_density_resources_dirty(void) {
+    g_density_generation++;
     for (int i = 0; i < g_sprite_capacity; i++) {
         if (g_sprites[i].used && g_sprites[i].max_w > 0 && g_sprites[i].max_h > 0) {
             g_sprites[i].needs_reraster = 1;
@@ -261,7 +263,7 @@ static void stasis_mark_density_resources_dirty(void) {
     }
 }
 
-static void stasis_sync_display_metrics(int native_resize) {
+static void stasis_sync_display_metrics(void) {
     if (!g_window) return;
 
     int native_w = g_native_window_width;
@@ -269,18 +271,6 @@ static void stasis_sync_display_metrics(int native_resize) {
     SDL_GetWindowSize(g_window, &native_w, &native_h);
     if (native_w > 0) g_native_window_width = native_w;
     if (native_h > 0) g_native_window_height = native_h;
-
-#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
-    if (native_resize && native_w > 0 && native_h > 0) {
-        g_window_prev_width = g_window_width;
-        g_window_prev_height = g_window_height;
-        g_window_width = native_w;
-        g_window_height = native_h;
-        g_window_resized = true;
-    }
-#else
-    (void)native_resize;
-#endif
 
     int drawable_w = native_w;
     int drawable_h = native_h;
@@ -294,33 +284,78 @@ static void stasis_sync_display_metrics(int native_resize) {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     else if (g_gl_context) {
         SDL_GL_GetDrawableSize(g_window, &drawable_w, &drawable_h);
-        glViewport(0, 0, drawable_w, drawable_h);
-        setup_ortho();
     }
 #endif
 
     if (drawable_w <= 0) drawable_w = g_window_width;
     if (drawable_h <= 0) drawable_h = g_window_height;
-    float pixel_scale = stasis_display_pixel_scale(
-        g_window_width, g_window_height, drawable_w, drawable_h);
-    if (fabsf(pixel_scale - g_pixel_scale) > 0.01f) {
-        g_pixel_scale = pixel_scale;
+    StasisDisplayViewport safe_native = {
+        0.0f, 0.0f, (float)g_native_window_width, (float)g_native_window_height};
+    StasisDisplayMetrics next = stasis_display_metrics(
+        g_window_width, g_window_height,
+        g_native_window_width, g_native_window_height,
+        drawable_w, drawable_h, safe_native);
+    const int dimensions_changed =
+        next.native_w != g_display_metrics.native_w ||
+        next.native_h != g_display_metrics.native_h ||
+        next.drawable_w != g_display_metrics.drawable_w ||
+        next.drawable_h != g_display_metrics.drawable_h ||
+        next.logical_w != g_display_metrics.logical_w ||
+        next.logical_h != g_display_metrics.logical_h;
+    const int density_changed =
+        g_density_generation == 0 || fabsf(next.raster_scale - g_pixel_scale) > 0.001f;
+    if (density_changed) {
+        g_pixel_scale = next.raster_scale;
         stasis_mark_density_resources_dirty();
     }
+    if (g_display_generation == 0 || dimensions_changed) {
+        g_display_generation++;
+        g_window_resized = true;
+    }
+    g_display_metrics = next;
     g_drawable_width = drawable_w;
     g_drawable_height = drawable_h;
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (!g_use_sdl_renderer && g_gl_context) {
+        glViewport(
+            (int)floorf(next.drawable_viewport.x),
+            stasis_display_bottom_origin_y(
+                next.drawable_h, next.drawable_viewport),
+            (int)ceilf(next.drawable_viewport.w),
+            (int)ceilf(next.drawable_viewport.h));
+        setup_ortho();
+    }
+#endif
 }
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+static void stasis_gl_clear_rect(int x, int y, int width, int height) {
+    if (width <= 0 || height <= 0) return;
+    glScissor(x, y, width, height);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
+
+static void stasis_gl_clear_letterbox_bars(void) {
+    const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
+    const int left = (int)viewport.x;
+    const int bottom = stasis_display_bottom_origin_y(
+        g_drawable_height, viewport);
+    const int right = left + (int)viewport.w;
+    const int top = bottom + (int)viewport.h;
+    glEnable(GL_SCISSOR_TEST);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    stasis_gl_clear_rect(0, 0, left, g_drawable_height);
+    stasis_gl_clear_rect(right, 0, g_drawable_width - right, g_drawable_height);
+    stasis_gl_clear_rect(0, 0, g_drawable_width, bottom);
+    stasis_gl_clear_rect(0, top, g_drawable_width, g_drawable_height - top);
+    glDisable(GL_SCISSOR_TEST);
+}
+#endif
 
 static void stasis_window_to_logical(float native_x, float native_y, float* logical_x, float* logical_y) {
     if (!logical_x || !logical_y) return;
-    if (g_use_sdl_renderer && g_renderer) {
-        SDL_RenderWindowToLogical(g_renderer, (int)native_x, (int)native_y, logical_x, logical_y);
-        return;
-    }
-    *logical_x = stasis_display_native_to_logical(
-        native_x, g_native_window_width, g_window_width);
-    *logical_y = stasis_display_native_to_logical(
-        native_y, g_native_window_height, g_window_height);
+    stasis_display_native_to_logical_xy(
+        &g_display_metrics, native_x, native_y, logical_x, logical_y);
 }
 
 static float stasis_clampf(float v, float minv, float maxv) {
@@ -340,23 +375,21 @@ static void stasis_update_pointer_norm(int idx) {
         return;
     }
 
-    g_input_frame.pointers[idx].x_n = stasis_clampf(g_input_frame.pointers[idx].x_px / (float)vw, 0.0f, 1.0f);
-    g_input_frame.pointers[idx].y_n = stasis_clampf(g_input_frame.pointers[idx].y_px / (float)vh, 0.0f, 1.0f);
+    g_input_frame.pointers[idx].x_n = stasis_clampf(
+        (g_input_frame.pointers[idx].x_px - (float)g_input_frame.viewport_x_px) /
+            (float)vw,
+        0.0f, 1.0f);
+    g_input_frame.pointers[idx].y_n = stasis_clampf(
+        (g_input_frame.pointers[idx].y_px - (float)g_input_frame.viewport_y_px) /
+            (float)vh,
+        0.0f, 1.0f);
 }
 
 static void stasis_set_pointer_pos_px(int idx, float x, float y) {
     if (!stasis_input_valid_index(idx)) return;
 
-    float vx = (float)g_input_frame.viewport_x_px;
-    float vy = (float)g_input_frame.viewport_y_px;
-    float vw = (float)g_input_frame.viewport_w_px;
-    float vh = (float)g_input_frame.viewport_h_px;
-
-    x -= vx;
-    y -= vy;
-
-    if (vw > 0.0f) x = stasis_clampf(x, 0.0f, vw);
-    if (vh > 0.0f) y = stasis_clampf(y, 0.0f, vh);
+    x = stasis_clampf(x, 0.0f, (float)g_window_width);
+    y = stasis_clampf(y, 0.0f, (float)g_window_height);
 
     g_input_frame.pointers[idx].x_px = x;
     g_input_frame.pointers[idx].y_px = y;
@@ -366,12 +399,15 @@ static void stasis_set_pointer_pos_px(int idx, float x, float y) {
 static void stasis_update_safe_viewport(void) {
     if (!g_window) return;
 
+    StasisDisplayViewport safe_native = {
+        0.0f, 0.0f, (float)g_native_window_width, (float)g_native_window_height};
+
     int display = SDL_GetWindowDisplayIndex(g_window);
-    if (display < 0) return;
+    if (display < 0) goto publish;
 
     SDL_Rect usable;
     if (SDL_GetDisplayUsableBounds(display, &usable) != 0) {
-        return;
+        goto publish;
     }
 
     int win_x = 0;
@@ -388,23 +424,21 @@ static void stasis_update_safe_viewport(void) {
     int h = bottom - top;
 
     if (w > 0 && h > 0) {
-        float logical_left = 0.0f;
-        float logical_top = 0.0f;
-        float logical_right = 0.0f;
-        float logical_bottom = 0.0f;
-        stasis_window_to_logical((float)(left - win_x), (float)(top - win_y),
-            &logical_left, &logical_top);
-        stasis_window_to_logical((float)(right - win_x), (float)(bottom - win_y),
-            &logical_right, &logical_bottom);
-        logical_left = stasis_clampf(logical_left, 0.0f, (float)g_window_width);
-        logical_top = stasis_clampf(logical_top, 0.0f, (float)g_window_height);
-        logical_right = stasis_clampf(logical_right, logical_left, (float)g_window_width);
-        logical_bottom = stasis_clampf(logical_bottom, logical_top, (float)g_window_height);
-        g_input_frame.viewport_x_px = (int)floorf(logical_left);
-        g_input_frame.viewport_y_px = (int)floorf(logical_top);
-        g_input_frame.viewport_w_px = (int)ceilf(logical_right - logical_left);
-        g_input_frame.viewport_h_px = (int)ceilf(logical_bottom - logical_top);
+        safe_native.x = (float)(left - win_x);
+        safe_native.y = (float)(top - win_y);
+        safe_native.w = (float)w;
+        safe_native.h = (float)h;
     }
+
+publish:
+    g_display_metrics = stasis_display_metrics(
+        g_window_width, g_window_height,
+        g_native_window_width, g_native_window_height,
+        g_drawable_width, g_drawable_height, safe_native);
+    g_input_frame.viewport_x_px = (int)floorf(g_display_metrics.safe_logical_viewport.x);
+    g_input_frame.viewport_y_px = (int)floorf(g_display_metrics.safe_logical_viewport.y);
+    g_input_frame.viewport_w_px = (int)ceilf(g_display_metrics.safe_logical_viewport.w);
+    g_input_frame.viewport_h_px = (int)ceilf(g_display_metrics.safe_logical_viewport.h);
 }
 
 static int stasis_find_finger_slot(SDL_FingerID fingerId) {
@@ -439,7 +473,7 @@ static void stasis_release_finger_slot(SDL_FingerID fingerId) {
 
 static void stasis_pump_events(void) {
     if (!g_window) return;
-    stasis_sync_display_metrics(0);
+    stasis_sync_display_metrics();
 
     /* Snapshot "previous tick" positions for deltas. */
     for (int i = 0; i < STASIS_MAX_POINTERS; i++) {
@@ -472,7 +506,7 @@ static void stasis_pump_events(void) {
                 break;
             case SDL_WINDOWEVENT:
                 if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                    stasis_sync_display_metrics(1);
+                    stasis_sync_display_metrics();
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
                     if (!g_use_sdl_renderer) {
                         reset_line_program();
@@ -763,7 +797,7 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     if (!out_i32 || !out_f32) return;
 
     static int32_t g_host_tick_index = 0;
-    const int32_t host_version = 1;
+    const int32_t host_version = 2;
     const int i32_key_base = 32;
     const int i32_key_count = 512;
 
@@ -813,8 +847,18 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
     out_i32[18] = minimized;
     out_i32[19] = stasis_get_time_us();
 
-    /* Reserved */
-    for (int i = 20; i < 32; i++) out_i32[i] = 0;
+    out_i32[20] = g_display_metrics.logical_w;
+    out_i32[21] = g_display_metrics.logical_h;
+    out_i32[22] = g_display_metrics.native_w;
+    out_i32[23] = g_display_metrics.native_h;
+    out_i32[24] = g_display_metrics.drawable_w;
+    out_i32[25] = g_display_metrics.drawable_h;
+    out_i32[26] = (int32_t)floorf(g_display_metrics.safe_logical_viewport.x);
+    out_i32[27] = (int32_t)floorf(g_display_metrics.safe_logical_viewport.y);
+    out_i32[28] = (int32_t)ceilf(g_display_metrics.safe_logical_viewport.w);
+    out_i32[29] = (int32_t)ceilf(g_display_metrics.safe_logical_viewport.h);
+    out_i32[30] = g_display_generation;
+    out_i32[31] = g_density_generation;
 
     /* Keyboard state: one i32 per scancode (0/1). */
     int num_keys = 0;
@@ -844,6 +888,8 @@ STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {
 
     for (int i = i32_base + STASIS_MAX_POINTERS * i32_stride; i < 768; i++) out_i32[i] = 0;
     for (int i = f32_base + STASIS_MAX_POINTERS * f32_stride; i < 64; i++) out_f32[i] = 0.0f;
+    out_f32[48] = g_display_metrics.content_scale;
+    out_f32[49] = g_display_metrics.raster_scale;
 }
 
 /* ============================================================
@@ -3566,7 +3612,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         g_use_sdl_renderer = false;
     }
 
-    stasis_sync_display_metrics(0);
+    stasis_sync_display_metrics();
     SDL_Log("Stasis display metrics: logical=%dx%d native=%dx%d drawable=%dx%d scale=%.2f",
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
@@ -3681,6 +3727,38 @@ STASIS_EXPORT void stasis_get_window_size(int* width, int* height) {
     if (height) *height = g_window_height;
 }
 
+STASIS_EXPORT void stasis_get_display_metrics(
+    int* logical_w,
+    int* logical_h,
+    int* native_w,
+    int* native_h,
+    int* drawable_w,
+    int* drawable_h,
+    int* safe_x,
+    int* safe_y,
+    int* safe_w,
+    int* safe_h,
+    float* content_scale,
+    float* raster_scale,
+    int* display_generation,
+    int* density_generation
+) {
+    if (logical_w) *logical_w = g_display_metrics.logical_w;
+    if (logical_h) *logical_h = g_display_metrics.logical_h;
+    if (native_w) *native_w = g_display_metrics.native_w;
+    if (native_h) *native_h = g_display_metrics.native_h;
+    if (drawable_w) *drawable_w = g_display_metrics.drawable_w;
+    if (drawable_h) *drawable_h = g_display_metrics.drawable_h;
+    if (safe_x) *safe_x = (int)floorf(g_display_metrics.safe_logical_viewport.x);
+    if (safe_y) *safe_y = (int)floorf(g_display_metrics.safe_logical_viewport.y);
+    if (safe_w) *safe_w = (int)ceilf(g_display_metrics.safe_logical_viewport.w);
+    if (safe_h) *safe_h = (int)ceilf(g_display_metrics.safe_logical_viewport.h);
+    if (content_scale) *content_scale = g_display_metrics.content_scale;
+    if (raster_scale) *raster_scale = g_display_metrics.raster_scale;
+    if (display_generation) *display_generation = g_display_generation;
+    if (density_generation) *density_generation = g_density_generation;
+}
+
 /*
  * Get current desktop usable dimensions (excluding taskbar/docks when available).
  * Writes width and height to provided pointers.
@@ -3726,15 +3804,13 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
         return;
     }
 
-    g_window_prev_width = g_window_width;
-    g_window_prev_height = g_window_height;
     g_window_width = width;
     g_window_height = height;
     g_window_resized = true;
 #if !defined(__ANDROID__) && !defined(__IPHONEOS__)
     SDL_SetWindowSize(g_window, width, height);
 #endif
-    stasis_sync_display_metrics(0);
+    stasis_sync_display_metrics();
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
     if (!g_use_sdl_renderer) {
@@ -3759,7 +3835,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
     int result = SDL_SetWindowFullscreen(g_window, flags);
 
     if (result == 0) {
-        stasis_sync_display_metrics(fullscreen ? 1 : 0);
+        stasis_sync_display_metrics();
 
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
         if (!g_use_sdl_renderer) {
@@ -3789,7 +3865,11 @@ STASIS_EXPORT void stasis_begin_frame(void) {
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
         SDL_RenderSetClipRect(g_renderer, NULL);
     } else {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        stasis_gl_clear_letterbox_bars();
+#else
         (void)g_force_debug_overlay;
+#endif
     }
 }
 
@@ -3844,12 +3924,27 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
     gfx_debug_hash_f32(b);
     gfx_debug_hash_f32(a);
     if (g_use_sdl_renderer) {
-        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
         SDL_RenderClear(g_renderer);
+        SDL_SetRenderDrawColor(g_renderer, (Uint8)(r * 255.0f), (Uint8)(g * 255.0f), (Uint8)(b * 255.0f), (Uint8)(a * 255.0f));
+        SDL_FRect logical_canvas = {
+            0.0f, 0.0f, (float)g_window_width, (float)g_window_height};
+        SDL_RenderFillRectF(g_renderer, &logical_canvas);
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
     } else {
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(
+            (int)viewport.x,
+            stasis_display_bottom_origin_y(
+                g_display_metrics.drawable_h, viewport),
+            (int)viewport.w,
+            (int)viewport.h);
         glClearColor(r, g, b, a);
         glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
 #else
         (void)r; (void)g; (void)b; (void)a;
 #endif
@@ -5338,9 +5433,15 @@ static int stasis_ensure_font_ready(int font_handle) {
     if (font_handle <= 0 || font_handle > MAX_FONTS) return 0;
     StasisFont* font = &g_fonts[font_handle - 1];
     if (!font->active) return 0;
-    if (!font->needs_reraster) return 1;
-    if (!stasis_build_font_atlas(font)) return 0;
-    return stasis_rebuild_text_runs();
+
+    int rebuilt_density_fonts = 0;
+    for (int i = 0; i < MAX_FONTS; i++) {
+        StasisFont* candidate = &g_fonts[i];
+        if (!candidate->active || !candidate->needs_reraster) continue;
+        if (!stasis_build_font_atlas(candidate)) return 0;
+        rebuilt_density_fonts = 1;
+    }
+    return !rebuilt_density_fonts || stasis_rebuild_text_runs();
 }
 
 static int stasis_find_or_alloc_text_run_slot(int font_handle, uint32_t hash, const char* text, int len) {

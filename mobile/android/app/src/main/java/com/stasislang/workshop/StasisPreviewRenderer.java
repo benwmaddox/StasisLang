@@ -3,6 +3,7 @@ package com.stasislang.workshop;
 import android.graphics.Bitmap;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
+import android.util.Log;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -10,6 +11,7 @@ import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 
 final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
+    private static final String LOG_TAG = "StasisRenderer";
     static final int RENDER_MAGIC = 0x47584631;
     static final int RENDER_VERSION = 1;
     static final int FLAG_CLEAR = 1;
@@ -20,6 +22,18 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int I_SPRITE_COUNT = 4;
     static final int I_TEXT_COUNT = 7;
     static final int I_TEXT_BYTES_USED = 9;
+    static final int I_LOGICAL_W = 10;
+    static final int I_LOGICAL_H = 11;
+    static final int I_NATIVE_W = 12;
+    static final int I_NATIVE_H = 13;
+    static final int I_DRAWABLE_W = 14;
+    static final int I_DRAWABLE_H = 15;
+    static final int I_SAFE_X = 16;
+    static final int I_SAFE_Y = 17;
+    static final int I_SAFE_W = 18;
+    static final int I_SAFE_H = 19;
+    static final int I_DISPLAY_GENERATION = 20;
+    static final int I_DENSITY_GENERATION = 21;
     static final int I_SPRITE_BASE = 32;
     static final int F_LINE_BASE = 4;
     static final int MAX_LINES = 10_000;
@@ -35,7 +49,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final int FRAME_I32_CAPACITY = I_TEXT_BASE + MAX_TEXT * TEXT_I32_STRIDE;
     static final int FRAME_F32_CAPACITY = F_TEXT_BASE + MAX_TEXT * TEXT_F32_STRIDE;
 
-    private static final int CAPTURE_HEADER_I32S = 10;
+    private static final int CAPTURE_HEADER_I32S = I_DENSITY_GENERATION + 1;
     private static final int LINE_CHUNK_SIZE = 256;
     private static final int SPRITE_CHUNK_SIZE = 128;
     private static final int VERTICES_PER_QUAD = 6;
@@ -49,6 +63,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         void onSurfaceCreated();
 
         default void onFrameStart() {}
+
+        default void onDisplayMetricsChanged(float rasterScale, int densityGeneration) {}
 
         int textureFor(int handle);
 
@@ -97,6 +113,25 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         }
     }
 
+    static final class DisplayViewport {
+        final int x;
+        final int y;
+        final int width;
+        final int height;
+        final float contentScale;
+        final float rasterScale;
+
+        DisplayViewport(int x, int y, int width, int height,
+                float contentScale, float rasterScale) {
+            this.x = x;
+            this.y = y;
+            this.width = width;
+            this.height = height;
+            this.contentScale = contentScale;
+            this.rasterScale = rasterScale;
+        }
+    }
+
     private static final String VERTEX_SHADER =
             "attribute vec2 aPosition;" +
             "attribute vec4 aColor;" +
@@ -141,6 +176,11 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int textureSampler;
     private int surfaceWidth = 1;
     private int surfaceHeight = 1;
+    private int logicalWidth = 1;
+    private int logicalHeight = 1;
+    private DisplayViewport displayViewport = new DisplayViewport(0, 0, 1, 1, 1.0f, 1.0f);
+    private int displayGeneration = -1;
+    private int densityGeneration = -1;
     private CaptureCallback pendingCapture;
 
     StasisPreviewRenderer(TextureProvider textures, TimingListener timing) {
@@ -206,6 +246,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         surfaceWidth = Math.max(1, width);
         surfaceHeight = Math.max(1, height);
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        displayGeneration = -1;
+        Log.i(LOG_TAG, "drawable=" + surfaceWidth + "x" + surfaceHeight);
     }
 
     @Override
@@ -226,17 +270,93 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     private void drawFrame() {
+        updateDisplayMetrics();
         textures.onFrameStart();
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+        clearLetterboxBars();
+        GLES20.glViewport(displayViewport.x,
+                surfaceHeight - displayViewport.y - displayViewport.height,
+                displayViewport.width, displayViewport.height);
         int flags = frameI32.get(I_FLAGS);
         if ((flags & FLAG_CLEAR) != 0) {
+            GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
+            GLES20.glScissor(displayViewport.x,
+                    surfaceHeight - displayViewport.y - displayViewport.height,
+                    displayViewport.width, displayViewport.height);
             GLES20.glClearColor(frameF32.get(0), frameF32.get(1), frameF32.get(2), frameF32.get(3));
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
         }
         drawLines(clampCount(frameI32.get(I_LINE_COUNT), MAX_LINES));
         drawSprites(clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES));
         drawText(clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT),
                 clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY));
+    }
+
+    private void clearLetterboxBars() {
+        int right = displayViewport.x + displayViewport.width;
+        int bottom = displayViewport.y + displayViewport.height;
+        GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        clearScissorRect(0, 0, displayViewport.x, surfaceHeight);
+        clearScissorRect(right, 0, surfaceWidth - right, surfaceHeight);
+        clearScissorRect(0, 0, surfaceWidth, surfaceHeight - bottom);
+        clearScissorRect(0, surfaceHeight - displayViewport.y,
+                surfaceWidth, displayViewport.y);
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+    }
+
+    private static void clearScissorRect(int x, int y, int width, int height) {
+        if (width <= 0 || height <= 0) return;
+        GLES20.glScissor(x, y, width, height);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+    }
+
+    private void updateDisplayMetrics() {
+        float previousRasterScale = displayViewport.rasterScale;
+        int nextLogicalWidth = frameI32.get(I_LOGICAL_W);
+        int nextLogicalHeight = frameI32.get(I_LOGICAL_H);
+        if (nextLogicalWidth <= 0 || nextLogicalHeight <= 0) {
+            nextLogicalWidth = surfaceWidth;
+            nextLogicalHeight = surfaceHeight;
+        }
+        int nextDisplayGeneration = frameI32.get(I_DISPLAY_GENERATION);
+        int nextDensityGeneration = frameI32.get(I_DENSITY_GENERATION);
+        if (displayGeneration != nextDisplayGeneration
+                || logicalWidth != nextLogicalWidth || logicalHeight != nextLogicalHeight) {
+            logicalWidth = nextLogicalWidth;
+            logicalHeight = nextLogicalHeight;
+            displayViewport = fitViewport(logicalWidth, logicalHeight, surfaceWidth, surfaceHeight);
+            displayGeneration = nextDisplayGeneration;
+            Log.i(LOG_TAG, "logical=" + logicalWidth + "x" + logicalHeight
+                    + " viewport=" + displayViewport.x + "," + displayViewport.y + ","
+                    + displayViewport.width + "x" + displayViewport.height
+                    + " generation=" + displayGeneration);
+        }
+        if (densityGeneration != nextDensityGeneration
+                || Math.abs(previousRasterScale - displayViewport.rasterScale) >= 0.001f) {
+            densityGeneration = nextDensityGeneration;
+            textures.onDisplayMetricsChanged(displayViewport.rasterScale, densityGeneration);
+        }
+    }
+
+    static DisplayViewport fitViewport(int logicalWidth, int logicalHeight,
+            int drawableWidth, int drawableHeight) {
+        logicalWidth = Math.max(1, logicalWidth);
+        logicalHeight = Math.max(1, logicalHeight);
+        drawableWidth = Math.max(1, drawableWidth);
+        drawableHeight = Math.max(1, drawableHeight);
+        float scale = Math.min((float)drawableWidth / logicalWidth,
+                (float)drawableHeight / logicalHeight);
+        int width = Math.max(1, Math.round(logicalWidth * scale));
+        int height = Math.max(1, Math.round(logicalHeight * scale));
+        int x = (drawableWidth - width) / 2;
+        int y = (drawableHeight - height) / 2;
+        float contentScale = Math.min((float)width / logicalWidth,
+                (float)height / logicalHeight);
+        return new DisplayViewport(x, y, width, height, contentScale,
+                Math.max(1.0f, Math.min(8.0f, contentScale)));
     }
 
     private void drawLines(int count) {
@@ -432,7 +552,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     private void drawColorBatch(FloatBuffer vertices, int vertexCount, int mode) {
         GLES20.glUseProgram(colorProgram);
-        GLES20.glUniform2f(colorResolution, surfaceWidth, surfaceHeight);
+        GLES20.glUniform2f(colorResolution, logicalWidth, logicalHeight);
         GLES20.glEnableVertexAttribArray(colorPosition);
         GLES20.glEnableVertexAttribArray(colorValue);
         vertices.position(0);
@@ -447,7 +567,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     private void beginTextureBatches(FloatBuffer vertices) {
         GLES20.glUseProgram(textureProgram);
-        GLES20.glUniform2f(textureResolution, surfaceWidth, surfaceHeight);
+        GLES20.glUniform2f(textureResolution, logicalWidth, logicalHeight);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glUniform1i(textureSampler, 0);
         GLES20.glEnableVertexAttribArray(texturePosition);
