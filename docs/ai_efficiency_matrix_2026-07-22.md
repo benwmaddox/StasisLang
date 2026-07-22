@@ -122,3 +122,30 @@ These single-run timings vary enough that the change is not claimed as a univers
 retained because it removes an ineffective validation loop, keeps all acceptance checks green,
 and makes the mandatory completion path one tested atomic edit rather than an edit plus a second
 synthetic runtime protocol.
+
+## Medium phase timing sample
+
+A subsequent single medium-project run added out-of-band event timing without changing the model
+payload. It passed 4/4 in 274.1 seconds with 43 tool calls. Provider waits consumed 271.6 seconds
+(99.2% of the traced AI action); initial context and every local tool batch together consumed 2.3
+seconds. The independent acceptance run took another 0.1 seconds.
+
+| Phase | Time |
+|---|---:|
+| Initial symbol context | 0.4s |
+| Turn 1: choose narrow discovery queries | 13.1s |
+| Five local symbol searches | 0.2s |
+| Turn 2: choose source/reference batch | 16.4s |
+| Sixteen local reads and reference lookups | 0.8s |
+| Turn 3: identify remaining test/state context | 13.8s |
+| Seven local context reads | 0.3s |
+| Turn 4: design the source and boundary-test batch | 124.7s |
+| Atomic compile/tests, failed pre-existing test | 0.3s |
+| Turn 5: diagnose failure and prepare retry | 96.7s |
+| Atomic compile/tests, successful retry | 0.3s |
+| Turn 6: final summary | 6.9s |
+| Independent four-test acceptance | 0.1s |
+
+This sample shows that making local validation faster cannot materially approach a one-minute
+task by itself. The largest opportunity is reducing or bounding the two long edit/repair provider
+turns while preserving first-pass accuracy.

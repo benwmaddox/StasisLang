@@ -174,6 +174,10 @@ struct AiAuditLog {
     file: fs::File,
     usage_path: PathBuf,
     usage_file: fs::File,
+    timing_path: PathBuf,
+    timing_file: fs::File,
+    started_at: Instant,
+    last_event_at: Instant,
 }
 
 impl AiAuditLog {
@@ -187,6 +191,7 @@ impl AiAuditLog {
             .as_millis();
         let path = directory.join(format!("tui-ai-{stamp}.jsonl"));
         let usage_path = directory.join(format!("tui-ai-{stamp}.usage.jsonl"));
+        let timing_path = directory.join(format!("tui-ai-{stamp}.timing.jsonl"));
         let file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -197,11 +202,21 @@ impl AiAuditLog {
             .write(true)
             .open(&usage_path)
             .map_err(|error| format!("failed creating AI usage trace: {error}"))?;
+        let timing_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&timing_path)
+            .map_err(|error| format!("failed creating AI timing trace: {error}"))?;
+        let now = Instant::now();
         let mut log = Self {
             path,
             file,
             usage_path,
             usage_file,
+            timing_path,
+            timing_file,
+            started_at: now,
+            last_event_at: now,
         };
         log.write(serde_json::json!({
             "event": "request",
@@ -217,6 +232,13 @@ impl AiAuditLog {
     }
 
     fn write(&mut self, value: Value) -> Result<(), String> {
+        let now = Instant::now();
+        let timing = serde_json::json!({
+            "event": value.get("event").cloned().unwrap_or(Value::Null),
+            "elapsed_ms": duration_millis(now.duration_since(self.started_at)),
+            "since_previous_ms": duration_millis(now.duration_since(self.last_event_at)),
+        });
+        self.last_event_at = now;
         serde_json::to_writer(&mut self.file, &value)
             .map_err(|error| format!("failed encoding AI trace: {error}"))?;
         self.file
@@ -224,7 +246,15 @@ impl AiAuditLog {
             .map_err(|error| format!("failed writing AI trace: {error}"))?;
         self.file
             .flush()
-            .map_err(|error| format!("failed flushing AI trace: {error}"))
+            .map_err(|error| format!("failed flushing AI trace: {error}"))?;
+        serde_json::to_writer(&mut self.timing_file, &timing)
+            .map_err(|error| format!("failed encoding AI timing trace: {error}"))?;
+        self.timing_file
+            .write_all(b"\n")
+            .map_err(|error| format!("failed writing AI timing trace: {error}"))?;
+        self.timing_file
+            .flush()
+            .map_err(|error| format!("failed flushing AI timing trace: {error}"))
     }
 
     fn write_usage(&mut self, usage: &Value) -> Result<(), String> {
@@ -237,6 +267,10 @@ impl AiAuditLog {
             .flush()
             .map_err(|error| format!("failed flushing AI usage trace: {error}"))
     }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 impl Drop for AiRun {
@@ -2944,9 +2978,31 @@ mod tests {
             "output_tokens": 20,
         });
         let mut log = AiAuditLog::create(&root, "test prompt").expect("audit log");
+        let trace_path = log.path.clone();
         let usage_path = log.usage_path.clone();
+        let timing_path = log.timing_path.clone();
+        log.write(serde_json::json!({"event": "test"}))
+            .expect("timed trace");
         log.write_usage(&usage).expect("usage log");
         drop(log);
+        let trace = fs::read_to_string(trace_path).expect("trace contents");
+        let records = trace
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("trace record"))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .iter()
+            .all(|record| record.get("elapsed_ms").is_none()));
+        let timings = fs::read_to_string(timing_path).expect("timing contents");
+        let timings = timings
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("timing record"))
+            .collect::<Vec<_>>();
+        assert_eq!(timings.len(), 2);
+        assert!(timings
+            .iter()
+            .all(|record| record["elapsed_ms"].is_u64() && record["since_previous_ms"].is_u64()));
         assert_eq!(
             fs::read_to_string(&usage_path).expect("usage contents"),
             format!("{}\n", serde_json::to_string(&usage).unwrap())

@@ -78,6 +78,12 @@ with the agent. Tool source arguments and results therefore appear verbatim when
 or received from the agent. The trace does not store the complete Codex transport request, response
 schema, tool catalog, repeated conversation envelope, or CLI transport output.
 
+Event timing is written separately to `tui-ai-<timestamp>.timing.jsonl`, preserving the exact
+payload trace without adding fields the AI did not receive. Timing records contain only the event
+name, milliseconds since the request began, and milliseconds since the previous event. The gap
+from `turn` to `working_notes` measures provider time; `tool_calls` to `tool_observations` measures
+the local tool batch, including compilation and tests for writes.
+
 Provider-reported token usage is written separately to
 `build/ai-traces/tui-ai-<timestamp>.usage.jsonl`. Each line is the exact `usage` object from a
 Codex `turn.completed` event; Stasis does not estimate or add missing token categories. The Codex
