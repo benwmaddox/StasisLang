@@ -39,6 +39,7 @@ typedef char *(*stasis_android_bridge_resolve_sprite_asset_fn)(const char *proje
 typedef char *(*stasis_android_bridge_resolve_cached_text_fn)(const char *project_root, int handle);
 typedef char *(*stasis_android_bridge_resolve_font_fn)(const char *project_root, int handle);
 typedef char *(*stasis_android_bridge_source_items_fn)(const char *project_root, const char *entry_file);
+typedef char *(*stasis_android_bridge_find_references_fn)(const char *project_root, const char *entry_file, const char *symbol, uintptr_t limit);
 typedef char *(*stasis_android_bridge_semantic_edit_fn)(const char *project_root, const char *entry_file, const char *request_json, int dry_run, int validate, int run_tests);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
@@ -82,6 +83,7 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_resolve_cached_text_fn resolve_cached_text;
     stasis_android_bridge_resolve_font_fn resolve_font;
     stasis_android_bridge_source_items_fn source_items;
+    stasis_android_bridge_find_references_fn find_references;
     stasis_android_bridge_semantic_edit_fn semantic_edit;
     stasis_android_bridge_free_string_fn free_string;
     int attempted;
@@ -1324,6 +1326,8 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_resolve_font_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_font");
     rust_bridge_api.source_items =
             (stasis_android_bridge_source_items_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_source_items");
+    rust_bridge_api.find_references =
+            (stasis_android_bridge_find_references_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_find_references");
     rust_bridge_api.semantic_edit =
             (stasis_android_bridge_semantic_edit_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_semantic_edit");
     rust_bridge_api.free_string =
@@ -1877,6 +1881,33 @@ Java_com_stasislang_workshop_MainActivity_nativeSourceItems(
     (*env)->ReleaseStringUTFChars(env, project_root, root);
     if (result == NULL) {
         return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"source item bridge returned null\"}");
+    }
+    jstring response = (*env)->NewStringUTF(env, result);
+    bridge->free_string(result);
+    return response;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeFindReferences(
+        JNIEnv *env, jclass activity_class, jstring project_root, jstring symbol, jint limit) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->find_references == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Rust reference bridge unavailable\"}");
+    }
+    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
+    const char *reference_symbol = (*env)->GetStringUTFChars(env, symbol, NULL);
+    if (root == NULL || reference_symbol == NULL) {
+        if (root != NULL) (*env)->ReleaseStringUTFChars(env, project_root, root);
+        if (reference_symbol != NULL) (*env)->ReleaseStringUTFChars(env, symbol, reference_symbol);
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"unable to read reference lookup input\"}");
+    }
+    char *result = bridge->find_references(
+            root, "src/main.stasis", reference_symbol, limit < 1 ? 1u : (uintptr_t)limit);
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
+    (*env)->ReleaseStringUTFChars(env, symbol, reference_symbol);
+    if (result == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"reference bridge returned null\"}");
     }
     jstring response = (*env)->NewStringUTF(env, result);
     bridge->free_string(result);

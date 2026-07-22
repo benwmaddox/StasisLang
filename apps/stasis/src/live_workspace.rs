@@ -6,11 +6,12 @@ use stasis_compiler::compiler::CompileError;
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
-    plan_workshop_semantic_edits, workshop_completion_items, workshop_reachable_files,
-    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
-    write_workshop_semantic_receipt, ExpectedReload, WorkshopCompletionItem, WorkshopSemanticEdit,
-    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
-    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    plan_workshop_semantic_edits, workshop_completion_items, workshop_direct_import_files,
+    workshop_reachable_files, workshop_source_hash, workshop_source_items,
+    write_workshop_semantic_plan, write_workshop_semantic_receipt, ExpectedReload,
+    WorkshopCompletionItem, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
+    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
+    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_runner::live::{
     compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
@@ -490,14 +491,14 @@ impl LiveWorkspace {
             LiveCommand::Symbols {
                 query,
                 kind,
-                file,
+                files,
                 owner,
                 page,
                 limit,
             } => self.symbols(
                 query.as_deref(),
                 kind.as_deref(),
-                file.as_deref(),
+                &files,
                 owner.as_deref(),
                 page,
                 limit,
@@ -773,14 +774,49 @@ impl LiveWorkspace {
         &self,
         query: Option<&str>,
         kind: Option<&str>,
-        file: Option<&str>,
+        files: &[String],
         owner: Option<&str>,
         page: u32,
         limit: usize,
     ) -> Result<(&'static str, Value), String> {
         let query = query.unwrap_or("").to_ascii_lowercase();
         let kind = kind.map(parse_kind).transpose()?;
-        let file = file.map(normalize_file);
+        if files.len() > 16 {
+            return Err("symbol search accepts at most 16 starting files".to_string());
+        }
+        let loaded_files = &self.source_files;
+        let default_scope = files.is_empty();
+        let mut scope_files = if default_scope {
+            vec![normalize_file(&self.config.entry.to_string_lossy())]
+        } else {
+            files.iter().map(|file| normalize_file(file)).collect()
+        };
+        if default_scope {
+            scope_files.extend(workshop_direct_import_files(
+                loaded_files,
+                &self.config.entry,
+            )?);
+        }
+        let available_files = self
+            .source_items
+            .iter()
+            .map(|item| normalize_file(&item.file))
+            .collect::<BTreeSet<_>>();
+        for file in &scope_files {
+            if !available_files.contains(file) {
+                return Err(format!("symbol search file is not in the project: {file}"));
+            }
+        }
+        let scope_files = scope_files.into_iter().collect::<BTreeSet<_>>();
+        let imports = scope_files
+            .iter()
+            .map(|file| {
+                Ok((
+                    file.clone(),
+                    workshop_direct_import_files(loaded_files, Path::new(file))?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
         let matches = |item: &WorkshopSourceItem| {
             item.kind != WorkshopSourceItemKind::Imports
                 && !(item.kind == WorkshopSourceItemKind::Globals && item.source.trim().is_empty())
@@ -788,9 +824,7 @@ impl LiveWorkspace {
                     || item.name.to_ascii_lowercase().contains(&query)
                     || item.signature.to_ascii_lowercase().contains(&query))
                 && kind.is_none_or(|kind| item.kind == kind)
-                && file
-                    .as_deref()
-                    .is_none_or(|file| normalize_file(&item.file) == file)
+                && scope_files.contains(&normalize_file(&item.file))
                 && owner.is_none_or(|owner| item.owner.as_deref() == Some(owner))
         };
         let limit = limit.clamp(1, 200);
@@ -823,7 +857,7 @@ impl LiveWorkspace {
             .collect::<Vec<_>>();
         Ok((
             "symbols",
-            json!({"schema_version": 1, "page": page, "limit": limit, "total": total, "items": items}),
+            json!({"schema_version": 1, "files": scope_files, "imports": imports, "page": page, "limit": limit, "total": total, "items": items}),
         ))
     }
 
@@ -1940,7 +1974,7 @@ fn help_data() -> Value {
     json!({
         "commands": [
             ":help", ":status", ":pause", ":resume", ":step [ticks]", ":cancel REQUEST_ID", ":quit",
-            ":symbols [query] [--page N --limit N]",
+            ":symbols [query] [--file PATH ... --kind KIND --owner OWNER --page N --limit N]",
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
             ":references SYMBOL [--limit N]", ":validate PATH OP VALUE [--frames N]",
             ":edit SYMBOL (interactive TUI)",
@@ -2641,12 +2675,22 @@ mod tests {
     #[test]
     fn symbol_search_is_filtered_compact_and_hash_free() {
         let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"helper.stasis\";\nglobal score: i32;\nfunction main(): i32 { score = 1; return 0; }\nfunction tick(): i32 { score += 1; return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("source with import");
+        fs::write(
+            root.join("src/helper.stasis"),
+            "function direct_import_value(): i32 { return 1; }\n",
+        )
+        .expect("helper source");
         let (jit, _package) = compile(&config);
         let (_client, server) = stasis_runner::live::live_session(8);
         let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
 
         let (_, all) = workspace
-            .symbols(None, None, None, None, 0, 32)
+            .symbols(None, None, &[], None, 0, 32)
             .expect("symbols");
         let items = all["items"].as_array().expect("items");
         assert!(items.iter().all(|item| item["kind"] != "imports"));
@@ -2655,12 +2699,23 @@ mod tests {
         assert!(items
             .iter()
             .all(|item| { matches!(item.as_object().map(|object| object.len()), Some(4 | 5)) }));
+        assert_eq!(
+            all["files"],
+            json!(["src/helper.stasis", "src/main.stasis"])
+        );
+        assert_eq!(
+            all["imports"],
+            json!({"src/helper.stasis": [], "src/main.stasis": ["src/helper.stasis"]})
+        );
+        assert!(items
+            .iter()
+            .any(|item| item["name"] == "direct_import_value"));
 
         let (_, filtered) = workspace
             .symbols(
                 Some("tick"),
                 Some("function"),
-                Some("src/main.stasis"),
+                &["src/main.stasis".to_string()],
                 None,
                 0,
                 1,
@@ -2669,6 +2724,19 @@ mod tests {
         assert_eq!(filtered["total"], 1);
         assert_eq!(filtered["items"][0]["name"], "tick");
         assert!(filtered["items"][0].get("owner").is_none());
+
+        let (_, tests) = workspace
+            .symbols(
+                None,
+                Some("test"),
+                &["tests/main.test.stasis".to_string()],
+                None,
+                0,
+                32,
+            )
+            .expect("test symbols");
+        assert_eq!(tests["total"], 1);
+        assert_eq!(tests["files"], json!(["tests/main.test.stasis"]));
         fs::remove_dir_all(root).ok();
     }
 

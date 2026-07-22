@@ -141,14 +141,15 @@ public final class MainActivity extends Activity {
     private static final String GITHUB_PREF_LAST_SYNC_FINGERPRINT = "github_last_sync_fingerprint";
     private static final String GITHUB_PREF_VALIDATED_TARGET = "github_validated_target_v1";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
+    private static final String AI_USAGE_LOG = "ai_usage.jsonl";
     private static final String DEFAULT_AI_MODEL = "gpt-5.6-sol";
     private static final int DEFAULT_AI_MODEL_VERSION = 2;
     private static final String AI_PROMPT_CACHE_KEY = "stasis-android-workshop-v2";
     private static final long AI_TRACE_RETENTION_MS = 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
     private static final long DEBUG_UPDATE_INTERVAL_NANOS = 250_000_000L;
-    private static final int MAX_AI_AGENT_TURNS = 25;
-    private static final int MAX_AI_TOOL_CALLS_PER_BATCH = 12;
+    private static final int MAX_AI_AGENT_TURNS = 15;
+    private static final int MAX_AI_TOOL_CALLS_PER_BATCH = 50;
     private static final int MAX_AI_READ_ONLY_BATCHES = 2;
     private static final int MAX_AI_OUTPUT_TOKENS = 8192;
     private static final int MAX_AI_IMAGE_ATTACHMENTS = 4;
@@ -343,6 +344,7 @@ public final class MainActivity extends Activity {
     private static native String nativeStatus();
     private static native String nativeCompileProject(String projectRoot);
     private static native String nativeSourceItems(String projectRoot);
+    private static native String nativeFindReferences(String projectRoot, String symbol, int limit);
     private static native String nativeSemanticEdit(String projectRoot, String requestJson,
                                                     boolean dryRun, boolean validate, boolean runTests);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
@@ -3427,6 +3429,11 @@ public final class MainActivity extends Activity {
             setStatusText("AI histories erased but trace deletion failed");
             return;
         }
+        File usage = aiUsageLogFile();
+        if (!usage.delete() && usage.exists()) {
+            setStatusText("AI histories erased but usage-log deletion failed");
+            return;
+        }
         clearPendingMediaConsent();
         refreshCommandHistory();
         refreshAiQueue();
@@ -5313,18 +5320,18 @@ public final class MainActivity extends Activity {
         if (project == null) {
             return globals;
         }
+        TreeSet<String> scopeFiles = aiDefaultSymbolScope(project);
         for (SymbolSection section : project.sections) {
             for (SymbolGroup group : section.groups) {
                 for (SymbolEntry symbol : group.symbols) {
-                    if (!"global".equals(symbol.kind)) {
+                    if (!"global".equals(symbol.kind) || !scopeFiles.contains(symbol.file)) {
                         continue;
                     }
                     globals.put(new JSONObject()
                             .put("kind", "global")
                             .put("name", symbol.name)
                             .put("file", symbol.file)
-                            .put("backing_struct_type", symbol.name)
-                            .put("backing_struct_source", symbol.backingStructSource));
+                            .put("backing_struct_type", symbol.name));
                 }
             }
         }
@@ -5332,6 +5339,9 @@ public final class MainActivity extends Activity {
     }
 
     private static JSONObject aiProjectSymbolIndex(ProjectSnapshot project) throws Exception {
+        TreeSet<String> scopeFiles = aiDefaultSymbolScope(project);
+        JSONObject imports = project == null ? new JSONObject()
+                : aiImportsForFiles(project, scopeFiles);
         JSONArray symbols = new JSONArray();
         int availableCount = 0;
         int serializedChars = 2;
@@ -5340,6 +5350,7 @@ public final class MainActivity extends Activity {
             for (SymbolSection section : project.sections) {
                 for (SymbolGroup group : section.groups) {
                     for (SymbolEntry symbol : group.symbols) {
+                        if (!scopeFiles.contains(symbol.file)) continue;
                         availableCount += 1;
                         if (!accepting) continue;
                         JSONObject compact = symbolToJson(symbol, false);
@@ -5357,10 +5368,44 @@ public final class MainActivity extends Activity {
             }
         }
         return new JSONObject()
+                .put("files", new JSONArray(scopeFiles))
+                .put("imports", imports)
                 .put("symbols", symbols)
                 .put("included_count", symbols.length())
                 .put("available_count", availableCount)
+                .put("project_symbol_count", project == null ? 0 : project.symbolCount)
                 .put("truncated", symbols.length() < availableCount);
+    }
+
+    private static TreeSet<String> aiDefaultSymbolScope(ProjectSnapshot project) throws Exception {
+        TreeSet<String> files = new TreeSet<>();
+        files.add(WorkshopAiSymbolDiscovery.DEFAULT_ENTRY_FILE);
+        if (project != null) {
+            JSONArray imports = aiDirectImportFiles(project,
+                    WorkshopAiSymbolDiscovery.DEFAULT_ENTRY_FILE);
+            for (int index = 0; index < imports.length(); index += 1) {
+                files.add(imports.getString(index));
+            }
+        }
+        return files;
+    }
+
+    private static JSONObject aiImportsForFiles(ProjectSnapshot project, Iterable<String> files)
+            throws Exception {
+        JSONObject imports = new JSONObject();
+        for (String file : files) imports.put(file, aiDirectImportFiles(project, file));
+        return imports;
+    }
+
+    private static JSONArray aiDirectImportFiles(ProjectSnapshot project, String file)
+            throws Exception {
+        SourceFile sourceFile = findProjectFile(project, file);
+        JSONArray paths = parseImportPaths(sourceFile.source);
+        TreeSet<String> resolved = new TreeSet<>();
+        for (int index = 0; index < paths.length(); index += 1) {
+            resolved.add(WorkshopAiSymbolDiscovery.resolveImport(file, paths.getString(index)));
+        }
+        return new JSONArray(resolved);
     }
 
     private static JSONObject aiStasisBasics() throws Exception {
@@ -5705,6 +5750,7 @@ public final class MainActivity extends Activity {
                         .put("turn", session.currentStep)
                         .put("provider", useCodex ? "codex_subscription" : "openai_api")
                         .put("requested_model", model)
+                        .put("request", new JSONObject(currentRequestJson))
                         .put("summary", summarizeAiRequestForTrace(currentRequestJson)));
                 saveActiveAiCheckpoint(WorkshopAiResumePolicy.PROVIDER_IN_FLIGHT, model, useCodex,
                         aiCheckpointPayload(initialRequestJson, currentRequestJson, turn,
@@ -5734,12 +5780,17 @@ public final class MainActivity extends Activity {
                 throwIfAiCancelled();
                 aiJson = extractAiJsonResponse(apiResponse.body);
                 response = new JSONObject(aiJson);
+                appendAiUsage(new JSONObject()
+                        .put("turn", session.currentStep)
+                        .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                        .put("requested_model", model)
+                        .put("response_model", apiResponse.model)
+                        .put("usage", apiResponse.usage));
                 appendAiTrace("llm_response", new JSONObject()
                         .put("turn", session.currentStep)
                         .put("provider", useCodex ? "codex_subscription" : "openai_api")
                         .put("requested_model", model).put("response_model", apiResponse.model)
                         .put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)
-                        .put("usage", apiResponse.usage)
                         .put("cost_available", !useCodex && usage.lastCallCostAvailable)
                         .put("estimated_cost_usd", !useCodex && usage.lastCallCostAvailable
                                 ? usage.lastCallEstimatedCostUsd : JSONObject.NULL)
@@ -5816,6 +5867,7 @@ public final class MainActivity extends Activity {
             appendAiTrace("tool_calls", new JSONObject().put("turn", session.currentStep).put("tool_calls", toolCalls));
             boolean batchHasWrites = aiToolCallsContainWrites(toolCalls);
             boolean blockedReadOnlyBatch = !session.toolLoopPolicy.shouldExecute(batchHasWrites);
+            JSONArray priorToolObservations = session.retainedToolObservations();
             JSONArray observations;
             long toolsStartedMs = SystemClock.elapsedRealtime();
             if (blockedReadOnlyBatch) {
@@ -5856,6 +5908,8 @@ public final class MainActivity extends Activity {
                 session.rememberToolObservations(observations,
                         batchHasWrites && testObservation.optBoolean("all_runnable_tests_passed", false));
             }
+            JSONArray latestProviderObservations = aiProviderObservations(observations,
+                    batchHasWrites && testObservation.optBoolean("all_runnable_tests_passed", false));
             if (batchHasWrites && WorkshopAiCompletionStatus.canFinalizeTestedWrites(
                     aiToolCallsContainTestWrite(toolCalls), session.successfulWriteCount,
                     compileReady, session.latestRunnableTestsPassed())) {
@@ -5902,8 +5956,8 @@ public final class MainActivity extends Activity {
             }
             JSONObject followup = new JSONObject();
             followup.put("original_request", new JSONObject(initialRequestJson));
-            followup.put("tool_observations", session.retainedToolObservations());
-            followup.put("latest_tool_observations", observations);
+            followup.put("tool_observations", priorToolObservations);
+            followup.put("latest_tool_observations", latestProviderObservations);
             followup.put("test_observation", testObservation);
             followup.put("tool_specs", aiToolSpecs());
             followup.put("working_notes", session.workingNotes);
@@ -6171,7 +6225,8 @@ public final class MainActivity extends Activity {
                     .put("provider", useCodex ? "codex_subscription" : "openai_api")
                     .put("requested_model", reviewerModel)
                     .put("reviewer_call", session.verifierCallCount)
-                    .put("risk", policy.risk.name().toLowerCase()));
+                    .put("risk", policy.risk.name().toLowerCase())
+                    .put("request", request));
             AiApiResponse response;
             long llmStartedMs = SystemClock.elapsedRealtime();
             markActiveAiCheckpointProviderInFlight();
@@ -6189,10 +6244,16 @@ public final class MainActivity extends Activity {
                 if (usage.lastCallCostAvailable) recordMonthlyAiSpend(usage.lastCallEstimatedCostUsd);
             }
             JSONObject reviewer = new JSONObject(extractAiJsonResponse(response.body));
+            appendAiUsage(new JSONObject()
+                    .put("phase", "verifier")
+                    .put("reviewer_call", session.verifierCallCount)
+                    .put("provider", useCodex ? "codex_subscription" : "openai_api")
+                    .put("requested_model", reviewerModel)
+                    .put("response_model", response.model)
+                    .put("usage", response.usage));
             appendAiTrace("verifier_response", new JSONObject()
                     .put("response_model", response.model)
                     .put("elapsed_ms", SystemClock.elapsedRealtime() - llmStartedMs)
-                    .put("usage", response.usage)
                     .put("response", reviewer));
             JSONArray errors = validateAiResponseShape(reviewer);
             JSONArray calls = reviewer.optJSONArray("tool_calls");
@@ -6375,6 +6436,9 @@ public final class MainActivity extends Activity {
         if ("read_symbol".equals(tool)) {
             return new JSONArray().put("name");
         }
+        if ("find_references".equals(tool)) {
+            return new JSONArray().put("symbol");
+        }
         if ("list_owner_symbols".equals(tool)) {
             return new JSONArray().put("owner");
         }
@@ -6416,6 +6480,7 @@ public final class MainActivity extends Activity {
                 .put("list_symbols")
                 .put("list_owner_symbols")
                 .put("read_symbol")
+                .put("find_references")
                 .put("read_imports")
                 .put("write_imports")
                 .put("write_symbol")
@@ -6443,9 +6508,10 @@ public final class MainActivity extends Activity {
 
     private static JSONArray aiToolSpecs() throws Exception {
         JSONArray specs = new JSONArray();
-        specs.put(aiToolSpec("list_symbols", "List all editable symbols, including globals.", new JSONArray(), new JSONArray(), new JSONObject()));
+        specs.put(aiToolSpec("list_symbols", "Search compact symbols in explicit starting files. Without files, search src/main.stasis and its direct imports; every result includes a direct-import map.", new JSONArray(), new JSONArray().put("files").put("query").put("kind").put("owner").put("page").put("limit"), new JSONObject().put("query", "paddle")));
         specs.put(aiToolSpec("list_owner_symbols", "List compact symbols owned by a type/group such as Player, Main, Root, Globals, or a system owner. Use this to discover receiver-style functions available for a type.", new JSONArray().put("owner"), new JSONArray(), new JSONObject().put("owner", "Player")));
-        specs.put(aiToolSpec("read_symbol", "Read one function, struct, or global symbol. Globals include backing_struct_source.", new JSONArray().put("name"), new JSONArray().put("kind").put("file").put("owner"), new JSONObject().put("name", "GameState").put("kind", "global")));
+        specs.put(aiToolSpec("read_symbol", "Read one function, struct, or global symbol. Globals include backing_struct_source; up to 50 deliberate reads may be batched in one turn.", new JSONArray().put("name"), new JSONArray().put("kind").put("file").put("owner"), new JSONObject().put("name", "GameState").put("kind", "global")));
+        specs.put(aiToolSpec("find_references", "Find compact compiler-owned definitions, reads, writes, and calls for a function, global, or dot-qualified field.", new JSONArray().put("symbol"), new JSONArray().put("limit"), new JSONObject().put("symbol", "GameState.paddle_y").put("limit", 128)));
         specs.put(aiToolSpec("read_imports", "Read one file's import block as import paths.", new JSONArray().put("file"), new JSONArray(), new JSONObject().put("file", "src/main.stasis")));
         specs.put(aiToolSpec("write_imports", "Replace one file's top import block. Writes in one tool-call batch compile together and roll back together on failure.", new JSONArray().put("file").put("imports"), new JSONArray(), new JSONObject().put("file", "src/main.stasis").put("imports", new JSONArray().put("game_state.stasis").put("systems/collision.stasis"))));
         specs.put(aiToolSpec("write_symbol", "Create or replace a function/struct symbol. Writes in one tool-call batch compile together and roll back together on failure.", new JSONArray().put("file").put("name").put("new_source"), new JSONArray().put("kind").put("owner"), new JSONObject().put("file", "src/main.stasis").put("name", "tick").put("kind", "replace_function").put("owner", "Main").put("new_source", "function tick(): void {\n    // ...\n}")));
@@ -6476,6 +6542,8 @@ public final class MainActivity extends Activity {
         String normalizedTool = tool == null ? "" : tool;
         if ("list_owner_symbols".equals(normalizedTool)) {
             acceptedArgs.put("owner", "Player");
+        } else if ("find_references".equals(normalizedTool)) {
+            acceptedArgs.put("symbol", "GameState.paddle_y").put("limit", 128);
         } else if ("read_symbol".equals(normalizedTool)) {
             acceptedArgs.put("name", "symbol_name").put("kind", "function_struct_or_global_optional").put("file", "src/main.stasis_optional").put("owner", "owner_optional");
         } else if ("read_imports".equals(normalizedTool)) {
@@ -6535,13 +6603,16 @@ public final class MainActivity extends Activity {
     }
     private JSONObject executeAiToolCall(String tool, JSONObject args, AiAgentSession session) throws Exception {
         if ("list_symbols".equals(tool)) {
-            return aiToolListSymbols(session);
+            return aiToolListSymbols(session, args);
         }
         if ("list_owner_symbols".equals(tool)) {
             return aiToolListOwnerSymbols(session, args);
         }
         if ("read_symbol".equals(tool)) {
             return aiToolReadSymbol(session, args);
+        }
+        if ("find_references".equals(tool)) {
+            return aiToolFindReferences(args);
         }
         if ("read_imports".equals(tool)) {
             return aiToolReadImports(session, args);
@@ -6591,19 +6662,79 @@ public final class MainActivity extends Activity {
         throw new IOException("Unsupported AI tool: " + tool);
     }
 
-    private JSONObject aiToolListSymbols(AiAgentSession session) throws Exception {
+    private JSONObject aiToolListSymbols(AiAgentSession session, JSONObject call) throws Exception {
         ProjectSnapshot project = session.project();
-        JSONArray symbols = new JSONArray();
+        JSONArray requestedFiles = call.optJSONArray("files");
+        if (requestedFiles != null
+                && requestedFiles.length() > WorkshopAiSymbolDiscovery.MAX_FILES) {
+            throw new IOException("list_symbols accepts at most "
+                    + WorkshopAiSymbolDiscovery.MAX_FILES + " starting files");
+        }
+        TreeSet<String> scopeFiles = new TreeSet<>();
+        if (requestedFiles == null || requestedFiles.length() == 0) {
+            scopeFiles.addAll(aiDefaultSymbolScope(project));
+        } else {
+            for (int index = 0; index < requestedFiles.length(); index += 1) {
+                String file = requestedFiles.getString(index).replace('\\', '/');
+                findProjectFile(project, file);
+                scopeFiles.add(file);
+            }
+        }
+        String query = call.optString("query", "");
+        String kind = call.optString("kind", "");
+        String owner = call.optString("owner", "");
+        int page = Math.max(0, call.optInt("page", 0));
+        int limit = WorkshopAiSymbolDiscovery.boundedLimit(call.optInt(
+                "limit", WorkshopAiSymbolDiscovery.DEFAULT_LIMIT));
+        int offset = page * limit;
+        int total = 0;
+        JSONArray items = new JSONArray();
         for (SymbolSection section : project.sections) {
             for (SymbolGroup group : section.groups) {
                 for (SymbolEntry symbol : group.symbols) {
-                    symbols.put(symbolToJson(symbol, false));
+                    if (!scopeFiles.contains(symbol.file)
+                            || !WorkshopAiSymbolDiscovery.matches(symbol.name, symbol.signature,
+                                    symbol.kind, symbol.owner, query, kind, owner)) {
+                        continue;
+                    }
+                    if (total >= offset && items.length() < limit) {
+                        items.put(symbolToJson(symbol, false));
+                    }
+                    total += 1;
                 }
             }
         }
         return new JSONObject()
-                .put("symbol_count", symbols.length())
-                .put("symbols", symbols);
+                .put("schema_version", 1)
+                .put("files", new JSONArray(scopeFiles))
+                .put("imports", aiImportsForFiles(project, scopeFiles))
+                .put("page", page)
+                .put("limit", limit)
+                .put("total", total)
+                .put("items", items);
+    }
+
+    private static JSONArray aiProviderObservations(JSONArray observations,
+            boolean compactSuccessfulWrites) throws Exception {
+        JSONArray provider = new JSONArray();
+        for (int index = 0; index < observations.length(); index += 1) {
+            JSONObject observation = observations.getJSONObject(index);
+            provider.put(compactSuccessfulWrites && isAiWriteTool(
+                    observation.optString("tool", ""))
+                    ? WorkshopAiObservationCompactor.compactSuccessfulWrite(observation)
+                    : new JSONObject(observation.toString()));
+        }
+        return provider;
+    }
+
+    private JSONObject aiToolFindReferences(JSONObject call) throws Exception {
+        String symbol = call.optString("symbol", "").trim();
+        int limit = WorkshopAiSymbolDiscovery.boundedLimit(call.optInt("limit", 128));
+        JSONObject result = new JSONObject(nativeFindReferences(projectRootPath(), symbol, limit));
+        if ("error".equals(result.optString("status", ""))) {
+            throw new IOException(result.optString("error", "Rust reference lookup failed"));
+        }
+        return result;
     }
 
     private JSONObject aiToolListOwnerSymbols(AiAgentSession session, JSONObject call) throws Exception {
@@ -7360,7 +7491,7 @@ public final class MainActivity extends Activity {
                 }
             }
         }
-        String stableInstruction = "Return only one JSON object. Follow the cached stasis_basics as the authoritative language/runtime orientation. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. The initial project_symbol_index is a compact source-free inventory; use it to choose a direct read_symbol target and do not call list_symbols when the index already identifies the target. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; use either the initial index, a compact list tool, or a direct read when possible, not every inspection tool. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
+        String stableInstruction = "Return only one JSON object. Follow the cached stasis_basics as the authoritative language/runtime orientation. You may inspect and edit any Stasis symbol in the workspace; selected_symbols are optional context only. The initial project_symbol_index is the completed compact list for src/main.stasis and its direct imports; use it to choose direct read_symbol targets and do not call list_symbols when the index already identifies them. Use the included import map to expand to explicit files only when necessary. You may use mode=tool_calls with tool_calls to inspect or write the Stasis workspace using only these tools: list_symbols, list_owner_symbols, read_symbol, find_references, read_imports, write_imports, write_symbol, delete_symbol, list_tests, read_test_file, write_test_file, delete_test_file, run_tests, get_diagnostics, set_input_state, run_frame, inspect_runtime_state, take_screenshot. take_screenshot returns a compact logical render snapshot with decoded commands, runtime state, and input. set_input_state controls simulated test input; run_frame advances one frame and returns runtime/render state. Before writing, inspect only the minimum target symbols or tests needed for the request; batch reads and find_references calls for the relevant candidates in one turn. Treat every initially listed function whose name directly contains the requested behavior noun as a candidate; do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. Never reread a target already present in selected_symbols or retained tool_observations. Small constant, size, color, position, or tuning changes should normally move from one focused inspection batch to a write. Do not use read_file; the workshop edits symbols, imports, and tests rather than whole source files. For behavior-changing requests, add or update a tests/*.test.stasis test before returning done. A valid test uses test `name`(): bool and returns true or false; do not create .ai_test.json files or use assert_runtime helpers, which are not Stasis syntax. run_tests executes the native bridge tests on the Android device. Apply code changes with write_symbol, delete_symbol, write_imports, write_test_file, or delete_test_file before final edits so failed writes and automatic compile/test_observation results return observations you can correct. The app compiles once after each tool-call batch that contains writes; read-only inspection batches do not rerun tests. Use write_test_file/run_tests or take_screenshot for validation instead of direct runtime pokes. Use on_code_swap() only for post-hot-swap migration, reinitialization, or compatibility work when a running game actually needs state adjusted after code changes; do not inspect it by default. Use tool_specs in the request for required_args, optional_args, and examples. Each tool call must use {\"tool\":\"name\",\"args\":{...}}; include only args relevant to that tool. Return mode=edits with replace_function/replace_struct edits only after write_symbol/delete_symbol/write_imports has successfully written, compiled, and the latest test_observation has passed runnable tests, including any new or updated behavior test for the request. If the requested work is already complete or no code changes are needed, return mode=done with a summary only. A replace_function edit for a missing function in an existing file is treated as an added helper. Do not use markdown.";
         stableInstruction += " Every response must include working_notes as a concise user-visible state summary of at most 2000 characters using Intent, Observed, Next, and Blocker. Report decisions and evidence, not private chain-of-thought. Update working_notes from the retained prior note and current observations on every call.";
         stableInstruction += " write_symbol creates or replaces a symbol. Before writing, inspect the current target. Follow game_design_rules, prefer_lifecycle_local_state, avoid_global_tick_for_per_entity_progression, and architecture_recommendations. Follow architecture_recommendations. Use command/event-style functions for durable gameplay concepts. Tool errors, validation_error observations, and test_observation failures are not final; correct them before returning mode=done. A failed write batch rolls back the whole batch and returns diagnostics.";
         String stableContextText = "Stable request context: " + stableRequest.toString();
@@ -7703,7 +7834,6 @@ public final class MainActivity extends Activity {
                 .put("response_id", response.optString("id", ""))
                 .put("response_model", response.optString("model", ""))
                 .put("status", response.optString("status", ""))
-                .put("usage", aiUsageSummary(extractAiUsage(responseBody)))
                 .put("mode", parsedResponse.optString("mode", ""))
                 .put("summary", parsedResponse.optString("summary", ""))
                 .put("tool_call_count", parsedResponse.optJSONArray("tool_calls") == null ? 0 : parsedResponse.optJSONArray("tool_calls").length())
@@ -10657,6 +10787,10 @@ public final class MainActivity extends Activity {
         return new File(getFilesDir(), AI_TRACE_LOG);
     }
 
+    private File aiUsageLogFile() {
+        return new File(getFilesDir(), AI_USAGE_LOG);
+    }
+
     private String aiTraceLogPath() {
         return aiTraceLogFile().getAbsolutePath();
     }
@@ -10679,8 +10813,15 @@ public final class MainActivity extends Activity {
         }
     }
     private void appendAiTrace(String event, JSONObject fields) {
+        appendAiJsonLine(aiTraceLogFile(), event, fields);
+    }
+
+    private void appendAiUsage(JSONObject fields) {
+        appendAiJsonLine(aiUsageLogFile(), "provider_usage", fields);
+    }
+
+    private void appendAiJsonLine(File file, String event, JSONObject fields) {
         try {
-            File file = aiTraceLogFile();
             long now = System.currentTimeMillis();
             if (file.isFile() && now - file.lastModified() > AI_TRACE_RETENTION_MS) {
                 writeTextFile(file, "");

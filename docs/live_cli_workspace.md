@@ -39,22 +39,32 @@ mounted into that directory. Codex receives only the user request, bounded Stasi
 and bounded observations returned by the live workspace. Symbol reads, runtime inspection, and
 deterministic ticks pass through `stasis_runner::live`; model write batches become one
 `WorkshopSemanticEditBatch`, compile and test on the normal preparation worker, and commit at a
-between-tick boundary. A layout-changing edit remains a validated preview and requires explicit
-user `:apply` approval.
+between-tick boundary. Successful writes return a compact receipt and changed-symbol summary rather
+than echoing whole before/after files into later model turns. A layout-changing edit remains a
+validated preview and requires explicit user `:apply` approval.
+
+`list_symbols` starts with the entry file and its direct imports when no file is supplied. Its
+compact response includes the direct imports for every searched file, allowing the next search to
+expand deliberately without enumerating the project. Each AI request preloads this default result
+in `initial_context`, avoiding a provider round trip while retaining filtered and paged follow-up
+searches. Explicit file arguments remain an exact scope.
 
 Before changing a behavior-bearing symbol, the AI must use compiler-backed `find_references` to
 locate its definition, reads, writes, and calls without receiving unrelated source bodies. For an
 observable game change it uses AI-only `validate_runtime_state` acceptance checks: the requested
 condition must fail before the edit (red), the atomic edit must compile and pass project tests, and
-the same condition must pass afterward (green). The default `live` baseline pauses and restores the
-same bounded runtime snapshot, so normal game progression cannot manufacture a pass. The optional
-`fresh` baseline boots `main`, advances bounded `tick` frames, renders, and inspects state in a
-separate Stasis child process for integration-style red/green checks without changing the running
-game. Projects with host adapters can select game-level `setup`, `tick`, and `render` entrypoints so
-the isolated check exercises logical gameplay without opening a second window or duplicating host
-resource side effects. These acceptance checks are ephemeral and do not create or replace project `.test.stasis`
-files; durable regression tests remain the appropriate place for behavior that should be protected
-after the AI turn.
+the runtime automatically evaluates the same condition afterward (green). Red validation may be
+immediately followed by one contiguous write batch in the same model turn, reducing provider turns
+without allowing writes when the red contract is not accepted. The default `live` baseline pauses
+and restores the same bounded runtime snapshot, so normal game progression cannot manufacture a
+pass. The optional `fresh` baseline boots `main`, advances bounded `tick` frames, renders, and
+inspects state in a separate Stasis child process for integration-style red/green checks without
+changing the running game. Successful fresh checks retain bounded stderr diagnostics as evidence
+instead of discarding otherwise valid results. Projects with host adapters can select game-level
+`setup`, `tick`, and `render` entrypoints so the isolated check exercises logical gameplay without
+opening a second window or duplicating host resource side effects. These acceptance checks are
+ephemeral and do not create or replace project `.test.stasis` files; durable regression tests remain
+the appropriate place for behavior that should be protected after the AI turn.
 
 Human commands intentionally cover every useful live AI capability:
 
@@ -84,11 +94,26 @@ Provider-reported token usage is written separately to
 Codex `turn.completed` event; Stasis does not estimate or add missing token categories. The Codex
 JSON event stream is consumed in memory and all non-usage transport events are discarded.
 
-AI `list_symbols` calls return at most 32 entries by default and accept `query`, `kind`, `file`,
-`owner`, `page`, and `limit` filters. Listings omit imports, empty global groups, source bodies, and
-source hashes. Each item contains only its name, kind, signature, file, and owner when applicable.
-`read_symbol` returns the selected source and its hash so a later write can use that hash solely as
-a stale-write guard.
+AI `list_symbols` calls search only the project entry file by default. The agent can pass `files` as
+an array of up to 16 project-relative paths to widen that starting scope, and can further narrow it
+with `query`, `kind`, `owner`, `page`, and `limit`. Human `stasis symbol list` and TUI `:symbols`
+accept repeated `--file` options and use the same entry-file default. Listings return at most 32
+entries by default and omit imports, empty global groups, source bodies, and source hashes. Each
+item contains only its name, kind, signature, file, and owner when applicable. `read_symbol` returns
+the selected source and its hash so a later write can use that hash solely as a stale-write guard.
+An AI request may use up to 15 provider turns. The agent may batch up to 50 deliberate tool calls
+in each turn, such as reading a related set of functions after targeted discovery. Combined
+observations are bounded to 1 MiB; this supports substantial explicit source reads without making
+whole-project enumeration the default behavior.
+
+Provider requests use JSONL: one immutable request-header record followed by append-only
+`turn_result` records. Each model response and its tool observations appear exactly once, including
+completion-gate feedback. Every later payload is the complete previous payload byte-for-byte plus
+one newline and one new record, so provider prefix caching can reuse the stable instruction,
+context, tools, contract, and prior interactions. All provider turns in one AI request also reuse
+the same isolated temporary working directory so Codex does not see a changing path before this
+stable payload. An atomic multi-symbol write returns its full transaction once; the remaining
+per-symbol observations point to that first result instead of repeating the same source-heavy plan.
 
 The current key map is:
 
