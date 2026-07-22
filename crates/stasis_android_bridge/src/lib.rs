@@ -71,8 +71,8 @@ impl AndroidDisplayMetrics {
         let native_h = native_h.max(1);
         let fit_scale =
             (native_w as f32 / logical_w as f32).min(native_h as f32 / logical_h as f32);
-        let viewport_w = (logical_w as f32 * fit_scale).round();
-        let viewport_h = (logical_h as f32 * fit_scale).round();
+        let viewport_w = (logical_w as f32 * fit_scale).round().max(1.0);
+        let viewport_h = (logical_h as f32 * fit_scale).round().max(1.0);
         let viewport_x = ((native_w as i32 - viewport_w as i32) / 2) as f32;
         let viewport_y = ((native_h as i32 - viewport_h as i32) / 2) as f32;
         let content_scale = (viewport_w / logical_w as f32).min(viewport_h / logical_h as f32);
@@ -2293,6 +2293,11 @@ mod tests {
         let vertical = AndroidDisplayMetrics::new(360, 720, 1080, 2401);
         assert_eq!(vertical.viewport_y, 120.0);
         assert_eq!(vertical.viewport_h, 2160.0);
+
+        let narrow = AndroidDisplayMetrics::new(800, 200, 1, 100);
+        assert_eq!(narrow.viewport_w, 1.0);
+        assert_eq!(narrow.viewport_h, 1.0);
+        assert_eq!(narrow.viewport_y, 49.0);
     }
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};

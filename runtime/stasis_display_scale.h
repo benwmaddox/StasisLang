@@ -46,6 +46,8 @@ static StasisDisplayViewport stasis_display_fit_viewport(
     const float scale = scale_x < scale_y ? scale_x : scale_y;
     viewport.w = floorf((float)logical_w * scale + 0.5f);
     viewport.h = floorf((float)logical_h * scale + 0.5f);
+    if (viewport.w < 1.0f) viewport.w = 1.0f;
+    if (viewport.h < 1.0f) viewport.h = 1.0f;
     viewport.x = floorf(((float)target_w - viewport.w) * 0.5f);
     viewport.y = floorf(((float)target_h - viewport.h) * 0.5f);
     return viewport;
