@@ -19,8 +19,9 @@ use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopSourceItem, WorkshopSourceItemKind,
 };
 use stasis_runner::live::{
-    CompletionContext, CompletionItem, CompletionQuery, LiveCommand, LiveEdit, LiveEditOperation,
-    LiveRequest, LiveResponse, LiveSessionClient, LiveSymbolTarget, TerminalBuffer, TerminalInput,
+    compare_live_validation_values, CompletionContext, CompletionItem, CompletionQuery,
+    LiveCommand, LiveEdit, LiveEditOperation, LiveRequest, LiveResponse, LiveSessionClient,
+    LiveSymbolTarget, TerminalBuffer, TerminalInput,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, OpenOptions};
@@ -2061,7 +2062,7 @@ impl LiveAiTools {
                     .and_then(|value| value.get("value"))
                     .cloned()
                     .ok_or_else(|| format!("inspection for {path} returned no scalar value"))?;
-                let passed = compare_validation_values(&actual, &operator, &expected)?;
+                let passed = compare_live_validation_values(&actual, &operator, &expected)?;
                 requirements_met &= passed;
                 checks.push(serde_json::json!({
                     "path": path,
@@ -2420,36 +2421,6 @@ fn usize_arg(args: &serde_json::Map<String, Value>, name: &str) -> Option<usize>
     args.get(name)
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
-}
-
-pub(super) fn compare_validation_values(
-    actual: &Value,
-    operator: &str,
-    expected: &Value,
-) -> Result<bool, String> {
-    if matches!(operator, "eq" | "ne") {
-        let equal = actual == expected
-            || actual
-                .as_f64()
-                .zip(expected.as_f64())
-                .is_some_and(|(actual, expected)| actual == expected);
-        return Ok(if operator == "eq" { equal } else { !equal });
-    }
-    let actual = actual
-        .as_f64()
-        .ok_or_else(|| format!("operator '{operator}' requires a numeric actual value"))?;
-    let expected = expected
-        .as_f64()
-        .ok_or_else(|| format!("operator '{operator}' requires a numeric expected value"))?;
-    match operator {
-        "lt" => Ok(actual < expected),
-        "lte" => Ok(actual <= expected),
-        "gt" => Ok(actual > expected),
-        "gte" => Ok(actual >= expected),
-        _ => Err(format!(
-            "unsupported validation operator '{operator}'; use eq, ne, lt, lte, gt, or gte"
-        )),
-    }
 }
 
 fn read_bounded_process_output(mut reader: impl Read) -> Result<String, String> {
@@ -3033,13 +3004,13 @@ mod tests {
 
     #[test]
     fn runtime_validation_comparisons_cover_scalar_requirements() {
-        assert!(compare_validation_values(&json!(144), "eq", &json!(144)).expect("eq"));
-        assert!(compare_validation_values(&json!(72), "ne", &json!(144)).expect("ne"));
-        assert!(compare_validation_values(&json!(2.5), "lt", &json!(15)).expect("lt"));
-        assert!(compare_validation_values(&json!(true), "eq", &json!(true)).expect("bool"));
-        assert!(compare_validation_values(&json!(7), "gte", &json!(7)).expect("gte"));
-        assert!(compare_validation_values(&json!(9), "gt", &json!(7)).expect("gt"));
-        assert!(compare_validation_values(&json!(7), "lte", &json!(7)).expect("lte"));
+        assert!(compare_live_validation_values(&json!(144), "eq", &json!(144)).expect("eq"));
+        assert!(compare_live_validation_values(&json!(72), "ne", &json!(144)).expect("ne"));
+        assert!(compare_live_validation_values(&json!(2.5), "lt", &json!(15)).expect("lt"));
+        assert!(compare_live_validation_values(&json!(true), "eq", &json!(true)).expect("bool"));
+        assert!(compare_live_validation_values(&json!(7), "gte", &json!(7)).expect("gte"));
+        assert!(compare_live_validation_values(&json!(9), "gt", &json!(7)).expect("gt"));
+        assert!(compare_live_validation_values(&json!(7), "lte", &json!(7)).expect("lte"));
     }
 
     #[test]

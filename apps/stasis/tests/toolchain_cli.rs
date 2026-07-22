@@ -107,6 +107,30 @@ fn fresh_runtime_validation_runs_in_a_separate_cli_process() {
     assert_eq!(result["command"], "__validate-runtime");
     assert_eq!(result["result"]["baseline"], "fresh");
     assert_eq!(result["result"]["requirements_met"], true);
+
+    let human_validation = stasis(
+        &[
+            "--json",
+            "validate",
+            "State.value",
+            "eq",
+            "3",
+            "--frames",
+            "2",
+        ],
+        &project,
+    );
+    assert_eq!(human_validation.status.code(), Some(0));
+    assert_eq!(
+        json_stdout(&human_validation)["result"]["requirements_met"],
+        true
+    );
+
+    let references = stasis(&["--json", "symbol", "references", "State.value"], &project);
+    assert_eq!(references.status.code(), Some(0));
+    assert!(json_stdout(&references)["result"]["references"]
+        .as_array()
+        .is_some_and(|references| references.len() >= 2));
     fs::remove_dir_all(&parent).ok();
 }
 

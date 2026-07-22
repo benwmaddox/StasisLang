@@ -7,14 +7,16 @@ use stasis::{
 };
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::workshop::{
-    find_workshop_symbols, load_workshop_edit_workspace, plan_workshop_semantic_edits,
-    workshop_reachable_files, workshop_source_hash, workshop_source_items,
-    write_workshop_semantic_plan, write_workshop_semantic_receipt, WorkshopSemanticEdit,
-    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
-    WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
+    plan_workshop_semantic_edits, workshop_reachable_files, workshop_source_hash,
+    workshop_source_items, write_workshop_semantic_plan, write_workshop_semantic_receipt,
+    WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
+    WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
+pub(super) use stasis_runner::live::LiveValidationRequirement as RuntimeValidationRequirement;
 use stasis_runner::live::{
-    live_session, LiveCommand, LiveRequest, LiveResponse, TerminalBuffer, TerminalInput,
+    compare_live_validation_values, live_session, LiveCommand, LiveRequest, LiveResponse,
+    TerminalBuffer, TerminalInput,
 };
 use std::env;
 use std::ffi::OsString;
@@ -38,6 +40,7 @@ const COMMANDS: &[&str] = &[
     "check",
     "test",
     "ai",
+    "validate",
     "run",
     "build",
     "package",
@@ -51,18 +54,6 @@ const COMMANDS: &[&str] = &[
     "help",
     "__validate-runtime",
 ];
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub(super) struct RuntimeValidationRequirement {
-    pub path: String,
-    #[serde(default = "default_validation_operator")]
-    pub op: String,
-    pub value: Value,
-}
-
-fn default_validation_operator() -> String {
-    "eq".to_string()
-}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -122,6 +113,20 @@ enum ToolchainCommand {
     Ai {
         #[arg(value_name = "PROMPT")]
         prompt: String,
+    },
+    /// Boot a fresh isolated runtime and validate one scalar requirement.
+    Validate {
+        path: String,
+        op: String,
+        value: String,
+        #[arg(long, default_value_t = 0)]
+        frames: u32,
+        #[arg(long, default_value = "main")]
+        setup: String,
+        #[arg(long, default_value = "tick")]
+        tick: String,
+        #[arg(long, default_value = "render")]
+        render: String,
     },
     #[command(name = "__validate-runtime", hide = true)]
     ValidateRuntime {
@@ -209,6 +214,12 @@ enum SymbolCommand {
     Find(SymbolSelectorArgs),
     /// Read one unambiguous symbol and its source.
     Read(SymbolSelectorArgs),
+    /// Find compact definitions, reads, writes, and calls for a symbol or field.
+    References {
+        symbol: String,
+        #[arg(long, default_value_t = 128)]
+        limit: usize,
+    },
     /// Add one declaration to an existing imported file.
     Add {
         #[command(flatten)]
@@ -525,6 +536,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Check => "check",
         ToolchainCommand::Test { .. } => "test",
         ToolchainCommand::Ai { .. } => "ai",
+        ToolchainCommand::Validate { .. } => "validate",
         ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
         ToolchainCommand::Build { .. } => "build",
@@ -575,6 +587,17 @@ fn execute(
                     test_workspace(&workspace, path.as_deref())
                 }
                 ToolchainCommand::Ai { prompt } => run_workspace_ai(&workspace, &prompt),
+                ToolchainCommand::Validate {
+                    path,
+                    op,
+                    value,
+                    frames,
+                    setup,
+                    tick,
+                    render,
+                } => validate_runtime_command(
+                    &workspace, path, op, value, frames, setup, tick, render,
+                ),
                 ToolchainCommand::ValidateRuntime {
                     frames,
                     requirements_json,
@@ -886,8 +909,7 @@ fn validate_fresh_runtime(
                     requirement.path
                 )
             })?;
-        let passed =
-            live_tui::compare_validation_values(&actual, &requirement.op, &requirement.value)?;
+        let passed = compare_live_validation_values(&actual, &requirement.op, &requirement.value)?;
         requirements_met &= passed;
         checks.push(json!({
             "path": requirement.path,
@@ -906,6 +928,61 @@ fn validate_fresh_runtime(
             "requirements_met": requirements_met,
             "checks": checks,
         }),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_runtime_command(
+    workspace: &Workspace,
+    path: String,
+    op: String,
+    value: String,
+    frames: u32,
+    setup: String,
+    tick: String,
+    render: String,
+) -> Result<CommandResult, String> {
+    let expected = serde_json::from_str(&value).unwrap_or(Value::String(value));
+    let requirements = serde_json::to_string(&[RuntimeValidationRequirement {
+        path: path.clone(),
+        op: op.clone(),
+        value: expected,
+    }])
+    .map_err(|error| format!("failed encoding runtime requirement: {error}"))?;
+    let result = validate_fresh_runtime(workspace, frames, &requirements, &setup, &tick, &render)?;
+    if !result
+        .data
+        .get("requirements_met")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let check = result
+            .data
+            .get("checks")
+            .and_then(Value::as_array)
+            .and_then(|checks| checks.first())
+            .cloned()
+            .unwrap_or(Value::Null);
+        return Err(format!(
+            "runtime validation failed: {path} {op} {}; actual {}",
+            scalar_text(check.get("expected").unwrap_or(&Value::Null)),
+            scalar_text(check.get("actual").unwrap_or(&Value::Null)),
+        ));
+    }
+    let check = result
+        .data
+        .get("checks")
+        .and_then(Value::as_array)
+        .and_then(|checks| checks.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(CommandResult::success(
+        format!(
+            "runtime validation passed: {path} {op} {} (actual {}, {frames} frame(s))",
+            scalar_text(check.get("expected").unwrap_or(&Value::Null)),
+            scalar_text(check.get("actual").unwrap_or(&Value::Null)),
+        ),
+        result.data,
     ))
 }
 
@@ -1208,6 +1285,7 @@ fn format_live_response(response: &LiveResponse) -> String {
         ),
         "symbols" => format_live_symbols(data),
         "symbol" => format_live_symbol(data),
+        "references" => format_live_references(data),
         "completion" | "palette" if response.truncated => {
             "completion response exceeded the output bound; narrow the query".to_string()
         }
@@ -1231,6 +1309,7 @@ fn format_live_response(response: &LiveResponse) -> String {
                 ""
             }
         ),
+        "runtime_validation" => format_live_runtime_validation(data),
         "print" => format!(
             "{} = {}",
             string_field(data, "static_type", "value"),
@@ -1403,6 +1482,60 @@ fn format_live_symbol(data: &Value) -> String {
         Some(source) => format!("{header}\n{}", source.trim()),
         None => header,
     }
+}
+
+fn format_live_references(data: &Value) -> String {
+    let references = data
+        .get("references")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if references.is_empty() {
+        return format!(
+            "no references found for {}",
+            string_field(data, "symbol", "symbol")
+        );
+    }
+    references
+        .iter()
+        .map(|reference| {
+            format!(
+                "{}  {}  {}  {}",
+                string_field(reference, "kind", "read"),
+                string_field(reference, "file", "unknown"),
+                string_field(reference, "containing_name", "unknown"),
+                string_field(reference, "containing_signature", ""),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_live_runtime_validation(data: &Value) -> String {
+    let Some(check) = data
+        .get("checks")
+        .and_then(Value::as_array)
+        .and_then(|checks| checks.first())
+    else {
+        return "runtime validation returned no check".to_string();
+    };
+    format!(
+        "{}: {} {} {} (actual {}, {} frame(s))",
+        if check
+            .get("passed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "PASS"
+        } else {
+            "FAIL"
+        },
+        string_field(check, "path", "value"),
+        string_field(check, "op", "eq"),
+        scalar_text(check.get("expected").unwrap_or(&Value::Null)),
+        scalar_text(check.get("actual").unwrap_or(&Value::Null)),
+        data.get("frames").and_then(Value::as_u64).unwrap_or(0),
+    )
 }
 
 fn format_live_completion(data: &Value) -> String {
@@ -2176,6 +2309,26 @@ fn symbol_workspace(
                 json!({"schema_version": 1, "item": item}),
             ))
         }
+        SymbolCommand::References { symbol, limit } => {
+            let references = find_workshop_references(&editable_files, &symbol, limit)?;
+            let human = references
+                .iter()
+                .map(|reference| {
+                    format!(
+                        "{:?}\t{}\t{}\t{}",
+                        reference.kind,
+                        reference.file,
+                        reference.containing_name,
+                        reference.containing_signature,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(CommandResult::success(
+                human,
+                json!({"schema_version": 1, "symbol": symbol, "references": references}),
+            ))
+        }
         SymbolCommand::Add {
             target,
             source,
@@ -2798,6 +2951,8 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stasis_ai::live_tool_specs;
+    use std::collections::BTreeMap;
 
     #[test]
     fn invalid_interactive_command_does_not_poison_terminal_buffer() {
@@ -2859,6 +3014,71 @@ mod tests {
             }),
         );
         assert_eq!(format_live_response(&response), "player.score: i32 = 12");
+    }
+
+    #[test]
+    fn human_live_output_formats_references_and_validation_evidence() {
+        let references = LiveResponse::success(
+            12,
+            42,
+            "references",
+            json!({
+                "symbol": "GameState.player_y",
+                "references": [{
+                    "kind": "write",
+                    "file": "src/main.stasis",
+                    "containing_name": "update_player_paddle",
+                    "containing_signature": "update_player_paddle(): void"
+                }]
+            }),
+        );
+        assert_eq!(
+            format_live_response(&references),
+            "write  src/main.stasis  update_player_paddle  update_player_paddle(): void"
+        );
+
+        let validation = LiveResponse::success(
+            13,
+            42,
+            "runtime_validation",
+            json!({
+                "frames": 2,
+                "checks": [{
+                    "path": "Render.command1_h",
+                    "op": "eq",
+                    "expected": 144,
+                    "actual": 144,
+                    "passed": true
+                }]
+            }),
+        );
+        assert_eq!(
+            format_live_response(&validation),
+            "PASS: Render.command1_h eq 144 (actual 144, 2 frame(s))"
+        );
+    }
+
+    #[test]
+    fn every_live_ai_tool_has_a_human_command_surface() {
+        let mappings = BTreeMap::from([
+            ("list_symbols", "stasis symbol list / :symbols"),
+            ("find_references", "stasis symbol references / :references"),
+            ("read_symbol", "stasis symbol read / :read"),
+            ("write_symbol", "stasis symbol update / :update"),
+            ("delete_symbol", "stasis symbol delete / :delete"),
+            ("inspect_runtime_state", ":inspect"),
+            ("validate_runtime_state", "stasis validate / :validate"),
+            ("run_frame", ":step / stasis validate --frames"),
+            ("run_tests", "stasis test / tested TUI apply"),
+        ]);
+
+        for tool in live_tool_specs() {
+            assert!(
+                mappings.contains_key(tool.tool.as_str()),
+                "live AI tool '{}' needs a useful CLI/TUI mapping",
+                tool.tool
+            );
+        }
     }
 
     #[test]

@@ -56,6 +56,23 @@ resource side effects. These acceptance checks are ephemeral and do not create o
 files; durable regression tests remain the appropriate place for behavior that should be protected
 after the AI turn.
 
+Human commands intentionally cover every useful live AI capability:
+
+| AI tool | CLI / TUI equivalent |
+| --- | --- |
+| `list_symbols` | `stasis symbol list` / `:symbols` |
+| `find_references` | `stasis symbol references SYMBOL` / `:references SYMBOL` |
+| `read_symbol` | `stasis symbol read SYMBOL` / `:read SYMBOL` |
+| `write_symbol`, `delete_symbol` | `stasis symbol add|update|delete` / `:add`, `:update`, `:delete` |
+| `inspect_runtime_state` | `:inspect`; `stasis validate` exposes fresh-run scalar evidence |
+| `validate_runtime_state` | `stasis validate PATH OP VALUE` / `:validate PATH OP VALUE` |
+| `run_frame` | `:step`; `stasis validate --frames N` in an isolated CLI run |
+| `run_tests` | `stasis test`; live `:apply`, `:undo`, `:redo`, and definition apply run tests automatically |
+
+`stasis validate` uses the isolated `fresh` baseline and accepts `--frames`, `--setup`, `--tick`,
+and `--render`. TUI `:validate` uses a snapshot of the live game, runs the requested frames, reports
+PASS/FAIL with expected and actual values, and restores the snapshot before returning.
+
 Every run creates `build/ai-traces/tui-ai-<timestamp>.jsonl`. The trace records the user request,
 turns, user-visible working notes, tool calls, and bounded observation/outcome summaries. It never
 stores the complete provider payload. Source-bearing fields and before/after source snapshots are

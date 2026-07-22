@@ -95,6 +95,11 @@ pub enum LiveCommand {
         #[serde(default = "default_reference_limit")]
         limit: usize,
     },
+    Validate {
+        requirement: LiveValidationRequirement,
+        #[serde(default)]
+        frames: u32,
+    },
     ValidationSnapshot,
     ValidationRestore,
     ValidationClear,
@@ -203,6 +208,44 @@ pub enum LiveCommand {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveValidationRequirement {
+    pub path: String,
+    #[serde(default = "default_validation_operator")]
+    pub op: String,
+    pub value: serde_json::Value,
+}
+
+pub fn compare_live_validation_values(
+    actual: &serde_json::Value,
+    operator: &str,
+    expected: &serde_json::Value,
+) -> Result<bool, String> {
+    if matches!(operator, "eq" | "ne") {
+        let equal = actual == expected
+            || actual
+                .as_f64()
+                .zip(expected.as_f64())
+                .is_some_and(|(actual, expected)| actual == expected);
+        return Ok(if operator == "eq" { equal } else { !equal });
+    }
+    let actual = actual
+        .as_f64()
+        .ok_or_else(|| format!("operator '{operator}' requires a numeric actual value"))?;
+    let expected = expected
+        .as_f64()
+        .ok_or_else(|| format!("operator '{operator}' requires a numeric expected value"))?;
+    match operator {
+        "lt" => Ok(actual < expected),
+        "lte" => Ok(actual <= expected),
+        "gt" => Ok(actual > expected),
+        "gte" => Ok(actual >= expected),
+        _ => Err(format!(
+            "unsupported validation operator '{operator}'; use eq, ne, lt, lte, gt, or gte"
+        )),
+    }
+}
+
 const fn one_tick() -> u32 {
     1
 }
@@ -221,6 +264,10 @@ const fn default_symbol_page_limit() -> usize {
 
 const fn default_reference_limit() -> usize {
     128
+}
+
+fn default_validation_operator() -> String {
+    "eq".to_string()
 }
 
 const fn default_true() -> bool {
@@ -1078,6 +1125,25 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
             owner: terminal_selector_value(&args, "--owner"),
             signature: terminal_selector_value(&args, "--signature"),
         }),
+        ":references" | ":refs" => ready(LiveCommand::References {
+            symbol: required_arg(&args, 1, "symbol")?.to_string(),
+            limit: terminal_selector_value(&args, "--limit")
+                .map(|value| parse_u32("limit", &value))
+                .transpose()?
+                .map(|value| value as usize)
+                .unwrap_or_else(default_reference_limit),
+        }),
+        ":validate" => ready(LiveCommand::Validate {
+            requirement: LiveValidationRequirement {
+                path: required_arg(&args, 1, "state path")?.to_string(),
+                op: required_arg(&args, 2, "operator")?.to_string(),
+                value: parse_terminal_scalar(required_arg(&args, 3, "expected value")?),
+            },
+            frames: terminal_selector_value(&args, "--frames")
+                .map(|value| parse_u32("frames", &value))
+                .transpose()?
+                .unwrap_or(0),
+        }),
         ":complete" => {
             let buffer = args.get(1).cloned().unwrap_or_default();
             ready(LiveCommand::Complete {
@@ -1206,6 +1272,10 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         }
         _ => Err(format!("unknown live command '{command}'; use :help")),
     }
+}
+
+fn parse_terminal_scalar(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
 }
 
 fn terminal_selector_value(args: &[String], option: &str) -> Option<String> {
@@ -1885,5 +1955,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn terminal_exposes_reference_and_runtime_validation_commands() {
+        let mut terminal = TerminalBuffer::new();
+        let TerminalInput::Request(references) = terminal
+            .feed_line(":references GameState.player_y --limit 24")
+            .expect("references")
+        else {
+            panic!("expected reference request");
+        };
+        assert_eq!(
+            references.command,
+            LiveCommand::References {
+                symbol: "GameState.player_y".into(),
+                limit: 24,
+            }
+        );
+
+        let TerminalInput::Request(validation) = terminal
+            .feed_line(":validate Render.command1_h eq 144 --frames 2")
+            .expect("validation")
+        else {
+            panic!("expected validation request");
+        };
+        assert_eq!(
+            validation.command,
+            LiveCommand::Validate {
+                requirement: LiveValidationRequirement {
+                    path: "Render.command1_h".into(),
+                    op: "eq".into(),
+                    value: serde_json::json!(144),
+                },
+                frames: 2,
+            }
+        );
     }
 }

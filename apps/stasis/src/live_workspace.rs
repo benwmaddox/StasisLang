@@ -13,9 +13,9 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_runner::live::{
-    CompletionContext, CompletionIndex, CompletionItem, CompletionQuery, CompletionScope,
-    LiveCommand, LiveEditOperation, LiveRequest, LiveResponse, LiveResponseSendError,
-    LiveSessionServer, LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_WATCHES,
+    compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
+    CompletionQuery, CompletionScope, LiveCommand, LiveEditOperation, LiveRequest, LiveResponse,
+    LiveResponseSendError, LiveSessionServer, LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_WATCHES,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
@@ -510,6 +510,10 @@ impl LiveWorkspace {
                     "references": find_workshop_references(&self.source_files, &symbol, limit)?,
                 }),
             )),
+            LiveCommand::Validate {
+                requirement,
+                frames,
+            } => validate_live_runtime(jit, &requirement, frames),
             LiveCommand::ValidationSnapshot => {
                 self.validation_snapshot = Some(
                     stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES)?,
@@ -1911,6 +1915,7 @@ fn help_data() -> Value {
             ":help", ":status", ":pause", ":resume", ":step [ticks]", ":cancel REQUEST_ID", ":quit",
             ":symbols [query] [--page N --limit N]",
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
+            ":references SYMBOL [--limit N]", ":validate PATH OP VALUE [--frames N]",
             ":edit SYMBOL (interactive TUI)",
             ":ai PROMPT | :ai status | :ai cancel (interactive TUI; installed Codex subscription)",
             ":complete BUFFER", ":palette [QUERY]",
@@ -1939,6 +1944,8 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":symbols",
         ":find",
         ":read",
+        ":references",
+        ":validate",
         ":edit",
         ":ai",
         ":complete",
@@ -2049,6 +2056,59 @@ fn inspect_scalar(jit: &JitProcess, path: &str) -> Result<(&'static str, Value),
         "inspection",
         json!({"path": path, "static_type": value.type_name(), "value": value}),
     ))
+}
+
+fn validate_live_runtime(
+    jit: &JitProcess,
+    requirement: &stasis_runner::live::LiveValidationRequirement,
+    frames: u32,
+) -> Result<(&'static str, Value), String> {
+    if frames > 600 {
+        return Err("frames exceeds the 600-frame limit".to_string());
+    }
+    let snapshot = stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES)?;
+    let result = (|| {
+        for _ in 0..frames {
+            execute_validation_entry(jit, "tick")?;
+        }
+        execute_validation_entry(jit, "render")?;
+        let actual = serde_json::to_value(jit.read_global_scalar(&requirement.path)?)
+            .map_err(|error| format!("failed encoding {}: {error}", requirement.path))?
+            .get("value")
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "inspection for {} returned no scalar value",
+                    requirement.path
+                )
+            })?;
+        let passed = compare_live_validation_values(&actual, &requirement.op, &requirement.value)?;
+        Ok((
+            "runtime_validation",
+            json!({
+                "baseline": "live",
+                "frames": frames,
+                "requirements_met": passed,
+                "checks": [{
+                    "path": requirement.path,
+                    "op": requirement.op,
+                    "expected": requirement.value,
+                    "actual": actual,
+                    "passed": passed,
+                }],
+            }),
+        ))
+    })();
+    stasis_dynload::restore_jit_runtime_state(&snapshot);
+    result
+}
+
+fn execute_validation_entry(jit: &JitProcess, name: &str) -> Result<(), String> {
+    match jit.execute_i32_noarg_by_name(name) {
+        Ok(_) => Ok(()),
+        Err(error) if error.contains("not i32-returning") => jit.execute_void_noarg_by_name(name),
+        Err(error) => Err(error),
+    }
 }
 
 fn inspect_all_scalars(
@@ -2614,6 +2674,41 @@ mod tests {
             )
             .ok
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn human_runtime_validation_restores_live_state_after_frames() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+
+        let response = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                44,
+                LiveCommand::Validate {
+                    requirement: stasis_runner::live::LiveValidationRequirement {
+                        path: "score".into(),
+                        op: "eq".into(),
+                        value: json!(3),
+                    },
+                    frames: 2,
+                },
+            ),
+        );
+
+        assert!(response.ok);
+        assert_eq!(response.data.expect("validation")["requirements_met"], true);
+        assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(1)));
         fs::remove_dir_all(root).ok();
     }
 
