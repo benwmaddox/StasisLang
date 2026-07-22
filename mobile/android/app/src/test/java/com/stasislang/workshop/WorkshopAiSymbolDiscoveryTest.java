@@ -1,5 +1,10 @@
 package com.stasislang.workshop;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.TreeSet;
+
+import org.json.JSONObject;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
@@ -26,5 +31,22 @@ public final class WorkshopAiSymbolDiscoveryTest {
         assertEquals(1, WorkshopAiSymbolDiscovery.boundedLimit(0));
         assertEquals(32, WorkshopAiSymbolDiscovery.boundedLimit(32));
         assertEquals(200, WorkshopAiSymbolDiscovery.boundedLimit(500));
+    }
+
+    @Test
+    public void preservesMissingDirectImportsAsRepairableContext() throws Exception {
+        Map<String, String> sources = new LinkedHashMap<>();
+        sources.put("src/main.stasis",
+                "import \"missing.stasis\";\nfunction main(): void {}\n");
+
+        TreeSet<String> scope = WorkshopAiSymbolDiscovery.defaultScope(sources);
+        assertEquals(2, scope.size());
+        assertTrue(scope.contains("src/main.stasis"));
+        assertTrue(scope.contains("src/missing.stasis"));
+        JSONObject imports = WorkshopAiSymbolDiscovery.importsForFiles(sources, scope);
+        assertEquals(
+                "[\"src/missing.stasis\"]",
+                imports.getJSONArray("src/main.stasis").toString());
+        assertEquals(0, imports.getJSONArray("src/missing.stasis").length());
     }
 }
