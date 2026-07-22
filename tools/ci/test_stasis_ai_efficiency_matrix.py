@@ -14,6 +14,31 @@ SPEC.loader.exec_module(matrix)
 
 
 class StasisAiEfficiencyMatrixTests(unittest.TestCase):
+    def test_default_prompt_states_every_hidden_acceptance_requirement(self) -> None:
+        prompt = matrix.DEFAULT_PROMPT.lower()
+        acceptance = matrix.ACCEPTANCE.read_text(encoding="utf-8").lower()
+        prompt_requirements = (
+            "exact 20 by 20 pixel square",
+            "centered on its existing logical position",
+            "top and bottom wall bounds",
+            "10-pixel half-size",
+            "exact rectangle edge contact with a paddle counts as a collision",
+            "score only after the entire square leaves the screen",
+            "touching a screen edge does not score",
+            "normal render and update paths",
+            "exact boundary and the adjacent values",
+        )
+        acceptance_cases = (
+            "comparison ball renders centered at twenty pixels",
+            "comparison ball uses ten pixel wall bounds",
+            "comparison paddle collision matches rendered center",
+            "comparison scoring waits for full ball exit",
+        )
+        for requirement in prompt_requirements:
+            self.assertIn(requirement, prompt)
+        for case in acceptance_cases:
+            self.assertIn(case, acceptance)
+
     def test_scaled_projects_are_deterministic_and_agent_ready(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

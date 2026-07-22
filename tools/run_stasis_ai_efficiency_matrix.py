@@ -16,7 +16,14 @@ ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
 GUIDE = ROOT / "docs/agent_workflow.md"
 ACCEPTANCE = ROOT / "tools/fixtures/ball_20_comparison_acceptance.test.stasis"
-DEFAULT_PROMPT = "make the ball 20 pixels square and keep it centered at its position and update collision behavior and tests"
+DEFAULT_PROMPT = (
+    "Make the Pong ball render as an exact 20 by 20 pixel square centered on its existing logical "
+    "position. Update top and bottom wall bounds and paddle collision bounds to use the square's "
+    "10-pixel half-size. Exact rectangle edge contact with a paddle counts as a collision. Preserve "
+    "scoring, but score only after the entire square leaves the screen: touching a screen edge does "
+    "not score, while crossing one pixel beyond full exit does. Add durable tests through the normal "
+    "render and update paths at each exact boundary and the adjacent values."
+)
 SCALE_LAYOUT = {"small": (0, 0), "medium": (8, 25), "large": (32, 50)}
 MODEL = "gpt-5.6-sol"
 REASONING = "medium"
