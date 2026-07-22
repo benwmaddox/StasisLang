@@ -5378,34 +5378,22 @@ public final class MainActivity extends Activity {
     }
 
     private static TreeSet<String> aiDefaultSymbolScope(ProjectSnapshot project) throws Exception {
-        TreeSet<String> files = new TreeSet<>();
-        files.add(WorkshopAiSymbolDiscovery.DEFAULT_ENTRY_FILE);
-        if (project != null) {
-            JSONArray imports = aiDirectImportFiles(project,
-                    WorkshopAiSymbolDiscovery.DEFAULT_ENTRY_FILE);
-            for (int index = 0; index < imports.length(); index += 1) {
-                files.add(imports.getString(index));
-            }
-        }
-        return files;
+        return WorkshopAiSymbolDiscovery.defaultScope(aiProjectSources(project));
     }
 
     private static JSONObject aiImportsForFiles(ProjectSnapshot project, Iterable<String> files)
             throws Exception {
-        JSONObject imports = new JSONObject();
-        for (String file : files) imports.put(file, aiDirectImportFiles(project, file));
-        return imports;
+        return WorkshopAiSymbolDiscovery.importsForFiles(aiProjectSources(project), files);
     }
 
-    private static JSONArray aiDirectImportFiles(ProjectSnapshot project, String file)
-            throws Exception {
-        SourceFile sourceFile = findProjectFile(project, file);
-        JSONArray paths = parseImportPaths(sourceFile.source);
-        TreeSet<String> resolved = new TreeSet<>();
-        for (int index = 0; index < paths.length(); index += 1) {
-            resolved.add(WorkshopAiSymbolDiscovery.resolveImport(file, paths.getString(index)));
+    private static Map<String, String> aiProjectSources(ProjectSnapshot project) {
+        LinkedHashMap<String, String> sources = new LinkedHashMap<>();
+        if (project != null) {
+            for (SourceFile sourceFile : project.files) {
+                sources.put(sourceFile.path, sourceFile.source);
+            }
         }
-        return new JSONArray(resolved);
+        return sources;
     }
 
     private static JSONObject aiStasisBasics() throws Exception {
@@ -6976,41 +6964,11 @@ public final class MainActivity extends Activity {
     }
 
     private static JSONArray parseImportPaths(String source) throws Exception {
-        JSONArray imports = new JSONArray();
-        String[] lines = source.split("\\r?\\n");
-        for (String line : lines) {
-            String trimmed = line.trim();
-            if (trimmed.isEmpty()) {
-                continue;
-            }
-            if (!trimmed.startsWith("import ")) {
-                break;
-            }
-            String path = normalizeImportPath(trimmed);
-            if (!path.isEmpty()) {
-                imports.put(path);
-            }
-        }
-        return imports;
+        return WorkshopAiSymbolDiscovery.parseImportPaths(source);
     }
 
     private static String normalizeImportPath(String value) throws IOException {
-        String trimmed = value == null ? "" : value.trim();
-        if (trimmed.isEmpty()) {
-            return "";
-        }
-        if (trimmed.startsWith("import ")) {
-            int firstQuote = trimmed.indexOf('"');
-            int secondQuote = firstQuote < 0 ? -1 : trimmed.indexOf('"', firstQuote + 1);
-            if (firstQuote < 0 || secondQuote <= firstQuote + 1) {
-                throw new IOException("Invalid import line: " + trimmed);
-            }
-            return trimmed.substring(firstQuote + 1, secondQuote);
-        }
-        if (trimmed.indexOf('"') >= 0 || trimmed.indexOf(';') >= 0) {
-            throw new IOException("Import paths should not include quotes or semicolons: " + trimmed);
-        }
-        return trimmed;
+        return WorkshopAiSymbolDiscovery.normalizeImportPath(value);
     }
 
     private static String importBlockSource(JSONArray imports) throws Exception {
