@@ -903,7 +903,12 @@ fn run_android_workshop_tick_internal(
         session.tick_count = session.tick_count.saturating_add(1);
         execute_optional_lifecycle_noarg(&session.jit, "render")?;
         take_embedded_resource_error()?;
-        let observed_game_tick_count = session.jit.read_i32_global_path("GameState.tick_count");
+        let write_runtime_state = should_write_jit_runtime_state(initialized, recompiled);
+        let observed_game_tick_count = if read_legacy_render_commands || write_runtime_state {
+            session.jit.read_i32_global_path("GameState.tick_count")
+        } else {
+            0
+        };
         let (render_command_count, render_commands) = if read_legacy_render_commands {
             (
                 session.jit.read_i32_global_path("Render.command_count"),
@@ -915,7 +920,7 @@ fn run_android_workshop_tick_internal(
                 [AndroidBridgeRenderCommand::default(); ANDROID_RENDER_COMMAND_CAPACITY],
             )
         };
-        if should_write_jit_runtime_state(session.tick_count, initialized, recompiled) {
+        if write_runtime_state {
             write_jit_runtime_state(
                 project_root,
                 session.tick_count,
@@ -1368,8 +1373,8 @@ fn fingerprint_workshop_sources(files: &[WorkshopSourceFile]) -> u64 {
     hasher.finish()
 }
 
-fn should_write_jit_runtime_state(tick_count: i32, initialized: bool, recompiled: bool) -> bool {
-    initialized || recompiled || tick_count % 60 == 0
+fn should_write_jit_runtime_state(initialized: bool, recompiled: bool) -> bool {
+    initialized || recompiled
 }
 
 fn write_jit_runtime_state(
@@ -2311,10 +2316,9 @@ mod tests {
 
     #[test]
     fn jit_runtime_state_write_policy_skips_ordinary_frames() {
-        assert!(should_write_jit_runtime_state(1, true, false));
-        assert!(should_write_jit_runtime_state(7, false, true));
-        assert!(should_write_jit_runtime_state(60, false, false));
-        assert!(!should_write_jit_runtime_state(2, false, false));
+        assert!(should_write_jit_runtime_state(true, false));
+        assert!(should_write_jit_runtime_state(false, true));
+        assert!(!should_write_jit_runtime_state(false, false));
     }
 
     #[test]
