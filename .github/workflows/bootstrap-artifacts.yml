@@ -100,7 +100,7 @@ jobs:
           mkdir -p "${out}/runtime"
           cp runtime/CMakeLists.txt runtime/nanosvg.h runtime/nanosvgrast.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_graphics.c runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stb_truetype.h "${out}/runtime/"
           mkdir -p "${out}/docs"
-          cp docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md "${out}/docs/"
+          cp docs/agent_workflow.md docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md "${out}/docs/"
           tar -C dist -czf "dist/stasis-release-${{ runner.os }}.tar.gz" "stasis-release-${{ runner.os }}"
 
       - name: Assemble bundle (windows)
@@ -136,7 +136,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out/runtime" | Out-Null
           @('CMakeLists.txt', 'nanosvg.h', 'nanosvgrast.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_graphics.c', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
           New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
-          Copy-Item docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md "$out/docs/" -Force
+          Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md "$out/docs/" -Force
           Compress-Archive -Path "$out/*" -DestinationPath "dist/stasis-release-${{ runner.os }}.zip" -Force
 
       - name: Smoke test bundled graphics runtime (windows)

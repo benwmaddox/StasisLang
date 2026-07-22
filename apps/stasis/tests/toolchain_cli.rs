@@ -51,6 +51,10 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     let created_json = json_stdout(&created);
     assert_eq!(created_json["ok"], true);
     assert_eq!(created_json["command"], "new");
+    let agent_guide = fs::read_to_string(project.join("AGENTS.md")).expect("read agent guide");
+    assert!(agent_guide.contains("stasis --json symbol list"));
+    assert!(agent_guide.contains("stasis --json symbol references SYMBOL"));
+    assert!(agent_guide.contains("stasis validate PATH OP VALUE --frames N"));
 
     let version = stasis(&["--json", "--version"], &parent);
     assert_eq!(version.status.code(), Some(0));

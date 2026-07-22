@@ -35,6 +35,7 @@ mod live_tui;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
+const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md");
 const COMMANDS: &[&str] = &[
     "new",
     "init",
@@ -687,6 +688,7 @@ fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> 
     let manifest_path = root.join(MANIFEST_NAME);
     let reserved_paths = [
         manifest_path.clone(),
+        root.join("AGENTS.md"),
         root.join("src/main.stasis"),
         root.join("tests/main.test.stasis"),
         root.join("stdlib"),
@@ -703,6 +705,7 @@ fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> 
     let manifest = ProjectManifest::new(name.clone());
     write_manifest(&manifest_path, &manifest)?;
     copy_dir_if_exists(&bundled_stdlib, &root.join("stdlib"))?;
+    write_new_file(&root.join("AGENTS.md"), PROJECT_AGENT_GUIDE)?;
     write_new_file(
         &root.join("src/main.stasis"),
         "import \"../stdlib/stdlib.stasis\";\n\nfunction main(): i32 {\n    return 0;\n}\n",
@@ -3579,6 +3582,22 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).expect("read user source"),
             "user source\n"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn init_preserves_existing_agent_instructions_without_partial_writes() {
+        let root = temp_dir("agent_guide_preflight");
+        fs::create_dir_all(&root).expect("create project directory");
+        fs::write(root.join("AGENTS.md"), "user guidance\n").expect("write user guide");
+
+        let error = create_project(root.clone(), "demo".to_string()).expect_err("reject conflict");
+        assert!(error.contains("AGENTS.md"));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        assert_eq!(
+            fs::read_to_string(root.join("AGENTS.md")).expect("read user guide"),
+            "user guidance\n"
         );
         remove_temp(&root);
     }
