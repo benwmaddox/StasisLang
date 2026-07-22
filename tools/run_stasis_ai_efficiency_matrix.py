@@ -261,7 +261,7 @@ def main() -> int:
     parser.add_argument("--modes", nargs="+", choices=("generalist", "stasis"), default=["generalist", "stasis"])
     parser.add_argument("--scales", nargs="+", choices=tuple(SCALE_LAYOUT), default=list(SCALE_LAYOUT))
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
-    parser.add_argument("--timeout-seconds", type=int, default=300)
+    parser.add_argument("--timeout-seconds", type=int, default=600)
     args = parser.parse_args()
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
