@@ -28,6 +28,8 @@ estimates.
 | Generalist | explicit equality and adjacent threshold checks | medium | 4/4 | 201.0 | 0.1 | 201.1 | 652,734 | 596,480 | 8,670 | 0.840 |
 | Built-in Stasis AI | current | small | 4/4 | 182.1 | 0.1 | 182.2 | 139,196 | 0 | 8,757 | 0.959 |
 | Built-in Stasis AI | current | medium | 2/4 | 127.2 | 0.1 | 127.3 | 140,125 | 12,032 | 5,726 | 0.818 |
+| Built-in Stasis AI | fair explicit contract | medium | 3/4 | 263.1 | 0.1 | 263.2 | 186,548 | 40,192 | 12,965 | 1.141 |
+| Built-in Stasis AI | fair contract + transition-aware guidance | medium | 3/4 | 414.8 | 0.1 | 414.9 | 314,465 | 47,104 | 20,753 | 1.983 |
 
 ## Retained instruction changes
 
@@ -55,3 +57,10 @@ on small. Adding strict full-exit guidance passed small 4/4 in 170.1 seconds but
 rectangle contact on medium in 239.1 seconds. The traces identify the next candidate rule as
 inclusive rectangle contact paired with strict full-exit scoring, but it was not added because the
 two-iteration limit was reached.
+
+The fair rerun stated every hidden behavior directly in the user prompt. The current built-in
+workflow improved to 3/4 but retained an old paddle-center argument instead of deriving the center
+from the rendered paddle rectangle. One generic refinement required public-path tests to account
+for earlier state transitions and derive boundaries from observed output. It failed the same case
+while increasing time, tools, tokens, and cost, so it was reverted. No built-in prompt change from
+this rerun was retained.
