@@ -363,6 +363,7 @@ pub struct CodexExecProvider {
     model: String,
     reasoning_effort: String,
     last_usage: Option<Value>,
+    run: Option<TemporaryRun>,
 }
 
 impl Default for CodexExecProvider {
@@ -380,6 +381,7 @@ impl Default for CodexExecProvider {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| DEFAULT_REASONING_EFFORT.to_string()),
             last_usage: None,
+            run: None,
         }
     }
 }
@@ -401,7 +403,10 @@ fn default_codex_executable() -> PathBuf {
 impl ModelProvider for CodexExecProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String> {
         self.last_usage = None;
-        let run = TemporaryRun::create()?;
+        if self.run.is_none() {
+            self.run = Some(TemporaryRun::create()?);
+        }
+        let run = self.run.as_ref().expect("AI temporary run initialized");
         fs::write(
             &run.schema,
             serde_json::to_vec_pretty(&model_response_schema())

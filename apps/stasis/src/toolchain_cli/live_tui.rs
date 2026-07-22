@@ -2378,14 +2378,14 @@ impl LiveAiTools {
                 }
                 calls
                     .iter()
-                    .map(|call| {
+                    .enumerate()
+                    .map(|(index, call)| {
                         if applied {
-                            ToolObservation::result(
-                                &call.tool,
-                                serde_json::json!({
-                                    "status": "compiled_tested_applied",
-                                    "transaction": response.data,
-                                }),
+                            applied_write_observation(
+                                call,
+                                index,
+                                calls.len(),
+                                &response.data,
                             )
                         } else {
                             let error = if response.ok && response.kind == "edit_preview" {
@@ -2405,6 +2405,28 @@ impl LiveAiTools {
                 .collect(),
         }
     }
+}
+
+fn applied_write_observation(
+    call: &ToolCall,
+    index: usize,
+    batch_size: usize,
+    transaction: &Option<Value>,
+) -> ToolObservation {
+    let result = if index == 0 {
+        serde_json::json!({
+            "status": "compiled_tested_applied",
+            "batch_size": batch_size,
+            "transaction": transaction,
+        })
+    } else {
+        serde_json::json!({
+            "status": "compiled_tested_applied",
+            "batch_size": batch_size,
+            "transaction_observation": 0,
+        })
+    };
+    ToolObservation::result(&call.tool, result)
 }
 
 impl Drop for LiveAiTools {
@@ -3154,6 +3176,34 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("find_references")));
+    }
+
+    #[test]
+    fn atomic_write_batch_returns_the_full_transaction_once() {
+        let calls = [
+            ToolCall {
+                tool: "write_symbol".into(),
+                args: json!({"name": "tick"}),
+            },
+            ToolCall {
+                tool: "write_symbol".into(),
+                args: json!({"name": "render"}),
+            },
+        ];
+        let transaction = Some(json!({"source": "full transaction payload"}));
+
+        let first = applied_write_observation(&calls[0], 0, calls.len(), &transaction);
+        let second = applied_write_observation(&calls[1], 1, calls.len(), &transaction);
+
+        assert_eq!(
+            first.result.as_ref().unwrap()["transaction"],
+            transaction.clone().unwrap()
+        );
+        assert!(second.result.as_ref().unwrap().get("transaction").is_none());
+        assert_eq!(
+            second.result.as_ref().unwrap()["transaction_observation"],
+            0
+        );
     }
 
     #[test]

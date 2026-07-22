@@ -100,7 +100,10 @@ Provider requests use JSONL: one immutable request-header record followed by app
 `turn_result` records. Each model response and its tool observations appear exactly once, including
 completion-gate feedback. Every later payload is the complete previous payload byte-for-byte plus
 one newline and one new record, so provider prefix caching can reuse the stable instruction,
-context, tools, contract, and prior interactions.
+context, tools, contract, and prior interactions. All provider turns in one AI request also reuse
+the same isolated temporary working directory so Codex does not see a changing path before this
+stable payload. An atomic multi-symbol write returns its full transaction once; the remaining
+per-symbol observations point to that first result instead of repeating the same source-heavy plan.
 
 The current key map is:
 
