@@ -13,7 +13,7 @@ for normal project work.
    `--kind`, `--owner`, or `--signature`. Batch independent reads when the agent environment
    supports parallel tool calls; up to 50 deliberate reads in one turn is reasonable.
 4. Before changing behavior, run `stasis --json symbol references SYMBOL` for the relevant
-   function, global, or qualified field such as `GameState.paddle_y`. Inspect related callers,
+   function, global, or qualified field such as `PlayerState.health`. Inspect related callers,
    reads, and writes before editing.
 
 For geometry or collision work, treat the rendered rectangle as the observable contract. Read the
