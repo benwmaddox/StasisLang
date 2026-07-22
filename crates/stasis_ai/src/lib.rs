@@ -8,12 +8,12 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const MAX_AGENT_TURNS: usize = 12;
-pub const MAX_TOOL_CALLS_PER_TURN: usize = 12;
+pub const MAX_AGENT_TURNS: usize = 15;
+pub const MAX_TOOL_CALLS_PER_TURN: usize = 50;
 pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 pub const DEFAULT_REASONING_EFFORT: &str = "medium";
-pub const MAX_OBSERVATION_BYTES: usize = 64 * 1024;
+pub const MAX_OBSERVATION_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -144,7 +144,7 @@ where
         });
         let request = json!({
             "role": "Stasis live-workspace coding agent",
-            "instruction": "Use only the supplied Stasis tools. Treat conversation_history as the authoritative record of your earlier tool calls and their results; do not repeat completed inspection or validation. Inspect narrowly and call find_references for behavior-bearing symbols before writing. For an observable requested behavior, call validate_runtime_state with the target requirements and expected_outcome=fail before writing, then the identical baseline, requirements, and frames with expected_outcome=pass after writing. Use baseline=fresh for startup/reset or integration-style behavior and baseline=live when the current running state matters. If the before check already passes, report that the request is already satisfied without rewriting it. Return done after any edit reports compilation/tests passed and the green validation passes. Return exactly one JSON object matching the response contract.",
+            "instruction": "Use only the supplied Stasis tools. Treat conversation_history as the authoritative record of your earlier tool calls and their results; do not repeat completed inspection or validation. Start discovery narrowly instead of enumerating the whole project. Once relevant symbols are identified, batch related read_symbol or other independent tool calls in one turn when useful. Call find_references for behavior-bearing symbols before writing. For an observable requested behavior, call validate_runtime_state with the target requirements and expected_outcome=fail before writing, then the identical baseline, requirements, and frames with expected_outcome=pass after writing. Use baseline=fresh for startup/reset or integration-style behavior and baseline=live when the current running state matters. If the before check already passes, report that the request is already satisfied without rewriting it. Return done after any edit reports compilation/tests passed and the green validation passes. Return exactly one JSON object matching the response contract.",
             "user_prompt": user_prompt,
             "initial_context": initial_context,
             "tool_specs": tool_specs,
@@ -285,7 +285,7 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
         spec("list_symbols", "Search compact editable Stasis symbols within explicit starting files. Without files, only the project entry file is searched. Pass files as an array of up to 16 project-relative paths to widen the scope. Results exclude imports and empty global groups, default to 32 items, and never include source or source hashes.", &[], &["files", "query", "kind", "owner", "page", "limit"]),
         spec("find_references", "Find compact compiler-owned definitions, reads, writes, and calls for a function, global, or dot-qualified field.", &["symbol"], &["limit"]),
         spec("list_owner_symbols", "List compact symbols owned by one type or group.", &["owner"], &[]),
-        spec("read_symbol", "Read one Stasis symbol.", &["name"], &["kind", "file", "owner", "signature"]),
+        spec("read_symbol", "Read one Stasis symbol. Up to 50 deliberate symbol reads may be batched as separate tool calls in one turn.", &["name"], &["kind", "file", "owner", "signature"]),
         spec("write_symbol", "Atomically add or replace a symbol; set operation=add for a new symbol. A write batch compiles and tests together.", &["file", "name", "new_source"], &["operation", "kind", "owner", "signature", "expected_source_hash"]),
         spec("delete_symbol", "Atomically delete a symbol.", &["name"], &["file", "kind", "owner", "signature", "expected_source_hash"]),
         spec("read_imports", "Read one source file's imports.", &["file"], &[]),
@@ -614,6 +614,71 @@ mod tests {
         .expect("agent");
         assert_eq!(result, "verified");
         assert_eq!(tools.0, 1);
+    }
+
+    #[test]
+    fn fifty_tool_calls_execute_in_one_turn() {
+        let calls = (0..MAX_TOOL_CALLS_PER_TURN)
+            .map(|index| ToolCall {
+                tool: "read_symbol".to_string(),
+                args: json!({"name": format!("function_{index}")}),
+            })
+            .collect();
+        let mut provider = Responses(vec![
+            ModelResponse::ToolCalls {
+                working_notes: "Read the explicitly selected related functions together."
+                    .to_string(),
+                summary: String::new(),
+                tool_calls: calls,
+            },
+            ModelResponse::Done {
+                working_notes: "The requested symbol batch is available for review.".to_string(),
+                summary: "verified".to_string(),
+            },
+        ]);
+        let mut tools = Tools::default();
+
+        run_agent(
+            &mut provider,
+            &mut tools,
+            "inspect selected functions",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("fifty-call batch");
+
+        assert_eq!(MAX_AGENT_TURNS, 15);
+        assert_eq!(tools.0, 50);
+        assert_eq!(contract_json()["limits"]["agent_turns"], 15);
+        assert_eq!(contract_json()["limits"]["tool_calls_per_turn"], 50);
+    }
+
+    #[test]
+    fn substantial_full_source_observations_fit_the_batch_budget() {
+        let source = "x".repeat(18 * 1024);
+        let observations = (0..MAX_TOOL_CALLS_PER_TURN)
+            .map(|index| {
+                ToolObservation::result(
+                    "read_symbol",
+                    json!({"name": format!("function_{index}"), "source": source}),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            serde_json::to_vec(&observations)
+                .expect("observations")
+                .len()
+                > 64 * 1024
+        );
+
+        let bounded = bound_observations(observations);
+
+        assert_eq!(bounded.len(), 50);
+        assert!(bounded
+            .iter()
+            .all(|observation| observation.error.is_none()));
     }
 
     #[test]

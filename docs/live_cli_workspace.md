@@ -91,6 +91,10 @@ accept repeated `--file` options and use the same entry-file default. Listings r
 entries by default and omit imports, empty global groups, source bodies, and source hashes. Each
 item contains only its name, kind, signature, file, and owner when applicable. `read_symbol` returns
 the selected source and its hash so a later write can use that hash solely as a stale-write guard.
+An AI request may use up to 15 provider turns. The agent may batch up to 50 deliberate tool calls
+in each turn, such as reading a related set of functions after targeted discovery. Combined
+observations are bounded to 1 MiB; this supports substantial explicit source reads without making
+whole-project enumeration the default behavior.
 
 The current key map is:
 
