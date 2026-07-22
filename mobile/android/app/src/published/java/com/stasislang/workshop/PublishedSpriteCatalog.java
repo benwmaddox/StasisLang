@@ -3,6 +3,9 @@ package com.stasislang.workshop;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Typeface;
 import android.opengl.GLES20;
 import android.opengl.GLUtils;
 import android.util.SparseArray;
@@ -16,7 +19,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 
 final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvider {
     private static final String ROOT = "stasis_game/";
@@ -28,14 +33,19 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
     private static final long MAX_PIXELS = 16_000_000L;
 
     private final AssetManager assets;
+    private final MainActivity activity;
     private final SparseArray<SpriteAsset> sprites = new SparseArray<>();
     private final SparseIntArray textures = new SparseIntArray();
     private final SparseBooleanArray failedHandles = new SparseBooleanArray();
+    private final SparseArray<TextTexture> textTextures = new SparseArray<>();
+    private final SparseArray<FontInfo> fonts = new SparseArray<>();
+    private final ArrayList<DynamicTextTexture> dynamicTextTextures = new ArrayList<>();
     private boolean manifestRead;
     private boolean manifestValid;
     private int fallbackTexture;
 
-    PublishedSpriteCatalog(AssetManager assets) {
+    PublishedSpriteCatalog(MainActivity activity, AssetManager assets) {
+        this.activity = activity;
         this.assets = assets;
     }
 
@@ -43,6 +53,9 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
     public void onSurfaceCreated() {
         textures.clear();
         failedHandles.clear();
+        textTextures.clear();
+        fonts.clear();
+        dynamicTextTextures.clear();
         fallbackTexture = createFallbackTexture();
     }
 
@@ -68,8 +81,104 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
             return texture;
         } catch (Exception error) {
             failedHandles.put(handle, true);
+            activity.reportPreviewResourceError("sprite " + handle + ": " + error.getMessage());
             return fallbackTexture;
         }
+    }
+
+    @Override
+    public int fallbackTexture() {
+        return fallbackTexture;
+    }
+
+    @Override
+    public long cachedTextTextureFor(int runHandle) {
+        TextTexture cached = textTextures.get(runHandle);
+        if (cached != null) return StasisPreviewRenderer.packTexture(
+                cached.texture, cached.width, cached.height);
+        try {
+            JSONObject resolved = new JSONObject(MainActivity.nativeResolveCachedText("", runHandle));
+            if (!"ok".equals(resolved.optString("status"))) {
+                throw new IOException(resolved.optString("error", "cached text resolution failed"));
+            }
+            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+            paint.setColor(0xffffffff);
+            paint.setTextSize(resolved.getInt("font_size"));
+            paint.setTypeface(Typeface.createFromAsset(assets, resolved.getString("font_asset")));
+            String text = resolved.getString("text");
+            Paint.FontMetrics metrics = paint.getFontMetrics();
+            int width = Math.max(1, (int)Math.ceil(paint.measureText(text)));
+            int height = Math.max(1, (int)Math.ceil(metrics.descent - metrics.ascent));
+            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            new Canvas(bitmap).drawText(text, 0.0f, -metrics.ascent, paint);
+            int texture;
+            try {
+                texture = upload(bitmap);
+            } finally {
+                bitmap.recycle();
+            }
+            cached = new TextTexture(texture, width, height);
+            textTextures.put(runHandle, cached);
+            return StasisPreviewRenderer.packTexture(texture, width, height);
+        } catch (Exception error) {
+            activity.reportPreviewResourceError("cached text " + runHandle + ": " + error.getMessage());
+            return 0L;
+        }
+    }
+
+    @Override
+    public long textTextureFor(int font, ByteBuffer utf8, int offset, int length) {
+        for (int index = 0; index < dynamicTextTextures.size(); index += 1) {
+            DynamicTextTexture cached = dynamicTextTextures.get(index);
+            if (cached.matches(font, utf8, offset, length)) {
+                return StasisPreviewRenderer.packTexture(
+                        cached.texture.texture, cached.texture.width, cached.texture.height);
+            }
+        }
+        try {
+            if (dynamicTextTextures.size() >= 4096) throw new IOException("dynamic text cache is full");
+            byte[] bytes = new byte[length];
+            for (int index = 0; index < length; index += 1) bytes[index] = utf8.get(offset + index);
+            FontInfo fontInfo = fontInfo(font);
+            TextTexture texture = rasterText(fontInfo, new String(bytes, StandardCharsets.UTF_8));
+            dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
+            return StasisPreviewRenderer.packTexture(texture.texture, texture.width, texture.height);
+        } catch (Exception error) {
+            activity.reportPreviewResourceError("text font " + font + ": " + error.getMessage());
+            return 0L;
+        }
+    }
+
+    private FontInfo fontInfo(int handle) throws Exception {
+        FontInfo cached = fonts.get(handle);
+        if (cached != null) return cached;
+        JSONObject resolved = new JSONObject(MainActivity.nativeResolveFont("", handle));
+        if (!"ok".equals(resolved.optString("status"))) {
+            throw new IOException(resolved.optString("error", "font resolution failed"));
+        }
+        cached = new FontInfo(Typeface.createFromAsset(
+                assets, resolved.getString("font_asset")), resolved.getInt("font_size"));
+        fonts.put(handle, cached);
+        return cached;
+    }
+
+    private static TextTexture rasterText(FontInfo font, String text) throws IOException {
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+        paint.setColor(0xffffffff);
+        paint.setTextSize(font.size);
+        paint.setTypeface(font.typeface);
+        Paint.FontMetrics metrics = paint.getFontMetrics();
+        int width = Math.max(1, (int)Math.ceil(paint.measureText(text)));
+        int height = Math.max(1, (int)Math.ceil(metrics.descent - metrics.ascent));
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        new Canvas(bitmap).drawText(text, 0.0f, -metrics.ascent, paint);
+        int texture;
+        try {
+            texture = upload(bitmap);
+        } finally {
+            bitmap.recycle();
+        }
+        return new TextTexture(texture, width, height);
     }
 
     private void ensureManifest() throws Exception {
@@ -230,6 +339,48 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
             this.encoding = encoding;
             this.width = width;
             this.height = height;
+        }
+    }
+
+    private static final class TextTexture {
+        final int texture;
+        final int width;
+        final int height;
+
+        TextTexture(int texture, int width, int height) {
+            this.texture = texture;
+            this.width = width;
+            this.height = height;
+        }
+    }
+
+    private static final class FontInfo {
+        final Typeface typeface;
+        final int size;
+
+        FontInfo(Typeface typeface, int size) {
+            this.typeface = typeface;
+            this.size = size;
+        }
+    }
+
+    private static final class DynamicTextTexture {
+        final int font;
+        final byte[] text;
+        final TextTexture texture;
+
+        DynamicTextTexture(int font, byte[] text, TextTexture texture) {
+            this.font = font;
+            this.text = text;
+            this.texture = texture;
+        }
+
+        boolean matches(int candidateFont, ByteBuffer utf8, int offset, int length) {
+            if (font != candidateFont || text.length != length) return false;
+            for (int index = 0; index < length; index += 1) {
+                if (text[index] != utf8.get(offset + index)) return false;
+            }
+            return true;
         }
     }
 }

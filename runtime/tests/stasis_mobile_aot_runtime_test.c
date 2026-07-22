@@ -52,9 +52,18 @@ void stasis_sleep_ms(int ms) { (void)ms; }
 int main(void) {
     int32_t external = 4;
     int32_t external_array[3] = {7, 8, 9};
+    int32_t overlapping_i32[5] = {1, 2, 3, 4, 5};
+    float overlapping_f32[5] = {1, 2, 3, 4, 5};
     uint8_t external_u8[4] = {1, 2, 3, 4};
     uint8_t dynamic_path[] = "sprite.bmp";
     int32_t *owned;
+    char escaped_json[64];
+    const char json_controls[] = {'"', '\\', '\b', '\f', '\n', '\r', '\t', 1, 'A', 0};
+
+    CHECK(stasis_mobile_json_escape(json_controls, escaped_json, sizeof(escaped_json)) == 1);
+    CHECK(strcmp(escaped_json, "\\\"\\\\\\b\\f\\n\\r\\t\\u0001A") == 0);
+    CHECK(stasis_mobile_json_escape("too long", escaped_json, 2) == 0);
+    CHECK(escaped_json[0] == '\0');
 
     stasis_mobile_aot_reset();
     stasis_jit_global_i32_store(10, 42);
@@ -75,6 +84,15 @@ int main(void) {
     CHECK(stasis_jit_global_i32_array_load(22, 0, 1) == 2);
     stasis_jit_sys_memcpy_u8(22, 2, 22, 0, 2);
     CHECK(external_u8[2] == 1 && external_u8[3] == 2);
+
+    stasis_jit_register_global_i32_array(24, 0, overlapping_i32, 5);
+    stasis_jit_sys_memmove_i32(24, 1, 24, 0, 4);
+    CHECK(overlapping_i32[0] == 1 && overlapping_i32[1] == 1 &&
+            overlapping_i32[2] == 2 && overlapping_i32[3] == 3 && overlapping_i32[4] == 4);
+    stasis_jit_register_global_f32_array(25, 0, overlapping_f32, 5);
+    stasis_jit_sys_memmove_f32(25, 1, 25, 0, 4);
+    CHECK(overlapping_f32[0] == 1 && overlapping_f32[1] == 1 &&
+            overlapping_f32[2] == 2 && overlapping_f32[3] == 3 && overlapping_f32[4] == 4);
 
     stasis_jit_register_global_u8_array(23, 0, dynamic_path, sizeof(dynamic_path) - 1);
     stasis_jit_collection_i32_store(23, 1, sizeof(dynamic_path) - 1);

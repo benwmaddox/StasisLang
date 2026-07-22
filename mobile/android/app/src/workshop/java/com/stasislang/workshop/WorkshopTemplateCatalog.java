@@ -14,6 +14,7 @@ final class WorkshopTemplateCatalog {
             "workshop_sample/",
             new String[] {
                     "src/main.stasis",
+                    "src/preview_adapter.stasis",
                     "src/root.stasis",
                     "src/game_state.stasis",
                     "src/player.stasis",
@@ -23,7 +24,12 @@ final class WorkshopTemplateCatalog {
                     "src/systems/collision.stasis"
             },
             new String[] { "tests/enemy_paddle_speed_schedule.test.stasis" },
-            new String[] { "assets/manifest.json", "assets/ball.svg" });
+            new String[] {
+                    "assets/manifest.json",
+                    "assets/ball.svg",
+                    "assets/paddle.svg",
+                    "assets/center_line.svg"
+            });
 
     private static final Template EXPLORATION = new Template(
             "exploration",

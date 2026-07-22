@@ -18,7 +18,11 @@ if(STASIS_ANDROID_PUBLISHED_AOT)
         message(FATAL_ERROR "STASIS_PUBLISHED_AOT_DIR is required when STASIS_ANDROID_PUBLISHED_AOT=ON")
     endif()
     include("${STASIS_PUBLISHED_AOT_DIR}/published_aot_objects.cmake")
-    target_sources(stasis_mobile_smoke PRIVATE ${STASIS_PUBLISHED_AOT_OBJECTS})
+    target_sources(stasis_mobile_smoke PRIVATE
+        ${STASIS_PUBLISHED_AOT_OBJECTS}
+        "${STASIS_PUBLISHED_AOT_DIR}/published_aot_bindings.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../runtime/stasis_mobile_aot_runtime.c")
     target_include_directories(stasis_mobile_smoke PRIVATE "${STASIS_PUBLISHED_AOT_DIR}")
-    target_compile_definitions(stasis_mobile_smoke PRIVATE STASIS_ANDROID_PUBLISHED_AOT=1)
+    target_compile_definitions(stasis_mobile_smoke PRIVATE
+        STASIS_ANDROID_PUBLISHED_AOT=1 STASIS_RENDER_V1_DIRECT=1)
 endif()

@@ -1,6 +1,9 @@
 package com.stasislang.workshop;
 
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Typeface;
 import android.opengl.GLES20;
 import android.util.SparseArray;
 
@@ -9,15 +12,22 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 
 final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProvider {
+    private static final long MANIFEST_CHECK_INTERVAL_NANOS = 500_000_000L;
     private final MainActivity activity;
     private final SparseArray<SpriteTexture> textures = new SparseArray<>();
+    private final SparseArray<TextTexture> textTextures = new SparseArray<>();
+    private final SparseArray<FontInfo> fonts = new SparseArray<>();
+    private final ArrayList<DynamicTextTexture> dynamicTextTextures = new ArrayList<>();
     private final int[] deletedTexture = new int[1];
     private File manifest;
     private String projectRootPath;
     private int fallbackTexture;
     private long manifestStamp = Long.MIN_VALUE;
+    private long nextManifestCheckNanos;
 
     WorkshopTextureProvider(MainActivity activity) {
         this.activity = activity;
@@ -26,28 +36,35 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     @Override
     public void onSurfaceCreated() {
         textures.clear();
+        textTextures.clear();
+        fonts.clear();
+        dynamicTextTextures.clear();
         setProjectRoot(activity.projectRootPath());
         manifestStamp = Long.MIN_VALUE;
+        nextManifestCheckNanos = 0L;
         fallbackTexture = createFallbackTexture();
     }
 
     @Override
-    public int textureFor(int handle) {
-        String currentProjectRoot = activity.projectRootPath();
-        if (projectChanged(projectRootPath, currentProjectRoot)) {
-            clearTextures();
-            setProjectRoot(currentProjectRoot);
-        }
+    public void onFrameStart() {
+        ensureCurrentProject();
+        long now = System.nanoTime();
+        if (now < nextManifestCheckNanos) return;
+        nextManifestCheckNanos = now + MANIFEST_CHECK_INTERVAL_NANOS;
         long currentStamp = manifest.isFile()
                 ? manifest.lastModified() ^ (manifest.length() << 7) : 0L;
         if (currentStamp != manifestStamp) manifestStamp = currentStamp;
+    }
+
+    @Override
+    public int textureFor(int handle) {
         SpriteTexture cached = textures.get(handle);
         if (cached != null && cached.checkedManifestStamp == manifestStamp) {
             return cached.texture;
         }
         try {
             JSONObject resolved = new JSONObject(MainActivity.nativeResolveSpriteAsset(
-                    currentProjectRoot, handle));
+                    projectRootPath, handle));
             if (!"ok".equals(resolved.optString("status"))) {
                 throw new IOException(resolved.optString("error", "sprite resolution failed"));
             }
@@ -67,12 +84,122 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             if (cached != null) deleteTexture(cached.texture);
             return uploaded;
         } catch (Exception error) {
+            activity.reportPreviewResourceError("sprite " + handle + ": " + error.getMessage());
             if (cached != null) {
                 cached.checkedManifestStamp = manifestStamp;
                 return cached.texture;
             }
             return fallbackTexture;
         }
+    }
+
+    @Override
+    public int fallbackTexture() {
+        return fallbackTexture;
+    }
+
+    @Override
+    public long cachedTextTextureFor(int runHandle) {
+        ensureCurrentProject();
+        TextTexture cached = textTextures.get(runHandle);
+        if (cached != null) return StasisPreviewRenderer.packTexture(
+                cached.texture, cached.width, cached.height);
+        try {
+            JSONObject resolved = new JSONObject(MainActivity.nativeResolveCachedText(
+                    activity.projectRootPath(), runHandle));
+            if (!"ok".equals(resolved.optString("status"))) {
+                throw new IOException(resolved.optString("error", "cached text resolution failed"));
+            }
+            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+            paint.setColor(0xffffffff);
+            paint.setTextSize(resolved.getInt("font_size"));
+            paint.setTypeface(Typeface.createFromFile(resolved.getString("font_path")));
+            String text = resolved.getString("text");
+            Paint.FontMetrics metrics = paint.getFontMetrics();
+            int width = Math.max(1, (int)Math.ceil(paint.measureText(text)));
+            int height = Math.max(1, (int)Math.ceil(metrics.descent - metrics.ascent));
+            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            new Canvas(bitmap).drawText(text, 0.0f, -metrics.ascent, paint);
+            int texture;
+            try {
+                texture = upload(bitmap);
+            } finally {
+                bitmap.recycle();
+            }
+            cached = new TextTexture(texture, width, height);
+            textTextures.put(runHandle, cached);
+            return StasisPreviewRenderer.packTexture(texture, width, height);
+        } catch (Exception error) {
+            activity.reportPreviewResourceError("cached text " + runHandle + ": " + error.getMessage());
+            return 0L;
+        }
+    }
+
+    @Override
+    public long textTextureFor(int font, ByteBuffer utf8, int offset, int length) {
+        ensureCurrentProject();
+        for (int index = 0; index < dynamicTextTextures.size(); index += 1) {
+            DynamicTextTexture cached = dynamicTextTextures.get(index);
+            if (cached.matches(font, utf8, offset, length)) {
+                return StasisPreviewRenderer.packTexture(
+                        cached.texture.texture, cached.texture.width, cached.texture.height);
+            }
+        }
+        try {
+            if (dynamicTextTextures.size() >= 4096) throw new IOException("dynamic text cache is full");
+            byte[] bytes = new byte[length];
+            for (int index = 0; index < length; index += 1) bytes[index] = utf8.get(offset + index);
+            FontInfo fontInfo = fontInfo(font);
+            TextTexture texture = rasterText(fontInfo, new String(bytes, StandardCharsets.UTF_8));
+            dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
+            return StasisPreviewRenderer.packTexture(texture.texture, texture.width, texture.height);
+        } catch (Exception error) {
+            activity.reportPreviewResourceError("text font " + font + ": " + error.getMessage());
+            return 0L;
+        }
+    }
+
+    private String ensureCurrentProject() {
+        String currentProjectRoot = activity.projectRootPath();
+        if (projectChanged(projectRootPath, currentProjectRoot)) {
+            clearTextures();
+            setProjectRoot(currentProjectRoot);
+        }
+        return currentProjectRoot;
+    }
+
+    private FontInfo fontInfo(int handle) throws Exception {
+        FontInfo cached = fonts.get(handle);
+        if (cached != null) return cached;
+        JSONObject resolved = new JSONObject(MainActivity.nativeResolveFont(projectRootPath, handle));
+        if (!"ok".equals(resolved.optString("status"))) {
+            throw new IOException(resolved.optString("error", "font resolution failed"));
+        }
+        cached = new FontInfo(Typeface.createFromFile(resolved.getString("font_path")),
+                resolved.getInt("font_size"));
+        fonts.put(handle, cached);
+        return cached;
+    }
+
+    private static TextTexture rasterText(FontInfo font, String text) {
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+        paint.setColor(0xffffffff);
+        paint.setTextSize(font.size);
+        paint.setTypeface(font.typeface);
+        Paint.FontMetrics metrics = paint.getFontMetrics();
+        int width = Math.max(1, (int)Math.ceil(paint.measureText(text)));
+        int height = Math.max(1, (int)Math.ceil(metrics.descent - metrics.ascent));
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        new Canvas(bitmap).drawText(text, 0.0f, -metrics.ascent, paint);
+        int texture;
+        try {
+            texture = upload(bitmap);
+        } catch (IOException error) {
+            throw new IllegalStateException(error);
+        } finally {
+            bitmap.recycle();
+        }
+        return new TextTexture(texture, width, height);
     }
 
     static boolean projectChanged(String boundRoot, String currentRoot) {
@@ -83,6 +210,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         projectRootPath = root;
         manifest = new File(root, WorkshopAssetManifest.RELATIVE_PATH);
         manifestStamp = Long.MIN_VALUE;
+        nextManifestCheckNanos = 0L;
     }
 
     private void clearTextures() {
@@ -90,6 +218,15 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             deleteTexture(textures.valueAt(index).texture);
         }
         textures.clear();
+        for (int index = 0; index < textTextures.size(); index++) {
+            deleteTexture(textTextures.valueAt(index).texture);
+        }
+        textTextures.clear();
+        for (DynamicTextTexture texture : dynamicTextTextures) {
+            deleteTexture(texture.texture.texture);
+        }
+        dynamicTextTextures.clear();
+        fonts.clear();
     }
 
     private void deleteTexture(int texture) {
@@ -183,6 +320,48 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             this.texture = texture;
             this.contentHash = contentHash;
             this.checkedManifestStamp = checkedManifestStamp;
+        }
+    }
+
+    private static final class TextTexture {
+        final int texture;
+        final int width;
+        final int height;
+
+        TextTexture(int texture, int width, int height) {
+            this.texture = texture;
+            this.width = width;
+            this.height = height;
+        }
+    }
+
+    private static final class FontInfo {
+        final Typeface typeface;
+        final int size;
+
+        FontInfo(Typeface typeface, int size) {
+            this.typeface = typeface;
+            this.size = size;
+        }
+    }
+
+    private static final class DynamicTextTexture {
+        final int font;
+        final byte[] text;
+        final TextTexture texture;
+
+        DynamicTextTexture(int font, byte[] text, TextTexture texture) {
+            this.font = font;
+            this.text = text;
+            this.texture = texture;
+        }
+
+        boolean matches(int candidateFont, ByteBuffer utf8, int offset, int length) {
+            if (font != candidateFont || text.length != length) return false;
+            for (int index = 0; index < length; index += 1) {
+                if (text[index] != utf8.get(offset + index)) return false;
+            }
+            return true;
         }
     }
 }

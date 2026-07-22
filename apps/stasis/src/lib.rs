@@ -3687,6 +3687,7 @@ mod tests {
 
     #[test]
     fn shipping_renderers_share_one_versioned_sdl_command_process() {
+        let runtime_cmake = STASIS_RUNTIME_CMAKE.replace("\r\n", "\n");
         for required in [
             "STASIS_RENDER_V1_MAGIC 0x47584631",
             "STASIS_RENDER_V1_VERSION 1",
@@ -3702,9 +3703,9 @@ mod tests {
             );
         }
         assert!(
-            STASIS_RUNTIME_CMAKE.contains(
+            runtime_cmake.contains(
                 "Build the canonical SDL_Renderer runtime (disable only for legacy GL conformance)"
-            ) && STASIS_RUNTIME_CMAKE.contains("    ON\n)"),
+            ) && runtime_cmake.contains("    ON\n)"),
             "shipping runtime should default to the canonical SDL backend"
         );
         assert!(
