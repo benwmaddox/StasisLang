@@ -47,9 +47,17 @@ pub(super) fn run_scripted_ai(
     project_root: &Path,
     prompt: &str,
 ) -> Result<(String, PathBuf), String> {
+    run_scripted_ai_with_cancel(client, project_root, prompt, &AtomicBool::new(false))
+}
+
+pub(super) fn run_scripted_ai_with_cancel(
+    client: &LiveSessionClient,
+    project_root: &Path,
+    prompt: &str,
+    canceled: &AtomicBool,
+) -> Result<(String, PathBuf), String> {
     let mut audit = AiAuditLog::create(project_root, prompt)?;
     let trace_path = audit.path.clone();
-    let canceled = AtomicBool::new(false);
     let mut provider = CodexExecProvider::default();
     let mut tools = LiveAiTools::new(client.clone());
     let mut audit_error = None;
@@ -59,7 +67,7 @@ pub(super) fn run_scripted_ai(
         prompt,
         ai_initial_context(),
         live_tool_specs(),
-        &canceled,
+        canceled,
         |event| {
             if audit_error.is_none() {
                 audit_error = audit.write(audit_agent_event(&event)).err();

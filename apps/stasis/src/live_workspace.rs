@@ -1624,6 +1624,7 @@ fn compile_candidate(
     ]);
     for file in runtime_files {
         let path = config.project_root.join(&file.path);
+        let path = path.canonicalize().unwrap_or(path);
         candidate.upsert_file(path.to_string_lossy().to_string(), file.source);
     }
     candidate
@@ -2295,6 +2296,26 @@ mod tests {
             .expect("main");
         assert!(main.source.contains("score += 3"));
         assert!(main.source.contains("return score"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn compile_candidate_does_not_reload_imports_under_a_second_path() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"adapter.stasis\";\nfunction main(): i32 { return helper(1); }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return helper(2); }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("main");
+        fs::write(
+            root.join("src/adapter.stasis"),
+            "function helper(value: i32): i32 { return value; }\n",
+        )
+        .expect("adapter");
+        let files = load_workshop_edit_workspace(&root, &config.entry).expect("files");
+
+        compile_candidate(&config, &files).expect("candidate with imported helper");
+
         fs::remove_dir_all(root).ok();
     }
 

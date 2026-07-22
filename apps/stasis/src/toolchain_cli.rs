@@ -22,6 +22,8 @@ use std::fs;
 use std::io::{self, BufRead};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -854,8 +856,11 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
     let ai_root = workspace.root.clone();
     let prompt = prompt.to_string();
+    let canceled = Arc::new(AtomicBool::new(false));
+    let ai_canceled = Arc::clone(&canceled);
     let ai = thread::spawn(move || {
-        let result = live_tui::run_scripted_ai(&client, &ai_root, &prompt);
+        let result =
+            live_tui::run_scripted_ai_with_cancel(&client, &ai_root, &prompt, &ai_canceled);
         let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
         result
     });
@@ -866,10 +871,14 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
     );
     let run_result =
         run_live_in_process(&entry, Some(&workspace.root), 16_000, None, server, config);
+    if let Err(error) = run_result {
+        canceled.store(true, Ordering::Release);
+        let _ = ai.join();
+        return Err(error);
+    }
     let (summary, trace) = ai
         .join()
         .map_err(|_| "live AI thread panicked".to_string())??;
-    run_result?;
     Ok(CommandResult::success(
         format!("AI complete: {summary}\nAI trace: {}", trace.display()),
         json!({

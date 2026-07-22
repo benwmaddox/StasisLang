@@ -679,15 +679,17 @@ fn prepare_embedded_resource_catalog(
 
 fn embedded_path(catalog: &EmbeddedResourceCatalog, bytes: &[u8]) -> Option<PathBuf> {
     let path = std::str::from_utf8(bytes).ok()?;
-    let absolute = catalog
-        .project_root
-        .join("src")
-        .join(path)
-        .canonicalize()
-        .ok()?;
-    absolute
-        .starts_with(&catalog.project_root)
-        .then_some(absolute)
+    [
+        catalog.project_root.join(path),
+        catalog.project_root.join("src").join(path),
+    ]
+    .into_iter()
+    .find_map(|candidate| {
+        let absolute = candidate.canonicalize().ok()?;
+        absolute
+            .starts_with(&catalog.project_root)
+            .then_some(absolute)
+    })
 }
 
 fn set_embedded_resource_error(catalog: &mut EmbeddedResourceCatalog, message: String) {

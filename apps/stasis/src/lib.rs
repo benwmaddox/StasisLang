@@ -1762,7 +1762,7 @@ fn run_play_in_process_inner(
         || gfx.host_bulk_init(&host_req_seq),
         || {
             jit.execute_i32_noarg_by_name("main")
-                .map_err(|error| format!("guest main() failed: {error}"))
+                .map_err(format_live_main_error)
         },
         || {
             gfx.host_bulk_apply_requests(
@@ -2010,6 +2010,14 @@ fn run_play_in_process_inner(
     }
 
     Ok(())
+}
+
+fn format_live_main_error(error: String) -> String {
+    if error.contains("not i32-returning") || error.contains("not a no-argument function") {
+        format!("interactive entry signature mismatch: expected `function main(): i32`; {error}")
+    } else {
+        format!("guest main() failed: {error}")
+    }
 }
 
 pub fn run_with_real_backend(config: RunnerConfig) -> RunnerSummary {
@@ -3392,6 +3400,14 @@ mod tests {
 
         assert_eq!(result, 0);
         assert_eq!(&*phases.borrow(), &["init", "main", "apply"]);
+    }
+
+    #[test]
+    fn live_main_signature_error_names_the_required_signature() {
+        let error =
+            format_live_main_error("function 'main' is not i32-returning (type id 0)".to_string());
+        assert!(error.contains("expected `function main(): i32`"));
+        assert!(error.contains("not i32-returning"));
     }
 
     #[test]
