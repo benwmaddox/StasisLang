@@ -2,6 +2,7 @@ param(
     [string]$AndroidHome = "",
     [string]$NdkVersion = "",
     [int]$MinSdk = 26,
+    [string[]]$Abis = @("arm64-v8a", "x86_64"),
     [switch]$Release
 )
 
@@ -36,8 +37,6 @@ $ndkRoot = if ($NdkVersion) {
     $ndks[0].FullName
 }
 $toolchain = Join-Path $ndkRoot "toolchains\llvm\prebuilt\windows-x86_64\bin"
-$linker = Join-Path $toolchain "aarch64-linux-android$MinSdk-clang.cmd"
-if (-not (Test-Path $linker)) { throw "Android linker not found: $linker" }
 
 if (-not (Test-Path (Join-Path $upstreamRoot ".git"))) {
     New-Item -ItemType Directory -Force $buildRoot | Out-Null
@@ -77,15 +76,6 @@ $wrapperCargo = Get-Content -Raw $wrapperManifest
 $wrapperCargo = $wrapperCargo.Replace('../../../crates/stasis_ai', '../stasis-ai')
 Set-Content -NoNewline -Path $wrapperManifest -Value $wrapperCargo
 
-$installedTargets = & rustup target list --installed --toolchain 1.95.0
-if ($installedTargets -notcontains "aarch64-linux-android") {
-    rustup target add aarch64-linux-android --toolchain 1.95.0
-    if ($LASTEXITCODE -ne 0) { throw "Rust Android target installation failed" }
-}
-
-$env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = $linker
-$env:CC_aarch64_linux_android = $linker
-$env:AR_aarch64_linux_android = Join-Path $toolchain "llvm-ar.exe"
 $env:CARGO_INCREMENTAL = "0"
 $profileArgs = @()
 $profileDir = "debug"
@@ -94,17 +84,42 @@ if ($Release) {
     $profileDir = "release"
 }
 
-cargo +1.95.0 build --manifest-path (Join-Path $wrapperRoot "Cargo.toml") --target aarch64-linux-android @profileArgs
-if ($LASTEXITCODE -ne 0) { throw "Codex Android native build failed with exit code $LASTEXITCODE" }
+$targets = @{
+    "arm64-v8a" = @{ Rust = "aarch64-linux-android"; Clang = "aarch64-linux-android" }
+    "x86_64" = @{ Rust = "x86_64-linux-android"; Clang = "x86_64-linux-android" }
+}
+$installedTargets = & rustup target list --installed --toolchain 1.95.0
+foreach ($abi in $Abis) {
+    $target = $targets[$abi]
+    if (-not $target) { throw "Unsupported Android ABI: $abi" }
+    $rustTarget = $target.Rust
+    $linker = Join-Path $toolchain "$($target.Clang)$MinSdk-clang.cmd"
+    if (-not (Test-Path $linker)) { throw "Android linker not found: $linker" }
+    if ($installedTargets -notcontains $rustTarget) {
+        rustup target add $rustTarget --toolchain 1.95.0
+        if ($LASTEXITCODE -ne 0) { throw "Rust Android target installation failed: $rustTarget" }
+    }
 
-$source = Join-Path $codexRustRoot "target\aarch64-linux-android\$profileDir\libstasis_codex_android.so"
-if (-not (Test-Path $source)) { throw "Codex Android library was not produced: $source" }
-$destDir = Join-Path $scriptRoot "app\src\workshop\jniLibs\arm64-v8a"
-New-Item -ItemType Directory -Force $destDir | Out-Null
-$dest = Join-Path $destDir "libstasis_codex_android.so"
-Copy-Item -Force $source $dest
+    $targetEnvName = $rustTarget.Replace('-', '_')
+    $linkerVariable = "CARGO_TARGET_$($rustTarget.ToUpperInvariant().Replace('-', '_'))_LINKER"
+    Set-Item -Path "Env:$linkerVariable" -Value $linker
+    Set-Item -Path "Env:CC_$targetEnvName" -Value $linker
+    Set-Item -Path "Env:AR_$targetEnvName" -Value (Join-Path $toolchain "llvm-ar.exe")
 
-$metadata = cargo +1.95.0 metadata --format-version 1 --filter-platform aarch64-linux-android `
+    cargo +1.95.0 build --manifest-path (Join-Path $wrapperRoot "Cargo.toml") --target $rustTarget @profileArgs
+    if ($LASTEXITCODE -ne 0) { throw "Codex Android native build failed with exit code $LASTEXITCODE" }
+
+    $source = Join-Path $codexRustRoot "target\$rustTarget\$profileDir\libstasis_codex_android.so"
+    if (-not (Test-Path $source)) { throw "Codex Android library was not produced: $source" }
+    $destDir = Join-Path $scriptRoot "app\src\workshop\jniLibs\$abi"
+    New-Item -ItemType Directory -Force $destDir | Out-Null
+    $dest = Join-Path $destDir "libstasis_codex_android.so"
+    Copy-Item -Force $source $dest
+    Write-Host "Packaged phone-native Codex login bridge: $dest"
+}
+
+$metadataTarget = $targets[$Abis[0]].Rust
+$metadata = cargo +1.95.0 metadata --format-version 1 --filter-platform $metadataTarget `
     --manifest-path (Join-Path $wrapperRoot "Cargo.toml") | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "Codex Android dependency discovery failed" }
 $verifierPackage = $metadata.packages | Where-Object { $_.name -eq "rustls-platform-verifier-android" } |
@@ -117,4 +132,3 @@ if (-not $verifierAar) { throw "Rustls Android verifier AAR was not found" }
 $aarDir = Join-Path $scriptRoot "app\src\workshop\libs"
 New-Item -ItemType Directory -Force $aarDir | Out-Null
 Copy-Item -Force $verifierAar.FullName (Join-Path $aarDir "rustls-platform-verifier.aar")
-Write-Host "Packaged phone-native Codex login bridge: $dest"

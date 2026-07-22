@@ -442,6 +442,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (gamePreview != null) gamePreview.onHostResume();
         codexLoginLifecycle.onResume();
         refreshPhoneNativeCodexStatus();
         startNextQueuedAiIfIdle();
@@ -452,6 +453,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (gamePreview != null) gamePreview.onHostPause();
         codexLoginLifecycle.onPause();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
         gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
@@ -6463,6 +6465,17 @@ public final class MainActivity extends Activity {
     }
 
     private static JSONArray supportedAiTools() {
+        JSONObject shared = sharedAiContract();
+        JSONArray sharedSpecs = shared == null ? null : shared.optJSONArray("tool_specs");
+        if (sharedSpecs != null && sharedSpecs.length() > 0) {
+            JSONArray tools = new JSONArray();
+            for (int index = 0; index < sharedSpecs.length(); index += 1) {
+                JSONObject spec = sharedSpecs.optJSONObject(index);
+                String tool = spec == null ? "" : spec.optString("tool", "");
+                if (!tool.isEmpty()) tools.put(tool);
+            }
+            if (tools.length() > 0) return tools;
+        }
         return new JSONArray()
                 .put("list_symbols")
                 .put("list_owner_symbols")
@@ -11716,6 +11729,17 @@ public final class MainActivity extends Activity {
 
         int touchActive() {
             return touchActive ? 1 : 0;
+        }
+
+        void onHostPause() {
+            renderer.onHostPaused();
+            onPause();
+        }
+
+        void onHostResume() {
+            onResume();
+            queueEvent(renderer::onHostResumed);
+            requestRender();
         }
 
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,

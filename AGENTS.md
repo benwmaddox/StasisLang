@@ -22,6 +22,10 @@
 - Keep commands deterministic and scriptable.
 - Validation entrypoint:
 - `tools/validate_repo.sh`
+- Android Workshop emulator testing uses the `Stasis_API_35` AVD. From the repository root, run the full headless build/install/acceptance flow with:
+- `powershell -NoProfile -ExecutionPolicy Bypass -File mobile/android/test_emulator.ps1 -Headless`
+- Reuse an already installed Workshop build with `-Headless -SkipBuild`. The `-Headless` option only affects a newly started emulator; when a truly headless run is required, stop an existing GUI AVD with `C:\Android\Sdk\platform-tools\adb.exe -s emulator-5554 emu kill` and wait until it disappears from `adb devices` before starting the headless run.
+- `mobile/android/validate_device.ps1` prefers an emulator for Workshop checks; pass `-Serial emulator-5554` to select it explicitly.
 
 ## Coding Style & Naming Conventions
 - Keep files ASCII unless a file already uses non-ASCII and there is a clear reason.

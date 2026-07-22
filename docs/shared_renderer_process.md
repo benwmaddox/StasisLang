@@ -55,6 +55,11 @@ uses fixed command arrays and direct vertex buffers. Texture uploads happen on
 first use or an explicit Workshop asset change, and framebuffer allocations
 happen only for an explicit screenshot capture.
 
+Surface/context loss, resize, orientation, background/resume, and renderer reset
+follow the generation-based state machine in `renderer_resource_lifecycle.md`.
+Both adapters retain CPU source metadata, reject stale GPU generations, and restore
+through their normal resource providers before accepting the next valid frame.
+
 Published shipping artifacts use `stasis package-mobile` and the SDL runtime.
 The preview adapter is therefore an embedded-editor boundary, not a competing
 shipping renderer. It performs no per-command JNI calls and adds no additional

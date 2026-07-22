@@ -60,7 +60,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private static final int MAX_CAPTURE_PIXELS = 8_000_000;
 
     interface TextureProvider {
-        void onSurfaceCreated();
+        void onResourceGenerationChanged(int surfaceGeneration, int rendererGeneration,
+                boolean discardGpuHandles, String transitionReason);
+
+        default void beginRestoreAttempt() {}
+
+        default String consumeFailure() { return null; }
 
         default void onFrameStart() {}
 
@@ -153,6 +158,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     private final TextureProvider textures;
     private final TimingListener timing;
+    private final RendererResourceLifecycle resourceLifecycle = new RendererResourceLifecycle();
     private final ByteBuffer frameI32Bytes = directBytes(FRAME_I32_CAPACITY * 4);
     private final ByteBuffer frameF32Bytes = directBytes(FRAME_F32_CAPACITY * 4);
     private final ByteBuffer frameU8Bytes = directBytes(TEXT_U8_CAPACITY);
@@ -220,9 +226,24 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         pendingCapture = callback;
     }
 
+    synchronized void onHostPaused() {
+        resourceLifecycle.onPause();
+    }
+
+    synchronized void onHostResumed() {
+        RendererResourceLifecycle.State before = resourceLifecycle.state();
+        resourceLifecycle.onResume();
+        if (before == RendererResourceLifecycle.State.PAUSED) {
+            textures.onResourceGenerationChanged(
+                    resourceLifecycle.surfaceGeneration(),
+                    resourceLifecycle.rendererGeneration(), false, resourceLifecycle.reason());
+        }
+    }
+
     @Override
     public synchronized void onSurfaceCreated(javax.microedition.khronos.opengles.GL10 gl,
             javax.microedition.khronos.egl.EGLConfig config) {
+        resourceLifecycle.onRendererCreated();
         colorProgram = createProgram(VERTEX_SHADER, FRAGMENT_SHADER);
         colorPosition = GLES20.glGetAttribLocation(colorProgram, "aPosition");
         colorValue = GLES20.glGetAttribLocation(colorProgram, "aColor");
@@ -233,7 +254,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         textureColor = GLES20.glGetAttribLocation(textureProgram, "aColor");
         textureResolution = GLES20.glGetUniformLocation(textureProgram, "uResolution");
         textureSampler = GLES20.glGetUniformLocation(textureProgram, "uTexture");
-        textures.onSurfaceCreated();
+        textures.onResourceGenerationChanged(
+                resourceLifecycle.surfaceGeneration(),
+                resourceLifecycle.rendererGeneration(), true, resourceLifecycle.reason());
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
         GLES20.glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
@@ -243,8 +266,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     @Override
     public synchronized void onSurfaceChanged(javax.microedition.khronos.opengles.GL10 gl,
             int width, int height) {
+        resourceLifecycle.onSurfaceChanged();
         surfaceWidth = Math.max(1, width);
         surfaceHeight = Math.max(1, height);
+        textures.onResourceGenerationChanged(
+                resourceLifecycle.surfaceGeneration(),
+                resourceLifecycle.rendererGeneration(), false, resourceLifecycle.reason());
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
         GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
@@ -258,9 +285,34 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         CaptureCallback capture;
         LogicalFrameSnapshot capturedFrame;
         synchronized (this) {
-            if (shouldPresent(frameI32)) {
-                drawFrame();
+            boolean restoring = resourceLifecycle.beginRestore();
+            textures.beginRestoreAttempt();
+            while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
+            boolean hasFrame = shouldPresent(frameI32);
+            if (hasFrame) prepareFrameResources();
+            String resourceFailure = textures.consumeFailure();
+            int glError = GLES20.glGetError();
+            boolean restored = resourceFailure == null && glError == GLES20.GL_NO_ERROR;
+            if (restoring) {
+                resourceLifecycle.finishRestore(restored);
+            } else if (!restored) {
+                resourceLifecycle.resourceFailed();
             }
+            if (restoring) {
+                if (restored) {
+                    Log.i(LOG_TAG, "resources restored backend=gles surface_generation="
+                            + resourceLifecycle.surfaceGeneration() + " renderer_generation="
+                            + resourceLifecycle.rendererGeneration() + " reason="
+                            + resourceLifecycle.reason());
+                } else {
+                    Log.e(LOG_TAG, "resource restore failed backend=gles surface_generation="
+                            + resourceLifecycle.surfaceGeneration() + " renderer_generation="
+                            + resourceLifecycle.rendererGeneration() + " reason="
+                            + resourceLifecycle.reason() + " failure="
+                            + (resourceFailure == null ? "gl_error_" + glError : resourceFailure));
+                }
+            }
+            if (hasFrame && restored && resourceLifecycle.canPresent()) drawFrame();
             capture = pendingCapture;
             pendingCapture = null;
             capturedFrame = capture == null ? null : captureLogicalFrame();
@@ -270,8 +322,6 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     private void drawFrame() {
-        updateDisplayMetrics();
-        textures.onFrameStart();
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
         clearLetterboxBars();
@@ -292,6 +342,30 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         drawSprites(clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES));
         drawText(clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT),
                 clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY));
+    }
+
+    private void prepareFrameResources() {
+        updateDisplayMetrics();
+        textures.onFrameStart();
+        int spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
+        for (int index = 0; index < spriteCount; index += 1) {
+            int base = I_SPRITE_BASE + index * SPRITE_I32_STRIDE;
+            spriteTextureFor(frameI32.get(base));
+        }
+        int textCount = clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT);
+        int bytesUsed = clampCount(frameI32.get(I_TEXT_BYTES_USED), TEXT_U8_CAPACITY);
+        for (int index = 0; index < textCount; index += 1) {
+            int meta = I_TEXT_BASE + index * TEXT_I32_STRIDE;
+            int font = frameI32.get(meta);
+            int offset = frameI32.get(meta + 1);
+            int length = frameI32.get(meta + 2);
+            if (font <= 0) continue;
+            if (offset < 0) {
+                if (offset != Integer.MIN_VALUE) textures.cachedTextTextureFor(-offset);
+            } else if (isValidTextSpan(offset, length, bytesUsed)) {
+                textures.textTextureFor(font, frameU8Bytes, offset, length);
+            }
+        }
     }
 
     private void clearLetterboxBars() {
@@ -357,6 +431,22 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 (float)height / logicalHeight);
         return new DisplayViewport(x, y, width, height, contentScale,
                 Math.max(1.0f, Math.min(8.0f, contentScale)));
+    }
+
+    static String formatResourceFailure(String stage, int handle, String path,
+            int logicalWidth, int logicalHeight, int rasterWidth, int rasterHeight,
+            int surfaceGeneration, int rendererGeneration, String transitionReason,
+            String failure) {
+        return "stage=" + stage + " handle=" + handle + " path=" + path
+                + " logical=" + logicalWidth + "x" + logicalHeight
+                + " raster=" + rasterWidth + "x" + rasterHeight + " backend=gles"
+                + " surface_generation=" + surfaceGeneration
+                + " renderer_generation=" + rendererGeneration
+                + " reason=" + transitionReason + " failure=" + failure;
+    }
+
+    static boolean textureCreationSucceeded(int texture, int glError) {
+        return texture != 0 && glError == GLES20.GL_NO_ERROR;
     }
 
     private void drawLines(int count) {

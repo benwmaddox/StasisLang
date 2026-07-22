@@ -66,6 +66,7 @@ EXPORTS
     stasis_gfx_cache_text
     stasis_gfx_draw_text_cached
     stasis_gfx_measure_text_cached
+    stasis_gfx_get_resource_lifecycle
     stasis_list_directory
     stasis_list_directory_struct
     stasis_copy_dir_entry_name
