@@ -8,16 +8,18 @@ use stasis::{
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
-    plan_workshop_semantic_edits, workshop_reachable_files, workshop_source_hash,
-    workshop_source_items, write_workshop_semantic_plan, write_workshop_semantic_receipt,
-    WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
-    WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
+    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
+    write_workshop_semantic_receipt, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
+    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
+    WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 pub(super) use stasis_runner::live::LiveValidationRequirement as RuntimeValidationRequirement;
 use stasis_runner::live::{
     compare_live_validation_values, live_session, LiveCommand, LiveRequest, LiveResponse,
     TerminalBuffer, TerminalInput,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -208,7 +210,7 @@ enum SymbolCommand {
         #[arg(long, value_enum)]
         kind: Option<SymbolKindArg>,
         #[arg(long)]
-        file: Option<String>,
+        file: Vec<String>,
         #[arg(long)]
         owner: Option<String>,
         #[arg(long, default_value_t = 0)]
@@ -2262,13 +2264,50 @@ fn symbol_workspace(
         SymbolCommand::List {
             query,
             kind,
-            file,
+            file: files,
             owner,
             page,
             limit,
         } => {
             let limit = limit.clamp(1, 200);
             let mut items = workshop_source_items(&editable_files)?;
+            if files.len() > 16 {
+                return Err("symbol list accepts at most 16 --file values".to_string());
+            }
+            let default_scope = files.is_empty();
+            let mut scope_files = if default_scope {
+                vec![normalize_symbol_file(&workspace.manifest.entry)]
+            } else {
+                files
+                    .iter()
+                    .map(|file| normalize_symbol_file(file))
+                    .collect::<Vec<_>>()
+            };
+            if default_scope {
+                scope_files.extend(workshop_direct_import_files(
+                    &editable_files,
+                    Path::new(&workspace.manifest.entry),
+                )?);
+            }
+            let available_files = items
+                .iter()
+                .map(|item| normalize_symbol_file(&item.file))
+                .collect::<BTreeSet<_>>();
+            for file in &scope_files {
+                if !available_files.contains(file) {
+                    return Err(format!("symbol list file is not in the project: {file}"));
+                }
+            }
+            let scope_files = scope_files.into_iter().collect::<BTreeSet<_>>();
+            let imports = scope_files
+                .iter()
+                .map(|file| {
+                    Ok((
+                        file.clone(),
+                        workshop_direct_import_files(&editable_files, Path::new(file))?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>, String>>()?;
             items.retain(|item| {
                 item.kind != WorkshopSourceItemKind::Imports
                     && !(item.kind == WorkshopSourceItemKind::Globals
@@ -2279,9 +2318,7 @@ fn symbol_workspace(
                             || item.signature.to_ascii_lowercase().contains(&query)
                     })
                     && kind.is_none_or(|kind| item.kind == kind.into())
-                    && file.as_deref().is_none_or(|file| {
-                        normalize_symbol_file(&item.file) == normalize_symbol_file(file)
-                    })
+                    && scope_files.contains(&normalize_symbol_file(&item.file))
                     && owner
                         .as_deref()
                         .is_none_or(|owner| item.owner.as_deref() == Some(owner))
@@ -2322,7 +2359,7 @@ fn symbol_workspace(
                 .collect::<Vec<_>>();
             Ok(CommandResult::success(
                 human,
-                json!({"schema_version": 1, "page": page, "limit": limit, "total": total, "items": metadata}),
+                json!({"schema_version": 1, "files": scope_files, "imports": imports, "page": page, "limit": limit, "total": total, "items": metadata}),
             ))
         }
         SymbolCommand::Find(args) => {
