@@ -8,17 +8,18 @@ use stasis::{
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
-    plan_workshop_semantic_edits, workshop_reachable_files, workshop_source_hash,
-    workshop_source_items, write_workshop_semantic_plan, write_workshop_semantic_receipt,
-    WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
-    WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
+    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
+    write_workshop_semantic_receipt, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
+    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
+    WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 pub(super) use stasis_runner::live::LiveValidationRequirement as RuntimeValidationRequirement;
 use stasis_runner::live::{
     compare_live_validation_values, live_session, LiveCommand, LiveRequest, LiveResponse,
     TerminalBuffer, TerminalInput,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -2273,7 +2274,8 @@ fn symbol_workspace(
             if files.len() > 16 {
                 return Err("symbol list accepts at most 16 --file values".to_string());
             }
-            let scope_files = if files.is_empty() {
+            let default_scope = files.is_empty();
+            let mut scope_files = if default_scope {
                 vec![normalize_symbol_file(&workspace.manifest.entry)]
             } else {
                 files
@@ -2281,6 +2283,12 @@ fn symbol_workspace(
                     .map(|file| normalize_symbol_file(file))
                     .collect::<Vec<_>>()
             };
+            if default_scope {
+                scope_files.extend(workshop_direct_import_files(
+                    &editable_files,
+                    Path::new(&workspace.manifest.entry),
+                )?);
+            }
             let available_files = items
                 .iter()
                 .map(|item| normalize_symbol_file(&item.file))
@@ -2291,6 +2299,15 @@ fn symbol_workspace(
                 }
             }
             let scope_files = scope_files.into_iter().collect::<BTreeSet<_>>();
+            let imports = scope_files
+                .iter()
+                .map(|file| {
+                    Ok((
+                        file.clone(),
+                        workshop_direct_import_files(&editable_files, Path::new(file))?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>, String>>()?;
             items.retain(|item| {
                 item.kind != WorkshopSourceItemKind::Imports
                     && !(item.kind == WorkshopSourceItemKind::Globals
@@ -2342,7 +2359,7 @@ fn symbol_workspace(
                 .collect::<Vec<_>>();
             Ok(CommandResult::success(
                 human,
-                json!({"schema_version": 1, "files": scope_files, "page": page, "limit": limit, "total": total, "items": metadata}),
+                json!({"schema_version": 1, "files": scope_files, "imports": imports, "page": page, "limit": limit, "total": total, "items": metadata}),
             ))
         }
         SymbolCommand::Find(args) => {

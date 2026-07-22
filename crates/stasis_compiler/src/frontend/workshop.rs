@@ -569,6 +569,24 @@ pub fn workshop_reachable_files(
     Ok(out)
 }
 
+pub fn workshop_direct_import_files(
+    files: &[WorkshopSourceFile],
+    file_path: &Path,
+) -> Result<Vec<String>, String> {
+    let normalized = normalize_project_path_text(&file_path.to_string_lossy());
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized)
+        .ok_or_else(|| format!("import graph file is not loaded: {normalized}"))?;
+    let mut imports = parse_workshop_import_paths(&file.source)?
+        .into_iter()
+        .map(|import| resolve_project_import_path(&file.path, &import))
+        .collect::<Vec<_>>();
+    imports.sort();
+    imports.dedup();
+    Ok(imports)
+}
+
 fn collect_workshop_source_files(
     project_root: &Path,
     directory: &Path,

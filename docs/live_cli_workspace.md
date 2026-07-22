@@ -39,22 +39,32 @@ mounted into that directory. Codex receives only the user request, bounded Stasi
 and bounded observations returned by the live workspace. Symbol reads, runtime inspection, and
 deterministic ticks pass through `stasis_runner::live`; model write batches become one
 `WorkshopSemanticEditBatch`, compile and test on the normal preparation worker, and commit at a
-between-tick boundary. A layout-changing edit remains a validated preview and requires explicit
-user `:apply` approval.
+between-tick boundary. Successful writes return a compact receipt and changed-symbol summary rather
+than echoing whole before/after files into later model turns. A layout-changing edit remains a
+validated preview and requires explicit user `:apply` approval.
+
+`list_symbols` starts with the entry file and its direct imports when no file is supplied. Its
+compact response includes the direct imports for every searched file, allowing the next search to
+expand deliberately without enumerating the project. Each AI request preloads this default result
+in `initial_context`, avoiding a provider round trip while retaining filtered and paged follow-up
+searches. Explicit file arguments remain an exact scope.
 
 Before changing a behavior-bearing symbol, the AI must use compiler-backed `find_references` to
 locate its definition, reads, writes, and calls without receiving unrelated source bodies. For an
 observable game change it uses AI-only `validate_runtime_state` acceptance checks: the requested
 condition must fail before the edit (red), the atomic edit must compile and pass project tests, and
-the same condition must pass afterward (green). The default `live` baseline pauses and restores the
-same bounded runtime snapshot, so normal game progression cannot manufacture a pass. The optional
-`fresh` baseline boots `main`, advances bounded `tick` frames, renders, and inspects state in a
-separate Stasis child process for integration-style red/green checks without changing the running
-game. Projects with host adapters can select game-level `setup`, `tick`, and `render` entrypoints so
-the isolated check exercises logical gameplay without opening a second window or duplicating host
-resource side effects. These acceptance checks are ephemeral and do not create or replace project `.test.stasis`
-files; durable regression tests remain the appropriate place for behavior that should be protected
-after the AI turn.
+the runtime automatically evaluates the same condition afterward (green). Red validation may be
+immediately followed by one contiguous write batch in the same model turn, reducing provider turns
+without allowing writes when the red contract is not accepted. The default `live` baseline pauses
+and restores the same bounded runtime snapshot, so normal game progression cannot manufacture a
+pass. The optional `fresh` baseline boots `main`, advances bounded `tick` frames, renders, and
+inspects state in a separate Stasis child process for integration-style red/green checks without
+changing the running game. Successful fresh checks retain bounded stderr diagnostics as evidence
+instead of discarding otherwise valid results. Projects with host adapters can select game-level
+`setup`, `tick`, and `render` entrypoints so the isolated check exercises logical gameplay without
+opening a second window or duplicating host resource side effects. These acceptance checks are
+ephemeral and do not create or replace project `.test.stasis` files; durable regression tests remain
+the appropriate place for behavior that should be protected after the AI turn.
 
 Human commands intentionally cover every useful live AI capability:
 

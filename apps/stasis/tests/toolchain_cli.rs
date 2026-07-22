@@ -230,8 +230,15 @@ fn semantic_symbol_cli_previews_applies_runs_and_reverts() {
     assert!(listed_items
         .iter()
         .any(|item| item["name"] == "tick" && item["file"] == "src/main.stasis"));
-    assert_eq!(listed_json["result"]["files"], json!(["src/main.stasis"]));
-    assert!(!listed_items.iter().any(|item| item["name"] == "old_value"));
+    assert_eq!(
+        listed_json["result"]["files"],
+        json!(["src/main.stasis", "src/old.stasis"])
+    );
+    assert_eq!(
+        listed_json["result"]["imports"],
+        json!({"src/main.stasis": ["src/old.stasis"], "src/old.stasis": []})
+    );
+    assert!(listed_items.iter().any(|item| item["name"] == "old_value"));
 
     let widened = stasis(
         &[
@@ -250,6 +257,10 @@ fn semantic_symbol_cli_previews_applies_runs_and_reverts() {
     assert_eq!(
         widened_json["result"]["files"],
         json!(["src/main.stasis", "src/old.stasis"])
+    );
+    assert_eq!(
+        widened_json["result"]["imports"],
+        json!({"src/main.stasis": ["src/old.stasis"], "src/old.stasis": []})
     );
     assert!(widened_json["result"]["items"]
         .as_array()

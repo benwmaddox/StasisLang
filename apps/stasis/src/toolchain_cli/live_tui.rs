@@ -34,11 +34,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_TRANSCRIPT_LINES: usize = 500;
 const MAX_UNDO_STATES: usize = 100;
+const MAX_AI_DIAGNOSTIC_CHARS: usize = 4096;
 const COMPLETION_LIMIT: usize = 64;
 const TUI_REQUEST_START: u64 = 1u64 << 61;
 const AI_REQUEST_START: u64 = 1u64 << 62;
 
 enum AiUiEvent {
+    InitialContext(Value),
     Progress(AgentEvent),
     Finished(Result<String, String>),
 }
@@ -62,12 +64,17 @@ pub(super) fn run_scripted_ai_with_cancel(
     let usage_path = audit.usage_path.clone();
     let mut provider = CodexExecProvider::default();
     let mut tools = LiveAiTools::new(client.clone(), project_root.to_path_buf());
+    let initial_context = load_ai_initial_context(&mut tools, canceled)?;
+    audit.write(serde_json::json!({
+        "event": "initial_context",
+        "value": initial_context.clone(),
+    }))?;
     let mut audit_error = None;
     let result = run_agent(
         &mut provider,
         &mut tools,
         prompt,
-        ai_initial_context(),
+        initial_context,
         live_tool_specs(),
         canceled,
         |event| {
@@ -102,13 +109,38 @@ pub(super) fn run_scripted_ai_with_cancel(
     }
 }
 
-fn ai_initial_context() -> Value {
+fn ai_initial_context(initial_symbols: Value) -> Value {
     serde_json::json!({
         "language": "Stasis",
         "runtime": "live in-process JIT",
         "commit_boundary": "between deterministic ticks",
         "write_policy": "all writes in one model batch compile, test, and commit atomically",
+        "initial_symbols": initial_symbols,
+        "initial_symbols_instruction": "This is the completed default list_symbols result. Use it before requesting filtered or paged follow-up discovery.",
     })
+}
+
+fn load_ai_initial_context(
+    tools: &mut LiveAiTools,
+    canceled: &AtomicBool,
+) -> Result<Value, String> {
+    let observations = tools.execute(
+        &[ToolCall {
+            tool: "list_symbols".to_string(),
+            args: serde_json::json!({}),
+        }],
+        canceled,
+    );
+    let observation = observations
+        .into_iter()
+        .next()
+        .ok_or_else(|| "initial symbol discovery returned no observation".to_string())?;
+    if let Some(error) = observation.error {
+        return Err(format!("initial symbol discovery failed: {error}"));
+    }
+    Ok(ai_initial_context(
+        observation.result.unwrap_or(Value::Null),
+    ))
 }
 
 fn audit_agent_event(event: &AgentEvent) -> Value {
@@ -1209,17 +1241,21 @@ impl LiveTui {
             let mut provider = CodexExecProvider::default();
             let mut tools = LiveAiTools::new(client, project_root);
             let progress = events_tx.clone();
-            let result = run_agent(
-                &mut provider,
-                &mut tools,
-                &prompt,
-                ai_initial_context(),
-                live_tool_specs(),
-                &worker_canceled,
-                move |event| {
-                    let _ = progress.send(AiUiEvent::Progress(event));
-                },
-            );
+            let result =
+                load_ai_initial_context(&mut tools, &worker_canceled).and_then(|initial_context| {
+                    let _ = progress.send(AiUiEvent::InitialContext(initial_context.clone()));
+                    run_agent(
+                        &mut provider,
+                        &mut tools,
+                        &prompt,
+                        initial_context,
+                        live_tool_specs(),
+                        &worker_canceled,
+                        move |event| {
+                            let _ = progress.send(AiUiEvent::Progress(event));
+                        },
+                    )
+                });
             let _ = events_tx.send(AiUiEvent::Finished(result));
         });
         self.ai_run = Some(AiRun {
@@ -1243,6 +1279,16 @@ impl LiveTui {
         let mut finished = None;
         for event in events {
             match event {
+                AiUiEvent::InitialContext(initial_context) => {
+                    if let Some(audit) = self.ai_audit.as_mut() {
+                        if let Err(error) = audit.write(serde_json::json!({
+                            "event": "initial_context",
+                            "value": initial_context,
+                        })) {
+                            self.status = format!("AI trace failed: {error}");
+                        }
+                    }
+                }
                 AiUiEvent::Progress(AgentEvent::Turn { current, maximum }) => {
                     self.status = format!("AI turn {current}/{maximum}; Ctrl+C cancels");
                     self.audit(serde_json::json!({"event": "turn", "current": current, "maximum": maximum}));
@@ -1970,7 +2016,10 @@ impl LiveAiTools {
                 return match &self.last_write {
                     Some(response) if response.ok => ToolObservation::result(
                         "run_tests",
-                        serde_json::json!({"status": "passed_with_latest_atomic_write", "edit": response.data}),
+                        serde_json::json!({
+                            "status": "passed_with_latest_atomic_write",
+                            "write": compact_write_transaction(response.data.as_ref()),
+                        }),
                     ),
                     _ => ToolObservation::error(
                         "run_tests",
@@ -2235,21 +2284,24 @@ impl LiveAiTools {
                 stderr.lines().last().unwrap_or("child process failed")
             ));
         }
-        if !stderr.trim().is_empty() {
-            return Err(format!(
-                "fresh validation reported diagnostics: {}",
-                stderr.lines().last().unwrap_or("unknown diagnostic")
-            ));
-        }
         let envelope = stdout
             .lines()
             .rev()
             .find_map(|line| serde_json::from_str::<Value>(line).ok())
             .ok_or_else(|| "fresh validation returned no JSON result".to_string())?;
-        envelope
+        let mut result = envelope
             .get("result")
             .cloned()
-            .ok_or_else(|| "fresh validation JSON omitted result".to_string())
+            .ok_or_else(|| "fresh validation JSON omitted result".to_string())?;
+        if !stderr.trim().is_empty() {
+            result["diagnostics"] = Value::String(
+                stderr
+                    .chars()
+                    .take(MAX_AI_DIAGNOSTIC_CHARS)
+                    .collect::<String>(),
+            );
+        }
+        Ok(result)
     }
 
     fn finish_validation_observation(
@@ -2413,20 +2465,57 @@ fn applied_write_observation(
     batch_size: usize,
     transaction: &Option<Value>,
 ) -> ToolObservation {
+    let transaction = compact_write_transaction(transaction.as_ref());
     let result = if index == 0 {
         serde_json::json!({
             "status": "compiled_tested_applied",
             "batch_size": batch_size,
-            "transaction": transaction,
+            "write": transaction,
         })
     } else {
         serde_json::json!({
             "status": "compiled_tested_applied",
             "batch_size": batch_size,
-            "transaction_observation": 0,
+            "write_receipt": transaction.get("receipt").cloned().unwrap_or(Value::Null),
         })
     };
     ToolObservation::result(&call.tool, result)
+}
+
+fn compact_write_transaction(transaction: Option<&Value>) -> Value {
+    let Some(transaction) = transaction else {
+        return Value::Null;
+    };
+    serde_json::json!({
+        "receipt": transaction.get("receipt").cloned().unwrap_or(Value::Null),
+        "tests": transaction.get("tests").cloned().unwrap_or(Value::Null),
+        "changed_symbols": transaction.pointer("/plan/reload/changed_symbols").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "expected_reload": transaction.pointer("/plan/reload/expected_reload").cloned().unwrap_or(Value::Null),
+        "state_layout_compatible": transaction.pointer("/swap/state_layout_compatible").cloned().unwrap_or(Value::Null),
+        "requires_explicit_apply": transaction.pointer("/swap/requires_explicit_apply").cloned().unwrap_or(Value::Null),
+        "warnings": transaction.pointer("/swap/warnings").cloned().unwrap_or_else(|| serde_json::json!([])),
+    })
+}
+
+fn contiguous_write_range(calls: &[ToolCall]) -> Result<Option<std::ops::Range<usize>>, String> {
+    let write_indexes = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| {
+            matches!(call.tool.as_str(), "write_symbol" | "delete_symbol").then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let Some(first) = write_indexes.first().copied() else {
+        return Ok(None);
+    };
+    let last = write_indexes.last().copied().expect("write index");
+    if write_indexes.len() != last - first + 1 {
+        return Err(
+            "write_symbol and delete_symbol calls must be contiguous so their atomic order is unambiguous"
+                .to_string(),
+        );
+    }
+    Ok(Some(first..last + 1))
 }
 
 impl Drop for LiveAiTools {
@@ -2439,29 +2528,55 @@ impl Drop for LiveAiTools {
 
 impl ToolExecutor for LiveAiTools {
     fn execute(&mut self, calls: &[ToolCall], canceled: &AtomicBool) -> Vec<ToolObservation> {
-        let writes = calls
-            .iter()
-            .filter(|call| matches!(call.tool.as_str(), "write_symbol" | "delete_symbol"))
-            .collect::<Vec<_>>();
-        let mut observations = calls
-            .iter()
-            .filter(|call| {
-                !matches!(
-                    call.tool.as_str(),
-                    "write_symbol" | "delete_symbol" | "run_tests" | "validate_runtime_state"
-                )
-            })
-            .map(|call| self.execute_read(call, canceled))
-            .collect::<Vec<_>>();
-        if !writes.is_empty() {
-            observations.extend(self.execute_writes(&writes, canceled));
+        let write_range = match contiguous_write_range(calls) {
+            Ok(range) => range,
+            Err(error) => {
+                return calls
+                    .iter()
+                    .map(|call| ToolObservation::error(&call.tool, error.clone()))
+                    .collect()
+            }
+        };
+        let mut observations = Vec::with_capacity(calls.len() + 1);
+        let mut index = 0;
+        while index < calls.len() {
+            if write_range
+                .as_ref()
+                .is_some_and(|range| range.start == index)
+            {
+                let range = write_range.as_ref().expect("write range");
+                let writes = calls[range.clone()].iter().collect::<Vec<_>>();
+                let write_observations = self.execute_writes(&writes, canceled);
+                let applied = write_observations
+                    .iter()
+                    .all(|observation| observation.error.is_none())
+                    && self.write_needs_green_validation;
+                observations.extend(write_observations);
+                if applied {
+                    let contract = self
+                        .red_validation_contract
+                        .clone()
+                        .expect("applied AI write has red validation contract");
+                    let green_call = ToolCall {
+                        tool: "validate_runtime_state".to_string(),
+                        args: serde_json::json!({
+                            "requirements": contract.requirements,
+                            "expected_outcome": "pass",
+                            "frames": contract.frames,
+                            "baseline": contract.baseline,
+                            "setup": contract.setup,
+                            "tick": contract.tick,
+                            "render": contract.render,
+                        }),
+                    };
+                    observations.push(self.execute_validation(&green_call, canceled));
+                }
+                index = range.end;
+            } else {
+                observations.push(self.execute_read(&calls[index], canceled));
+                index += 1;
+            }
         }
-        observations.extend(
-            calls
-                .iter()
-                .filter(|call| matches!(call.tool.as_str(), "run_tests" | "validate_runtime_state"))
-                .map(|call| self.execute_read(call, canceled)),
-        );
         observations
     }
 
@@ -3179,7 +3294,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_batch_returns_the_full_transaction_once() {
+    fn atomic_write_batch_returns_one_compact_receipt() {
         let calls = [
             ToolCall {
                 tool: "write_symbol".into(),
@@ -3190,20 +3305,57 @@ mod tests {
                 args: json!({"name": "render"}),
             },
         ];
-        let transaction = Some(json!({"source": "full transaction payload"}));
+        let transaction = Some(json!({
+            "receipt": "build/live-edits/receipt.json",
+            "tests": "passed",
+            "plan": {"reload": {
+                "changed_symbols": [{"name": "tick", "kind": "function"}],
+                "expected_reload": "FastReload"
+            }},
+            "swap": {
+                "state_layout_compatible": true,
+                "requires_explicit_apply": false,
+                "warnings": []
+            },
+            "large_source": "must not be returned"
+        }));
 
         let first = applied_write_observation(&calls[0], 0, calls.len(), &transaction);
         let second = applied_write_observation(&calls[1], 1, calls.len(), &transaction);
 
         assert_eq!(
-            first.result.as_ref().unwrap()["transaction"],
-            transaction.clone().unwrap()
+            first.result.as_ref().unwrap()["write"]["receipt"],
+            "build/live-edits/receipt.json"
         );
-        assert!(second.result.as_ref().unwrap().get("transaction").is_none());
+        assert!(first.result.as_ref().unwrap()["write"]
+            .get("large_source")
+            .is_none());
         assert_eq!(
-            second.result.as_ref().unwrap()["transaction_observation"],
-            0
+            second.result.as_ref().unwrap()["write_receipt"],
+            "build/live-edits/receipt.json"
         );
+    }
+
+    #[test]
+    fn write_batches_must_be_contiguous_to_preserve_call_order() {
+        let calls = [
+            ToolCall {
+                tool: "write_symbol".into(),
+                args: json!({}),
+            },
+            ToolCall {
+                tool: "read_symbol".into(),
+                args: json!({}),
+            },
+            ToolCall {
+                tool: "write_symbol".into(),
+                args: json!({}),
+            },
+        ];
+
+        assert!(contiguous_write_range(&calls)
+            .expect_err("split writes")
+            .contains("must be contiguous"));
     }
 
     #[test]

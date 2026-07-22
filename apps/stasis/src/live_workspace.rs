@@ -6,11 +6,12 @@ use stasis_compiler::compiler::CompileError;
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
-    plan_workshop_semantic_edits, workshop_completion_items, workshop_reachable_files,
-    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
-    write_workshop_semantic_receipt, ExpectedReload, WorkshopCompletionItem, WorkshopSemanticEdit,
-    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
-    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    plan_workshop_semantic_edits, workshop_completion_items, workshop_direct_import_files,
+    workshop_reachable_files, workshop_source_hash, workshop_source_items,
+    write_workshop_semantic_plan, write_workshop_semantic_receipt, ExpectedReload,
+    WorkshopCompletionItem, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
+    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
+    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_runner::live::{
     compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
@@ -783,11 +784,19 @@ impl LiveWorkspace {
         if files.len() > 16 {
             return Err("symbol search accepts at most 16 starting files".to_string());
         }
-        let scope_files = if files.is_empty() {
+        let loaded_files = &self.source_files;
+        let default_scope = files.is_empty();
+        let mut scope_files = if default_scope {
             vec![normalize_file(&self.config.entry.to_string_lossy())]
         } else {
             files.iter().map(|file| normalize_file(file)).collect()
         };
+        if default_scope {
+            scope_files.extend(workshop_direct_import_files(
+                loaded_files,
+                &self.config.entry,
+            )?);
+        }
         let available_files = self
             .source_items
             .iter()
@@ -799,6 +808,15 @@ impl LiveWorkspace {
             }
         }
         let scope_files = scope_files.into_iter().collect::<BTreeSet<_>>();
+        let imports = scope_files
+            .iter()
+            .map(|file| {
+                Ok((
+                    file.clone(),
+                    workshop_direct_import_files(loaded_files, Path::new(file))?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
         let matches = |item: &WorkshopSourceItem| {
             item.kind != WorkshopSourceItemKind::Imports
                 && !(item.kind == WorkshopSourceItemKind::Globals && item.source.trim().is_empty())
@@ -839,7 +857,7 @@ impl LiveWorkspace {
             .collect::<Vec<_>>();
         Ok((
             "symbols",
-            json!({"schema_version": 1, "files": scope_files, "page": page, "limit": limit, "total": total, "items": items}),
+            json!({"schema_version": 1, "files": scope_files, "imports": imports, "page": page, "limit": limit, "total": total, "items": items}),
         ))
     }
 
@@ -2657,6 +2675,16 @@ mod tests {
     #[test]
     fn symbol_search_is_filtered_compact_and_hash_free() {
         let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"helper.stasis\";\nglobal score: i32;\nfunction main(): i32 { score = 1; return 0; }\nfunction tick(): i32 { score += 1; return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("source with import");
+        fs::write(
+            root.join("src/helper.stasis"),
+            "function direct_import_value(): i32 { return 1; }\n",
+        )
+        .expect("helper source");
         let (jit, _package) = compile(&config);
         let (_client, server) = stasis_runner::live::live_session(8);
         let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
@@ -2671,6 +2699,17 @@ mod tests {
         assert!(items
             .iter()
             .all(|item| { matches!(item.as_object().map(|object| object.len()), Some(4 | 5)) }));
+        assert_eq!(
+            all["files"],
+            json!(["src/helper.stasis", "src/main.stasis"])
+        );
+        assert_eq!(
+            all["imports"],
+            json!({"src/helper.stasis": [], "src/main.stasis": ["src/helper.stasis"]})
+        );
+        assert!(items
+            .iter()
+            .any(|item| item["name"] == "direct_import_value"));
 
         let (_, filtered) = workspace
             .symbols(
