@@ -40,6 +40,11 @@ Most users will:
 The integrated CLI, `stasis.json` workspace contract, JSON output, offline behavior, and
 installation layout are documented in `docs/toolchain_cli.md`.
 
+`stasis new` and `stasis init` also create a concise `AGENTS.md` that teaches coding agents to use
+the compiler-backed symbol, reference, semantic-edit, test, and fresh-runtime validation commands
+instead of scanning and rewriting whole files. The same guide ships as `docs/agent_workflow.md` in
+release archives so it can be copied into an existing project.
+
 Lean Android/iOS app packaging is documented in `docs/mobile_packaging.md`;
 the lower-level AOT artifact contract is in `docs/mobile_aot_artifacts.md`.
 
@@ -54,7 +59,7 @@ Windows release zip layout:
 - `stasis_graphics.dll` at the archive root
 - `lld-link.exe`, `clang-cl.exe`, `stasis_dynload.dll`, and `stasis_dynload.dll.lib` for offline AOT builds
 - `stasis_runner.exe` and `stasis_graphics.dll` for packaged desktop games
-- `src/`, `samples/`, `mobile/shells/`, and `runtime/` at the archive root
+- `src/`, `samples/`, `mobile/shells/`, `runtime/`, and `docs/agent_workflow.md` at the archive root
 
 That keeps the common Windows command simple:
 
