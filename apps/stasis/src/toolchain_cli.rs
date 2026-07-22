@@ -203,12 +203,18 @@ enum ToolchainCommand {
 enum SymbolCommand {
     /// List symbols in deterministic source order.
     List {
+        #[arg(long)]
+        query: Option<String>,
         #[arg(long, value_enum)]
         kind: Option<SymbolKindArg>,
         #[arg(long)]
         file: Option<String>,
         #[arg(long)]
         owner: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        page: usize,
+        #[arg(long, default_value_t = 32)]
+        limit: usize,
     },
     /// Find symbol metadata without returning its source.
     Find(SymbolSelectorArgs),
@@ -1080,16 +1086,21 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
         let _ = ai.join();
         return Err(error);
     }
-    let (summary, trace) = ai
+    let (summary, trace, usage_trace) = ai
         .join()
         .map_err(|_| "live AI thread panicked".to_string())??;
     Ok(CommandResult::success(
-        format!("AI complete: {summary}\nAI trace: {}", trace.display()),
+        format!(
+            "AI complete: {summary}\nAI trace: {}\nAI usage: {}",
+            trace.display(),
+            usage_trace.display()
+        ),
         json!({
             "backend": "jit",
             "provider": "installed_codex_subscription",
             "summary": summary,
             "trace": trace,
+            "usage_trace": usage_trace,
         }),
     ))
 }
@@ -1158,7 +1169,8 @@ fn run_live_terminal_inner(
         for line in io::BufReader::new(file).lines() {
             let line = line.map_err(|error| format!("failed reading live script: {error}"))?;
             if let Some(prompt) = line.trim().strip_prefix(":ai ") {
-                let (summary, trace) = live_tui::run_scripted_ai(client, project_root, prompt)?;
+                let (summary, trace, usage_trace) =
+                    live_tui::run_scripted_ai(client, project_root, prompt)?;
                 if json_lines {
                     println!(
                         "{}",
@@ -1168,11 +1180,13 @@ fn run_live_terminal_inner(
                             "ok": true,
                             "summary": summary,
                             "trace": trace,
+                            "usage_trace": usage_trace,
                         })
                     );
                 } else {
                     println!("AI complete: {summary}");
                     println!("AI trace: {}", trace.display());
+                    println!("AI usage: {}", usage_trace.display());
                 }
                 continue;
             }
@@ -2245,10 +2259,26 @@ fn symbol_workspace(
         .cloned()
         .collect::<Vec<_>>();
     match command {
-        SymbolCommand::List { kind, file, owner } => {
+        SymbolCommand::List {
+            query,
+            kind,
+            file,
+            owner,
+            page,
+            limit,
+        } => {
+            let limit = limit.clamp(1, 200);
             let mut items = workshop_source_items(&editable_files)?;
             items.retain(|item| {
-                kind.is_none_or(|kind| item.kind == kind.into())
+                item.kind != WorkshopSourceItemKind::Imports
+                    && !(item.kind == WorkshopSourceItemKind::Globals
+                        && item.source.trim().is_empty())
+                    && query.as_deref().is_none_or(|query| {
+                        let query = query.to_ascii_lowercase();
+                        item.name.to_ascii_lowercase().contains(&query)
+                            || item.signature.to_ascii_lowercase().contains(&query)
+                    })
+                    && kind.is_none_or(|kind| item.kind == kind.into())
                     && file.as_deref().is_none_or(|file| {
                         normalize_symbol_file(&item.file) == normalize_symbol_file(file)
                     })
@@ -2256,6 +2286,12 @@ fn symbol_workspace(
                         .as_deref()
                         .is_none_or(|owner| item.owner.as_deref() == Some(owner))
             });
+            let total = items.len();
+            let items = items
+                .into_iter()
+                .skip(page.saturating_mul(limit))
+                .take(limit)
+                .collect::<Vec<_>>();
             let human = items
                 .iter()
                 .map(|item| {
@@ -2269,9 +2305,24 @@ fn symbol_workspace(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let metadata = items
+                .into_iter()
+                .map(|item| {
+                    let mut value = json!({
+                        "kind": item.kind,
+                        "name": item.name,
+                        "file": item.file,
+                        "signature": item.signature,
+                    });
+                    if let Some(owner) = item.owner {
+                        value["owner"] = Value::String(owner);
+                    }
+                    value
+                })
+                .collect::<Vec<_>>();
             Ok(CommandResult::success(
                 human,
-                json!({"schema_version": 1, "items": items}),
+                json!({"schema_version": 1, "page": page, "limit": limit, "total": total, "items": metadata}),
             ))
         }
         SymbolCommand::Find(args) => {

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -88,6 +88,7 @@ impl ModelResponse {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     Turn { current: usize, maximum: usize },
+    ProviderUsage(Value),
     WorkingNotes(String),
     ToolBatch(Vec<ToolCall>),
     Observations(Vec<ToolObservation>),
@@ -96,6 +97,10 @@ pub enum AgentEvent {
 
 pub trait ModelProvider {
     fn respond(&mut self, request: &Value, canceled: &AtomicBool) -> Result<ModelResponse, String>;
+
+    fn take_usage(&mut self) -> Option<Value> {
+        None
+    }
 }
 
 pub trait ToolExecutor {
@@ -148,6 +153,9 @@ where
             "response_contract": response_contract(),
         });
         let response = provider.respond(&request, canceled)?;
+        if let Some(usage) = provider.take_usage() {
+            emit(AgentEvent::ProviderUsage(usage));
+        }
         validate_working_notes(response.working_notes())?;
         emit(AgentEvent::WorkingNotes(
             response.working_notes().to_string(),
@@ -274,7 +282,7 @@ pub fn model_response_schema() -> Value {
 
 pub fn workshop_tool_specs() -> Vec<ToolSpec> {
     vec![
-        spec("list_symbols", "List editable Stasis symbols.", &[], &[]),
+        spec("list_symbols", "Search compact editable Stasis symbols. Results exclude imports and empty global groups, default to 32 items, and never include source or source hashes.", &[], &["query", "kind", "file", "owner", "page", "limit"]),
         spec("find_references", "Find compact compiler-owned definitions, reads, writes, and calls for a function, global, or dot-qualified field.", &["symbol"], &["limit"]),
         spec("list_owner_symbols", "List compact symbols owned by one type or group.", &["owner"], &[]),
         spec("read_symbol", "Read one Stasis symbol.", &["name"], &["kind", "file", "owner", "signature"]),
@@ -327,6 +335,7 @@ pub struct CodexExecProvider {
     executable: PathBuf,
     model: String,
     reasoning_effort: String,
+    last_usage: Option<Value>,
 }
 
 impl Default for CodexExecProvider {
@@ -343,6 +352,7 @@ impl Default for CodexExecProvider {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| DEFAULT_REASONING_EFFORT.to_string()),
+            last_usage: None,
         }
     }
 }
@@ -363,6 +373,7 @@ fn default_codex_executable() -> PathBuf {
 
 impl ModelProvider for CodexExecProvider {
     fn respond(&mut self, request: &Value, canceled: &AtomicBool) -> Result<ModelResponse, String> {
+        self.last_usage = None;
         let run = TemporaryRun::create()?;
         fs::write(
             &run.schema,
@@ -383,6 +394,7 @@ impl ModelProvider for CodexExecProvider {
             .arg("--skip-git-repo-check")
             .arg("--color")
             .arg("never")
+            .arg("--json")
             .arg("--cd")
             .arg(&run.root)
             .arg("--output-schema")
@@ -397,7 +409,7 @@ impl ModelProvider for CodexExecProvider {
         command
             .arg("-")
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr));
         #[cfg(windows)]
         {
@@ -409,6 +421,11 @@ impl ModelProvider for CodexExecProvider {
                 "failed starting Codex; install/sign in to Codex or set STASIS_CODEX_EXE: {error}"
             )
         })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Codex stdout was unavailable".to_string())?;
+        let usage_worker = std::thread::spawn(move || read_codex_usage(stdout));
         let encoded = serde_json::to_vec(request).map_err(|error| error.to_string())?;
         child
             .stdin
@@ -420,6 +437,7 @@ impl ModelProvider for CodexExecProvider {
             if canceled.load(Ordering::Acquire) {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = usage_worker.join();
                 return Err("AI request canceled".to_string());
             }
             match child
@@ -428,15 +446,37 @@ impl ModelProvider for CodexExecProvider {
             {
                 Some(status) if status.success() => break,
                 Some(status) => {
+                    let _ = usage_worker.join();
                     return Err(codex_failure_message(&run.stderr, status));
                 }
                 None => std::thread::sleep(Duration::from_millis(50)),
             }
         }
+        self.last_usage = usage_worker
+            .join()
+            .map_err(|_| "Codex usage reader panicked".to_string())??;
         let source = fs::read_to_string(&run.output)
             .map_err(|error| format!("Codex did not produce a final response: {error}"))?;
         decode_codex_response(&source)
     }
+
+    fn take_usage(&mut self) -> Option<Value> {
+        self.last_usage.take()
+    }
+}
+
+fn read_codex_usage(stdout: impl Read) -> Result<Option<Value>, String> {
+    let mut usage = None;
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| format!("failed reading Codex JSON events: {error}"))?;
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) == Some("turn.completed") {
+            usage = event.get("usage").cloned();
+        }
+    }
+    Ok(usage)
 }
 
 fn decode_codex_response(source: &str) -> Result<ModelResponse, String> {
@@ -756,6 +796,31 @@ mod tests {
             panic!("tool calls");
         };
         assert_eq!(tool_calls[0].args, json!({"name": "tick"}));
+    }
+
+    #[test]
+    fn codex_json_stream_keeps_only_the_exact_reported_usage() {
+        let stream = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"hidden\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"text\":\"not retained\"}}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":24763,\"cached_input_tokens\":24448,\"output_tokens\":122,\"reasoning_output_tokens\":7}}\n"
+        );
+
+        let usage = read_codex_usage(std::io::Cursor::new(stream))
+            .expect("stream")
+            .expect("usage");
+
+        assert_eq!(
+            usage,
+            json!({
+                "input_tokens": 24763,
+                "cached_input_tokens": 24448,
+                "output_tokens": 122,
+                "reasoning_output_tokens": 7,
+            })
+        );
+        assert!(!usage.to_string().contains("not retained"));
+        assert!(!usage.to_string().contains("hidden"));
     }
 
     #[test]

@@ -47,7 +47,7 @@ pub(super) fn run_scripted_ai(
     client: &LiveSessionClient,
     project_root: &Path,
     prompt: &str,
-) -> Result<(String, PathBuf), String> {
+) -> Result<(String, PathBuf, PathBuf), String> {
     run_scripted_ai_with_cancel(client, project_root, prompt, &AtomicBool::new(false))
 }
 
@@ -56,9 +56,10 @@ pub(super) fn run_scripted_ai_with_cancel(
     project_root: &Path,
     prompt: &str,
     canceled: &AtomicBool,
-) -> Result<(String, PathBuf), String> {
+) -> Result<(String, PathBuf, PathBuf), String> {
     let mut audit = AiAuditLog::create(project_root, prompt)?;
     let trace_path = audit.path.clone();
+    let usage_path = audit.usage_path.clone();
     let mut provider = CodexExecProvider::default();
     let mut tools = LiveAiTools::new(client.clone(), project_root.to_path_buf());
     let mut audit_error = None;
@@ -71,7 +72,10 @@ pub(super) fn run_scripted_ai_with_cancel(
         canceled,
         |event| {
             if audit_error.is_none() {
-                audit_error = audit.write(audit_agent_event(&event)).err();
+                audit_error = match &event {
+                    AgentEvent::ProviderUsage(usage) => audit.write_usage(usage).err(),
+                    _ => audit.write(audit_agent_event(&event)).err(),
+                };
             }
         },
     );
@@ -85,7 +89,7 @@ pub(super) fn run_scripted_ai_with_cancel(
                 "ok": true,
                 "summary": summary,
             }))?;
-            Ok((summary, trace_path))
+            Ok((summary, trace_path, usage_path))
         }
         Err(error) => {
             audit.write(serde_json::json!({
@@ -112,6 +116,7 @@ fn audit_agent_event(event: &AgentEvent) -> Value {
         AgentEvent::Turn { current, maximum } => {
             serde_json::json!({"event": "turn", "current": current, "maximum": maximum})
         }
+        AgentEvent::ProviderUsage(_) => unreachable!("provider usage has a separate log"),
         AgentEvent::WorkingNotes(notes) => {
             serde_json::json!({"event": "working_notes", "text": notes})
         }
@@ -138,6 +143,8 @@ struct AiRun {
 struct AiAuditLog {
     path: PathBuf,
     file: fs::File,
+    usage_path: PathBuf,
+    usage_file: fs::File,
 }
 
 impl AiAuditLog {
@@ -150,12 +157,23 @@ impl AiAuditLog {
             .unwrap_or_default()
             .as_millis();
         let path = directory.join(format!("tui-ai-{stamp}.jsonl"));
+        let usage_path = directory.join(format!("tui-ai-{stamp}.usage.jsonl"));
         let file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&path)
             .map_err(|error| format!("failed creating AI trace: {error}"))?;
-        let mut log = Self { path, file };
+        let usage_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&usage_path)
+            .map_err(|error| format!("failed creating AI usage trace: {error}"))?;
+        let mut log = Self {
+            path,
+            file,
+            usage_path,
+            usage_file,
+        };
         log.write(serde_json::json!({
             "event": "request",
             "provider": "installed_codex_subscription",
@@ -178,6 +196,17 @@ impl AiAuditLog {
         self.file
             .flush()
             .map_err(|error| format!("failed flushing AI trace: {error}"))
+    }
+
+    fn write_usage(&mut self, usage: &Value) -> Result<(), String> {
+        serde_json::to_writer(&mut self.usage_file, usage)
+            .map_err(|error| format!("failed encoding AI usage trace: {error}"))?;
+        self.usage_file
+            .write_all(b"\n")
+            .map_err(|error| format!("failed writing AI usage trace: {error}"))?;
+        self.usage_file
+            .flush()
+            .map_err(|error| format!("failed flushing AI usage trace: {error}"))
     }
 }
 
@@ -1162,6 +1191,7 @@ impl LiveTui {
         match AiAuditLog::create(&self.project_root, &prompt) {
             Ok(log) => {
                 self.push_transcript(format!("AI trace: {}", log.path.display()));
+                self.push_transcript(format!("AI usage: {}", log.usage_path.display()));
                 self.ai_audit = Some(log);
             }
             Err(error) => {
@@ -1216,6 +1246,13 @@ impl LiveTui {
                 AiUiEvent::Progress(AgentEvent::Turn { current, maximum }) => {
                     self.status = format!("AI turn {current}/{maximum}; Ctrl+C cancels");
                     self.audit(serde_json::json!({"event": "turn", "current": current, "maximum": maximum}));
+                }
+                AiUiEvent::Progress(AgentEvent::ProviderUsage(usage)) => {
+                    if let Some(log) = &mut self.ai_audit {
+                        if let Err(error) = log.write_usage(&usage) {
+                            self.status = format!("AI usage trace disabled: {error}");
+                        }
+                    }
                 }
                 AiUiEvent::Progress(AgentEvent::WorkingNotes(notes)) => {
                     self.inspector.title = "AI working notes".to_string();
@@ -1903,9 +1940,12 @@ impl LiveAiTools {
         let args = call.args.as_object().expect("validated tool args");
         let command = match call.tool.as_str() {
             "list_symbols" => LiveCommand::Symbols {
-                query: None,
-                page: 0,
-                limit: 256,
+                query: string_arg(args, "query"),
+                kind: string_arg(args, "kind"),
+                file: string_arg(args, "file"),
+                owner: string_arg(args, "owner"),
+                page: usize_arg(args, "page").unwrap_or(0).min(u32::MAX as usize) as u32,
+                limit: usize_arg(args, "limit").unwrap_or(32).min(64),
             },
             "read_symbol" => LiveCommand::Read {
                 name: string_arg(args, "name").unwrap_or_default(),
@@ -3124,6 +3164,28 @@ mod tests {
             audit_observation(&observation),
             serde_json::to_value(observation).unwrap()
         );
+
+        let root = std::env::temp_dir().join(format!(
+            "stasis_ai_usage_log_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let usage = serde_json::json!({
+            "input_tokens": 100,
+            "cached_input_tokens": 80,
+            "output_tokens": 20,
+        });
+        let mut log = AiAuditLog::create(&root, "test prompt").expect("audit log");
+        let usage_path = log.usage_path.clone();
+        log.write_usage(&usage).expect("usage log");
+        drop(log);
+        assert_eq!(
+            fs::read_to_string(&usage_path).expect("usage contents"),
+            format!("{}\n", serde_json::to_string(&usage).unwrap())
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -79,6 +79,17 @@ with the agent. Tool source arguments and results therefore appear verbatim when
 or received from the agent. The trace does not store the complete Codex transport request, response
 schema, tool catalog, repeated conversation envelope, or CLI transport output.
 
+Provider-reported token usage is written separately to
+`build/ai-traces/tui-ai-<timestamp>.usage.jsonl`. Each line is the exact `usage` object from a
+Codex `turn.completed` event; Stasis does not estimate or add missing token categories. The Codex
+JSON event stream is consumed in memory and all non-usage transport events are discarded.
+
+AI `list_symbols` calls return at most 32 entries by default and accept `query`, `kind`, `file`,
+`owner`, `page`, and `limit` filters. Listings omit imports, empty global groups, source bodies, and
+source hashes. Each item contains only its name, kind, signature, file, and owner when applicable.
+`read_symbol` returns the selected source and its hash so a later write can use that hash solely as
+a stale-write guard.
+
 The current key map is:
 
 ```text

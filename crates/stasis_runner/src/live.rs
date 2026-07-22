@@ -75,6 +75,12 @@ pub enum LiveCommand {
         #[serde(default)]
         query: Option<String>,
         #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        file: Option<String>,
+        #[serde(default)]
+        owner: Option<String>,
+        #[serde(default)]
         page: u32,
         #[serde(default = "default_symbol_page_limit")]
         limit: usize,
@@ -259,7 +265,7 @@ const fn default_inspect_limit() -> usize {
 }
 
 const fn default_symbol_page_limit() -> usize {
-    50
+    32
 }
 
 const fn default_reference_limit() -> usize {
@@ -1107,6 +1113,9 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         }),
         ":symbols" | ":find" => ready(LiveCommand::Symbols {
             query: args.get(1).filter(|arg| !arg.starts_with("--")).cloned(),
+            kind: terminal_selector_value(&args, "--kind"),
+            file: terminal_selector_value(&args, "--file"),
+            owner: terminal_selector_value(&args, "--owner"),
             page: terminal_selector_value(&args, "--page")
                 .map(|value| parse_u32("page", &value))
                 .transpose()?
@@ -1942,7 +1951,7 @@ mod tests {
         assert_eq!(signature.as_deref(), Some("update(i32): void"));
 
         let TerminalInput::Request(request) = terminal
-            .feed_line(":symbols update --page 2 --limit 10")
+            .feed_line(":symbols update --kind function --file src/game.stasis --owner Enemy --page 2 --limit 10")
             .expect("page")
         else {
             panic!("expected request")
@@ -1950,10 +1959,16 @@ mod tests {
         assert!(matches!(
             request.command,
             LiveCommand::Symbols {
+                query: Some(ref query),
+                kind: Some(ref kind),
+                file: Some(ref file),
+                owner: Some(ref owner),
                 page: 2,
                 limit: 10,
-                ..
-            }
+            } if query == "update"
+                && kind == "function"
+                && file == "src/game.stasis"
+                && owner == "Enemy"
         ));
     }
 

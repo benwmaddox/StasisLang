@@ -222,11 +222,14 @@ fn semantic_symbol_cli_previews_applies_runs_and_reverts() {
     let listed = stasis(&["--json", "symbol", "list"], &project);
     assert_eq!(listed.status.code(), Some(0));
     let listed_json = json_stdout(&listed);
-    assert!(listed_json["result"]["items"]
-        .as_array()
-        .expect("items")
+    let listed_items = listed_json["result"]["items"].as_array().expect("items");
+    assert!(listed_items.iter().all(|item| item["kind"] != "imports"));
+    assert!(listed_items
         .iter()
-        .any(|item| item["kind"] == "imports" && item["file"] == "src/main.stasis"));
+        .all(|item| item.get("source").is_none() && item.get("source_hash").is_none()));
+    assert!(listed_items
+        .iter()
+        .any(|item| item["name"] == "tick" && item["file"] == "src/main.stasis"));
 
     let preview = stasis(
         &[

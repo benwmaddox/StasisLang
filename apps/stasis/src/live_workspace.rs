@@ -487,9 +487,21 @@ impl LiveWorkspace {
                 self.quit = true;
                 Ok(("quitting", json!({"tick": tick})))
             }
-            LiveCommand::Symbols { query, page, limit } => {
-                self.symbols(query.as_deref(), page, limit)
-            }
+            LiveCommand::Symbols {
+                query,
+                kind,
+                file,
+                owner,
+                page,
+                limit,
+            } => self.symbols(
+                query.as_deref(),
+                kind.as_deref(),
+                file.as_deref(),
+                owner.as_deref(),
+                page,
+                limit,
+            ),
             LiveCommand::Read {
                 name,
                 kind,
@@ -760,38 +772,53 @@ impl LiveWorkspace {
     fn symbols(
         &self,
         query: Option<&str>,
+        kind: Option<&str>,
+        file: Option<&str>,
+        owner: Option<&str>,
         page: u32,
         limit: usize,
     ) -> Result<(&'static str, Value), String> {
         let query = query.unwrap_or("").to_ascii_lowercase();
-        let matching = self
-            .source_items
-            .iter()
-            .filter(|item| {
-                query.is_empty()
+        let kind = kind.map(parse_kind).transpose()?;
+        let file = file.map(normalize_file);
+        let matches = |item: &WorkshopSourceItem| {
+            item.kind != WorkshopSourceItemKind::Imports
+                && !(item.kind == WorkshopSourceItemKind::Globals && item.source.trim().is_empty())
+                && (query.is_empty()
                     || item.name.to_ascii_lowercase().contains(&query)
-                    || item.signature.to_ascii_lowercase().contains(&query)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+                    || item.signature.to_ascii_lowercase().contains(&query))
+                && kind.is_none_or(|kind| item.kind == kind)
+                && file
+                    .as_deref()
+                    .is_none_or(|file| normalize_file(&item.file) == file)
+                && owner.is_none_or(|owner| item.owner.as_deref() == Some(owner))
+        };
         let limit = limit.clamp(1, 200);
         let offset = usize::try_from(page)
             .unwrap_or(usize::MAX)
             .saturating_mul(limit);
-        let total = matching.len();
-        let items = matching
-            .into_iter()
+        let total = self
+            .source_items
+            .iter()
+            .filter(|item| matches(item))
+            .count();
+        let items = self
+            .source_items
+            .iter()
+            .filter(|item| matches(item))
             .skip(offset)
             .take(limit)
             .map(|item| {
-                json!({
+                let mut value = json!({
                     "kind": item.kind,
                     "name": item.name,
-                    "owner": item.owner,
                     "file": item.file,
                     "signature": item.signature,
-                    "source_hash": item.source_hash,
-                })
+                });
+                if let Some(owner) = &item.owner {
+                    value["owner"] = Value::String(owner.clone());
+                }
+                value
             })
             .collect::<Vec<_>>();
         Ok((
@@ -2608,6 +2635,40 @@ mod tests {
         assert!(references
             .iter()
             .all(|reference| reference.get("source").is_none()));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn symbol_search_is_filtered_compact_and_hash_free() {
+        let (root, config) = project();
+        let (jit, _package) = compile(&config);
+        let (_client, server) = stasis_runner::live::live_session(8);
+        let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+
+        let (_, all) = workspace
+            .symbols(None, None, None, None, 0, 32)
+            .expect("symbols");
+        let items = all["items"].as_array().expect("items");
+        assert!(items.iter().all(|item| item["kind"] != "imports"));
+        assert!(items.iter().all(|item| item.get("source_hash").is_none()));
+        assert!(items.iter().all(|item| item.get("source").is_none()));
+        assert!(items
+            .iter()
+            .all(|item| { matches!(item.as_object().map(|object| object.len()), Some(4 | 5)) }));
+
+        let (_, filtered) = workspace
+            .symbols(
+                Some("tick"),
+                Some("function"),
+                Some("src/main.stasis"),
+                None,
+                0,
+                1,
+            )
+            .expect("filtered symbols");
+        assert_eq!(filtered["total"], 1);
+        assert_eq!(filtered["items"][0]["name"], "tick");
+        assert!(filtered["items"][0].get("owner").is_none());
         fs::remove_dir_all(root).ok();
     }
 
