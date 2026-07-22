@@ -2,6 +2,7 @@ param(
     [switch]$Published,
     [switch]$Install,
     [switch]$RequireDevice,
+    [string]$Serial = "",
     [string]$OutputPath = ""
 )
 
@@ -42,7 +43,14 @@ function Write-Report([hashtable]$Report) {
 }
 
 $deviceLines = & $adb devices -l
-$deviceLine = $deviceLines | Where-Object { $_ -match '^(\S+)\s+device(?:\s|$)' } | Select-Object -First 1
+$connectedDevices = @($deviceLines | Where-Object { $_ -match '^(\S+)\s+device(?:\s|$)' })
+$deviceLine = if ($Serial) {
+    $connectedDevices | Where-Object { $_ -match "^$([regex]::Escape($Serial))\s" } | Select-Object -First 1
+} elseif (-not $Published) {
+    $connectedDevices | Sort-Object { if ($_ -match '^emulator-') { 0 } else { 1 } } | Select-Object -First 1
+} else {
+    $connectedDevices | Select-Object -First 1
+}
 if (-not $deviceLine) {
     Write-Report @{
         status = "skipped"
@@ -65,7 +73,8 @@ try {
     $model = (Invoke-Adb @("shell", "getprop", "ro.product.model") | Select-Object -First 1).Trim()
     $sdk = (Invoke-Adb @("shell", "getprop", "ro.build.version.sdk") | Select-Object -First 1).Trim()
     $abis = (Invoke-Adb @("shell", "getprop", "ro.product.cpu.abilist") | Select-Object -First 1).Trim()
-    if ($abis -notmatch 'arm64-v8a') { throw "attached device does not support arm64-v8a: $abis" }
+    $requiredAbiPattern = if ($Published) { 'arm64-v8a' } else { 'arm64-v8a|x86_64' }
+    if ($abis -notmatch $requiredAbiPattern) { throw "attached device does not support a packaged ABI: $abis" }
 
     if ($Install) {
         if (-not (Test-Path $apk)) { throw "APK was not found; build it first: $apk" }
@@ -75,8 +84,8 @@ try {
     Invoke-Adb @("shell", "am", "force-stop", $package) | Out-Null
     $launchOutput = Invoke-Adb @("shell", "am", "start", "-W", "-n", "$package/com.stasislang.workshop.MainActivity")
     Start-Sleep -Seconds 2
-    $pid = (Invoke-Adb @("shell", "pidof", $package) | Select-Object -First 1).Trim()
-    if (-not $pid) { throw "Android package did not remain running after launch: $package" }
+    $appPid = (Invoke-Adb @("shell", "pidof", $package) | Select-Object -First 1).Trim()
+    if (-not $appPid) { throw "Android package did not remain running after launch: $package" }
     $packageInfo = Invoke-Adb @("shell", "dumpsys", "package", $package)
     $versionName = ($packageInfo | Select-String -Pattern 'versionName=' | Select-Object -First 1).Line.Trim()
 
@@ -87,7 +96,7 @@ try {
         model = $model
         sdk = $sdk
         abis = $abis
-        pid = $pid
+        pid = $appPid
         version = $versionName
         launch = @($launchOutput)
     }
