@@ -105,6 +105,12 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(541, viewport.width);
         assertEquals(1081, viewport.height);
         assertEquals(1081.0f / 720.0f, viewport.contentScale, 0.0001f);
+
+        StasisPreviewRenderer.DisplayViewport vertical =
+                StasisPreviewRenderer.fitViewport(360, 720, 1080, 2401);
+        assertEquals(120, vertical.y);
+        assertEquals(2160, vertical.height);
+        assertEquals(121, 2401 - vertical.y - vertical.height);
     }
 
     @Test

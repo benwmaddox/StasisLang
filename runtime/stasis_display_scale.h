@@ -51,6 +51,13 @@ static StasisDisplayViewport stasis_display_fit_viewport(
     return viewport;
 }
 
+static int stasis_display_bottom_origin_y(
+    int target_h,
+    StasisDisplayViewport viewport
+) {
+    return target_h - (int)viewport.y - (int)viewport.h;
+}
+
 static StasisDisplayMetrics stasis_display_metrics(
     int logical_w,
     int logical_h,

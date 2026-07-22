@@ -2289,6 +2289,10 @@ mod tests {
         let (right, bottom) = odd.native_to_logical(1470, 1081);
         assert_eq!(right, 360.0);
         assert_eq!(bottom, 720.0);
+
+        let vertical = AndroidDisplayMetrics::new(360, 720, 1080, 2401);
+        assert_eq!(vertical.viewport_y, 120.0);
+        assert_eq!(vertical.viewport_h, 2160.0);
     }
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};

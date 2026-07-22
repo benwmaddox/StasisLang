@@ -94,6 +94,12 @@ static void test_odd_fractional_viewport_uses_renderer_rounding(void) {
         &metrics, 1470.0f, 1081.0f, &logical_x, &logical_y);
     CHECK(close_enough(logical_x, 360.0f));
     CHECK(close_enough(logical_y, 720.0f));
+
+    StasisDisplayMetrics vertical = metrics_for(
+        360, 720, 1080, 2401, 1080, 2401);
+    CHECK(close_enough(vertical.drawable_viewport.y, 120.0f));
+    CHECK(stasis_display_bottom_origin_y(
+        vertical.drawable_h, vertical.drawable_viewport) == 121);
 }
 
 static void test_safe_native_area_maps_to_logical_viewport(void) {

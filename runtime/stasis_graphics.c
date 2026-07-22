@@ -319,7 +319,8 @@ static void stasis_sync_display_metrics(void) {
     if (!g_use_sdl_renderer && g_gl_context) {
         glViewport(
             (int)floorf(next.drawable_viewport.x),
-            (int)floorf(next.drawable_viewport.y),
+            stasis_display_bottom_origin_y(
+                next.drawable_h, next.drawable_viewport),
             (int)ceilf(next.drawable_viewport.w),
             (int)ceilf(next.drawable_viewport.h));
         setup_ortho();
@@ -337,7 +338,8 @@ static void stasis_gl_clear_rect(int x, int y, int width, int height) {
 static void stasis_gl_clear_letterbox_bars(void) {
     const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
     const int left = (int)viewport.x;
-    const int bottom = (int)viewport.y;
+    const int bottom = stasis_display_bottom_origin_y(
+        g_drawable_height, viewport);
     const int right = left + (int)viewport.w;
     const int top = bottom + (int)viewport.h;
     glEnable(GL_SCISSOR_TEST);
@@ -3936,7 +3938,8 @@ STASIS_EXPORT void stasis_clear(float r, float g, float b, float a) {
         glEnable(GL_SCISSOR_TEST);
         glScissor(
             (int)viewport.x,
-            (int)viewport.y,
+            stasis_display_bottom_origin_y(
+                g_display_metrics.drawable_h, viewport),
             (int)viewport.w,
             (int)viewport.h);
         glClearColor(r, g, b, a);
