@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const MAX_AGENT_TURNS: usize = 25;
+pub const MAX_AGENT_TURNS: usize = 12;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 12;
 pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
@@ -128,6 +128,7 @@ where
         .map(|spec| spec.tool.as_str())
         .collect::<BTreeSet<_>>();
     let mut observations = Vec::<ToolObservation>::new();
+    let mut conversation_history = Vec::<Value>::new();
     for turn in 1..=MAX_AGENT_TURNS {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
@@ -138,10 +139,11 @@ where
         });
         let request = json!({
             "role": "Stasis live-workspace coding agent",
-            "instruction": "Use only the supplied Stasis tools. Inspect narrowly and call find_references for behavior-bearing symbols before writing. For an observable requested behavior, call validate_runtime_state with the target requirements and expected_outcome=fail before writing, then the identical baseline, requirements, and frames with expected_outcome=pass after writing. Use baseline=fresh for startup/reset or integration-style behavior and baseline=live when the current running state matters. If the before check already passes, report that the request is already satisfied without rewriting it. Return done after any edit reports compilation/tests passed and the green validation passes. Return exactly one JSON object matching the response contract.",
+            "instruction": "Use only the supplied Stasis tools. Treat conversation_history as the authoritative record of your earlier tool calls and their results; do not repeat completed inspection or validation. Inspect narrowly and call find_references for behavior-bearing symbols before writing. For an observable requested behavior, call validate_runtime_state with the target requirements and expected_outcome=fail before writing, then the identical baseline, requirements, and frames with expected_outcome=pass after writing. Use baseline=fresh for startup/reset or integration-style behavior and baseline=live when the current running state matters. If the before check already passes, report that the request is already satisfied without rewriting it. Return done after any edit reports compilation/tests passed and the green validation passes. Return exactly one JSON object matching the response contract.",
             "user_prompt": user_prompt,
             "initial_context": initial_context,
             "tool_specs": tool_specs,
+            "conversation_history": conversation_history,
             "observations": observations,
             "response_contract": response_contract(),
         });
@@ -150,6 +152,8 @@ where
         emit(AgentEvent::WorkingNotes(
             response.working_notes().to_string(),
         ));
+        let response_record = serde_json::to_value(&response)
+            .map_err(|error| format!("failed recording AI response: {error}"))?;
         match response {
             ModelResponse::Done { summary, .. } => {
                 if let Err(error) = executor.validate_completion() {
@@ -181,6 +185,10 @@ where
                 emit(AgentEvent::ToolBatch(tool_calls.clone()));
                 observations = bound_observations(executor.execute(&tool_calls, canceled));
                 emit(AgentEvent::Observations(observations.clone()));
+                conversation_history.push(json!({
+                    "response": response_record,
+                    "observations": observations,
+                }));
             }
         }
     }
@@ -566,6 +574,65 @@ mod tests {
         .expect("agent");
         assert_eq!(result, "verified");
         assert_eq!(tools.0, 1);
+    }
+
+    #[test]
+    fn later_turns_receive_prior_calls_and_observations() {
+        struct RecordingResponses {
+            responses: Vec<ModelResponse>,
+            requests: Vec<Value>,
+        }
+        impl ModelProvider for RecordingResponses {
+            fn respond(
+                &mut self,
+                request: &Value,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.requests.push(request.clone());
+                Ok(self.responses.remove(0))
+            }
+        }
+
+        let mut provider = RecordingResponses {
+            responses: vec![
+                ModelResponse::ToolCalls {
+                    working_notes: "Inspect the relevant symbol once.".to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![ToolCall {
+                        tool: "read_symbol".to_string(),
+                        args: json!({"name": "tick"}),
+                    }],
+                },
+                ModelResponse::Done {
+                    working_notes: "The prior inspection is visible and complete.".to_string(),
+                    summary: "verified".to_string(),
+                },
+            ],
+            requests: Vec::new(),
+        };
+
+        run_agent(
+            &mut provider,
+            &mut Tools::default(),
+            "inspect",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("agent");
+
+        assert_eq!(provider.requests.len(), 2);
+        assert_eq!(provider.requests[0]["conversation_history"], json!([]));
+        assert_eq!(
+            provider.requests[1]["conversation_history"][0]["response"]["tool_calls"][0]["args"]
+                ["name"],
+            "tick"
+        );
+        assert_eq!(
+            provider.requests[1]["conversation_history"][0]["observations"][0]["result"]["ok"],
+            true
+        );
     }
 
     #[test]
