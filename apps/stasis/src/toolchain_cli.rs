@@ -49,7 +49,20 @@ const COMMANDS: &[&str] = &[
     "env",
     "symbol",
     "help",
+    "__validate-runtime",
 ];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(super) struct RuntimeValidationRequirement {
+    pub path: String,
+    #[serde(default = "default_validation_operator")]
+    pub op: String,
+    pub value: Value,
+}
+
+fn default_validation_operator() -> String {
+    "eq".to_string()
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -109,6 +122,19 @@ enum ToolchainCommand {
     Ai {
         #[arg(value_name = "PROMPT")]
         prompt: String,
+    },
+    #[command(name = "__validate-runtime", hide = true)]
+    ValidateRuntime {
+        #[arg(long, default_value_t = 0)]
+        frames: u32,
+        #[arg(long)]
+        requirements_json: String,
+        #[arg(long, default_value = "main")]
+        setup: String,
+        #[arg(long, default_value = "tick")]
+        tick: String,
+        #[arg(long, default_value = "render")]
+        render: String,
     },
     /// JIT-compile and run main() in the headless toolchain runtime.
     Run {
@@ -499,6 +525,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Check => "check",
         ToolchainCommand::Test { .. } => "test",
         ToolchainCommand::Ai { .. } => "ai",
+        ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
@@ -548,6 +575,20 @@ fn execute(
                     test_workspace(&workspace, path.as_deref())
                 }
                 ToolchainCommand::Ai { prompt } => run_workspace_ai(&workspace, &prompt),
+                ToolchainCommand::ValidateRuntime {
+                    frames,
+                    requirements_json,
+                    setup,
+                    tick,
+                    render,
+                } => validate_fresh_runtime(
+                    &workspace,
+                    frames,
+                    &requirements_json,
+                    &setup,
+                    &tick,
+                    &render,
+                ),
                 ToolchainCommand::Run {
                     watch,
                     headless,
@@ -788,6 +829,92 @@ fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
         }
     })?;
     Ok(jit)
+}
+
+fn validate_fresh_runtime(
+    workspace: &Workspace,
+    frames: u32,
+    requirements_json: &str,
+    setup: &str,
+    tick: &str,
+    render: &str,
+) -> Result<CommandResult, String> {
+    if frames > 600 {
+        return Err("frames exceeds the 600-frame limit".to_string());
+    }
+    let requirements = serde_json::from_str::<Vec<RuntimeValidationRequirement>>(requirements_json)
+        .map_err(|error| format!("invalid runtime validation requirements: {error}"))?;
+    if requirements.is_empty() || requirements.len() > 16 {
+        return Err("requirements must contain 1..=16 checks".to_string());
+    }
+    for (label, name) in [("setup", setup), ("tick", tick), ("render", render)] {
+        if name.is_empty()
+            || !name.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+            })
+        {
+            return Err(format!(
+                "fresh validation {label} must be a Stasis identifier"
+            ));
+        }
+    }
+    let entry = workspace.root.join(&workspace.manifest.entry);
+    validate_workspace_destination(workspace, "entry", &entry)?;
+    let source = fs::read_to_string(&entry)
+        .map_err(|error| format!("failed to read entry {}: {error}", entry.display()))?;
+    let mut jit = JitProcess::new();
+    jit.set_required_emit_roots(&[setup.to_string(), tick.to_string(), render.to_string()]);
+    jit.upsert_file(display_path(&entry), source);
+    jit.compile()
+        .map_err(|error| format!("fresh validation compile failed: {error:?}"))?;
+    execute_noarg_entry(&jit, setup)?;
+    for _ in 0..frames {
+        execute_noarg_entry(&jit, tick)?;
+    }
+    execute_noarg_entry(&jit, render)?;
+
+    let mut requirements_met = true;
+    let mut checks = Vec::with_capacity(requirements.len());
+    for requirement in requirements {
+        let actual = serde_json::to_value(jit.read_global_scalar(&requirement.path)?)
+            .map_err(|error| format!("failed encoding {}: {error}", requirement.path))?
+            .get("value")
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "inspection for {} returned no scalar value",
+                    requirement.path
+                )
+            })?;
+        let passed =
+            live_tui::compare_validation_values(&actual, &requirement.op, &requirement.value)?;
+        requirements_met &= passed;
+        checks.push(json!({
+            "path": requirement.path,
+            "op": requirement.op,
+            "expected": requirement.value,
+            "actual": actual,
+            "passed": passed,
+        }));
+    }
+    Ok(CommandResult::success(
+        "fresh runtime validation complete",
+        json!({
+            "baseline": "fresh",
+            "entrypoints": {"setup": setup, "tick": tick, "render": render},
+            "frames": frames,
+            "requirements_met": requirements_met,
+            "checks": checks,
+        }),
+    ))
+}
+
+fn execute_noarg_entry(jit: &JitProcess, name: &str) -> Result<(), String> {
+    match jit.execute_i32_noarg_by_name(name) {
+        Ok(_) => Ok(()),
+        Err(error) if error.contains("not i32-returning") => jit.execute_void_noarg_by_name(name),
+        Err(error) => Err(error),
+    }
 }
 
 fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandResult, String> {
@@ -2867,6 +2994,44 @@ mod tests {
 
     fn remove_temp(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn fresh_runtime_validation_boots_ticks_renders_and_checks_state() {
+        let root = temp_dir("fresh_validation");
+        fs::create_dir_all(root.join("src")).expect("src");
+        fs::write(
+            root.join(MANIFEST_NAME),
+            serde_json::to_vec(&ProjectManifest::new("fresh_validation".into())).expect("manifest"),
+        )
+        .expect("write manifest");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global State { value: i32; rendered: i32; }\nfunction main(): i32 { State.value = 1; State.rendered = 0; return 0; }\nfunction tick(): i32 { State.value += 1; return 0; }\nfunction render(): i32 { State.rendered = 1; return 0; }\n",
+        )
+        .expect("write source");
+        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let requirements = serde_json::to_string(&vec![
+            RuntimeValidationRequirement {
+                path: "State.value".into(),
+                op: "eq".into(),
+                value: json!(3),
+            },
+            RuntimeValidationRequirement {
+                path: "State.rendered".into(),
+                op: "eq".into(),
+                value: json!(1),
+            },
+        ])
+        .expect("requirements");
+
+        let result = validate_fresh_runtime(&workspace, 2, &requirements, "main", "tick", "render")
+            .expect("validation");
+
+        assert_eq!(result.data["baseline"], "fresh");
+        assert_eq!(result.data["requirements_met"], true);
+        assert_eq!(result.data["checks"].as_array().expect("checks").len(), 2);
+        remove_temp(&root);
     }
 
     #[test]

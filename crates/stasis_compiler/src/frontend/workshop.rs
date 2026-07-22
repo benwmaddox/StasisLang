@@ -958,6 +958,27 @@ pub struct WorkshopSourceItem {
     pub source_hash: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkshopReferenceKind {
+    Definition,
+    Read,
+    Write,
+    Call,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkshopReference {
+    pub symbol: String,
+    pub kind: WorkshopReferenceKind,
+    pub file: String,
+    pub source_span: WorkshopSourceSpan,
+    pub containing_kind: WorkshopSourceItemKind,
+    pub containing_name: String,
+    pub containing_signature: String,
+    pub containing_source_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkshopCompletionItem {
     pub text: String,
@@ -1122,6 +1143,151 @@ pub fn workshop_source_items(
         (item.file.clone(), order, start, item.name.clone())
     });
     Ok(items)
+}
+
+pub fn find_workshop_references(
+    files: &[WorkshopSourceFile],
+    symbol: &str,
+    limit: usize,
+) -> Result<Vec<WorkshopReference>, String> {
+    let segments = symbol.split('.').collect::<Vec<_>>();
+    if segments.is_empty()
+        || segments.len() > 8
+        || segments
+            .iter()
+            .any(|segment| !is_workshop_identifier(segment))
+    {
+        return Err("reference symbol must be 1..=8 dot-separated identifiers".to_string());
+    }
+    let limit = limit.clamp(1, 256);
+    let items = workshop_source_items(files)?;
+    let mut references = Vec::new();
+    for file in files {
+        let tokens = lex(&file.source)?;
+        for start_index in 0..tokens.len() {
+            let Some(end_index) =
+                reference_match_end(&file.source, &tokens, start_index, &segments)
+            else {
+                continue;
+            };
+            let start = tokens[start_index].start;
+            let end = tokens[end_index].end;
+            let Some(item) = items
+                .iter()
+                .filter(|item| {
+                    item.file == file.path
+                        && item
+                            .source_spans
+                            .iter()
+                            .any(|span| span.start as usize <= start && end <= span.end as usize)
+                })
+                .min_by_key(|item| {
+                    item.source_spans
+                        .iter()
+                        .map(|span| span.end.saturating_sub(span.start))
+                        .min()
+                        .unwrap_or(u32::MAX)
+                })
+            else {
+                continue;
+            };
+            let kind =
+                classify_workshop_reference(&file.source, &tokens, end_index, item, symbol, start);
+            references.push(WorkshopReference {
+                symbol: symbol.to_string(),
+                kind,
+                file: file.path.clone(),
+                source_span: WorkshopSourceSpan {
+                    start: u32::try_from(start)
+                        .map_err(|_| "reference start exceeds u32".to_string())?,
+                    end: u32::try_from(end).map_err(|_| "reference end exceeds u32".to_string())?,
+                },
+                containing_kind: item.kind,
+                containing_name: item.name.clone(),
+                containing_signature: item.signature.clone(),
+                containing_source_hash: item.source_hash.clone(),
+            });
+            if references.len() >= limit {
+                return Ok(references);
+            }
+        }
+    }
+    Ok(references)
+}
+
+fn is_workshop_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn reference_match_end(
+    source: &str,
+    tokens: &[Token],
+    start: usize,
+    segments: &[&str],
+) -> Option<usize> {
+    let mut cursor = start;
+    for (index, segment) in segments.iter().enumerate() {
+        let token = *tokens.get(cursor)?;
+        if token.kind != TokenKind::Identifier || token_text(source, token) != *segment {
+            return None;
+        }
+        if index + 1 < segments.len() {
+            let dot = *tokens.get(cursor + 1)?;
+            if dot.kind != TokenKind::Other || token_text(source, dot) != "." {
+                return None;
+            }
+            cursor += 2;
+        }
+    }
+    Some(cursor)
+}
+
+fn classify_workshop_reference(
+    source: &str,
+    tokens: &[Token],
+    end_index: usize,
+    item: &WorkshopSourceItem,
+    symbol: &str,
+    start: usize,
+) -> WorkshopReferenceKind {
+    if !symbol.contains('.')
+        && item.name == symbol
+        && matches!(
+            item.kind,
+            WorkshopSourceItemKind::Function
+                | WorkshopSourceItemKind::Struct
+                | WorkshopSourceItemKind::Test
+        )
+        && item
+            .source_spans
+            .first()
+            .is_some_and(|span| start < span.start as usize + item.signature.len() + 16)
+    {
+        return WorkshopReferenceKind::Definition;
+    }
+    let next = tokens.get(end_index + 1).copied();
+    if next.is_some_and(|token| token.kind == TokenKind::LParen) {
+        return WorkshopReferenceKind::Call;
+    }
+    let next_text = next.map(|token| token_text(source, token));
+    let following_text = tokens
+        .get(end_index + 2)
+        .copied()
+        .map(|token| token_text(source, token));
+    if next_text == Some("=")
+        || (matches!(
+            next_text,
+            Some("+") | Some("-") | Some("*") | Some("/") | Some("%")
+        ) && following_text == Some("="))
+    {
+        WorkshopReferenceKind::Write
+    } else {
+        WorkshopReferenceKind::Read
+    }
 }
 
 pub fn workshop_completion_items(
@@ -4269,6 +4435,25 @@ mod workshop_compile_plan_tests {
         assert!(update.source.starts_with("// Advances the player."));
         assert!(!update.source.contains("Unrelated note"));
         assert!(update.source.ends_with("}\n"));
+    }
+
+    #[test]
+    fn references_find_dot_qualified_reads_and_writes_by_containing_function() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "global Game { score: i32; }\nfunction bump(): void { Game.score += 1; }\nfunction current(): i32 { return Game.score; }\n"
+                .to_string(),
+        }];
+
+        let references = find_workshop_references(&files, "Game.score", 16).expect("references");
+
+        assert_eq!(references.len(), 2);
+        assert!(references.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Write && reference.containing_name == "bump"
+        }));
+        assert!(references.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Read && reference.containing_name == "current"
+        }));
     }
 
     #[test]

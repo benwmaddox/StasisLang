@@ -100,6 +100,10 @@ pub trait ModelProvider {
 
 pub trait ToolExecutor {
     fn execute(&mut self, calls: &[ToolCall], canceled: &AtomicBool) -> Vec<ToolObservation>;
+
+    fn validate_completion(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub fn run_agent<P, T, E>(
@@ -134,7 +138,7 @@ where
         });
         let request = json!({
             "role": "Stasis live-workspace coding agent",
-            "instruction": "Use only the supplied Stasis tools. Inspect narrowly, make the requested change, and return done only after the edit response reports that compilation and tests passed. Return exactly one JSON object matching the response contract.",
+            "instruction": "Use only the supplied Stasis tools. Inspect narrowly and call find_references for behavior-bearing symbols before writing. For an observable requested behavior, call validate_runtime_state with the target requirements and expected_outcome=fail before writing, then the identical baseline, requirements, and frames with expected_outcome=pass after writing. Use baseline=fresh for startup/reset or integration-style behavior and baseline=live when the current running state matters. If the before check already passes, report that the request is already satisfied without rewriting it. Return done after any edit reports compilation/tests passed and the green validation passes. Return exactly one JSON object matching the response contract.",
             "user_prompt": user_prompt,
             "initial_context": initial_context,
             "tool_specs": tool_specs,
@@ -148,6 +152,11 @@ where
         ));
         match response {
             ModelResponse::Done { summary, .. } => {
+                if let Err(error) = executor.validate_completion() {
+                    observations = vec![ToolObservation::error("completion_gate", error)];
+                    emit(AgentEvent::Observations(observations.clone()));
+                    continue;
+                }
                 let summary = if summary.trim().is_empty() {
                     "AI request completed".to_string()
                 } else {
@@ -258,6 +267,7 @@ pub fn model_response_schema() -> Value {
 pub fn workshop_tool_specs() -> Vec<ToolSpec> {
     vec![
         spec("list_symbols", "List editable Stasis symbols.", &[], &[]),
+        spec("find_references", "Find compact compiler-owned definitions, reads, writes, and calls for a function, global, or dot-qualified field.", &["symbol"], &["limit"]),
         spec("list_owner_symbols", "List compact symbols owned by one type or group.", &["owner"], &[]),
         spec("read_symbol", "Read one Stasis symbol.", &["name"], &["kind", "file", "owner", "signature"]),
         spec("write_symbol", "Atomically add or replace a symbol; set operation=add for a new symbol. A write batch compiles and tests together.", &["file", "name", "new_source"], &["operation", "kind", "owner", "signature", "expected_source_hash"]),
@@ -267,6 +277,7 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
         spec("get_diagnostics", "Read the latest compiler diagnostics.", &[], &[]),
         spec("set_input_state", "Set simulated input state.", &[], &["x", "y", "active", "screen_w", "screen_h"]),
         spec("inspect_runtime_state", "Read bounded live scalar state.", &[], &[]),
+        spec("validate_runtime_state", "Evaluate 1..=16 scalar requirements shaped as {path, op, value}, where op is eq, ne, lt, lte, gt, or gte. baseline=live pauses and restores the running game; baseline=fresh boots an isolated child process for an integration-style check. Fresh defaults to main/tick/render; use setup, tick, and render to select game-level entrypoints when host adapters have side effects. Use expected_outcome=fail before an edit and pass afterward with an identical contract.", &["requirements", "expected_outcome"], &["frames", "baseline", "setup", "tick", "render"]),
         spec("run_frame", "Advance the live runtime by one deterministic tick.", &[], &[]),
         spec("take_screenshot", "Capture a logical render snapshot and runtime state.", &[], &[]),
         spec("list_tests", "List Stasis test files.", &[], &[]),
@@ -280,10 +291,12 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
 pub fn live_tool_specs() -> Vec<ToolSpec> {
     const LIVE_TOOLS: &[&str] = &[
         "list_symbols",
+        "find_references",
         "read_symbol",
         "write_symbol",
         "delete_symbol",
         "inspect_runtime_state",
+        "validate_runtime_state",
         "run_frame",
         "run_tests",
     ];
@@ -556,6 +569,77 @@ mod tests {
     }
 
     #[test]
+    fn completion_gate_returns_evidence_to_the_agent_before_finishing() {
+        #[derive(Default)]
+        struct GatedTools {
+            ready: bool,
+        }
+        impl ToolExecutor for GatedTools {
+            fn execute(
+                &mut self,
+                calls: &[ToolCall],
+                _canceled: &AtomicBool,
+            ) -> Vec<ToolObservation> {
+                self.ready = true;
+                calls
+                    .iter()
+                    .map(|call| ToolObservation::result(&call.tool, json!({"ok": true})))
+                    .collect()
+            }
+
+            fn validate_completion(&self) -> Result<(), String> {
+                self.ready
+                    .then_some(())
+                    .ok_or_else(|| "green validation required".to_string())
+            }
+        }
+
+        let mut provider = Responses(vec![
+            ModelResponse::Done {
+                working_notes: "Intent: finish. Observed: edit. Next: none. Blocker: none."
+                    .to_string(),
+                summary: "too early".to_string(),
+            },
+            ModelResponse::ToolCalls {
+                working_notes: "Intent: validate. Observed: gate. Next: check. Blocker: none."
+                    .to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "run_tests".to_string(),
+                    args: json!({}),
+                }],
+            },
+            ModelResponse::Done {
+                working_notes: "Intent: finish. Observed: green. Next: none. Blocker: none."
+                    .to_string(),
+                summary: "verified".to_string(),
+            },
+        ]);
+        let mut tools = GatedTools::default();
+        let mut saw_gate = false;
+
+        let result = run_agent(
+            &mut provider,
+            &mut tools,
+            "change",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |event| {
+                if let AgentEvent::Observations(observations) = event {
+                    saw_gate |= observations
+                        .iter()
+                        .any(|observation| observation.tool == "completion_gate");
+                }
+            },
+        )
+        .expect("agent");
+
+        assert_eq!(result, "verified");
+        assert!(saw_gate);
+    }
+
+    #[test]
     fn rejects_unknown_tools_before_execution() {
         let mut provider = Responses(vec![ModelResponse::ToolCalls {
             working_notes: "Intent: act. Observed: none. Next: shell. Blocker: none.".to_string(),
@@ -588,6 +672,10 @@ mod tests {
             .iter()
             .all(|tool| workshop.iter().any(|candidate| candidate.tool == tool.tool)));
         assert!(live.iter().any(|tool| tool.tool == "write_symbol"));
+        assert!(live.iter().any(|tool| tool.tool == "find_references"));
+        assert!(live
+            .iter()
+            .any(|tool| tool.tool == "validate_runtime_state"));
         assert!(!live.iter().any(|tool| tool.tool == "capture_screenshot"));
     }
 

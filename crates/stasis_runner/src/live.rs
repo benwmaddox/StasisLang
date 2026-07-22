@@ -90,6 +90,14 @@ pub enum LiveCommand {
         #[serde(default)]
         signature: Option<String>,
     },
+    References {
+        symbol: String,
+        #[serde(default = "default_reference_limit")]
+        limit: usize,
+    },
+    ValidationSnapshot,
+    ValidationRestore,
+    ValidationClear,
     Complete {
         buffer: String,
         cursor: usize,
@@ -209,6 +217,10 @@ const fn default_inspect_limit() -> usize {
 
 const fn default_symbol_page_limit() -> usize {
     50
+}
+
+const fn default_reference_limit() -> usize {
+    128
 }
 
 const fn default_true() -> bool {

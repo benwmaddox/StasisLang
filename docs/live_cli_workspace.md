@@ -42,6 +42,20 @@ deterministic ticks pass through `stasis_runner::live`; model write batches beco
 between-tick boundary. A layout-changing edit remains a validated preview and requires explicit
 user `:apply` approval.
 
+Before changing a behavior-bearing symbol, the AI must use compiler-backed `find_references` to
+locate its definition, reads, writes, and calls without receiving unrelated source bodies. For an
+observable game change it uses AI-only `validate_runtime_state` acceptance checks: the requested
+condition must fail before the edit (red), the atomic edit must compile and pass project tests, and
+the same condition must pass afterward (green). The default `live` baseline pauses and restores the
+same bounded runtime snapshot, so normal game progression cannot manufacture a pass. The optional
+`fresh` baseline boots `main`, advances bounded `tick` frames, renders, and inspects state in a
+separate Stasis child process for integration-style red/green checks without changing the running
+game. Projects with host adapters can select game-level `setup`, `tick`, and `render` entrypoints so
+the isolated check exercises logical gameplay without opening a second window or duplicating host
+resource side effects. These acceptance checks are ephemeral and do not create or replace project `.test.stasis`
+files; durable regression tests remain the appropriate place for behavior that should be protected
+after the AI turn.
+
 Every run creates `build/ai-traces/tui-ai-<timestamp>.jsonl`. The trace records the user request,
 turns, user-visible working notes, tool calls, and bounded observation/outcome summaries. It never
 stores the complete provider payload. Source-bearing fields and before/after source snapshots are

@@ -1,4 +1,4 @@
-use super::{format_live_response, scalar_text};
+use super::{format_live_response, scalar_text, RuntimeValidationRequirement};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -24,8 +24,9 @@ use stasis_runner::live::{
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -59,7 +60,7 @@ pub(super) fn run_scripted_ai_with_cancel(
     let mut audit = AiAuditLog::create(project_root, prompt)?;
     let trace_path = audit.path.clone();
     let mut provider = CodexExecProvider::default();
-    let mut tools = LiveAiTools::new(client.clone());
+    let mut tools = LiveAiTools::new(client.clone(), project_root.to_path_buf());
     let mut audit_error = None;
     let result = run_agent(
         &mut provider,
@@ -1170,12 +1171,13 @@ impl LiveTui {
             }
         }
         let client = self.client.clone();
+        let project_root = self.project_root.clone();
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_canceled = canceled.clone();
         let (events_tx, events_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
             let mut provider = CodexExecProvider::default();
-            let mut tools = LiveAiTools::new(client);
+            let mut tools = LiveAiTools::new(client, project_root);
             let progress = events_tx.clone();
             let result = run_agent(
                 &mut provider,
@@ -1825,18 +1827,40 @@ fn completion_key(item: &CompletionItem) -> (String, String, String) {
     (item.text.clone(), item.kind.clone(), item.detail.clone())
 }
 
+#[derive(Clone, PartialEq)]
+struct AiValidationContract {
+    requirements: Value,
+    frames: usize,
+    baseline: String,
+    setup: String,
+    tick: String,
+    render: String,
+}
+
 struct LiveAiTools {
     client: LiveSessionClient,
+    project_root: PathBuf,
     next_request_id: u64,
     last_write: Option<LiveResponse>,
+    validation_baseline_active: bool,
+    validation_was_paused: bool,
+    red_validation_contract: Option<AiValidationContract>,
+    write_needs_green_validation: bool,
+    reference_search_ready: bool,
 }
 
 impl LiveAiTools {
-    fn new(client: LiveSessionClient) -> Self {
+    fn new(client: LiveSessionClient, project_root: PathBuf) -> Self {
         Self {
             client,
+            project_root,
             next_request_id: AI_REQUEST_START,
             last_write: None,
+            validation_baseline_active: false,
+            validation_was_paused: false,
+            red_validation_contract: None,
+            write_needs_green_validation: false,
+            reference_search_ready: false,
         }
     }
 
@@ -1890,6 +1914,10 @@ impl LiveAiTools {
                 owner: string_arg(args, "owner"),
                 signature: string_arg(args, "signature"),
             },
+            "find_references" => LiveCommand::References {
+                symbol: string_arg(args, "symbol").unwrap_or_default(),
+                limit: usize_arg(args, "limit").unwrap_or(128).min(256),
+            },
             "inspect_runtime_state" => LiveCommand::InspectAll {
                 limit: 64,
                 concise: true,
@@ -1907,10 +1935,14 @@ impl LiveAiTools {
                     ),
                 };
             }
+            "validate_runtime_state" => return self.execute_validation(call, canceled),
             _ => return ToolObservation::error(&call.tool, "tool is not a read operation"),
         };
         match self.request(command, canceled) {
             Ok(response) if response.ok => {
+                if call.tool == "find_references" {
+                    self.reference_search_ready = true;
+                }
                 ToolObservation::result(&call.tool, response.data.unwrap_or(Value::Null))
             }
             Ok(response) => ToolObservation::error(&call.tool, format_live_response(&response)),
@@ -1918,11 +1950,349 @@ impl LiveAiTools {
         }
     }
 
+    fn execute_validation(&mut self, call: &ToolCall, canceled: &AtomicBool) -> ToolObservation {
+        let args = call.args.as_object().expect("validated tool args");
+        let expected_outcome = string_arg(args, "expected_outcome").unwrap_or_default();
+        if !matches!(expected_outcome.as_str(), "pass" | "fail") {
+            return ToolObservation::error(&call.tool, "expected_outcome must be 'pass' or 'fail'");
+        }
+        let Some(requirements) = args.get("requirements").and_then(Value::as_array) else {
+            return ToolObservation::error(&call.tool, "requirements must be an array");
+        };
+        if requirements.is_empty() || requirements.len() > 16 {
+            return ToolObservation::error(&call.tool, "requirements must contain 1..=16 checks");
+        }
+        let frames = usize_arg(args, "frames").unwrap_or(0);
+        if frames > 600 {
+            return ToolObservation::error(&call.tool, "frames exceeds the 600-frame limit");
+        }
+        let baseline = string_arg(args, "baseline").unwrap_or_else(|| "live".to_string());
+        if !matches!(baseline.as_str(), "live" | "fresh") {
+            return ToolObservation::error(&call.tool, "baseline must be 'live' or 'fresh'");
+        }
+        let setup = string_arg(args, "setup").unwrap_or_else(|| "main".to_string());
+        let tick = string_arg(args, "tick").unwrap_or_else(|| "tick".to_string());
+        let render = string_arg(args, "render").unwrap_or_else(|| "render".to_string());
+        let validation_contract = AiValidationContract {
+            requirements: Value::Array(requirements.clone()),
+            frames,
+            baseline: baseline.clone(),
+            setup,
+            tick,
+            render,
+        };
+        if expected_outcome == "pass"
+            && self.write_needs_green_validation
+            && self.red_validation_contract.as_ref() != Some(&validation_contract)
+        {
+            return ToolObservation::error(
+                &call.tool,
+                "green validation must use the same baseline, requirements, and frame count as the accepted red validation",
+            );
+        }
+        if baseline == "fresh" {
+            let result = self.execute_fresh_validation(&validation_contract, canceled);
+            return self.finish_validation_observation(
+                &call.tool,
+                expected_outcome,
+                validation_contract,
+                result,
+            );
+        }
+        if !self.validation_baseline_active {
+            self.validation_was_paused = match self.request(LiveCommand::Status, canceled) {
+                Ok(response) if response.ok => response
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("paused"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                Ok(response) => {
+                    return ToolObservation::error(&call.tool, format_live_response(&response))
+                }
+                Err(error) => return ToolObservation::error(&call.tool, error),
+            };
+        }
+        let mut validation_pause_acquired = false;
+        let result = (|| -> Result<Value, String> {
+            let response = self.request(LiveCommand::Pause, canceled)?;
+            if !response.ok {
+                return Err(format_live_response(&response));
+            }
+            validation_pause_acquired = true;
+            let baseline_command = if self.validation_baseline_active {
+                LiveCommand::ValidationRestore
+            } else {
+                LiveCommand::ValidationSnapshot
+            };
+            let response = self.request(baseline_command, canceled)?;
+            if !response.ok {
+                return Err(format_live_response(&response));
+            }
+            self.validation_baseline_active = true;
+            for _ in 0..frames {
+                let response = self.request(LiveCommand::Step { ticks: 1 }, canceled)?;
+                if !response.ok {
+                    return Err(format_live_response(&response));
+                }
+            }
+            let mut checks = Vec::new();
+            let mut requirements_met = true;
+            for requirement in requirements {
+                let object = requirement
+                    .as_object()
+                    .ok_or_else(|| "each requirement must be an object".to_string())?;
+                let path = string_arg(object, "path")
+                    .ok_or_else(|| "each requirement needs a path".to_string())?;
+                let operator = string_arg(object, "op").unwrap_or_else(|| "eq".to_string());
+                let expected = object
+                    .get("value")
+                    .cloned()
+                    .ok_or_else(|| format!("requirement for {path} needs a value"))?;
+                let response =
+                    self.request(LiveCommand::Inspect { path: path.clone() }, canceled)?;
+                if !response.ok {
+                    return Err(format_live_response(&response));
+                }
+                let actual = response
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("value"))
+                    .and_then(|value| value.get("value"))
+                    .cloned()
+                    .ok_or_else(|| format!("inspection for {path} returned no scalar value"))?;
+                let passed = compare_validation_values(&actual, &operator, &expected)?;
+                requirements_met &= passed;
+                checks.push(serde_json::json!({
+                    "path": path,
+                    "op": operator,
+                    "expected": expected,
+                    "actual": actual,
+                    "passed": passed,
+                }));
+            }
+            let expected_met = expected_outcome == "pass";
+            Ok(serde_json::json!({
+                "status": if requirements_met == expected_met { "accepted" } else { "unexpected" },
+                "expected_outcome": expected_outcome,
+                "requirements_met": requirements_met,
+                "validation_passed": requirements_met == expected_met,
+                "frames": frames,
+                "checks": checks,
+            }))
+        })();
+        let requirements_met = result
+            .as_ref()
+            .ok()
+            .and_then(|value| value.get("requirements_met"))
+            .and_then(Value::as_bool);
+        let should_finish = result.is_err()
+            || expected_outcome == "pass"
+            || (expected_outcome == "fail" && requirements_met == Some(true));
+        if should_finish {
+            if self.validation_baseline_active {
+                self.finish_validation();
+            } else if validation_pause_acquired && !self.validation_was_paused {
+                let _ = self.request(LiveCommand::Resume, &AtomicBool::new(false));
+            }
+        } else if self.validation_baseline_active {
+            let _ = self.request(LiveCommand::ValidationRestore, canceled);
+        }
+        self.finish_validation_observation(
+            &call.tool,
+            expected_outcome,
+            validation_contract,
+            result,
+        )
+    }
+
+    fn execute_fresh_validation(
+        &self,
+        contract: &AiValidationContract,
+        canceled: &AtomicBool,
+    ) -> Result<Value, String> {
+        let requirements = contract
+            .requirements
+            .as_array()
+            .expect("validated requirements array")
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<RuntimeValidationRequirement>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("invalid fresh validation requirement: {error}"))?;
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("failed locating stasis executable: {error}"))?;
+        let mut child = Command::new(executable)
+            .arg("--json")
+            .arg("--workspace")
+            .arg(&self.project_root)
+            .arg("__validate-runtime")
+            .arg("--frames")
+            .arg(contract.frames.to_string())
+            .arg("--requirements-json")
+            .arg(
+                serde_json::to_string(&requirements)
+                    .map_err(|error| format!("failed encoding validation requirements: {error}"))?,
+            )
+            .arg("--setup")
+            .arg(&contract.setup)
+            .arg("--tick")
+            .arg(&contract.tick)
+            .arg("--render")
+            .arg(&contract.render)
+            .current_dir(&self.project_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("failed starting fresh validation process: {error}"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "fresh validation stdout was unavailable".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "fresh validation stderr was unavailable".to_string())?;
+        let stdout_worker = thread::spawn(move || read_bounded_process_output(stdout));
+        let stderr_worker = thread::spawn(move || read_bounded_process_output(stderr));
+        let started = Instant::now();
+        let status = loop {
+            if canceled.load(Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_worker.join();
+                let _ = stderr_worker.join();
+                return Err("AI request canceled".to_string());
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("fresh validation process failed: {error}"))?
+            {
+                break status;
+            }
+            if started.elapsed() >= Duration::from_secs(60) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_worker.join();
+                let _ = stderr_worker.join();
+                return Err("fresh validation exceeded 60 seconds".to_string());
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let stdout = stdout_worker
+            .join()
+            .map_err(|_| "fresh validation stdout reader panicked".to_string())??;
+        let stderr = stderr_worker
+            .join()
+            .map_err(|_| "fresh validation stderr reader panicked".to_string())??;
+        if !status.success() {
+            return Err(format!(
+                "fresh validation failed: {}",
+                stderr.lines().last().unwrap_or("child process failed")
+            ));
+        }
+        if !stderr.trim().is_empty() {
+            return Err(format!(
+                "fresh validation reported diagnostics: {}",
+                stderr.lines().last().unwrap_or("unknown diagnostic")
+            ));
+        }
+        let envelope = stdout
+            .lines()
+            .rev()
+            .find_map(|line| serde_json::from_str::<Value>(line).ok())
+            .ok_or_else(|| "fresh validation returned no JSON result".to_string())?;
+        envelope
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "fresh validation JSON omitted result".to_string())
+    }
+
+    fn finish_validation_observation(
+        &mut self,
+        tool: &str,
+        expected_outcome: String,
+        validation_contract: AiValidationContract,
+        result: Result<Value, String>,
+    ) -> ToolObservation {
+        match result {
+            Ok(mut result) => {
+                let requirements_met = result
+                    .get("requirements_met")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let validation_passed = requirements_met == (expected_outcome == "pass");
+                let object = result.as_object_mut().expect("validation result object");
+                object.insert(
+                    "expected_outcome".into(),
+                    Value::String(expected_outcome.clone()),
+                );
+                object.insert("validation_passed".into(), Value::Bool(validation_passed));
+                object.insert(
+                    "status".into(),
+                    Value::String(
+                        if validation_passed {
+                            "accepted"
+                        } else {
+                            "unexpected"
+                        }
+                        .into(),
+                    ),
+                );
+                if validation_passed && expected_outcome == "fail" {
+                    self.red_validation_contract = Some(validation_contract);
+                }
+                if validation_passed && expected_outcome == "pass" && self.last_write.is_some() {
+                    self.write_needs_green_validation = false;
+                    self.red_validation_contract = None;
+                }
+                ToolObservation::result(tool, result)
+            }
+            Err(error) => ToolObservation::error(tool, error),
+        }
+    }
+
+    fn finish_validation(&mut self) {
+        if !self.validation_baseline_active {
+            return;
+        }
+        let cleanup_canceled = AtomicBool::new(false);
+        let _ = self.request(LiveCommand::ValidationRestore, &cleanup_canceled);
+        let _ = self.request(LiveCommand::ValidationClear, &cleanup_canceled);
+        if !self.validation_was_paused {
+            let _ = self.request(LiveCommand::Resume, &cleanup_canceled);
+        }
+        self.validation_baseline_active = false;
+    }
+
     fn execute_writes(
         &mut self,
         calls: &[&ToolCall],
         canceled: &AtomicBool,
     ) -> Vec<ToolObservation> {
+        if self.red_validation_contract.is_none() {
+            return calls
+                .iter()
+                .map(|call| {
+                    ToolObservation::error(
+                        &call.tool,
+                        "run validate_runtime_state with expected_outcome=fail before a live AI write",
+                    )
+                })
+                .collect();
+        }
+        if !self.reference_search_ready {
+            return calls
+                .iter()
+                .map(|call| {
+                    ToolObservation::error(
+                        &call.tool,
+                        "run find_references for a behavior-bearing symbol before a live AI write",
+                    )
+                })
+                .collect();
+        }
         let edits = calls
             .iter()
             .map(|call| {
@@ -1960,6 +2330,8 @@ impl LiveAiTools {
                 let applied = response.ok && response.kind == "edit_applied";
                 if applied {
                     self.last_write = Some(response.clone());
+                    self.write_needs_green_validation = true;
+                    self.reference_search_ready = false;
                 }
                 calls
                     .iter()
@@ -1992,6 +2364,14 @@ impl LiveAiTools {
     }
 }
 
+impl Drop for LiveAiTools {
+    fn drop(&mut self) {
+        if self.validation_baseline_active {
+            self.finish_validation();
+        }
+    }
+}
+
 impl ToolExecutor for LiveAiTools {
     fn execute(&mut self, calls: &[ToolCall], canceled: &AtomicBool) -> Vec<ToolObservation> {
         let writes = calls
@@ -2003,7 +2383,7 @@ impl ToolExecutor for LiveAiTools {
             .filter(|call| {
                 !matches!(
                     call.tool.as_str(),
-                    "write_symbol" | "delete_symbol" | "run_tests"
+                    "write_symbol" | "delete_symbol" | "run_tests" | "validate_runtime_state"
                 )
             })
             .map(|call| self.execute_read(call, canceled))
@@ -2014,10 +2394,18 @@ impl ToolExecutor for LiveAiTools {
         observations.extend(
             calls
                 .iter()
-                .filter(|call| call.tool == "run_tests")
+                .filter(|call| matches!(call.tool.as_str(), "run_tests" | "validate_runtime_state"))
                 .map(|call| self.execute_read(call, canceled)),
         );
         observations
+    }
+
+    fn validate_completion(&self) -> Result<(), String> {
+        if self.write_needs_green_validation {
+            Err("the applied live edit still requires validate_runtime_state with expected_outcome=pass".to_string())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -2026,6 +2414,59 @@ fn string_arg(args: &serde_json::Map<String, Value>, name: &str) -> Option<Strin
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|value| !value.trim().is_empty())
+}
+
+fn usize_arg(args: &serde_json::Map<String, Value>, name: &str) -> Option<usize> {
+    args.get(name)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+}
+
+pub(super) fn compare_validation_values(
+    actual: &Value,
+    operator: &str,
+    expected: &Value,
+) -> Result<bool, String> {
+    if matches!(operator, "eq" | "ne") {
+        let equal = actual == expected
+            || actual
+                .as_f64()
+                .zip(expected.as_f64())
+                .is_some_and(|(actual, expected)| actual == expected);
+        return Ok(if operator == "eq" { equal } else { !equal });
+    }
+    let actual = actual
+        .as_f64()
+        .ok_or_else(|| format!("operator '{operator}' requires a numeric actual value"))?;
+    let expected = expected
+        .as_f64()
+        .ok_or_else(|| format!("operator '{operator}' requires a numeric expected value"))?;
+    match operator {
+        "lt" => Ok(actual < expected),
+        "lte" => Ok(actual <= expected),
+        "gt" => Ok(actual > expected),
+        "gte" => Ok(actual >= expected),
+        _ => Err(format!(
+            "unsupported validation operator '{operator}'; use eq, ne, lt, lte, gt, or gte"
+        )),
+    }
+}
+
+fn read_bounded_process_output(mut reader: impl Read) -> Result<String, String> {
+    const CAPTURE_LIMIT: usize = 65_536;
+    let mut captured = Vec::with_capacity(CAPTURE_LIMIT);
+    let mut buffer = [0u8; 8_192];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("failed reading validation process output: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        let remaining = CAPTURE_LIMIT.saturating_sub(captured.len());
+        captured.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    Ok(String::from_utf8_lossy(&captured).into_owned())
 }
 
 fn audit_tool_call(call: &ToolCall) -> Value {
@@ -2588,6 +3029,146 @@ fn write_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn runtime_validation_comparisons_cover_scalar_requirements() {
+        assert!(compare_validation_values(&json!(144), "eq", &json!(144)).expect("eq"));
+        assert!(compare_validation_values(&json!(72), "ne", &json!(144)).expect("ne"));
+        assert!(compare_validation_values(&json!(2.5), "lt", &json!(15)).expect("lt"));
+        assert!(compare_validation_values(&json!(true), "eq", &json!(true)).expect("bool"));
+        assert!(compare_validation_values(&json!(7), "gte", &json!(7)).expect("gte"));
+        assert!(compare_validation_values(&json!(9), "gt", &json!(7)).expect("gt"));
+        assert!(compare_validation_values(&json!(7), "lte", &json!(7)).expect("lte"));
+    }
+
+    #[test]
+    fn runtime_validation_runs_bounded_red_green_requirements() {
+        let (client, server) = stasis_runner::live::live_session(8);
+        let worker = thread::spawn(move || {
+            let mut handled = 0;
+            let mut inspections = 0;
+            while handled < 11 {
+                for request in server.drain(8) {
+                    let (kind, data) = match request.command {
+                        LiveCommand::Status => ("status", json!({"paused": false})),
+                        LiveCommand::Pause => ("paused", json!({"paused": true})),
+                        LiveCommand::ValidationSnapshot => {
+                            ("validation_snapshot", json!({"captured": true}))
+                        }
+                        LiveCommand::ValidationRestore => {
+                            ("validation_restored", json!({"restored": true}))
+                        }
+                        LiveCommand::ValidationClear => {
+                            ("validation_cleared", json!({"cleared": true}))
+                        }
+                        LiveCommand::Inspect { path } => {
+                            inspections += 1;
+                            let value = if inspections == 1 { 72 } else { 144 };
+                            (
+                                "inspection",
+                                json!({"path": path, "value": {"type": "i32", "value": value}}),
+                            )
+                        }
+                        LiveCommand::Resume => ("resumed", json!({"paused": false})),
+                        command => panic!("unexpected validation command: {command:?}"),
+                    };
+                    server
+                        .respond(LiveResponse::success(request.request_id, 0, kind, data))
+                        .expect("respond");
+                    handled += 1;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let mut tools = LiveAiTools::new(client, PathBuf::from("."));
+        let red = tools.execute(
+            &[ToolCall {
+                tool: "validate_runtime_state".into(),
+                args: json!({
+                    "expected_outcome": "fail",
+                    "requirements": [{"path": "Render.command1_h", "op": "eq", "value": 144}]
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+        let green = tools.execute(
+            &[ToolCall {
+                tool: "validate_runtime_state".into(),
+                args: json!({
+                    "expected_outcome": "pass",
+                    "requirements": [{"path": "Render.command1_h", "op": "eq", "value": 144}]
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        worker.join().expect("validation server");
+        assert_eq!(red.len(), 1);
+        assert_eq!(
+            red[0].result.as_ref().expect("red")["validation_passed"],
+            true
+        );
+        assert!(tools.red_validation_contract.is_some());
+        assert_eq!(
+            green[0].result.as_ref().expect("green")["validation_passed"],
+            true
+        );
+    }
+
+    #[test]
+    fn live_ai_write_is_rejected_until_red_validation_exists() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client, PathBuf::from("."));
+
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "write_symbol".into(),
+                args: json!({
+                    "file": "src/main.stasis",
+                    "name": "tick",
+                    "new_source": "function tick(): void { return; }"
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("expected_outcome=fail")));
+    }
+
+    #[test]
+    fn live_ai_write_is_rejected_until_references_were_checked() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client, PathBuf::from("."));
+        tools.red_validation_contract = Some(AiValidationContract {
+            requirements: json!([{"path": "State.value", "op": "eq", "value": 2}]),
+            frames: 0,
+            baseline: "live".into(),
+            setup: "main".into(),
+            tick: "tick".into(),
+            render: "render".into(),
+        });
+
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "write_symbol".into(),
+                args: json!({
+                    "file": "src/main.stasis",
+                    "name": "tick",
+                    "new_source": "function tick(): void { return; }"
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("find_references")));
+    }
 
     #[test]
     fn ai_audit_redacts_source_bodies_but_keeps_action_identity() {

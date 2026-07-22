@@ -73,6 +73,44 @@ fn project_commands_emit_stable_json_from_nested_directories() {
 }
 
 #[test]
+fn fresh_runtime_validation_runs_in_a_separate_cli_process() {
+    let parent = temp_dir("fresh_validation");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    fs::write(
+        project.join("src/main.stasis"),
+        "global State { value: i32; rendered: i32; }\nfunction main(): i32 { State.value = 1; return 0; }\nfunction tick(): i32 { State.value += 1; return 0; }\nfunction render(): i32 { State.rendered = 1; return 0; }\n",
+    )
+    .expect("write validation game");
+    let requirements = r#"[{"path":"State.value","op":"eq","value":3},{"path":"State.rendered","op":"eq","value":1}]"#;
+
+    let output = stasis(
+        &[
+            "--json",
+            "__validate-runtime",
+            "--frames",
+            "2",
+            "--requirements-json",
+            requirements,
+        ],
+        &project,
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let result = json_stdout(&output);
+    assert_eq!(result["command"], "__validate-runtime");
+    assert_eq!(result["result"]["baseline"], "fresh");
+    assert_eq!(result["result"]["requirements_met"], true);
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
 fn usage_compile_test_and_guest_exit_codes_are_stable() {
     let parent = temp_dir("failures");
     fs::create_dir_all(&parent).expect("create temp parent");
