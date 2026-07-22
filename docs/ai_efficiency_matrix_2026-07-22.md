@@ -48,6 +48,15 @@ inventory preserved 4/4 acceptance while reducing agent time by 57.0 seconds, ac
 34, input tokens by 29.2%, and estimated weighted cost by 18.4%. The trace also eliminated an
 invalid `--kind global` attempt by documenting the exact `globals` spelling.
 
+## Fair-contract rerun
+
+The revised prompt explicitly states every hidden acceptance behavior, including inclusive paddle
+contact and strict full-exit scoring. With that contract, the retained generalist workflow passed
+4/4 on medium in 293.1 seconds using 47 actions, 1,097,919 input tokens, and an estimated $1.292.
+A single refinement that discouraged repeated validation and generated-output inspection also
+passed 4/4, but regressed to 329.7 seconds, 48 actions, and an estimated $1.298, so the instruction
+was not retained.
+
 ## Next provider target
 
 Built-in Stasis AI remains faster and consumes far fewer raw input tokens, but its medium result
