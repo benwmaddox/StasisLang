@@ -846,7 +846,10 @@ fn run_workspace_live(
     let entry = workspace.root.join(&workspace.manifest.entry);
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
     let script = script.map(|path| workspace.root.join(path));
-    let terminal = thread::spawn(move || run_live_terminal(client, script.as_deref(), json_lines));
+    let terminal_root = workspace.root.clone();
+    let terminal = thread::spawn(move || {
+        run_live_terminal(client, script.as_deref(), json_lines, &terminal_root)
+    });
     let config = LiveRunConfig::new(
         workspace.root.clone(),
         PathBuf::from(&workspace.manifest.entry),
@@ -875,8 +878,9 @@ fn run_live_terminal(
     client: stasis_runner::live::LiveSessionClient,
     script: Option<&Path>,
     json_lines: bool,
+    project_root: &Path,
 ) -> Result<(), String> {
-    let result = run_live_terminal_inner(&client, script, json_lines);
+    let result = run_live_terminal_inner(&client, script, json_lines, project_root);
     if result.is_err() {
         let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
     }
@@ -887,6 +891,7 @@ fn run_live_terminal_inner(
     client: &stasis_runner::live::LiveSessionClient,
     script: Option<&Path>,
     json_lines: bool,
+    project_root: &Path,
 ) -> Result<(), String> {
     let mut terminal = TerminalBuffer::new();
     let mut saw_quit = false;
@@ -912,7 +917,7 @@ fn run_live_terminal_inner(
             );
         }
     } else {
-        saw_quit = live_tui::run(client)?;
+        saw_quit = live_tui::run(client, project_root)?;
     }
     if !saw_quit {
         submit_and_print_live_response(

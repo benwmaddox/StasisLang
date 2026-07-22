@@ -20,6 +20,29 @@ Status: the first desktop feel slice is implemented. Run `stasis run --interacti
 project to open it. The deterministic `--live-script` and `--live-json` clients remain available
 without the TUI.
 
+### Subscription-backed AI
+
+`:ai PROMPT` runs a bounded coding turn through the locally installed `codex` executable and its
+existing ChatGPT/Codex subscription sign-in. Stasis does not request, store, or infer an API key.
+On Windows, the provider prefers the current npm-installed native Codex binary over older desktop
+shims on `PATH`. It defaults to `gpt-5.6-sol` with medium reasoning. Set `STASIS_CODEX_EXE`,
+`STASIS_AI_MODEL`, or `STASIS_AI_REASONING_EFFORT` to override those selections. `:ai status`,
+`:ai cancel`, and Ctrl+C expose status and cancellation without stopping the live runtime.
+
+Each model turn runs ephemerally in an empty read-only temporary directory. The project is not
+mounted into that directory. Codex receives only the user request, bounded Stasis tool catalog,
+and bounded observations returned by the live workspace. Symbol reads, runtime inspection, and
+deterministic ticks pass through `stasis_runner::live`; model write batches become one
+`WorkshopSemanticEditBatch`, compile and test on the normal preparation worker, and commit at a
+between-tick boundary. A layout-changing edit remains a validated preview and requires explicit
+user `:apply` approval.
+
+Every run creates `build/ai-traces/tui-ai-<timestamp>.jsonl`. The trace records the user request,
+turns, user-visible working notes, tool calls, and bounded observation/outcome summaries. It never
+stores the complete provider payload. Source-bearing fields and before/after source snapshots are
+replaced by their byte count and SHA-256 digest before writing; long strings and arrays are also
+bounded.
+
 The current key map is:
 
 ```text

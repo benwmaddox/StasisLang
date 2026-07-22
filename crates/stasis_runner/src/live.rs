@@ -120,6 +120,13 @@ pub enum LiveCommand {
         #[serde(default = "default_true")]
         run_tests: bool,
     },
+    EditBatch {
+        edits: Vec<LiveEdit>,
+        #[serde(default)]
+        preview: bool,
+        #[serde(default = "default_true")]
+        run_tests: bool,
+    },
     Preview,
     Apply {
         #[serde(default = "default_true")]
@@ -214,6 +221,16 @@ pub enum LiveEditOperation {
     Add,
     Update,
     Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveEdit {
+    pub operation: LiveEditOperation,
+    pub target: LiveSymbolTarget,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub expected_source_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1245,6 +1262,37 @@ fn split_terminal_args(line: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_batch_has_a_stable_json_contract() {
+        let request = LiveRequest::new(
+            7,
+            LiveCommand::EditBatch {
+                edits: vec![LiveEdit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "tick".into(),
+                        kind: Some("function".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("function tick(): void {}".into()),
+                    expected_source_hash: Some("before".into()),
+                }],
+                preview: false,
+                run_tests: true,
+            },
+        );
+        let json = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(json["type"], "edit_batch");
+        assert_eq!(json["edits"][0]["operation"], "update");
+        assert_eq!(json["edits"][0]["target"]["name"], "tick");
+        assert_eq!(
+            serde_json::from_value::<LiveRequest>(json).expect("round trip"),
+            request
+        );
+    }
 
     #[test]
     fn bounded_queue_reports_backpressure_without_blocking() {

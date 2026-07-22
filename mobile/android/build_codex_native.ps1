@@ -14,6 +14,7 @@ $buildRoot = Join-Path $repoRoot "build\android_codex_native"
 $upstreamRoot = Join-Path $buildRoot "codex"
 $codexRustRoot = Join-Path $upstreamRoot "codex-rs"
 $wrapperRoot = Join-Path $codexRustRoot "stasis-codex-android"
+$sharedAiRoot = Join-Path $codexRustRoot "stasis-ai"
 $patchPath = Join-Path $scriptRoot "patches\codex-android-rustls.patch"
 
 if (-not $AndroidHome) {
@@ -60,6 +61,21 @@ if ($LASTEXITCODE -eq 0) {
 New-Item -ItemType Directory -Force (Join-Path $wrapperRoot "src") | Out-Null
 Copy-Item -Force (Join-Path $scriptRoot "codex_native\Cargo.toml") (Join-Path $wrapperRoot "Cargo.toml")
 Copy-Item -Force (Join-Path $scriptRoot "codex_native\src\lib.rs") (Join-Path $wrapperRoot "src\lib.rs")
+New-Item -ItemType Directory -Force (Join-Path $sharedAiRoot "src") | Out-Null
+Copy-Item -Force (Join-Path $repoRoot "crates\stasis_ai\Cargo.toml") (Join-Path $sharedAiRoot "Cargo.toml")
+Copy-Item -Force (Join-Path $repoRoot "crates\stasis_ai\src\lib.rs") (Join-Path $sharedAiRoot "src\lib.rs")
+$sharedManifest = Join-Path $sharedAiRoot "Cargo.toml"
+$sharedCargo = Get-Content -Raw $sharedManifest
+$sharedCargo = $sharedCargo.Replace('version.workspace = true', 'version = "0.1.0"')
+$sharedCargo = $sharedCargo.Replace('edition.workspace = true', 'edition = "2021"')
+$sharedCargo = $sharedCargo.Replace('license.workspace = true', 'license = "MIT"')
+$sharedCargo = $sharedCargo.Replace('serde.workspace = true', 'serde = { version = "1", features = ["derive"] }')
+$sharedCargo = $sharedCargo.Replace('serde_json.workspace = true', 'serde_json = "1"')
+Set-Content -NoNewline -Path $sharedManifest -Value $sharedCargo
+$wrapperManifest = Join-Path $wrapperRoot "Cargo.toml"
+$wrapperCargo = Get-Content -Raw $wrapperManifest
+$wrapperCargo = $wrapperCargo.Replace('../../../crates/stasis_ai', '../stasis-ai')
+Set-Content -NoNewline -Path $wrapperManifest -Value $wrapperCargo
 
 $installedTargets = & rustup target list --installed --toolchain 1.95.0
 if ($installedTargets -notcontains "aarch64-linux-android") {

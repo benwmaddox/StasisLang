@@ -369,6 +369,7 @@ public final class MainActivity extends Activity {
     private static native void nativeCodexCancelResponse();
     private static native String nativeCodexResponse(String codexHome, String requestJson,
                                                      long generation);
+    private static native String nativeSharedAiContract();
     private static native int nativeCodexInitialize(Object applicationContext);
 
     @Override
@@ -5450,6 +5451,8 @@ public final class MainActivity extends Activity {
             request.put("response_contract", aiResponseContract());
             request.put("available_tools", supportedAiTools());
             request.put("tool_specs", aiToolSpecs());
+            JSONObject sharedContract = sharedAiContract();
+            if (sharedContract != null) request.put("shared_rust_ai_contract", sharedContract);
             request.put("stasis_style_rules", rules);
             request.put("game_design_rules", gameRules);
             request.put("architecture_recommendations", architectureRecommendations);
@@ -6396,6 +6399,17 @@ public final class MainActivity extends Activity {
     }
 
     private static JSONArray supportedAiTools() {
+        JSONObject shared = sharedAiContract();
+        JSONArray sharedSpecs = shared == null ? null : shared.optJSONArray("tool_specs");
+        if (sharedSpecs != null && sharedSpecs.length() > 0) {
+            JSONArray tools = new JSONArray();
+            for (int index = 0; index < sharedSpecs.length(); index += 1) {
+                JSONObject spec = sharedSpecs.optJSONObject(index);
+                String tool = spec == null ? "" : spec.optString("tool", "");
+                if (!tool.isEmpty()) tools.put(tool);
+            }
+            if (tools.length() > 0) return tools;
+        }
         return new JSONArray()
                 .put("list_symbols")
                 .put("list_owner_symbols")
@@ -6414,6 +6428,15 @@ public final class MainActivity extends Activity {
                 .put("write_test_file")
                 .put("delete_test_file")
                 .put("run_tests");
+    }
+
+    private static JSONObject sharedAiContract() {
+        try {
+            JSONObject contract = new JSONObject(nativeSharedAiContract());
+            return contract.optInt("schema_version", 0) == 1 ? contract : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static JSONArray aiToolSpecs() throws Exception {

@@ -1036,11 +1036,20 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "stasis_ai",
  "stasis_assets",
  "stasis_compiler",
  "stasis_dynload",
  "stasis_jit",
  "stasis_runner",
+]
+
+[[package]]
+name = "stasis_ai"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

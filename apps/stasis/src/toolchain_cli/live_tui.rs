@@ -9,26 +9,103 @@ use crossterm::terminal::{
     EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use stasis_ai::{
+    live_tool_specs, run_agent, AgentEvent, CodexExecProvider, ToolCall, ToolExecutor,
+    ToolObservation, DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT,
+};
 use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopSourceItem, WorkshopSourceItemKind,
 };
 use stasis_runner::live::{
-    CompletionContext, CompletionItem, CompletionQuery, LiveCommand, LiveEditOperation,
+    CompletionContext, CompletionItem, CompletionQuery, LiveCommand, LiveEdit, LiveEditOperation,
     LiveRequest, LiveResponse, LiveSessionClient, LiveSymbolTarget, TerminalBuffer, TerminalInput,
 };
 use std::collections::{BTreeMap, VecDeque};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_TRANSCRIPT_LINES: usize = 500;
 const MAX_UNDO_STATES: usize = 100;
 const COMPLETION_LIMIT: usize = 64;
 const TUI_REQUEST_START: u64 = 1u64 << 61;
+const AI_REQUEST_START: u64 = 1u64 << 62;
 
-pub(super) fn run(client: &LiveSessionClient) -> Result<bool, String> {
+enum AiUiEvent {
+    Progress(AgentEvent),
+    Finished(Result<String, String>),
+}
+
+struct AiRun {
+    canceled: Arc<AtomicBool>,
+    events: mpsc::Receiver<AiUiEvent>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+struct AiAuditLog {
+    path: PathBuf,
+    file: fs::File,
+}
+
+impl AiAuditLog {
+    fn create(project_root: &Path, prompt: &str) -> Result<Self, String> {
+        let directory = project_root.join("build/ai-traces");
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("failed creating AI trace directory: {error}"))?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let path = directory.join(format!("tui-ai-{stamp}.jsonl"));
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| format!("failed creating AI trace: {error}"))?;
+        let mut log = Self { path, file };
+        log.write(serde_json::json!({
+            "event": "request",
+            "provider": "installed_codex_subscription",
+            "model": std::env::var("STASIS_AI_MODEL")
+                .unwrap_or_else(|_| DEFAULT_CODEX_MODEL.to_string()),
+            "reasoning_effort": std::env::var("STASIS_AI_REASONING_EFFORT")
+                .unwrap_or_else(|_| DEFAULT_REASONING_EFFORT.to_string()),
+            "prompt": prompt,
+            "payload_logging": "bounded meaningful fields; source bodies hashed",
+        }))?;
+        Ok(log)
+    }
+
+    fn write(&mut self, value: Value) -> Result<(), String> {
+        serde_json::to_writer(&mut self.file, &value)
+            .map_err(|error| format!("failed encoding AI trace: {error}"))?;
+        self.file
+            .write_all(b"\n")
+            .map_err(|error| format!("failed writing AI trace: {error}"))?;
+        self.file
+            .flush()
+            .map_err(|error| format!("failed flushing AI trace: {error}"))
+    }
+}
+
+impl Drop for AiRun {
+    fn drop(&mut self) {
+        self.canceled.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+pub(super) fn run(client: &LiveSessionClient, project_root: &Path) -> Result<bool, String> {
     let _guard = TerminalGuard::enter()?;
-    let mut app = LiveTui::new(client.clone());
+    let mut app = LiveTui::new(client.clone(), project_root.to_path_buf());
     app.request_default_inspection()?;
     app.refresh_completion(false);
     loop {
@@ -416,6 +493,7 @@ impl Default for InspectorState {
 
 struct LiveTui {
     client: LiveSessionClient,
+    project_root: PathBuf,
     terminal: TerminalBuffer,
     input: InputMode,
     command_bar: Option<EditBuffer>,
@@ -434,6 +512,9 @@ struct LiveTui {
     inspector_watch_target: Option<String>,
     last_default_inspection: Instant,
     status: String,
+    queued_ai_prompt: Option<String>,
+    ai_run: Option<AiRun>,
+    ai_audit: Option<AiAuditLog>,
     prompt: &'static str,
     quit: bool,
     last_regions: [Vec<u8>; 5],
@@ -441,9 +522,10 @@ struct LiveTui {
 }
 
 impl LiveTui {
-    fn new(client: LiveSessionClient) -> Self {
+    fn new(client: LiveSessionClient, project_root: PathBuf) -> Self {
         Self {
             client,
+            project_root,
             terminal: TerminalBuffer::new(),
             input: InputMode::Prompt(EditBuffer::default()),
             command_bar: None,
@@ -466,6 +548,9 @@ impl LiveTui {
             inspector_watch_target: None,
             last_default_inspection: Instant::now() - Duration::from_secs(1),
             status: "running".to_string(),
+            queued_ai_prompt: None,
+            ai_run: None,
+            ai_audit: None,
             prompt: "stasis> ",
             quit: false,
             last_regions: std::array::from_fn(|_| Vec::new()),
@@ -517,6 +602,9 @@ impl LiveTui {
     }
 
     fn refresh_completion(&mut self, arm: bool) {
+        if self.queued_ai_prompt.is_some() || self.ai_run.is_some() {
+            return;
+        }
         let buffer = self.active_buffer().text.clone();
         let cursor = self.active_buffer().cursor;
         let selected_key = self
@@ -544,6 +632,9 @@ impl LiveTui {
     }
 
     fn dispatch_completion(&mut self) {
+        if self.queued_ai_prompt.is_some() || self.ai_run.is_some() {
+            return;
+        }
         if self.completion_in_flight.is_some() {
             return;
         }
@@ -577,6 +668,15 @@ impl LiveTui {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
         if control && key.code == KeyCode::Char('c') {
+            if let Some(run) = &self.ai_run {
+                run.canceled.store(true, Ordering::Release);
+                self.status = "canceling AI request...".to_string();
+                return Ok(());
+            }
+            if self.queued_ai_prompt.take().is_some() {
+                self.status = "queued AI request canceled".to_string();
+                return Ok(());
+            }
             self.cancel_input();
             return Ok(());
         }
@@ -694,7 +794,9 @@ impl LiveTui {
                 let line = std::mem::take(&mut self.input.buffer_mut().text);
                 self.input.buffer_mut().cursor = 0;
                 self.submit_line(line)?;
-                self.refresh_completion(false);
+                if self.queued_ai_prompt.is_none() && self.ai_run.is_none() {
+                    self.refresh_completion(false);
+                }
             }
         }
         Ok(())
@@ -708,6 +810,9 @@ impl LiveTui {
         self.push_transcript(format!("{}{}", self.prompt, line));
         self.history.push(line.clone());
         self.history_cursor = self.history.len();
+        if line.trim_start().starts_with(":ai") {
+            return self.handle_ai_command(&line);
+        }
         if line.trim() == ":inspect" {
             self.replace_inspector_watch(None);
             self.inspector.pinned = false;
@@ -906,13 +1011,205 @@ impl LiveTui {
     }
 
     fn drain_responses(&mut self) -> Result<(), String> {
+        self.drain_ai_events();
+        if self.ai_run.is_some() {
+            return Ok(());
+        }
         while let Some(response) = self.client.try_receive()? {
             self.handle_response(response);
         }
+        self.maybe_start_queued_ai();
         Ok(())
     }
 
+    fn handle_ai_command(&mut self, line: &str) -> Result<(), String> {
+        let argument = line
+            .trim_start()
+            .strip_prefix(":ai")
+            .unwrap_or_default()
+            .trim();
+        if argument.eq_ignore_ascii_case("cancel") {
+            if let Some(run) = &self.ai_run {
+                run.canceled.store(true, Ordering::Release);
+                self.status = "canceling AI request...".to_string();
+            } else if self.queued_ai_prompt.take().is_some() {
+                self.status = "queued AI request canceled".to_string();
+            } else {
+                self.status = "no AI request is active".to_string();
+            }
+            return Ok(());
+        }
+        if argument.eq_ignore_ascii_case("status") {
+            self.push_transcript(if self.ai_run.is_some() {
+                "AI: running through the installed Codex subscription".to_string()
+            } else if self.queued_ai_prompt.is_some() {
+                "AI: waiting for outstanding live responses".to_string()
+            } else {
+                "AI: idle; use :ai PROMPT".to_string()
+            });
+            return Ok(());
+        }
+        if argument.is_empty() {
+            self.push_transcript("error: use :ai PROMPT, :ai status, or :ai cancel".to_string());
+            return Ok(());
+        }
+        if self.ai_run.is_some() || self.queued_ai_prompt.is_some() {
+            self.push_transcript("error: one AI request is already active".to_string());
+            return Ok(());
+        }
+        self.completion.armed = false;
+        self.queued_completion = None;
+        self.queued_ai_prompt = Some(argument.to_string());
+        self.status = "AI request queued; draining live UI responses...".to_string();
+        self.maybe_start_queued_ai();
+        Ok(())
+    }
+
+    fn maybe_start_queued_ai(&mut self) {
+        if self.ai_run.is_some() || !self.pending.is_empty() {
+            return;
+        }
+        let Some(prompt) = self.queued_ai_prompt.take() else {
+            return;
+        };
+        match AiAuditLog::create(&self.project_root, &prompt) {
+            Ok(log) => {
+                self.push_transcript(format!("AI trace: {}", log.path.display()));
+                self.ai_audit = Some(log);
+            }
+            Err(error) => {
+                self.status = format!("AI trace unavailable: {error}");
+                self.push_transcript(format!("error: {error}"));
+                return;
+            }
+        }
+        let client = self.client.clone();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_canceled = canceled.clone();
+        let (events_tx, events_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut provider = CodexExecProvider::default();
+            let mut tools = LiveAiTools::new(client);
+            let progress = events_tx.clone();
+            let result = run_agent(
+                &mut provider,
+                &mut tools,
+                &prompt,
+                serde_json::json!({
+                    "language": "Stasis",
+                    "runtime": "live in-process JIT",
+                    "commit_boundary": "between deterministic ticks",
+                    "write_policy": "all writes in one model batch compile, test, and commit atomically",
+                }),
+                live_tool_specs(),
+                &worker_canceled,
+                move |event| {
+                    let _ = progress.send(AiUiEvent::Progress(event));
+                },
+            );
+            let _ = events_tx.send(AiUiEvent::Finished(result));
+        });
+        self.ai_run = Some(AiRun {
+            canceled,
+            events: events_rx,
+            worker: Some(worker),
+        });
+        self.status = "AI: starting installed Codex... Ctrl+C cancels".to_string();
+        self.inspector.title = "AI working notes".to_string();
+        self.inspector.lines = vec!["Starting a subscription-backed Codex turn...".to_string()];
+        self.inspector.pinned = true;
+    }
+
+    fn drain_ai_events(&mut self) {
+        let mut events = Vec::new();
+        if let Some(run) = &self.ai_run {
+            while let Ok(event) = run.events.try_recv() {
+                events.push(event);
+            }
+        }
+        let mut finished = None;
+        for event in events {
+            match event {
+                AiUiEvent::Progress(AgentEvent::Turn { current, maximum }) => {
+                    self.status = format!("AI turn {current}/{maximum}; Ctrl+C cancels");
+                    self.audit(serde_json::json!({"event": "turn", "current": current, "maximum": maximum}));
+                }
+                AiUiEvent::Progress(AgentEvent::WorkingNotes(notes)) => {
+                    self.inspector.title = "AI working notes".to_string();
+                    self.inspector.lines = notes.lines().map(str::to_string).collect();
+                    if self.inspector.lines.is_empty() {
+                        self.inspector
+                            .lines
+                            .push("AI supplied no displayable notes".to_string());
+                    }
+                    self.audit(serde_json::json!({"event": "working_notes", "text": notes}));
+                }
+                AiUiEvent::Progress(AgentEvent::ToolBatch(calls)) => {
+                    let tools = calls
+                        .iter()
+                        .map(|call| call.tool.as_str())
+                        .collect::<Vec<_>>();
+                    self.status = format!("AI tools: {}", tools.join(", "));
+                    self.push_transcript(format!("AI tools: {}", tools.join(", ")));
+                    self.audit(serde_json::json!({
+                        "event": "tool_calls",
+                        "calls": calls.iter().map(audit_tool_call).collect::<Vec<_>>(),
+                    }));
+                }
+                AiUiEvent::Progress(AgentEvent::Observations(observations)) => {
+                    self.audit(serde_json::json!({
+                        "event": "tool_observations",
+                        "observations": observations.iter().map(audit_observation).collect::<Vec<_>>(),
+                    }));
+                }
+                AiUiEvent::Progress(AgentEvent::Completed(summary)) => {
+                    self.push_transcript(format!("AI: {summary}"));
+                    self.audit(serde_json::json!({"event": "model_completed", "summary": summary}));
+                }
+                AiUiEvent::Finished(result) => finished = Some(result),
+            }
+        }
+        if let Some(result) = finished {
+            let mut run = self.ai_run.take().expect("finished AI run exists");
+            if let Some(worker) = run.worker.take() {
+                let _ = worker.join();
+            }
+            match result {
+                Ok(summary) => {
+                    self.status = "AI request completed and verified".to_string();
+                    self.push_transcript(format!("AI complete: {summary}"));
+                    self.audit(
+                        serde_json::json!({"event": "finished", "ok": true, "summary": summary}),
+                    );
+                }
+                Err(error) => {
+                    self.status = "AI request failed".to_string();
+                    self.push_transcript(format!("AI error: {error}"));
+                    self.audit(
+                        serde_json::json!({"event": "finished", "ok": false, "error": error}),
+                    );
+                }
+            }
+            self.ai_audit = None;
+            self.inspector.pinned = false;
+            let _ = self.request_default_inspection();
+            self.refresh_completion(false);
+        }
+    }
+
+    fn audit(&mut self, value: Value) {
+        if let Some(log) = &mut self.ai_audit {
+            if let Err(error) = log.write(value) {
+                self.status = error;
+                self.ai_audit = None;
+            }
+        }
+    }
+
     fn request_default_inspection(&mut self) -> Result<(), String> {
+        if self.queued_ai_prompt.is_some() || self.ai_run.is_some() {
+            return Ok(());
+        }
         if self.inspector.pinned
             || self
                 .pending
@@ -1447,6 +1744,267 @@ fn completion_key(item: &CompletionItem) -> (String, String, String) {
     (item.text.clone(), item.kind.clone(), item.detail.clone())
 }
 
+struct LiveAiTools {
+    client: LiveSessionClient,
+    next_request_id: u64,
+    last_write: Option<LiveResponse>,
+}
+
+impl LiveAiTools {
+    fn new(client: LiveSessionClient) -> Self {
+        Self {
+            client,
+            next_request_id: AI_REQUEST_START,
+            last_write: None,
+        }
+    }
+
+    fn request(
+        &mut self,
+        command: LiveCommand,
+        canceled: &AtomicBool,
+    ) -> Result<LiveResponse, String> {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.client.submit(LiveRequest::new(request_id, command))?;
+        loop {
+            if canceled.load(Ordering::Acquire) {
+                let _ = self.client.submit(LiveRequest::new(
+                    self.next_request_id,
+                    LiveCommand::Cancel { request_id },
+                ));
+                return Err("AI request canceled".to_string());
+            }
+            let response = self.client.receive_timeout(Duration::from_millis(100));
+            let response = match response {
+                Ok(response) => response,
+                Err(error) if error.contains("timed out") => continue,
+                Err(error) => return Err(error),
+            };
+            if response.request_id != request_id {
+                continue;
+            }
+            if matches!(
+                response.kind.as_str(),
+                "edit_preparing" | "completion_preparing"
+            ) {
+                continue;
+            }
+            return Ok(response);
+        }
+    }
+
+    fn execute_read(&mut self, call: &ToolCall, canceled: &AtomicBool) -> ToolObservation {
+        let args = call.args.as_object().expect("validated tool args");
+        let command = match call.tool.as_str() {
+            "list_symbols" => LiveCommand::Symbols {
+                query: None,
+                page: 0,
+                limit: 256,
+            },
+            "read_symbol" => LiveCommand::Read {
+                name: string_arg(args, "name").unwrap_or_default(),
+                kind: string_arg(args, "kind"),
+                file: string_arg(args, "file"),
+                owner: string_arg(args, "owner"),
+                signature: string_arg(args, "signature"),
+            },
+            "inspect_runtime_state" => LiveCommand::InspectAll {
+                limit: 64,
+                concise: true,
+            },
+            "run_frame" => LiveCommand::Step { ticks: 1 },
+            "run_tests" => {
+                return match &self.last_write {
+                    Some(response) if response.ok => ToolObservation::result(
+                        "run_tests",
+                        serde_json::json!({"status": "passed_with_latest_atomic_write", "edit": response.data}),
+                    ),
+                    _ => ToolObservation::error(
+                        "run_tests",
+                        "live AI tests run as part of each atomic write batch; no successful write batch is available",
+                    ),
+                };
+            }
+            _ => return ToolObservation::error(&call.tool, "tool is not a read operation"),
+        };
+        match self.request(command, canceled) {
+            Ok(response) if response.ok => {
+                ToolObservation::result(&call.tool, response.data.unwrap_or(Value::Null))
+            }
+            Ok(response) => ToolObservation::error(&call.tool, format_live_response(&response)),
+            Err(error) => ToolObservation::error(&call.tool, error),
+        }
+    }
+
+    fn execute_writes(
+        &mut self,
+        calls: &[&ToolCall],
+        canceled: &AtomicBool,
+    ) -> Vec<ToolObservation> {
+        let edits = calls
+            .iter()
+            .map(|call| {
+                let args = call.args.as_object().expect("validated tool args");
+                let operation = if call.tool == "delete_symbol" {
+                    LiveEditOperation::Delete
+                } else if string_arg(args, "operation").as_deref() == Some("add") {
+                    LiveEditOperation::Add
+                } else {
+                    LiveEditOperation::Update
+                };
+                LiveEdit {
+                    operation,
+                    target: LiveSymbolTarget {
+                        name: string_arg(args, "name").unwrap_or_default(),
+                        kind: string_arg(args, "kind"),
+                        file: string_arg(args, "file"),
+                        owner: string_arg(args, "owner"),
+                        signature: string_arg(args, "signature"),
+                    },
+                    source: string_arg(args, "new_source"),
+                    expected_source_hash: string_arg(args, "expected_source_hash"),
+                }
+            })
+            .collect();
+        match self.request(
+            LiveCommand::EditBatch {
+                edits,
+                preview: false,
+                run_tests: true,
+            },
+            canceled,
+        ) {
+            Ok(response) => {
+                let applied = response.ok && response.kind == "edit_applied";
+                if applied {
+                    self.last_write = Some(response.clone());
+                }
+                calls
+                    .iter()
+                    .map(|call| {
+                        if applied {
+                            ToolObservation::result(
+                                &call.tool,
+                                serde_json::json!({
+                                    "status": "compiled_tested_applied",
+                                    "transaction": response.data,
+                                }),
+                            )
+                        } else {
+                            let error = if response.ok && response.kind == "edit_preview" {
+                                "layout-changing AI edit was validated but requires explicit user :apply approval"
+                                    .to_string()
+                            } else {
+                                format_live_response(&response)
+                            };
+                            ToolObservation::error(&call.tool, error)
+                        }
+                    })
+                    .collect()
+            }
+            Err(error) => calls
+                .iter()
+                .map(|call| ToolObservation::error(&call.tool, error.clone()))
+                .collect(),
+        }
+    }
+}
+
+impl ToolExecutor for LiveAiTools {
+    fn execute(&mut self, calls: &[ToolCall], canceled: &AtomicBool) -> Vec<ToolObservation> {
+        let writes = calls
+            .iter()
+            .filter(|call| matches!(call.tool.as_str(), "write_symbol" | "delete_symbol"))
+            .collect::<Vec<_>>();
+        let mut observations = calls
+            .iter()
+            .filter(|call| {
+                !matches!(
+                    call.tool.as_str(),
+                    "write_symbol" | "delete_symbol" | "run_tests"
+                )
+            })
+            .map(|call| self.execute_read(call, canceled))
+            .collect::<Vec<_>>();
+        if !writes.is_empty() {
+            observations.extend(self.execute_writes(&writes, canceled));
+        }
+        observations.extend(
+            calls
+                .iter()
+                .filter(|call| call.tool == "run_tests")
+                .map(|call| self.execute_read(call, canceled)),
+        );
+        observations
+    }
+}
+
+fn string_arg(args: &serde_json::Map<String, Value>, name: &str) -> Option<String> {
+    args.get(name)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn audit_tool_call(call: &ToolCall) -> Value {
+    serde_json::json!({
+        "tool": call.tool,
+        "args": audit_value(&call.args, None),
+    })
+}
+
+fn audit_observation(observation: &ToolObservation) -> Value {
+    serde_json::json!({
+        "tool": observation.tool,
+        "result": observation.result.as_ref().map(|value| audit_value(value, None)),
+        "error": observation.error.as_deref().map(bounded_audit_text),
+    })
+}
+
+fn audit_value(value: &Value, key: Option<&str>) -> Value {
+    let sensitive = key.is_some_and(|key| {
+        matches!(
+            key,
+            "source" | "new_source" | "before_source" | "after_source" | "request_json" | "payload"
+        )
+    });
+    if sensitive {
+        let text = value.as_str().unwrap_or_default();
+        let hash = Sha256::digest(text.as_bytes());
+        return serde_json::json!({
+            "redacted": true,
+            "bytes": text.len(),
+            "sha256": format!("{hash:x}"),
+        });
+    }
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), audit_value(value, Some(key))))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .take(64)
+                .map(|value| audit_value(value, key))
+                .collect(),
+        ),
+        Value::String(text) => Value::String(bounded_audit_text(text)),
+        other => other.clone(),
+    }
+}
+
+fn bounded_audit_text(text: &str) -> String {
+    const MAX: usize = 1_000;
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    text.chars().take(MAX).collect::<String>() + "..."
+}
+
 fn edit_target_from_completion(symbol: &str, completion: &CompletionState) -> LiveSymbolTarget {
     let supported = |item: &&CompletionItem| {
         item.text == symbol && matches!(item.kind.as_str(), "function" | "struct" | "test")
@@ -1951,6 +2509,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ai_audit_redacts_source_bodies_but_keeps_action_identity() {
+        let call = ToolCall {
+            tool: "write_symbol".into(),
+            args: serde_json::json!({
+                "file": "src/main.stasis",
+                "name": "tick",
+                "new_source": "function tick(): void { return; }"
+            }),
+        };
+        let logged = audit_tool_call(&call);
+        assert_eq!(logged["tool"], "write_symbol");
+        assert_eq!(logged["args"]["file"], "src/main.stasis");
+        assert_eq!(logged["args"]["name"], "tick");
+        assert_eq!(logged["args"]["new_source"]["redacted"], true);
+        assert_eq!(logged["args"]["new_source"]["bytes"], 33);
+        assert_eq!(
+            logged["args"]["new_source"]["sha256"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
+        assert!(!logged.to_string().contains("function tick"));
+    }
+
+    #[test]
     fn multiline_editor_autoindents_and_moves_vertically() {
         let mut buffer = EditBuffer::from_text("function tick(): i32 {".to_string());
         buffer.insert_newline();
@@ -2118,7 +2702,7 @@ mod tests {
     #[test]
     fn successful_clean_apply_closes_definition_editor() {
         let (client, _server) = stasis_runner::live::live_session(8);
-        let mut app = LiveTui::new(client);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
         let target = LiveSymbolTarget {
             name: "tick".to_string(),
             kind: Some("function".to_string()),
@@ -2164,7 +2748,7 @@ mod tests {
     #[test]
     fn completed_apply_does_not_mutate_a_different_open_definition() {
         let (client, _server) = stasis_runner::live::live_session(8);
-        let mut app = LiveTui::new(client);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
         let submitted_target = LiveSymbolTarget {
             name: "tick".to_string(),
             kind: Some("function".to_string()),
@@ -2222,7 +2806,7 @@ mod tests {
     #[test]
     fn completed_apply_does_not_mutate_a_reopened_same_definition() {
         let (client, _server) = stasis_runner::live::live_session(8);
-        let mut app = LiveTui::new(client);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
         let target = LiveSymbolTarget {
             name: "obstacle_enabled".to_string(),
             kind: Some("function".to_string()),
@@ -2275,7 +2859,7 @@ mod tests {
     #[test]
     fn completion_requests_coalesce_and_stale_results_are_discarded() {
         let (client, server) = stasis_runner::live::live_session(8);
-        let mut app = LiveTui::new(client);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
         app.refresh_completion(false);
         app.active_buffer_mut().insert_char('s');
         app.refresh_completion(true);
@@ -2325,7 +2909,7 @@ mod tests {
     #[test]
     fn editing_after_discard_warning_requires_a_fresh_confirmation() {
         let (client, _server) = stasis_runner::live::live_session(8);
-        let mut app = LiveTui::new(client);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
         app.input = InputMode::Definition(EditSession {
             id: 1,
             target: LiveSymbolTarget {
@@ -2357,7 +2941,7 @@ mod tests {
     #[test]
     fn rendering_buffer_access_preserves_discard_confirmation() {
         let (client, _server) = stasis_runner::live::live_session(8);
-        let mut app = LiveTui::new(client);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
         app.input = InputMode::Definition(EditSession {
             id: 1,
             target: LiveSymbolTarget {
@@ -2431,7 +3015,7 @@ mod tests {
         client
             .submit(LiveRequest::new(99, LiveCommand::Pause))
             .expect("fill request queue");
-        let mut app = LiveTui::new(client);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
 
         app.request_default_inspection()
             .expect("backpressure stays inside the TUI");
@@ -2446,7 +3030,7 @@ mod tests {
     #[test]
     fn replacing_a_pinned_inspection_unwatches_the_previous_path() {
         let (client, server) = stasis_runner::live::live_session(8);
-        let mut app = LiveTui::new(client);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
         app.handle_response(LiveResponse::success(
             10,
             1,
@@ -2512,7 +3096,7 @@ mod tests {
         client
             .submit(LiveRequest::new(99, LiveCommand::Pause))
             .expect("fill request queue");
-        let mut app = LiveTui::new(client);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
         app.inspector_watch = Some("score".to_string());
 
         app.replace_inspector_watch(Some("speed".to_string()));
@@ -2547,7 +3131,7 @@ mod tests {
     #[test]
     fn rejected_watch_does_not_create_a_ghost_or_suppress_retry() {
         let (client, server) = stasis_runner::live::live_session(8);
-        let mut app = LiveTui::new(client);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
         app.replace_inspector_watch(Some("score".to_string()));
         let first = server.drain(1);
         assert_eq!(app.inspector_watch, None);

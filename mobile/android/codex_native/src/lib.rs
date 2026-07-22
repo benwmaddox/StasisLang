@@ -610,6 +610,14 @@ pub extern "C" fn stasis_codex_android_cancel_response() {
 }
 
 #[no_mangle]
+pub extern "C" fn stasis_codex_android_ai_contract() -> *mut c_char {
+    match catch_unwind(AssertUnwindSafe(|| Ok(stasis_ai::contract_json()))) {
+        Ok(result) => into_c_json(result),
+        Err(_) => into_c_json(Err("shared AI contract bridge panicked".to_string())),
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn stasis_codex_android_response(
     codex_home: *const c_char,
     request_json: *const c_char,

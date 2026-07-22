@@ -32,6 +32,7 @@ use stasis_compiler::backend::state_migration::{
 const REQUESTS_PER_TICK: usize = 8;
 const MAX_PENDING_LIVE_REQUESTS: usize = 64;
 const MAX_LIVE_EDIT_SOURCE_BYTES: usize = 256 * 1024;
+const MAX_LIVE_EDIT_BATCH: usize = 64;
 const MAX_LIVE_TRANSACTION_ASSIGNMENTS: usize = 64;
 const MAX_STAGED_TEST_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_STAGED_TEST_DIAGNOSTIC_BYTES: usize = 4096;
@@ -117,6 +118,11 @@ enum EditPreparationInput {
         target: LiveSymbolTarget,
         source: Option<String>,
         expected_source_hash: Option<String>,
+        preview: bool,
+        run_tests: bool,
+    },
+    EditBatch {
+        edits: Vec<stasis_runner::live::LiveEdit>,
         preview: bool,
         run_tests: bool,
     },
@@ -529,6 +535,19 @@ impl LiveWorkspace {
                     target,
                     source,
                     expected_source_hash,
+                    preview,
+                    run_tests,
+                },
+                jit,
+            ),
+            LiveCommand::EditBatch {
+                edits,
+                preview,
+                run_tests,
+            } => self.start_edit_preparation(
+                request_id,
+                EditPreparationInput::EditBatch {
+                    edits,
                     preview,
                     run_tests,
                 },
@@ -1321,6 +1340,24 @@ fn paged_completion_query(
 fn validate_edit_input_size(input: &EditPreparationInput) -> Result<(), String> {
     let source = match input {
         EditPreparationInput::Edit { source, .. } => source.as_deref(),
+        EditPreparationInput::EditBatch { edits, .. } => {
+            if edits.len() > MAX_LIVE_EDIT_BATCH {
+                return Err(format!(
+                    "live edit batch exceeds {MAX_LIVE_EDIT_BATCH} edits"
+                ));
+            }
+            let bytes = edits
+                .iter()
+                .filter_map(|edit| edit.source.as_deref())
+                .map(str::len)
+                .sum::<usize>();
+            if bytes > MAX_LIVE_EDIT_SOURCE_BYTES {
+                return Err(format!(
+                    "live edit source exceeds {MAX_LIVE_EDIT_SOURCE_BYTES} bytes"
+                ));
+            }
+            None
+        }
         EditPreparationInput::Persist { source, .. } => Some(source.as_str()),
         EditPreparationInput::Plan { .. } => None,
     };
@@ -1357,6 +1394,25 @@ fn prepare_edit(
         } => {
             let (after, plan) =
                 plan_live_edit(&files, operation, target, source, expected_source_hash)?;
+            (
+                after,
+                plan,
+                false,
+                run_tests && !preview,
+                if preview {
+                    PreparedAction::Preview
+                } else {
+                    PreparedAction::ApplyNew
+                },
+                None,
+            )
+        }
+        EditPreparationInput::EditBatch {
+            edits,
+            preview,
+            run_tests,
+        } => {
+            let (after, plan) = plan_live_edit_batch(&files, edits)?;
             (
                 after,
                 plan,
@@ -1506,6 +1562,50 @@ fn plan_live_edit(
                 new_source: source,
                 expected_source_hash,
             }],
+        },
+    )
+}
+
+fn plan_live_edit_batch(
+    files: &[WorkshopSourceFile],
+    edits: Vec<stasis_runner::live::LiveEdit>,
+) -> Result<(Vec<WorkshopSourceFile>, WorkshopSemanticEditPlan), String> {
+    if edits.is_empty() {
+        return Err("live edit batch must contain at least one edit".to_string());
+    }
+    let mut semantic_edits = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let mut target = selector(&edit.target)?;
+        let operation = match edit.operation {
+            LiveEditOperation::Add => WorkshopSemanticEditOperation::Add,
+            LiveEditOperation::Update => WorkshopSemanticEditOperation::Update,
+            LiveEditOperation::Delete => WorkshopSemanticEditOperation::Delete,
+        };
+        if operation == WorkshopSemanticEditOperation::Add && target.file.is_none() {
+            return Err("code-aware live add requires a project src/ or tests/ file".to_string());
+        }
+        if operation != WorkshopSemanticEditOperation::Add && target.file.is_none() {
+            let matches = find_workshop_symbols(files, &target)?;
+            if matches.len() != 1 {
+                return Err(format!(
+                    "code-aware live edit requires one target; found {}",
+                    matches.len()
+                ));
+            }
+            target.file = Some(matches[0].file.clone());
+        }
+        semantic_edits.push(WorkshopSemanticEdit {
+            operation,
+            target,
+            new_source: edit.source,
+            expected_source_hash: edit.expected_source_hash,
+        });
+    }
+    plan_workshop_semantic_edits(
+        files,
+        &WorkshopSemanticEditBatch {
+            schema_version: 1,
+            edits: semantic_edits,
         },
     )
 }
@@ -1774,6 +1874,7 @@ fn help_data() -> Value {
             ":symbols [query] [--page N --limit N]",
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
             ":edit SYMBOL (interactive TUI)",
+            ":ai PROMPT | :ai status | :ai cancel (interactive TUI; installed Codex subscription)",
             ":complete BUFFER", ":palette [QUERY]",
             ":add KIND NAME FILE ... :end", ":update KIND NAME [FILE] ... :end",
             ":delete KIND NAME [FILE]", ":preview", ":apply", ":changes", ":undo", ":redo",
@@ -1801,6 +1902,7 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":find",
         ":read",
         ":edit",
+        ":ai",
         ":complete",
         ":palette",
         ":add",
@@ -2149,6 +2251,51 @@ mod tests {
             .build_engine_package(&EngineEntrypoints::runtime_default())
             .expect("package");
         (jit, package)
+    }
+
+    #[test]
+    fn live_edit_batch_plans_all_symbols_as_one_transaction() {
+        let (root, config) = project();
+        let files = load_workshop_edit_workspace(&root, &config.entry).expect("files");
+        let (after, plan) = plan_live_edit_batch(
+            &files,
+            vec![
+                stasis_runner::live::LiveEdit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "tick".into(),
+                        kind: Some("function".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("function tick(): i32 { score += 3; return 0; }".into()),
+                    expected_source_hash: None,
+                },
+                stasis_runner::live::LiveEdit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "render".into(),
+                        kind: Some("function".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some("function render(): i32 { return score; }".into()),
+                    expected_source_hash: None,
+                },
+            ],
+        )
+        .expect("batch plan");
+        assert_eq!(plan.edits.len(), 2);
+        assert_eq!(plan.changed_files.len(), 1);
+        let main = after
+            .iter()
+            .find(|file| file.path == "src/main.stasis")
+            .expect("main");
+        assert!(main.source.contains("score += 3"));
+        assert!(main.source.contains("return score"));
+        fs::remove_dir_all(root).ok();
     }
 
     fn run_request(
