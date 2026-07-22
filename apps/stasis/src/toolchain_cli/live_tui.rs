@@ -64,7 +64,7 @@ pub(super) fn run_scripted_ai_with_cancel(
     let usage_path = audit.usage_path.clone();
     let mut provider = CodexExecProvider::default();
     let mut tools = LiveAiTools::new(client.clone(), project_root.to_path_buf());
-    let initial_context = load_ai_initial_context(&mut tools, canceled)?;
+    let initial_context = load_ai_initial_context(&mut tools, prompt, canceled)?;
     audit.write(serde_json::json!({
         "event": "initial_context",
         "value": initial_context.clone(),
@@ -109,19 +109,28 @@ pub(super) fn run_scripted_ai_with_cancel(
     }
 }
 
-fn ai_initial_context(initial_symbols: Value) -> Value {
-    serde_json::json!({
+fn ai_initial_context(initial_symbols: Value, targeted_symbols: Vec<Value>) -> Value {
+    let mut context = serde_json::json!({
         "language": "Stasis",
         "runtime": "live in-process JIT",
         "commit_boundary": "between deterministic ticks",
         "write_policy": "all writes in one model batch compile, test, and commit atomically",
         "initial_symbols": initial_symbols,
         "initial_symbols_instruction": "This is the completed default list_symbols result. Use it before requesting filtered or paged follow-up discovery.",
-    })
+    });
+    if !targeted_symbols.is_empty() {
+        context["targeted_symbols"] = Value::Array(targeted_symbols);
+        context["targeted_symbols_instruction"] = Value::String(
+            "The default page was truncated. These compact prompt-matched symbols are the priority candidates; do not repeat their discovery queries."
+                .to_string(),
+        );
+    }
+    context
 }
 
 fn load_ai_initial_context(
     tools: &mut LiveAiTools,
+    prompt: &str,
     canceled: &AtomicBool,
 ) -> Result<Value, String> {
     let observations = tools.execute(
@@ -138,9 +147,86 @@ fn load_ai_initial_context(
     if let Some(error) = observation.error {
         return Err(format!("initial symbol discovery failed: {error}"));
     }
-    Ok(ai_initial_context(
-        observation.result.unwrap_or(Value::Null),
-    ))
+    let initial_symbols = observation.result.unwrap_or(Value::Null);
+    let item_count = initial_symbols
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let total = initial_symbols
+        .get("total")
+        .and_then(Value::as_u64)
+        .unwrap_or(item_count as u64);
+    let mut targeted_symbols = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    if total > item_count as u64 {
+        let calls = ai_discovery_queries(prompt)
+            .into_iter()
+            .map(|query| ToolCall {
+                tool: "list_symbols".to_string(),
+                args: serde_json::json!({"query": query, "limit": 16}),
+            })
+            .collect::<Vec<_>>();
+        for result in tools.execute(&calls, canceled) {
+            let Some(items) = result
+                .result
+                .as_ref()
+                .and_then(|value| value.get("items"))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            for item in items {
+                let key = (
+                    item.get("file")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    item.get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    item.get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    item.get("signature")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                if seen.insert(key) && targeted_symbols.len() < 32 {
+                    targeted_symbols.push(item.clone());
+                }
+            }
+        }
+    }
+    Ok(ai_initial_context(initial_symbols, targeted_symbols))
+}
+
+fn ai_discovery_queries(prompt: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "behavior", "change", "keep", "make", "pixels", "position", "square", "tests", "update",
+        "with",
+    ];
+    let mut queries = Vec::new();
+    for word in prompt
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .map(str::to_ascii_lowercase)
+        .filter(|word| word.len() >= 4 && !STOP.contains(&word.as_str()))
+    {
+        if !queries.contains(&word) {
+            queries.push(word);
+        }
+        if queries.len() == 4 {
+            break;
+        }
+    }
+    for fallback in ["render", "update", "collision"] {
+        if !queries.iter().any(|query| query == fallback) {
+            queries.push(fallback.to_string());
+        }
+    }
+    queries
 }
 
 fn audit_agent_event(event: &AgentEvent) -> Value {
@@ -1241,8 +1327,8 @@ impl LiveTui {
             let mut provider = CodexExecProvider::default();
             let mut tools = LiveAiTools::new(client, project_root);
             let progress = events_tx.clone();
-            let result =
-                load_ai_initial_context(&mut tools, &worker_canceled).and_then(|initial_context| {
+            let result = load_ai_initial_context(&mut tools, &prompt, &worker_canceled).and_then(
+                |initial_context| {
                     let _ = progress.send(AiUiEvent::InitialContext(initial_context.clone()));
                     run_agent(
                         &mut provider,
@@ -1255,7 +1341,8 @@ impl LiveTui {
                             let _ = progress.send(AiUiEvent::Progress(event));
                         },
                     )
-                });
+                },
+            );
             let _ = events_tx.send(AiUiEvent::Finished(result));
         });
         self.ai_run = Some(AiRun {
@@ -3153,6 +3240,32 @@ fn write_at(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ai_discovery_queries_are_prompt_driven_and_bounded() {
+        let queries = ai_discovery_queries(
+            "make the ball 20 pixels square and keep it centered and update collision behavior",
+        );
+        assert_eq!(queries[0], "ball");
+        assert!(queries.iter().any(|query| query == "centered"));
+        assert!(queries.iter().any(|query| query == "render"));
+        assert!(queries.iter().any(|query| query == "update"));
+        assert!(queries.len() <= 7);
+    }
+
+    #[test]
+    fn ai_initial_context_omits_empty_targeted_inventory() {
+        let initial = json!({"items": [], "total": 0});
+        let compact = ai_initial_context(initial.clone(), Vec::new());
+        assert_eq!(compact["initial_symbols"], initial);
+        assert!(compact.get("targeted_symbols").is_none());
+
+        let targeted = ai_initial_context(
+            json!({"items": [], "total": 40}),
+            vec![json!({"name": "update_ball", "kind": "function", "file": "src/main.stasis"})],
+        );
+        assert_eq!(targeted["targeted_symbols"][0]["name"], "update_ball");
+    }
 
     #[test]
     fn runtime_validation_comparisons_cover_scalar_requirements() {
