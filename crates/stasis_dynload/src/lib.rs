@@ -6,7 +6,8 @@ use std::ffi::c_char;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 #[cfg(windows)]
 use std::ffi::{c_void, CString, OsStr};
@@ -31,7 +32,11 @@ impl Library {
             wide.push(0);
             let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
             if handle.is_null() {
-                return Err(format!("failed to load dynamic library {}", path.display()));
+                return Err(format!(
+                    "failed to load dynamic library {}: {}",
+                    path.display(),
+                    std::io::Error::last_os_error()
+                ));
             }
             return Ok(Self { handle });
         }
@@ -84,6 +89,7 @@ pub fn invoke_noarg_u64(address: usize) -> Result<u64, String> {
     let _dispatch_lock = jit_dispatch_lock()
         .lock()
         .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
     #[cfg(windows)]
     {
         let callback: extern "system" fn() -> u64 = unsafe { std::mem::transmute(address) };
@@ -103,6 +109,7 @@ pub fn invoke_noarg_i32(address: usize) -> Result<i32, String> {
     let _dispatch_lock = jit_dispatch_lock()
         .lock()
         .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
     #[cfg(windows)]
     {
         let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
@@ -122,6 +129,7 @@ pub fn invoke_noarg_void(address: usize) -> Result<(), String> {
     let _dispatch_lock = jit_dispatch_lock()
         .lock()
         .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
     #[cfg(windows)]
     {
         let callback: extern "system" fn() = unsafe { std::mem::transmute(address) };
@@ -160,6 +168,7 @@ pub fn invoke_i32_to_void(address: usize, arg0: i32) -> Result<(), String> {
     let _dispatch_lock = jit_dispatch_lock()
         .lock()
         .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
     #[cfg(windows)]
     {
         let callback: extern "system" fn(i32) = unsafe { std::mem::transmute(address) };
@@ -181,6 +190,7 @@ pub fn invoke_i32_i32_to_i32(address: usize, left: i32, right: i32) -> Result<i3
     let _dispatch_lock = jit_dispatch_lock()
         .lock()
         .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
     #[cfg(windows)]
     {
         let callback: extern "system" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(address) };
@@ -205,6 +215,7 @@ pub fn invoke_i32_i32_i32_to_i32(
     let _dispatch_lock = jit_dispatch_lock()
         .lock()
         .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
     #[cfg(windows)]
     {
         let callback: extern "system" fn(i32, i32, i32) -> i32 =
@@ -231,6 +242,7 @@ pub fn invoke_i32_i32_i32_i32_to_void(
     let _dispatch_lock = jit_dispatch_lock()
         .lock()
         .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
     #[cfg(windows)]
     {
         let callback: extern "system" fn(i32, i32, i32, i32) =
@@ -726,6 +738,160 @@ pub fn jit_string_literal_value(id: i32) -> Option<String> {
 
 type ArrayKey = (i32, i32); // (collection_hash, field_hash)
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JitStorageKind {
+    I32,
+    F32,
+    F64,
+    U8,
+}
+
+#[repr(C)]
+pub struct JitStorageSlot {
+    data: usize,
+    len: usize,
+}
+
+impl JitStorageSlot {
+    pub const DATA_OFFSET: i32 = 0;
+    pub const LEN_OFFSET: i32 = std::mem::size_of::<usize>() as i32;
+}
+
+// Slot fields are only rebound while no guest execution window is active. Generated code reads
+// them directly, so the registry mutex is deliberately absent from the load/store hot path.
+unsafe impl Send for JitStorageSlot {}
+unsafe impl Sync for JitStorageSlot {}
+
+type StorageKey = (JitStorageKind, i32, i32);
+
+fn direct_storage_slots() -> &'static Mutex<HashMap<StorageKey, Box<JitStorageSlot>>> {
+    static TABLE: OnceLock<Mutex<HashMap<StorageKey, Box<JitStorageSlot>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn guest_execution_count() -> &'static AtomicUsize {
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    &COUNT
+}
+
+pub struct JitExecutionGuard;
+
+impl JitExecutionGuard {
+    pub fn enter() -> Self {
+        guest_execution_count().fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for JitExecutionGuard {
+    fn drop(&mut self) {
+        guest_execution_count().fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn ensure_rebind_allowed() -> Result<(), String> {
+    (guest_execution_count().load(Ordering::Acquire) == 0)
+        .then_some(())
+        .ok_or_else(|| {
+            "storage rebinding is only allowed between guest execution windows".to_string()
+        })
+}
+
+fn acquire_rebind_guard() -> Result<MutexGuard<'static, ()>, String> {
+    ensure_rebind_allowed()?;
+    let guard = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
+    ensure_rebind_allowed()?;
+    Ok(guard)
+}
+
+fn update_direct_storage_slot(key: StorageKey, data: usize, len: usize) {
+    if let Some(slot) = direct_storage_slots()
+        .lock()
+        .expect("direct storage slot table mutex poisoned")
+        .get_mut(&key)
+    {
+        slot.data = data;
+        slot.len = len;
+    }
+}
+
+pub fn direct_scalar_storage_slot_address(
+    kind: JitStorageKind,
+    path_hash: i32,
+) -> Result<usize, String> {
+    direct_storage_slot_address(kind, path_hash, 0)
+}
+
+pub fn direct_array_storage_slot_address(
+    kind: JitStorageKind,
+    collection_hash: i32,
+    field_hash: i32,
+) -> Result<usize, String> {
+    direct_storage_slot_address(kind, collection_hash, field_hash)
+}
+
+fn direct_storage_slot_address(
+    kind: JitStorageKind,
+    collection_hash: i32,
+    field_hash: i32,
+) -> Result<usize, String> {
+    let key = (kind, collection_hash, field_hash);
+    let current = registered_storage(kind, collection_hash, field_hash);
+    let (data, actual_len) = current.unwrap_or((0, 0));
+    let mut slots = direct_storage_slots()
+        .lock()
+        .expect("direct storage slot table mutex poisoned");
+    let slot = slots.entry(key).or_insert_with(|| {
+        Box::new(JitStorageSlot {
+            data,
+            len: actual_len,
+        })
+    });
+    Ok(slot.as_ref() as *const JitStorageSlot as usize)
+}
+
+pub fn provision_direct_scalar_storage(kind: JitStorageKind, path_hash: i32) -> Result<(), String> {
+    let _rebind = acquire_rebind_guard()?;
+    match kind {
+        JitStorageKind::I32 => ensure_owned_i32_scalar(path_hash)?,
+        JitStorageKind::F32 => ensure_owned_f32_scalar(path_hash)?,
+        JitStorageKind::F64 => ensure_owned_f64_scalar(path_hash)?,
+        JitStorageKind::U8 => return Err("u8 scalar storage uses the i32 ABI lane".to_string()),
+    }
+    let (data, len) = registered_storage(kind, path_hash, 0)?;
+    update_direct_storage_slot((kind, path_hash, 0), data, len);
+    Ok(())
+}
+
+pub fn provision_direct_array_storage(
+    kind: JitStorageKind,
+    collection_hash: i32,
+    field_hash: i32,
+    len: usize,
+) -> Result<(), String> {
+    let _rebind = acquire_rebind_guard()?;
+    let key = (kind, collection_hash, field_hash);
+    match kind {
+        JitStorageKind::I32 => {
+            ensure_jit_i32_array_capacity_unlocked(collection_hash, field_hash, len)?
+        }
+        JitStorageKind::F32 => {
+            ensure_jit_f32_array_capacity_unlocked(collection_hash, field_hash, len)?
+        }
+        JitStorageKind::F64 => {
+            ensure_jit_f64_array_capacity_unlocked(collection_hash, field_hash, len)?
+        }
+        JitStorageKind::U8 => {
+            ensure_jit_u8_array_capacity_unlocked(collection_hash, field_hash, len)?
+        }
+    }
+    let (data, actual_len) = registered_storage(kind, collection_hash, field_hash)?;
+    update_direct_storage_slot(key, data, actual_len);
+    Ok(())
+}
+
 fn registered_i32_ptrs() -> &'static Mutex<HashMap<i32, usize>> {
     static TABLE: OnceLock<Mutex<HashMap<i32, usize>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -779,6 +945,146 @@ fn owned_u8_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<u8>>> {
 fn owned_f64_arrays() -> &'static Mutex<HashMap<ArrayKey, Vec<f64>>> {
     static TABLE: OnceLock<Mutex<HashMap<ArrayKey, Vec<f64>>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn owned_i32_scalars() -> &'static Mutex<HashMap<i32, Box<i32>>> {
+    static TABLE: OnceLock<Mutex<HashMap<i32, Box<i32>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn owned_f32_scalars() -> &'static Mutex<HashMap<i32, Box<f32>>> {
+    static TABLE: OnceLock<Mutex<HashMap<i32, Box<f32>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn owned_f64_scalars() -> &'static Mutex<HashMap<i32, Box<f64>>> {
+    static TABLE: OnceLock<Mutex<HashMap<i32, Box<f64>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn ensure_owned_scalar<T: Copy + Default>(
+    path_hash: i32,
+    owned: &Mutex<HashMap<i32, Box<T>>>,
+    registered: &Mutex<HashMap<i32, usize>>,
+    fallback: &Mutex<HashMap<i32, T>>,
+) -> Result<(), String> {
+    if registered
+        .lock()
+        .expect("registered scalar table mutex poisoned")
+        .contains_key(&path_hash)
+    {
+        return Ok(());
+    }
+    ensure_rebind_allowed()?;
+    let initial = fallback
+        .lock()
+        .expect("fallback scalar table mutex poisoned")
+        .remove(&path_hash)
+        .unwrap_or_default();
+    let mut owned = owned.lock().expect("owned scalar table mutex poisoned");
+    let value = owned.entry(path_hash).or_insert_with(|| Box::new(initial));
+    let address = value.as_mut() as *mut T as usize;
+    registered
+        .lock()
+        .expect("registered scalar table mutex poisoned")
+        .insert(path_hash, address);
+    Ok(())
+}
+
+fn ensure_owned_i32_scalar(path_hash: i32) -> Result<(), String> {
+    ensure_owned_scalar(
+        path_hash,
+        owned_i32_scalars(),
+        registered_i32_ptrs(),
+        jit_i32_global_table(),
+    )
+}
+
+fn ensure_owned_f32_scalar(path_hash: i32) -> Result<(), String> {
+    ensure_owned_scalar(
+        path_hash,
+        owned_f32_scalars(),
+        registered_f32_ptrs(),
+        jit_f32_global_table(),
+    )
+}
+
+fn ensure_owned_f64_scalar(path_hash: i32) -> Result<(), String> {
+    ensure_owned_scalar(
+        path_hash,
+        owned_f64_scalars(),
+        registered_f64_ptrs(),
+        jit_f64_global_table(),
+    )
+}
+
+fn registered_storage(
+    kind: JitStorageKind,
+    collection_hash: i32,
+    field_hash: i32,
+) -> Result<(usize, usize), String> {
+    let value = match kind {
+        JitStorageKind::I32 if field_hash == 0 => registered_i32_ptrs()
+            .lock()
+            .expect("registered i32 ptr table mutex poisoned")
+            .get(&collection_hash)
+            .copied()
+            .map(|ptr| (ptr, 1))
+            .or_else(|| {
+                registered_i32_arrays()
+                    .lock()
+                    .expect("registered i32 array table mutex poisoned")
+                    .get(&(collection_hash, field_hash))
+                    .copied()
+            }),
+        JitStorageKind::I32 => registered_i32_arrays()
+            .lock()
+            .expect("registered i32 array table mutex poisoned")
+            .get(&(collection_hash, field_hash))
+            .copied(),
+        JitStorageKind::F32 if field_hash == 0 => registered_f32_ptrs()
+            .lock()
+            .expect("registered f32 ptr table mutex poisoned")
+            .get(&collection_hash)
+            .copied()
+            .map(|ptr| (ptr, 1))
+            .or_else(|| {
+                registered_f32_arrays()
+                    .lock()
+                    .expect("registered f32 array table mutex poisoned")
+                    .get(&(collection_hash, field_hash))
+                    .copied()
+            }),
+        JitStorageKind::F32 => registered_f32_arrays()
+            .lock()
+            .expect("registered f32 array table mutex poisoned")
+            .get(&(collection_hash, field_hash))
+            .copied(),
+        JitStorageKind::F64 if field_hash == 0 => registered_f64_ptrs()
+            .lock()
+            .expect("registered f64 ptr table mutex poisoned")
+            .get(&collection_hash)
+            .copied()
+            .map(|ptr| (ptr, 1))
+            .or_else(|| {
+                registered_f64_arrays()
+                    .lock()
+                    .expect("registered f64 array table mutex poisoned")
+                    .get(&(collection_hash, field_hash))
+                    .copied()
+            }),
+        JitStorageKind::F64 => registered_f64_arrays()
+            .lock()
+            .expect("registered f64 array table mutex poisoned")
+            .get(&(collection_hash, field_hash))
+            .copied(),
+        JitStorageKind::U8 => registered_u8_arrays()
+            .lock()
+            .expect("registered u8 array table mutex poisoned")
+            .get(&(collection_hash, field_hash))
+            .copied(),
+    };
+    value.ok_or_else(|| "direct storage backing was not provisioned".to_string())
 }
 
 fn ensure_owned_array_capacity<T: Copy>(
@@ -926,12 +1232,34 @@ fn migrate_fallback_array<T: Copy>(
     }
 }
 
+fn direct_array_rebind_guard(
+    kind: JitStorageKind,
+    collection_hash: i32,
+    field_hash: i32,
+) -> Result<Option<MutexGuard<'static, ()>>, String> {
+    let has_direct_slot = direct_storage_slots()
+        .lock()
+        .expect("direct storage slot table mutex poisoned")
+        .contains_key(&(kind, collection_hash, field_hash));
+    has_direct_slot.then(acquire_rebind_guard).transpose()
+}
+
 pub fn ensure_jit_i32_array_capacity(
     collection_hash: i32,
     field_hash: i32,
     requested_len: usize,
 ) -> Result<(), String> {
+    let _rebind = direct_array_rebind_guard(JitStorageKind::I32, collection_hash, field_hash)?;
+    ensure_jit_i32_array_capacity_unlocked(collection_hash, field_hash, requested_len)
+}
+
+fn ensure_jit_i32_array_capacity_unlocked(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
     let key = (collection_hash, field_hash);
+    discard_integer_array_lane(key, JitStorageKind::I32);
     ensure_owned_array_capacity(
         key,
         requested_len,
@@ -940,10 +1268,27 @@ pub fn ensure_jit_i32_array_capacity(
         registered_i32_arrays(),
     )?;
     migrate_fallback_array(key, owned_i32_arrays(), jit_i32_array_global_table());
+    if let Some((data, len)) = registered_i32_arrays()
+        .lock()
+        .expect("registered i32 array table mutex poisoned")
+        .get(&key)
+        .copied()
+    {
+        update_direct_storage_slot((JitStorageKind::I32, key.0, key.1), data, len);
+    }
     Ok(())
 }
 
 pub fn ensure_jit_f32_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    let _rebind = direct_array_rebind_guard(JitStorageKind::F32, collection_hash, field_hash)?;
+    ensure_jit_f32_array_capacity_unlocked(collection_hash, field_hash, requested_len)
+}
+
+fn ensure_jit_f32_array_capacity_unlocked(
     collection_hash: i32,
     field_hash: i32,
     requested_len: usize,
@@ -957,10 +1302,27 @@ pub fn ensure_jit_f32_array_capacity(
         registered_f32_arrays(),
     )?;
     migrate_fallback_array(key, owned_f32_arrays(), jit_f32_array_global_table());
+    if let Some((data, len)) = registered_f32_arrays()
+        .lock()
+        .expect("registered f32 array table mutex poisoned")
+        .get(&key)
+        .copied()
+    {
+        update_direct_storage_slot((JitStorageKind::F32, key.0, key.1), data, len);
+    }
     Ok(())
 }
 
 pub fn ensure_jit_f64_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    let _rebind = direct_array_rebind_guard(JitStorageKind::F64, collection_hash, field_hash)?;
+    ensure_jit_f64_array_capacity_unlocked(collection_hash, field_hash, requested_len)
+}
+
+fn ensure_jit_f64_array_capacity_unlocked(
     collection_hash: i32,
     field_hash: i32,
     requested_len: usize,
@@ -974,10 +1336,54 @@ pub fn ensure_jit_f64_array_capacity(
         registered_f64_arrays(),
     )?;
     migrate_fallback_array(key, owned_f64_arrays(), jit_f64_array_global_table());
+    if let Some((data, len)) = registered_f64_arrays()
+        .lock()
+        .expect("registered f64 array table mutex poisoned")
+        .get(&key)
+        .copied()
+    {
+        update_direct_storage_slot((JitStorageKind::F64, key.0, key.1), data, len);
+    }
+    Ok(())
+}
+
+pub fn ensure_jit_u8_array_capacity(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    let _rebind = direct_array_rebind_guard(JitStorageKind::U8, collection_hash, field_hash)?;
+    ensure_jit_u8_array_capacity_unlocked(collection_hash, field_hash, requested_len)
+}
+
+fn ensure_jit_u8_array_capacity_unlocked(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+) -> Result<(), String> {
+    let key = (collection_hash, field_hash);
+    discard_integer_array_lane(key, JitStorageKind::U8);
+    ensure_owned_array_capacity(
+        key,
+        requested_len,
+        0,
+        owned_u8_arrays(),
+        registered_u8_arrays(),
+    )?;
+    let (data, len) = registered_u8_arrays()
+        .lock()
+        .expect("registered u8 array table mutex poisoned")
+        .get(&key)
+        .copied()
+        .ok_or_else(|| "u8 storage was not provisioned".to_string())?;
+    update_direct_storage_slot((JitStorageKind::U8, key.0, key.1), data, len);
     Ok(())
 }
 
 pub fn clear_registered_global_memory() {
+    let Ok(_rebind) = acquire_rebind_guard() else {
+        return;
+    };
     registered_i32_ptrs()
         .lock()
         .expect("registered i32 ptr table mutex poisoned")
@@ -1023,6 +1429,22 @@ pub fn clear_registered_global_memory() {
         .lock()
         .expect("owned u8 array table mutex poisoned")
         .clear();
+    owned_i32_scalars()
+        .lock()
+        .expect("owned i32 scalar table mutex poisoned")
+        .clear();
+    owned_f32_scalars()
+        .lock()
+        .expect("owned f32 scalar table mutex poisoned")
+        .clear();
+    owned_f64_scalars()
+        .lock()
+        .expect("owned f64 scalar table mutex poisoned")
+        .clear();
+    direct_storage_slots()
+        .lock()
+        .expect("direct storage slot table mutex poisoned")
+        .clear();
 }
 
 #[derive(Debug, Clone)]
@@ -1033,13 +1455,21 @@ pub struct JitRuntimeStateSnapshot {
     i32_array_globals: JitI32ArrayGlobalMap,
     f32_array_globals: JitF32ArrayGlobalMap,
     f64_array_globals: JitF64ArrayGlobalMap,
-    i32_ptrs: Vec<(usize, i32)>,
-    f32_ptrs: Vec<(usize, f32)>,
-    f64_ptrs: Vec<(usize, f64)>,
+    i32_ptrs: Vec<RegisteredScalarSnapshot<i32>>,
+    f32_ptrs: Vec<RegisteredScalarSnapshot<f32>>,
+    f64_ptrs: Vec<RegisteredScalarSnapshot<f64>>,
     i32_arrays: Vec<RegisteredArraySnapshot<i32>>,
     f32_arrays: Vec<RegisteredArraySnapshot<f32>>,
     f64_arrays: Vec<RegisteredArraySnapshot<f64>>,
     u8_arrays: Vec<RegisteredArraySnapshot<u8>>,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredScalarSnapshot<T> {
+    key: i32,
+    address: usize,
+    value: T,
+    owned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1089,9 +1519,9 @@ pub fn snapshot_jit_runtime_state_bounded(
             .lock()
             .expect("jit f64 array global table mutex poisoned")
             .clone(),
-        i32_ptrs: snapshot_registered_ptrs(registered_i32_ptrs()),
-        f32_ptrs: snapshot_registered_ptrs(registered_f32_ptrs()),
-        f64_ptrs: snapshot_registered_ptrs(registered_f64_ptrs()),
+        i32_ptrs: snapshot_registered_ptrs(registered_i32_ptrs(), owned_i32_scalars()),
+        f32_ptrs: snapshot_registered_ptrs(registered_f32_ptrs(), owned_f32_scalars()),
+        f64_ptrs: snapshot_registered_ptrs(registered_f64_ptrs(), owned_f64_scalars()),
         i32_arrays: snapshot_registered_arrays(registered_i32_arrays(), Some(owned_i32_arrays())),
         f32_arrays: snapshot_registered_arrays(registered_f32_arrays(), Some(owned_f32_arrays())),
         f64_arrays: snapshot_registered_arrays(registered_f64_arrays(), Some(owned_f64_arrays())),
@@ -1207,6 +1637,9 @@ fn add_registered_array_bytes(
 }
 
 pub fn restore_jit_runtime_state(snapshot: &JitRuntimeStateSnapshot) {
+    let Ok(_rebind) = acquire_rebind_guard() else {
+        return;
+    };
     *jit_i32_global_table()
         .lock()
         .expect("jit i32 global table mutex poisoned") = snapshot.i32_globals.clone();
@@ -1225,9 +1658,21 @@ pub fn restore_jit_runtime_state(snapshot: &JitRuntimeStateSnapshot) {
     *jit_f64_array_global_table()
         .lock()
         .expect("jit f64 array global table mutex poisoned") = snapshot.f64_array_globals.clone();
-    restore_registered_ptrs(&snapshot.i32_ptrs);
-    restore_registered_ptrs(&snapshot.f32_ptrs);
-    restore_registered_ptrs(&snapshot.f64_ptrs);
+    restore_registered_ptrs(
+        &snapshot.i32_ptrs,
+        registered_i32_ptrs(),
+        owned_i32_scalars(),
+    );
+    restore_registered_ptrs(
+        &snapshot.f32_ptrs,
+        registered_f32_ptrs(),
+        owned_f32_scalars(),
+    );
+    restore_registered_ptrs(
+        &snapshot.f64_ptrs,
+        registered_f64_ptrs(),
+        owned_f64_scalars(),
+    );
     restore_registered_arrays(
         &snapshot.i32_arrays,
         registered_i32_arrays(),
@@ -1248,27 +1693,74 @@ pub fn restore_jit_runtime_state(snapshot: &JitRuntimeStateSnapshot) {
         registered_u8_arrays(),
         Some(owned_u8_arrays()),
     );
+    refresh_direct_storage_slots();
 }
 
-fn snapshot_registered_ptrs<T: Copy>(table: &Mutex<HashMap<i32, usize>>) -> Vec<(usize, T)> {
+fn refresh_direct_storage_slots() {
+    let keys = direct_storage_slots()
+        .lock()
+        .expect("direct storage slot table mutex poisoned")
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    for (kind, collection_hash, field_hash) in keys {
+        let (data, len) = registered_storage(kind, collection_hash, field_hash).unwrap_or((0, 0));
+        update_direct_storage_slot((kind, collection_hash, field_hash), data, len);
+    }
+}
+
+fn snapshot_registered_ptrs<T: Copy>(
+    table: &Mutex<HashMap<i32, usize>>,
+    owned: &Mutex<HashMap<i32, Box<T>>>,
+) -> Vec<RegisteredScalarSnapshot<T>> {
+    let owned_addresses = owned
+        .lock()
+        .expect("owned scalar table mutex poisoned")
+        .iter()
+        .map(|(key, value)| (*key, value.as_ref() as *const T as usize))
+        .collect::<HashMap<_, _>>();
     table
         .lock()
         .expect("registered global pointer table mutex poisoned")
-        .values()
-        .copied()
-        .map(|address| {
+        .iter()
+        .map(|(key, address)| {
             // Registered pointers remain host-owned and stable for the in-process runtime.
-            let value = unsafe { *(address as *const T) };
-            (address, value)
+            let value = unsafe { *(*address as *const T) };
+            RegisteredScalarSnapshot {
+                key: *key,
+                address: *address,
+                value,
+                owned: owned_addresses.get(key) == Some(address),
+            }
         })
         .collect()
 }
 
-fn restore_registered_ptrs<T: Copy>(values: &[(usize, T)]) {
-    for (address, value) in values {
-        // Restoration runs at a main-thread tick boundary while the registered owner is alive.
-        unsafe { *(*address as *mut T) = *value };
+fn restore_registered_ptrs<T: Copy>(
+    values: &[RegisteredScalarSnapshot<T>],
+    registered: &Mutex<HashMap<i32, usize>>,
+    owned: &Mutex<HashMap<i32, Box<T>>>,
+) {
+    let mut restored = HashMap::new();
+    let mut owned = owned.lock().expect("owned scalar table mutex poisoned");
+    owned.retain(|key, _| values.iter().any(|value| value.owned && value.key == *key));
+    for snapshot in values {
+        let address = if snapshot.owned {
+            let value = owned
+                .entry(snapshot.key)
+                .or_insert_with(|| Box::new(snapshot.value));
+            **value = snapshot.value;
+            value.as_mut() as *mut T as usize
+        } else {
+            // Restoration runs at a main-thread tick boundary while the registered owner is alive.
+            unsafe { *(snapshot.address as *mut T) = snapshot.value };
+            snapshot.address
+        };
+        restored.insert(snapshot.key, address);
     }
+    *registered
+        .lock()
+        .expect("registered scalar table mutex poisoned") = restored;
 }
 
 fn snapshot_registered_arrays<T: Copy>(
@@ -1342,52 +1834,76 @@ pub fn register_global_i32_ptr(path_hash: i32, ptr: *mut i32) {
     if ptr.is_null() {
         return;
     }
+    let Ok(_rebind) = acquire_rebind_guard() else {
+        return;
+    };
     let table = registered_i32_ptrs();
     let mut guard = table
         .lock()
         .expect("registered i32 ptr table mutex poisoned");
     guard.insert(path_hash, ptr as usize);
+    update_direct_storage_slot((JitStorageKind::I32, path_hash, 0), ptr as usize, 1);
 }
 
 pub fn register_global_f32_ptr(path_hash: i32, ptr: *mut f32) {
     if ptr.is_null() {
         return;
     }
+    let Ok(_rebind) = acquire_rebind_guard() else {
+        return;
+    };
     let table = registered_f32_ptrs();
     let mut guard = table
         .lock()
         .expect("registered f32 ptr table mutex poisoned");
     guard.insert(path_hash, ptr as usize);
+    update_direct_storage_slot((JitStorageKind::F32, path_hash, 0), ptr as usize, 1);
 }
 
 pub fn register_global_f64_ptr(path_hash: i32, ptr: *mut f64) {
     if ptr.is_null() {
         return;
     }
+    let Ok(_rebind) = acquire_rebind_guard() else {
+        return;
+    };
     let table = registered_f64_ptrs();
     let mut guard = table
         .lock()
         .expect("registered f64 ptr table mutex poisoned");
     guard.insert(path_hash, ptr as usize);
+    update_direct_storage_slot((JitStorageKind::F64, path_hash, 0), ptr as usize, 1);
 }
 
 pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mut i32, len: usize) {
     if ptr.is_null() {
         return;
     }
+    let Ok(_rebind) = acquire_rebind_guard() else {
+        return;
+    };
     let key = (collection_hash, field_hash);
+    discard_integer_array_lane(key, JitStorageKind::I32);
     remove_replaced_owned_array(key, ptr as usize, owned_i32_arrays());
     let table = registered_i32_arrays();
     let mut guard = table
         .lock()
         .expect("registered i32 array table mutex poisoned");
     guard.insert(key, (ptr as usize, len));
+    update_direct_storage_slot(
+        (JitStorageKind::I32, collection_hash, field_hash),
+        ptr as usize,
+        len,
+    );
 }
 
 pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mut f32, len: usize) {
     if ptr.is_null() {
         return;
     }
+    let Ok(_rebind) = acquire_rebind_guard() else {
+        return;
+    };
     let key = (collection_hash, field_hash);
     remove_replaced_owned_array(key, ptr as usize, owned_f32_arrays());
     let table = registered_f32_arrays();
@@ -1395,12 +1911,20 @@ pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mu
         .lock()
         .expect("registered f32 array table mutex poisoned");
     guard.insert(key, (ptr as usize, len));
+    update_direct_storage_slot(
+        (JitStorageKind::F32, collection_hash, field_hash),
+        ptr as usize,
+        len,
+    );
 }
 
 pub fn register_global_f64_array(collection_hash: i32, field_hash: i32, ptr: *mut f64, len: usize) {
     if ptr.is_null() {
         return;
     }
+    let Ok(_rebind) = acquire_rebind_guard() else {
+        return;
+    };
     let key = (collection_hash, field_hash);
     remove_replaced_owned_array(key, ptr as usize, owned_f64_arrays());
     let table = registered_f64_arrays();
@@ -1408,6 +1932,11 @@ pub fn register_global_f64_array(collection_hash: i32, field_hash: i32, ptr: *mu
         .lock()
         .expect("registered f64 array table mutex poisoned");
     guard.insert(key, (ptr as usize, len));
+    update_direct_storage_slot(
+        (JitStorageKind::F64, collection_hash, field_hash),
+        ptr as usize,
+        len,
+    );
 }
 
 fn remove_replaced_owned_array<T>(
@@ -1424,15 +1953,52 @@ fn remove_replaced_owned_array<T>(
     }
 }
 
+fn discard_integer_array_lane(key: ArrayKey, retained: JitStorageKind) {
+    match retained {
+        JitStorageKind::I32 => {
+            registered_u8_arrays()
+                .lock()
+                .expect("registered u8 array table mutex poisoned")
+                .remove(&key);
+            owned_u8_arrays()
+                .lock()
+                .expect("owned u8 array table mutex poisoned")
+                .remove(&key);
+        }
+        JitStorageKind::U8 => {
+            registered_i32_arrays()
+                .lock()
+                .expect("registered i32 array table mutex poisoned")
+                .remove(&key);
+            owned_i32_arrays()
+                .lock()
+                .expect("owned i32 array table mutex poisoned")
+                .remove(&key);
+        }
+        JitStorageKind::F32 | JitStorageKind::F64 => {}
+    }
+}
+
 pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut u8, len: usize) {
     if ptr.is_null() {
         return;
     }
+    let Ok(_rebind) = acquire_rebind_guard() else {
+        return;
+    };
+    let key = (collection_hash, field_hash);
+    discard_integer_array_lane(key, JitStorageKind::U8);
+    remove_replaced_owned_array(key, ptr as usize, owned_u8_arrays());
     let table = registered_u8_arrays();
     let mut guard = table
         .lock()
         .expect("registered u8 array table mutex poisoned");
-    guard.insert((collection_hash, field_hash), (ptr as usize, len));
+    guard.insert(key, (ptr as usize, len));
+    update_direct_storage_slot(
+        (JitStorageKind::U8, collection_hash, field_hash),
+        ptr as usize,
+        len,
+    );
 }
 
 #[no_mangle]
@@ -1512,71 +2078,26 @@ pub extern "C" fn stasis_jit_global_i32_array_ptr(
         return std::ptr::null_mut();
     }
 
-    // Fast path: already registered (host-owned or previously allocated).
-    let registered_len = {
-        let table = registered_i32_arrays();
-        let guard = table
-            .lock()
-            .expect("registered i32 array table mutex poisoned");
-        if let Some((ptr, registered_len)) = guard.get(&(collection_hash, field_hash)).copied() {
-            if registered_len >= len as usize {
-                return ptr as *mut i32;
-            }
-            Some(registered_len)
-        } else {
-            None
-        }
-    };
-
-    if registered_len.is_some() {
-        if ensure_jit_i32_array_capacity(collection_hash, field_hash, len as usize).is_err() {
-            return std::ptr::null_mut();
-        }
-        return registered_i32_arrays()
-            .lock()
-            .expect("registered i32 array table mutex poisoned")
-            .get(&(collection_hash, field_hash))
-            .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut i32);
-    }
-
     let requested_len = len as usize;
     let key = (collection_hash, field_hash);
-
-    let ptr = {
-        let mut owned_guard = owned_i32_arrays()
-            .lock()
-            .expect("owned i32 array table mutex poisoned");
-        let array = owned_guard
-            .entry(key)
-            .or_insert_with(|| vec![0; requested_len]);
-        if array.len() < requested_len {
-            array.resize(requested_len, 0);
-        }
-
-        // Migrate any previously-stored values from the fallback hash map.
-        {
-            let table = jit_i32_array_global_table();
-            let mut guard = table.lock().expect("jit global table mutex poisoned");
-            for idx in 0..requested_len {
-                let idx_i32 = idx as i32;
-                if let Some(value) = guard.remove(&(collection_hash, field_hash, idx_i32)) {
-                    array[idx] = value;
-                }
-            }
-        }
-
-        array.as_mut_ptr()
-    };
-
+    if let Some((ptr, registered_len)) = registered_i32_arrays()
+        .lock()
+        .expect("registered i32 array table mutex poisoned")
+        .get(&key)
+        .copied()
     {
-        let table = registered_i32_arrays();
-        let mut guard = table
-            .lock()
-            .expect("registered i32 array table mutex poisoned");
-        guard.insert(key, (ptr as usize, requested_len));
+        if registered_len >= requested_len {
+            return ptr as *mut i32;
+        }
     }
-
-    ptr
+    if ensure_jit_i32_array_capacity(collection_hash, field_hash, requested_len).is_err() {
+        return std::ptr::null_mut();
+    }
+    registered_i32_arrays()
+        .lock()
+        .expect("registered i32 array table mutex poisoned")
+        .get(&key)
+        .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut i32)
 }
 
 #[no_mangle]
@@ -1589,74 +2110,26 @@ pub extern "C" fn stasis_jit_global_f32_array_ptr(
         return std::ptr::null_mut();
     }
 
-    // Fast path: already registered (host-owned or previously allocated).
-    let registered_len = {
-        let table = registered_f32_arrays();
-        let guard = table
-            .lock()
-            .expect("registered f32 array table mutex poisoned");
-        if let Some((ptr, registered_len)) = guard.get(&(collection_hash, field_hash)).copied() {
-            if registered_len >= len as usize {
-                return ptr as *mut f32;
-            }
-            Some(registered_len)
-        } else {
-            None
-        }
-    };
-
-    if registered_len.is_some() {
-        if ensure_jit_f32_array_capacity(collection_hash, field_hash, len as usize).is_err() {
-            return std::ptr::null_mut();
-        }
-        return registered_f32_arrays()
-            .lock()
-            .expect("registered f32 array table mutex poisoned")
-            .get(&(collection_hash, field_hash))
-            .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut f32);
-    }
-
     let requested_len = len as usize;
     let key = (collection_hash, field_hash);
-
-    // Allocate (or reuse) an owned backing array, then register it so subsequent helper calls
-    // can skip the fallback hash map path.
-    let ptr = {
-        let mut owned_guard = owned_f32_arrays()
-            .lock()
-            .expect("owned f32 array table mutex poisoned");
-        let array = owned_guard
-            .entry(key)
-            .or_insert_with(|| vec![0.0; requested_len]);
-        if array.len() < requested_len {
-            array.resize(requested_len, 0.0);
-        }
-
-        // Migrate any previously-stored values from the fallback hash map.
-        {
-            let table = jit_f32_array_global_table();
-            let mut guard = table.lock().expect("jit global table mutex poisoned");
-            for idx in 0..requested_len {
-                let idx_i32 = idx as i32;
-                if let Some(value) = guard.remove(&(collection_hash, field_hash, idx_i32)) {
-                    array[idx] = value;
-                }
-            }
-        }
-
-        array.as_mut_ptr()
-    };
-
+    if let Some((ptr, registered_len)) = registered_f32_arrays()
+        .lock()
+        .expect("registered f32 array table mutex poisoned")
+        .get(&key)
+        .copied()
     {
-        let table = registered_f32_arrays();
-        let mut guard = table
-            .lock()
-            .expect("registered f32 array table mutex poisoned");
-        // Register with the requested len so helper loads/stores use the same bounds as foreach.
-        guard.insert(key, (ptr as usize, requested_len));
+        if registered_len >= requested_len {
+            return ptr as *mut f32;
+        }
     }
-
-    ptr
+    if ensure_jit_f32_array_capacity(collection_hash, field_hash, requested_len).is_err() {
+        return std::ptr::null_mut();
+    }
+    registered_f32_arrays()
+        .lock()
+        .expect("registered f32 array table mutex poisoned")
+        .get(&key)
+        .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut f32)
 }
 
 fn global_u8_array_ptr(collection_hash: i32, field_hash: i32, len: i32) -> *mut u8 {
@@ -1672,38 +2145,18 @@ fn global_u8_array_ptr(collection_hash: i32, field_hash: i32, len: i32) -> *mut 
         .get(&key)
         .copied()
     {
-        return if registered_len >= requested_len {
-            ptr as *mut u8
-        } else {
-            std::ptr::null_mut()
-        };
+        if registered_len >= requested_len {
+            return ptr as *mut u8;
+        }
     }
-
-    let ptr = {
-        let mut owned_guard = owned_u8_arrays()
-            .lock()
-            .expect("owned u8 array table mutex poisoned");
-        let array = owned_guard
-            .entry(key)
-            .or_insert_with(|| vec![0; requested_len]);
-        if array.len() < requested_len {
-            array.resize(requested_len, 0);
-        }
-        let mut fallback = jit_i32_array_global_table()
-            .lock()
-            .expect("jit global table mutex poisoned");
-        for (index, value) in array.iter_mut().enumerate() {
-            if let Some(stored) = fallback.remove(&(collection_hash, field_hash, index as i32)) {
-                *value = stored as u8;
-            }
-        }
-        array.as_mut_ptr()
-    };
+    if ensure_jit_u8_array_capacity(collection_hash, field_hash, requested_len).is_err() {
+        return std::ptr::null_mut();
+    }
     registered_u8_arrays()
         .lock()
         .expect("registered u8 array table mutex poisoned")
-        .insert(key, (ptr as usize, requested_len));
-    ptr
+        .get(&key)
+        .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut u8)
 }
 
 #[no_mangle]
@@ -1716,71 +2169,26 @@ pub extern "C" fn stasis_jit_global_f64_array_ptr(
         return std::ptr::null_mut();
     }
 
-    // Fast path: already registered (host-owned or previously allocated).
-    let registered_len = {
-        let table = registered_f64_arrays();
-        let guard = table
-            .lock()
-            .expect("registered f64 array table mutex poisoned");
-        if let Some((ptr, registered_len)) = guard.get(&(collection_hash, field_hash)).copied() {
-            if registered_len >= len as usize {
-                return ptr as *mut f64;
-            }
-            Some(registered_len)
-        } else {
-            None
-        }
-    };
-
-    if registered_len.is_some() {
-        if ensure_jit_f64_array_capacity(collection_hash, field_hash, len as usize).is_err() {
-            return std::ptr::null_mut();
-        }
-        return registered_f64_arrays()
-            .lock()
-            .expect("registered f64 array table mutex poisoned")
-            .get(&(collection_hash, field_hash))
-            .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut f64);
-    }
-
     let requested_len = len as usize;
     let key = (collection_hash, field_hash);
-
-    let ptr = {
-        let mut owned_guard = owned_f64_arrays()
-            .lock()
-            .expect("owned f64 array table mutex poisoned");
-        let array = owned_guard
-            .entry(key)
-            .or_insert_with(|| vec![0.0; requested_len]);
-        if array.len() < requested_len {
-            array.resize(requested_len, 0.0);
-        }
-
-        // Migrate any previously-stored values from the fallback hash map.
-        {
-            let table = jit_f64_array_global_table();
-            let mut guard = table.lock().expect("jit global table mutex poisoned");
-            for idx in 0..requested_len {
-                let idx_i32 = idx as i32;
-                if let Some(value) = guard.remove(&(collection_hash, field_hash, idx_i32)) {
-                    array[idx] = value;
-                }
-            }
-        }
-
-        array.as_mut_ptr()
-    };
-
+    if let Some((ptr, registered_len)) = registered_f64_arrays()
+        .lock()
+        .expect("registered f64 array table mutex poisoned")
+        .get(&key)
+        .copied()
     {
-        let table = registered_f64_arrays();
-        let mut guard = table
-            .lock()
-            .expect("registered f64 array table mutex poisoned");
-        guard.insert(key, (ptr as usize, requested_len));
+        if registered_len >= requested_len {
+            return ptr as *mut f64;
+        }
     }
-
-    ptr
+    if ensure_jit_f64_array_capacity(collection_hash, field_hash, requested_len).is_err() {
+        return std::ptr::null_mut();
+    }
+    registered_f64_arrays()
+        .lock()
+        .expect("registered f64 array table mutex poisoned")
+        .get(&key)
+        .map_or(std::ptr::null_mut(), |(ptr, _)| *ptr as *mut f64)
 }
 
 #[no_mangle]
@@ -2978,36 +3386,78 @@ pub fn clear_jit_i32_global_table() {
     let table = jit_i32_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.clear();
+    for value in owned_i32_scalars()
+        .lock()
+        .expect("owned i32 scalar table mutex poisoned")
+        .values_mut()
+    {
+        **value = 0;
+    }
 }
 
 pub fn clear_jit_f32_global_table() {
     let table = jit_f32_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.clear();
+    for value in owned_f32_scalars()
+        .lock()
+        .expect("owned f32 scalar table mutex poisoned")
+        .values_mut()
+    {
+        **value = 0.0;
+    }
 }
 
 pub fn clear_jit_f64_global_table() {
     let table = jit_f64_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.clear();
+    for value in owned_f64_scalars()
+        .lock()
+        .expect("owned f64 scalar table mutex poisoned")
+        .values_mut()
+    {
+        **value = 0.0;
+    }
 }
 
 pub fn clear_jit_i32_array_global_table() {
     let table = jit_i32_array_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.clear();
+    for values in owned_i32_arrays()
+        .lock()
+        .expect("owned i32 array table mutex poisoned")
+        .values_mut()
+    {
+        values.fill(0);
+    }
 }
 
 pub fn clear_jit_f32_array_global_table() {
     let table = jit_f32_array_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.clear();
+    for values in owned_f32_arrays()
+        .lock()
+        .expect("owned f32 array table mutex poisoned")
+        .values_mut()
+    {
+        values.fill(0.0);
+    }
 }
 
 pub fn clear_jit_f64_array_global_table() {
     let table = jit_f64_array_global_table();
     let mut guard = table.lock().expect("jit global table mutex poisoned");
     guard.clear();
+    for values in owned_f64_arrays()
+        .lock()
+        .expect("owned f64 array table mutex poisoned")
+        .values_mut()
+    {
+        values.fill(0.0);
+    }
 }
 
 #[no_mangle]
@@ -3674,9 +4124,10 @@ mod tests {
     use std::sync::MutexGuard;
 
     fn test_lock() -> MutexGuard<'static, ()> {
-        jit_dispatch_lock()
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("jit dispatch lock mutex poisoned")
+            .expect("dynload test lock mutex poisoned")
     }
 
     #[cfg(windows)]
@@ -3809,6 +4260,56 @@ mod tests {
         assert_eq!(stasis_jit_global_i32_load(30), 9);
         assert_eq!(stasis_jit_global_i32_load(31), 0);
         assert_eq!(stasis_jit_global_f32_array_load(40, 2, 0), 1.5);
+    }
+
+    #[test]
+    fn runtime_state_rollback_rebinds_direct_storage_descriptor_atomically() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        let key = 77;
+        let mut original = [3, 5];
+        register_global_i32_array(key, 0, original.as_mut_ptr(), original.len());
+        let slot_address = direct_array_storage_slot_address(JitStorageKind::I32, key, 0)
+            .expect("reserve direct slot");
+        let snapshot = snapshot_jit_runtime_state();
+
+        let mut replacement = [9, 8, 7, 6];
+        register_global_i32_array(key, 0, replacement.as_mut_ptr(), replacement.len());
+        let slot = unsafe { &*(slot_address as *const JitStorageSlot) };
+        assert_eq!(slot.data, replacement.as_ptr() as usize);
+        assert_eq!(slot.len, replacement.len());
+
+        restore_jit_runtime_state(&snapshot);
+        let slot = unsafe { &*(slot_address as *const JitStorageSlot) };
+        assert_eq!(slot.data, original.as_ptr() as usize);
+        assert_eq!(slot.len, original.len());
+        assert_eq!(unsafe { *(slot.data as *const i32).add(1) }, 5);
+        clear_registered_global_memory();
+    }
+
+    #[test]
+    fn direct_array_growth_is_rejected_during_guest_execution() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        let key = 78;
+        let mut values = [3, 5];
+        register_global_i32_array(key, 0, values.as_mut_ptr(), values.len());
+        let slot_address = direct_array_storage_slot_address(JitStorageKind::I32, key, 0)
+            .expect("reserve direct slot");
+
+        {
+            let _execution = JitExecutionGuard::enter();
+            let error = ensure_jit_i32_array_capacity(key, 0, 4)
+                .expect_err("growth must not rebind direct storage during guest execution");
+            assert!(error.contains("between guest execution windows"));
+            assert!(stasis_jit_global_i32_array_ptr(key, 0, 4).is_null());
+        }
+
+        let slot = unsafe { &*(slot_address as *const JitStorageSlot) };
+        assert_eq!(slot.data, values.as_ptr() as usize);
+        assert_eq!(slot.len, values.len());
+        assert_eq!(values, [3, 5]);
+        clear_registered_global_memory();
     }
 
     #[test]

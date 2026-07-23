@@ -1,4 +1,4 @@
-use crate::backend::emit::RuntimeHelperLinkage;
+use crate::backend::emit::{DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage};
 use crate::backend::state_layout::build_state_layout;
 use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
@@ -12,9 +12,11 @@ use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Module};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::rc::Rc;
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::SystemTime;
@@ -53,6 +55,7 @@ pub struct JitArtifact {
     pub slot: u32,
     pub body_hash: u64,
     pub code_ptr: u64,
+    pub clif: String,
 }
 
 pub struct JitProcess {
@@ -272,6 +275,13 @@ impl JitProcess {
                 "jit compile analysis cache missing after refresh".to_string(),
             )
         })?;
+        let direct_storage = build_direct_storage_bindings(
+            &analysis.global_path_types,
+            &analysis.collection_infos,
+            self.compiler.types(),
+            false,
+        )
+        .map_err(crate::compiler::CompileError::Backend)?;
         let emit_function_ids = select_emit_function_ids(
             self.compiler.functions(),
             self.artifacts(),
@@ -303,10 +313,11 @@ impl JitProcess {
                         &analysis.collection_infos,
                         &analysis.named_struct_field_types,
                         &analysis.extern_symbol_addresses,
+                        &direct_storage,
                         local_runtime_helper_trampolines,
                     )
                 }));
-                let (module, code_ptr) = match compiled {
+                let (module, code_ptr, clif) = match compiled {
                     Ok(result) => result?,
                     Err(payload) => {
                         let message = payload
@@ -329,6 +340,7 @@ impl JitProcess {
                     slot,
                     body_hash: meta.body_hash,
                     code_ptr,
+                    clif,
                 });
                 Ok(())
             },
@@ -352,6 +364,16 @@ impl JitProcess {
         &self.artifacts
     }
 
+    pub fn clif_for_function_name(&self, name: &str) -> Option<&str> {
+        let function = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == name)?;
+        self.artifact_for_function_id(function.id)
+            .map(|artifact| artifact.clif.as_str())
+    }
+
     pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
         self.compiler.last_source_diagnostic()
     }
@@ -366,6 +388,12 @@ impl JitProcess {
             .compile_analysis_cache
             .as_ref()
             .ok_or_else(|| "cannot activate an uncompiled JIT process".to_string())?;
+        build_direct_storage_bindings(
+            &analysis.global_path_types,
+            &analysis.collection_infos,
+            self.compiler.types(),
+            true,
+        )?;
         seed_fixed_collection_max_length_headers(
             &analysis.global_path_types,
             self.compiler.types(),
@@ -1231,6 +1259,120 @@ fn is_u8_type(type_table: &TypeTable, type_id: u16) -> bool {
         .is_some_and(|info| info.name == "u8")
 }
 
+fn scalar_storage_kind(
+    type_table: &TypeTable,
+    type_id: u16,
+) -> Option<stasis_dynload::JitStorageKind> {
+    match type_id {
+        TYPE_ID_I32 | TYPE_ID_BOOL => Some(stasis_dynload::JitStorageKind::I32),
+        TYPE_ID_F32 => Some(stasis_dynload::JitStorageKind::F32),
+        TYPE_ID_F64 => Some(stasis_dynload::JitStorageKind::F64),
+        type_id if is_u8_type(type_table, type_id) => Some(stasis_dynload::JitStorageKind::I32),
+        _ => None,
+    }
+}
+
+fn array_storage_kind(
+    type_table: &TypeTable,
+    type_id: u16,
+) -> Option<stasis_dynload::JitStorageKind> {
+    if is_u8_type(type_table, type_id) {
+        return Some(stasis_dynload::JitStorageKind::U8);
+    }
+    if crate::backend::emit::is_i32_abi_compatible_type(type_id, type_table) {
+        return Some(stasis_dynload::JitStorageKind::I32);
+    }
+    scalar_storage_kind(type_table, type_id)
+}
+
+fn build_direct_storage_bindings(
+    global_path_types: &crate::backend::emit::GlobalPathTypeMap,
+    collection_infos: &crate::backend::emit::CollectionInfoMap,
+    type_table: &TypeTable,
+    provision: bool,
+) -> Result<DirectStorageBindings, String> {
+    let mut bindings = DirectStorageBindings::default();
+    for (path, type_id) in global_path_types {
+        if collection_infos.contains_key(path) {
+            continue;
+        }
+        if let Some(kind) = scalar_storage_kind(type_table, *type_id) {
+            let path_hash = crate::backend::emit::hash_global_path(path);
+            let address = stasis_dynload::direct_scalar_storage_slot_address(kind, path_hash)?;
+            if provision {
+                stasis_dynload::provision_direct_scalar_storage(kind, path_hash)?;
+            }
+            bindings
+                .scalars
+                .insert(path.clone(), DirectStorageBinding::Absolute(address));
+        }
+    }
+    for (path, info) in collection_infos {
+        let path_hash = crate::backend::emit::hash_global_path(path);
+        if let Some(type_id) = info.element_type {
+            let text_storage = global_path_types
+                .get(path)
+                .and_then(|global_type| type_table.type_info(*global_type))
+                .is_some_and(|type_info| {
+                    matches!(
+                        type_info.category,
+                        TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed
+                    )
+                });
+            let kind = if text_storage {
+                Some(stasis_dynload::JitStorageKind::U8)
+            } else {
+                array_storage_kind(type_table, type_id)
+            }
+            .ok_or_else(|| {
+                format!("unsupported direct storage element type {type_id} for '{path}'")
+            })?;
+            let address = stasis_dynload::direct_array_storage_slot_address(kind, path_hash, 0)?;
+            if provision {
+                stasis_dynload::provision_direct_array_storage(
+                    kind,
+                    path_hash,
+                    0,
+                    info.len as usize,
+                )?;
+            }
+            bindings.arrays.insert(
+                (path.clone(), String::new()),
+                crate::backend::emit::DirectArrayStorageBinding {
+                    slot: DirectStorageBinding::Absolute(address),
+                    byte_lane: kind == stasis_dynload::JitStorageKind::U8,
+                    static_len: None,
+                },
+            );
+        }
+        for (field, type_id) in &info.field_types {
+            let kind = array_storage_kind(type_table, *type_id).ok_or_else(|| {
+                format!("unsupported direct storage field type {type_id} for '{path}.{field}'")
+            })?;
+            let field_hash = crate::backend::emit::hash_foreach_field_suffix(field);
+            let address =
+                stasis_dynload::direct_array_storage_slot_address(kind, path_hash, field_hash)?;
+            if provision {
+                stasis_dynload::provision_direct_array_storage(
+                    kind,
+                    path_hash,
+                    field_hash,
+                    info.len as usize,
+                )?;
+            }
+            bindings.arrays.insert(
+                (path.clone(), field.clone()),
+                crate::backend::emit::DirectArrayStorageBinding {
+                    slot: DirectStorageBinding::Absolute(address),
+                    byte_lane: kind == stasis_dynload::JitStorageKind::U8,
+                    static_len: None,
+                },
+            );
+        }
+    }
+    Ok(bindings)
+}
+
 fn collect_current_string_literals(compiler: &Compiler) -> Result<HashMap<i32, String>, String> {
     let mut literals = HashMap::new();
     for file in compiler.files() {
@@ -1585,8 +1727,9 @@ fn compile_function_to_jit_module(
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
     extern_symbol_addresses: &ExternSymbolAddressMap,
+    direct_storage: &DirectStorageBindings,
     local_runtime_helper_trampolines: bool,
-) -> Result<(JITModule, u64), String> {
+) -> Result<(JITModule, u64, String), String> {
     let mut jit_builder = new_stasis_jit_builder()?;
     jit_builder.symbol(
         "stasis_jit_call_i32_0",
@@ -1804,7 +1947,9 @@ fn compile_function_to_jit_module(
         .map_or(RuntimeHelperLinkage::Imported, |addresses| {
             RuntimeHelperLinkage::LocalTrampolines(addresses)
         });
-    compile_function_with_module(
+    let clif = Rc::new(RefCell::new(String::new()));
+    let clif_capture = Rc::clone(&clif);
+    let (module, code_ptr) = compile_function_with_module(
         JITModule::new(jit_builder),
         meta,
         hir,
@@ -1817,8 +1962,11 @@ fn compile_function_to_jit_module(
         constant_values,
         collection_infos,
         named_struct_field_types,
+        Some(direct_storage),
         |_| Ok(()),
-        |_, _| {},
+        move |_, function| {
+            *clif_capture.borrow_mut() = function.display().to_string();
+        },
         |mut module, function_id, mut context| {
             module
                 .define_function(function_id, &mut context)
@@ -1830,7 +1978,9 @@ fn compile_function_to_jit_module(
             let code_ptr = module.get_finalized_function(function_id) as usize as u64;
             Ok((module, code_ptr))
         },
-    )
+    )?;
+    let clif = clif.borrow().clone();
+    Ok((module, code_ptr, clif))
 }
 
 #[cfg(test)]
@@ -1868,20 +2018,61 @@ mod tests {
     }
 
     #[test]
-    fn local_runtime_helper_trampolines_emit_only_referenced_helpers() {
+    fn direct_global_storage_emits_no_local_runtime_helper_trampolines() {
         crate::backend::emit::reset_runtime_helper_trampoline_count_for_test();
         let mut process = JitProcess::new();
         process.set_local_runtime_helper_trampolines(true);
         process.upsert_file(
             "sample.stasis",
-            "global State { value: i32; }\nfunction main(): i32 { State.value = 7; return State.value; }\n",
+            "global State { value: i32; }\nglobal bytes: u8[3];\nfunction main(): i32 { State.value = 7; bytes[0] = 1; bytes[1] = 2; bytes[2] = 3; let total: i32 = 0; foreach (let byte in bytes) { total += byte; byte += 1; } return State.value + total + bytes[0]; }\n",
         );
         process.compile().expect("jit compile");
-        assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 7);
+        assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 15);
         assert_eq!(
             crate::backend::emit::runtime_helper_trampoline_count_for_test(),
-            2
+            0
         );
+    }
+
+    #[test]
+    fn direct_foreach_caps_iteration_at_rebound_storage_length() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "rebound_foreach.stasis",
+            "struct ReboundItem172 { score: i32; weight: f32; }\nglobal rebound_nums_172: i32[4];\nglobal rebound_bytes_172: u8[4];\nglobal rebound_items_172: ReboundItem172[4];\nfunction main(): i32 { let total: i32 = 0; foreach (let value in rebound_nums_172) { total += value; } foreach (let byte in rebound_bytes_172) { total += byte; } foreach (let item in rebound_items_172) { total += item.score; if (item.weight > 0.0) { total += 1; } } return total; }\n",
+        );
+        process.compile().expect("jit compile");
+
+        let nums = Box::leak(Box::new([2, 3]));
+        let bytes = Box::leak(Box::new([4]));
+        let scores = Box::leak(Box::new([5, 6]));
+        let weights = Box::leak(Box::new([1.0]));
+        stasis_dynload::register_global_i32_array(
+            hash_global_path("rebound_nums_172"),
+            0,
+            nums.as_mut_ptr(),
+            nums.len(),
+        );
+        stasis_dynload::register_global_u8_array(
+            hash_global_path("rebound_bytes_172"),
+            0,
+            bytes.as_mut_ptr(),
+            bytes.len(),
+        );
+        stasis_dynload::register_global_i32_array(
+            hash_global_path("rebound_items_172"),
+            crate::backend::emit::hash_foreach_field_suffix("score"),
+            scores.as_mut_ptr(),
+            scores.len(),
+        );
+        stasis_dynload::register_global_f32_array(
+            hash_global_path("rebound_items_172"),
+            crate::backend::emit::hash_foreach_field_suffix("weight"),
+            weights.as_mut_ptr(),
+            weights.len(),
+        );
+
+        assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 15);
     }
 
     #[test]
@@ -3463,6 +3654,114 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 7);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_lowers_core_global_storage_without_runtime_calls() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "direct_storage.stasis",
+            "struct Enemy { hp: i32; speed: f32; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ints: i32[2];\nglobal floats: f32[2];\nglobal doubles: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction main(): i32 {\n    count = 7;\n    ratio = 1.5;\n    precise = 2.5;\n    ints[0] = 11;\n    floats[1] = 3.5;\n    doubles[0] = 4.5;\n    bytes[2] = 250;\n    enemies[0].hp = 13;\n    enemies[0].speed = 6.5;\n    label[0] = 65;\n    let negative: i32 = 0 - 1;\n    ints[negative] = 99;\n    ints[8] = 88;\n    let result: i32 = count + ints[0] + bytes[2] + enemies[0].hp + label[0] + label.max_length;\n    if (ints[negative] != 0) { return 1; }\n    if (ints[8] != 0) { return 2; }\n    if (ratio < 1.4) { return 3; }\n    if (precise < 2.4) { return 4; }\n    if (floats[1] < 3.4) { return 5; }\n    if (doubles[0] < 4.4) { return 6; }\n    if (enemies[0].speed < 6.4) { return 7; }\n    return result;\n}\n",
+        );
+        process.compile().expect("compile direct storage fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute direct storage fixture"),
+            350
+        );
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(clif.contains("load.i32"), "expected direct loads:\n{clif}");
+        assert!(clif.contains("store"), "expected direct stores:\n{clif}");
+        let has_call_instruction = clif.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("call ") || line.contains(" = call ")
+        });
+        assert!(
+            !has_call_instruction,
+            "core global storage emitted a runtime call:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_storage_rebinding_is_rejected_during_execution_windows() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "rebind.stasis",
+            "global value: i32;\nfunction main(): i32 { value += 1; return value; }\n",
+        );
+        process.compile().expect("compile rebind fixture");
+        let path_hash = hash_global_path("value");
+        let first = Box::leak(Box::new(40));
+        let second = Box::leak(Box::new(90));
+        stasis_dynload::register_global_i32_ptr(path_hash, first);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("first run"),
+            41
+        );
+        {
+            let _execution = stasis_dynload::JitExecutionGuard::enter();
+            stasis_dynload::register_global_i32_ptr(path_hash, second);
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("run after rejected in-window rebind"),
+            42
+        );
+        assert_eq!(*second, 90);
+        stasis_dynload::register_global_i32_ptr(path_hash, second);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("run after boundary rebind"),
+            91
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_direct_array_bounds_follow_between_tick_rebinding() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "resize.stasis",
+            "global values: i32[2];\nfunction main(): i32 { return values[3]; }\n",
+        );
+        process.compile().expect("compile resize fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("initial run"),
+            0
+        );
+
+        let hash = hash_global_path("values");
+        let expanded = Box::leak(Box::new([1, 2, 3, 44]));
+        stasis_dynload::register_global_i32_array(hash, 0, expanded.as_mut_ptr(), expanded.len());
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("expanded run"),
+            44
+        );
+
+        let contracted = Box::leak(Box::new([9]));
+        stasis_dynload::register_global_i32_array(
+            hash,
+            0,
+            contracted.as_mut_ptr(),
+            contracted.len(),
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("contracted run"),
+            0
+        );
     }
 
     #[test]

@@ -2,7 +2,9 @@ use crate::backend::emit::*;
 use crate::backend::state_layout::{build_state_layout, StateLayout};
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
-use crate::frontend::types::{TypeCategory, TypeTable, TYPE_ID_I32};
+use crate::frontend::types::{
+    TypeCategory, TypeId, TypeTable, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+};
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
@@ -137,6 +139,12 @@ impl AotProcess {
         self.collection_max_lengths =
             collect_fixed_collection_max_lengths(&analysis.global_path_types, &analysis_type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
+        let direct_storage = build_aot_direct_storage_bindings(
+            &analysis.global_path_types,
+            &analysis.collection_infos,
+            &analysis_type_table,
+        )
+        .map_err(crate::compiler::CompileError::Backend)?;
         let compiled_body_hashes: HashMap<FunctionId, u64> = self
             .artifacts
             .iter()
@@ -188,6 +196,7 @@ impl AotProcess {
                     &target,
                     &analysis.collection_infos,
                     &analysis.named_struct_field_types,
+                    &direct_storage,
                 )?;
                 let object_index = *next_object_index;
                 *next_object_index = next_object_index.saturating_add(1);
@@ -570,6 +579,103 @@ fn object_file_extension(target: &stasis_jit::AotTarget) -> &'static str {
     }
 }
 
+fn aot_scalar_lane(type_id: TypeId, type_table: &TypeTable) -> Option<&'static str> {
+    if is_i32_abi_compatible_type(type_id, type_table) {
+        Some("i32")
+    } else if type_id == TYPE_ID_F32 {
+        Some("f32")
+    } else if type_id == TYPE_ID_F64 {
+        Some("f64")
+    } else {
+        None
+    }
+}
+
+fn aot_array_lane(
+    path: &str,
+    type_id: TypeId,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Option<&'static str> {
+    let text_storage = global_path_types
+        .get(path)
+        .and_then(|global_type| type_table.type_info(*global_type))
+        .is_some_and(|info| {
+            matches!(
+                info.category,
+                TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed
+            )
+        });
+    let u8_storage = type_table
+        .type_info(type_id)
+        .is_some_and(|info| info.name == "u8");
+    if text_storage || u8_storage || path == "gfx_cmd_u8" {
+        Some("u8")
+    } else {
+        aot_scalar_lane(type_id, type_table)
+    }
+}
+
+fn build_aot_direct_storage_bindings(
+    global_path_types: &GlobalPathTypeMap,
+    collection_infos: &CollectionInfoMap,
+    type_table: &TypeTable,
+) -> Result<DirectStorageBindings, String> {
+    fn storage_symbol(path: &str, field: &str) -> String {
+        if field.is_empty() {
+            path.replace('.', "__")
+        } else {
+            format!("{}__{}", path.replace('.', "__"), field.replace('.', "__"))
+        }
+    }
+
+    let mut bindings = DirectStorageBindings::default();
+    for (path, type_id) in global_path_types {
+        if collection_infos.contains_key(path) {
+            continue;
+        }
+        if aot_scalar_lane(*type_id, type_table).is_some() {
+            bindings.scalars.insert(
+                path.clone(),
+                DirectStorageBinding::Symbol(storage_symbol(path, "")),
+            );
+        }
+    }
+    for (path, info) in collection_infos {
+        if let Some(type_id) = info.element_type {
+            let lane =
+                aot_array_lane(path, type_id, global_path_types, type_table).ok_or_else(|| {
+                    format!("unsupported AOT direct storage element type {type_id} for '{path}'")
+                })?;
+            bindings.arrays.insert(
+                (path.clone(), String::new()),
+                crate::backend::emit::DirectArrayStorageBinding {
+                    slot: DirectStorageBinding::Symbol(storage_symbol(path, "")),
+                    byte_lane: lane == "u8",
+                    static_len: Some(info.len as usize),
+                },
+            );
+        }
+        for (field, type_id) in &info.field_types {
+            let lane =
+                aot_array_lane(path, *type_id, global_path_types, type_table).ok_or_else(|| {
+                    format!(
+                        "unsupported AOT direct storage field type {type_id} for '{path}.{field}'"
+                    )
+                })?;
+            bindings.arrays.insert(
+                (path.clone(), field.clone()),
+                crate::backend::emit::DirectArrayStorageBinding {
+                    slot: DirectStorageBinding::Symbol(storage_symbol(path, field)),
+                    byte_lane: lane == "u8",
+                    static_len: Some(info.len as usize),
+                },
+            );
+        }
+    }
+    Ok(bindings)
+}
+
 fn compile_function_to_object_bytes(
     meta: &FunctionMeta,
     hir: &FunctionHIR,
@@ -583,6 +689,7 @@ fn compile_function_to_object_bytes(
     target: &stasis_jit::AotTarget,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    direct_storage: &DirectStorageBindings,
 ) -> Result<Vec<u8>, String> {
     let mut flag_builder = settings::builder();
     flag_builder
@@ -630,6 +737,7 @@ fn compile_function_to_object_bytes(
         constant_values,
         collection_infos,
         named_struct_field_types,
+        Some(direct_storage),
         |statement| record_string_literals_in_stmt(statement, string_literals),
         |_meta, _func| {
             #[cfg(test)]
@@ -961,6 +1069,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    static CLIF_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
     struct ParityCorpusCase {
         label: &'static str,
         source: &'static str,
@@ -1065,6 +1175,7 @@ mod tests {
     }
 
     fn capture_aot_clif_by_function(process: &mut AotProcess) -> BTreeMap<String, String> {
+        let _capture_lock = CLIF_CAPTURE_LOCK.lock().expect("lock CLIF capture");
         let captured: Arc<Mutex<BTreeMap<String, String>>> = Arc::new(Mutex::new(BTreeMap::new()));
         let captured_hook = Arc::clone(&captured);
         set_clif_dump_hook(Some(Box::new(move |meta, func| {
@@ -1098,7 +1209,7 @@ mod tests {
                 expected_extern_symbols: &[],
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[("nums", 3)],
-                expected_clif_markers: &[("main", &["call", "iadd"])],
+                expected_clif_markers: &[("main", &["load.i32", "store", "iadd"])],
             },
             ParityCorpusCase {
                 label: "renderer_command_trace",
@@ -1228,6 +1339,35 @@ mod tests {
                 case.label
             );
         }
+    }
+
+    #[test]
+    fn aot_lowers_core_global_storage_without_runtime_calls() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "direct_storage.stasis",
+            "struct Enemy { hp: i32; speed: f32; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ints: i32[2];\nglobal floats: f32[2];\nglobal doubles: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction main(): i32 {\n    count = 7;\n    ratio = 1.5;\n    precise = 2.5;\n    ints[0] = 11;\n    floats[1] = 3.5;\n    doubles[0] = 4.5;\n    bytes[2] = 250;\n    foreach (let byte in bytes) { byte += 1; }\n    enemies[0].hp = 13;\n    enemies[0].speed = 6.5;\n    label[0] = 65;\n    ints[8] = 88;\n    if (ints[8] != 0) { return 1; }\n    if (enemies[0].speed < 6.4) { return 2; }\n    return count + ints[0] + bytes[2] + enemies[0].hp + label[0] + label.max_length;\n}\n",
+        );
+        let captured = capture_aot_clif_by_function(&mut process);
+        let clif = captured.get("main").expect("main CLIF");
+        assert!(clif.contains("load.i32"), "expected direct loads:\n{clif}");
+        assert!(
+            clif.contains("load.i8"),
+            "expected direct byte loads:\n{clif}"
+        );
+        assert!(clif.contains("store"), "expected direct stores:\n{clif}");
+        assert!(
+            clif.contains("ireduce.i8"),
+            "expected byte-width direct stores:\n{clif}"
+        );
+        let has_call_instruction = clif.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("call ") || line.contains(" = call ")
+        });
+        assert!(
+            !has_call_instruction,
+            "core AOT global storage emitted a runtime call:\n{clif}"
+        );
     }
 
     #[test]
