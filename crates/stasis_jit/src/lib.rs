@@ -406,7 +406,46 @@ fn native_unix_executable_launcher_source(entry_symbol: &str) -> Result<String, 
         ));
     }
     Ok(format!(
-        "#include <stdint.h>\nextern int32_t {entry_symbol}(void);\nint main(void) {{ return (int){entry_symbol}(); }}\n"
+        "#include <stdint.h>\n\
+#include <stdio.h>\n\
+#include <string.h>\n\
+#if defined(__APPLE__)\n\
+#include <mach-o/dyld.h>\n\
+#elif defined(__linux__)\n\
+#include <unistd.h>\n\
+#endif\n\
+extern int32_t {entry_symbol}(void);\n\
+static const char *stasis_executable_path(char *buffer, size_t capacity, const char *fallback) {{\n\
+#if defined(__APPLE__)\n\
+    uint32_t size = (uint32_t)capacity;\n\
+    if (_NSGetExecutablePath(buffer, &size) == 0) return buffer;\n\
+#elif defined(__linux__)\n\
+    ssize_t count = readlink(\"/proc/self/exe\", buffer, capacity - 1);\n\
+    if (count > 0 && (size_t)count < capacity) {{ buffer[count] = 0; return buffer; }}\n\
+#endif\n\
+    return fallback ? fallback : \"\";\n\
+}}\n\
+static void stasis_log_package_provenance(const char *program) {{\n\
+    char executable[4096];\n\
+    char path[4096];\n\
+    const char *resolved = stasis_executable_path(executable, sizeof(executable), program);\n\
+    const char *slash = strrchr(resolved, '/');\n\
+    size_t directory = slash ? (size_t)(slash - resolved + 1) : 0;\n\
+    const char *name = \"stasis_provenance.json\";\n\
+    if (directory + strlen(name) >= sizeof(path)) return;\n\
+    if (directory) memcpy(path, resolved, directory);\n\
+    strcpy(path + directory, name);\n\
+    FILE *file = fopen(path, \"rb\");\n\
+    if (!file) return;\n\
+    char manifest[65537];\n\
+    size_t count = fread(manifest, 1, sizeof(manifest) - 1, file);\n\
+    int overflow = fgetc(file) != EOF;\n\
+    fclose(file);\n\
+    if (overflow) {{ fprintf(stderr, \"Stasis package provenance is invalid: manifest exceeds 65536 bytes path=%s\\n\", path); return; }}\n\
+    manifest[count] = 0;\n\
+    fprintf(stderr, \"Stasis package provenance: path=%s manifest=%s\\n\", path, manifest);\n\
+}}\n\
+int main(int argc, char **argv) {{ (void)argc; stasis_log_package_provenance(argv ? argv[0] : 0); return (int){entry_symbol}(); }}\n"
     ))
 }
 
@@ -514,6 +553,10 @@ mod tests {
             .expect("valid AOT symbol should produce launcher source");
         assert!(source.contains("extern int32_t aot_fn_0(void);"));
         assert!(source.contains("return (int)aot_fn_0();"));
+        assert!(source.contains("stasis_provenance.json"));
+        assert!(source.contains("manifest exceeds 65536 bytes"));
+        assert!(source.contains("/proc/self/exe"));
+        assert!(source.contains("_NSGetExecutablePath"));
     }
 
     #[test]

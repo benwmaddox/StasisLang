@@ -1,6 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use stasis::{
     run_jit_tests_in_directory_with_session, run_live_in_process, run_play_in_process,
     run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
@@ -23,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +36,23 @@ mod live_tui;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
+const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
+const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
+const MOBILE_RUNTIME_FILES: &[&str] = &[
+    "CMakeLists.txt",
+    "nanosvg.h",
+    "nanosvgrast.h",
+    "stasis_display_scale.h",
+    "stasis_asset_path.h",
+    "stasis_render_contract.h",
+    "stasis_renderer_lifecycle.h",
+    "stasis_graphics.c",
+    "stasis_mobile_aot_runtime.c",
+    "stasis_mobile_aot_runtime.h",
+    "stasis_mobile_runtime.c",
+    "stasis_mobile_runtime.h",
+    "stb_truetype.h",
+];
 const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md");
 const COMMANDS: &[&str] = &[
     "new",
@@ -175,6 +193,9 @@ enum ToolchainCommand {
         target: PackageTarget,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+        /// Permit a visibly labeled package from a local/source toolchain.
+        #[arg(long)]
+        development_build: bool,
     },
     /// Assemble a release-only Android or iOS app project around one AOT game.
     PackageMobile {
@@ -184,6 +205,9 @@ enum ToolchainCommand {
         entry: Option<PathBuf>,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+        /// Permit a visibly labeled package from a local/source toolchain.
+        #[arg(long)]
+        development_build: bool,
     },
     /// Report deterministic workspace and output layout information.
     Inspect,
@@ -651,11 +675,20 @@ fn execute(
                     validate_optional_workspace_path(&workspace, "build output", out.as_deref())?;
                     build_workspace(&workspace, mode, out.as_deref())
                 }
-                ToolchainCommand::Package { target, out } => {
+                ToolchainCommand::Package {
+                    target,
+                    out,
+                    development_build,
+                } => {
                     validate_optional_workspace_path(&workspace, "package output", out.as_deref())?;
-                    package_workspace(&workspace, target, out.as_deref())
+                    package_workspace(&workspace, target, out.as_deref(), development_build)
                 }
-                ToolchainCommand::PackageMobile { target, entry, out } => {
+                ToolchainCommand::PackageMobile {
+                    target,
+                    entry,
+                    out,
+                    development_build,
+                } => {
                     validate_optional_workspace_path(
                         &workspace,
                         "mobile entry",
@@ -671,6 +704,7 @@ fn execute(
                         target,
                         entry.as_deref(),
                         out.as_deref(),
+                        development_build,
                     )
                 }
                 ToolchainCommand::Inspect => inspect_workspace(&workspace),
@@ -1860,6 +1894,7 @@ fn package_workspace(
     workspace: &Workspace,
     target: PackageTarget,
     output: Option<&Path>,
+    development_build: bool,
 ) -> Result<CommandResult, String> {
     let package_root = output
         .map(|path| workspace.root.join(path))
@@ -1883,6 +1918,7 @@ fn package_workspace(
             target,
             Path::new(&workspace.manifest.entry),
             &package_root,
+            development_build,
         );
     }
     let staging_name = format!(
@@ -1899,6 +1935,7 @@ fn package_workspace(
             staging_root.display()
         ));
     }
+    let provenance = resolve_package_provenance(development_build)?;
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let assembled = (|| -> Result<(), String> {
@@ -1929,6 +1966,7 @@ fn package_workspace(
                 &staging_root.join(runtime.file_name().unwrap_or_default()),
             )?;
         }
+        write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
         Ok(())
     })();
     if let Err(error) = assembled {
@@ -1944,7 +1982,12 @@ fn package_workspace(
     })?;
     Ok(CommandResult::success(
         format!("packaged {} at {}", target.as_str(), package_root.display()),
-        json!({"target": target.as_str(), "output": display_path(&package_root)}),
+        json!({
+            "target": target.as_str(),
+            "output": display_path(&package_root),
+            "provenance": PACKAGE_PROVENANCE_NAME,
+            "development_build": provenance["development_build"],
+        }),
     ))
 }
 
@@ -1953,6 +1996,7 @@ fn package_mobile_command(
     target: MobilePackageTarget,
     entry: Option<&Path>,
     output: Option<&Path>,
+    development_build: bool,
 ) -> Result<CommandResult, String> {
     let target = target.package_target();
     let entry = entry.unwrap_or_else(|| Path::new(&workspace.manifest.entry));
@@ -1966,7 +2010,7 @@ fn package_mobile_command(
             ))
         });
     validate_workspace_destination(workspace, "package output", &package_root)?;
-    package_mobile_workspace(workspace, target, entry, &package_root)
+    package_mobile_workspace(workspace, target, entry, &package_root, development_build)
 }
 
 fn package_mobile_workspace(
@@ -1974,6 +2018,7 @@ fn package_mobile_workspace(
     target: PackageTarget,
     entry: &Path,
     package_root: &Path,
+    development_build: bool,
 ) -> Result<CommandResult, String> {
     if package_root.exists() {
         return Err(format!(
@@ -1994,6 +2039,7 @@ fn package_mobile_workspace(
             staging_root.display()
         ));
     }
+    let provenance = resolve_package_provenance(development_build)?;
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let child_result = (|| -> Result<(), String> {
@@ -2020,7 +2066,7 @@ fn package_mobile_workspace(
                 String::from_utf8_lossy(&child.stderr).trim()
             ));
         }
-        assemble_mobile_shell(workspace, target, &aot_root, &staging_root)?;
+        assemble_mobile_shell(workspace, target, &aot_root, &staging_root, &provenance)?;
         Ok(())
     })();
     if let Err(error) = child_result {
@@ -2045,6 +2091,8 @@ fn package_mobile_workspace(
                 PackageTarget::IosArm64 => "ios/StasisMobile.xcodeproj",
                 PackageTarget::Desktop => unreachable!(),
             },
+            "provenance": PACKAGE_PROVENANCE_NAME,
+            "development_build": provenance["development_build"],
         }),
     ))
 }
@@ -2054,6 +2102,7 @@ fn assemble_mobile_shell(
     target: PackageTarget,
     aot_root: &Path,
     staging_root: &Path,
+    provenance: &Value,
 ) -> Result<(), String> {
     let mobile_assets = bundled_mobile_assets_dir()?;
     let runtime = bundled_mobile_runtime_dir()?;
@@ -2067,6 +2116,8 @@ fn assemble_mobile_shell(
     copy_required_dir(&mobile_assets.join("common"), &common_destination)?;
     copy_required_dir(&mobile_assets.join(platform), &platform_destination)?;
     copy_mobile_runtime(&runtime, &staging_root.join("runtime"))?;
+    write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), provenance)?;
+    write_mobile_provenance_header(&common_destination, provenance)?;
 
     let asset_source = match target {
         PackageTarget::AndroidArm64 => aot_root.join("apk_assets/stasis_game"),
@@ -2089,6 +2140,7 @@ fn assemble_mobile_shell(
     replace_shell_tokens(&common_destination, &replacements)?;
     replace_shell_tokens(&platform_destination, &replacements)?;
     copy_required_dir(&asset_source, &asset_destination)?;
+    write_json_file(&asset_destination.join(PACKAGE_PROVENANCE_NAME), provenance)?;
     fs::write(
         asset_destination.join("stasis_asset_base.marker"),
         b"stasis.mobile.asset_base.v1\n",
@@ -2110,6 +2162,8 @@ fn assemble_mobile_shell(
             "target": target.as_str(),
             "name": workspace.manifest.name,
             "aot_manifest": "aot/mobile_aot_bundle_manifest.json",
+            "provenance": PACKAGE_PROVENANCE_NAME,
+            "development_build": provenance["development_build"],
             "assets": match target {
                 PackageTarget::AndroidArm64 => "android/app/src/main/assets/stasis_game",
                 PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game",
@@ -2148,24 +2202,285 @@ fn copy_required_dir(source: &Path, destination: &Path) -> Result<(), String> {
 fn copy_mobile_runtime(source: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination)
         .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
-    for name in [
-        "CMakeLists.txt",
-        "nanosvg.h",
-        "nanosvgrast.h",
-        "stasis_display_scale.h",
-        "stasis_asset_path.h",
-        "stasis_render_contract.h",
-        "stasis_renderer_lifecycle.h",
-        "stasis_graphics.c",
-        "stasis_mobile_aot_runtime.c",
-        "stasis_mobile_aot_runtime.h",
-        "stasis_mobile_runtime.c",
-        "stasis_mobile_runtime.h",
-        "stb_truetype.h",
-    ] {
+    for name in MOBILE_RUNTIME_FILES {
         copy_file(&source.join(name), &destination.join(name))?;
     }
     Ok(())
+}
+
+fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
+    let mut body = serde_json::to_string_pretty(value)
+        .map_err(|error| format!("failed to encode {}: {error}", path.display()))?;
+    body.push('\n');
+    fs::write(path, body).map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        format!(
+            "failed to read provenance input {}: {error}",
+            path.display()
+        )
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("failed to hash {}: {error}", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn provenance_relative_path(root: &Path, value: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(value);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!("release provenance contains unsafe path: {value}"));
+    }
+    Ok(root.join(relative))
+}
+
+fn content_hashes(root: &Path, prefix: &str) -> Result<serde_json::Map<String, Value>, String> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        prefix: &str,
+        output: &mut serde_json::Map<String, Value>,
+    ) -> Result<(), String> {
+        let mut entries = fs::read_dir(directory)
+            .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to enumerate {}: {error}", directory.display()))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let kind = entry.file_type().map_err(|error| {
+                format!("failed to inspect {}: {error}", entry.path().display())
+            })?;
+            if kind.is_symlink() {
+                return Err(format!(
+                    "provenance input cannot contain a symlink: {}",
+                    entry.path().display()
+                ));
+            }
+            if kind.is_dir() {
+                visit(root, &entry.path(), prefix, output)?;
+            } else if kind.is_file() {
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|_| format!("provenance path escaped root: {}", path.display()))?;
+                let key = format!("{prefix}/{}", relative.to_string_lossy().replace('\\', "/"));
+                output.insert(key, Value::String(sha256_file(&path)?));
+            }
+        }
+        Ok(())
+    }
+
+    let mut output = serde_json::Map::new();
+    visit(root, root, prefix, &mut output)?;
+    Ok(output)
+}
+
+fn release_provenance_path() -> Result<PathBuf, String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+    let directory = executable.parent().unwrap_or(Path::new("."));
+    for candidate in [
+        directory.join(RELEASE_PROVENANCE_NAME),
+        directory.join("..").join(RELEASE_PROVENANCE_NAME),
+    ] {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "installed toolchain is missing {RELEASE_PROVENANCE_NAME}; reinstall an official release or pass --development-build for a visibly labeled local package"
+    ))
+}
+
+fn provenance_string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str, String> {
+    value[field]
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| format!("release provenance is missing {field}"))
+}
+
+fn verify_release_provenance(path: &Path) -> Result<Value, String> {
+    let bytes = fs::read(path).map_err(|error| {
+        format!(
+            "failed to read release provenance {}: {error}",
+            path.display()
+        )
+    })?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "failed to parse release provenance {}: {error}",
+            path.display()
+        )
+    })?;
+    if value["schema"] != "stasis.release_provenance.v1"
+        || value["development_build"] != false
+        || value["dirty_state"] != false
+        || value["command_buffer"]["version"] != 1
+    {
+        return Err("release provenance is not a clean official gfx_cmd v1 build".to_string());
+    }
+    let release_tag = provenance_string_field(&value, "release_tag")?;
+    let source_commit = provenance_string_field(&value, "source_commit")?;
+    if !(release_tag.starts_with("v") || release_tag.starts_with("nightly-"))
+        || source_commit.len() != 40
+        || !source_commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("release provenance has an invalid release tag or source commit".to_string());
+    }
+    if value["dependencies"]
+        .as_object()
+        .is_none_or(|items| items.is_empty())
+        || value["backends"].as_array().is_none_or(Vec::is_empty)
+        || value["features"].as_array().is_none_or(Vec::is_empty)
+    {
+        return Err(
+            "release provenance is missing dependencies, backends, or features".to_string(),
+        );
+    }
+    let dependencies = &value["dependencies"];
+    if dependencies["cargo_packages"]
+        .as_array()
+        .is_none_or(Vec::is_empty)
+        || dependencies["sdl2"].as_str().is_none_or(str::is_empty)
+        || dependencies["sdl2_image"]
+            .as_str()
+            .is_none_or(str::is_empty)
+    {
+        return Err("release provenance is missing exact dependency versions".to_string());
+    }
+    let root = path.parent().unwrap_or(Path::new("."));
+    let compiler = &value["compiler"];
+    let compiler_path = provenance_relative_path(root, provenance_string_field(compiler, "path")?)?;
+    let expected_compiler = provenance_string_field(compiler, "sha256")?;
+    let actual_compiler = sha256_file(&compiler_path)?;
+    let running_compiler = sha256_file(
+        &env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
+    )?;
+    if actual_compiler != expected_compiler || running_compiler != expected_compiler {
+        return Err(format!(
+            "release compiler hash mismatch for {}: expected {expected_compiler}, packaged {actual_compiler}, running {running_compiler}",
+            compiler_path.display()
+        ));
+    }
+    let sources = value["runtime_sources"]
+        .as_object()
+        .ok_or_else(|| "release provenance is missing runtime_sources".to_string())?;
+    for name in MOBILE_RUNTIME_FILES {
+        let key = format!("runtime/{name}");
+        let expected = sources
+            .get(&key)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("release provenance is missing runtime hash {key}"))?;
+        let source = provenance_relative_path(root, &key)?;
+        let actual = sha256_file(&source)?;
+        if actual != expected {
+            return Err(format!(
+                "release runtime hash mismatch for {key}: expected {expected}, found {actual}"
+            ));
+        }
+    }
+    let expected_shells = value["mobile_shell_sources"]
+        .as_object()
+        .ok_or_else(|| "release provenance is missing mobile_shell_sources".to_string())?;
+    let shell_root = root.join("mobile/shells");
+    let actual_shells = content_hashes(&shell_root, "mobile/shells")?;
+    if &actual_shells != expected_shells {
+        return Err(
+            "release mobile shell source hashes do not match the installed templates".to_string(),
+        );
+    }
+    Ok(value)
+}
+
+fn git_text(args: &[&str]) -> Option<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn development_provenance() -> Result<Value, String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+    let runtime = bundled_mobile_runtime_dir()?;
+    let mobile_shells = bundled_mobile_assets_dir()?;
+    let mut sources = serde_json::Map::new();
+    for name in MOBILE_RUNTIME_FILES {
+        sources.insert(
+            format!("runtime/{name}"),
+            Value::String(sha256_file(&runtime.join(name))?),
+        );
+    }
+    Ok(json!({
+        "schema": "stasis.release_provenance.v1",
+        "release_tag": Value::Null,
+        "source_commit": git_text(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string()),
+        "dirty_state": true,
+        "development_build": true,
+        "compiler": {
+            "path": executable.file_name().unwrap_or_default().to_string_lossy(),
+            "sha256": sha256_file(&executable)?,
+        },
+        "runtime_sources": sources,
+        "mobile_shell_sources": content_hashes(&mobile_shells, "mobile/shells")?,
+        "command_buffer": {"name": "gfx_cmd", "version": 1},
+        "backends": ["sdl2"],
+        "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
+        "dependencies": {"stasis": env!("CARGO_PKG_VERSION"), "toolchain": "development"},
+    }))
+}
+
+fn resolve_package_provenance(development_build: bool) -> Result<Value, String> {
+    if development_build {
+        development_provenance()
+    } else {
+        verify_release_provenance(&release_provenance_path()?)
+    }
+}
+
+fn c_string(value: &str) -> Result<String, String> {
+    serde_json::to_string(value)
+        .map_err(|error| format!("failed to quote provenance text: {error}"))
+}
+
+fn write_mobile_provenance_header(destination: &Path, provenance: &Value) -> Result<(), String> {
+    let tag = provenance["release_tag"].as_str().unwrap_or("development");
+    let commit = provenance["source_commit"].as_str().unwrap_or("unknown");
+    let label = if provenance["development_build"].as_bool() == Some(true) {
+        "non-release development build"
+    } else {
+        "official release"
+    };
+    let body = format!(
+        "#ifndef STASIS_PACKAGE_PROVENANCE_H\n#define STASIS_PACKAGE_PROVENANCE_H\n#define STASIS_PACKAGE_RELEASE_TAG {}\n#define STASIS_PACKAGE_SOURCE_COMMIT {}\n#define STASIS_PACKAGE_BUILD_LABEL {}\n#endif\n",
+        c_string(tag)?,
+        c_string(commit)?,
+        c_string(label)?,
+    );
+    fs::write(destination.join("stasis_package_provenance.h"), body)
+        .map_err(|error| format!("failed to write mobile provenance header: {error}"))
 }
 
 fn replace_shell_tokens(root: &Path, replacements: &[(&str, &str)]) -> Result<(), String> {
@@ -3435,8 +3750,83 @@ mod tests {
                 target: MobilePackageTarget::IosArm64,
                 entry: Some(ref entry),
                 out: Some(ref out),
+                development_build: false,
             } if entry == Path::new("src/mobile.stasis") && out == Path::new("dist/ios")
         ));
+    }
+
+    #[test]
+    fn release_provenance_rejects_substituted_renderer_sources() {
+        let root = temp_dir("release_provenance_mismatch");
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&runtime).expect("create runtime fixture");
+        let compiler_name = executable_name("stasis");
+        fs::copy(
+            env::current_exe().expect("current test executable"),
+            root.join(&compiler_name),
+        )
+        .expect("write compiler fixture");
+        let mut runtime_sources = serde_json::Map::new();
+        for name in MOBILE_RUNTIME_FILES {
+            let path = runtime.join(name);
+            fs::write(&path, format!("official {name}\n")).expect("write runtime fixture");
+            runtime_sources.insert(
+                format!("runtime/{name}"),
+                Value::String(sha256_file(&path).expect("hash runtime fixture")),
+            );
+        }
+        let shells = root.join("mobile/shells/common");
+        fs::create_dir_all(&shells).expect("create shell fixture");
+        fs::write(shells.join("stasis_mobile_main.c"), b"official shell\n")
+            .expect("write shell fixture");
+        let mobile_shell_sources = content_hashes(&root.join("mobile/shells"), "mobile/shells")
+            .expect("hash shell fixture");
+        let manifest = json!({
+            "schema": "stasis.release_provenance.v1",
+            "release_tag": "nightly-20260719-131",
+            "source_commit": "0123456789012345678901234567890123456789",
+            "dirty_state": false,
+            "development_build": false,
+            "compiler": {
+                "path": compiler_name,
+                "sha256": sha256_file(&root.join(executable_name("stasis"))).expect("hash compiler"),
+            },
+            "runtime_sources": runtime_sources,
+            "mobile_shell_sources": mobile_shell_sources,
+            "command_buffer": {"name": "gfx_cmd", "version": 1},
+            "backends": ["sdl2"],
+            "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
+            "dependencies": {
+                "cargo_lock_sha256": "fixture",
+                "cargo_packages": ["fixture 1.0.0 workspace"],
+                "sdl2": "2.30.0",
+                "sdl2_image": "2.8.0",
+            },
+        });
+        let manifest_path = root.join(RELEASE_PROVENANCE_NAME);
+        write_json_file(&manifest_path, &manifest).expect("write provenance fixture");
+        verify_release_provenance(&manifest_path).expect("accept matching release");
+
+        fs::write(
+            runtime.join("stasis_graphics.c"),
+            b"high-DPI worktree renderer\n",
+        )
+        .expect("substitute renderer");
+        let error = verify_release_provenance(&manifest_path).expect_err("reject mismatch");
+        assert!(error.contains("runtime hash mismatch for runtime/stasis_graphics.c"));
+        fs::write(
+            runtime.join("stasis_graphics.c"),
+            "official stasis_graphics.c\n",
+        )
+        .expect("restore renderer");
+        fs::write(
+            shells.join("stasis_mobile_main.c"),
+            b"substituted mobile shell\n",
+        )
+        .expect("substitute mobile shell");
+        let error = verify_release_provenance(&manifest_path).expect_err("reject shell mismatch");
+        assert!(error.contains("mobile shell source hashes do not match"));
+        remove_temp(&root);
     }
 
     #[test]
@@ -3491,8 +3881,15 @@ mod tests {
 
         let android = root.join("android-package");
         fs::create_dir_all(&android).expect("create Android staging");
-        assemble_mobile_shell(&workspace, PackageTarget::AndroidArm64, &aot, &android)
-            .expect("assemble Android shell");
+        let provenance = development_provenance().expect("development provenance");
+        assemble_mobile_shell(
+            &workspace,
+            PackageTarget::AndroidArm64,
+            &aot,
+            &android,
+            &provenance,
+        )
+        .expect("assemble Android shell");
         let android_cmake =
             fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
                 .expect("read Android CMake");
@@ -3540,7 +3937,7 @@ mod tests {
 
         let ios = root.join("ios-package");
         fs::create_dir_all(&ios).expect("create iOS staging");
-        assemble_mobile_shell(&workspace, PackageTarget::IosArm64, &aot, &ios)
+        assemble_mobile_shell(&workspace, PackageTarget::IosArm64, &aot, &ios, &provenance)
             .expect("assemble iOS shell");
         let project = fs::read_to_string(ios.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
             .expect("read Xcode project");
@@ -3638,7 +4035,8 @@ mod tests {
         assert!(package_workspace(
             &workspace,
             PackageTarget::Desktop,
-            Some(Path::new("dist/out"))
+            Some(Path::new("dist/out")),
+            true,
         )
         .is_err());
         assert!(!root.join("dist/out").exists());

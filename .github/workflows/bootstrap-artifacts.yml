@@ -98,9 +98,23 @@ jobs:
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
           mkdir -p "${out}/runtime"
-          cp runtime/CMakeLists.txt runtime/nanosvg.h runtime/nanosvgrast.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_graphics.c runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stb_truetype.h "${out}/runtime/"
+          cp runtime/CMakeLists.txt runtime/nanosvg.h runtime/nanosvgrast.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_graphics.c runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stb_truetype.h "${out}/runtime/"
           mkdir -p "${out}/docs"
-          cp docs/agent_workflow.md docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md "${out}/docs/"
+          cp docs/agent_workflow.md docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md docs/release_provenance.md "${out}/docs/"
+          release_tag="${{ github.event.release.tag_name }}"
+          development_flag=()
+          if [ -z "${release_tag}" ]; then
+            release_tag="development-bootstrap-${{ github.run_id }}"
+            development_flag=(--development-build)
+          fi
+          python3 tools/generate_release_provenance.py \
+            --archive-root "${out}" \
+            --release-tag "${release_tag}" \
+            --source-commit "${{ github.sha }}" \
+            --compiler "bin/stasis" \
+            --dependency "sdl2=external-not-linked" \
+            --dependency "sdl2_image=external-not-linked" \
+            "${development_flag[@]}"
           tar -C dist -czf "dist/stasis-release-${{ runner.os }}.tar.gz" "stasis-release-${{ runner.os }}"
 
       - name: Assemble bundle (windows)
@@ -134,9 +148,29 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null
           Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/runtime" | Out-Null
-          @('CMakeLists.txt', 'nanosvg.h', 'nanosvgrast.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_graphics.c', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
+          @('CMakeLists.txt', 'nanosvg.h', 'nanosvgrast.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_render_contract.h', 'stasis_renderer_lifecycle.h', 'stasis_graphics.c', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
           New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
-          Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md "$out/docs/" -Force
+          Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md "$out/docs/" -Force
+          $releaseTag = "${{ github.event.release.tag_name }}"
+          $developmentFlag = @()
+          if (-not $releaseTag) {
+            $releaseTag = "development-bootstrap-${{ github.run_id }}"
+            $developmentFlag = @("--development-build")
+          }
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
+          $installed = & (Join-Path $vcpkgRoot "vcpkg.exe") list
+          $sdl2Version = (($installed | Where-Object { $_ -match '^sdl2:x64-windows-static\s+' } | Select-Object -First 1).Trim() -split '\s+')[1]
+          $sdl2ImageVersion = (($installed | Where-Object { $_ -match '^sdl2-image:x64-windows-static\s+' } | Select-Object -First 1).Trim() -split '\s+')[1]
+          if (-not $sdl2Version -or -not $sdl2ImageVersion) { throw "resolved SDL dependency versions not found" }
+          python tools/generate_release_provenance.py `
+            --archive-root "$out" `
+            --release-tag "$releaseTag" `
+            --source-commit "${{ github.sha }}" `
+            --compiler "stasis.exe" `
+            --dependency "sdl2=$sdl2Version" `
+            --dependency "sdl2_image=$sdl2ImageVersion" `
+            @developmentFlag
           Compress-Archive -Path "$out/*" -DestinationPath "dist/stasis-release-${{ runner.os }}.zip" -Force
 
       - name: Smoke test bundled graphics runtime (windows)
@@ -161,26 +195,62 @@ jobs:
           )
           New-Item -ItemType Directory -Force -Path "cli-smoke/assets" | Out-Null
           Set-Content -Path "cli-smoke/assets/manifest.json" -Encoding ASCII -Value '{"schema":"stasis-assets","version":1,"assets":[]}'
-          .\stasis.exe --workspace cli-smoke package --target desktop
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            .\stasis.exe --workspace cli-smoke package --target desktop --development-build
+          } else {
+            .\stasis.exe --workspace cli-smoke package --target desktop
+          }
           if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package runner missing" }
           if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.dll")) { throw "game package library missing" }
-          .\stasis.exe --workspace cli-smoke package-mobile --target android-arm64 --out dist/android
-          .\stasis.exe --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            .\stasis.exe --workspace cli-smoke package-mobile --target android-arm64 --out dist/android --development-build
+            .\stasis.exe --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios --development-build
+          } else {
+            .\stasis.exe --workspace cli-smoke package-mobile --target android-arm64 --out dist/android
+            .\stasis.exe --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios
+          }
           if (-not (Test-Path "cli-smoke/dist/android/android/app/src/main/cpp/CMakeLists.txt")) { throw "Android mobile shell missing" }
           if (-not (Test-Path "cli-smoke/dist/ios/ios/StasisMobile.xcodeproj/project.pbxproj")) { throw "iOS mobile shell missing" }
           Pop-Location
+          if ("${{ github.event_name }}" -ne "workflow_dispatch") {
+            python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ci_smoke-desktop"
+            python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/android" --expect-runtime-sources
+            python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ios" --expect-runtime-sources
+          }
 
       - name: Smoke test bundled CLI (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          cd "dist/stasis-release-${{ runner.os }}"
+          pushd "dist/stasis-release-${{ runner.os }}"
           ./bin/stasis new ci_smoke --dir cli-smoke
           ./bin/stasis --workspace cli-smoke check
           ./bin/stasis --workspace cli-smoke test
           ./bin/stasis --workspace cli-smoke build --mode release
           ./cli-smoke/build/ci_smoke
+          printf '%s\n' \
+            'function main(): i32 { return 0; }' \
+            'function tick(): i32 { return 0; }' \
+            'function render(): i32 { return 0; }' > cli-smoke/src/main.stasis
+          mkdir -p cli-smoke/assets
+          printf '%s\n' '{"schema":"stasis-assets","version":1,"assets":[]}' > cli-smoke/assets/manifest.json
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            package_flag=(--development-build)
+          else
+            package_flag=()
+          fi
+          ./bin/stasis --workspace cli-smoke package --target desktop "${package_flag[@]}"
+          desktop_diagnostics="$(./cli-smoke/dist/ci_smoke-desktop/ci_smoke 2>&1)"
+          grep -q 'Stasis package provenance:' <<<"${desktop_diagnostics}"
+          ./bin/stasis --workspace cli-smoke package-mobile --target android-arm64 --out dist/android "${package_flag[@]}"
+          ./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios "${package_flag[@]}"
+          popd
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ci_smoke-desktop"
+            python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/android" --expect-runtime-sources
+            python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ios" --expect-runtime-sources
+          fi
 
       - name: Upload artifact (unix)
         if: runner.os != 'Windows'

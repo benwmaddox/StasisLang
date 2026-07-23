@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #include "published_aot_symbols.h"
+#include "stasis_package_provenance.h"
 #include "stasis_mobile_runtime.h"
 
 static int configure_asset_root(void) {
@@ -37,6 +38,12 @@ int SDL_main(int argc, char **argv) {
         SDL_Log("Stasis could not configure the bundled asset root");
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
+    SDL_Log(
+        "Stasis provenance: %s tag=%s commit=%s renderer=gfx_cmd_v1",
+        STASIS_PACKAGE_BUILD_LABEL,
+        STASIS_PACKAGE_RELEASE_TAG,
+        STASIS_PACKAGE_SOURCE_COMMIT
+    );
     StasisMobileGameEntries game = {
         STASIS_AOT_BIND_RUNTIME_GLOBALS,
         STASIS_AOT_MAIN,

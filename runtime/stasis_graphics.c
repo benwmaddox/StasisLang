@@ -68,6 +68,27 @@ static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority 
 #endif
 }
 
+static void log_package_provenance(void) {
+    char* base = SDL_GetBasePath();
+    if (!base) return;
+    char path[1024];
+    int written = snprintf(path, sizeof(path), "%sstasis_provenance.json", base);
+    SDL_free(base);
+    if (written < 0 || (size_t)written >= sizeof(path)) return;
+    FILE* file = fopen(path, "rb");
+    if (!file) return;
+    char manifest[65537];
+    size_t count = fread(manifest, 1, sizeof(manifest) - 1, file);
+    int overflow = fgetc(file) != EOF;
+    fclose(file);
+    if (overflow) {
+        SDL_Log("Stasis package provenance is invalid: manifest exceeds 65536 bytes path=%s", path);
+        return;
+    }
+    manifest[count] = '\0';
+    SDL_Log("Stasis package provenance: path=%s manifest=%s", path, manifest);
+}
+
 #if defined(STASIS_GRAPHICS_STATIC)
 #define STASIS_EXPORT
 #elif defined(_WIN32)
@@ -3508,6 +3529,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
 
     SDL_LogSetOutputFunction(stasis_sdl_log_output, NULL);
     SDL_LogSetAllPriority(SDL_LOG_PRIORITY_INFO);
+    log_package_provenance();
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());

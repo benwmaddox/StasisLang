@@ -545,6 +545,7 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
                 "src/main.stasis",
                 "--out",
                 output,
+                "--development-build",
             ],
             &project,
         );
@@ -559,6 +560,34 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
             .join(output)
             .join("stasis_mobile_package.json")
             .is_file());
+        let provenance: Value = serde_json::from_str(
+            &fs::read_to_string(project.join(output).join("stasis_provenance.json"))
+                .expect("read package provenance"),
+        )
+        .expect("parse package provenance");
+        assert_eq!(provenance["schema"], "stasis.release_provenance.v1");
+        assert_eq!(provenance["development_build"], true);
+        assert_eq!(provenance["dirty_state"], true);
+        assert!(provenance["mobile_shell_sources"].as_object().is_some_and(
+            |sources| sources.contains_key("mobile/shells/common/stasis_mobile_main.c")
+        ));
+        assert!(provenance["runtime_sources"]
+            .as_object()
+            .is_some_and(|sources| sources.contains_key("runtime/stasis_renderer_lifecycle.h")));
+        let receipt: Value = serde_json::from_str(
+            &fs::read_to_string(project.join(output).join("stasis_mobile_package.json"))
+                .expect("read package receipt"),
+        )
+        .expect("parse package receipt");
+        assert_eq!(receipt["provenance"], "stasis_provenance.json");
+        assert_eq!(receipt["development_build"], true);
+        assert!(fs::read_to_string(
+            project
+                .join(output)
+                .join("common/stasis_package_provenance.h")
+        )
+        .expect("read provenance header")
+        .contains("non-release development build"));
         let aot_manifest_path = project
             .join(output)
             .join("aot/mobile_aot_bundle_manifest.json");
@@ -607,6 +636,12 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
         .iter()
         .any(|path| path.extension().and_then(|value| value.to_str()) == Some("stasis")));
 
+    let graphics_source = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/stasis_graphics.c"),
+    )
+    .expect("read desktop graphics runtime");
+    assert!(graphics_source.contains("Stasis package provenance: path=%s manifest=%s"));
+
     fs::write(project.join("src/main.stasis"), "function main(: i32 {\n")
         .expect("write invalid mobile entry");
     let failed = stasis(
@@ -616,6 +651,7 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
             "android-arm64",
             "--out",
             "broken",
+            "--development-build",
         ],
         &project,
     );
