@@ -63,6 +63,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Capture the real Windows SDL parity fixture
         shell: pwsh
         run: |
@@ -71,7 +74,15 @@ jobs:
           if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
           & (Join-Path $vcpkgRoot "vcpkg.exe") install sdl2:x64-windows sdl2-image:x64-windows --recurse
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake -S runtime -B target/render-parity-runtime -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF
+          $cmakeHelp = cmake --help | Out-String
+          if ($cmakeHelp -match "Visual Studio 18 2026") {
+            $generator = "Visual Studio 18 2026"
+          } elseif ($cmakeHelp -match "Visual Studio 17 2022") {
+            $generator = "Visual Studio 17 2022"
+          } else {
+            throw "Supported Visual Studio CMake generator not found."
+          }
+          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build target/render-parity-runtime --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
