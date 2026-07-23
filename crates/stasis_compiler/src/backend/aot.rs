@@ -1594,28 +1594,37 @@ mod tests {
         let mut process = AotProcess::new();
         process.upsert_file(
             "direct_storage.stasis",
-            "struct Enemy { hp: i32; speed: f32; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ints: i32[2];\nglobal floats: f32[2];\nglobal doubles: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction main(): i32 {\n    count = 7;\n    ratio = 1.5;\n    precise = 2.5;\n    ints[0] = 11;\n    floats[1] = 3.5;\n    doubles[0] = 4.5;\n    bytes[2] = 250;\n    foreach (let byte in bytes) { byte += 1; }\n    enemies[0].hp = 13;\n    enemies[0].speed = 6.5;\n    label[0] = 65;\n    ints[8] = 88;\n    if (ints[8] != 0) { return 1; }\n    if (enemies[0].speed < 6.4) { return 2; }\n    return count + ints[0] + bytes[2] + enemies[0].hp + label[0] + label.max_length;\n}\n",
+            "struct Enemy { hp: i32; speed: f32; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ints: i32[2];\nglobal floats: f32[2];\nglobal doubles: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction write_globals(): void {\n    count = 7;\n    ratio = 1.5;\n    precise = 2.5;\n    ints[0] = 11;\n    floats[1] = 3.5;\n    doubles[0] = 4.5;\n    bytes[2] = 250;\n    foreach (let byte in bytes) { byte += 1; }\n    enemies[0].hp = 13;\n    enemies[0].speed = 6.5;\n    label[0] = 65;\n    ints[8] = 88;\n}\nfunction read_globals(): i32 {\n    if (ints[8] != 0) { return 1; }\n    if (enemies[0].speed < 6.4) { return 2; }\n    return count + ints[0] + bytes[2] + enemies[0].hp + label[0] + label.max_length;\n}\nfunction main(): i32 { write_globals(); return read_globals(); }\n",
         );
         let captured = capture_aot_clif_by_function(&mut process);
-        let clif = captured.get("main").expect("main CLIF");
-        assert!(clif.contains("load.i32"), "expected direct loads:\n{clif}");
+        let writer = captured.get("write_globals").expect("writer CLIF");
+        let reader = captured.get("read_globals").expect("reader CLIF");
         assert!(
-            clif.contains("load.i8"),
-            "expected direct byte loads:\n{clif}"
+            reader.contains("load.i32"),
+            "expected direct loads:\n{reader}"
         );
-        assert!(clif.contains("store"), "expected direct stores:\n{clif}");
         assert!(
-            clif.contains("ireduce.i8"),
-            "expected byte-width direct stores:\n{clif}"
+            reader.contains("load.i8"),
+            "expected direct byte loads:\n{reader}"
         );
-        let has_call_instruction = clif.lines().any(|line| {
-            let line = line.trim_start();
-            line.starts_with("call ") || line.contains(" = call ")
-        });
         assert!(
-            !has_call_instruction,
-            "core AOT global storage emitted a runtime call:\n{clif}"
+            writer.contains("store"),
+            "expected direct stores:\n{writer}"
         );
+        assert!(
+            writer.contains("ireduce.i8"),
+            "expected byte-width direct stores:\n{writer}"
+        );
+        for (name, clif) in [("writer", writer), ("reader", reader)] {
+            let has_call_instruction = clif.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("call ") || line.contains(" = call ")
+            });
+            assert!(
+                !has_call_instruction,
+                "core AOT global storage emitted a runtime call in {name}:\n{clif}"
+            );
+        }
     }
 
     #[test]
