@@ -2155,6 +2155,7 @@ fn copy_mobile_runtime(source: &Path, destination: &Path) -> Result<(), String> 
         "stasis_display_scale.h",
         "stasis_asset_path.h",
         "stasis_render_contract.h",
+        "stasis_renderer_lifecycle.h",
         "stasis_graphics.c",
         "stasis_mobile_aot_runtime.c",
         "stasis_mobile_aot_runtime.h",
@@ -3508,6 +3509,9 @@ mod tests {
         assert!(android.join("runtime/stasis_asset_path.h").is_file());
         assert!(android.join("runtime/stasis_render_contract.h").is_file());
         assert!(android
+            .join("runtime/stasis_renderer_lifecycle.h")
+            .is_file());
+        assert!(android
             .join("android/app/src/main/assets/stasis_game/assets/manifest.json")
             .is_file());
         assert!(android
@@ -3548,6 +3552,7 @@ mod tests {
         assert!(ios.join("runtime/stasis_display_scale.h").is_file());
         assert!(ios.join("runtime/stasis_asset_path.h").is_file());
         assert!(ios.join("runtime/stasis_render_contract.h").is_file());
+        assert!(ios.join("runtime/stasis_renderer_lifecycle.h").is_file());
         assert!(config.contains("@executable_path/Frameworks"));
         assert!(project.contains("Embed SDL frameworks"));
         assert!(ios

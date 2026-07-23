@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "name": "render_parity",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build"
+}

@@ -3710,6 +3710,8 @@ mod tests {
             "STASIS_RENDER_V1_TRACE_VERSION 1",
             "STASIS_RENDER_I32_COUNT",
             "STASIS_RENDER_F32_COUNT",
+            "stasis_render_v1_validate",
+            "stasis_render_v1_validation_name",
             "stasis_render_v1_is_valid",
             "stasis_render_v1_trace",
         ] {
@@ -3725,7 +3727,7 @@ mod tests {
             "shipping runtime should default to the canonical SDL backend"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("stasis_render_v1_is_valid(cmd_i32)")
+            STASIS_GRAPHICS_SOURCE.contains("stasis_render_v1_validate(cmd_i32, cmd_f32)")
                 && STASIS_GRAPHICS_SOURCE.contains("STASIS_RENDER_FLAG_PRESENT")
                 && STASIS_GRAPHICS_SOURCE
                     .contains("SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, \"linear\")")
@@ -3733,7 +3735,9 @@ mod tests {
                 && STASIS_GRAPHICS_SOURCE.contains("if (a < 0) a = 0;")
                 && STASIS_GRAPHICS_SOURCE.contains("if (a > 255) a = 255;")
                 && STASIS_GRAPHICS_SOURCE.contains("SDL_BLENDMODE_BLEND")
-                && STASIS_GRAPHICS_SOURCE.contains("SDL_RenderCopyEx"),
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_RenderCopyEx")
+                && STASIS_GRAPHICS_SOURCE.contains("STASIS_PARITY_CAPTURE_STAGE")
+                && STASIS_GRAPHICS_SOURCE.contains("Stasis parity capture: stage=%s"),
             "desktop and mobile should enter the shared versioned command interpreter"
         );
         assert!(
