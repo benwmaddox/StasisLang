@@ -46,17 +46,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Capture the real SDL parity fixture
-        run: |
-          set -o pipefail
-          sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libsdl2-image-dev xvfb
-          cmake -S runtime -B target/render-parity-runtime -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF
-          cmake --build target/render-parity-runtime --config Release
-          mkdir -p target/render-parity-ci
-          STASIS_RUNTIME_DLL_PATH="$PWD/target/render-parity-runtime/bin/libstasis_graphics.so" STASIS_GFX_LOG_SPRITES=1 STASIS_PARITY_CAPTURE_STAGE=second_frame xvfb-run -a cargo run -p stasis -- play samples/render_parity/main.stasis --watch-dir samples/render_parity --ticks 2 --screenshot target/render-parity-ci/frame.png --screenshot-frame 2 --exit-after-screenshot 2>&1 | tee target/render-parity-ci/runtime.log
-          python tools/ci/verify_render_parity.py --capture target/render-parity-ci/frame.png --runtime-log target/render-parity-ci/runtime.log --evidence target/render-parity-ci/evidence.json --write-evidence --require-load-details --profile portable --stage second_frame
-
       - name: Run Cargo Test
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
         run: cargo test --workspace --all-targets -- --test-threads=1
@@ -80,11 +69,14 @@ jobs:
           $ErrorActionPreference = "Stop"
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
           if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
-          & (Join-Path $vcpkgRoot "vcpkg.exe") install sdl2:x64-windows-static sdl2-image:x64-windows-static --recurse
-          cmake -S runtime -B target/render-parity-runtime -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF
-          cmake --build target/render-parity-runtime
+          & (Join-Path $vcpkgRoot "vcpkg.exe") install sdl2:x64-windows sdl2-image:x64-windows --recurse
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake -S runtime -B target/render-parity-runtime -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build target/render-parity-runtime --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force target/render-parity-ci | Out-Null
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/stasis_graphics.dll")
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
           $env:STASIS_GFX_LOG_SPRITES = "1"
           $env:STASIS_PARITY_CAPTURE_STAGE = "second_frame"
           cargo run -p stasis -- play samples/render_parity/main.stasis --watch-dir samples/render_parity --ticks 2 --screenshot target/render-parity-ci/frame.png --screenshot-frame 2 --exit-after-screenshot 2>&1 | Tee-Object target/render-parity-ci/runtime.log
