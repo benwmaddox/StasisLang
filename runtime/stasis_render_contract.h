@@ -60,6 +60,42 @@
      STASIS_RENDER_MAX_TEXT * STASIS_RENDER_TEXT_F32_STRIDE)
 #define STASIS_RENDER_U8_COUNT STASIS_RENDER_TEXT_MAX_BYTES
 
+typedef enum StasisRenderV1Validation {
+    STASIS_RENDER_V1_VALID = 0,
+    STASIS_RENDER_V1_NULL_I32 = 1,
+    STASIS_RENDER_V1_NULL_F32 = 2,
+    STASIS_RENDER_V1_BAD_MAGIC = 3,
+    STASIS_RENDER_V1_BAD_VERSION = 4
+} StasisRenderV1Validation;
+
+static inline StasisRenderV1Validation stasis_render_v1_validate(
+    const int32_t *cmd_i32,
+    const float *cmd_f32
+) {
+    if (cmd_i32 == NULL) return STASIS_RENDER_V1_NULL_I32;
+    if (cmd_f32 == NULL) return STASIS_RENDER_V1_NULL_F32;
+    if (cmd_i32[STASIS_RENDER_I_MAGIC] != STASIS_RENDER_V1_MAGIC) {
+        return STASIS_RENDER_V1_BAD_MAGIC;
+    }
+    if (cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_V1_VERSION) {
+        return STASIS_RENDER_V1_BAD_VERSION;
+    }
+    return STASIS_RENDER_V1_VALID;
+}
+
+static inline const char *stasis_render_v1_validation_name(
+    StasisRenderV1Validation validation
+) {
+    switch (validation) {
+        case STASIS_RENDER_V1_VALID: return "ok";
+        case STASIS_RENDER_V1_NULL_I32: return "missing_i32_buffer";
+        case STASIS_RENDER_V1_NULL_F32: return "missing_f32_buffer";
+        case STASIS_RENDER_V1_BAD_MAGIC: return "invalid_magic";
+        case STASIS_RENDER_V1_BAD_VERSION: return "unsupported_version";
+        default: return "unknown_validation_failure";
+    }
+}
+
 static inline int32_t stasis_render_clamp_count(int32_t value, int32_t maximum) {
     if (value < 0) return 0;
     return value > maximum ? maximum : value;

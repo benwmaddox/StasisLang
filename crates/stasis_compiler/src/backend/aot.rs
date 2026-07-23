@@ -971,63 +971,10 @@ mod tests {
         expected_clif_markers: &'static [(&'static str, &'static [&'static str])],
     }
 
-    const RENDER_TRACE_FIXTURE: &str = r#"
-function @extern("stasis_jit_render_v1_trace") native_render_trace(
-    cmd_i32: i32[], cmd_i32_len: i32,
-    cmd_f32: f32[], cmd_f32_len: i32,
-    cmd_u8: u8[], cmd_u8_len: i32
-): i32;
-
-global cmd_i32: i32[34848];
-global cmd_f32: f32[92292];
-global cmd_u8: u8[65536];
-
-function main(): i32 {
-    cmd_i32[0] = 1196967473;
-    cmd_i32[1] = 1;
-    cmd_i32[2] = 3;
-    cmd_i32[3] = 1;
-    cmd_i32[4] = 1;
-    cmd_i32[7] = 1;
-    cmd_i32[9] = 3;
-
-    cmd_f32[0] = 0.05;
-    cmd_f32[1] = 0.10;
-    cmd_f32[2] = 0.15;
-    cmd_f32[3] = 1.0;
-    cmd_f32[4] = 10.0;
-    cmd_f32[5] = 20.0;
-    cmd_f32[6] = 30.0;
-    cmd_f32[7] = 40.0;
-    cmd_f32[8] = 0.25;
-    cmd_f32[9] = 0.50;
-    cmd_f32[10] = 0.75;
-    cmd_f32[11] = 1.0;
-
-    cmd_i32[32] = 17;
-    cmd_i32[33] = 50;
-    cmd_i32[34] = 60;
-    cmd_i32[35] = 70;
-    cmd_i32[36] = 80;
-    cmd_i32[37] = 45;
-    cmd_i32[38] = 192;
-
-    cmd_i32[28704] = 4;
-    cmd_i32[28705] = 0;
-    cmd_i32[28706] = 2;
-    cmd_f32[80004] = 90.0;
-    cmd_f32[80005] = 100.0;
-    cmd_f32[80006] = 1.0;
-    cmd_f32[80007] = 0.5;
-    cmd_f32[80008] = 0.25;
-    cmd_f32[80009] = 1.0;
-    cmd_u8[0] = 79;
-    cmd_u8[1] = 75;
-    cmd_u8[2] = 0;
-
-    return native_render_trace(cmd_i32, 34848, cmd_f32, 92292, cmd_u8, 65536);
-}
-"#;
+    const RENDER_TRACE_FIXTURE: &str = concat!(
+        include_str!("../../../../samples/render_parity/frame.stasis"),
+        include_str!("../../../../samples/render_parity/trace.stasis")
+    );
 
     #[cfg(windows)]
     fn ensure_test_dynload_artifacts(deps_dir: &Path) -> (PathBuf, PathBuf) {
@@ -1156,7 +1103,7 @@ function main(): i32 {
             ParityCorpusCase {
                 label: "renderer_command_trace",
                 source: RENDER_TRACE_FIXTURE,
-                expected_exit: 975_559_585,
+                expected_exit: 829_981_937,
                 expected_extern_symbols: &[(
                     "native_render_trace",
                     "stasis_jit_render_v1_trace",

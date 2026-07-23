@@ -1689,8 +1689,8 @@ static int parse_env_i32(const char* name, int fallback, int min_value, int max_
     return (int)parsed;
 }
 
-static int sprite_source_within_limits(const char* path, int max_w, int max_h) {
-    if (!path || !path[0] || max_w <= 0 || max_h <= 0) return 0;
+static int sprite_source_within_limits(const char* resolved_path, int max_w, int max_h) {
+    if (!resolved_path || !resolved_path[0] || max_w <= 0 || max_h <= 0) return 0;
     if (g_sprite_max_dimension < 0) {
         g_sprite_max_dimension = parse_env_i32(
             "STASIS_GFX_MAX_SPRITE_DIMENSION", 16384, 1, 65536);
@@ -1711,19 +1711,14 @@ static int sprite_source_within_limits(const char* path, int max_w, int max_h) {
         return 0;
     }
 
-    char resolved[1024];
-    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
-        SDL_Log("gfx_load_sprite: sprite_path_invalid");
-        return 0;
-    }
 #if defined(_WIN32)
     struct _stat st;
-    if (_stat(resolved, &st) != 0 || st.st_size < 0) {
+    if (_stat(resolved_path, &st) != 0 || st.st_size < 0) {
 #else
     struct stat st;
-    if (stat(resolved, &st) != 0 || st.st_size < 0) {
+    if (stat(resolved_path, &st) != 0 || st.st_size < 0) {
 #endif
-        SDL_Log("gfx_load_sprite: sprite_file_unreadable path=%s", resolved);
+        SDL_Log("gfx_load_sprite: sprite_file_unreadable path=%s", resolved_path);
         return 0;
     }
     if ((uint64_t)st.st_size > (uint64_t)(unsigned int)g_sprite_max_file_bytes) {
@@ -2482,7 +2477,7 @@ static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* o
  * and centered with transparent padding. This keeps sprite textures 1:1 with draw sizes to
  * avoid fuzz from resampling.
  */
-static int bake_svg_to_rgba_sized(const char* path, int max_w, int max_h,
+static int bake_svg_to_rgba_sized(const char* resolved_path, int max_w, int max_h,
                                    unsigned char** out_pixels, int* out_w, int* out_h) {
     *out_pixels = NULL;
     *out_w = 0;
@@ -2493,21 +2488,15 @@ static int bake_svg_to_rgba_sized(const char* path, int max_w, int max_h,
         return 0;
     }
 
-    char resolved[1024];
-    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
-        fprintf(stderr, "bake_svg_to_rgba_sized: bad path %s\n", path ? path : "(null)");
-        return 0;
-    }
-
-    NSVGimage* image = nsvgParseFromFile(resolved, "px", 96.0f);
+    NSVGimage* image = nsvgParseFromFile(resolved_path, "px", 96.0f);
     if (!image) {
-        fprintf(stderr, "bake_svg_to_rgba_sized: failed to parse %s\n", resolved);
+        fprintf(stderr, "bake_svg_to_rgba_sized: failed to parse %s\n", resolved_path);
         return 0;
     }
 
     if (image->width <= 0 || image->height <= 0) {
         fprintf(stderr, "bake_svg_to_rgba_sized: invalid SVG size %.1fx%.1f in %s\n",
-                image->width, image->height, resolved);
+                image->width, image->height, resolved_path);
         nsvgDelete(image);
         return 0;
     }
@@ -2530,14 +2519,14 @@ static int bake_svg_to_rgba_sized(const char* path, int max_w, int max_h,
 
     NSVGrasterizer* rast = nsvgCreateRasterizer();
     if (!rast) {
-        fprintf(stderr, "bake_svg_to_rgba_sized: failed to create rasterizer for %s\n", resolved);
+        fprintf(stderr, "bake_svg_to_rgba_sized: failed to create rasterizer for %s\n", resolved_path);
         nsvgDelete(image);
         return 0;
     }
 
     unsigned char* pixels = (unsigned char*)malloc((size_t)max_w * (size_t)max_h * 4u);
     if (!pixels) {
-        fprintf(stderr, "bake_svg_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", max_w, max_h, resolved);
+        fprintf(stderr, "bake_svg_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", max_w, max_h, resolved_path);
         nsvgDeleteRasterizer(rast);
         nsvgDelete(image);
         return 0;
@@ -2603,7 +2592,7 @@ static void premultiply_rgba(unsigned char* pixels, int w, int h) {
     }
 }
 
-static int bake_raster_to_rgba_sized(const char* path, int max_w, int max_h,
+static int bake_raster_to_rgba_sized(const char* resolved_path, int max_w, int max_h,
                                      unsigned char** out_pixels, int* out_w, int* out_h) {
     *out_pixels = NULL;
     *out_w = 0;
@@ -2614,22 +2603,16 @@ static int bake_raster_to_rgba_sized(const char* path, int max_w, int max_h,
         return 0;
     }
 
-    char resolved[1024];
-    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
-        fprintf(stderr, "bake_raster_to_rgba_sized: bad path %s\n", path ? path : "(null)");
-        return 0;
-    }
-
-    SDL_Surface* loaded = IMG_Load(resolved);
+    SDL_Surface* loaded = IMG_Load(resolved_path);
     if (!loaded) {
-        fprintf(stderr, "bake_raster_to_rgba_sized: IMG_Load failed for %s: %s\n", resolved, IMG_GetError());
+        fprintf(stderr, "bake_raster_to_rgba_sized: IMG_Load failed for %s: %s\n", resolved_path, IMG_GetError());
         return 0;
     }
 
     SDL_Surface* rgba = SDL_ConvertSurfaceFormat(loaded, SDL_PIXELFORMAT_RGBA32, 0);
     SDL_FreeSurface(loaded);
     if (!rgba) {
-        fprintf(stderr, "bake_raster_to_rgba_sized: SDL_ConvertSurfaceFormat failed for %s: %s\n", resolved, SDL_GetError());
+        fprintf(stderr, "bake_raster_to_rgba_sized: SDL_ConvertSurfaceFormat failed for %s: %s\n", resolved_path, SDL_GetError());
         return 0;
     }
 
@@ -2637,14 +2620,14 @@ static int bake_raster_to_rgba_sized(const char* path, int max_w, int max_h,
     const int src_h = rgba->h;
     if (src_w <= 0 || src_h <= 0) {
         SDL_FreeSurface(rgba);
-        fprintf(stderr, "bake_raster_to_rgba_sized: invalid raster size %dx%d in %s\n", src_w, src_h, resolved);
+        fprintf(stderr, "bake_raster_to_rgba_sized: invalid raster size %dx%d in %s\n", src_w, src_h, resolved_path);
         return 0;
     }
 
     unsigned char* out = (unsigned char*)malloc((size_t)max_w * (size_t)max_h * 4u);
     if (!out) {
         SDL_FreeSurface(rgba);
-        fprintf(stderr, "bake_raster_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", max_w, max_h, resolved);
+        fprintf(stderr, "bake_raster_to_rgba_sized: OOM allocating %d x %d buffer for %s\n", max_w, max_h, resolved_path);
         return 0;
     }
     memset(out, 0, (size_t)max_w * (size_t)max_h * 4u);
@@ -3017,6 +3000,17 @@ static void capture_scheduled_screenshot(void) {
         return;
     }
     g_screenshot_taken = true;
+    const char* parity_stage = SDL_getenv("STASIS_PARITY_CAPTURE_STAGE");
+    if (parity_stage && *parity_stage) {
+        SDL_Log(
+            "Stasis parity capture: stage=%s path=%s frame=%d backend=%s surface_generation=%u renderer_generation=%u",
+            parity_stage,
+            g_screenshot_path,
+            g_screenshot_frame,
+            g_use_sdl_renderer ? "sdl" : "gl",
+            g_resource_lifecycle.surface_generation,
+            g_resource_lifecycle.renderer_generation);
+    }
     if (g_screenshot_exit_after) g_should_quit = true;
 }
 
@@ -4169,14 +4163,17 @@ static void flush_sprites_before_text(void) {
 
 static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8) {
     static int contract_logged = 0;
-    if (!cmd_i32 || !cmd_f32) return;
-
-    if (!stasis_render_v1_is_valid(cmd_i32)) {
+    StasisRenderV1Validation validation = stasis_render_v1_validate(cmd_i32, cmd_f32);
+    if (validation != STASIS_RENDER_V1_VALID) {
         if (!contract_logged) {
             SDL_Log(
-                "Stasis render contract rejected: magic=%d version=%d",
-                cmd_i32[STASIS_RENDER_I_MAGIC],
-                cmd_i32[STASIS_RENDER_I_VERSION]);
+                "Stasis renderer rejected frame: stage=command_header failure=%s magic=%d version=%d backend=%s surface_generation=%u renderer_generation=%u",
+                stasis_render_v1_validation_name(validation),
+                cmd_i32 ? cmd_i32[STASIS_RENDER_I_MAGIC] : 0,
+                cmd_i32 ? cmd_i32[STASIS_RENDER_I_VERSION] : 0,
+                g_use_sdl_renderer ? "sdl" : "gl",
+                g_resource_lifecycle.surface_generation,
+                g_resource_lifecycle.renderer_generation);
             contract_logged = 1;
         }
         return;

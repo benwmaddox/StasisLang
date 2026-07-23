@@ -17,6 +17,12 @@ static void build_representative_frame(
     i32s[STASIS_RENDER_I_SPRITE_COUNT] = 1;
     i32s[STASIS_RENDER_I_TEXT_COUNT] = 2;
     i32s[STASIS_RENDER_I_TEXT_BYTES_USED] = 5;
+    i32s[STASIS_RENDER_I_LOGICAL_W] = 640;
+    i32s[STASIS_RENDER_I_LOGICAL_H] = 360;
+    i32s[STASIS_RENDER_I_DRAWABLE_W] = 1280;
+    i32s[STASIS_RENDER_I_DRAWABLE_H] = 720;
+    i32s[STASIS_RENDER_I_DISPLAY_GENERATION] = 3;
+    i32s[STASIS_RENDER_I_DENSITY_GENERATION] = 5;
 
     f32s[0] = 0.1f; f32s[1] = 0.2f; f32s[2] = 0.3f; f32s[3] = 1.0f;
     const float line[] = {1.0f, 2.0f, 3.0f, 4.0f, 0.5f, 0.6f, 0.7f, 0.8f};
@@ -53,17 +59,37 @@ int main(void) {
 
     build_representative_frame(first_i32, first_f32, first_u8);
     build_representative_frame(second_i32, second_f32, second_u8);
+    CHECK(stasis_render_v1_validate(first_i32, first_f32) == STASIS_RENDER_V1_VALID);
+    CHECK(strcmp(stasis_render_v1_validation_name(STASIS_RENDER_V1_VALID), "ok") == 0);
+    CHECK(stasis_render_v1_validate(NULL, first_f32) == STASIS_RENDER_V1_NULL_I32);
+    CHECK(stasis_render_v1_validate(first_i32, NULL) == STASIS_RENDER_V1_NULL_F32);
     CHECK(stasis_render_v1_is_valid(first_i32));
     uint32_t first_trace = stasis_render_v1_trace(first_i32, first_f32, first_u8);
     uint32_t second_trace = stasis_render_v1_trace(second_i32, second_f32, second_u8);
     CHECK(first_trace != 0);
     CHECK(first_trace == second_trace);
 
+    second_i32[STASIS_RENDER_I_DRAWABLE_W] = 1920;
+    second_i32[STASIS_RENDER_I_DRAWABLE_H] = 1080;
+    second_i32[STASIS_RENDER_I_DISPLAY_GENERATION]++;
+    second_i32[STASIS_RENDER_I_DENSITY_GENERATION]++;
+    CHECK(first_trace == stasis_render_v1_trace(second_i32, second_f32, second_u8));
+
     second_i32[STASIS_RENDER_I_SPRITE_BASE + 1] += 1;
     CHECK(first_trace != stasis_render_v1_trace(second_i32, second_f32, second_u8));
     second_i32[STASIS_RENDER_I_VERSION] = 99;
+    CHECK(stasis_render_v1_validate(second_i32, second_f32) == STASIS_RENDER_V1_BAD_VERSION);
+    CHECK(strcmp(
+        stasis_render_v1_validation_name(STASIS_RENDER_V1_BAD_VERSION),
+        "unsupported_version") == 0);
     CHECK(!stasis_render_v1_is_valid(second_i32));
     CHECK(stasis_render_v1_trace(second_i32, second_f32, second_u8) == 0);
+
+    second_i32[STASIS_RENDER_I_MAGIC] = 0;
+    CHECK(stasis_render_v1_validate(second_i32, second_f32) == STASIS_RENDER_V1_BAD_MAGIC);
+    CHECK(strcmp(
+        stasis_render_v1_validation_name(STASIS_RENDER_V1_BAD_MAGIC),
+        "invalid_magic") == 0);
 
     build_representative_frame(second_i32, second_f32, second_u8);
     second_i32[STASIS_RENDER_I_TEXT_BASE + 1] = 1;
