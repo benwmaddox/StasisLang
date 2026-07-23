@@ -6,9 +6,11 @@ use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
 };
 use crate::ir::hir::FunctionHIR;
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
-use cranelift_module::{default_libcall_names, Module};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_module::{default_libcall_names, DataDescription, DataId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -378,12 +380,11 @@ impl AotProcess {
                         artifact_function.name, artifact.object_index
                     )
                 })?;
-            let object_file_name = format!(
+            let object_path = object_dir.join(format!(
                 "{}_{}.obj",
                 sanitize_file_token(&artifact_function.name),
                 artifact.object_index
-            );
-            let object_path = object_dir.join(object_file_name);
+            ));
             fs::write(&object_path, object_bytes).map_err(|error| {
                 format!(
                     "failed to write object file {}: {error}",
@@ -398,13 +399,242 @@ impl AotProcess {
         let entry_object_path = entry_object_path
             .ok_or_else(|| format!("entry object path missing for function '{name}'"))?;
 
+        let mut link_entry = entry_artifact.symbol_name.clone();
+        if let Some((storage_bytes, wrapper_symbol)) =
+            self.compile_standalone_storage_object(&entry_artifact.symbol_name)?
+        {
+            let storage_path = object_dir.join("direct_storage.obj");
+            fs::write(&storage_path, storage_bytes).map_err(|error| {
+                format!(
+                    "failed to write direct storage object {}: {error}",
+                    storage_path.display()
+                )
+            })?;
+            object_paths.push(storage_path);
+            link_entry = wrapper_symbol;
+        }
+
         stasis_jit::link_objects_to_executable(
             &object_paths,
             output_executable,
-            &entry_artifact.symbol_name,
+            &link_entry,
             link_config,
         )?;
         Ok(entry_object_path)
+    }
+
+    fn compile_standalone_storage_object(
+        &self,
+        entry_symbol: &str,
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
+        fn storage_width(type_name: &str) -> Result<usize, String> {
+            match type_name {
+                "u8" => Ok(1),
+                "bool" | "u16" | "u32" | "i32" | "f32" => Ok(4),
+                "f64" => Ok(8),
+                other => Err(format!("unsupported standalone AOT storage type '{other}'")),
+            }
+        }
+
+        let layout = self.state_layout();
+        if layout.scalars.is_empty() && layout.collections.is_empty() {
+            return Ok(None);
+        }
+        let mut flag_builder = settings::builder();
+        flag_builder
+            .set(
+                "opt_level",
+                self.optimization_profile.as_cranelift_opt_level(),
+            )
+            .map_err(|error| format!("failed to configure Cranelift opt level: {error}"))?;
+        if self.target.requires_position_independent_code() {
+            flag_builder.set("is_pic", "true").map_err(|error| {
+                format!("failed to configure position-independent AOT: {error}")
+            })?;
+        }
+        let flags = settings::Flags::new(flag_builder);
+        let isa_builder = match self.target.object_triple() {
+            Some(triple_text) => {
+                let triple = Triple::from_str(triple_text).map_err(|error| {
+                    format!("failed to parse AOT target triple {triple_text}: {error}")
+                })?;
+                let triple_display = triple.to_string();
+                cranelift_codegen::isa::lookup(triple).map_err(|error| {
+                    format!("failed to construct ISA builder for {triple_display}: {error}")
+                })?
+            }
+            None => cranelift_native::builder()
+                .map_err(|error| format!("failed to construct native ISA builder: {error}"))?,
+        };
+        let isa = isa_builder
+            .finish(flags)
+            .map_err(|error| format!("failed to finalize native ISA: {error}"))?;
+        let builder = ObjectBuilder::new(
+            isa,
+            "stasis_aot_standalone_storage".to_string(),
+            default_libcall_names(),
+        )
+        .map_err(|error| format!("failed to construct storage object builder: {error}"))?;
+        let mut module = ObjectModule::new(builder);
+        let pointer_type = module.target_config().pointer_type();
+        let mut registrations = Vec::new();
+
+        for scalar in &layout.scalars {
+            let width = storage_width(&scalar.type_name)?;
+            let mut bytes = vec![0; width];
+            if let Some(collection_path) = scalar.path.strip_suffix(".max_length") {
+                if let Some(collection) = layout
+                    .collections
+                    .iter()
+                    .find(|collection| collection.path == collection_path)
+                {
+                    bytes[..4].copy_from_slice(&collection.capacity.to_ne_bytes());
+                }
+            }
+            let symbol = aot_storage_symbol(&scalar.path, "");
+            let data_id = define_standalone_storage_data(&mut module, &symbol, bytes)?;
+            registrations.push((
+                data_id,
+                scalar.type_name.clone(),
+                hash_global_path(&scalar.path),
+                0,
+                None,
+            ));
+        }
+        for collection in &layout.collections {
+            let len = usize::try_from(collection.capacity).map_err(|_| {
+                format!(
+                    "negative standalone AOT collection capacity for '{}'",
+                    collection.path
+                )
+            })?;
+            for field in &collection.fields {
+                let width = storage_width(&field.type_name)?;
+                let size = len.checked_mul(width).ok_or_else(|| {
+                    format!(
+                        "standalone AOT storage size overflow for '{}.{}'",
+                        collection.path, field.field
+                    )
+                })?;
+                let symbol = aot_storage_symbol(&collection.path, &field.field);
+                let data_id = define_standalone_storage_data(&mut module, &symbol, vec![0; size])?;
+                registrations.push((
+                    data_id,
+                    field.type_name.clone(),
+                    hash_global_path(&collection.path),
+                    hash_foreach_field_suffix(&field.field),
+                    Some(collection.capacity),
+                ));
+            }
+        }
+
+        let mut entry_signature = module.make_signature();
+        entry_signature.returns.push(AbiParam::new(types::I32));
+        let entry_id = module
+            .declare_function(entry_symbol, Linkage::Import, &entry_signature)
+            .map_err(|error| format!("failed to declare standalone entry: {error}"))?;
+        let wrapper_symbol = "stasis_aot_standalone_entry".to_string();
+        let wrapper_id = module
+            .declare_function(&wrapper_symbol, Linkage::Export, &entry_signature)
+            .map_err(|error| format!("failed to declare standalone wrapper: {error}"))?;
+
+        let mut register_functions = BTreeMap::new();
+        for (_, type_name, _, _, len) in &registrations {
+            let lane = if type_name == "f32" {
+                "f32"
+            } else if type_name == "f64" {
+                "f64"
+            } else if type_name == "u8" && len.is_some() {
+                "u8"
+            } else {
+                "i32"
+            };
+            let key = (lane, len.is_some());
+            if register_functions.contains_key(&key) {
+                continue;
+            }
+            let symbol = if len.is_some() {
+                format!("stasis_jit_register_global_{lane}_array")
+            } else {
+                format!("stasis_jit_register_global_{lane}_ptr")
+            };
+            let mut signature = module.make_signature();
+            signature.params.push(AbiParam::new(types::I32));
+            if len.is_some() {
+                signature.params.push(AbiParam::new(types::I32));
+            }
+            signature.params.push(AbiParam::new(pointer_type));
+            if len.is_some() {
+                signature.params.push(AbiParam::new(types::I32));
+            }
+            let function_id = module
+                .declare_function(&symbol, Linkage::Import, &signature)
+                .map_err(|error| format!("failed to declare '{symbol}': {error}"))?;
+            register_functions.insert(key, function_id);
+        }
+
+        let mut context = module.make_context();
+        context.func.signature = entry_signature;
+        let entry_ref = module.declare_func_in_func(entry_id, &mut context.func);
+        let register_refs: BTreeMap<_, _> = register_functions
+            .into_iter()
+            .map(|(key, id)| (key, module.declare_func_in_func(id, &mut context.func)))
+            .collect();
+        let registration_refs: Vec<_> = registrations
+            .into_iter()
+            .map(|(data_id, type_name, path_hash, field_hash, len)| {
+                (
+                    module.declare_data_in_func(data_id, &mut context.func),
+                    type_name,
+                    path_hash,
+                    field_hash,
+                    len,
+                )
+            })
+            .collect();
+        let mut builder_context = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+            let block = builder.create_block();
+            builder.switch_to_block(block);
+            builder.seal_block(block);
+            for (data, type_name, path_hash, field_hash, len) in registration_refs {
+                let lane = if type_name == "f32" {
+                    "f32"
+                } else if type_name == "f64" {
+                    "f64"
+                } else if type_name == "u8" && len.is_some() {
+                    "u8"
+                } else {
+                    "i32"
+                };
+                let function_ref = register_refs[&(lane, len.is_some())];
+                let path = builder.ins().iconst(types::I32, i64::from(path_hash));
+                let pointer = builder.ins().global_value(pointer_type, data);
+                if let Some(len) = len {
+                    let field = builder.ins().iconst(types::I32, i64::from(field_hash));
+                    let length = builder.ins().iconst(types::I32, i64::from(len));
+                    builder
+                        .ins()
+                        .call(function_ref, &[path, field, pointer, length]);
+                } else {
+                    builder.ins().call(function_ref, &[path, pointer]);
+                }
+            }
+            let call = builder.ins().call(entry_ref, &[]);
+            let result = builder.inst_results(call)[0];
+            builder.ins().return_(&[result]);
+            builder.finalize();
+        }
+        module
+            .define_function(wrapper_id, &mut context)
+            .map_err(|error| format!("failed to define standalone wrapper: {error}"))?;
+        module.clear_context(&mut context);
+        let bytes = module
+            .finish()
+            .emit()
+            .map_err(|error| format!("failed to emit standalone AOT storage object: {error}"))?;
+        Ok(Some((bytes, wrapper_symbol)))
     }
 
     pub fn write_engine_bundle(
@@ -616,19 +846,35 @@ fn aot_array_lane(
     }
 }
 
+fn aot_storage_symbol(path: &str, field: &str) -> String {
+    if field.is_empty() {
+        path.replace('.', "__")
+    } else {
+        format!("{}__{}", path.replace('.', "__"), field.replace('.', "__"))
+    }
+}
+
+fn define_standalone_storage_data(
+    module: &mut ObjectModule,
+    symbol: &str,
+    bytes: Vec<u8>,
+) -> Result<DataId, String> {
+    let data_id = module
+        .declare_data(symbol, Linkage::Export, true, false)
+        .map_err(|error| format!("failed to declare standalone storage '{symbol}': {error}"))?;
+    let mut description = DataDescription::new();
+    description.define(bytes.into_boxed_slice());
+    module
+        .define_data(data_id, &description)
+        .map_err(|error| format!("failed to define standalone storage '{symbol}': {error}"))?;
+    Ok(data_id)
+}
+
 fn build_aot_direct_storage_bindings(
     global_path_types: &GlobalPathTypeMap,
     collection_infos: &CollectionInfoMap,
     type_table: &TypeTable,
 ) -> Result<DirectStorageBindings, String> {
-    fn storage_symbol(path: &str, field: &str) -> String {
-        if field.is_empty() {
-            path.replace('.', "__")
-        } else {
-            format!("{}__{}", path.replace('.', "__"), field.replace('.', "__"))
-        }
-    }
-
     let mut bindings = DirectStorageBindings::default();
     for (path, type_id) in global_path_types {
         if collection_infos.contains_key(path) {
@@ -637,7 +883,7 @@ fn build_aot_direct_storage_bindings(
         if aot_scalar_lane(*type_id, type_table).is_some() {
             bindings.scalars.insert(
                 path.clone(),
-                DirectStorageBinding::Symbol(storage_symbol(path, "")),
+                DirectStorageBinding::Symbol(aot_storage_symbol(path, "")),
             );
         }
     }
@@ -650,7 +896,7 @@ fn build_aot_direct_storage_bindings(
             bindings.arrays.insert(
                 (path.clone(), String::new()),
                 crate::backend::emit::DirectArrayStorageBinding {
-                    slot: DirectStorageBinding::Symbol(storage_symbol(path, "")),
+                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(path, "")),
                     byte_lane: lane == "u8",
                     static_len: Some(info.len as usize),
                 },
@@ -666,7 +912,7 @@ fn build_aot_direct_storage_bindings(
             bindings.arrays.insert(
                 (path.clone(), field.clone()),
                 crate::backend::emit::DirectArrayStorageBinding {
-                    slot: DirectStorageBinding::Symbol(storage_symbol(path, field)),
+                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(path, field)),
                     byte_lane: lane == "u8",
                     static_len: Some(info.len as usize),
                 },
@@ -1063,7 +1309,9 @@ mod tests {
     use super::*;
     use crate::backend::jit::JitProcess;
     use crate::backend::EngineEntrypoints;
-    use object::{Architecture, BinaryFormat, File, Object, ObjectSection, RelocationKind};
+    use object::{
+        Architecture, BinaryFormat, File, Object, ObjectSection, ObjectSymbol, RelocationKind,
+    };
     #[cfg(windows)]
     use std::process::Command;
     use std::sync::Arc;
@@ -1368,6 +1616,42 @@ mod tests {
             !has_call_instruction,
             "core AOT global storage emitted a runtime call:\n{clif}"
         );
+    }
+
+    #[test]
+    fn standalone_aot_storage_defines_and_registers_direct_symbols() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "storage.stasis",
+            "global count: i32;\nglobal ints: i32[2];\nglobal bytes: u8[3];\nfunction main(): i32 { count = 1; ints[0] = 2; bytes[0] = 3; return 0; }\n",
+        );
+        process.compile().expect("compile");
+        let (bytes, wrapper) = process
+            .compile_standalone_storage_object("aot_fn_0")
+            .expect("storage object")
+            .expect("storage required");
+        let object = File::parse(bytes.as_slice()).expect("parse storage object");
+        let symbols: BTreeSet<String> = object
+            .symbols()
+            .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+            .collect();
+
+        assert_eq!(wrapper, "stasis_aot_standalone_entry");
+        for expected in [
+            "count",
+            "ints",
+            "bytes",
+            "stasis_aot_standalone_entry",
+            "stasis_jit_register_global_i32_ptr",
+            "stasis_jit_register_global_i32_array",
+            "stasis_jit_register_global_u8_array",
+            "aot_fn_0",
+        ] {
+            assert!(
+                symbols.contains(expected),
+                "standalone storage object missing symbol '{expected}': {symbols:?}"
+            );
+        }
     }
 
     #[test]

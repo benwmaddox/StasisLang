@@ -10454,7 +10454,7 @@ fn resolve_direct_storage_refs(
             DirectStorageBinding::Absolute(address) => Ok(DirectStorageRef::Absolute(*address)),
             DirectStorageBinding::Symbol(symbol) => {
                 let data_id = module
-                    .declare_data(symbol, Linkage::Import, false, false)
+                    .declare_data(symbol, Linkage::Import, true, false)
                     .map_err(|error| {
                         format!("failed to declare direct storage symbol '{symbol}': {error}")
                     })?;
