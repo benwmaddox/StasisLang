@@ -92,3 +92,60 @@ red/green replay tests passed, but the model used the capability only for render
 task still scored 3/4 with the same paddle-center failure, while rising to 342.4 seconds, 50 tool
 calls, 308,626 input tokens, and an estimated $1.849. The capability and its prompt instruction
 were therefore reverted rather than adding unproven surface area.
+
+## Tested-write completion
+
+The next refinement removed runtime-state validation from the built-in AI contract. Human
+`stasis validate` and TUI `:validate` remain available, but AI writes now compile and run project
+tests atomically, and the agent cannot report completion without a successful write batch. A
+separate live `run_tests` tool was also removed because it only repeated the result already
+returned by the write. Repeated failures from the same atomic batch now include full diagnostics
+once instead of duplicating them for every write observation.
+
+The first lean run passed medium 4/4 in 201.9 seconds with 38 tool calls, 160,967 input tokens,
+25,344 cached input tokens, 9,540 output tokens, and an estimated $0.977. Its first small run was
+faster and cheaper but failed one paddle-contact case, so that configuration was rejected. The
+trace showed that the model copied an old collision constant instead of deriving contact from the
+rendered rectangle after movement.
+
+A generic game-geometry instruction corrected that reasoning: collision and geometry changes use
+rendered rectangle bounds as the coordinate source of truth and derive test inputs after the
+update function's movement order. The retained configuration passed 4/4 at every scale:
+
+| Size | Total s | Tool calls | Input | Cached | Output | Est. USD |
+|---|---:|---:|---:|---:|---:|---:|
+| small | 255.6 | 31 | 131,859 | 22,016 | 12,972 | 0.949 |
+| medium | 262.6 | 41 | 183,149 | 30,208 | 12,620 | 1.158 |
+| large | 204.7 | 40 | 224,678 | 32,000 | 9,551 | 1.266 |
+
+These single-run timings vary enough that the change is not claimed as a universal speedup. It is
+retained because it removes an ineffective validation loop, keeps all acceptance checks green,
+and makes the mandatory completion path one tested atomic edit rather than an edit plus a second
+synthetic runtime protocol.
+
+## Medium phase timing sample
+
+A subsequent single medium-project run added out-of-band event timing without changing the model
+payload. It passed 4/4 in 274.1 seconds with 43 tool calls. Provider waits consumed 271.6 seconds
+(99.2% of the traced AI action); initial context and every local tool batch together consumed 2.3
+seconds. The independent acceptance run took another 0.1 seconds.
+
+| Phase | Time |
+|---|---:|
+| Initial symbol context | 0.4s |
+| Turn 1: choose narrow discovery queries | 13.1s |
+| Five local symbol searches | 0.2s |
+| Turn 2: choose source/reference batch | 16.4s |
+| Sixteen local reads and reference lookups | 0.8s |
+| Turn 3: identify remaining test/state context | 13.8s |
+| Seven local context reads | 0.3s |
+| Turn 4: design the source and boundary-test batch | 124.7s |
+| Atomic compile/tests, failed pre-existing test | 0.3s |
+| Turn 5: diagnose failure and prepare retry | 96.7s |
+| Atomic compile/tests, successful retry | 0.3s |
+| Turn 6: final summary | 6.9s |
+| Independent four-test acceptance | 0.1s |
+
+This sample shows that making local validation faster cannot materially approach a one-minute
+task by itself. The largest opportunity is reducing or bounding the two long edit/repair provider
+turns while preserving first-pass accuracy.

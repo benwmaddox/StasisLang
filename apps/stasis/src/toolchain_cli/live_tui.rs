@@ -1,4 +1,4 @@
-use super::{format_live_response, scalar_text, RuntimeValidationRequirement};
+use super::{format_live_response, scalar_text};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -18,15 +18,13 @@ use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopSourceItem, WorkshopSourceItemKind,
 };
 use stasis_runner::live::{
-    compare_live_validation_values, CompletionContext, CompletionItem, CompletionQuery,
-    LiveCommand, LiveEdit, LiveEditOperation, LiveRequest, LiveResponse, LiveSessionClient,
-    LiveSymbolTarget, TerminalBuffer, TerminalInput,
+    CompletionContext, CompletionItem, CompletionQuery, LiveCommand, LiveEdit, LiveEditOperation,
+    LiveRequest, LiveResponse, LiveSessionClient, LiveSymbolTarget, TerminalBuffer, TerminalInput,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -34,7 +32,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_TRANSCRIPT_LINES: usize = 500;
 const MAX_UNDO_STATES: usize = 100;
-const MAX_AI_DIAGNOSTIC_CHARS: usize = 4096;
 const COMPLETION_LIMIT: usize = 64;
 const TUI_REQUEST_START: u64 = 1u64 << 61;
 const AI_REQUEST_START: u64 = 1u64 << 62;
@@ -63,7 +60,7 @@ pub(super) fn run_scripted_ai_with_cancel(
     let trace_path = audit.path.clone();
     let usage_path = audit.usage_path.clone();
     let mut provider = CodexExecProvider::default();
-    let mut tools = LiveAiTools::new(client.clone(), project_root.to_path_buf());
+    let mut tools = LiveAiTools::new(client.clone());
     let initial_context = load_ai_initial_context(&mut tools, canceled)?;
     audit.write(serde_json::json!({
         "event": "initial_context",
@@ -177,6 +174,10 @@ struct AiAuditLog {
     file: fs::File,
     usage_path: PathBuf,
     usage_file: fs::File,
+    timing_path: PathBuf,
+    timing_file: fs::File,
+    started_at: Instant,
+    last_event_at: Instant,
 }
 
 impl AiAuditLog {
@@ -190,6 +191,7 @@ impl AiAuditLog {
             .as_millis();
         let path = directory.join(format!("tui-ai-{stamp}.jsonl"));
         let usage_path = directory.join(format!("tui-ai-{stamp}.usage.jsonl"));
+        let timing_path = directory.join(format!("tui-ai-{stamp}.timing.jsonl"));
         let file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -200,11 +202,21 @@ impl AiAuditLog {
             .write(true)
             .open(&usage_path)
             .map_err(|error| format!("failed creating AI usage trace: {error}"))?;
+        let timing_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&timing_path)
+            .map_err(|error| format!("failed creating AI timing trace: {error}"))?;
+        let now = Instant::now();
         let mut log = Self {
             path,
             file,
             usage_path,
             usage_file,
+            timing_path,
+            timing_file,
+            started_at: now,
+            last_event_at: now,
         };
         log.write(serde_json::json!({
             "event": "request",
@@ -220,6 +232,13 @@ impl AiAuditLog {
     }
 
     fn write(&mut self, value: Value) -> Result<(), String> {
+        let now = Instant::now();
+        let timing = serde_json::json!({
+            "event": value.get("event").cloned().unwrap_or(Value::Null),
+            "elapsed_ms": duration_millis(now.duration_since(self.started_at)),
+            "since_previous_ms": duration_millis(now.duration_since(self.last_event_at)),
+        });
+        self.last_event_at = now;
         serde_json::to_writer(&mut self.file, &value)
             .map_err(|error| format!("failed encoding AI trace: {error}"))?;
         self.file
@@ -227,7 +246,15 @@ impl AiAuditLog {
             .map_err(|error| format!("failed writing AI trace: {error}"))?;
         self.file
             .flush()
-            .map_err(|error| format!("failed flushing AI trace: {error}"))
+            .map_err(|error| format!("failed flushing AI trace: {error}"))?;
+        serde_json::to_writer(&mut self.timing_file, &timing)
+            .map_err(|error| format!("failed encoding AI timing trace: {error}"))?;
+        self.timing_file
+            .write_all(b"\n")
+            .map_err(|error| format!("failed writing AI timing trace: {error}"))?;
+        self.timing_file
+            .flush()
+            .map_err(|error| format!("failed flushing AI timing trace: {error}"))
     }
 
     fn write_usage(&mut self, usage: &Value) -> Result<(), String> {
@@ -240,6 +267,10 @@ impl AiAuditLog {
             .flush()
             .map_err(|error| format!("failed flushing AI usage trace: {error}"))
     }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 impl Drop for AiRun {
@@ -1233,13 +1264,12 @@ impl LiveTui {
             }
         }
         let client = self.client.clone();
-        let project_root = self.project_root.clone();
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_canceled = canceled.clone();
         let (events_tx, events_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
             let mut provider = CodexExecProvider::default();
-            let mut tools = LiveAiTools::new(client, project_root);
+            let mut tools = LiveAiTools::new(client);
             let progress = events_tx.clone();
             let result =
                 load_ai_initial_context(&mut tools, &worker_canceled).and_then(|initial_context| {
@@ -1910,39 +1940,19 @@ fn completion_key(item: &CompletionItem) -> (String, String, String) {
     (item.text.clone(), item.kind.clone(), item.detail.clone())
 }
 
-#[derive(Clone, PartialEq)]
-struct AiValidationContract {
-    requirements: Value,
-    frames: usize,
-    baseline: String,
-    setup: String,
-    tick: String,
-    render: String,
-}
-
 struct LiveAiTools {
     client: LiveSessionClient,
-    project_root: PathBuf,
     next_request_id: u64,
     last_write: Option<LiveResponse>,
-    validation_baseline_active: bool,
-    validation_was_paused: bool,
-    red_validation_contract: Option<AiValidationContract>,
-    write_needs_green_validation: bool,
     reference_search_ready: bool,
 }
 
 impl LiveAiTools {
-    fn new(client: LiveSessionClient, project_root: PathBuf) -> Self {
+    fn new(client: LiveSessionClient) -> Self {
         Self {
             client,
-            project_root,
             next_request_id: AI_REQUEST_START,
             last_write: None,
-            validation_baseline_active: false,
-            validation_was_paused: false,
-            red_validation_contract: None,
-            write_needs_green_validation: false,
             reference_search_ready: false,
         }
     }
@@ -2012,22 +2022,6 @@ impl LiveAiTools {
                 concise: true,
             },
             "run_frame" => LiveCommand::Step { ticks: 1 },
-            "run_tests" => {
-                return match &self.last_write {
-                    Some(response) if response.ok => ToolObservation::result(
-                        "run_tests",
-                        serde_json::json!({
-                            "status": "passed_with_latest_atomic_write",
-                            "write": compact_write_transaction(response.data.as_ref()),
-                        }),
-                    ),
-                    _ => ToolObservation::error(
-                        "run_tests",
-                        "live AI tests run as part of each atomic write batch; no successful write batch is available",
-                    ),
-                };
-            }
-            "validate_runtime_state" => return self.execute_validation(call, canceled),
             _ => return ToolObservation::error(&call.tool, "tool is not a read operation"),
         };
         match self.request(command, canceled) {
@@ -2042,341 +2036,11 @@ impl LiveAiTools {
         }
     }
 
-    fn execute_validation(&mut self, call: &ToolCall, canceled: &AtomicBool) -> ToolObservation {
-        let args = call.args.as_object().expect("validated tool args");
-        let expected_outcome = string_arg(args, "expected_outcome").unwrap_or_default();
-        if !matches!(expected_outcome.as_str(), "pass" | "fail") {
-            return ToolObservation::error(&call.tool, "expected_outcome must be 'pass' or 'fail'");
-        }
-        let Some(requirements) = args.get("requirements").and_then(Value::as_array) else {
-            return ToolObservation::error(&call.tool, "requirements must be an array");
-        };
-        if requirements.is_empty() || requirements.len() > 16 {
-            return ToolObservation::error(&call.tool, "requirements must contain 1..=16 checks");
-        }
-        let frames = usize_arg(args, "frames").unwrap_or(0);
-        if frames > 600 {
-            return ToolObservation::error(&call.tool, "frames exceeds the 600-frame limit");
-        }
-        let baseline = string_arg(args, "baseline").unwrap_or_else(|| "live".to_string());
-        if !matches!(baseline.as_str(), "live" | "fresh") {
-            return ToolObservation::error(&call.tool, "baseline must be 'live' or 'fresh'");
-        }
-        let setup = string_arg(args, "setup").unwrap_or_else(|| "main".to_string());
-        let tick = string_arg(args, "tick").unwrap_or_else(|| "tick".to_string());
-        let render = string_arg(args, "render").unwrap_or_else(|| "render".to_string());
-        let validation_contract = AiValidationContract {
-            requirements: Value::Array(requirements.clone()),
-            frames,
-            baseline: baseline.clone(),
-            setup,
-            tick,
-            render,
-        };
-        if expected_outcome == "pass"
-            && self.write_needs_green_validation
-            && self.red_validation_contract.as_ref() != Some(&validation_contract)
-        {
-            return ToolObservation::error(
-                &call.tool,
-                "green validation must use the same baseline, requirements, and frame count as the accepted red validation",
-            );
-        }
-        if baseline == "fresh" {
-            let result = self.execute_fresh_validation(&validation_contract, canceled);
-            return self.finish_validation_observation(
-                &call.tool,
-                expected_outcome,
-                validation_contract,
-                result,
-            );
-        }
-        if !self.validation_baseline_active {
-            self.validation_was_paused = match self.request(LiveCommand::Status, canceled) {
-                Ok(response) if response.ok => response
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("paused"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                Ok(response) => {
-                    return ToolObservation::error(&call.tool, format_live_response(&response))
-                }
-                Err(error) => return ToolObservation::error(&call.tool, error),
-            };
-        }
-        let mut validation_pause_acquired = false;
-        let result = (|| -> Result<Value, String> {
-            let response = self.request(LiveCommand::Pause, canceled)?;
-            if !response.ok {
-                return Err(format_live_response(&response));
-            }
-            validation_pause_acquired = true;
-            let baseline_command = if self.validation_baseline_active {
-                LiveCommand::ValidationRestore
-            } else {
-                LiveCommand::ValidationSnapshot
-            };
-            let response = self.request(baseline_command, canceled)?;
-            if !response.ok {
-                return Err(format_live_response(&response));
-            }
-            self.validation_baseline_active = true;
-            for _ in 0..frames {
-                let response = self.request(LiveCommand::Step { ticks: 1 }, canceled)?;
-                if !response.ok {
-                    return Err(format_live_response(&response));
-                }
-            }
-            let mut checks = Vec::new();
-            let mut requirements_met = true;
-            for requirement in requirements {
-                let object = requirement
-                    .as_object()
-                    .ok_or_else(|| "each requirement must be an object".to_string())?;
-                let path = string_arg(object, "path")
-                    .ok_or_else(|| "each requirement needs a path".to_string())?;
-                let operator = string_arg(object, "op").unwrap_or_else(|| "eq".to_string());
-                let expected = object
-                    .get("value")
-                    .cloned()
-                    .ok_or_else(|| format!("requirement for {path} needs a value"))?;
-                let response =
-                    self.request(LiveCommand::Inspect { path: path.clone() }, canceled)?;
-                if !response.ok {
-                    return Err(format_live_response(&response));
-                }
-                let actual = response
-                    .data
-                    .as_ref()
-                    .and_then(|data| data.get("value"))
-                    .and_then(|value| value.get("value"))
-                    .cloned()
-                    .ok_or_else(|| format!("inspection for {path} returned no scalar value"))?;
-                let passed = compare_live_validation_values(&actual, &operator, &expected)?;
-                requirements_met &= passed;
-                checks.push(serde_json::json!({
-                    "path": path,
-                    "op": operator,
-                    "expected": expected,
-                    "actual": actual,
-                    "passed": passed,
-                }));
-            }
-            let expected_met = expected_outcome == "pass";
-            Ok(serde_json::json!({
-                "status": if requirements_met == expected_met { "accepted" } else { "unexpected" },
-                "expected_outcome": expected_outcome,
-                "requirements_met": requirements_met,
-                "validation_passed": requirements_met == expected_met,
-                "frames": frames,
-                "checks": checks,
-            }))
-        })();
-        let requirements_met = result
-            .as_ref()
-            .ok()
-            .and_then(|value| value.get("requirements_met"))
-            .and_then(Value::as_bool);
-        let should_finish = result.is_err()
-            || expected_outcome == "pass"
-            || (expected_outcome == "fail" && requirements_met == Some(true));
-        if should_finish {
-            if self.validation_baseline_active {
-                self.finish_validation();
-            } else if validation_pause_acquired && !self.validation_was_paused {
-                let _ = self.request(LiveCommand::Resume, &AtomicBool::new(false));
-            }
-        } else if self.validation_baseline_active {
-            let _ = self.request(LiveCommand::ValidationRestore, canceled);
-        }
-        self.finish_validation_observation(
-            &call.tool,
-            expected_outcome,
-            validation_contract,
-            result,
-        )
-    }
-
-    fn execute_fresh_validation(
-        &self,
-        contract: &AiValidationContract,
-        canceled: &AtomicBool,
-    ) -> Result<Value, String> {
-        let requirements = contract
-            .requirements
-            .as_array()
-            .expect("validated requirements array")
-            .iter()
-            .cloned()
-            .map(serde_json::from_value::<RuntimeValidationRequirement>)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("invalid fresh validation requirement: {error}"))?;
-        let executable = std::env::current_exe()
-            .map_err(|error| format!("failed locating stasis executable: {error}"))?;
-        let mut child = Command::new(executable)
-            .arg("--json")
-            .arg("--workspace")
-            .arg(&self.project_root)
-            .arg("__validate-runtime")
-            .arg("--frames")
-            .arg(contract.frames.to_string())
-            .arg("--requirements-json")
-            .arg(
-                serde_json::to_string(&requirements)
-                    .map_err(|error| format!("failed encoding validation requirements: {error}"))?,
-            )
-            .arg("--setup")
-            .arg(&contract.setup)
-            .arg("--tick")
-            .arg(&contract.tick)
-            .arg("--render")
-            .arg(&contract.render)
-            .current_dir(&self.project_root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("failed starting fresh validation process: {error}"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "fresh validation stdout was unavailable".to_string())?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "fresh validation stderr was unavailable".to_string())?;
-        let stdout_worker = thread::spawn(move || read_bounded_process_output(stdout));
-        let stderr_worker = thread::spawn(move || read_bounded_process_output(stderr));
-        let started = Instant::now();
-        let status = loop {
-            if canceled.load(Ordering::Acquire) {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_worker.join();
-                let _ = stderr_worker.join();
-                return Err("AI request canceled".to_string());
-            }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("fresh validation process failed: {error}"))?
-            {
-                break status;
-            }
-            if started.elapsed() >= Duration::from_secs(60) {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_worker.join();
-                let _ = stderr_worker.join();
-                return Err("fresh validation exceeded 60 seconds".to_string());
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
-        let stdout = stdout_worker
-            .join()
-            .map_err(|_| "fresh validation stdout reader panicked".to_string())??;
-        let stderr = stderr_worker
-            .join()
-            .map_err(|_| "fresh validation stderr reader panicked".to_string())??;
-        if !status.success() {
-            return Err(format!(
-                "fresh validation failed: {}",
-                stderr.lines().last().unwrap_or("child process failed")
-            ));
-        }
-        let envelope = stdout
-            .lines()
-            .rev()
-            .find_map(|line| serde_json::from_str::<Value>(line).ok())
-            .ok_or_else(|| "fresh validation returned no JSON result".to_string())?;
-        let mut result = envelope
-            .get("result")
-            .cloned()
-            .ok_or_else(|| "fresh validation JSON omitted result".to_string())?;
-        if !stderr.trim().is_empty() {
-            result["diagnostics"] = Value::String(
-                stderr
-                    .chars()
-                    .take(MAX_AI_DIAGNOSTIC_CHARS)
-                    .collect::<String>(),
-            );
-        }
-        Ok(result)
-    }
-
-    fn finish_validation_observation(
-        &mut self,
-        tool: &str,
-        expected_outcome: String,
-        validation_contract: AiValidationContract,
-        result: Result<Value, String>,
-    ) -> ToolObservation {
-        match result {
-            Ok(mut result) => {
-                let requirements_met = result
-                    .get("requirements_met")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let validation_passed = requirements_met == (expected_outcome == "pass");
-                let object = result.as_object_mut().expect("validation result object");
-                object.insert(
-                    "expected_outcome".into(),
-                    Value::String(expected_outcome.clone()),
-                );
-                object.insert("validation_passed".into(), Value::Bool(validation_passed));
-                object.insert(
-                    "status".into(),
-                    Value::String(
-                        if validation_passed {
-                            "accepted"
-                        } else {
-                            "unexpected"
-                        }
-                        .into(),
-                    ),
-                );
-                if validation_passed && expected_outcome == "fail" {
-                    self.red_validation_contract = Some(validation_contract);
-                }
-                if validation_passed && expected_outcome == "pass" && self.last_write.is_some() {
-                    self.write_needs_green_validation = false;
-                    self.red_validation_contract = None;
-                }
-                ToolObservation::result(tool, result)
-            }
-            Err(error) => ToolObservation::error(tool, error),
-        }
-    }
-
-    fn finish_validation(&mut self) {
-        if !self.validation_baseline_active {
-            return;
-        }
-        let cleanup_canceled = AtomicBool::new(false);
-        let _ = self.request(LiveCommand::ValidationRestore, &cleanup_canceled);
-        let _ = self.request(LiveCommand::ValidationClear, &cleanup_canceled);
-        if !self.validation_was_paused {
-            let _ = self.request(LiveCommand::Resume, &cleanup_canceled);
-        }
-        self.validation_baseline_active = false;
-    }
-
     fn execute_writes(
         &mut self,
         calls: &[&ToolCall],
         canceled: &AtomicBool,
     ) -> Vec<ToolObservation> {
-        if self.red_validation_contract.is_none() {
-            return calls
-                .iter()
-                .map(|call| {
-                    ToolObservation::error(
-                        &call.tool,
-                        "run validate_runtime_state with expected_outcome=fail before a live AI write",
-                    )
-                })
-                .collect();
-        }
         if !self.reference_search_ready {
             return calls
                 .iter()
@@ -2425,38 +2089,46 @@ impl LiveAiTools {
                 let applied = response.ok && response.kind == "edit_applied";
                 if applied {
                     self.last_write = Some(response.clone());
-                    self.write_needs_green_validation = true;
                     self.reference_search_ready = false;
                 }
-                calls
-                    .iter()
-                    .enumerate()
-                    .map(|(index, call)| {
-                        if applied {
-                            applied_write_observation(
-                                call,
-                                index,
-                                calls.len(),
-                                &response.data,
-                            )
-                        } else {
-                            let error = if response.ok && response.kind == "edit_preview" {
-                                "layout-changing AI edit was validated but requires explicit user :apply approval"
-                                    .to_string()
-                            } else {
-                                format_live_response(&response)
-                            };
-                            ToolObservation::error(&call.tool, error)
-                        }
-                    })
-                    .collect()
+                if applied {
+                    calls
+                        .iter()
+                        .enumerate()
+                        .map(|(index, call)| {
+                            applied_write_observation(call, index, calls.len(), &response.data)
+                        })
+                        .collect()
+                } else {
+                    let error = if response.ok && response.kind == "edit_preview" {
+                        "layout-changing AI edit was validated but requires explicit user :apply approval"
+                            .to_string()
+                    } else {
+                        format_live_response(&response)
+                    };
+                    failed_write_observations(calls, error)
+                }
             }
-            Err(error) => calls
-                .iter()
-                .map(|call| ToolObservation::error(&call.tool, error.clone()))
-                .collect(),
+            Err(error) => failed_write_observations(calls, error),
         }
     }
+}
+
+fn failed_write_observations(calls: &[&ToolCall], error: String) -> Vec<ToolObservation> {
+    calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            ToolObservation::error(
+                &call.tool,
+                if index == 0 {
+                    error.clone()
+                } else {
+                    "atomic write batch failed; see the first write observation".to_string()
+                },
+            )
+        })
+        .collect()
 }
 
 fn applied_write_observation(
@@ -2518,14 +2190,6 @@ fn contiguous_write_range(calls: &[ToolCall]) -> Result<Option<std::ops::Range<u
     Ok(Some(first..last + 1))
 }
 
-impl Drop for LiveAiTools {
-    fn drop(&mut self) {
-        if self.validation_baseline_active {
-            self.finish_validation();
-        }
-    }
-}
-
 impl ToolExecutor for LiveAiTools {
     fn execute(&mut self, calls: &[ToolCall], canceled: &AtomicBool) -> Vec<ToolObservation> {
         let write_range = match contiguous_write_range(calls) {
@@ -2537,7 +2201,7 @@ impl ToolExecutor for LiveAiTools {
                     .collect()
             }
         };
-        let mut observations = Vec::with_capacity(calls.len() + 1);
+        let mut observations = Vec::with_capacity(calls.len());
         let mut index = 0;
         while index < calls.len() {
             if write_range
@@ -2546,31 +2210,7 @@ impl ToolExecutor for LiveAiTools {
             {
                 let range = write_range.as_ref().expect("write range");
                 let writes = calls[range.clone()].iter().collect::<Vec<_>>();
-                let write_observations = self.execute_writes(&writes, canceled);
-                let applied = write_observations
-                    .iter()
-                    .all(|observation| observation.error.is_none())
-                    && self.write_needs_green_validation;
-                observations.extend(write_observations);
-                if applied {
-                    let contract = self
-                        .red_validation_contract
-                        .clone()
-                        .expect("applied AI write has red validation contract");
-                    let green_call = ToolCall {
-                        tool: "validate_runtime_state".to_string(),
-                        args: serde_json::json!({
-                            "requirements": contract.requirements,
-                            "expected_outcome": "pass",
-                            "frames": contract.frames,
-                            "baseline": contract.baseline,
-                            "setup": contract.setup,
-                            "tick": contract.tick,
-                            "render": contract.render,
-                        }),
-                    };
-                    observations.push(self.execute_validation(&green_call, canceled));
-                }
+                observations.extend(self.execute_writes(&writes, canceled));
                 index = range.end;
             } else {
                 observations.push(self.execute_read(&calls[index], canceled));
@@ -2581,10 +2221,23 @@ impl ToolExecutor for LiveAiTools {
     }
 
     fn validate_completion(&self) -> Result<(), String> {
-        if self.write_needs_green_validation {
-            Err("the applied live edit still requires validate_runtime_state with expected_outcome=pass".to_string())
-        } else {
-            Ok(())
+        match &self.last_write {
+            Some(response)
+                if response.ok
+                    && response.kind == "edit_applied"
+                    && response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("tests"))
+                        .and_then(Value::as_str)
+                        == Some("passed") =>
+            {
+                Ok(())
+            }
+            _ => Err(
+                "complete the requested change with one atomic write that compiles and passes project tests"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -2623,23 +2276,6 @@ fn string_array_arg(
                 .ok_or_else(|| format!("{name} must contain non-empty strings"))
         })
         .collect()
-}
-
-fn read_bounded_process_output(mut reader: impl Read) -> Result<String, String> {
-    const CAPTURE_LIMIT: usize = 65_536;
-    let mut captured = Vec::with_capacity(CAPTURE_LIMIT);
-    let mut buffer = [0u8; 8_192];
-    loop {
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|error| format!("failed reading validation process output: {error}"))?;
-        if count == 0 {
-            break;
-        }
-        let remaining = CAPTURE_LIMIT.saturating_sub(captured.len());
-        captured.extend_from_slice(&buffer[..count.min(remaining)]);
-    }
-    Ok(String::from_utf8_lossy(&captured).into_owned())
 }
 
 fn audit_tool_call(call: &ToolCall) -> Value {
@@ -3155,125 +2791,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn runtime_validation_comparisons_cover_scalar_requirements() {
-        assert!(compare_live_validation_values(&json!(144), "eq", &json!(144)).expect("eq"));
-        assert!(compare_live_validation_values(&json!(72), "ne", &json!(144)).expect("ne"));
-        assert!(compare_live_validation_values(&json!(2.5), "lt", &json!(15)).expect("lt"));
-        assert!(compare_live_validation_values(&json!(true), "eq", &json!(true)).expect("bool"));
-        assert!(compare_live_validation_values(&json!(7), "gte", &json!(7)).expect("gte"));
-        assert!(compare_live_validation_values(&json!(9), "gt", &json!(7)).expect("gt"));
-        assert!(compare_live_validation_values(&json!(7), "lte", &json!(7)).expect("lte"));
-    }
-
-    #[test]
-    fn runtime_validation_runs_bounded_red_green_requirements() {
-        let (client, server) = stasis_runner::live::live_session(8);
-        let worker = thread::spawn(move || {
-            let mut handled = 0;
-            let mut inspections = 0;
-            while handled < 11 {
-                for request in server.drain(8) {
-                    let (kind, data) = match request.command {
-                        LiveCommand::Status => ("status", json!({"paused": false})),
-                        LiveCommand::Pause => ("paused", json!({"paused": true})),
-                        LiveCommand::ValidationSnapshot => {
-                            ("validation_snapshot", json!({"captured": true}))
-                        }
-                        LiveCommand::ValidationRestore => {
-                            ("validation_restored", json!({"restored": true}))
-                        }
-                        LiveCommand::ValidationClear => {
-                            ("validation_cleared", json!({"cleared": true}))
-                        }
-                        LiveCommand::Inspect { path } => {
-                            inspections += 1;
-                            let value = if inspections == 1 { 72 } else { 144 };
-                            (
-                                "inspection",
-                                json!({"path": path, "value": {"type": "i32", "value": value}}),
-                            )
-                        }
-                        LiveCommand::Resume => ("resumed", json!({"paused": false})),
-                        command => panic!("unexpected validation command: {command:?}"),
-                    };
-                    server
-                        .respond(LiveResponse::success(request.request_id, 0, kind, data))
-                        .expect("respond");
-                    handled += 1;
-                }
-                thread::sleep(Duration::from_millis(1));
-            }
-        });
-        let mut tools = LiveAiTools::new(client, PathBuf::from("."));
-        let red = tools.execute(
-            &[ToolCall {
-                tool: "validate_runtime_state".into(),
-                args: json!({
-                    "expected_outcome": "fail",
-                    "requirements": [{"path": "Render.command1_h", "op": "eq", "value": 144}]
-                }),
-            }],
-            &AtomicBool::new(false),
-        );
-        let green = tools.execute(
-            &[ToolCall {
-                tool: "validate_runtime_state".into(),
-                args: json!({
-                    "expected_outcome": "pass",
-                    "requirements": [{"path": "Render.command1_h", "op": "eq", "value": 144}]
-                }),
-            }],
-            &AtomicBool::new(false),
-        );
-
-        worker.join().expect("validation server");
-        assert_eq!(red.len(), 1);
-        assert_eq!(
-            red[0].result.as_ref().expect("red")["validation_passed"],
-            true
-        );
-        assert!(tools.red_validation_contract.is_some());
-        assert_eq!(
-            green[0].result.as_ref().expect("green")["validation_passed"],
-            true
-        );
-    }
-
-    #[test]
-    fn live_ai_write_is_rejected_until_red_validation_exists() {
-        let (client, _server) = stasis_runner::live::live_session(1);
-        let mut tools = LiveAiTools::new(client, PathBuf::from("."));
-
-        let observations = tools.execute(
-            &[ToolCall {
-                tool: "write_symbol".into(),
-                args: json!({
-                    "file": "src/main.stasis",
-                    "name": "tick",
-                    "new_source": "function tick(): void { return; }"
-                }),
-            }],
-            &AtomicBool::new(false),
-        );
-
-        assert!(observations[0]
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("expected_outcome=fail")));
-    }
-
-    #[test]
     fn live_ai_write_is_rejected_until_references_were_checked() {
         let (client, _server) = stasis_runner::live::live_session(1);
-        let mut tools = LiveAiTools::new(client, PathBuf::from("."));
-        tools.red_validation_contract = Some(AiValidationContract {
-            requirements: json!([{"path": "State.value", "op": "eq", "value": 2}]),
-            frames: 0,
-            baseline: "live".into(),
-            setup: "main".into(),
-            tick: "tick".into(),
-            render: "render".into(),
-        });
+        let mut tools = LiveAiTools::new(client);
 
         let observations = tools.execute(
             &[ToolCall {
@@ -3334,6 +2854,58 @@ mod tests {
             second.result.as_ref().unwrap()["write_receipt"],
             "build/live-edits/receipt.json"
         );
+    }
+
+    #[test]
+    fn failed_atomic_batch_reports_details_once() {
+        let calls = [
+            ToolCall {
+                tool: "write_symbol".into(),
+                args: json!({"name": "tick"}),
+            },
+            ToolCall {
+                tool: "write_symbol".into(),
+                args: json!({"name": "render"}),
+            },
+        ];
+        let call_refs = calls.iter().collect::<Vec<_>>();
+
+        let observations = failed_write_observations(&call_refs, "compile failed at line 4".into());
+
+        assert_eq!(
+            observations[0].error.as_deref(),
+            Some("compile failed at line 4")
+        );
+        assert_eq!(
+            observations[1].error.as_deref(),
+            Some("atomic write batch failed; see the first write observation")
+        );
+    }
+
+    #[test]
+    fn live_ai_completion_requires_a_tested_atomic_write() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        assert!(tools
+            .validate_completion()
+            .expect_err("write required")
+            .contains("compiles and passes project tests"));
+
+        tools.last_write = Some(LiveResponse::success(
+            1,
+            0,
+            "edit_applied",
+            json!({"tests": "skipped"}),
+        ));
+        assert!(tools.validate_completion().is_err());
+
+        tools.last_write = Some(LiveResponse::success(
+            2,
+            0,
+            "edit_applied",
+            json!({"tests": "passed"}),
+        ));
+        tools.validate_completion().expect("tested write completes");
     }
 
     #[test]
@@ -3406,9 +2978,31 @@ mod tests {
             "output_tokens": 20,
         });
         let mut log = AiAuditLog::create(&root, "test prompt").expect("audit log");
+        let trace_path = log.path.clone();
         let usage_path = log.usage_path.clone();
+        let timing_path = log.timing_path.clone();
+        log.write(serde_json::json!({"event": "test"}))
+            .expect("timed trace");
         log.write_usage(&usage).expect("usage log");
         drop(log);
+        let trace = fs::read_to_string(trace_path).expect("trace contents");
+        let records = trace
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("trace record"))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .iter()
+            .all(|record| record.get("elapsed_ms").is_none()));
+        let timings = fs::read_to_string(timing_path).expect("timing contents");
+        let timings = timings
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("timing record"))
+            .collect::<Vec<_>>();
+        assert_eq!(timings.len(), 2);
+        assert!(timings
+            .iter()
+            .all(|record| record["elapsed_ms"].is_u64() && record["since_previous_ms"].is_u64()));
         assert_eq!(
             fs::read_to_string(&usage_path).expect("usage contents"),
             format!("{}\n", serde_json::to_string(&usage).unwrap())

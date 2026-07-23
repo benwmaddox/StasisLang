@@ -50,21 +50,12 @@ in `initial_context`, avoiding a provider round trip while retaining filtered an
 searches. Explicit file arguments remain an exact scope.
 
 Before changing a behavior-bearing symbol, the AI must use compiler-backed `find_references` to
-locate its definition, reads, writes, and calls without receiving unrelated source bodies. For an
-observable game change it uses AI-only `validate_runtime_state` acceptance checks: the requested
-condition must fail before the edit (red), the atomic edit must compile and pass project tests, and
-the runtime automatically evaluates the same condition afterward (green). Red validation may be
-immediately followed by one contiguous write batch in the same model turn, reducing provider turns
-without allowing writes when the red contract is not accepted. The default `live` baseline pauses
-and restores the same bounded runtime snapshot, so normal game progression cannot manufacture a
-pass. The optional `fresh` baseline boots `main`, advances bounded `tick` frames, renders, and
-inspects state in a separate Stasis child process for integration-style red/green checks without
-changing the running game. Successful fresh checks retain bounded stderr diagnostics as evidence
-instead of discarding otherwise valid results. Projects with host adapters can select game-level
-`setup`, `tick`, and `render` entrypoints so the isolated check exercises logical gameplay without
-opening a second window or duplicating host resource side effects. These acceptance checks are
-ephemeral and do not create or replace project `.test.stasis` files; durable regression tests remain
-the appropriate place for behavior that should be protected after the AI turn.
+locate its definition, reads, writes, and calls without receiving unrelated source bodies. Related
+source edits and requested durable tests are submitted as one atomic batch. The normal preparation
+worker compiles that batch and runs project tests before applying it; failure rolls back the whole
+batch. A built-in AI change cannot report completion until one such tested batch is applied. The
+successful write receipt is the completion evidence, so the live AI does not run a second test or
+model-authored runtime-validation loop afterward.
 
 Human commands intentionally cover every useful live AI capability:
 
@@ -75,9 +66,7 @@ Human commands intentionally cover every useful live AI capability:
 | `read_symbol` | `stasis symbol read SYMBOL` / `:read SYMBOL` |
 | `write_symbol`, `delete_symbol` | `stasis symbol add|update|delete` / `:add`, `:update`, `:delete` |
 | `inspect_runtime_state` | `:inspect`; `stasis validate` exposes fresh-run scalar evidence |
-| `validate_runtime_state` | `stasis validate PATH OP VALUE` / `:validate PATH OP VALUE` |
 | `run_frame` | `:step`; `stasis validate --frames N` in an isolated CLI run |
-| `run_tests` | `stasis test`; live `:apply`, `:undo`, `:redo`, and definition apply run tests automatically |
 
 `stasis validate` uses the isolated `fresh` baseline and accepts `--frames`, `--setup`, `--tick`,
 and `--render`. TUI `:validate` uses a snapshot of the live game, runs the requested frames, reports
@@ -88,6 +77,12 @@ turns, user-visible working notes, and the exact tool calls and bounded tool obs
 with the agent. Tool source arguments and results therefore appear verbatim when they were sent to
 or received from the agent. The trace does not store the complete Codex transport request, response
 schema, tool catalog, repeated conversation envelope, or CLI transport output.
+
+Event timing is written separately to `tui-ai-<timestamp>.timing.jsonl`, preserving the exact
+payload trace without adding fields the AI did not receive. Timing records contain only the event
+name, milliseconds since the request began, and milliseconds since the previous event. The gap
+from `turn` to `working_notes` measures provider time; `tool_calls` to `tool_observations` measures
+the local tool batch, including compilation and tests for writes.
 
 Provider-reported token usage is written separately to
 `build/ai-traces/tui-ai-<timestamp>.usage.jsonl`. Each line is the exact `usage` object from a
