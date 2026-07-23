@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 import tempfile
 import unittest
@@ -58,6 +59,147 @@ class AndroidAiAgentHostTests(unittest.TestCase):
 
     def test_host_run_finishes_before_repository_command_limit(self) -> None:
         self.assertLess(host.DEFAULT_MAX_RUN_SECONDS, 300.0)
+
+    def test_openrouter_payload_preserves_exact_context_and_zero_price_route(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        request = host.build_agent_request(project, "change tick", {"phase": "initial"})
+        openai_payload = host.build_openai_payload("poolside/laguna-xs-2.1:free", request)
+        payload = host.build_openrouter_payload(
+            "poolside/laguna-xs-2.1:free", request, "poolside", 0.0, 0.0)
+        self.assertEqual([], host.validate_openrouter_payload(payload))
+        self.assertEqual({"effort": "medium", "exclude": True}, payload["reasoning"])
+        self.assertEqual({
+            "allow_fallbacks": False,
+            "require_parameters": True,
+            "only": ["poolside"],
+            "max_price": {"prompt": 0.0, "completion": 0.0},
+        }, payload["provider"])
+        expected_messages = [
+            {
+                "role": item["role"],
+                "content": "".join(block["text"] for block in item["content"]),
+            }
+            for item in openai_payload["input"]
+        ]
+        self.assertEqual(expected_messages, payload["messages"])
+
+    def test_openrouter_can_omit_unsupported_structured_output(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        request = host.build_agent_request(project, "change tick", {"phase": "initial"})
+        payload = host.build_openrouter_payload(
+            "poolside/laguna-xs-2.1:free", request, max_input_price=0.0,
+            max_output_price=0.0, response_format="none")
+        self.assertNotIn("response_format", payload)
+        self.assertEqual([], host.validate_openrouter_payload(payload))
+
+    def test_openrouter_native_tools_match_workshop_specs(self) -> None:
+        tools = host.openrouter_native_tools()
+        self.assertEqual([spec["tool"] for spec in host.tool_specs()], [
+            tool["function"]["name"] for tool in tools])
+        list_symbols = tools[0]["function"]["parameters"]
+        self.assertEqual({"type": "array", "items": {"type": "string"}},
+                         list_symbols["properties"]["files"])
+        self.assertEqual({"type": "integer"}, list_symbols["properties"]["limit"])
+
+    def test_openrouter_native_prompt_requires_batched_known_symbols(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        request = host.build_agent_request(project, "change tick", {"phase": "initial"})
+        payload = host.build_openrouter_payload(
+            "poolside/laguna-xs-2.1", request, response_format="none", native_tools=True)
+        instruction = payload["messages"][0]["content"]
+        self.assertIn("Batch every independent read_symbol", instruction)
+        self.assertIn("project_symbol_index as the authoritative list", instruction)
+        self.assertIn("Do not guess a main symbol", instruction)
+
+    def test_openrouter_usage_is_aggregated_and_written_separately(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        trace_path = Path(temporary.name) / "laguna.json"
+        events = [{
+            "kind": "openrouter_exchange",
+            "turn": 1,
+            "usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 40,
+                "cache_write_input_tokens": 0,
+                "uncached_input_tokens": 60,
+                "output_tokens": 25,
+                "reasoning_tokens": 10,
+                "total_tokens": 125,
+                "cost_usd": 0.001,
+            },
+        }]
+        host.write_trace_file(trace_path, {"model": "poolside/laguna-xs-2.1:free"}, events, 0, "now", 1.0, 0)
+        usage = json.loads((Path(temporary.name) / "laguna.usage.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, usage["usage_summary"]["calls"])
+        self.assertEqual(40, usage["usage_summary"]["totals"]["cached_input_tokens"])
+        self.assertEqual(10, usage["usage_summary"]["totals"]["reasoning_tokens"])
+        self.assertEqual(0.001, usage["usage_summary"]["provider_reported_cost_usd"])
+
+    def test_openrouter_usage_reads_reasoning_cache_and_cost(self) -> None:
+        usage = host.response_usage_from_body({"usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 25,
+            "cost": 0.002,
+            "prompt_tokens_details": {"cached_tokens": 60},
+            "completion_tokens_details": {"reasoning_tokens": 15},
+        }})
+        self.assertEqual(60, usage["cached_input_tokens"])
+        self.assertEqual(15, usage["reasoning_tokens"])
+        self.assertEqual(0.002, usage["cost_usd"])
+
+    def test_openrouter_retries_rate_limit_without_retry_after(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        request = host.build_agent_request(project, "change tick", {"phase": "initial"})
+        error_body = io.BytesIO(b'{"error":{"metadata":{"provider_name":"Poolside"}}}')
+        rate_limit = host.urllib.error.HTTPError("url", 429, "limited", {}, error_body)
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "model": "poolside/laguna-xs-2.1:free",
+            "choices": [{"message": {"content": json.dumps({
+                "mode": "done",
+                "working_notes": "Intent: done. Observed: done. Next: none. Blocker: none.",
+                "summary": "done",
+            })}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }).encode("utf-8")
+        events: list[dict] = []
+        with mock.patch.object(host.urllib.request, "urlopen", side_effect=[rate_limit, response]), \
+                mock.patch.object(host.time, "sleep") as sleep:
+            result = host.call_openrouter(
+                "secret", "poolside/laguna-xs-2.1:free", request, events,
+                response_format="none")
+        self.assertEqual("done", result["mode"])
+        sleep.assert_called_once_with(10.0)
+        self.assertEqual(10.0, events[-1]["rate_limit_wait_seconds"])
+
+    def test_openrouter_native_call_translates_to_internal_tool_call(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        request = host.build_agent_request(project, "change tick", {"phase": "initial"})
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "model": "poolside/laguna-xs-2.1",
+            "choices": [{"message": {
+                "content": "Inspect tick.",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_symbol", "arguments": '{"name":"tick"}'},
+                }],
+            }}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }).encode("utf-8")
+        with mock.patch.object(host.urllib.request, "urlopen", return_value=response):
+            result = host.call_openrouter(
+                "secret", "poolside/laguna-xs-2.1", request,
+                response_format="none", native_tools=True)
+        self.assertEqual("tool_calls", result["mode"])
+        self.assertEqual([{"tool": "read_symbol", "args": {"name": "tick"}}], result["tool_calls"])
 
     def test_prebuilt_test_runner_command_avoids_cargo_run(self) -> None:
         temporary, project = self.make_project()
@@ -121,6 +263,11 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         first = [{"tool": "read_symbol", "args": {"name": "tick", "file": "src/main.stasis"}}]
         second = [{"args": {"file": "src/main.stasis", "name": "tick"}, "tool": "read_symbol"}]
         self.assertEqual(host.tool_call_batch_key(first), host.tool_call_batch_key(second))
+
+    def test_repeat_correction_instruction_does_not_claim_execution(self) -> None:
+        correction = host.repeated_tool_call_correction()
+        self.assertEqual("repeated_tool_call_not_executed", correction["result"]["status"])
+        self.assertIn("already ran", correction["result"]["error"])
 
     def test_observation_memory_is_deduplicated_and_bounded(self) -> None:
         memory: dict[str, dict] = {}

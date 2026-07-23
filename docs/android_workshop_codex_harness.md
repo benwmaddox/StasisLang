@@ -169,6 +169,27 @@ priority` opts into the API's separately billed Priority processing. This is a
 useful request/cache latency comparison, but it is not billed against ChatGPT
 subscription Fast-mode allowance and is reported separately.
 
+The host comparison runner can also use OpenRouter with `--provider
+openrouter`. It disables provider fallbacks and requires supported parameters.
+Use both `--openrouter-max-input-price` and
+`--openrouter-max-output-price` to enforce per-million-token price ceilings,
+and optionally pin a provider with `--openrouter-only-provider`. Providers
+without JSON Schema support can use `--openrouter-response-format none`; the
+same exact JSON contract remains in the system instruction and responses still
+pass local shape validation. OpenRouter 429 responses receive at most two
+bounded retries when the provider omits `Retry-After`.
+
+`--openrouter-native-tools` exposes the same Stasis tools through the provider's
+native function-calling protocol and translates calls back into the shared local
+validation path. Native-tool runs allow ten sequential inspection batches by
+default because some models issue one tool per response; other runs retain the
+two-batch efficiency default. `--max-read-only-batches` overrides either value.
+
+OpenRouter traces contain the exact JSON payload sent to the provider, excluding
+HTTP authorization headers. Each trace also writes a sibling `.usage.json`
+file containing only timing metadata and provider-reported token usage. API
+keys are loaded from `OPENROUTER_API_KEY` and are never written to either log.
+
 The host runner compiles the selected `--project-root` through the same
 `compile_android_workshop_project` bridge used by Android before accepting
 writes or final test success. Source and test writes are one atomic batch:

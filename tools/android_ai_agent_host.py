@@ -24,6 +24,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROJECT = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
 DEFAULT_MODEL = "gpt-5.6-sol"
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_TRACE_DIR = ROOT / "artifacts/android_ai_runs"
 MAX_TURNS = 15
@@ -295,7 +296,7 @@ DEFAULT_MODEL_PRICING_PER_MILLION = {
     },
 }
 
-def response_usage_from_body(body: dict[str, Any]) -> dict[str, int]:
+def response_usage_from_body(body: dict[str, Any]) -> dict[str, Any]:
     usage = body.get("usage") if isinstance(body, dict) else {}
     if not isinstance(usage, dict):
         usage = {}
@@ -307,22 +308,27 @@ def response_usage_from_body(body: dict[str, Any]) -> dict[str, int]:
         input_details = {}
     cached_tokens = int(input_details.get("cached_tokens") or 0)
     cache_write_tokens = int(input_details.get("cache_write_tokens") or 0)
+    output_details = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
+    if not isinstance(output_details, dict):
+        output_details = {}
     return {
         "input_tokens": input_tokens,
         "cached_input_tokens": cached_tokens,
         "cache_write_input_tokens": cache_write_tokens,
         "uncached_input_tokens": max(input_tokens - cached_tokens - cache_write_tokens, 0),
         "output_tokens": output_tokens,
+        "reasoning_tokens": int(output_details.get("reasoning_tokens") or 0),
         "total_tokens": total_tokens,
+        "cost_usd": float(usage.get("cost") or 0.0),
     }
 
 
 def aggregate_trace_usage(trace_events: list[dict[str, Any]], model: str) -> dict[str, Any]:
-    totals = {"input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "uncached_input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    totals = {"input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "uncached_input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0, "total_tokens": 0, "cost_usd": 0.0}
     calls = 0
     per_call = []
     for event in trace_events:
-        if event.get("kind") == "openai_exchange":
+        if event.get("kind") in {"openai_exchange", "openrouter_exchange"}:
             usage = event.get("usage", {})
             if not isinstance(usage, dict):
                 usage = {}
@@ -331,6 +337,9 @@ def aggregate_trace_usage(trace_events: list[dict[str, Any]], model: str) -> dic
         calls += 1
         per_call.append({"turn": event.get("turn"), **usage})
         for key in totals:
+            if key == "cost_usd":
+                totals[key] += float(usage.get(key) or 0.0)
+                continue
             totals[key] += int(usage.get(key) or 0)
     pricing = DEFAULT_MODEL_PRICING_PER_MILLION.get(model, {})
     cost = None
@@ -346,6 +355,7 @@ def aggregate_trace_usage(trace_events: list[dict[str, Any]], model: str) -> dic
         "totals": totals,
         "per_call": per_call,
         "estimated_cost_usd": cost,
+        "provider_reported_cost_usd": totals["cost_usd"],
         "pricing_per_million_tokens": pricing or None,
         "pricing_note": pricing.get("source") if pricing else "No pricing estimate configured for this model.",
     }
@@ -361,6 +371,8 @@ def write_trace_file(path: Path, meta: dict[str, Any], trace_events: list[dict[s
         "exit_code": exit_code,
     }
     write_text(path, json.dumps(payload, indent=2))
+    usage_path = path.with_name(f"{path.stem}.usage.json")
+    write_text(usage_path, json.dumps({"meta": payload["meta"], "usage_summary": usage_summary}, indent=2))
 
 
 def default_trace_file() -> Path:
@@ -1020,6 +1032,229 @@ def call_openai(api_key: str, model: str, request: dict[str, Any], service_tier:
     return parsed
 
 
+def build_openrouter_payload(
+    model: str,
+    request: dict[str, Any],
+    only_provider: str = "",
+    max_input_price: float | None = None,
+    max_output_price: float | None = None,
+    response_format: str = "json_schema",
+    native_tools: bool = False,
+) -> dict[str, Any]:
+    """Translate the stable Workshop request into OpenRouter chat completions."""
+    source = build_openai_payload(model, request)
+    messages = [
+        {
+            "role": item["role"],
+            "content": "".join(str(block.get("text", "")) for block in item.get("content", [])),
+        }
+        for item in source["input"]
+    ]
+    provider: dict[str, Any] = {"allow_fallbacks": False, "require_parameters": True}
+    if only_provider:
+        provider["only"] = [only_provider]
+    if max_input_price is not None and max_output_price is not None:
+        provider["max_price"] = {"prompt": max_input_price, "completion": max_output_price}
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "reasoning": {"effort": DEFAULT_REASONING_EFFORT, "exclude": True},
+        "max_tokens": 16384,
+        "temperature": 0.2,
+        "provider": provider,
+    }
+    if response_format == "json_schema":
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "stasis_host_ai_response",
+                "strict": False,
+                "schema": response_json_schema(),
+            },
+        }
+    if native_tools:
+        payload["messages"][0]["content"] += (
+            " Native tools are available and take precedence over the JSON tool-call envelope. "
+            "Call tools through the native API, never by emitting XML or textual tool syntax. "
+            "Batch every independent read_symbol, find_references, and test inspection needed for the current step in one response; up to 50 native calls are allowed. "
+            "Treat the initial project_symbol_index as the authoritative list of available symbols. Do not guess a main symbol or simulate a full-file read. "
+            "Prefer no more than two inspection responses before writing. Return the JSON done envelope only after local tests pass."
+        )
+        payload["tools"] = openrouter_native_tools()
+        payload["tool_choice"] = "auto"
+    return payload
+
+
+def openrouter_native_tools() -> list[dict[str, Any]]:
+    integer_args = {"page", "limit"}
+    array_args = {"files"}
+    tools = []
+    for spec in tool_specs():
+        argument_names = spec["required_args"] + spec["optional_args"]
+        properties: dict[str, Any] = {}
+        for name in argument_names:
+            if name in integer_args:
+                properties[name] = {"type": "integer"}
+            elif name in array_args:
+                properties[name] = {"type": "array", "items": {"type": "string"}}
+            else:
+                properties[name] = {"type": "string"}
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": spec["tool"],
+                "description": spec["purpose"],
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": spec["required_args"],
+                    "additionalProperties": False,
+                },
+            },
+        })
+    return tools
+
+
+def validate_openrouter_payload(payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    response_format = payload.get("response_format")
+    if response_format is not None and (
+        response_format.get("type") != "json_schema"
+        or not response_format.get("json_schema", {}).get("schema")
+    ):
+        errors.append("OpenRouter response_format must include the Workshop JSON schema")
+    if payload.get("reasoning") != {"effort": DEFAULT_REASONING_EFFORT, "exclude": True}:
+        errors.append(f"OpenRouter reasoning must use {DEFAULT_REASONING_EFFORT} effort and exclude private reasoning")
+    provider = payload.get("provider", {})
+    if provider.get("allow_fallbacks") is not False or provider.get("require_parameters") is not True:
+        errors.append("OpenRouter provider fallbacks must be disabled and parameters required")
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or len(messages) != 3:
+        errors.append("OpenRouter messages must preserve system, stable, and volatile turns")
+    return errors
+
+
+def call_openrouter(
+    api_key: str,
+    model: str,
+    request: dict[str, Any],
+    trace_events: list[dict[str, Any]] | None = None,
+    turn: int = 0,
+    timeout_seconds: float = 120.0,
+    only_provider: str = "",
+    max_input_price: float | None = None,
+    max_output_price: float | None = None,
+    response_format: str = "json_schema",
+    native_tools: bool = False,
+) -> dict[str, Any]:
+    started_at = time.perf_counter()
+    payload = build_openrouter_payload(
+        model, request, only_provider, max_input_price, max_output_price, response_format, native_tools)
+    errors = validate_openrouter_payload(payload)
+    if errors:
+        raise RuntimeError("OpenRouter payload preflight failed: " + "; ".join(errors))
+    if trace_events is not None:
+        # The payload contains exactly what is sent to the provider and no authorization header.
+        trace_events.append({"kind": "openrouter_request", "turn": turn, "payload": payload})
+    deadline = started_at + timeout_seconds
+    retry_count = 0
+    rate_limit_wait_seconds = 0.0
+    while True:
+        request_message = urllib.request.Request(
+            OPENROUTER_API_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/stasislang/stasislang",
+                "X-Title": "Stasis Workshop model comparison",
+            },
+            method="POST",
+        )
+        try:
+            remaining = deadline - time.perf_counter()
+            with urllib.request.urlopen(request_message, timeout=max(1.0, min(120.0, remaining))) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            retry_after = 0.0
+            if error.code == 429:
+                try:
+                    metadata = json.loads(detail).get("error", {}).get("metadata", {})
+                    retry_after = float(metadata.get("retry_after_seconds") or 0.0)
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    retry_after = 0.0
+                if retry_after <= 0.0 and retry_count < 2:
+                    retry_after = 10.0 * (2 ** retry_count)
+            remaining = deadline - time.perf_counter()
+            if error.code == 429 and 0.0 < retry_after <= 60.0 and retry_after + 1.0 < remaining:
+                retry_count += 1
+                if trace_events is not None:
+                    trace_events.append({
+                        "kind": "openrouter_rate_limit_wait",
+                        "turn": turn,
+                        "retry": retry_count,
+                        "retry_after_seconds": retry_after,
+                    })
+                time.sleep(retry_after)
+                rate_limit_wait_seconds += retry_after
+                continue
+            raise RuntimeError(f"OpenRouter request failed with HTTP {error.code}: {detail}") from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"OpenRouter request failed: {error.reason}") from error
+    choices = body.get("choices", [])
+    message = choices[0].get("message", {}) if choices else {}
+    text = message.get("content") or ""
+    native_calls = message.get("tool_calls") or []
+    if trace_events is not None:
+        trace_events.append({
+            "kind": "openrouter_response",
+            "turn": turn,
+            "model": body.get("model", model),
+            "content": text,
+            "tool_calls": native_calls,
+            "finish_reason": choices[0].get("finish_reason") if choices else None,
+            "usage": body.get("usage", {}),
+        })
+    if native_calls:
+        tool_calls = []
+        for native_call in native_calls:
+            function = native_call.get("function", {})
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments or "{}")
+            tool_calls.append({"tool": function.get("name", ""), "args": arguments})
+        parsed = {
+            "mode": "tool_calls",
+            "working_notes": text.strip() or "Intent: continue. Observed: selected native tools. Next: inspect results. Blocker: none.",
+            "summary": text.strip(),
+            "tool_calls": tool_calls,
+        }
+    elif not text:
+        raise RuntimeError("OpenRouter response did not contain text content")
+    else:
+        parsed = parse_json_object(text)
+    if trace_events is not None:
+        trace_events.append({
+            "kind": "openrouter_exchange",
+            "turn": turn,
+            "elapsed_seconds": time.perf_counter() - started_at,
+            "rate_limit_wait_seconds": rate_limit_wait_seconds,
+            "request": summarize_request_for_trace(request),
+            "response": {
+                "response_model": body.get("model", model),
+                "mode": parsed.get("mode"),
+                "summary": parsed.get("summary", ""),
+                "working_notes": parsed.get("working_notes", ""),
+                "tool_call_count": len(parsed.get("tool_calls") or []),
+                "edit_count": len(parsed.get("edits") or []),
+            },
+            "usage": response_usage_from_body(body),
+        })
+    return parsed
+
+
 def validate_response_shape(response: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     errors: list[dict[str, Any]] = []
     contract = response_contract()
@@ -1111,6 +1346,17 @@ def can_auto_finalize_tested_writes(wrote_test: bool, final_test: dict[str, Any]
 
 def tool_call_batch_key(tool_calls: list[dict[str, Any]]) -> str:
     return json.dumps(tool_calls, sort_keys=True, separators=(",", ":"))
+
+
+def repeated_tool_call_correction() -> dict[str, Any]:
+    return {
+        "tool": "progress_policy",
+        "args": {},
+        "result": {
+            "status": "repeated_tool_call_not_executed",
+            "error": "This identical tool call already ran and its result is present in retained observations. Choose a different tool call, write the change, or return done.",
+        },
+    }
 
 
 def compact_observation_for_provider(observation: dict[str, Any]) -> dict[str, Any]:
@@ -1294,6 +1540,19 @@ def main() -> int:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--provider", choices=("openai", "openrouter"), default="openai")
+    parser.add_argument("--openrouter-only-provider", default="",
+                        help="Allow only this OpenRouter provider slug; fallbacks remain disabled.")
+    parser.add_argument("--openrouter-max-input-price", type=float,
+                        help="Maximum accepted OpenRouter input price in USD per million tokens.")
+    parser.add_argument("--openrouter-max-output-price", type=float,
+                        help="Maximum accepted OpenRouter output price in USD per million tokens.")
+    parser.add_argument("--openrouter-response-format", choices=("json_schema", "none"), default="json_schema",
+                        help="Use provider-enforced JSON Schema or rely on the prompt contract for providers that do not support it.")
+    parser.add_argument("--openrouter-native-tools", action="store_true",
+                        help="Expose Workshop tools through the provider's native tool-calling API.")
+    parser.add_argument("--max-read-only-batches", type=int,
+                        help="Maximum sequential inspection batches before requiring a write or done response; defaults to 10 for native tools and 2 otherwise.")
     parser.add_argument("--service-tier", choices=("standard", "priority"), default="standard",
                         help="Use standard API processing or opt into separately billed Priority processing.")
     parser.add_argument("--reset-paddle-speed-feature", action="store_true", help="Reset the bundled Pong sample to the baseline before the requested paddle-speed feature.")
@@ -1301,31 +1560,47 @@ def main() -> int:
     parser.add_argument("--preflight", action="store_true", help="Validate the outgoing Responses payload locally without calling OpenAI or editing the project.")
     parser.add_argument("--max-seconds", type=float, default=DEFAULT_MAX_RUN_SECONDS, help="Stop the host comparison cleanly before the repository's five-minute command limit.")
     args = parser.parse_args()
+    if (args.openrouter_max_input_price is None) != (args.openrouter_max_output_price is None):
+        parser.error("OpenRouter max input and output prices must be supplied together")
+    max_read_only_batches = args.max_read_only_batches
+    if max_read_only_batches is None:
+        max_read_only_batches = 10 if args.provider == "openrouter" and args.openrouter_native_tools else MAX_READ_ONLY_BATCHES
+    if not 1 <= max_read_only_batches <= MAX_TURNS:
+        parser.error(f"max read-only batches must be between 1 and {MAX_TURNS}")
     load_env_file(ROOT / ".env")
     project = args.project_root.resolve()
     trace_file = args.trace_file or default_trace_file()
     request = build_agent_request(project, args.prompt, {"phase": "initial", "instruction": "Inspect the workspace with fine-grained tools, make the requested behavior change, add or update tests, run tests, then return done only after tests pass."})
     shared_context = request["shared_context"]
     trace_events: list[dict[str, Any]] = []
-    trace_meta = {"prompt": args.prompt, "provider": "openai_api", "model": args.model, "service_tier": args.service_tier, "project_root": str(project), "reset_paddle_speed_feature": bool(args.reset_paddle_speed_feature), "successful_write_count": 0, "rolled_back_write_count": 0}
+    trace_meta = {"prompt": args.prompt, "provider": f"{args.provider}_api", "model": args.model, "service_tier": args.service_tier, "project_root": str(project), "reset_paddle_speed_feature": bool(args.reset_paddle_speed_feature), "successful_write_count": 0, "rolled_back_write_count": 0}
     trace_events.append({"kind": "trace_meta", "meta": trace_meta})
     trace_events.append({"kind": "initial_request", "summary": summarize_request_for_trace(request)})
     print(f"Trace file: {trace_file}")
     started_at_iso = datetime.now(timezone.utc).isoformat()
     started_at_perf = time.perf_counter()
     if args.preflight:
-        payload = build_openai_payload(args.model, request, args.service_tier)
-        errors = validate_openai_payload(payload)
+        if args.provider == "openrouter":
+            payload = build_openrouter_payload(args.model, request, args.openrouter_only_provider,
+                                               args.openrouter_max_input_price, args.openrouter_max_output_price,
+                                               args.openrouter_response_format, args.openrouter_native_tools)
+            errors = validate_openrouter_payload(payload)
+            payload_summary = payload
+        else:
+            payload = build_openai_payload(args.model, request, args.service_tier)
+            errors = validate_openai_payload(payload)
+            payload_summary = summarize_openai_payload(payload)
         trace_events.append({"kind": "payload_preflight", "ok": not errors, "errors": errors,
-                             "payload": summarize_openai_payload(payload)})
+                             "payload": payload_summary})
         write_trace_file(trace_file, trace_meta, trace_events, 0 if not errors else 1, started_at_iso, time.perf_counter() - started_at_perf, 0)
         print(json.dumps({"preflight_ok": not errors, "errors": errors}, indent=2))
         return 0 if not errors else 1
-    api_key = os.environ.get("OPENAI_API_KEY")
+    key_name = "OPENROUTER_API_KEY" if args.provider == "openrouter" else "OPENAI_API_KEY"
+    api_key = os.environ.get(key_name)
     if not api_key:
-        trace_events.append({"kind": "api_error", "error": "OPENAI_API_KEY is required"})
+        trace_events.append({"kind": "api_error", "error": f"{key_name} is required"})
         write_trace_file(trace_file, trace_meta, trace_events, 2, started_at_iso, time.perf_counter() - started_at_perf, 0)
-        print("OPENAI_API_KEY is required", file=sys.stderr)
+        print(f"{key_name} is required", file=sys.stderr)
         return 2
     if args.reset_paddle_speed_feature:
         reset_paddle_speed_feature(project)
@@ -1336,6 +1611,7 @@ def main() -> int:
     total_actions = 0
     working_notes = ""
     previous_tool_call_batch = ""
+    repeated_tool_call_corrections = 0
     read_only_batches = 0
     observation_memory: dict[str, dict[str, Any]] = {}
     for turn in range(1, MAX_TURNS + 1):
@@ -1347,7 +1623,13 @@ def main() -> int:
             print(json.dumps({"error": "time_limit", "max_seconds": args.max_seconds, "actions": total_actions}, indent=2), file=sys.stderr)
             return 124
         try:
-            response = call_openai(api_key, args.model, request, args.service_tier, trace_events, turn, remaining_seconds)
+            if args.provider == "openrouter":
+                response = call_openrouter(
+                    api_key, args.model, request, trace_events, turn, remaining_seconds,
+                    args.openrouter_only_provider, args.openrouter_max_input_price, args.openrouter_max_output_price,
+                    args.openrouter_response_format, args.openrouter_native_tools)
+            else:
+                response = call_openai(api_key, args.model, request, args.service_tier, trace_events, turn, remaining_seconds)
         except Exception as error:
             trace_events.append({"kind": "api_error", "turn": turn, "error_type": type(error).__name__, "error": str(error)})
             write_trace_file(trace_file, trace_meta, trace_events, 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
@@ -1401,15 +1683,32 @@ def main() -> int:
             continue
         current_tool_call_batch = tool_call_batch_key(tool_calls)
         if current_tool_call_batch == previous_tool_call_batch:
+            if repeated_tool_call_corrections < 1 and turn < MAX_TURNS:
+                repeated_tool_call_corrections += 1
+                correction = repeated_tool_call_correction()
+                trace_events.append({
+                    "kind": "repeated_tool_call_correction",
+                    "turn": turn,
+                    "tool_calls": tool_calls,
+                })
+                request = build_followup_request(shared_context, retain_working_notes({
+                    "phase": "repeated_tool_call_correction",
+                    "tool_observations": retained_observations(observation_memory),
+                    "latest_tool_observations": [correction],
+                    "instruction": "The identical tool call was not rerun. Its prior result is already present. Use that result and take a different next action; do not repeat it again.",
+                }, working_notes))
+                trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
+                continue
             repeated = {"kind": "repeated_tool_calls", "turn": turn, "tool_calls": tool_calls, "actions": total_actions}
             trace_events.append(repeated)
             passed_after_writes = trace_meta["successful_write_count"] > 0 and last_diagnostics.get("kind") == "behavior_tests" and last_diagnostics.get("ok")
             write_trace_file(trace_file, trace_meta, trace_events, 0 if passed_after_writes else 1, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
             print(json.dumps({"error": "repeated_tool_calls", "accepted_tested_writes": passed_after_writes, "actions": total_actions}, indent=2), file=sys.stderr)
             return 0 if passed_after_writes else 1
+        repeated_tool_call_corrections = 0
         previous_tool_call_batch = current_tool_call_batch
         batch_has_writes = any(call.get("tool") in {"write_symbol", "delete_symbol", "write_file", "write_test_file", "delete_test_file"} for call in tool_calls)
-        blocked_read_only_batch = not batch_has_writes and read_only_batches >= MAX_READ_ONLY_BATCHES
+        blocked_read_only_batch = not batch_has_writes and read_only_batches >= max_read_only_batches
         prior_observations = retained_observations(observation_memory)
         tool_started_at = time.perf_counter()
         if blocked_read_only_batch:
@@ -1440,7 +1739,7 @@ def main() -> int:
                 return 0
         write_trace_file(trace_file, trace_meta, trace_events, None, started_at_iso, time.perf_counter() - started_at_perf, total_actions)
         instruction = "Use retained tool_observations and working_notes as cumulative memory; update Intent, Observed, Next, and Blocker. Do not reread targets already present in retained observations. If tests fail, fix the exact required state/checks. Do not repeat identical tool calls."
-        if read_only_batches >= MAX_READ_ONLY_BATCHES:
+        if read_only_batches >= max_read_only_batches:
             instruction += " You have completed the maximum read-only inspection batches. Your next response must contain at least one write tool call or mode=done."
         request = build_followup_request(shared_context, retain_working_notes({"phase": "tool_observations", "tool_observations": prior_observations, "latest_tool_observations": [compact_observation_for_provider(observation) for observation in observations], "instruction": instruction}, working_notes))
         trace_events.append({"kind": "next_request", "turn": turn, "summary": summarize_request_for_trace(request)})
