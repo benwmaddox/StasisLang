@@ -141,7 +141,6 @@ struct StructMetaExportFile {
 struct PackagedAotSupportFiles {
     data_bind_json_rel: Option<String>,
     data_bind_meta_rel: Option<String>,
-    export_symbols: Vec<String>,
     runtime_fields: Vec<PackagedRuntimeField>,
 }
 
@@ -3022,10 +3021,6 @@ fn stage_entry_support_files(
     }
     let runtime_fields: Vec<_> = fields_by_name.into_values().collect();
     let mut support = PackagedAotSupportFiles {
-        export_symbols: runtime_fields
-            .iter()
-            .map(|field| field.name.clone())
-            .collect(),
         runtime_fields,
         ..PackagedAotSupportFiles::default()
     };
@@ -3041,6 +3036,129 @@ fn stage_entry_support_files(
     }
 
     Ok(support)
+}
+
+fn state_layout_runtime_fields(
+    layout: &StateLayout,
+    include_bridge_owned: bool,
+) -> Result<Vec<PackagedRuntimeField>, String> {
+    fn field_width(type_name: &str) -> Result<usize, String> {
+        match type_name {
+            "bool" | "u16" | "u32" | "i32" | "f32" => Ok(4),
+            "u8" => Ok(1),
+            "f64" => Ok(8),
+            other => Err(format!("unsupported AOT state storage type '{other}'")),
+        }
+    }
+
+    fn is_bridge_owned(path: &str) -> bool {
+        matches!(
+            path,
+            "host_i32"
+                | "host_f32"
+                | "gfx_cmd_i32"
+                | "gfx_cmd_f32"
+                | "gfx_cmd_u8"
+                | "host_req_seq"
+                | "host_req_flags"
+                | "host_req_window_w_px"
+                | "host_req_window_h_px"
+        )
+    }
+
+    let collection_capacities = layout
+        .collections
+        .iter()
+        .map(|collection| (collection.path.as_str(), collection.capacity))
+        .collect::<BTreeMap<_, _>>();
+    let mut fields = Vec::new();
+    for scalar in &layout.scalars {
+        if !include_bridge_owned && is_bridge_owned(&scalar.path) {
+            continue;
+        }
+        let initial_value = scalar.path.strip_suffix(".max_length").and_then(|parent| {
+            collection_capacities
+                .get(parent)
+                .map(|capacity| serde_json::json!(capacity))
+        });
+        fields.push(PackagedRuntimeField {
+            name: scalar.path.replace('.', "__"),
+            size: field_width(&scalar.type_name)?,
+            field_type: scalar.type_name.clone(),
+            array_count: 1,
+            initial_value,
+            collection_path: None,
+            collection_field: None,
+        });
+    }
+    for collection in &layout.collections {
+        if !include_bridge_owned && is_bridge_owned(&collection.path) {
+            continue;
+        }
+        let array_count = usize::try_from(collection.capacity).map_err(|_| {
+            format!(
+                "negative AOT state collection capacity {} for '{}'",
+                collection.capacity, collection.path
+            )
+        })?;
+        for field in &collection.fields {
+            let width = field_width(&field.type_name)?;
+            let name = if field.field.is_empty() {
+                collection.path.replace('.', "__")
+            } else {
+                format!(
+                    "{}__{}",
+                    collection.path.replace('.', "__"),
+                    field.field.replace('.', "__")
+                )
+            };
+            fields.push(PackagedRuntimeField {
+                name,
+                size: width.checked_mul(array_count).ok_or_else(|| {
+                    format!("AOT state storage size overflow for '{}'", collection.path)
+                })?,
+                field_type: field.type_name.clone(),
+                array_count,
+                initial_value: None,
+                collection_path: Some(collection.path.clone()),
+                collection_field: (!field.field.is_empty()).then(|| field.field.clone()),
+            });
+        }
+    }
+    Ok(fields)
+}
+
+fn merge_runtime_fields(
+    layout: &StateLayout,
+    support_fields: &[PackagedRuntimeField],
+) -> Result<Vec<PackagedRuntimeField>, String> {
+    let mut fields = state_layout_runtime_fields(layout, false)?
+        .into_iter()
+        .map(|field| (field.name.clone(), field))
+        .collect::<BTreeMap<_, _>>();
+    for field in support_fields {
+        fields.insert(field.name.clone(), field.clone());
+    }
+    Ok(fields.into_values().collect())
+}
+
+pub fn build_aot_direct_storage_source(
+    layout: &StateLayout,
+) -> Result<(String, Vec<String>), String> {
+    let mut source = String::from(
+        "#ifndef STASIS_EXPORT\n\
+#if defined(_WIN32)\n\
+#define STASIS_EXPORT __declspec(dllexport)\n\
+#else\n\
+#define STASIS_EXPORT __attribute__((visibility(\"default\")))\n\
+#endif\n\
+#endif\n",
+    );
+    let mut register_lines = Vec::new();
+    for field in state_layout_runtime_fields(layout, true)? {
+        append_runtime_bridge_field_source(&mut source, &mut register_lines, &field)?;
+    }
+    Ok((source, register_lines))
 }
 
 fn append_runtime_bridge_field_source(
@@ -3110,10 +3228,40 @@ fn append_runtime_bridge_field_source(
         .as_deref()
         .map(crate::hash_global_path)
         .unwrap_or(0);
+    let is_array = field.collection_path.is_some() || field.array_count > 1;
     match field.field_type.as_str() {
+        "u8" if is_array => {
+            let values = values_for_field(field)?;
+            let initializer = if values.is_empty() {
+                "0".to_string()
+            } else {
+                values
+                    .iter()
+                    .map(|value| {
+                        let value = i32_literal(value, &field.name)?;
+                        let parsed = value.parse::<i32>().map_err(|error| error.to_string())?;
+                        u8::try_from(parsed)
+                            .map(|value| value.to_string())
+                            .map_err(|_| {
+                                format!("packaged data field {} is outside u8 range", field.name)
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
+            };
+            source.push_str(&format!(
+                "STASIS_EXPORT uint8_t {}[{}] = {{{initializer}}};\n",
+                field.name, field.array_count,
+            ));
+            register_lines.push(format!(
+                "stasis_jit_register_global_u8_array({collection_hash}, {field_hash}, {name}, {len});",
+                name = field.name,
+                len = field.array_count
+            ));
+        }
         "bool" | "u8" | "u16" | "u32" | "i32" => {
             let values = values_for_field(field)?;
-            if field.array_count > 1 {
+            if is_array {
                 let initializer = if values.is_empty() {
                     "0".to_string()
                 } else {
@@ -3150,7 +3298,7 @@ fn append_runtime_bridge_field_source(
         }
         "f32" => {
             let values = values_for_field(field)?;
-            if field.array_count > 1 {
+            if is_array {
                 let initializer = if values.is_empty() {
                     "0.0f".to_string()
                 } else {
@@ -3187,7 +3335,7 @@ fn append_runtime_bridge_field_source(
         }
         "f64" => {
             let values = values_for_field(field)?;
-            if field.array_count > 1 {
+            if is_array {
                 let initializer = if values.is_empty() {
                     "0.0".to_string()
                 } else {
@@ -3349,7 +3497,8 @@ typedef unsigned char uint8_t;\n\
 typedef unsigned long long uintptr_t;\n\
 #else\n\
 #include <stdint.h>\n\
-#endif\n",
+#endif\n\
+",
     );
     source.push_str(
         "#if defined(_WIN32)\n\
@@ -3665,6 +3814,11 @@ fn package_engine_bundle_release(
 
     let entry_file = resolve_self_host_aot_entry_file(project_dir, entry_file_override)?;
     let support = stage_entry_support_files(project_dir, entry_file.as_deref(), output_root)?;
+    let state_layout = backend
+        .last_state_layout
+        .as_ref()
+        .ok_or_else(|| "AOT state layout missing during packaging".to_string())?;
+    let runtime_fields = merge_runtime_fields(state_layout, &support.runtime_fields)?;
     let mut function_aliases = vec![PackagedFunctionAlias {
         alias: "main",
         target_symbol: entry_symbol.clone(),
@@ -3721,8 +3875,8 @@ fn package_engine_bundle_release(
     ] {
         export_symbols.insert(format!("{symbol},DATA"));
     }
-    for symbol in &support.export_symbols {
-        export_symbols.insert(format!("{symbol},DATA"));
+    for field in &runtime_fields {
+        export_symbols.insert(format!("{},DATA", field.name));
     }
 
     let mut link_config = backend.aot_link_config.clone();
@@ -3754,7 +3908,7 @@ fn package_engine_bundle_release(
     let string_literals = manifest.string_literals.clone().unwrap_or_default();
     let bridge_object = emit_engine_bundle_runtime_bridge_object(
         backend,
-        &support.runtime_fields,
+        &runtime_fields,
         &function_symbols,
         &function_aliases,
         &string_literals,
@@ -4045,6 +4199,7 @@ mod tests {
         )
         .expect("build android bridge source");
 
+        assert!(!source.contains("StasisDirectStorageSlot"));
         assert!(source.contains("STASIS_EXPORT void stasis_init(int width, int height)"));
         assert!(source.contains("host_i32[1] = width;"));
         assert!(source.contains("STASIS_EXPORT void stasis_tick(float dt)"));
@@ -7882,6 +8037,113 @@ mod tests {
         let callee_value = invoke_noarg_u64(callee_ptr).expect("invoke callee");
         assert_eq!(main_value, callee_value);
 
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_bundle_executes_direct_global_storage_if_real_link_available() {
+        let Some(linker_path) = find_lld_link() else {
+            return;
+        };
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_aot_direct_storage_{stamp}"));
+        let project_dir = temp_root.join("project");
+        fs::create_dir_all(&project_dir).expect("create project root");
+        let source = project_dir.join("main.stasis");
+        fs::write(
+            &source,
+            "struct Enemy { hp: i32; speed: f32; precise: f64; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal values: i32[2];\nglobal float_values: f32[2];\nglobal double_values: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction main(): i32 { count = 7; ratio = 1.5; precise = 2.5; values[1] = 11; float_values[0] = 3.5; double_values[1] = 4.5; bytes[2] = 250; foreach (let byte in bytes) { byte += 1; } enemies[0].hp = 13; enemies[0].speed = 6.5; enemies[0].precise = 7.5; label[0] = 65; if (ratio < 1.4 || precise < 2.4 || float_values[0] < 3.4 || double_values[1] < 4.4 || enemies[0].speed < 6.4 || enemies[0].precise < 7.4) { return -1; } return count + values[1] + bytes[2] + enemies[0].hp + label[0] + label.max_length; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+
+        let artifact_root = temp_root.join("artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(AotCompileConfig::default(), artifact_root);
+        let result = backend.compile(CompileRequest::new(
+            RequestId(17_200),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(
+            result.status,
+            CompileStatus::Success,
+            "AOT direct storage compile failed: {:?}",
+            result.diagnostics
+        );
+        let bundle = backend
+            .last_aot_engine_bundle()
+            .expect("AOT engine bundle")
+            .clone();
+        let manifest = backend
+            .read_engine_bundle_manifest(&bundle.manifest_path)
+            .expect("read manifest");
+        let runtime_fields = merge_runtime_fields(
+            backend.last_state_layout.as_ref().expect("state layout"),
+            &[],
+        )
+        .expect("derive AOT storage fields");
+        let aliases = ["main", "tick", "render"]
+            .into_iter()
+            .map(|name| PackagedFunctionAlias {
+                alias: name,
+                target_symbol: resolve_engine_bundle_symbol(&manifest, name)
+                    .expect("resolve entrypoint"),
+                returns_i32: true,
+            })
+            .collect::<Vec<_>>();
+        let function_symbols = manifest
+            .functions
+            .iter()
+            .map(|row| row.symbol.clone())
+            .collect::<Vec<_>>();
+        let bridge = emit_engine_bundle_runtime_bridge_object(
+            &backend,
+            &runtime_fields,
+            &function_symbols,
+            &aliases,
+            &[],
+        )
+        .expect("compile direct storage bridge");
+        let mut objects = bundle
+            .object_paths_by_function
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        objects.push(bridge);
+        let linked = temp_root.join("direct_storage.dll");
+        let dynload = ensure_stasis_dynload_link_library().expect("stasis dynload link library");
+        stasis_jit::link_objects_to_dynamic_library(
+            &objects,
+            &linked,
+            &[
+                "main".to_string(),
+                "stasis_aot_bind_runtime_globals".to_string(),
+            ],
+            &AotLinkConfig {
+                linker_path: Some(linker_path),
+                runtime_lib_paths: vec![dynload.clone()],
+                target: stasis_jit::AotTarget::default(),
+            },
+        )
+        .expect("link direct storage AOT bundle");
+        stage_stasis_dynload_runtime(&dynload, &linked).expect("stage stasis dynload runtime");
+
+        let library = DynamicLibrary::load(&linked).expect("load direct storage AOT bundle");
+        let bind = library
+            .symbol_address("stasis_aot_bind_runtime_globals")
+            .expect("resolve runtime binding");
+        stasis_dynload::invoke_noarg_void(bind).expect("bind runtime globals");
+        let main = library.symbol_address("main").expect("resolve main");
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(main).expect("execute AOT main"),
+            351
+        );
+        // Runtime bindings intentionally remain valid until the test process exits.
+        std::mem::forget(library);
         fs::remove_dir_all(&temp_root).ok();
     }
     fn write_fake_linker(temp_root: &Path) -> PathBuf {

@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use stasis::{
-    run_jit_tests_in_directory_with_session, run_play_in_process_with_input_script,
-    run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
-    RunnerConfig, StasisTestRunSession,
+    build_aot_direct_storage_source, run_jit_tests_in_directory_with_session,
+    run_play_in_process_with_input_script, run_self_host_aot_cli_with_options,
+    run_with_default_backend, run_with_real_backend, RunnerConfig, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, AssetFormat, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
@@ -1623,7 +1623,12 @@ fn write_mobile_aot_engine_bundle(
     let symbols_header = output_dir.join("published_aot_symbols.h");
     write_mobile_aot_symbols_header(&manifest_json, &symbols_header)?;
     let bindings_source = output_dir.join("published_aot_bindings.c");
-    write_mobile_aot_bindings_source(&manifest_json, project_dir, &bindings_source)?;
+    write_mobile_aot_bindings_source(
+        &manifest_json,
+        &process.state_layout(),
+        project_dir,
+        &bindings_source,
+    )?;
     let cmake_file = if target == MobileAotTarget::AndroidArm64 {
         let path = output_dir.join("published_aot_objects.cmake");
         write_android_aot_cmake_file(&bundle.object_paths_by_function, &path)?;
@@ -1970,6 +1975,7 @@ fn write_mobile_aot_symbols_header(
 
 fn write_mobile_aot_bindings_source(
     manifest: &serde_json::Value,
+    state_layout: &stasis_compiler::backend::state_layout::StateLayout,
     project_dir: &Path,
     output_path: &Path,
 ) -> Result<(), String> {
@@ -1984,6 +1990,9 @@ fn write_mobile_aot_bindings_source(
     let mut out = String::from(
         "#include <stdint.h>\n#include <string.h>\n#include \"stasis_mobile_aot_runtime.h\"\n\n",
     );
+    let (direct_storage_source, direct_storage_register_lines) =
+        build_aot_direct_storage_source(state_layout)?;
+    out.push_str(&direct_storage_source);
     for function in functions {
         let symbol = function
             .get("symbol")
@@ -2055,6 +2064,9 @@ fn write_mobile_aot_bindings_source(
          }\n",
     );
     out.push_str("\nvoid stasis_aot_bind_runtime_globals(void) {\n");
+    for line in direct_storage_register_lines {
+        out.push_str(&format!("    {line}\n"));
+    }
     for function in functions {
         let symbol = function
             .get("symbol")
@@ -2884,18 +2896,22 @@ mod tests {
                 .expect("read shared mobile AOT runtime header");
         let graphics_runtime = fs::read_to_string(repo_root.join("runtime/stasis_graphics.c"))
             .expect("read graphics runtime");
+        let generated_bindings =
+            fs::read_to_string(summary.bundle_dir.join("published_aot_bindings.c"))
+                .expect("read generated AOT bindings");
         let missing: Vec<_> = undefined
             .difference(&defined)
             .filter(|symbol| {
                 !mobile_aot_runtime.contains(&format!("{symbol}("))
                     && !mobile_aot_header.contains(&format!("{symbol}("))
                     && !graphics_runtime.contains(&format!("{symbol}("))
+                    && !generated_bindings.contains(symbol.as_str())
             })
             .cloned()
             .collect();
         assert!(
             missing.is_empty(),
-            "shared mobile core must provide AOT imports: {missing:?}"
+            "mobile runtime or generated bindings must provide AOT imports: {missing:?}"
         );
         let runtime_exports = fs::read_to_string(
             repo_root.join("crates/stasis_compiler/src/backend/runtime_exports.rs"),

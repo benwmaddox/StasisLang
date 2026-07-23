@@ -111,6 +111,7 @@ pub(crate) struct ForeachBinding {
     pub(crate) element_type: Option<TypeId>,
     pub(crate) struct_type_id: Option<TypeId>,
     pub(crate) field_types: BTreeMap<String, TypeId>,
+    pub(crate) u8_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) i32_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) f32_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) f64_array_base_ptrs: BTreeMap<String, Value>,
@@ -1412,6 +1413,45 @@ pub(crate) struct RuntimeCallRefs {
     pub(crate) collection_i32_load: FuncRef,
     pub(crate) collection_i32_store: FuncRef,
     pub(crate) extern_calls: BTreeMap<ExternImportKey, FuncRef>,
+    pub(crate) direct_storage: Option<DirectStorageRefs>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum DirectStorageBinding {
+    Absolute(usize),
+    Symbol(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DirectStorageBindings {
+    pub(crate) scalars: BTreeMap<String, DirectStorageBinding>,
+    pub(crate) arrays: BTreeMap<(String, String), DirectArrayStorageBinding>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DirectArrayStorageBinding {
+    pub(crate) slot: DirectStorageBinding,
+    pub(crate) byte_lane: bool,
+    pub(crate) static_len: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DirectStorageRef {
+    Absolute(usize),
+    Symbol(cranelift_codegen::ir::GlobalValue),
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DirectStorageRefs {
+    pub(crate) scalars: BTreeMap<String, DirectStorageRef>,
+    pub(crate) arrays: BTreeMap<(String, String), DirectArrayStorageRef>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DirectArrayStorageRef {
+    pub(crate) slot: DirectStorageRef,
+    pub(crate) byte_lane: bool,
+    pub(crate) static_len: Option<usize>,
 }
 
 pub(crate) struct AotDirectCallMode<'a> {
@@ -1544,6 +1584,7 @@ pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuil
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    direct_storage: Option<&DirectStorageBindings>,
     mut before_statement: BeforeStatement,
     on_function_built: OnFunctionBuilt,
     finalize: Finalize,
@@ -1593,8 +1634,12 @@ where
     let mut function_builder_context = FunctionBuilderContext::new();
     {
         let mut builder = FunctionBuilder::new(&mut context.func, &mut function_builder_context);
-        let runtime_call_refs =
-            build_runtime_call_refs(&mut module, &runtime_call_imports, builder.func);
+        let runtime_call_refs = build_runtime_call_refs(
+            &mut module,
+            &runtime_call_imports,
+            builder.func,
+            direct_storage,
+        )?;
         let entry = builder.create_block();
         for param_type in &meta.params {
             if is_struct_view_type(*param_type, named_struct_field_types) {
@@ -6097,59 +6142,171 @@ pub(crate) fn emit_simple_statements(
                 let len_value = builder
                     .ins()
                     .iconst(types::I32, i64::from(collection_info.len));
+                let mut loop_len_value = len_value;
                 let mut i32_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
+                let mut u8_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
                 let mut f32_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
                 let mut f64_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
-                if collection_info
-                    .element_type
-                    .is_some_and(|type_id| is_i32_abi_compatible_type(type_id, type_table))
-                {
-                    let field_hash_value = builder.ins().iconst(types::I32, 0);
-                    let call = builder.ins().call(
-                        runtime_call_refs.global_i32_array_ptr,
-                        &[collection_hash_value, field_hash_value, len_value],
-                    );
-                    i32_array_base_ptrs.insert(String::new(), builder.inst_results(call)[0]);
-                }
-                if collection_info.element_type == Some(TYPE_ID_F32) {
-                    let field_hash_value = builder.ins().iconst(types::I32, 0);
-                    let call = builder.ins().call(
-                        runtime_call_refs.global_f32_array_ptr,
-                        &[collection_hash_value, field_hash_value, len_value],
-                    );
-                    f32_array_base_ptrs.insert(String::new(), builder.inst_results(call)[0]);
-                }
-                if collection_info.element_type == Some(TYPE_ID_F64) {
-                    let field_hash_value = builder.ins().iconst(types::I32, 0);
-                    let call = builder.ins().call(
-                        runtime_call_refs.global_f64_array_ptr,
-                        &[collection_hash_value, field_hash_value, len_value],
-                    );
-                    f64_array_base_ptrs.insert(String::new(), builder.inst_results(call)[0]);
-                }
-                for (suffix, type_id) in &collection_info.field_types {
-                    let field_hash = hash_foreach_field_suffix(suffix);
-                    let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
-                    if is_i32_abi_compatible_type(*type_id, type_table) {
+                if collection_info.element_type.is_some_and(|type_id| {
+                    is_i32_abi_compatible_type(type_id, type_table)
+                        && !is_u8_lane(type_table, type_id)
+                }) {
+                    let direct = matches!(collection_handle, ForeachCollectionHandle::PathHash(_))
+                        .then(|| runtime_call_refs.direct_storage.as_ref())
+                        .flatten()
+                        .and_then(|bindings| {
+                            bindings
+                                .arrays
+                                .get(&(collection_path.clone(), String::new()))
+                        })
+                        .copied();
+                    let base = if let Some(direct) = direct {
+                        loop_len_value =
+                            emit_bounded_direct_array_len(builder, direct, loop_len_value);
+                        emit_direct_slot_data_ptr(builder, direct.slot)
+                    } else {
+                        let field_hash_value = builder.ins().iconst(types::I32, 0);
                         let call = builder.ins().call(
                             runtime_call_refs.global_i32_array_ptr,
                             &[collection_hash_value, field_hash_value, len_value],
                         );
-                        i32_array_base_ptrs.insert(suffix.clone(), builder.inst_results(call)[0]);
+                        builder.inst_results(call)[0]
+                    };
+                    i32_array_base_ptrs.insert(String::new(), base);
+                }
+                if collection_info
+                    .element_type
+                    .is_some_and(|type_id| is_u8_lane(type_table, type_id))
+                {
+                    if let Some(direct) =
+                        matches!(collection_handle, ForeachCollectionHandle::PathHash(_))
+                            .then(|| runtime_call_refs.direct_storage.as_ref())
+                            .flatten()
+                            .and_then(|bindings| {
+                                bindings
+                                    .arrays
+                                    .get(&(collection_path.clone(), String::new()))
+                            })
+                            .copied()
+                    {
+                        loop_len_value =
+                            emit_bounded_direct_array_len(builder, direct, loop_len_value);
+                        u8_array_base_ptrs.insert(
+                            String::new(),
+                            emit_direct_slot_data_ptr(builder, direct.slot),
+                        );
                     }
-                    if *type_id == TYPE_ID_F32 {
+                }
+                if collection_info.element_type == Some(TYPE_ID_F32) {
+                    let direct = matches!(collection_handle, ForeachCollectionHandle::PathHash(_))
+                        .then(|| runtime_call_refs.direct_storage.as_ref())
+                        .flatten()
+                        .and_then(|bindings| {
+                            bindings
+                                .arrays
+                                .get(&(collection_path.clone(), String::new()))
+                        })
+                        .copied();
+                    let base = if let Some(direct) = direct {
+                        loop_len_value =
+                            emit_bounded_direct_array_len(builder, direct, loop_len_value);
+                        emit_direct_slot_data_ptr(builder, direct.slot)
+                    } else {
+                        let field_hash_value = builder.ins().iconst(types::I32, 0);
                         let call = builder.ins().call(
                             runtime_call_refs.global_f32_array_ptr,
                             &[collection_hash_value, field_hash_value, len_value],
                         );
-                        f32_array_base_ptrs.insert(suffix.clone(), builder.inst_results(call)[0]);
-                    }
-                    if *type_id == TYPE_ID_F64 {
+                        builder.inst_results(call)[0]
+                    };
+                    f32_array_base_ptrs.insert(String::new(), base);
+                }
+                if collection_info.element_type == Some(TYPE_ID_F64) {
+                    let direct = matches!(collection_handle, ForeachCollectionHandle::PathHash(_))
+                        .then(|| runtime_call_refs.direct_storage.as_ref())
+                        .flatten()
+                        .and_then(|bindings| {
+                            bindings
+                                .arrays
+                                .get(&(collection_path.clone(), String::new()))
+                        })
+                        .copied();
+                    let base = if let Some(direct) = direct {
+                        loop_len_value =
+                            emit_bounded_direct_array_len(builder, direct, loop_len_value);
+                        emit_direct_slot_data_ptr(builder, direct.slot)
+                    } else {
+                        let field_hash_value = builder.ins().iconst(types::I32, 0);
                         let call = builder.ins().call(
                             runtime_call_refs.global_f64_array_ptr,
                             &[collection_hash_value, field_hash_value, len_value],
                         );
-                        f64_array_base_ptrs.insert(suffix.clone(), builder.inst_results(call)[0]);
+                        builder.inst_results(call)[0]
+                    };
+                    f64_array_base_ptrs.insert(String::new(), base);
+                }
+                for (suffix, type_id) in &collection_info.field_types {
+                    let field_hash = hash_foreach_field_suffix(suffix);
+                    let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
+                    let direct = matches!(collection_handle, ForeachCollectionHandle::PathHash(_))
+                        .then(|| runtime_call_refs.direct_storage.as_ref())
+                        .flatten()
+                        .and_then(|bindings| {
+                            bindings
+                                .arrays
+                                .get(&(collection_path.clone(), suffix.clone()))
+                        })
+                        .copied();
+                    if is_i32_abi_compatible_type(*type_id, type_table)
+                        && !is_u8_lane(type_table, *type_id)
+                    {
+                        let base = if let Some(direct) = direct {
+                            loop_len_value =
+                                emit_bounded_direct_array_len(builder, direct, loop_len_value);
+                            emit_direct_slot_data_ptr(builder, direct.slot)
+                        } else {
+                            let call = builder.ins().call(
+                                runtime_call_refs.global_i32_array_ptr,
+                                &[collection_hash_value, field_hash_value, len_value],
+                            );
+                            builder.inst_results(call)[0]
+                        };
+                        i32_array_base_ptrs.insert(suffix.clone(), base);
+                    } else if is_u8_lane(type_table, *type_id) {
+                        if let Some(direct) = direct {
+                            loop_len_value =
+                                emit_bounded_direct_array_len(builder, direct, loop_len_value);
+                            u8_array_base_ptrs.insert(
+                                suffix.clone(),
+                                emit_direct_slot_data_ptr(builder, direct.slot),
+                            );
+                        }
+                    } else if *type_id == TYPE_ID_F32 {
+                        let base = if let Some(direct) = direct {
+                            loop_len_value =
+                                emit_bounded_direct_array_len(builder, direct, loop_len_value);
+                            emit_direct_slot_data_ptr(builder, direct.slot)
+                        } else {
+                            let call = builder.ins().call(
+                                runtime_call_refs.global_f32_array_ptr,
+                                &[collection_hash_value, field_hash_value, len_value],
+                            );
+                            builder.inst_results(call)[0]
+                        };
+                        f32_array_base_ptrs.insert(suffix.clone(), base);
+                    } else if *type_id == TYPE_ID_F64 {
+                        let base = if let Some(direct) = direct {
+                            loop_len_value =
+                                emit_bounded_direct_array_len(builder, direct, loop_len_value);
+                            emit_direct_slot_data_ptr(builder, direct.slot)
+                        } else {
+                            let call = builder.ins().call(
+                                runtime_call_refs.global_f64_array_ptr,
+                                &[collection_hash_value, field_hash_value, len_value],
+                            );
+                            builder.inst_results(call)[0]
+                        };
+                        f64_array_base_ptrs.insert(suffix.clone(), base);
                     }
                 }
 
@@ -6174,6 +6331,7 @@ pub(crate) fn emit_simple_statements(
                         element_type: collection_info.element_type,
                         struct_type_id: collection_struct_type_id,
                         field_types: collection_info.field_types.clone(),
+                        u8_array_base_ptrs,
                         i32_array_base_ptrs,
                         f32_array_base_ptrs,
                         f64_array_base_ptrs,
@@ -6192,13 +6350,10 @@ pub(crate) fn emit_simple_statements(
                 builder.switch_to_block(condition_block);
 
                 let index_value = builder.use_var(index_var);
-                let len_value = builder
-                    .ins()
-                    .iconst(types::I32, i64::from(collection_info.len));
                 let condition_value =
                     builder
                         .ins()
-                        .icmp(IntCC::SignedLessThan, index_value, len_value);
+                        .icmp(IntCC::SignedLessThan, index_value, loop_len_value);
                 builder
                     .ins()
                     .brif(condition_value, body_block, &[], exit_block, &[]);
@@ -7749,6 +7904,17 @@ pub(crate) fn emit_foreach_binding_load(
 ) -> Result<ValueBinding, String> {
     let resolved = resolve_foreach_binding_value_type(binding, suffix)?;
     let index_value = builder.use_var(binding.index_var);
+    if is_u8_lane(type_table, resolved) {
+        if let Some(base_ptr) = binding.u8_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let address = builder.ins().iadd(base_ptr, index_i64);
+            let byte = builder.ins().load(types::I8, MemFlags::new(), address, 0);
+            return Ok(ValueBinding {
+                value: builder.ins().uextend(types::I32, byte),
+                type_id: resolved,
+            });
+        }
+    }
     if is_i32_abi_compatible_type(resolved, type_table) {
         if let Some(base_ptr) = binding.i32_array_base_ptrs.get(suffix).copied() {
             let index_i64 = builder.ins().uextend(types::I64, index_value);
@@ -7910,7 +8076,12 @@ pub(crate) fn emit_foreach_binding_assignment(
                 builder.ins().srem(lhs, rhs.value)
             }
         };
-        if let Some(base_ptr) = binding.i32_array_base_ptrs.get(suffix).copied() {
+        if let Some(base_ptr) = binding.u8_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let addr = builder.ins().iadd(base_ptr, index_i64);
+            let byte = builder.ins().ireduce(types::I8, value);
+            builder.ins().store(MemFlags::new(), byte, addr, 0);
+        } else if let Some(base_ptr) = binding.i32_array_base_ptrs.get(suffix).copied() {
             let index_i64 = builder.ins().uextend(types::I64, index_value);
             let byte_offset = builder.ins().ishl_imm(index_i64, 2);
             let addr = builder.ins().iadd(base_ptr, byte_offset);
@@ -8878,6 +9049,151 @@ pub(crate) fn emit_local_indexed_collection_assignment(
     ))
 }
 
+fn is_u8_lane(type_table: &TypeTable, type_id: TypeId) -> bool {
+    type_table
+        .type_info(type_id)
+        .is_some_and(|info| info.name == "u8")
+}
+
+fn emit_direct_array_load(
+    builder: &mut FunctionBuilder<'_>,
+    slot_ref: DirectStorageRef,
+    index: Value,
+    type_id: TypeId,
+    type_table: &TypeTable,
+    byte_lane: bool,
+    static_len: Option<usize>,
+) -> Result<Value, String> {
+    let data = emit_direct_slot_data_ptr(builder, slot_ref);
+    let len = if let Some(len) = static_len {
+        builder.ins().iconst(types::I64, len as i64)
+    } else {
+        let slot = emit_direct_slot_address(builder, slot_ref);
+        builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            slot,
+            stasis_dynload::JitStorageSlot::LEN_OFFSET,
+        )
+    };
+    let non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+    let index_i64 = builder.ins().sextend(types::I64, index);
+    let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index_i64, len);
+    let valid = builder.ins().band(non_negative, below_len);
+    let valid_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let merge_block = builder.create_block();
+    let result_type = if is_i32_abi_compatible_type(type_id, type_table) {
+        types::I32
+    } else if type_id == TYPE_ID_F32 {
+        types::F32
+    } else if type_id == TYPE_ID_F64 {
+        types::F64
+    } else {
+        return Err(format!("unsupported direct array load type {type_id}"));
+    };
+    builder.append_block_param(merge_block, result_type);
+    builder
+        .ins()
+        .brif(valid, valid_block, &[], invalid_block, &[]);
+    builder.switch_to_block(valid_block);
+    let shift = if type_id == TYPE_ID_F64 {
+        3
+    } else if byte_lane {
+        0
+    } else {
+        2
+    };
+    let byte_offset = if shift == 0 {
+        index_i64
+    } else {
+        builder.ins().ishl_imm(index_i64, shift)
+    };
+    let address = builder.ins().iadd(data, byte_offset);
+    let value = if byte_lane {
+        let byte = builder.ins().load(types::I8, MemFlags::new(), address, 0);
+        builder.ins().uextend(types::I32, byte)
+    } else {
+        builder.ins().load(result_type, MemFlags::new(), address, 0)
+    };
+    builder.ins().jump(merge_block, &[value]);
+    builder.seal_block(valid_block);
+    builder.switch_to_block(invalid_block);
+    let zero = if result_type == types::F32 {
+        builder.ins().f32const(Ieee32::with_float(0.0))
+    } else if result_type == types::F64 {
+        builder.ins().f64const(Ieee64::with_float(0.0))
+    } else {
+        builder.ins().iconst(types::I32, 0)
+    };
+    builder.ins().jump(merge_block, &[zero]);
+    builder.seal_block(invalid_block);
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    Ok(builder.block_params(merge_block)[0])
+}
+
+fn emit_direct_array_store(
+    builder: &mut FunctionBuilder<'_>,
+    slot_ref: DirectStorageRef,
+    index: Value,
+    value: Value,
+    type_id: TypeId,
+    byte_lane: bool,
+    static_len: Option<usize>,
+) -> Result<(), String> {
+    let data = emit_direct_slot_data_ptr(builder, slot_ref);
+    let len = if let Some(len) = static_len {
+        builder.ins().iconst(types::I64, len as i64)
+    } else {
+        let slot = emit_direct_slot_address(builder, slot_ref);
+        builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            slot,
+            stasis_dynload::JitStorageSlot::LEN_OFFSET,
+        )
+    };
+    let non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+    let index_i64 = builder.ins().sextend(types::I64, index);
+    let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index_i64, len);
+    let valid = builder.ins().band(non_negative, below_len);
+    let store_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder
+        .ins()
+        .brif(valid, store_block, &[], merge_block, &[]);
+    builder.switch_to_block(store_block);
+    let shift = if type_id == TYPE_ID_F64 {
+        3
+    } else if byte_lane {
+        0
+    } else {
+        2
+    };
+    let byte_offset = if shift == 0 {
+        index_i64
+    } else {
+        builder.ins().ishl_imm(index_i64, shift)
+    };
+    let address = builder.ins().iadd(data, byte_offset);
+    let stored = if byte_lane {
+        builder.ins().ireduce(types::I8, value)
+    } else {
+        value
+    };
+    builder.ins().store(MemFlags::new(), stored, address, 0);
+    builder.ins().jump(merge_block, &[]);
+    builder.seal_block(store_block);
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    Ok(())
+}
+
 pub(crate) fn emit_indexed_collection_load(
     builder: &mut FunctionBuilder<'_>,
     runtime_call_refs: &RuntimeCallRefs,
@@ -8889,6 +9205,29 @@ pub(crate) fn emit_indexed_collection_load(
 ) -> Result<ValueBinding, String> {
     let resolved = resolve_collection_value_type(collection_info, suffix)?;
     let index_binding = normalize_index_binding(index_binding, type_table)?;
+    if let Some(direct) = runtime_call_refs
+        .direct_storage
+        .as_ref()
+        .and_then(|bindings| {
+            bindings
+                .arrays
+                .get(&(collection_path.to_string(), suffix.to_string()))
+        })
+        .copied()
+    {
+        return Ok(ValueBinding {
+            value: emit_direct_array_load(
+                builder,
+                direct.slot,
+                index_binding.value,
+                resolved,
+                type_table,
+                direct.byte_lane,
+                direct.static_len,
+            )?,
+            type_id: resolved,
+        });
+    }
     let collection_hash = builder
         .ins()
         .iconst(types::I32, i64::from(hash_global_path(collection_path)));
@@ -8950,6 +9289,15 @@ pub(crate) fn emit_indexed_collection_assignment(
             collection_path, suffix, path_type, rhs.type_id
         ));
     }
+    let direct_slot = runtime_call_refs
+        .direct_storage
+        .as_ref()
+        .and_then(|bindings| {
+            bindings
+                .arrays
+                .get(&(collection_path.to_string(), suffix.to_string()))
+        })
+        .copied();
     let collection_hash = builder
         .ins()
         .iconst(types::I32, i64::from(hash_global_path(collection_path)));
@@ -9026,10 +9374,22 @@ pub(crate) fn emit_indexed_collection_assignment(
                 builder.ins().srem(lhs, rhs.value)
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[collection_hash, field_hash, index_binding.value, value],
-        );
+        if let Some(direct) = direct_slot {
+            emit_direct_array_store(
+                builder,
+                direct.slot,
+                index_binding.value,
+                value,
+                path_type,
+                direct.byte_lane,
+                direct.static_len,
+            )?;
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_i32_array_store,
+                &[collection_hash, field_hash, index_binding.value, value],
+            );
+        }
         return Ok(());
     }
     if path_type == TYPE_ID_BOOL {
@@ -9039,10 +9399,22 @@ pub(crate) fn emit_indexed_collection_assignment(
                 collection_path, suffix
             ));
         }
-        builder.ins().call(
-            runtime_call_refs.global_i32_array_store,
-            &[collection_hash, field_hash, index_binding.value, rhs.value],
-        );
+        if let Some(direct) = direct_slot {
+            emit_direct_array_store(
+                builder,
+                direct.slot,
+                index_binding.value,
+                rhs.value,
+                path_type,
+                direct.byte_lane,
+                direct.static_len,
+            )?;
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_i32_array_store,
+                &[collection_hash, field_hash, index_binding.value, rhs.value],
+            );
+        }
         return Ok(());
     }
     if path_type == TYPE_ID_F32 {
@@ -9107,10 +9479,22 @@ pub(crate) fn emit_indexed_collection_assignment(
                 ))
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f32_array_store,
-            &[collection_hash, field_hash, index_binding.value, value],
-        );
+        if let Some(direct) = direct_slot {
+            emit_direct_array_store(
+                builder,
+                direct.slot,
+                index_binding.value,
+                value,
+                path_type,
+                direct.byte_lane,
+                direct.static_len,
+            )?;
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_f32_array_store,
+                &[collection_hash, field_hash, index_binding.value, value],
+            );
+        }
         return Ok(());
     }
     if path_type == TYPE_ID_F64 {
@@ -9175,10 +9559,22 @@ pub(crate) fn emit_indexed_collection_assignment(
                 ))
             }
         };
-        builder.ins().call(
-            runtime_call_refs.global_f64_array_store,
-            &[collection_hash, field_hash, index_binding.value, value],
-        );
+        if let Some(direct) = direct_slot {
+            emit_direct_array_store(
+                builder,
+                direct.slot,
+                index_binding.value,
+                value,
+                path_type,
+                direct.byte_lane,
+                direct.static_len,
+            )?;
+        } else {
+            builder.ins().call(
+                runtime_call_refs.global_f64_array_store,
+                &[collection_hash, field_hash, index_binding.value, value],
+            );
+        }
         return Ok(());
     }
     Err(format!(
@@ -9194,6 +9590,17 @@ pub(crate) fn emit_global_load(
     path: &str,
     path_type: TypeId,
 ) -> Result<ValueBinding, String> {
+    if let Some(slot_address) = runtime_call_refs
+        .direct_storage
+        .as_ref()
+        .and_then(|bindings| bindings.scalars.get(path))
+        .copied()
+    {
+        return Ok(ValueBinding {
+            value: emit_direct_scalar_load(builder, slot_address, path_type, type_table)?,
+            type_id: path_type,
+        });
+    }
     let path_hash = builder
         .ins()
         .iconst(types::I32, i64::from(hash_global_path(path)));
@@ -9291,12 +9698,14 @@ pub(crate) fn emit_global_assignment(
                 builder.ins().srem(lhs, rhs.value)
             }
         };
-        let path_hash = builder
-            .ins()
-            .iconst(types::I32, i64::from(hash_global_path(path)));
-        builder
-            .ins()
-            .call(runtime_call_refs.global_i32_store, &[path_hash, value]);
+        emit_global_scalar_store(
+            builder,
+            runtime_call_refs,
+            type_table,
+            path,
+            path_type,
+            value,
+        )?;
         return Ok(());
     }
     if path_type == TYPE_ID_BOOL {
@@ -9306,12 +9715,14 @@ pub(crate) fn emit_global_assignment(
                 path
             ));
         }
-        let path_hash = builder
-            .ins()
-            .iconst(types::I32, i64::from(hash_global_path(path)));
-        builder
-            .ins()
-            .call(runtime_call_refs.global_i32_store, &[path_hash, rhs.value]);
+        emit_global_scalar_store(
+            builder,
+            runtime_call_refs,
+            type_table,
+            path,
+            path_type,
+            rhs.value,
+        )?;
         return Ok(());
     }
     if path_type == TYPE_ID_F32 {
@@ -9348,12 +9759,14 @@ pub(crate) fn emit_global_assignment(
                 ))
             }
         };
-        let path_hash = builder
-            .ins()
-            .iconst(types::I32, i64::from(hash_global_path(path)));
-        builder
-            .ins()
-            .call(runtime_call_refs.global_f32_store, &[path_hash, value]);
+        emit_global_scalar_store(
+            builder,
+            runtime_call_refs,
+            type_table,
+            path,
+            path_type,
+            value,
+        )?;
         return Ok(());
     }
     if path_type == TYPE_ID_F64 {
@@ -9390,18 +9803,127 @@ pub(crate) fn emit_global_assignment(
                 ))
             }
         };
-        let path_hash = builder
-            .ins()
-            .iconst(types::I32, i64::from(hash_global_path(path)));
-        builder
-            .ins()
-            .call(runtime_call_refs.global_f64_store, &[path_hash, value]);
+        emit_global_scalar_store(
+            builder,
+            runtime_call_refs,
+            type_table,
+            path,
+            path_type,
+            value,
+        )?;
         return Ok(());
     }
     Err(format!(
         "unsupported global path type {} for '{}'",
         path_type, path
     ))
+}
+
+fn emit_direct_slot_address(
+    builder: &mut FunctionBuilder<'_>,
+    slot_ref: DirectStorageRef,
+) -> Value {
+    match slot_ref {
+        DirectStorageRef::Absolute(address) => builder.ins().iconst(types::I64, address as i64),
+        DirectStorageRef::Symbol(symbol) => builder.ins().global_value(types::I64, symbol),
+    }
+}
+
+fn emit_direct_slot_data_ptr(
+    builder: &mut FunctionBuilder<'_>,
+    slot_ref: DirectStorageRef,
+) -> Value {
+    match slot_ref {
+        DirectStorageRef::Absolute(_) => {
+            let slot = emit_direct_slot_address(builder, slot_ref);
+            builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                slot,
+                stasis_dynload::JitStorageSlot::DATA_OFFSET,
+            )
+        }
+        DirectStorageRef::Symbol(symbol) => builder.ins().global_value(types::I64, symbol),
+    }
+}
+
+fn emit_bounded_direct_array_len(
+    builder: &mut FunctionBuilder<'_>,
+    direct: DirectArrayStorageRef,
+    current_len: Value,
+) -> Value {
+    if direct.static_len.is_some() {
+        return current_len;
+    }
+    let slot = emit_direct_slot_address(builder, direct.slot);
+    let direct_len = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        slot,
+        stasis_dynload::JitStorageSlot::LEN_OFFSET,
+    );
+    let current_len_i64 = builder.ins().uextend(types::I64, current_len);
+    let direct_is_shorter =
+        builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, direct_len, current_len_i64);
+    let bounded_len = builder
+        .ins()
+        .select(direct_is_shorter, direct_len, current_len_i64);
+    builder.ins().ireduce(types::I32, bounded_len)
+}
+
+fn emit_direct_scalar_load(
+    builder: &mut FunctionBuilder<'_>,
+    slot_ref: DirectStorageRef,
+    type_id: TypeId,
+    type_table: &TypeTable,
+) -> Result<Value, String> {
+    let data = emit_direct_slot_data_ptr(builder, slot_ref);
+    let clif_type = if is_i32_abi_compatible_type(type_id, type_table) {
+        types::I32
+    } else if type_id == TYPE_ID_F32 {
+        types::F32
+    } else if type_id == TYPE_ID_F64 {
+        types::F64
+    } else {
+        return Err(format!("unsupported direct scalar load type {type_id}"));
+    };
+    Ok(builder.ins().load(clif_type, MemFlags::new(), data, 0))
+}
+
+fn emit_global_scalar_store(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    path: &str,
+    type_id: TypeId,
+    value: Value,
+) -> Result<(), String> {
+    if let Some(slot_ref) = runtime_call_refs
+        .direct_storage
+        .as_ref()
+        .and_then(|bindings| bindings.scalars.get(path))
+        .copied()
+    {
+        let data = emit_direct_slot_data_ptr(builder, slot_ref);
+        builder.ins().store(MemFlags::new(), value, data, 0);
+        return Ok(());
+    }
+    let path_hash = builder
+        .ins()
+        .iconst(types::I32, i64::from(hash_global_path(path)));
+    let helper = if is_i32_abi_compatible_type(type_id, type_table) {
+        runtime_call_refs.global_i32_store
+    } else if type_id == TYPE_ID_F32 {
+        runtime_call_refs.global_f32_store
+    } else if type_id == TYPE_ID_F64 {
+        runtime_call_refs.global_f64_store
+    } else {
+        return Err(format!("unsupported global scalar store type {type_id}"));
+    };
+    builder.ins().call(helper, &[path_hash, value]);
+    Ok(())
 }
 
 pub(crate) fn hash_global_path(path: &str) -> i32 {
@@ -9854,8 +10376,12 @@ pub(crate) fn build_runtime_call_refs(
     module: &mut impl Module,
     imports: &RuntimeCallImportIds,
     func: &mut cranelift_codegen::ir::Function,
-) -> RuntimeCallRefs {
-    RuntimeCallRefs {
+    direct_storage: Option<&DirectStorageBindings>,
+) -> Result<RuntimeCallRefs, String> {
+    let direct_storage = direct_storage
+        .map(|bindings| resolve_direct_storage_refs(module, func, bindings))
+        .transpose()?;
+    Ok(RuntimeCallRefs {
         call_i32_0: module.declare_func_in_func(imports.call_i32_0, func),
         call_i32_1: module.declare_func_in_func(imports.call_i32_1, func),
         call_i32_2: module.declare_func_in_func(imports.call_i32_2, func),
@@ -9910,5 +10436,54 @@ pub(crate) fn build_runtime_call_refs(
             .iter()
             .map(|(key, id)| (key.clone(), module.declare_func_in_func(*id, func)))
             .collect(),
+        direct_storage,
+    })
+}
+
+fn resolve_direct_storage_refs(
+    module: &mut impl Module,
+    func: &mut cranelift_codegen::ir::Function,
+    bindings: &DirectStorageBindings,
+) -> Result<DirectStorageRefs, String> {
+    fn resolve(
+        module: &mut impl Module,
+        func: &mut cranelift_codegen::ir::Function,
+        binding: &DirectStorageBinding,
+    ) -> Result<DirectStorageRef, String> {
+        match binding {
+            DirectStorageBinding::Absolute(address) => Ok(DirectStorageRef::Absolute(*address)),
+            DirectStorageBinding::Symbol(symbol) => {
+                let data_id = module
+                    .declare_data(symbol, Linkage::Import, true, false)
+                    .map_err(|error| {
+                        format!("failed to declare direct storage symbol '{symbol}': {error}")
+                    })?;
+                Ok(DirectStorageRef::Symbol(
+                    module.declare_data_in_func(data_id, func),
+                ))
+            }
+        }
     }
+
+    Ok(DirectStorageRefs {
+        scalars: bindings
+            .scalars
+            .iter()
+            .map(|(path, binding)| Ok((path.clone(), resolve(module, func, binding)?)))
+            .collect::<Result<_, String>>()?,
+        arrays: bindings
+            .arrays
+            .iter()
+            .map(|(key, binding)| {
+                Ok((
+                    key.clone(),
+                    DirectArrayStorageRef {
+                        slot: resolve(module, func, &binding.slot)?,
+                        byte_lane: binding.byte_lane,
+                        static_len: binding.static_len,
+                    },
+                ))
+            })
+            .collect::<Result<_, String>>()?,
+    })
 }
