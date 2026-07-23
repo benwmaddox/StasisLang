@@ -86,7 +86,7 @@ def run_acceptance(project: Path, acceptance_test: Path) -> dict[str, Any]:
     output = str(result.get("output_tail", ""))
     failed = len(re.findall(r"comparison_acceptance\.test\.stasis\s+::", output))
     result["acceptance_tests_total"] = total
-    result["acceptance_tests_passed"] = max(0, total - failed)
+    result["acceptance_tests_passed"] = max(0, total - failed) if result.get("ok") or failed else 0
     return result
 
 
@@ -96,7 +96,7 @@ def write_markdown(path: Path, prompt: str, rows: list[dict[str, Any]]) -> None:
         "",
         f"Prompt: `{prompt}`",
         "",
-        "All runs use fresh copies of the same baseline, medium reasoning, standard API service, and a 25-turn cap.",
+        f"All runs use fresh copies of the same baseline, medium reasoning, standard API service, and a {host.MAX_TURNS}-turn cap.",
         "",
         "| Model | Harness | Acceptance | Total s | Model s | Tool s | Calls | Tool batches | Actions | Schema retries | Failed write batches | Restored writes | Input | Cached | Cache % | Cache write | Output | Est. USD |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",

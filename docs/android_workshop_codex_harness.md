@@ -184,6 +184,9 @@ native function-calling protocol and translates calls back into the shared local
 validation path. Native-tool runs allow ten sequential inspection batches by
 default because some models issue one tool per response; other runs retain the
 two-batch efficiency default. `--max-read-only-batches` overrides either value.
+`--openrouter-max-total-cost` adds a cumulative run ceiling using reported cost
+after each response and a conservative request-byte/output-token upper bound
+before the next request. It requires both per-million-token price ceilings.
 
 OpenRouter traces contain the exact JSON payload sent to the provider, excluding
 HTTP authorization headers. Each trace also writes a sibling `.usage.json`

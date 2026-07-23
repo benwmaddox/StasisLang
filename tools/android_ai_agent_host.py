@@ -400,8 +400,8 @@ def stasis_test_command(project: Path) -> list[str]:
     executable = stasis_test_executable()
     if os.name == "nt":
         runner = ROOT / ".cargo/stasis-sign-and-run.cmd"
-        return [str(runner), str(executable), "test", "--dir", str(project / "tests")]
-    return [str(executable), "test", "--dir", str(project / "tests")]
+        return [str(runner), str(executable), "test", "--workspace", str(project)]
+    return [str(executable), "test", "--workspace", str(project)]
 
 
 def stasis_test_runner_is_fresh() -> bool:
@@ -541,7 +541,21 @@ def run_behavior_tests(project: Path, compile_first: bool = True) -> dict[str, A
     runner = ensure_stasis_test_runner()
     if not runner.get("ok"):
         return {"kind": "behavior_tests", "ok": False, "status": "runner_build_failed", "runner_build": runner}
-    result = run_command(stasis_test_command(project))
+    manifest_path = project / "stasis.json"
+    created_manifest = not manifest_path.is_file()
+    if created_manifest:
+        write_text(manifest_path, json.dumps({
+            "manifest_version": 1,
+            "name": "workshop_ai_validation",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+        }, indent=2) + "\n")
+    try:
+        result = run_command(stasis_test_command(project))
+    finally:
+        if created_manifest:
+            manifest_path.unlink(missing_ok=True)
     result["kind"] = "behavior_tests"
     tests = list_test_files(project)
     stasis_tests = [test for test in tests if test.get("kind") == "stasis_test"]
@@ -1115,6 +1129,14 @@ def openrouter_native_tools() -> list[dict[str, Any]]:
     return tools
 
 
+def openrouter_request_cost_upper_bound(
+    payload: dict[str, Any], max_input_price: float, max_output_price: float
+) -> float:
+    input_bytes = len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    max_output_tokens = int(payload.get("max_tokens") or 0)
+    return (input_bytes * max_input_price + max_output_tokens * max_output_price) / 1_000_000.0
+
+
 def validate_openrouter_payload(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     response_format = payload.get("response_format")
@@ -1146,6 +1168,7 @@ def call_openrouter(
     max_output_price: float | None = None,
     response_format: str = "json_schema",
     native_tools: bool = False,
+    remaining_cost_usd: float | None = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     payload = build_openrouter_payload(
@@ -1153,6 +1176,13 @@ def call_openrouter(
     errors = validate_openrouter_payload(payload)
     if errors:
         raise RuntimeError("OpenRouter payload preflight failed: " + "; ".join(errors))
+    if remaining_cost_usd is not None:
+        if max_input_price is None or max_output_price is None:
+            raise RuntimeError("OpenRouter total cost guard requires input and output price ceilings")
+        upper_bound = openrouter_request_cost_upper_bound(payload, max_input_price, max_output_price)
+        if upper_bound > remaining_cost_usd:
+            raise RuntimeError(
+                f"OpenRouter total cost guard stopped before request: ${upper_bound:.6f} upper bound exceeds ${remaining_cost_usd:.6f} remaining")
     if trace_events is not None:
         # The payload contains exactly what is sent to the provider and no authorization header.
         trace_events.append({"kind": "openrouter_request", "turn": turn, "payload": payload})
@@ -1547,6 +1577,8 @@ def main() -> int:
                         help="Maximum accepted OpenRouter input price in USD per million tokens.")
     parser.add_argument("--openrouter-max-output-price", type=float,
                         help="Maximum accepted OpenRouter output price in USD per million tokens.")
+    parser.add_argument("--openrouter-max-total-cost", type=float,
+                        help="Maximum cumulative provider-reported cost in USD for this run.")
     parser.add_argument("--openrouter-response-format", choices=("json_schema", "none"), default="json_schema",
                         help="Use provider-enforced JSON Schema or rely on the prompt contract for providers that do not support it.")
     parser.add_argument("--openrouter-native-tools", action="store_true",
@@ -1562,6 +1594,12 @@ def main() -> int:
     args = parser.parse_args()
     if (args.openrouter_max_input_price is None) != (args.openrouter_max_output_price is None):
         parser.error("OpenRouter max input and output prices must be supplied together")
+    if args.openrouter_max_total_cost is not None and (
+        args.openrouter_max_total_cost <= 0
+        or args.openrouter_max_input_price is None
+        or args.openrouter_max_output_price is None
+    ):
+        parser.error("OpenRouter total cost requires a positive value and both price ceilings")
     max_read_only_batches = args.max_read_only_batches
     if max_read_only_batches is None:
         max_read_only_batches = 10 if args.provider == "openrouter" and args.openrouter_native_tools else MAX_READ_ONLY_BATCHES
@@ -1624,10 +1662,16 @@ def main() -> int:
             return 124
         try:
             if args.provider == "openrouter":
+                spent_usd = sum(
+                    float(event.get("usage", {}).get("cost_usd") or 0.0)
+                    for event in trace_events if event.get("kind") == "openrouter_exchange")
+                remaining_cost_usd = (
+                    args.openrouter_max_total_cost - spent_usd
+                    if args.openrouter_max_total_cost is not None else None)
                 response = call_openrouter(
                     api_key, args.model, request, trace_events, turn, remaining_seconds,
                     args.openrouter_only_provider, args.openrouter_max_input_price, args.openrouter_max_output_price,
-                    args.openrouter_response_format, args.openrouter_native_tools)
+                    args.openrouter_response_format, args.openrouter_native_tools, remaining_cost_usd)
             else:
                 response = call_openai(api_key, args.model, request, args.service_tier, trace_events, turn, remaining_seconds)
         except Exception as error:

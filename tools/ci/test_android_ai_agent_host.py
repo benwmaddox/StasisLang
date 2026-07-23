@@ -114,6 +114,24 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         self.assertIn("project_symbol_index as the authoritative list", instruction)
         self.assertIn("Do not guess a main symbol", instruction)
 
+    def test_openrouter_cost_upper_bound_uses_payload_bytes_and_max_output(self) -> None:
+        payload = {"messages": [{"content": "x" * 1000}], "max_tokens": 200}
+        bound = host.openrouter_request_cost_upper_bound(payload, 2.0, 6.0)
+        self.assertGreater(bound, 0.0012)
+        self.assertLess(bound, 0.004)
+
+    def test_openrouter_total_cost_guard_stops_before_network_call(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        request = host.build_agent_request(project, "change tick", {"phase": "initial"})
+        with mock.patch.object(host.urllib.request, "urlopen") as urlopen, self.assertRaisesRegex(
+                RuntimeError, "total cost guard stopped before request"):
+            host.call_openrouter(
+                "secret", "x-ai/grok-4.5", request,
+                max_input_price=2.0, max_output_price=6.0,
+                remaining_cost_usd=0.000001)
+        urlopen.assert_not_called()
+
     def test_openrouter_usage_is_aggregated_and_written_separately(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -207,7 +225,54 @@ class AndroidAiAgentHostTests(unittest.TestCase):
         command = host.stasis_test_command(project)
         self.assertNotEqual("cargo", Path(command[0]).name.lower())
         self.assertNotIn("run", command[1:])
+        self.assertNotIn("--dir", command)
+        self.assertIn("--workspace", command)
+        self.assertEqual(str(project), command[-1])
         self.assertIn("stasis", " ".join(command).lower())
+
+    def test_behavior_runner_uses_and_removes_temporary_manifest(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        manifest_path = project / "stasis.json"
+
+        def observe_manifest(_args: list[str]) -> dict:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual("src/main.stasis", manifest["entry"])
+            self.assertEqual("tests", manifest["tests"])
+            return {"ok": True, "returncode": 0, "output_tail": ""}
+
+        with mock.patch.object(host, "ensure_stasis_test_runner", return_value={"ok": True}), \
+                mock.patch.object(host, "run_command", side_effect=observe_manifest):
+            result = host.run_behavior_tests(project, compile_first=False)
+        self.assertFalse(manifest_path.exists())
+        self.assertFalse(result["ok"], "a project without a test file must still fail validation")
+
+    def test_acceptance_does_not_report_passes_when_runner_fails(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        with mock.patch.object(host, "run_behavior_tests", return_value={
+            "ok": False,
+            "returncode": 2,
+            "output_tail": "runner argument error",
+        }):
+            result = comparison.run_acceptance(project, comparison.DEFAULT_ACCEPTANCE_TEST)
+        self.assertEqual(4, result["acceptance_tests_total"])
+        self.assertEqual(0, result["acceptance_tests_passed"])
+
+    def test_acceptance_reports_partial_assertion_failures(self) -> None:
+        temporary, project = self.make_project()
+        self.addCleanup(temporary.cleanup)
+        output = (
+            "comparison_acceptance.test.stasis :: first :: returned false | "
+            "comparison_acceptance.test.stasis :: second :: returned false"
+        )
+        with mock.patch.object(host, "run_behavior_tests", return_value={
+            "ok": False,
+            "returncode": 1,
+            "output_tail": output,
+        }):
+            result = comparison.run_acceptance(project, comparison.DEFAULT_ACCEPTANCE_TEST)
+        self.assertEqual(2, result["acceptance_tests_passed"])
 
     def make_project(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
