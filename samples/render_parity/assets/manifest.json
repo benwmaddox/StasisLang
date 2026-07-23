@@ -1,0 +1,27 @@
+{
+  "schema": "stasis-assets",
+  "version": 1,
+  "assets": [
+    {
+      "id": "full_canvas",
+      "path": "assets/full_canvas.svg",
+      "content_sha256": "cd835349f65d2b7bf3f97eb9ab68fb8a0de2097bcbe83e3b794cc5db44312a03",
+      "format": {"kind": "sprite", "encoding": "svg", "width": 640, "height": 360},
+      "dependencies": []
+    },
+    {
+      "id": "opaque",
+      "path": "assets/opaque.svg",
+      "content_sha256": "4237c38d67bc6b660aeea9ba92c86f5c122192fe4e1d9d60a6ca232162622691",
+      "format": {"kind": "sprite", "encoding": "svg", "width": 96, "height": 72},
+      "dependencies": []
+    },
+    {
+      "id": "translucent",
+      "path": "assets/translucent.svg",
+      "content_sha256": "8319b2879d03d06a2a4bb947ad0c5c9a37ef08be8888666b06086252770c526c",
+      "format": {"kind": "sprite", "encoding": "svg", "width": 96, "height": 72},
+      "dependencies": []
+    }
+  ]
+}

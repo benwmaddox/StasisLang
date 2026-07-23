@@ -1,0 +1,59 @@
+@link("stasis_graphics");
+import "frame.stasis";
+
+extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+extern function load_font(path: string, size: i32): i32;
+function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
+
+global gfx_cmd_i32: i32[34848];
+global gfx_cmd_f32: f32[92292];
+global gfx_cmd_u8: u8[65536];
+
+// The host consumes this request between ticks; mobile shells already own the
+// surface and simply ignore the desktop window size request.
+global host_req_flags: i32;
+global host_req_window_w_px: i32;
+global host_req_window_h_px: i32;
+global host_req_seq: i32;
+
+global opaque_sprite: i32;
+global translucent_sprite: i32;
+global canvas_sprite: i32;
+global parity_font: i32;
+global cached_label: i32;
+
+function main(): i32 {
+    host_req_flags = 1;
+    host_req_window_w_px = PARITY_WINDOW_W;
+    host_req_window_h_px = PARITY_WINDOW_H;
+    host_req_seq += 1;
+
+    opaque_sprite = gfx_load_sprite("assets/opaque.svg", 96, 72);
+    translucent_sprite = gfx_load_sprite("assets/translucent.svg", 96, 72);
+    canvas_sprite = gfx_load_sprite("assets/full_canvas.svg", PARITY_WINDOW_W, PARITY_WINDOW_H);
+    parity_font = load_font("assets/parity.ttf", 24);
+    if (opaque_sprite == 0) { return 11; }
+    if (translucent_sprite == 0) { return 12; }
+    if (canvas_sprite == 0) { return 13; }
+    if (parity_font == 0) { return 14; }
+    cached_label = gfx_cache_text(parity_font, "cached parity");
+    if (cached_label == 0) { return 15; }
+    return 0;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    build_parity_frame(
+        gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8,
+        canvas_sprite, opaque_sprite, translucent_sprite,
+        parity_font, cached_label
+    );
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}
