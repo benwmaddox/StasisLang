@@ -32,6 +32,9 @@ jobs:
       - name: Test AI efficiency matrix
         run: python -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 
+      - name: Test release provenance
+        run: python -m unittest tools.ci.test_release_provenance
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

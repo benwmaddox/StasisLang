@@ -8,6 +8,11 @@ stasis --workspace path/to/game package-mobile --target android-arm64
 stasis --workspace path/to/game package-mobile --target ios-arm64
 ```
 
+Official release archives verify their compiler and runtime sources against
+`stasis_release_provenance.json` before packaging. A source checkout must add
+`--development-build`; that output is explicitly labeled non-release. See
+`release_provenance.md` for the manifest and repinning contract.
+
 `stasis.json` supplies the entry source. Use `--entry path/to/main.stasis` to
 select another project-relative import root and `--out path` to select a new,
 nonexistent output directory. Packaging is atomic: compiler or file failures do
@@ -19,6 +24,7 @@ Each output contains the same pieces:
 - `runtime/`: the shared SDL-only mobile runtime sources
 - `common/`: the fixed `SDL_main` lifecycle adapter
 - `stasis_mobile_package.json`: the versioned package receipt
+- `stasis_provenance.json`: verified release identity and content hashes
 - `android/` or `ios/`: a thin platform-native app project
 
 The packaged runtime is the same canonical SDL command interpreter used by the
@@ -33,6 +39,9 @@ the resolved path to escape `stasis_game`.
 
 No package contains the Stasis compiler, JIT, watcher, dynamic game loader, or
 writable Stasis source.
+
+Android and iOS also embed the provenance manifest below `stasis_game/`. Startup
+diagnostics report the release/development label, tag, commit, and renderer ABI.
 
 ## Android arm64
 

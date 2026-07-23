@@ -85,14 +85,20 @@ runnable `main()` and a real `.test.stasis` test.
 - `build --mode release`: use the shared Cranelift AOT pipeline and write the native executable to
   `build/`.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
-  assets, and graphics runtime when present.
+  assets, graphics runtime when present, and verified release provenance.
 - `package-mobile --target android-arm64|ios-arm64 [--entry PATH]`: atomically assemble the
-  shared AOT output, SDL-only runtime, bundled assets, and thin Gradle or Xcode app shell.
+  shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
+  Xcode app shell.
 - `package --target android-arm64|ios-arm64`: compatibility spelling that uses the manifest entry.
 - `inspect`, `version`, and `env`: report workspace, installation, cache, and output locations.
 
 `replay` and `verify` intentionally return deterministic unsupported diagnostics until the replay
 runtime contract lands; they do not fake successful behavior.
+
+Official packaging fails if the installed compiler or renderer sources differ from the release
+manifest. When working from a source checkout, pass `--development-build` to `package` or
+`package-mobile`; the resulting package is permanently labeled non-release. See
+[Release and package provenance](release_provenance.md).
 
 Add `--json` to receive one stable JSON result object. Usage errors exit 2, command/compile/test
 failures exit 1, and successful commands exit 0 except `run`, which preserves the guest's `i32`
