@@ -25,6 +25,7 @@ final class WorkshopTemplateCatalog {
             },
             new String[] { "tests/enemy_paddle_speed_schedule.test.stasis" },
             new String[] {
+                    "AGENTS.md",
                     "assets/manifest.json",
                     "assets/ball.svg",
                     "assets/paddle.svg",
@@ -57,6 +58,7 @@ final class WorkshopTemplateCatalog {
             },
             new String[] { "tests/exploration_gameplay.test.stasis" },
             new String[] {
+                    "AGENTS.md",
                     "assets/manifest.json",
                     "assets/player.svg",
                     "assets/sun_keepsake.svg",
