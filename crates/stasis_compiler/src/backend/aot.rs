@@ -642,6 +642,7 @@ impl AotProcess {
         entrypoints: &EngineEntrypoints,
         output_dir: &Path,
     ) -> Result<AotEngineBundle, String> {
+        validate_normalized_lifecycle_signatures(self.compiler.functions())?;
         fs::create_dir_all(output_dir).map_err(|error| {
             format!(
                 "failed to create AOT engine bundle directory {}: {error}",
@@ -778,6 +779,20 @@ impl AotProcess {
         }
         Ok(out)
     }
+}
+
+fn validate_normalized_lifecycle_signatures(functions: &[FunctionMeta]) -> Result<(), String> {
+    for name in ["commit_tick", "normalize_tick", "validate_tick"] {
+        let Some(function) = functions.iter().find(|function| function.name == name) else {
+            continue;
+        };
+        if !function.params.is_empty() || function.return_type != TYPE_ID_I32 {
+            return Err(format!(
+                "normalized lifecycle function '{name}' must have signature {name}(): i32"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn compact_active_artifact_storage(artifacts: &mut [AotArtifact], object_bytes: &mut Vec<Vec<u8>>) {
@@ -1254,6 +1269,11 @@ fn build_engine_bundle_manifest(
         "    \"render\": \"{}\"",
         json_escape(&entrypoints.render)
     ));
+    for lifecycle in ["commit_tick", "normalize_tick", "validate_tick"] {
+        if rows.iter().any(|(name, _, _, _)| name == lifecycle) {
+            out.push_str(&format!(",\n    \"{lifecycle}\": \"{lifecycle}\""));
+        }
+    }
     if let Some(on_code_swap) = entrypoints.on_code_swap.as_ref() {
         out.push_str(&format!(
             ",\n    \"on_code_swap\": \"{}\"\n",
@@ -2045,6 +2065,35 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[test]
+    fn aot_engine_bundle_rejects_normalized_lifecycle_signature_mismatch() {
+        for invalid in [
+            "function commit_tick(): void { return; }",
+            "function validate_tick(value: i32): i32 { return value; }",
+        ] {
+            let mut process = AotProcess::new();
+            process.upsert_file(
+                "sample.stasis",
+                format!(
+                    "function tick(): void {{ return; }}\nfunction render(): void {{ return; }}\n{invalid}\n"
+                ),
+            );
+            process.compile().expect("compile invalid ABI fixture");
+            let bundle_dir = std::env::temp_dir().join(format!(
+                "stasis_aot_invalid_lifecycle_{}",
+                process.artifacts.len()
+            ));
+            let error = process
+                .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+                .expect_err("invalid normalized lifecycle ABI should fail");
+            assert!(
+                error.contains("must have signature"),
+                "unexpected error: {error}"
+            );
+            let _ = fs::remove_dir_all(&bundle_dir);
+        }
     }
 
     #[test]

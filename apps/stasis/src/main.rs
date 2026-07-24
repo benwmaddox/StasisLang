@@ -2003,7 +2003,6 @@ fn write_mobile_aot_bindings_source(
     }
     for (name, wrapper) in [
         ("main", "stasis_mobile_main_entry"),
-        ("tick", "stasis_mobile_tick_entry"),
         ("render", "stasis_mobile_render_entry"),
     ] {
         let (symbol, return_type) = mobile_aot_function_for(manifest, name)?;
@@ -2021,6 +2020,37 @@ fn write_mobile_aot_bindings_source(
             ));
         }
     }
+    let (tick_symbol, tick_return_type) = mobile_aot_function_for(manifest, "tick")?;
+    let tick_call = match tick_return_type {
+        0 => format!("    {tick_symbol}();\n"),
+        1 => format!("    status = {tick_symbol}();\n"),
+        other => {
+            return Err(format!(
+                "mobile AOT entry 'tick' must return void or i32, found type id {other}"
+            ));
+        }
+    };
+    let mut normalized_stages = Vec::new();
+    for name in ["commit_tick", "normalize_tick", "validate_tick"] {
+        if let Ok((symbol, return_type)) = mobile_aot_function_for(manifest, name) {
+            if return_type != 1 {
+                return Err(format!(
+                    "mobile AOT lifecycle '{name}' must return i32, found type id {return_type}"
+                ));
+            }
+            normalized_stages.push(symbol);
+        }
+    }
+    out.push_str("int32_t stasis_mobile_tick_entry(void) {\n");
+    out.push_str("    int32_t status = stasis_tick_checkpoint_begin(8388608ULL);\n");
+    out.push_str("    if (status != 0) return status;\n");
+    out.push_str(&tick_call);
+    for symbol in normalized_stages {
+        out.push_str(&format!("    if (status == 0) status = {symbol}();\n"));
+    }
+    out.push_str("    if (status == 0) status = stasis_tick_checkpoint_accept();\n");
+    out.push_str("    else (void)stasis_tick_checkpoint_restore();\n");
+    out.push_str("    return status;\n}\n");
     for literal in literals {
         let id = literal
             .get("id")
@@ -3122,7 +3152,7 @@ function frame_width(): i32 { return 360; }
         std::fs::create_dir_all(&asset_dir).expect("mkdir assets");
         std::fs::write(
             src_dir.join("main.stasis"),
-            "function main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+            "function main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction commit_tick(): i32 { return 0; }\nfunction normalize_tick(): i32 { return 0; }\nfunction validate_tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
         )
         .expect("write main");
         std::fs::write(
@@ -3145,6 +3175,34 @@ function frame_width(): i32 { return 360; }
         assert!(header.contains("#define STASIS_AOT_TICK stasis_mobile_tick_entry"));
         assert!(header.contains("#define STASIS_AOT_RENDER stasis_mobile_render_entry"));
         assert!(bindings.contains("stasis_mobile_main_entry(void) { return aot_fn_0(); }"));
+        let checkpoint = bindings
+            .find("stasis_tick_checkpoint_begin")
+            .expect("checkpoint begin");
+        let tick = bindings[checkpoint..]
+            .find("status = aot_fn_")
+            .expect("tick")
+            + checkpoint;
+        let commit = bindings[tick + 1..]
+            .find("status = aot_fn_")
+            .expect("commit")
+            + tick
+            + 1;
+        let normalize = bindings[commit + 1..]
+            .find("status = aot_fn_")
+            .expect("normalize")
+            + commit
+            + 1;
+        let validate = bindings[normalize + 1..]
+            .find("status = aot_fn_")
+            .expect("validate")
+            + normalize
+            + 1;
+        let accept = bindings
+            .find("stasis_tick_checkpoint_accept")
+            .expect("accept");
+        assert!(checkpoint < tick && tick < commit && commit < normalize);
+        assert!(normalize < validate && validate < accept);
+        assert!(bindings.contains("stasis_tick_checkpoint_restore"));
         assert!(!header.contains("STASIS_AOT_ON_CODE_SWAP"));
 
         std::fs::remove_dir_all(&project_dir).ok();

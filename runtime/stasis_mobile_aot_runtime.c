@@ -11,6 +11,7 @@
 #define STASIS_MOBILE_MAX_FUNCTIONS 1024
 #define STASIS_MOBILE_MAX_STRINGS 512
 #define STASIS_MOBILE_MAX_ARRAY_LENGTH 1048576
+#define STASIS_MOBILE_TICK_CHECKPOINT_BYTES (8u * 1024u * 1024u)
 
 int stasis_audio_init(int sample_rate, int channels, int target_latency_frames);
 void stasis_audio_shutdown(void);
@@ -79,6 +80,12 @@ static StasisCodePtr code_ptrs[STASIS_MOBILE_MAX_FUNCTIONS];
 static size_t code_ptr_count;
 static StasisStringLiteral strings[STASIS_MOBILE_MAX_STRINGS];
 static size_t string_count;
+static StasisScalarValue checkpoint_scalars[STASIS_MOBILE_MAX_SCALARS];
+static size_t checkpoint_array_offsets[STASIS_MOBILE_MAX_ARRAYS];
+static unsigned char checkpoint_array_bytes[STASIS_MOBILE_TICK_CHECKPOINT_BYTES];
+static size_t checkpoint_scalar_count;
+static size_t checkpoint_array_count;
+static int checkpoint_active;
 
 int stasis_mobile_json_escape(const char *input, char *output, size_t capacity) {
     static const char hex[] = "0123456789abcdef";
@@ -134,6 +141,63 @@ static size_t value_size(int kind) {
     if (kind == STASIS_VALUE_F32) return sizeof(float);
     if (kind == STASIS_VALUE_F64) return sizeof(double);
     if (kind == STASIS_VALUE_U8) return sizeof(uint8_t);
+    return 0;
+}
+
+int32_t stasis_tick_checkpoint_begin(uint64_t max_bytes) {
+    size_t index;
+    size_t total = 0;
+    size_t array_used = 0;
+    size_t limit = max_bytes < STASIS_MOBILE_TICK_CHECKPOINT_BYTES
+        ? (size_t)max_bytes
+        : STASIS_MOBILE_TICK_CHECKPOINT_BYTES;
+    if (checkpoint_active) return -1;
+    for (index = 0; index < scalar_count; index += 1) {
+        size_t bytes = value_size(scalars[index].kind);
+        const void *source = scalars[index].external
+            ? scalars[index].value.ptr
+            : (const void *)&scalars[index].value;
+        if (bytes == 0 || source == NULL || bytes > limit - total) return -2;
+        memset(&checkpoint_scalars[index], 0, sizeof(checkpoint_scalars[index]));
+        memcpy(&checkpoint_scalars[index], source, bytes);
+        total += bytes;
+    }
+    for (index = 0; index < array_count; index += 1) {
+        size_t bytes = arrays[index].length * value_size(arrays[index].kind);
+        if (arrays[index].data == NULL || bytes > limit - total) return -3;
+        checkpoint_array_offsets[index] = array_used;
+        memcpy(checkpoint_array_bytes + array_used, arrays[index].data, bytes);
+        array_used += bytes;
+        total += bytes;
+    }
+    checkpoint_scalar_count = scalar_count;
+    checkpoint_array_count = array_count;
+    checkpoint_active = 1;
+    return 0;
+}
+
+int32_t stasis_tick_checkpoint_accept(void) {
+    if (!checkpoint_active) return -1;
+    checkpoint_active = 0;
+    return 0;
+}
+
+int32_t stasis_tick_checkpoint_restore(void) {
+    size_t index;
+    if (!checkpoint_active) return -1;
+    if (scalar_count != checkpoint_scalar_count || array_count != checkpoint_array_count) return -2;
+    for (index = 0; index < scalar_count; index += 1) {
+        size_t bytes = value_size(scalars[index].kind);
+        void *destination = scalars[index].external
+            ? scalars[index].value.ptr
+            : (void *)&scalars[index].value;
+        memcpy(destination, &checkpoint_scalars[index], bytes);
+    }
+    for (index = 0; index < array_count; index += 1) {
+        size_t bytes = arrays[index].length * value_size(arrays[index].kind);
+        memcpy(arrays[index].data, checkpoint_array_bytes + checkpoint_array_offsets[index], bytes);
+    }
+    checkpoint_active = 0;
     return 0;
 }
 
@@ -217,6 +281,9 @@ void stasis_mobile_aot_reset(void) {
     array_count = 0;
     code_ptr_count = 0;
     string_count = 0;
+    checkpoint_scalar_count = 0;
+    checkpoint_array_count = 0;
+    checkpoint_active = 0;
 }
 
 void stasis_jit_register_global_i32_ptr(int32_t hash, int32_t *ptr) {

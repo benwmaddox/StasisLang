@@ -366,6 +366,36 @@ Rules:
 
 The engine defines `TICKS_PER_SECOND`.
 
+### 10.1 Normalized Tick Boundary
+
+The runtime treats each simulation tick as one deterministic transaction:
+
+`between-tick swap -> gameplay -> structural commit -> normalize -> validate -> hash/snapshot -> render`
+
+Structural commits process pools in declaration order. Within a pool, removals and destructions
+refer to original indexes, survivors compact stably, and additions and spawns append in request
+order. The commit produces index-repair metadata before invariants are checked. Bounded event
+queues publish one request-ordered batch at the same boundary.
+
+All pre-render stages are rejection-capable. A failure restores the prior accepted boundary state,
+does not publish a state hash or snapshot for the rejected tick, and does not render rejected
+state. Capacity overflow, duplicate or invalid removal indexes, unconsumed event batches,
+normalization failures, and invariant failures are deterministic rejection diagnostics.
+
+Code swaps are main-thread transactions allowed only before gameplay begins or after the previous
+tick has fully returned to the between-tick phase. A swap cannot split gameplay from its structural
+commit or make tick and render observe different accepted code/state generations.
+
+The runner owns the phase coordinator and atomic commit machinery. Stasis source owns gameplay and
+the declarations/requests that the typed fixed-capacity collection slice will lower into this
+contract. Hashing/replay may extend the snapshot artifact, but may not reorder this boundary.
+
+Optional `commit_tick(): i32`, `normalize_tick(): i32`, and `validate_tick(): i32` lifecycle
+entries expose the three post-gameplay stages without requiring games that have no work in a stage
+to declare it. Non-zero status rejects the tick. The desktop JIT runner and packaged mobile AOT
+bridge take the same bounded runtime checkpoint, restore it on rejection, and render only after all
+present stages return zero. These entries are host-required reachability roots in JIT and AOT.
+
 ## 11. VS Code Workflow
 
 Phase 1 - File Watcher

@@ -821,7 +821,17 @@ fn format_function_signature(
 }
 
 fn is_lifecycle_function(name: &str) -> bool {
-    matches!(name, "main" | "init" | "tick" | "render" | "on_code_swap")
+    matches!(
+        name,
+        "main"
+            | "init"
+            | "tick"
+            | "commit_tick"
+            | "normalize_tick"
+            | "validate_tick"
+            | "render"
+            | "on_code_swap"
+    )
 }
 
 fn is_main_path(path: &str) -> bool {
@@ -2249,7 +2259,16 @@ fn prune_unused_workshop_imports(
             if exports.is_empty()
                 || exports.iter().any(|name| identifiers.contains(name))
                 || exports.iter().any(|name| {
-                    matches!(name.as_str(), "main" | "tick" | "render" | "on_code_swap")
+                    matches!(
+                        name.as_str(),
+                        "main"
+                            | "tick"
+                            | "commit_tick"
+                            | "normalize_tick"
+                            | "validate_tick"
+                            | "render"
+                            | "on_code_swap"
+                    )
                 })
             {
                 kept.push(import);

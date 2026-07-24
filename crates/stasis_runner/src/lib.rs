@@ -3,4 +3,5 @@
 
 pub mod live;
 pub mod swap;
+pub mod tick;
 pub use stasis_assets as assets;
