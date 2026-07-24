@@ -55,6 +55,12 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert!(agent_guide.contains("stasis --json symbol list"));
     assert!(agent_guide.contains("stasis --json symbol references SYMBOL"));
     assert!(agent_guide.contains("stasis validate PATH OP VALUE --frames N"));
+    assert!(agent_guide.contains("## Theory-building practice"));
+    assert!(agent_guide.contains("Mapping:"));
+    assert!(agent_guide.contains("Rationale:"));
+    assert!(agent_guide.contains("Extension:"));
+    let claude_guide = fs::read_to_string(project.join("CLAUDE.md")).expect("read Claude guide");
+    assert_eq!(claude_guide, "# CLAUDE.md\n\n@AGENTS.md\n");
 
     let version = stasis(&["--json", "--version"], &parent);
     assert_eq!(version.status.code(), Some(0));
