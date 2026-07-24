@@ -678,9 +678,11 @@ Rules:
 - Compute per-function semantic hashes.
 - Compile changed functions.
 2. Commit between ticks:
-- Run `on_code_swap()` if present.
-- Atomically update function pointer table.
-- Retire previous code generation.
+- Snapshot active bounded state when migration or `on_code_swap()` may mutate it.
+- Activate candidate storage and migrate compatible struct/global fields.
+- Run the candidate `on_code_swap()` if present.
+- Atomically publish candidate storage bindings and function pointers.
+- Retire the previous code generation.
 
 Swap is rejected if:
 - Global layout changes and state-map migration is missing or incompatible.
@@ -705,6 +707,20 @@ Current migration policy (pre-1.0):
 - Shrink copies the retained prefix, warns about the discarded range, and clamps logical lengths; UTF-8 shrink retains the largest valid code-point prefix and recomputes byte and character counts.
 - Incompatible or missing state metadata fails deterministically with an actionable diagnostic.
 - Migration, `on_code_swap`, or pointer commit failure restores the old code and complete bounded runtime snapshot; partial migration is forbidden.
+
+The migration transaction is a code-swap operation, not a gameplay transaction. Ordinary calls to
+`tick()` do not commit pools, normalize gameplay state, or invoke migration lifecycle functions.
+When a compiled candidate changes a struct or global layout, the host waits until the current
+`tick()` and `render()` have both returned. At that between-ticks safe point it snapshots the active
+state, activates candidate storage, copies compatible fields, initializes new fields, runs
+`on_code_swap()` if present, and atomically publishes the candidate code and migrated state. The
+next `tick()` is the first gameplay call allowed to observe the new generation.
+
+There is one visibility rule: a tick and its following render use one code/layout generation. A
+failed migration or swap hook restores the complete old generation before gameplay resumes; no
+candidate field, storage binding, function pointer, or partial value may be visible to the next
+tick. The executable fixtures under `samples/between_tick_layout_migration/` cover accepted and
+rejected struct growth across this boundary.
 
 ### 14.4 Development File-Change Boundary Contracts
 

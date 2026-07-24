@@ -1873,43 +1873,20 @@ fn run_play_in_process_inner(
                         Ok(next_package) => {
                             let package_ms = t_pkg.elapsed().as_millis();
 
-                            // Candidate pointers: do not commit them until after the swap hook succeeds.
-                            let candidate_tick_code_ptr = next_package.tick_code_ptr;
-                            let candidate_render_code_ptr = next_package.render_code_ptr;
-                            let candidate_on_code_swap_code_ptr =
-                                next_package.on_code_swap_code_ptr;
+                            let candidate_entrypoints = PlayEntrypoints {
+                                tick_code_ptr: next_package.tick_code_ptr,
+                                render_code_ptr: next_package.render_code_ptr,
+                            };
 
-                            let mut migration_preview = match plan_state_migration(
-                                &jit.state_layout(),
-                                &candidate.state_layout(),
+                            let t_commit = Instant::now();
+                            let commit_result = commit_play_candidate_between_ticks(
+                                &mut jit,
+                                candidate,
                                 next_package.symbol_code_ptrs.keys().cloned().collect(),
-                                false,
-                                None,
-                            ) {
-                                Ok(preview) => preview,
-                                Err(error) => {
-                                    println!("[swap] aborted before activation: {error}");
-                                    continue;
-                                }
-                            };
-                            finalize_runtime_preview(&candidate, &mut migration_preview);
-                            let t_hook = Instant::now();
-                            let hook_failed = match activate_candidate_transactionally(
-                                Some(&jit),
-                                &candidate,
-                                &migration_preview,
-                                candidate_on_code_swap_code_ptr.is_some(),
-                                || {
-                                    candidate_on_code_swap_code_ptr.map_or(Ok(()), |code_ptr| {
-                                        stasis_dynload::invoke_code_swap_hook(code_ptr as usize)
-                                    })
-                                },
-                                Result::is_ok,
-                            ) {
-                                Ok(Ok(())) => None,
-                                Ok(Err(error)) | Err(error) => Some(error),
-                            };
-                            let hook_ms = t_hook.elapsed().as_millis();
+                                next_package.on_code_swap_code_ptr,
+                                candidate_entrypoints,
+                            );
+                            let commit_ms = t_commit.elapsed().as_millis();
 
                             let t_deps = Instant::now();
                             if let Ok(next_graph) = collect_watch_dependency_paths(&root_path) {
@@ -1919,21 +1896,20 @@ fn run_play_in_process_inner(
 
                             let total_ms = t_total.elapsed().as_millis();
 
-                            if let Some(error) = hook_failed {
-                                println!(
-                                    "[swap] aborted (on_code_swap failed) total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms hook={hook_ms}ms deps={deps_ms}ms): {error}"
-                                );
-                            } else {
-                                // Commit the swap (all-or-nothing).
-                                jit.accept_staged_candidate(candidate);
-                                tick_code_ptr = candidate_tick_code_ptr;
-                                render_code_ptr = candidate_render_code_ptr;
-                                if let Some(live) = live.as_mut() {
-                                    live.refresh_after_external_edit(&jit);
+                            match commit_result {
+                                Err(error) => println!(
+                                    "[swap] aborted total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms commit={commit_ms}ms deps={deps_ms}ms): {error}"
+                                ),
+                                Ok(entrypoints) => {
+                                    tick_code_ptr = entrypoints.tick_code_ptr;
+                                    render_code_ptr = entrypoints.render_code_ptr;
+                                    if let Some(live) = live.as_mut() {
+                                        live.refresh_after_external_edit(&jit);
+                                    }
+                                    println!(
+                                        "[swap] swapped ok total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms commit={commit_ms}ms deps={deps_ms}ms)"
+                                    );
                                 }
-                                println!(
-                                    "[swap] swapped ok total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms hook={hook_ms}ms deps={deps_ms}ms)"
-                                );
                             }
                         }
                         Err(error) => {
@@ -2011,6 +1987,43 @@ fn run_play_in_process_inner(
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PlayEntrypoints {
+    tick_code_ptr: u64,
+    render_code_ptr: u64,
+}
+
+fn commit_play_candidate_between_ticks(
+    active: &mut JitProcess,
+    candidate: JitProcess,
+    changed_functions: Vec<String>,
+    on_code_swap_code_ptr: Option<u64>,
+    entrypoints: PlayEntrypoints,
+) -> Result<PlayEntrypoints, String> {
+    let mut preview = plan_state_migration(
+        &active.state_layout(),
+        &candidate.state_layout(),
+        changed_functions,
+        false,
+        None,
+    )?;
+    finalize_runtime_preview(&candidate, &mut preview);
+    activate_candidate_transactionally(
+        Some(&*active),
+        &candidate,
+        &preview,
+        on_code_swap_code_ptr.is_some(),
+        || {
+            on_code_swap_code_ptr.map_or(Ok(()), |code_ptr| {
+                stasis_dynload::invoke_code_swap_hook(code_ptr as usize)
+            })
+        },
+        Result::is_ok,
+    )??;
+    active.accept_staged_candidate(candidate);
+    Ok(entrypoints)
 }
 
 fn format_live_main_error(error: String) -> String {
@@ -3320,6 +3333,18 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_render_contract.h"
     ));
+    const BETWEEN_TICK_LAYOUT_V1: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../samples/between_tick_layout_migration/v1.stasis"
+    ));
+    const BETWEEN_TICK_LAYOUT_V2: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../samples/between_tick_layout_migration/v2.stasis"
+    ));
+    const BETWEEN_TICK_LAYOUT_REJECT: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../samples/between_tick_layout_migration/reject.stasis"
+    ));
 
     fn jit_global_table_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -4596,6 +4621,157 @@ mod tests {
 
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_i32_array_global_table();
+    }
+
+    #[test]
+    fn layout_migration_commits_between_ticks_before_new_code_runs() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_jit_i32_global_table();
+
+        let source_path = "between_tick_layout_migration.stasis";
+        let mut active = JitProcess::new();
+        active.upsert_file(source_path, BETWEEN_TICK_LAYOUT_V1);
+        active.compile().expect("compile v1");
+        let active_package = active
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect("build v1 package");
+        let active_entrypoints = PlayEntrypoints {
+            tick_code_ptr: active_package.tick_code_ptr,
+            render_code_ptr: active_package.render_code_ptr,
+        };
+        assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(0));
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(active_entrypoints.tick_code_ptr as usize),
+            Ok(11)
+        );
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(active_entrypoints.render_code_ptr as usize),
+            Ok(0)
+        );
+        assert_eq!(
+            active.read_global_scalar("state.rendered_generation"),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(1))
+        );
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(source_path, BETWEEN_TICK_LAYOUT_V2);
+        candidate.compile_staged().expect("compile staged v2");
+        let package = candidate
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect("build staged v2 package");
+        let published = commit_play_candidate_between_ticks(
+            &mut active,
+            candidate,
+            package.symbol_code_ptrs.keys().cloned().collect(),
+            package.on_code_swap_code_ptr,
+            PlayEntrypoints {
+                tick_code_ptr: package.tick_code_ptr,
+                render_code_ptr: package.render_code_ptr,
+            },
+        )
+        .expect("commit and publish v2 at the production between-tick boundary");
+
+        assert_eq!(
+            active.read_global_scalar("state.score"),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(11))
+        );
+        assert_eq!(
+            active.read_global_scalar("state.combo"),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(5))
+        );
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(published.tick_code_ptr as usize),
+            Ok(16),
+            "the first v2 tick must observe migrated state and v2 code together"
+        );
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(published.render_code_ptr as usize),
+            Ok(0)
+        );
+        assert_eq!(
+            active.read_global_scalar("state.rendered_generation"),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(2)),
+            "render must switch to the same accepted generation as tick"
+        );
+
+        stasis_dynload::clear_jit_i32_global_table();
+    }
+
+    #[test]
+    fn rejected_between_tick_layout_migration_keeps_old_code_and_state() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_jit_i32_global_table();
+
+        let source_path = "between_tick_layout_migration.stasis";
+        let mut active = JitProcess::new();
+        active.upsert_file(source_path, BETWEEN_TICK_LAYOUT_V1);
+        active.compile().expect("compile v1");
+        let active_package = active
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect("build v1 package");
+        let active_entrypoints = PlayEntrypoints {
+            tick_code_ptr: active_package.tick_code_ptr,
+            render_code_ptr: active_package.render_code_ptr,
+        };
+        assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(0));
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(active_entrypoints.tick_code_ptr as usize),
+            Ok(11)
+        );
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(active_entrypoints.render_code_ptr as usize),
+            Ok(0)
+        );
+        assert_eq!(
+            active.read_global_scalar("state.rendered_generation"),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(1))
+        );
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(source_path, BETWEEN_TICK_LAYOUT_REJECT);
+        candidate
+            .compile_staged()
+            .expect("compile rejecting candidate");
+        let package = candidate
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect("build rejecting package");
+        let error = commit_play_candidate_between_ticks(
+            &mut active,
+            candidate,
+            package.symbol_code_ptrs.keys().cloned().collect(),
+            package.on_code_swap_code_ptr,
+            PlayEntrypoints {
+                tick_code_ptr: package.tick_code_ptr,
+                render_code_ptr: package.render_code_ptr,
+            },
+        )
+        .expect_err("swap hook must reject at the production boundary");
+        assert!(error.contains("rejection"));
+
+        assert_eq!(
+            active.read_global_scalar("state.score"),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(11))
+        );
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(active_entrypoints.tick_code_ptr as usize),
+            Ok(12),
+            "the next tick must still execute v1 code against restored v1 state"
+        );
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(active_entrypoints.render_code_ptr as usize),
+            Ok(0)
+        );
+        assert_eq!(
+            active.read_global_scalar("state.rendered_generation"),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(1)),
+            "rejection must restore the v1 render generation with v1 state"
+        );
+
+        stasis_dynload::clear_jit_i32_global_table();
     }
 
     #[test]

@@ -1,0 +1,28 @@
+struct GameState {
+    score: i32;
+    rendered_generation: i32;
+    combo: i32;
+}
+
+global state: GameState;
+
+function main(): i32 {
+    state.score = 10;
+    state.combo = 5;
+    return 0;
+}
+
+function tick(): i32 {
+    state.score += state.combo;
+    return state.score;
+}
+
+function render(): i32 {
+    state.rendered_generation = 2;
+    return 0;
+}
+
+function on_code_swap(): void {
+    state.combo = 5;
+    return;
+}

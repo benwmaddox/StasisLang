@@ -250,18 +250,26 @@ Occurs strictly between ticks.
 
 Order:
 
-1. Run `on_code_swap()`
-2. Atomically swap function pointers
-3. Retire old code generation
-4. Signal runtime (for visual feedback)
+1. Finish the active generation's `tick()` and `render()`.
+2. Snapshot active bounded state when layout migration or the swap hook can mutate it.
+3. Activate candidate storage and migrate compatible struct/global fields.
+4. Run the candidate `on_code_swap()` when present.
+5. Atomically publish candidate storage bindings and function pointers.
+6. Retire the old code generation and signal runtime feedback.
 
 If any step fails, swap is aborted.
+
+This commit exists only for a pending code generation. It is not part of ordinary gameplay tick
+semantics: the host does not infer gameplay changes, and Stasis programs expose no
+`commit_tick`, `normalize_tick`, or `validate_tick` lifecycle functions. The first candidate
+`tick()` runs only after migration and publication succeed; rejection restores the old code and
+state before another tick begins.
 
 ## 7. Swap Hook (User-Defined)
 
 ### 7.1 Purpose
 
-Allow explicit adjustment of runtime data after code changes, assuming layout is unchanged.
+Allow explicit adjustment of migrated runtime data after code changes.
 
 Solves:
 
@@ -282,15 +290,15 @@ Properties:
 - Optional
 - Runs once per successful swap attempt
 - Runs between ticks
-- Executes before new code
+- Executes as candidate code before publication and before the next `tick()`
 - May mutate global data
 - Must not invoke gameplay entrypoints
 
 ### 7.3 Enforcement Rules
 
 - Hook error -> swap aborted
-- Layout change -> swap rejected
-- Hook runs using old code pointers
+- Incompatible layout change -> swap rejected
+- Hook runs against candidate code and migrated candidate storage
 
 ## 8. Failure Handling
 
