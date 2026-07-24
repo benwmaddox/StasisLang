@@ -59,7 +59,8 @@ project root and nested directories. `--workspace PATH` selects a project explic
 ```
 
 Manifest paths must be project-relative and cannot contain `..`. Generated projects include a
-runnable `main()` and a real `.test.stasis` test.
+runnable `main()`, a real `.test.stasis` test, an `AGENTS.md` theory-building and semantic-edit
+guide, and a minimal `CLAUDE.md` that points to `AGENTS.md`.
 
 ## Commands and outputs
 

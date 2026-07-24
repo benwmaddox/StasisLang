@@ -54,6 +54,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stb_truetype.h",
 ];
 const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md");
+const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const COMMANDS: &[&str] = &[
     "new",
     "init",
@@ -723,6 +724,7 @@ fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> 
     let reserved_paths = [
         manifest_path.clone(),
         root.join("AGENTS.md"),
+        root.join("CLAUDE.md"),
         root.join("src/main.stasis"),
         root.join("tests/main.test.stasis"),
         root.join("stdlib"),
@@ -740,6 +742,7 @@ fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> 
     write_manifest(&manifest_path, &manifest)?;
     copy_dir_if_exists(&bundled_stdlib, &root.join("stdlib"))?;
     write_new_file(&root.join("AGENTS.md"), PROJECT_AGENT_GUIDE)?;
+    write_new_file(&root.join("CLAUDE.md"), PROJECT_CLAUDE_GUIDE)?;
     write_new_file(
         &root.join("src/main.stasis"),
         "import \"../stdlib/stdlib.stasis\";\n\nfunction main(): i32 {\n    return 0;\n}\n",
@@ -3997,6 +4000,22 @@ mod tests {
         assert!(!root.join(MANIFEST_NAME).exists());
         assert_eq!(
             fs::read_to_string(root.join("AGENTS.md")).expect("read user guide"),
+            "user guidance\n"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn init_preserves_existing_claude_pointer_without_partial_writes() {
+        let root = temp_dir("claude_guide_preflight");
+        fs::create_dir_all(&root).expect("create project directory");
+        fs::write(root.join("CLAUDE.md"), "user guidance\n").expect("write user guide");
+
+        let error = create_project(root.clone(), "demo".to_string()).expect_err("reject conflict");
+        assert!(error.contains("CLAUDE.md"));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        assert_eq!(
+            fs::read_to_string(root.join("CLAUDE.md")).expect("read user guide"),
             "user guidance\n"
         );
         remove_temp(&root);
