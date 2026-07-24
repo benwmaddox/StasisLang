@@ -71,6 +71,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/workshop_sample/src/assets.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/AGENTS.md",
+    "mobile/android/app/src/main/assets/workshop_sample/CLAUDE.md",
     "mobile/android/app/src/main/assets/workshop_sample/assets/ball.svg",
     "mobile/android/app/src/main/assets/workshop_sample/assets/paddle.svg",
     "mobile/android/app/src/main/assets/workshop_sample/assets/center_line.svg",
@@ -95,6 +96,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/assets/exploration_sample/src/systems/schedule.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/tests/exploration_gameplay.test.stasis",
     "mobile/android/app/src/main/assets/exploration_sample/AGENTS.md",
+    "mobile/android/app/src/main/assets/exploration_sample/CLAUDE.md",
     "mobile/android/app/src/main/assets/exploration_sample/assets/manifest.json",
     "mobile/android/app/src/main/assets/exploration_sample/assets/player.svg",
     "mobile/android/app/src/main/assets/exploration_sample/assets/sun_keepsake.svg",
@@ -904,6 +906,7 @@ def main() -> int:
     assert '"exploration_sample/"' in template_catalog
     assert '"Exploration Garden"' in template_catalog
     assert template_catalog.count('"AGENTS.md"') == 2
+    assert template_catalog.count('"CLAUDE.md"') == 2
     assert "for (String file : template.auxiliaryFiles)" in activity
     pong_agents = read("mobile/android/app/src/main/assets/workshop_sample/AGENTS.md")
     exploration_agents = read("mobile/android/app/src/main/assets/exploration_sample/AGENTS.md")
@@ -913,6 +916,10 @@ def main() -> int:
     assert "Rationale:" in exploration_agents
     assert "Extension:" in exploration_agents
     assert "Theory gained:" in exploration_agents
+    pong_claude = read("mobile/android/app/src/main/assets/workshop_sample/CLAUDE.md")
+    exploration_claude = read("mobile/android/app/src/main/assets/exploration_sample/CLAUDE.md")
+    assert pong_claude == exploration_claude
+    assert exploration_claude.strip() == "# CLAUDE.md\n\n@AGENTS.md"
     exploration_main = read("mobile/android/app/src/main/assets/exploration_sample/src/main.stasis")
     exploration_config = read("mobile/android/app/src/main/assets/exploration_sample/src/config.stasis")
     exploration_components = read("mobile/android/app/src/main/assets/exploration_sample/src/components.stasis")
