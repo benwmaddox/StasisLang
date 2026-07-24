@@ -1,0 +1,29 @@
+extern function reject_code_swap(): void;
+
+struct GameState {
+    score: i32;
+    rendered_generation: i32;
+    combo: i32;
+}
+
+global state: GameState;
+
+function main(): i32 {
+    return 0;
+}
+
+function tick(): i32 {
+    state.score += 100;
+    return state.score;
+}
+
+function render(): i32 {
+    state.rendered_generation = 9;
+    return 0;
+}
+
+function on_code_swap(): void {
+    state.score = 99;
+    reject_code_swap();
+    return;
+}
