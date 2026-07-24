@@ -1,15 +1,7 @@
 use crate::compiler::{FunctionId, FunctionMeta};
 use std::collections::BTreeSet;
 
-const DEFAULT_ROOTS: [&str; 7] = [
-    "tick",
-    "commit_tick",
-    "normalize_tick",
-    "validate_tick",
-    "main",
-    "render",
-    "on_code_swap",
-];
+const DEFAULT_ROOTS: [&str; 4] = ["tick", "main", "render", "on_code_swap"];
 
 pub(crate) fn compute_reachable_function_ids(
     functions: &[FunctionMeta],

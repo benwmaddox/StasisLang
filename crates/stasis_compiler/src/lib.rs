@@ -2130,9 +2130,6 @@ fn all_reachability_root_hashes(required_roots: &[i32]) -> Vec<i32> {
     let mut roots = vec![
         hash_identifier("main"),
         hash_identifier("tick"),
-        hash_identifier("commit_tick"),
-        hash_identifier("normalize_tick"),
-        hash_identifier("validate_tick"),
         hash_identifier("on_code_swap"),
     ];
     for root in required_roots {

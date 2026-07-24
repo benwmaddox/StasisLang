@@ -40,7 +40,6 @@ use stasis_runner::swap::contracts::{
     TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
-use stasis_runner::tick::{TickCoordinator, TickTransaction};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
@@ -51,77 +50,6 @@ use std::time::Instant;
 use watch::WatchService;
 
 const SWAP_FLASH_TICKS_MAX: u32 = 180;
-
-struct JitNormalizedTick {
-    tick_code_ptr: u64,
-    commit_tick_code_ptr: Option<u64>,
-    normalize_tick_code_ptr: Option<u64>,
-    validate_tick_code_ptr: Option<u64>,
-    render_code_ptr: u64,
-    accepted_snapshot: Option<stasis_dynload::JitRuntimeStateSnapshot>,
-}
-
-impl JitNormalizedTick {
-    fn invoke_stage(name: &str, code_ptr: Option<u64>) -> Result<(), String> {
-        let Some(code_ptr) = code_ptr else {
-            return Ok(());
-        };
-        let result = stasis_dynload::invoke_noarg_i32(code_ptr as usize)?;
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(format!("{name}() returned rejection status {result}"))
-        }
-    }
-}
-
-impl TickTransaction for JitNormalizedTick {
-    type Checkpoint = stasis_dynload::JitRuntimeStateSnapshot;
-    type Snapshot = stasis_dynload::JitRuntimeStateSnapshot;
-
-    fn checkpoint(&mut self) -> Result<Self::Checkpoint, String> {
-        stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES)
-    }
-
-    fn restore(&mut self, checkpoint: Self::Checkpoint) {
-        stasis_dynload::restore_jit_runtime_state(&checkpoint);
-        self.accepted_snapshot = None;
-    }
-
-    fn gameplay(&mut self) -> Result<(), String> {
-        Self::invoke_stage("tick", Some(self.tick_code_ptr))
-    }
-
-    fn commit_structural(&mut self) -> Result<(), String> {
-        Self::invoke_stage("commit_tick", self.commit_tick_code_ptr)
-    }
-
-    fn normalize(&mut self) -> Result<(), String> {
-        Self::invoke_stage("normalize_tick", self.normalize_tick_code_ptr)
-    }
-
-    fn validate(&mut self) -> Result<(), String> {
-        Self::invoke_stage("validate_tick", self.validate_tick_code_ptr)
-    }
-
-    fn state_hash(&mut self) -> Result<u64, String> {
-        let snapshot =
-            stasis_dynload::snapshot_jit_runtime_state_bounded(MAX_STATE_SNAPSHOT_BYTES)?;
-        let hash = snapshot.deterministic_hash();
-        self.accepted_snapshot = Some(snapshot);
-        Ok(hash)
-    }
-
-    fn capture(&mut self) -> Result<Self::Snapshot, String> {
-        self.accepted_snapshot
-            .take()
-            .ok_or_else(|| "accepted tick snapshot was not captured".to_string())
-    }
-
-    fn render(&mut self) -> Result<(), String> {
-        Self::invoke_stage("render", Some(self.render_code_ptr))
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 struct PendingAotCompileMetadata {
@@ -1855,18 +1783,13 @@ fn run_play_in_process_inner(
     }
 
     let mut tick_code_ptr = package.tick_code_ptr;
-    let mut commit_tick_code_ptr = package.commit_tick_code_ptr;
-    let mut normalize_tick_code_ptr = package.normalize_tick_code_ptr;
-    let mut validate_tick_code_ptr = package.validate_tick_code_ptr;
     let mut render_code_ptr = package.render_code_ptr;
-    let mut tick_coordinator = TickCoordinator::default();
     let mut live = live
         .map(|(server, config)| LiveWorkspace::new(server, config, &jit))
         .transpose()?;
 
     let mut ticks_executed: u64 = 0;
     loop {
-        tick_coordinator.require_between_ticks()?;
         if let Some(live) = live.as_mut() {
             live.process_boundary(
                 ticks_executed,
@@ -1874,16 +1797,6 @@ fn run_play_in_process_inner(
                 &mut tick_code_ptr,
                 &mut render_code_ptr,
             );
-            let refreshed = jit
-                .build_engine_package(&EngineEntrypoints::runtime_default())
-                .map_err(|error| {
-                    format!("failed to refresh normalized tick entrypoints: {error}")
-                })?;
-            tick_code_ptr = refreshed.tick_code_ptr;
-            commit_tick_code_ptr = refreshed.commit_tick_code_ptr;
-            normalize_tick_code_ptr = refreshed.normalize_tick_code_ptr;
-            validate_tick_code_ptr = refreshed.validate_tick_code_ptr;
-            render_code_ptr = refreshed.render_code_ptr;
             if live.should_quit() {
                 break;
             }
@@ -1962,11 +1875,6 @@ fn run_play_in_process_inner(
 
                             // Candidate pointers: do not commit them until after the swap hook succeeds.
                             let candidate_tick_code_ptr = next_package.tick_code_ptr;
-                            let candidate_commit_tick_code_ptr = next_package.commit_tick_code_ptr;
-                            let candidate_normalize_tick_code_ptr =
-                                next_package.normalize_tick_code_ptr;
-                            let candidate_validate_tick_code_ptr =
-                                next_package.validate_tick_code_ptr;
                             let candidate_render_code_ptr = next_package.render_code_ptr;
                             let candidate_on_code_swap_code_ptr =
                                 next_package.on_code_swap_code_ptr;
@@ -2019,9 +1927,6 @@ fn run_play_in_process_inner(
                                 // Commit the swap (all-or-nothing).
                                 jit.accept_staged_candidate(candidate);
                                 tick_code_ptr = candidate_tick_code_ptr;
-                                commit_tick_code_ptr = candidate_commit_tick_code_ptr;
-                                normalize_tick_code_ptr = candidate_normalize_tick_code_ptr;
-                                validate_tick_code_ptr = candidate_validate_tick_code_ptr;
                                 render_code_ptr = candidate_render_code_ptr;
                                 if let Some(live) = live.as_mut() {
                                     live.refresh_after_external_edit(&jit);
@@ -2071,23 +1976,14 @@ fn run_play_in_process_inner(
 
         let run_tick = live.as_ref().is_none_or(LiveWorkspace::should_run_tick);
         if run_tick {
-            let mut transaction = JitNormalizedTick {
-                tick_code_ptr,
-                commit_tick_code_ptr,
-                normalize_tick_code_ptr,
-                validate_tick_code_ptr,
-                render_code_ptr,
-                accepted_snapshot: None,
-            };
-            if let Err(error) = tick_coordinator.run_tick(&mut transaction) {
-                println!("[tick] {error}");
+            let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
+            if tick_rc != 0 {
                 break;
             }
-        } else {
-            let render_rc = stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?;
-            if render_rc != 0 {
-                break;
-            }
+        }
+        let render_rc = stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?;
+        if render_rc != 0 {
+            break;
         }
 
         gfx.gfx_submit_u8(&gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
@@ -3437,80 +3333,6 @@ mod tests {
         let path_hash = REJECTING_HOOK_PATH_HASH.load(std::sync::atomic::Ordering::Relaxed);
         stasis_dynload::stasis_jit_global_i32_store(path_hash, 99);
         stasis_dynload::stasis_jit_reject_code_swap();
-    }
-
-    #[test]
-    fn compiled_stasis_tick_transaction_commits_and_rejects_atomically() {
-        let _lock = jit_global_table_lock()
-            .lock()
-            .expect("JIT global test lock");
-        let source = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/normalized_tick_transaction/main.stasis"
-        ));
-        let mut jit = JitProcess::new();
-        jit.upsert_file("normalized_tick_transaction.stasis", source);
-        jit.compile().expect("compile normalized tick sample");
-        let package = jit
-            .build_engine_package(&EngineEntrypoints::runtime_default())
-            .expect("build normalized tick engine package");
-        assert!(package.commit_tick_code_ptr.is_some());
-        assert!(package.normalize_tick_code_ptr.is_some());
-        assert!(package.validate_tick_code_ptr.is_some());
-        assert_eq!(jit.execute_i32_noarg_by_name("main").unwrap(), 0);
-
-        let mut coordinator = TickCoordinator::default();
-        let accepted = coordinator
-            .run_tick(&mut JitNormalizedTick {
-                tick_code_ptr: package.tick_code_ptr,
-                commit_tick_code_ptr: package.commit_tick_code_ptr,
-                normalize_tick_code_ptr: package.normalize_tick_code_ptr,
-                validate_tick_code_ptr: package.validate_tick_code_ptr,
-                render_code_ptr: package.render_code_ptr,
-                accepted_snapshot: None,
-            })
-            .expect("accept normalized tick");
-
-        assert_eq!(accepted.tick, 1);
-        assert_eq!(accepted.state_hash, accepted.snapshot.deterministic_hash());
-        assert_eq!(jit.read_i32_global_path("enemy_count"), 4);
-        assert_eq!(jit.read_i32_global_path("target_index"), 1);
-        assert_eq!(jit.read_i32_global_path("stage_trace"), 1234);
-        assert_eq!(jit.read_i32_global_path("accepted_tick"), 1);
-        assert_eq!(
-            jit.read_global_collection_scalar("enemies", "", 1).unwrap(),
-            stasis_compiler::backend::jit::JitScalarValue::I32(30)
-        );
-        assert_eq!(
-            jit.read_global_collection_scalar("effects", "", 1).unwrap(),
-            stasis_compiler::backend::jit::JitScalarValue::I32(9)
-        );
-
-        assert_eq!(jit.execute_i32_noarg_by_name("main").unwrap(), 0);
-        jit.write_i32_global_path("force_reject", 1);
-        let baseline = stasis_dynload::snapshot_jit_runtime_state();
-        let error = coordinator
-            .run_tick(&mut JitNormalizedTick {
-                tick_code_ptr: package.tick_code_ptr,
-                commit_tick_code_ptr: package.commit_tick_code_ptr,
-                normalize_tick_code_ptr: package.normalize_tick_code_ptr,
-                validate_tick_code_ptr: package.validate_tick_code_ptr,
-                render_code_ptr: package.render_code_ptr,
-                accepted_snapshot: None,
-            })
-            .expect_err("validate_tick must reject");
-
-        assert_eq!(error.phase, stasis_runner::tick::TickPhase::Validate);
-        assert!(error
-            .message
-            .contains("validate_tick() returned rejection status 41"));
-        assert_eq!(coordinator.accepted_ticks(), 1);
-        assert_eq!(
-            stasis_dynload::snapshot_jit_runtime_state().deterministic_hash(),
-            baseline.deterministic_hash()
-        );
-        assert_eq!(jit.read_i32_global_path("stage_trace"), 0);
-        assert_eq!(jit.read_i32_global_path("accepted_tick"), 0);
     }
 
     fn process_env_lock() -> &'static std::sync::Mutex<()> {

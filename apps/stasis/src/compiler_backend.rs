@@ -3517,10 +3517,7 @@ void stasis_jit_register_global_f64_array(int32_t collection_hash, int32_t field
 void stasis_jit_register_global_u8_array(int32_t collection_hash, int32_t field_hash, uint8_t* ptr, int32_t len);\n\
 void stasis_jit_register_code_ptr(int32_t fn_id_raw, int64_t code_ptr);\n\
 void stasis_jit_clear_string_literal_table(void);\n\
-void stasis_jit_upsert_string_literal(int32_t id, const char* value);\n\
-int32_t stasis_tick_checkpoint_begin(unsigned long long max_bytes);\n\
-int32_t stasis_tick_checkpoint_accept(void);\n\
-int32_t stasis_tick_checkpoint_restore(void);\n",
+void stasis_jit_upsert_string_literal(int32_t id, const char* value);\n",
     );
 
     for symbol in function_symbols {
@@ -3611,43 +3608,8 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
             ));
         }
     }
-    let has_commit_tick = function_aliases
-        .iter()
-        .any(|alias| alias.alias == "commit_tick");
-    let has_normalize_tick = function_aliases
-        .iter()
-        .any(|alias| alias.alias == "normalize_tick");
-    let has_validate_tick = function_aliases
-        .iter()
-        .any(|alias| alias.alias == "validate_tick");
     // Keep the Android ABI surface fixed while the host shell/input event mapping lands separately.
     if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
-        source.push_str("static int32_t stasis_normalized_tick_status = 0;\n");
-        source.push_str("static void stasis_run_normalized_tick(void) {\n");
-        source.push_str(
-            "    stasis_normalized_tick_status = stasis_tick_checkpoint_begin(8388608ULL);\n",
-        );
-        source.push_str("    if (stasis_normalized_tick_status != 0) { return; }\n");
-        source.push_str("    host_i32[10] = host_i32[10] + 1;\n");
-        source.push_str("    stasis_normalized_tick_status = tick();\n");
-        for (present, name) in [
-            (has_commit_tick, "commit_tick"),
-            (has_normalize_tick, "normalize_tick"),
-            (has_validate_tick, "validate_tick"),
-        ] {
-            if present {
-                source.push_str(&format!(
-                    "    if (stasis_normalized_tick_status == 0) {{ stasis_normalized_tick_status = {name}(); }}\n"
-                ));
-            }
-        }
-        source.push_str("    if (stasis_normalized_tick_status == 0) {\n");
-        source
-            .push_str("        stasis_normalized_tick_status = stasis_tick_checkpoint_accept();\n");
-        source.push_str("    } else {\n");
-        source.push_str("        (void)stasis_tick_checkpoint_restore();\n");
-        source.push_str("    }\n");
-        source.push_str("}\n");
         source.push_str(
             "STASIS_EXPORT void stasis_init(int width, int height) {\n\
     host_i32[1] = width;\n\
@@ -3675,10 +3637,11 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
 }\n\
 STASIS_EXPORT void stasis_tick(float dt) {\n\
     (void)dt;\n\
-    stasis_run_normalized_tick();\n\
+    host_i32[10] = host_i32[10] + 1;\n\
+    tick();\n\
 }\n\
 STASIS_EXPORT void stasis_render(void) {\n\
-    if (stasis_normalized_tick_status == 0) { render(); }\n\
+    render();\n\
 }\n\
 STASIS_EXPORT void stasis_on_input(int type, int a, int b) {\n\
     (void)type;\n\
@@ -3840,17 +3803,6 @@ fn package_engine_bundle_release(
         .iter()
         .find(|row| row.name == "on_code_swap")
         .map(|row| row.symbol.clone());
-    let normalized_lifecycle_symbols: Vec<(&str, String)> =
-        ["commit_tick", "normalize_tick", "validate_tick"]
-            .into_iter()
-            .filter_map(|name| {
-                manifest
-                    .functions
-                    .iter()
-                    .find(|row| row.name == name)
-                    .map(|row| (name, row.symbol.clone()))
-            })
-            .collect();
 
     let output_root = output_exe.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(output_root).map_err(|error| {
@@ -3893,13 +3845,6 @@ fn package_engine_bundle_release(
             returns_i32: false,
         });
     }
-    for (name, symbol) in &normalized_lifecycle_symbols {
-        function_aliases.push(PackagedFunctionAlias {
-            alias: name,
-            target_symbol: symbol.clone(),
-            returns_i32: true,
-        });
-    }
 
     let mut export_symbols: BTreeSet<String> = BTreeSet::new();
     export_symbols.insert(entry_symbol.clone());
@@ -3916,10 +3861,6 @@ fn package_engine_bundle_release(
     if let Some(on_code_swap) = on_code_swap_symbol.as_ref() {
         export_symbols.insert(on_code_swap.clone());
         export_symbols.insert("on_code_swap".to_string());
-    }
-    for (name, symbol) in &normalized_lifecycle_symbols {
-        export_symbols.insert(symbol.clone());
-        export_symbols.insert((*name).to_string());
     }
     for symbol in [
         "host_i32",
@@ -4236,9 +4177,6 @@ mod tests {
                 "aot_fn_1".to_string(),
                 "aot_fn_2".to_string(),
                 "aot_fn_3".to_string(),
-                "aot_fn_4".to_string(),
-                "aot_fn_5".to_string(),
-                "aot_fn_6".to_string(),
             ],
             &[
                 PackagedFunctionAlias {
@@ -4256,21 +4194,6 @@ mod tests {
                     target_symbol: "aot_fn_3".to_string(),
                     returns_i32: true,
                 },
-                PackagedFunctionAlias {
-                    alias: "commit_tick",
-                    target_symbol: "aot_fn_4".to_string(),
-                    returns_i32: true,
-                },
-                PackagedFunctionAlias {
-                    alias: "normalize_tick",
-                    target_symbol: "aot_fn_5".to_string(),
-                    returns_i32: true,
-                },
-                PackagedFunctionAlias {
-                    alias: "validate_tick",
-                    target_symbol: "aot_fn_6".to_string(),
-                    returns_i32: true,
-                },
             ],
             &[],
         )
@@ -4281,16 +4204,7 @@ mod tests {
         assert!(source.contains("host_i32[1] = width;"));
         assert!(source.contains("STASIS_EXPORT void stasis_tick(float dt)"));
         assert!(source.contains("host_i32[10] = host_i32[10] + 1;"));
-        let gameplay = source.find("= tick();").expect("gameplay call");
-        let structural = source.find("= commit_tick();").expect("commit call");
-        let normalize = source.find("= normalize_tick();").expect("normalize call");
-        let validate = source.find("= validate_tick();").expect("validate call");
-        assert!(gameplay < structural && structural < normalize && normalize < validate);
-        assert!(source.contains("stasis_tick_checkpoint_begin(8388608ULL)"));
-        assert!(source.contains("stasis_tick_checkpoint_restore()"));
-        assert!(source.contains("stasis_tick_checkpoint_accept()"));
         assert!(source.contains("STASIS_EXPORT void stasis_render(void)"));
-        assert!(source.contains("if (stasis_normalized_tick_status == 0) { render(); }"));
         assert!(source.contains("STASIS_EXPORT void stasis_on_input(int type, int a, int b)"));
     }
 
@@ -5534,7 +5448,7 @@ mod tests {
         let source = temp_root.join("engine.stasis");
         fs::write(
             &source,
-            "function tick(): i32 { return 1; }\nfunction commit_tick(): i32 { return 0; }\nfunction normalize_tick(): i32 { return 0; }\nfunction validate_tick(): i32 { return 0; }\nfunction render(): i32 { return 2; }\nfunction on_code_swap(): void { return; }\n",
+            "function tick(): i32 { return 1; }\nfunction render(): i32 { return 2; }\nfunction on_code_swap(): void { return; }\n",
         )
         .expect("write source");
 
@@ -5561,9 +5475,6 @@ mod tests {
             .last_jit_engine_package()
             .expect("jit engine package should be present");
         assert!(package.tick_code_ptr != 0);
-        assert!(package.commit_tick_code_ptr.is_some());
-        assert!(package.normalize_tick_code_ptr.is_some());
-        assert!(package.validate_tick_code_ptr.is_some());
         assert!(package.render_code_ptr != 0);
         assert!(package.on_code_swap_code_ptr.is_some());
         assert!(backend.last_aot_engine_bundle().is_none());
@@ -7806,7 +7717,7 @@ mod tests {
         let source = temp_root.join("engine.stasis");
         fs::write(
             &source,
-            "function tick(): i32 { return 1; }\nfunction commit_tick(): i32 { return 0; }\nfunction normalize_tick(): i32 { return 0; }\nfunction validate_tick(): i32 { return 0; }\nfunction render(): i32 { return 2; }\nfunction on_code_swap(): void { return; }\n",
+            "function tick(): i32 { return 1; }\nfunction render(): i32 { return 2; }\nfunction on_code_swap(): void { return; }\n",
         )
         .expect("write source");
 
@@ -7822,18 +7733,7 @@ mod tests {
             .expect("aot engine bundle should be present");
         assert!(bundle.manifest_path.exists());
         assert!(bundle.object_paths_by_function.contains_key("tick"));
-        assert!(bundle.object_paths_by_function.contains_key("commit_tick"));
-        assert!(bundle
-            .object_paths_by_function
-            .contains_key("normalize_tick"));
-        assert!(bundle
-            .object_paths_by_function
-            .contains_key("validate_tick"));
         assert!(bundle.object_paths_by_function.contains_key("render"));
-        let manifest = fs::read_to_string(&bundle.manifest_path).expect("read engine manifest");
-        assert!(manifest.contains("\"commit_tick\": \"commit_tick\""));
-        assert!(manifest.contains("\"normalize_tick\": \"normalize_tick\""));
-        assert!(manifest.contains("\"validate_tick\": \"validate_tick\""));
         assert_eq!(
             result.aot_linked_image_path,
             Some(bundle.manifest_path.clone())

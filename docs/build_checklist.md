@@ -10,8 +10,7 @@ Status note:
 
 Locked decisions:
 - Entrypoint is `function main(): i32`.
-- Reachability-DCE roots are `main`, `tick`, normalized tick lifecycle entries, and `on_code_swap`
-  (when present), plus host-exported required entry symbols.
+- Reachability-DCE roots are `main`, `tick`, and `on_code_swap` (when present), plus host-exported required entry symbols.
 - Initial host externs are `print_i32` and `print_string`.
 - Function-form calls remain supported indefinitely (receiver-form still preferred).
 - Runtime boundary is host-set-based and deny-by-default: Stasis can only access extern symbols exported by the selected host set.
@@ -1519,34 +1518,6 @@ Archived priority override (2026-02-13, historical):
 - Done gate:
 - Host-set misuse cannot produce partial state mutation or silent nondeterminism.
 - Status: `planned (post-S10b)`
-
-### DS1 - Normalized Tick Commit Transactions
-
-- Language:
-- `Rust` runner contract; later `.stasis` typed collections lower to the same contract.
-- Scope:
-- Establish the single accepted-tick order: between-tick swap, gameplay, declaration-order
-  structural commits, normalization/index repair, invariants, hash/snapshot, then render.
-- Deliverable:
-- `stasis_runner::tick::TickCoordinator` rolls rejected pre-render stages back to the prior accepted
-  boundary; the production loop gates swaps at `BetweenTicks`.
-- `BoundedPool` implements original-index removal/destruction, stable compaction, request-order
-  addition/spawn, capacity preflight, and index-repair metadata.
-- `BoundedEventQueue` publishes bounded request-order event batches without overwrite.
-- Tests:
-- Mixed removals/additions and index repair, duplicate/out-of-range removal rollback, event
-  ordering/overflow, multi-pool declaration ordering, full stage ordering, invariant rollback,
-  render suppression, deterministic snapshot hashing, and bounded AOT checkpoint restore/accept.
-- Executable verification:
-- `cargo run -p stasis_runner --example normalized_tick` verifies the two-pool reference boundary.
-- `samples/normalized_tick_transaction/main.stasis` compiles through Cranelift JIT, executes the
-  production lifecycle coordinator, verifies accepted state/hash, then proves validation rollback.
-- AOT bundle and Android bridge tests verify lifecycle retention, exact stage order, bounded
-  checkpoint restore/accept, and rejected-state render suppression.
-- Follow-up boundary:
-- DS1 intentionally adds no temporary parser syntax. Task #147 owns typed fixed-capacity Stasis
-  collection syntax/lowering; task #148 owns state hashing/input recording/replay artifacts.
-- Status: `completed`
 
 ## PR Sequence
 

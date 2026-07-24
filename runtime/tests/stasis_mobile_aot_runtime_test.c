@@ -105,19 +105,6 @@ int main(void) {
     stasis_jit_global_i32_array_store(21, 0, 3, 99);
     CHECK(owned[3] == 99);
 
-    CHECK(stasis_tick_checkpoint_begin(8u * 1024u * 1024u) == 0);
-    stasis_jit_global_i32_store(10, 100);
-    stasis_jit_global_i32_store(11, 101);
-    stasis_jit_global_i32_array_store(20, 0, 2, 102);
-    CHECK(stasis_tick_checkpoint_restore() == 0);
-    CHECK(stasis_jit_global_i32_load(10) == 42);
-    CHECK(external == 6);
-    CHECK(external_array[2] == 12);
-    CHECK(stasis_tick_checkpoint_begin(8u * 1024u * 1024u) == 0);
-    stasis_jit_global_i32_store(10, 103);
-    CHECK(stasis_tick_checkpoint_accept() == 0);
-    CHECK(stasis_jit_global_i32_load(10) == 103);
-
     stasis_jit_register_code_ptr(30, (int64_t)(uintptr_t)&add_two);
     CHECK(stasis_jit_call_i32_2(30, 5, 7) == 12);
     CHECK(stasis_jit_call_i32_0(999) == 0);

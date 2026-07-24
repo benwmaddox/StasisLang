@@ -80,9 +80,6 @@ pub struct JitProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitEnginePackage {
     pub tick_code_ptr: u64,
-    pub commit_tick_code_ptr: Option<u64>,
-    pub normalize_tick_code_ptr: Option<u64>,
-    pub validate_tick_code_ptr: Option<u64>,
     pub render_code_ptr: u64,
     pub on_code_swap_code_ptr: Option<u64>,
     pub symbol_code_ptrs: BTreeMap<String, u64>,
@@ -1012,9 +1009,6 @@ impl JitProcess {
         entrypoints: &EngineEntrypoints,
     ) -> Result<JitEnginePackage, String> {
         let tick_code_ptr = self.code_ptr_for_i32_noarg_entrypoint(&entrypoints.tick)?;
-        let commit_tick_code_ptr = self.optional_i32_noarg_entrypoint("commit_tick")?;
-        let normalize_tick_code_ptr = self.optional_i32_noarg_entrypoint("normalize_tick")?;
-        let validate_tick_code_ptr = self.optional_i32_noarg_entrypoint("validate_tick")?;
         let render_code_ptr = self.code_ptr_for_i32_noarg_entrypoint(&entrypoints.render)?;
         let on_code_swap_code_ptr = if let Some(name) = entrypoints.on_code_swap.as_ref() {
             self.validate_on_code_swap_signature()?;
@@ -1025,9 +1019,6 @@ impl JitProcess {
 
         Ok(JitEnginePackage {
             tick_code_ptr,
-            commit_tick_code_ptr,
-            normalize_tick_code_ptr,
-            validate_tick_code_ptr,
             render_code_ptr,
             on_code_swap_code_ptr,
             symbol_code_ptrs: self.symbol_code_ptrs(),
@@ -1064,18 +1055,6 @@ impl JitProcess {
         self.artifact_for_function_id(function.id)
             .map(|artifact| artifact.code_ptr)
             .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))
-    }
-
-    fn optional_i32_noarg_entrypoint(&self, name: &str) -> Result<Option<u64>, String> {
-        if !self
-            .compiler
-            .functions()
-            .iter()
-            .any(|function| function.name == name)
-        {
-            return Ok(None);
-        }
-        self.code_ptr_for_i32_noarg_entrypoint(name).map(Some)
     }
 
     fn refresh_runtime_dispatch_table(&self) {
@@ -4920,16 +4899,13 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "function tick(): i32 { return 0; }\nfunction commit_tick(): i32 { return 0; }\nfunction normalize_tick(): i32 { return 0; }\nfunction validate_tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+            "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
         );
         process.compile().expect("compile");
         let package = process
             .build_engine_package(&EngineEntrypoints::runtime_default())
             .expect("engine package");
         assert_ne!(package.tick_code_ptr, 0);
-        assert!(package.commit_tick_code_ptr.is_some());
-        assert!(package.normalize_tick_code_ptr.is_some());
-        assert!(package.validate_tick_code_ptr.is_some());
         assert_ne!(package.render_code_ptr, 0);
         assert_eq!(
             package.on_code_swap_code_ptr.is_some(),
@@ -4975,19 +4951,5 @@ mod tests {
             .expect_err("void tick should fail");
         assert!(error.contains("expected `function tick(): i32`"));
         assert!(error.contains("actual return type id"));
-    }
-
-    #[test]
-    fn jit_engine_package_rejects_normalized_lifecycle_signature_mismatch() {
-        let mut process = JitProcess::new();
-        process.upsert_file(
-            "sample.stasis",
-            "function tick(): i32 { return 0; }\nfunction commit_tick(): void { return; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
-        );
-        process.compile().expect("compile");
-        let error = process
-            .build_engine_package(&EngineEntrypoints::runtime_default())
-            .expect_err("void commit_tick should fail");
-        assert!(error.contains("expected `function commit_tick(): i32`"));
     }
 }

@@ -19,8 +19,7 @@ Core direction:
 - Cranelift AOT for production builds.
 - File-level incremental compilation.
 - Symbol-level reachability pruning before lowering (functions + struct metadata).
-- Reachability roots: `main`, `tick`, normalized tick lifecycle entries, `on_code_swap` (when
-  present), and host-required exported entries.
+- Reachability roots: `main`, `tick`, `on_code_swap` (when present), and host-required exported entries.
 - Hot swap only between ticks.
 - Rust host/runtime with a Rust-implemented compiler pipeline.
 
@@ -654,58 +653,6 @@ function draw_debug_ui(): void {
     }
 }
 ```
-
-### 13.1 Normalized Tick Commit Transaction
-
-An accepted simulation tick has one canonical order:
-
-1. Apply an eligible code swap at the between-tick safe point, if one is pending.
-2. Run gameplay against the last accepted state.
-3. Commit typed structural queues in pool declaration order.
-4. Normalize derived state and repair stored indexes.
-5. Validate declared invariants.
-6. Compute the accepted-state hash and capture the boundary snapshot.
-7. Render the accepted state.
-
-The transaction returns to the between-tick phase only after render submission. A code swap may
-not become visible during gameplay, structural commit, normalization, validation, hashing,
-snapshot capture, or render. A rejected swap leaves the previously accepted code and state active.
-
-Structural queue rules:
-
-- Removal and destruction requests name indexes from the pool as it existed before the commit.
-- Duplicate or out-of-range removals reject the transaction; they are not silently ignored.
-- Surviving elements compact stably in their original relative order.
-- Addition and spawn requests append after compaction in request order.
-- A commit that would exceed a declared capacity rejects before mutating the pool.
-- A successful pool commit produces an old-index-to-new-index repair map plus the final index for
-  each accepted spawn request.
-- Pool commits run in source declaration order. Index repair occurs after the referenced pool has
-  committed and before invariant validation.
-- Event queues are bounded, preserve request order, and become visible as one committed batch.
-  The batch must be consumed before the next batch can commit; events are never overwritten.
-
-Gameplay, structural commits, normalization, validation, hashing, and snapshot capture form one
-state transaction. Failure in any of those stages restores the last accepted tick-boundary state
-and suppresses rendering of the rejected state. Rendering is read-only with respect to simulation
-state and occurs only after acceptance.
-
-`stasis_runner::tick` is the executable reference contract for this ordering and for bounded pool
-and event commits. The separate typed fixed-capacity collection slice defines the eventual Stasis
-source surface; it must lower to these semantics rather than introducing a second ordering model.
-
-The normalized lifecycle entries are optional no-argument `i32` functions:
-
-```stasis
-function commit_tick(): i32 { return 0; }
-function normalize_tick(): i32 { return 0; }
-function validate_tick(): i32 { return 0; }
-```
-
-Absence means the corresponding stage has no user-defined work. A non-zero result rejects at that
-stage. Development JIT and packaged mobile AOT take a bounded checkpoint before gameplay, restore
-it on rejection, and suppress render for the rejected state. JIT and AOT both retain these
-host-required lifecycle roots and reject an entry with parameters or a non-`i32` return type.
 
 ## 14. Incremental Compilation and Hot Swap
 
