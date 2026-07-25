@@ -1,0 +1,9 @@
+:pause
+:inspect
+:inspect state.enemies[1].hp
+:print state.score + state.enemies[1].hp
+:inspect state.enemies[?hp >= 8]
+:watch state.score + state.enemies[1].hp
+:step 1
+:inspect state.score
+:quit

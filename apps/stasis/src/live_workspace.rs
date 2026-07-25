@@ -157,7 +157,7 @@ pub(crate) struct LiveWorkspace {
     source_files: Vec<WorkshopSourceFile>,
     completion_snapshot: Arc<CompletionSnapshot>,
     scratch: ScratchWorkspace,
-    watches: BTreeMap<String, Option<JitScalarValue>>,
+    watches: BTreeMap<String, Option<Value>>,
     pending_plan: Option<PendingEdit>,
     pending_requests: VecDeque<LiveRequest>,
     pending_responses: VecDeque<LiveResponse>,
@@ -410,19 +410,20 @@ impl LiveWorkspace {
         }
         let paths = self.watches.keys().cloned().collect::<Vec<_>>();
         for path in paths {
-            let Ok(value) = jit.read_global_scalar(&path) else {
+            let Ok(value) = jit.inspect_state_query(&path) else {
                 continue;
             };
-            let prior = self.watches.get(&path).copied().flatten();
-            if prior == Some(value) {
+            let prior = self.watches.get(&path).and_then(Option::as_ref);
+            if prior == Some(&value) {
                 continue;
             }
-            self.watches.insert(path.clone(), Some(value));
+            self.watches.insert(path.clone(), Some(value.clone()));
+            let observed = inspection_observed_value(&value);
             match self.server.respond(LiveResponse::success(
                 0,
                 tick,
                 "watch",
-                json!({"path": path, "value": value}),
+                json!({"path": path, "value": observed, "inspection": value}),
             )) {
                 Ok(()) => {}
                 Err(LiveResponseSendError::Full(_)) => {
@@ -681,16 +682,17 @@ impl LiveWorkspace {
             LiveCommand::Inspect { path } => inspect_scalar(jit, &path),
             LiveCommand::InspectAll { limit, concise } => inspect_all_scalars(jit, limit, concise),
             LiveCommand::Watch { path } => {
-                let value = jit.read_global_scalar(&path)?;
+                let value = jit.inspect_state_query(&path)?;
                 if !self.watches.contains_key(&path) && self.watches.len() >= MAX_LIVE_WATCHES {
                     return Err(format!(
                         "live watching is limited to {MAX_LIVE_WATCHES} paths"
                     ));
                 }
+                let observed = inspection_observed_value(&value);
                 self.watches.insert(path.clone(), Some(value));
                 Ok((
                     "watch_added",
-                    json!({"path": path, "value": value, "tick": tick}),
+                    json!({"path": path, "value": observed, "tick": tick}),
                 ))
             }
             LiveCommand::Unwatch { path } => {
@@ -1982,9 +1984,9 @@ fn help_data() -> Value {
             ":complete BUFFER", ":palette [QUERY]",
             ":add KIND NAME FILE ... :end", ":update KIND NAME [FILE] ... :end",
             ":delete KIND NAME [FILE]", ":preview", ":apply", ":changes", ":undo", ":redo",
-            ":inspect [PATH]", ":watch PATH", ":unwatch [PATH]",
+            ":inspect [QUERY]", ":watch QUERY", ":unwatch [QUERY]",
             ":set PATH VALUE",
-            ":print VALUE_OR_PATH", ":do ... :end", ":cell put|run|list|clear"
+            ":print SCALAR_EXPRESSION", ":do ... :end", ":cell put|run|list|clear"
         ],
         "multiline_terminator": ":end",
         "multiline_cancel": ":abort or Ctrl-C",
@@ -2112,11 +2114,14 @@ fn candidate_diagnostic(candidate: &JitProcess, error: CompileError) -> String {
 }
 
 fn inspect_scalar(jit: &JitProcess, path: &str) -> Result<(&'static str, Value), String> {
-    let value = jit.read_global_scalar(path)?;
-    Ok((
-        "inspection",
-        json!({"path": path, "static_type": value.type_name(), "value": value}),
-    ))
+    Ok(("inspection", jit.inspect_state_query(path)?))
+}
+
+fn inspection_observed_value(inspection: &Value) -> Value {
+    inspection
+        .get("value")
+        .cloned()
+        .unwrap_or_else(|| inspection.clone())
 }
 
 fn validate_live_runtime(
@@ -2196,9 +2201,47 @@ fn inspect_all_scalars(
             Ok(json!({"path": path, "static_type": static_type, "value": value}))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let memory = jit.state_memory_report(&BTreeMap::new(), MAX_STATE_SNAPSHOT_BYTES as u64)?;
+    let layout = jit.state_layout();
+    let collections = layout
+        .collections
+        .iter()
+        .take(limit)
+        .map(|collection| {
+            let active_count = memory
+                .entries
+                .iter()
+                .find(|entry| entry.path == collection.path && entry.kind == "collection_field")
+                .and_then(|entry| entry.active_count);
+            json!({
+                "path": collection.path,
+                "kind": "collection",
+                "element_shape": collection.element_shape,
+                "capacity": collection.capacity,
+                "active_count": active_count,
+                "fields": collection.fields,
+            })
+        })
+        .collect::<Vec<_>>();
+    let structs = layout.structs.iter().take(limit).collect::<Vec<_>>();
     Ok((
         "state_inspection",
-        json!({"total": total, "limit": limit, "truncated": total > limit, "concise": concise, "items": items}),
+        json!({
+            "total": total,
+            "limit": limit,
+            "truncated": total > limit || layout.collections.len() > limit || layout.structs.len() > limit,
+            "concise": concise,
+            "items": items,
+            "collections": collections,
+            "structs": structs,
+            "memory": {
+                "storage_model": memory.storage_model,
+                "total_capacity_bytes": memory.total_capacity_bytes,
+                "snapshot_bytes": memory.snapshot_bytes,
+                "mobile_budget_bytes": memory.mobile_budget_bytes,
+                "warnings": memory.warnings,
+            },
+        }),
     ))
 }
 
@@ -2224,19 +2267,7 @@ fn concise_state_path_is_visible(path: &str, all_paths: &HashSet<String>) -> boo
 }
 
 fn print_scalar(jit: &JitProcess, expression: &str) -> Result<(&'static str, Value), String> {
-    if jit.has_global_path(expression) {
-        return inspect_scalar(jit, expression);
-    }
-    if let Ok(value) = expression.parse::<i32>() {
-        return Ok(("print", json!({"static_type": "i32", "value": value})));
-    }
-    if matches!(expression, "true" | "false") {
-        return Ok((
-            "print",
-            json!({"static_type": "bool", "value": expression == "true"}),
-        ));
-    }
-    Err("live print currently accepts a compiler-indexed scalar path, i32 literal, or bool literal; unsupported expressions fail instead of using a second evaluator".to_string())
+    Ok(("print", jit.inspect_state_query(expression)?))
 }
 
 fn set_scalar(
@@ -2859,7 +2890,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_step_and_watch_events_are_boundary_exact() {
+    fn pause_step_and_expression_watch_events_are_boundary_exact() {
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -2877,7 +2908,7 @@ mod tests {
                 LiveRequest::new(
                     40,
                     LiveCommand::Watch {
-                        path: "score".into()
+                        path: "score + 1".into()
                     }
                 ),
             )
@@ -2912,7 +2943,7 @@ mod tests {
             .expect("watch event");
         assert_eq!(watch.request_id, 0);
         assert_eq!(watch.tick, 1);
-        assert_eq!(watch.data.expect("watch data")["value"]["value"], 9);
+        assert_eq!(watch.data.expect("watch data")["value"]["value"], 10);
         workspace.publish_watches(1, &jit);
         assert!(client
             .receive_timeout(std::time::Duration::from_millis(10))

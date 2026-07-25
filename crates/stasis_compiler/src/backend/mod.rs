@@ -5,6 +5,7 @@ mod reachability;
 mod runtime_exports;
 pub mod state_layout;
 pub mod state_migration;
+mod state_query;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineEntrypoints {

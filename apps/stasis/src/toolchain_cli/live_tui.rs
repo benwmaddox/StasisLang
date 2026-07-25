@@ -1671,6 +1671,9 @@ impl LiveTui {
         };
         self.inspector.title = "Live state (default)".to_string();
         self.inspector.lines = items.iter().map(format_state_item).collect();
+        if let Some(data) = response.data.as_ref() {
+            append_state_tree_lines(data, &mut self.inspector.lines);
+        }
         if self.inspector.lines.is_empty() {
             self.inspector.lines = vec!["No concise state values; use :inspect PATH.".to_string()];
         }
@@ -2331,6 +2334,64 @@ fn format_state_item(item: &Value) -> String {
         name,
         scalar_text(item.get("value").unwrap_or(&Value::Null))
     )
+}
+
+fn append_state_tree_lines(data: &Value, lines: &mut Vec<String>) {
+    if let Some(collections) = data.get("collections").and_then(Value::as_array) {
+        for collection in collections {
+            let path = collection
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("collection");
+            let active = collection
+                .get("active_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let capacity = collection
+                .get("capacity")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            lines.push(format!("{path} [{active}/{capacity}]"));
+            if let Some(fields) = collection.get("fields").and_then(Value::as_array) {
+                for field in fields {
+                    let name = field
+                        .get("field")
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or("element");
+                    let static_type = field
+                        .get("type_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    lines.push(format!("  {name}: {static_type}"));
+                }
+            }
+        }
+    }
+    if let Some(structs) = data.get("structs").and_then(Value::as_array) {
+        for state_struct in structs {
+            let path = state_struct
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("struct");
+            let name = state_struct
+                .get("type_name")
+                .and_then(Value::as_str)
+                .unwrap_or("struct");
+            lines.push(format!("{path}: {name}"));
+        }
+    }
+    if let Some(memory) = data.get("memory") {
+        let bytes = memory
+            .get("total_capacity_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let snapshot = memory
+            .get("snapshot_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        lines.push(format!("memory: {bytes} bytes; snapshot: {snapshot} bytes"));
+    }
 }
 
 fn current_token(buffer: &EditBuffer) -> &str {
@@ -3127,6 +3188,33 @@ mod tests {
             "value": {"type": "f32", "value": 12.5}
         });
         assert_eq!(format_state_item(&item), "    score = 12.5");
+    }
+
+    #[test]
+    fn default_state_tree_includes_collections_structs_and_memory() {
+        let data = serde_json::json!({
+            "collections": [{
+                "path": "state.enemies",
+                "active_count": 2,
+                "capacity": 8,
+                "fields": [{"field": "hp", "type_name": "i32"}]
+            }],
+            "structs": [{"path": "state.player", "type_name": "Player"}],
+            "memory": {"total_capacity_bytes": 96, "snapshot_bytes": 96}
+        });
+        let mut lines = Vec::new();
+
+        append_state_tree_lines(&data, &mut lines);
+
+        assert_eq!(
+            lines,
+            vec![
+                "state.enemies [2/8]",
+                "  hp: i32",
+                "state.player: Player",
+                "memory: 96 bytes; snapshot: 96 bytes",
+            ]
+        );
     }
 
     #[test]

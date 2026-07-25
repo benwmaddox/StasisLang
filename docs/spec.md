@@ -722,6 +722,27 @@ candidate field, storage binding, function pointer, or partial value may be visi
 tick. The executable fixtures under `samples/between_tick_layout_migration/` cover accepted and
 rejected struct growth across this boundary.
 
+### 14.3.1 State memory and development inspection
+
+The canonical compiler state layout also owns development memory reporting and live inspection.
+JIT and AOT must describe the same scalar bindings, SoA collection lanes, struct paths, field
+types, capacities, and opaque exclusions. `stasis inspect` derives capacity bytes, scalar/lane
+alignment, zero intra-allocation padding, struct/field rollups, snapshot size, largest pools,
+recognized command buffers, capacity-change projections, and mobile snapshot warnings from that
+metadata. A report must label the direct-binding storage model and must not imply an AoS packed
+layout when runtime storage is SoA.
+
+The development runtime may read those compiler-indexed bindings at between-tick observation
+points. It supports scalar paths, fixed indexes, bounded collection predicates, and scalar
+arithmetic/comparisons. Predicate scans and returned matches are bounded and report truncation.
+Invalid paths, fields, indexes, types, operators, and expressions fail deterministically. This is
+metadata-guided inspection, not general reflection: it exposes no arbitrary memory, lexical stack,
+host object, call expression, or release-runtime evaluator. Change-only watches evaluate the same
+query contract between ticks.
+
+`samples/state_inspection/` is the representative executable fixture for static reporting, state
+tree browsing, indexed/predicate expressions, and change-only watches.
+
 ### 14.4 Development File-Change Boundary Contracts
 
 During development, file-change handling uses explicit role ownership and message boundaries.

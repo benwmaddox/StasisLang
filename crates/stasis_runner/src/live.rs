@@ -1198,10 +1198,10 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
             concise: false,
         }),
         ":inspect" => ready(LiveCommand::Inspect {
-            path: required_arg(&args, 1, "state path")?.to_string(),
+            path: remaining_args(&args, 1, "state query")?,
         }),
         ":watch" => ready(LiveCommand::Watch {
-            path: required_arg(&args, 1, "state path")?.to_string(),
+            path: remaining_args(&args, 1, "state query")?,
         }),
         ":unwatch" => ready(LiveCommand::Unwatch {
             path: args.get(1).cloned(),
@@ -1212,7 +1212,7 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
             preview: args.iter().any(|arg| arg == "--preview"),
         }),
         ":print" => ready(LiveCommand::Print {
-            expression: required_arg(&args, 1, "expression")?.to_string(),
+            expression: remaining_args(&args, 1, "expression")?,
         }),
         ":do" => Ok(ParsedTerminalCommand::Pending(PendingCommand::Do {
             preview: args.iter().any(|arg| arg == "--preview"),
@@ -1304,6 +1304,13 @@ fn required_arg<'a>(args: &'a [String], index: usize, name: &str) -> Result<&'a 
     args.get(index)
         .map(String::as_str)
         .ok_or_else(|| format!("missing {name}"))
+}
+
+fn remaining_args(args: &[String], index: usize, name: &str) -> Result<String, String> {
+    if args.len() <= index {
+        return Err(format!("missing {name}"));
+    }
+    Ok(args[index..].join(" "))
 }
 
 fn parse_u32(name: &str, value: &str) -> Result<u32, String> {
@@ -1841,6 +1848,35 @@ mod tests {
             LiveCommand::InspectAll {
                 limit: 32,
                 concise: false,
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_preserves_spaced_state_queries() {
+        let mut terminal = TerminalBuffer::new();
+        let TerminalInput::Request(inspect) = terminal
+            .feed_line(":inspect enemies[?hp >= score + 1]")
+            .expect("inspect query")
+        else {
+            panic!("expected inspect request")
+        };
+        assert_eq!(
+            inspect.command,
+            LiveCommand::Inspect {
+                path: "enemies[?hp >= score + 1]".to_string(),
+            }
+        );
+        let TerminalInput::Request(watch) = terminal
+            .feed_line(":watch score + enemies[2].hp")
+            .expect("watch query")
+        else {
+            panic!("expected watch request")
+        };
+        assert_eq!(
+            watch.command,
+            LiveCommand::Watch {
+                path: "score + enemies[2].hp".to_string(),
             }
         );
     }

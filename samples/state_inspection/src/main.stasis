@@ -1,0 +1,42 @@
+struct Enemy {
+    hp: i32;
+    speed: f32;
+    active: bool;
+}
+
+struct SimulationState {
+    score: i32;
+    enemies: Enemy[4];
+}
+
+global state: SimulationState;
+global render_cmd_i32: i32[16];
+
+function main(): i32 {
+    state.score = 10;
+    state.enemies[0].hp = 3;
+    state.enemies[0].speed = 1.0;
+    state.enemies[0].active = true;
+    state.enemies[1].hp = 8;
+    state.enemies[1].speed = 2.0;
+    state.enemies[1].active = true;
+    state.enemies[2].hp = 12;
+    state.enemies[2].speed = 1.5;
+    state.enemies[2].active = false;
+    return 0;
+}
+
+function tick(): i32 {
+    state.score += 1;
+    state.enemies[1].hp -= 1;
+    return 0;
+}
+
+function render(): i32 {
+    render_cmd_i32[0] = state.score;
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

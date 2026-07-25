@@ -83,6 +83,72 @@ fn project_commands_emit_stable_json_from_nested_directories() {
 }
 
 #[test]
+fn inspect_reports_compiler_state_memory_and_capacity_projection() {
+    let parent = temp_dir("memory_report");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    fs::write(
+        project.join("src/main.stasis"),
+        "struct Enemy { hp: i32; speed: f64; }\n\
+         struct GameState { score: i32; enemies: Enemy[4]; }\n\
+         global state: GameState;\n\
+         global gfx_cmd_i32: i32[8];\n\
+         function main(): i32 { return state.score; }\n",
+    )
+    .expect("write memory fixture");
+
+    let inspected = stasis(
+        &[
+            "--json",
+            "inspect",
+            "--capacity",
+            "state.enemies=8",
+            "--mobile-budget-bytes",
+            "64",
+        ],
+        &project,
+    );
+    assert_eq!(
+        inspected.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&inspected.stdout),
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let result = json_stdout(&inspected);
+    let memory = &result["result"]["memory"];
+    assert_eq!(memory["storage_model"], "soa_direct_bindings");
+    assert_eq!(memory["capacity_changes"][0]["path"], "state.enemies");
+    assert_eq!(memory["capacity_changes"][0]["delta_bytes"], 48);
+    assert!(memory["structs"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["path"] == "state")));
+    assert!(memory["command_buffers"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["path"] == "gfx_cmd_i32")));
+    assert!(memory["warnings"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item
+            .as_str()
+            .unwrap_or_default()
+            .contains("mobile snapshot budget"))));
+
+    let invalid = stasis(&["--json", "inspect", "--capacity", "missing=4"], &project);
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(json_stderr(&invalid)["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not found in compiler collection metadata"));
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
 fn fresh_runtime_validation_runs_in_a_separate_cli_process() {
     let parent = temp_dir("fresh_validation");
     fs::create_dir_all(&parent).expect("create temp parent");
@@ -1318,6 +1384,41 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     assert!(String::from_utf8_lossy(&unfinished.stderr)
         .contains("live script ended with unfinished multiline input"));
     fs::remove_dir_all(parent).ok();
+}
+
+#[test]
+fn state_inspection_sample_browses_state_and_watches_live_runtime() {
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/state_inspection");
+
+    let output = stasis(
+        &["run", "--interactive", "--live-script", "live.commands"],
+        &sample,
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("state.enemies [4/4]"), "{stdout}");
+    assert!(stdout.contains("state: SimulationState"), "{stdout}");
+    assert!(
+        stdout.contains("memory: 132 bytes; snapshot: 132 bytes"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("state.enemies[1].hp: i32 = 8"), "{stdout}");
+    assert!(
+        stdout.contains("state.enemies[?hp >= 8]: 2 match(es)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("watching state.score + state.enemies[1].hp = 18"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("session closed"), "{stdout}");
 }
 
 fn walk_files(root: &Path) -> Vec<PathBuf> {

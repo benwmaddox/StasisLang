@@ -36,6 +36,8 @@ stasis build --mode release
 stasis package --target desktop
 stasis package-mobile --target android-arm64
 stasis package-mobile --target ios-arm64
+stasis inspect
+stasis inspect --capacity state.enemies=512
 ```
 
 `stasis init --name brick_game .` initializes an existing directory. The built-in template copies
@@ -91,7 +93,14 @@ guide, and a minimal `CLAUDE.md` that points to `AGENTS.md`.
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
   Xcode app shell.
 - `package --target android-arm64|ios-arm64`: compatibility spelling that uses the manifest entry.
-- `inspect`, `version`, and `env`: report workspace, installation, cache, and output locations.
+- `inspect [--capacity PATH=COUNT] [--mobile-budget-bytes N]`: compile the manifest entry and
+  report the canonical direct-storage model: bytes and alignment by state path/field, struct
+  rollups, capacity versus active count, snapshot size, the eight largest pools, recognized
+  command buffers, projected capacity-change bytes, and mobile-budget warnings. Repeating
+  `--capacity` compares several proposed pool sizes without changing source or runtime state.
+  JSON output includes the complete deterministic report; human output emphasizes totals,
+  largest pools, projections, and warnings.
+- `version` and `env`: report installation, cache, and workspace locations.
 
 `replay` and `verify` intentionally return deterministic unsupported diagnostics until the replay
 runtime contract lands; they do not fake successful behavior.
