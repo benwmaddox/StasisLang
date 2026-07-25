@@ -1387,6 +1387,7 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
 }
 
 #[test]
+#[cfg(windows)]
 fn state_inspection_sample_browses_state_and_watches_live_runtime() {
     let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/state_inspection");
 
