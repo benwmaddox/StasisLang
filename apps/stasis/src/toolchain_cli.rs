@@ -894,14 +894,26 @@ fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
 fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
     let entry = workspace.root.join(&workspace.manifest.entry);
     validate_workspace_destination(workspace, "entry", &entry)?;
-    let source = fs::read_to_string(&entry)
-        .map_err(|error| format!("failed to read entry {}: {error}", entry.display()))?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
     jit.set_required_emit_roots(&["main".to_string()]);
-    jit.upsert_file(display_path(&entry), source.clone());
+    let mut sources = BTreeMap::new();
+    for file in files {
+        let path = workspace.root.join(&file.path);
+        let path = path.canonicalize().unwrap_or(path);
+        let path = path.to_string_lossy().to_string();
+        sources.insert(path.clone(), file.source.clone());
+        jit.upsert_file(path, file.source);
+    }
     jit.compile().map_err(|error| {
         if let Some(diagnostic) = jit.last_source_diagnostic() {
-            let (line, column) = line_column(&source, diagnostic.start);
+            let source = sources
+                .get(&diagnostic.path)
+                .map(String::as_str)
+                .unwrap_or("");
+            let (line, column) = line_column(source, diagnostic.start);
             format!(
                 "{}:{}:{}: {}",
                 diagnostic.path, line, column, diagnostic.message
@@ -1374,6 +1386,11 @@ fn format_live_response(response: &LiveResponse) -> String {
             "{} -> {}",
             string_field(data, "path", "value"),
             scalar_text(data.get("value").unwrap_or(&Value::Null))
+        ),
+        "watch_error" => format!(
+            "{} watch error: {}",
+            string_field(data, "path", "value"),
+            string_field(data, "error", "unknown watch error")
         ),
         "watch_removed" => format_live_watch_removed(data),
         "watch_backpressure" => format!(

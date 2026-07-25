@@ -38,6 +38,7 @@ const MAX_LIVE_EDIT_BATCH: usize = 64;
 const MAX_LIVE_TRANSACTION_ASSIGNMENTS: usize = 64;
 const MAX_STAGED_TEST_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_STAGED_TEST_DIAGNOSTIC_BYTES: usize = 4096;
+const MAX_WATCH_PREDICATE_SCAN_PER_TICK: usize = 4096;
 #[derive(Debug, Clone)]
 pub struct LiveRunConfig {
     pub project_root: PathBuf,
@@ -409,9 +410,49 @@ impl LiveWorkspace {
             }
         }
         let paths = self.watches.keys().cloned().collect::<Vec<_>>();
-        for path in paths {
-            let Ok(value) = jit.inspect_state_query(&path) else {
-                continue;
+        let mut remaining_scan = MAX_WATCH_PREDICATE_SCAN_PER_TICK;
+        let path_count = paths.len();
+        for (index, path) in paths.into_iter().enumerate() {
+            let paths_left = path_count - index;
+            let scan_limit = if remaining_scan == 0 {
+                0
+            } else {
+                (remaining_scan / paths_left).max(1)
+            };
+            let value = match jit.inspect_state_query_with_scan_limit(&path, scan_limit) {
+                Ok(value) => {
+                    let scanned = value
+                        .get("scanned")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .unwrap_or(0);
+                    remaining_scan = remaining_scan.saturating_sub(scanned);
+                    value
+                }
+                Err(error) => {
+                    let value = json!({"kind": "error", "error": error.clone()});
+                    let prior = self.watches.get(&path).and_then(Option::as_ref);
+                    if prior == Some(&value) {
+                        continue;
+                    }
+                    self.watches.insert(path.clone(), Some(value));
+                    match self.server.respond(LiveResponse::success(
+                        0,
+                        tick,
+                        "watch_error",
+                        json!({"path": path, "error": error}),
+                    )) {
+                        Ok(()) => {}
+                        Err(LiveResponseSendError::Full(_)) => {
+                            self.dropped_watch_events = self.dropped_watch_events.saturating_add(1);
+                        }
+                        Err(LiveResponseSendError::Disconnected) => {
+                            self.quit = true;
+                            return;
+                        }
+                    }
+                    continue;
+                }
             };
             let prior = self.watches.get(&path).and_then(Option::as_ref);
             if prior == Some(&value) {
@@ -2977,6 +3018,103 @@ mod tests {
         assert!(workspace.should_run_tick());
         workspace.after_tick();
         assert!(!workspace.should_run_tick());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn expression_watch_reports_and_deduplicates_evaluation_errors() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("main");
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(
+                    43,
+                    LiveCommand::Watch {
+                        path: "10 / score".into(),
+                    },
+                ),
+            )
+            .ok
+        );
+        assert!(
+            run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(
+                    44,
+                    LiveCommand::Set {
+                        path: "score".into(),
+                        expression: "0".into(),
+                        preview: false,
+                    },
+                ),
+            )
+            .ok
+        );
+
+        workspace.publish_watches(2, &jit);
+        let error = client
+            .receive_timeout(std::time::Duration::from_secs(1))
+            .expect("watch error");
+        assert_eq!(error.kind, "watch_error");
+        assert!(error.data.expect("watch error data")["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("division by zero"));
+        workspace.publish_watches(3, &jit);
+        assert!(client
+            .receive_timeout(std::time::Duration::from_millis(10))
+            .is_err());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn predicate_watches_share_one_per_tick_scan_budget() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "struct Enemy { hp: i32; }\n\
+             global alpha: Enemy[4096];\n\
+             global beta: Enemy[4096];\n\
+             function main(): i32 { return alpha[0].hp + beta[0].hp; }\n\
+             function tick(): i32 { return 0; }\n\
+             function render(): i32 { return 0; }\n\
+             function on_code_swap(): void { return; }\n",
+        )
+        .expect("predicate watch source");
+        let (jit, _) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        workspace.watches.insert("alpha[?hp >= 0]".into(), None);
+        workspace.watches.insert("beta[?hp >= 0]".into(), None);
+
+        workspace.publish_watches(1, &jit);
+
+        let scanned = (0..2)
+            .map(|_| {
+                client
+                    .receive_timeout(std::time::Duration::from_secs(1))
+                    .expect("predicate watch event")
+                    .data
+                    .expect("predicate watch data")["inspection"]["scanned"]
+                    .as_u64()
+                    .unwrap_or(0)
+            })
+            .sum::<u64>();
+        assert_eq!(scanned, MAX_WATCH_PREDICATE_SCAN_PER_TICK as u64);
         fs::remove_dir_all(root).ok();
     }
 

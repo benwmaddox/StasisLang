@@ -95,13 +95,17 @@ fn inspect_reports_compiler_state_memory_and_capacity_projection() {
     );
     fs::write(
         project.join("src/main.stasis"),
+        "import \"state.stasis\";\nfunction main(): i32 { return state.score; }\n",
+    )
+    .expect("write memory entry fixture");
+    fs::write(
+        project.join("src/state.stasis"),
         "struct Enemy { hp: i32; speed: f64; }\n\
          struct GameState { score: i32; enemies: Enemy[4]; }\n\
          global state: GameState;\n\
-         global gfx_cmd_i32: i32[8];\n\
-         function main(): i32 { return state.score; }\n",
+         global gfx_cmd_i32: i32[8];\n",
     )
-    .expect("write memory fixture");
+    .expect("write imported memory fixture");
 
     let inspected = stasis(
         &[

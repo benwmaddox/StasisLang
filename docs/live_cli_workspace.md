@@ -315,7 +315,9 @@ and `:watch` use compiler-indexed state queries. Queries support scalar paths, f
 indexes (`state.enemies[2].hp`), bounded predicates (`state.enemies[?hp >= 10]`), parentheses,
 and scalar arithmetic/comparison with normal precedence. Predicate scans stop after 4096 elements
 and return at most 64 matches with explicit truncation fields. Watches re-evaluate the same query
-between ticks and publish only changes.
+between ticks and publish only changes. Predicate watches share one 4096-element scan budget per
+tick, and a watch that becomes invalid publishes one `watch_error` until it recovers or its error
+changes.
 
 Queries do not expose arbitrary addresses, lexical stacks, calls, or runtime reflection. Missing
 paths/fields, invalid indexes/types/operators, divide-by-zero, and unsupported syntax return stable

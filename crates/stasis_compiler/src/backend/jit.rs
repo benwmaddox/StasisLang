@@ -603,6 +603,14 @@ impl JitProcess {
     }
 
     pub fn inspect_state_query(&self, query: &str) -> Result<JsonValue, String> {
+        self.inspect_state_query_with_scan_limit(query, MAX_STATE_QUERY_SCAN)
+    }
+
+    pub fn inspect_state_query_with_scan_limit(
+        &self,
+        query: &str,
+        max_predicate_scan: usize,
+    ) -> Result<JsonValue, String> {
         match parse_state_query(query)? {
             StateQuery::Scalar(expression) => {
                 let value = self.evaluate_state_expression(&expression)?;
@@ -615,6 +623,9 @@ impl JitProcess {
                 }))
             }
             StateQuery::Predicate(predicate) => {
+                if max_predicate_scan == 0 {
+                    return Err("state predicate query scan budget is exhausted".to_string());
+                }
                 let (_, capacity) =
                     self.global_collection_value_type(&predicate.path, &predicate.field)?;
                 let capacity = usize::try_from(capacity).map_err(|_| {
@@ -623,7 +634,7 @@ impl JitProcess {
                         predicate.path
                     )
                 })?;
-                let scan_count = capacity.min(MAX_STATE_QUERY_SCAN);
+                let scan_count = capacity.min(MAX_STATE_QUERY_SCAN).min(max_predicate_scan);
                 let right = self.evaluate_state_expression(&predicate.right)?;
                 let mut total_matches = 0usize;
                 let mut matches = Vec::new();
@@ -5292,6 +5303,12 @@ mod tests {
         assert_eq!(predicate["total_matches"], 2);
         assert_eq!(predicate["matches"][0]["index"], 1);
         assert_eq!(predicate["matches"][1]["index"], 2);
+        let bounded = process
+            .inspect_state_query_with_scan_limit("enemies[?hp >= score]", 2)
+            .expect("bounded predicate query");
+        assert_eq!(bounded["scanned"], 2);
+        assert_eq!(bounded["total_matches"], 1);
+        assert!(bounded["scan_truncated"].as_bool().unwrap_or(false));
 
         assert!(process
             .inspect_state_query("enemies[9].hp")
