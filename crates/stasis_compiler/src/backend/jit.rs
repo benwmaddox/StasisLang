@@ -1,5 +1,8 @@
 use crate::backend::emit::{DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage};
-use crate::backend::state_layout::build_state_layout;
+use crate::backend::state_layout::{build_state_layout, build_state_memory_report};
+use crate::backend::state_query::{
+    parse_state_query, BinaryOperator, ScalarExpression, StateQuery, StateValueReference,
+};
 use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::indexer::hash_text;
@@ -12,6 +15,7 @@ use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Module};
+use serde_json::{json, Value as JsonValue};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -22,10 +26,19 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::SystemTime;
 
 pub use crate::backend::state_layout::{
+    StateCapacityChangeReport as JitStateCapacityChangeReport,
     StateCollectionFieldLayout as JitStateCollectionFieldLayout,
     StateCollectionLayout as JitStateCollectionLayout, StateLayout as JitStateLayout,
+    StateMemoryEntry as JitStateMemoryEntry, StateMemoryPoolReport as JitStateMemoryPoolReport,
+    StateMemoryReport as JitStateMemoryReport,
+    StateMemoryStructFieldReport as JitStateMemoryStructFieldReport,
+    StateMemoryStructReport as JitStateMemoryStructReport,
     StateOpaqueLayout as JitStateOpaqueLayout, StateScalarLayout as JitStateScalarLayout,
+    StateStructFieldLayout as JitStateStructFieldLayout, StateStructLayout as JitStateStructLayout,
 };
+
+const MAX_STATE_QUERY_SCAN: usize = 4096;
+const MAX_STATE_QUERY_MATCHES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -556,6 +569,143 @@ impl JitProcess {
                     self.compiler.types(),
                 )
             })
+    }
+
+    pub fn state_memory_report(
+        &self,
+        capacity_overrides: &BTreeMap<String, u64>,
+        mobile_budget_bytes: u64,
+    ) -> Result<JitStateMemoryReport, String> {
+        let layout = self.state_layout();
+        let active_counts = layout
+            .collections
+            .iter()
+            .map(|collection| {
+                let capacity = u64::try_from(collection.capacity).unwrap_or(0);
+                let active = if self.global_fixed_text_encoding(&collection.path).is_some() {
+                    self.read_global_scalar(&format!("{}.byte_length", collection.path))
+                        .ok()
+                        .and_then(jit_value_as_nonnegative_u64)
+                        .unwrap_or(0)
+                        .min(capacity)
+                } else {
+                    capacity
+                };
+                (collection.path.clone(), active)
+            })
+            .collect::<BTreeMap<_, _>>();
+        build_state_memory_report(
+            &layout,
+            &active_counts,
+            capacity_overrides,
+            mobile_budget_bytes,
+        )
+    }
+
+    pub fn inspect_state_query(&self, query: &str) -> Result<JsonValue, String> {
+        self.inspect_state_query_with_scan_limit(query, MAX_STATE_QUERY_SCAN)
+    }
+
+    pub fn inspect_state_query_with_scan_limit(
+        &self,
+        query: &str,
+        max_predicate_scan: usize,
+    ) -> Result<JsonValue, String> {
+        match parse_state_query(query)? {
+            StateQuery::Scalar(expression) => {
+                let value = self.evaluate_state_expression(&expression)?;
+                Ok(json!({
+                    "query": query,
+                    "path": query,
+                    "kind": "scalar",
+                    "static_type": value.type_name(),
+                    "value": value,
+                }))
+            }
+            StateQuery::Predicate(predicate) => {
+                if max_predicate_scan == 0 {
+                    return Err("state predicate query scan budget is exhausted".to_string());
+                }
+                let (_, capacity) =
+                    self.global_collection_value_type(&predicate.path, &predicate.field)?;
+                let capacity = usize::try_from(capacity).map_err(|_| {
+                    format!(
+                        "collection '{}' has invalid capacity {capacity}",
+                        predicate.path
+                    )
+                })?;
+                let scan_count = capacity.min(MAX_STATE_QUERY_SCAN).min(max_predicate_scan);
+                let right = self.evaluate_state_expression(&predicate.right)?;
+                let mut total_matches = 0usize;
+                let mut matches = Vec::new();
+                for index in 0..scan_count {
+                    let value = self.read_global_collection_scalar(
+                        &predicate.path,
+                        &predicate.field,
+                        i32::try_from(index)
+                            .map_err(|_| "state query index overflow".to_string())?,
+                    )?;
+                    let matched = apply_state_binary(value, predicate.operator, right)?;
+                    if matched != JitScalarValue::Bool(true) {
+                        continue;
+                    }
+                    total_matches += 1;
+                    if matches.len() < MAX_STATE_QUERY_MATCHES {
+                        matches.push(json!({"index": index, "value": value}));
+                    }
+                }
+                Ok(json!({
+                    "query": query,
+                    "path": query,
+                    "kind": "predicate",
+                    "path": predicate.path,
+                    "field": predicate.field,
+                    "operator": predicate.operator.text(),
+                    "capacity": capacity,
+                    "scanned": scan_count,
+                    "scan_truncated": scan_count < capacity,
+                    "total_matches": total_matches,
+                    "matches_truncated": total_matches > matches.len(),
+                    "matches": matches,
+                }))
+            }
+        }
+    }
+
+    fn evaluate_state_expression(
+        &self,
+        expression: &ScalarExpression,
+    ) -> Result<JitScalarValue, String> {
+        match expression {
+            ScalarExpression::Value(reference) => self.evaluate_state_reference(reference),
+            ScalarExpression::Negate(expression) => {
+                negate_state_value(self.evaluate_state_expression(expression)?)
+            }
+            ScalarExpression::Binary {
+                left,
+                operator,
+                right,
+            } => apply_state_binary(
+                self.evaluate_state_expression(left)?,
+                *operator,
+                self.evaluate_state_expression(right)?,
+            ),
+        }
+    }
+
+    fn evaluate_state_reference(
+        &self,
+        reference: &StateValueReference,
+    ) -> Result<JitScalarValue, String> {
+        match reference {
+            StateValueReference::Path(path) => self.read_global_scalar(path),
+            StateValueReference::CollectionItem { path, index, field } => {
+                self.read_global_collection_scalar(path, field, *index)
+            }
+            StateValueReference::I32(value) => Ok(JitScalarValue::I32(*value)),
+            StateValueReference::F64(value) => Ok(JitScalarValue::F64(*value)),
+            StateValueReference::Bool(value) => Ok(JitScalarValue::Bool(*value)),
+        }
     }
 
     pub fn read_global_collection_scalar(
@@ -1250,6 +1400,167 @@ fn scalar_type_name(type_id: u16) -> Option<&'static str> {
         TYPE_ID_F64 => Some("f64"),
         TYPE_ID_BOOL => Some("bool"),
         _ => None,
+    }
+}
+
+fn jit_value_as_nonnegative_u64(value: JitScalarValue) -> Option<u64> {
+    match value {
+        JitScalarValue::I32(value) if value >= 0 => Some(value as u64),
+        JitScalarValue::U8(value) => Some(u64::from(value)),
+        _ => None,
+    }
+}
+
+fn negate_state_value(value: JitScalarValue) -> Result<JitScalarValue, String> {
+    match value {
+        JitScalarValue::I32(value) => value
+            .checked_neg()
+            .map(JitScalarValue::I32)
+            .ok_or_else(|| "state expression i32 negation overflow".to_string()),
+        JitScalarValue::U8(value) => Ok(JitScalarValue::I32(-i32::from(value))),
+        JitScalarValue::F32(value) => Ok(JitScalarValue::F32(-value)),
+        JitScalarValue::F64(value) => Ok(JitScalarValue::F64(-value)),
+        JitScalarValue::Bool(_) => Err("state expression cannot negate a bool value".to_string()),
+    }
+}
+
+fn apply_state_binary(
+    left: JitScalarValue,
+    operator: BinaryOperator,
+    right: JitScalarValue,
+) -> Result<JitScalarValue, String> {
+    if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
+        let equal = match (left, right) {
+            (JitScalarValue::Bool(left), JitScalarValue::Bool(right)) => left == right,
+            (left, right) => {
+                let (left, right) = state_numeric_pair(left, right).ok_or_else(|| {
+                    format!(
+                        "state expression operator '{}' requires two numeric operands or two bool operands",
+                        operator.text()
+                    )
+                })?;
+                left == right
+            }
+        };
+        return Ok(JitScalarValue::Bool(if operator == BinaryOperator::Equal {
+            equal
+        } else {
+            !equal
+        }));
+    }
+    if matches!(
+        operator,
+        BinaryOperator::Less
+            | BinaryOperator::LessEqual
+            | BinaryOperator::Greater
+            | BinaryOperator::GreaterEqual
+    ) {
+        let (left, right) = state_numeric_pair(left, right).ok_or_else(|| {
+            format!(
+                "state expression operator '{}' requires numeric operands",
+                operator.text()
+            )
+        })?;
+        let result = match operator {
+            BinaryOperator::Less => left < right,
+            BinaryOperator::LessEqual => left <= right,
+            BinaryOperator::Greater => left > right,
+            BinaryOperator::GreaterEqual => left >= right,
+            _ => unreachable!("comparison operators are matched above"),
+        };
+        return Ok(JitScalarValue::Bool(result));
+    }
+    if matches!(left, JitScalarValue::Bool(_)) || matches!(right, JitScalarValue::Bool(_)) {
+        return Err(format!(
+            "state expression operator '{}' does not accept bool operands",
+            operator.text()
+        ));
+    }
+    if matches!(left, JitScalarValue::F64(_)) || matches!(right, JitScalarValue::F64(_)) {
+        let (left, right) = state_numeric_pair(left, right).expect("numeric operands checked");
+        return apply_state_f64(left, operator, right).map(JitScalarValue::F64);
+    }
+    if matches!(left, JitScalarValue::F32(_)) || matches!(right, JitScalarValue::F32(_)) {
+        let left = state_value_as_f32(left).expect("numeric operands checked");
+        let right = state_value_as_f32(right).expect("numeric operands checked");
+        return apply_state_f32(left, operator, right).map(JitScalarValue::F32);
+    }
+    let left = state_value_as_i32(left).expect("integer operands checked");
+    let right = state_value_as_i32(right).expect("integer operands checked");
+    apply_state_i32(left, operator, right).map(JitScalarValue::I32)
+}
+
+fn state_numeric_pair(left: JitScalarValue, right: JitScalarValue) -> Option<(f64, f64)> {
+    Some((state_value_as_f64(left)?, state_value_as_f64(right)?))
+}
+
+fn state_value_as_f64(value: JitScalarValue) -> Option<f64> {
+    match value {
+        JitScalarValue::I32(value) => Some(f64::from(value)),
+        JitScalarValue::U8(value) => Some(f64::from(value)),
+        JitScalarValue::F32(value) => Some(f64::from(value)),
+        JitScalarValue::F64(value) => Some(value),
+        JitScalarValue::Bool(_) => None,
+    }
+}
+
+fn state_value_as_f32(value: JitScalarValue) -> Option<f32> {
+    match value {
+        JitScalarValue::I32(value) => Some(value as f32),
+        JitScalarValue::U8(value) => Some(f32::from(value)),
+        JitScalarValue::F32(value) => Some(value),
+        JitScalarValue::F64(_) | JitScalarValue::Bool(_) => None,
+    }
+}
+
+fn state_value_as_i32(value: JitScalarValue) -> Option<i32> {
+    match value {
+        JitScalarValue::I32(value) => Some(value),
+        JitScalarValue::U8(value) => Some(i32::from(value)),
+        JitScalarValue::F32(_) | JitScalarValue::F64(_) | JitScalarValue::Bool(_) => None,
+    }
+}
+
+fn apply_state_i32(left: i32, operator: BinaryOperator, right: i32) -> Result<i32, String> {
+    match operator {
+        BinaryOperator::Add => left.checked_add(right),
+        BinaryOperator::Subtract => left.checked_sub(right),
+        BinaryOperator::Multiply => left.checked_mul(right),
+        BinaryOperator::Divide if right != 0 => left.checked_div(right),
+        BinaryOperator::Remainder if right != 0 => left.checked_rem(right),
+        BinaryOperator::Divide | BinaryOperator::Remainder => {
+            return Err("state expression division by zero".to_string())
+        }
+        _ => return Err(format!("unsupported i32 operator '{}'", operator.text())),
+    }
+    .ok_or_else(|| format!("state expression i32 '{}' overflow", operator.text()))
+}
+
+fn apply_state_f32(left: f32, operator: BinaryOperator, right: f32) -> Result<f32, String> {
+    if matches!(operator, BinaryOperator::Divide | BinaryOperator::Remainder) && right == 0.0 {
+        return Err("state expression division by zero".to_string());
+    }
+    match operator {
+        BinaryOperator::Add => Ok(left + right),
+        BinaryOperator::Subtract => Ok(left - right),
+        BinaryOperator::Multiply => Ok(left * right),
+        BinaryOperator::Divide => Ok(left / right),
+        BinaryOperator::Remainder => Ok(left % right),
+        _ => Err(format!("unsupported f32 operator '{}'", operator.text())),
+    }
+}
+
+fn apply_state_f64(left: f64, operator: BinaryOperator, right: f64) -> Result<f64, String> {
+    if matches!(operator, BinaryOperator::Divide | BinaryOperator::Remainder) && right == 0.0 {
+        return Err("state expression division by zero".to_string());
+    }
+    match operator {
+        BinaryOperator::Add => Ok(left + right),
+        BinaryOperator::Subtract => Ok(left - right),
+        BinaryOperator::Multiply => Ok(left * right),
+        BinaryOperator::Divide => Ok(left / right),
+        BinaryOperator::Remainder => Ok(left % right),
+        _ => Err(format!("unsupported f64 operator '{}'", operator.text())),
     }
 }
 
@@ -4951,5 +5262,73 @@ mod tests {
             .expect_err("void tick should fail");
         assert!(error.contains("expected `function tick(): i32`"));
         assert!(error.contains("actual return type id"));
+    }
+
+    #[test]
+    fn compiler_indexed_state_queries_cover_indexes_predicates_and_expressions() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "state_queries.stasis",
+            "struct Enemy { hp: i32; alive: bool; }\n\
+             global enemies: Enemy[4];\n\
+             global score: i32;\n\
+             function main(): i32 {\n\
+                 score = 5;\n\
+                 enemies[0].hp = 2; enemies[0].alive = true;\n\
+                 enemies[1].hp = 7; enemies[1].alive = true;\n\
+                 enemies[2].hp = 9; enemies[2].alive = false;\n\
+                 return 0;\n\
+             }\n",
+        );
+        process.compile().expect("compile query fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("initialize query fixture"),
+            0
+        );
+
+        let indexed = process
+            .inspect_state_query("enemies[1].hp + score * 2")
+            .expect("indexed expression");
+        assert_eq!(indexed["kind"], "scalar");
+        assert_eq!(indexed["static_type"], "i32");
+        assert_eq!(indexed["value"]["value"], 17);
+
+        let predicate = process
+            .inspect_state_query("enemies[?hp >= score]")
+            .expect("predicate query");
+        assert_eq!(predicate["kind"], "predicate");
+        assert_eq!(predicate["capacity"], 4);
+        assert_eq!(predicate["total_matches"], 2);
+        assert_eq!(predicate["matches"][0]["index"], 1);
+        assert_eq!(predicate["matches"][1]["index"], 2);
+        let bounded = process
+            .inspect_state_query_with_scan_limit("enemies[?hp >= score]", 2)
+            .expect("bounded predicate query");
+        assert_eq!(bounded["scanned"], 2);
+        assert_eq!(bounded["total_matches"], 1);
+        assert!(bounded["scan_truncated"].as_bool().unwrap_or(false));
+
+        assert!(process
+            .inspect_state_query("enemies[9].hp")
+            .expect_err("out-of-range index")
+            .contains("outside capacity 4"));
+        assert!(process
+            .inspect_state_query("enemies[?missing > 0]")
+            .expect_err("unknown field")
+            .contains("field 'missing' was not found"));
+        assert!(process
+            .inspect_state_query("score / 0")
+            .expect_err("division by zero")
+            .contains("division by zero"));
+        assert!(process
+            .inspect_state_query("enemies[0].alive == score")
+            .expect_err("mixed equality operands")
+            .contains("two numeric operands or two bool operands"));
+        assert!(process
+            .inspect_state_query("enemies[?alive == score]")
+            .expect_err("mixed predicate operands")
+            .contains("two numeric operands or two bool operands"));
     }
 }

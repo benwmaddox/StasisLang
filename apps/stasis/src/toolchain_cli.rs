@@ -7,6 +7,7 @@ use stasis::{
     run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
 };
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
     plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
@@ -210,8 +211,15 @@ enum ToolchainCommand {
         #[arg(long)]
         development_build: bool,
     },
-    /// Report deterministic workspace and output layout information.
-    Inspect,
+    /// Report compiler-owned state memory, layout, and mobile budget information.
+    Inspect {
+        /// Project the byte impact of a collection capacity change (PATH=COUNT).
+        #[arg(long = "capacity", value_name = "PATH=COUNT")]
+        capacities: Vec<String>,
+        /// Mobile snapshot budget used for deterministic warnings.
+        #[arg(long, default_value_t = MAX_STATE_SNAPSHOT_BYTES as u64)]
+        mobile_budget_bytes: u64,
+    },
     /// Replay support is reserved until the replay runtime lands.
     Replay,
     /// Replay verification is reserved until the replay runtime lands.
@@ -576,7 +584,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
         ToolchainCommand::PackageMobile { .. } => "package-mobile",
-        ToolchainCommand::Inspect => "inspect",
+        ToolchainCommand::Inspect { .. } => "inspect",
         ToolchainCommand::Replay => "replay",
         ToolchainCommand::Verify => "verify",
         ToolchainCommand::Version => "version",
@@ -708,7 +716,10 @@ fn execute(
                         development_build,
                     )
                 }
-                ToolchainCommand::Inspect => inspect_workspace(&workspace),
+                ToolchainCommand::Inspect {
+                    capacities,
+                    mobile_budget_bytes,
+                } => inspect_workspace(&workspace, &capacities, mobile_budget_bytes),
                 ToolchainCommand::Symbol { command } => symbol_workspace(&workspace, command),
                 _ => Err("unsupported command routing".to_string()),
             }
@@ -883,14 +894,26 @@ fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
 fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
     let entry = workspace.root.join(&workspace.manifest.entry);
     validate_workspace_destination(workspace, "entry", &entry)?;
-    let source = fs::read_to_string(&entry)
-        .map_err(|error| format!("failed to read entry {}: {error}", entry.display()))?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
     jit.set_required_emit_roots(&["main".to_string()]);
-    jit.upsert_file(display_path(&entry), source.clone());
+    let mut sources = BTreeMap::new();
+    for file in files {
+        let path = workspace.root.join(&file.path);
+        let path = path.canonicalize().unwrap_or(path);
+        let path = path.to_string_lossy().to_string();
+        sources.insert(path.clone(), file.source.clone());
+        jit.upsert_file(path, file.source);
+    }
     jit.compile().map_err(|error| {
         if let Some(diagnostic) = jit.last_source_diagnostic() {
-            let (line, column) = line_column(&source, diagnostic.start);
+            let source = sources
+                .get(&diagnostic.path)
+                .map(String::as_str)
+                .unwrap_or("");
+            let (line, column) = line_column(source, diagnostic.start);
             format!(
                 "{}:{}:{}: {}",
                 diagnostic.path, line, column, diagnostic.message
@@ -1346,25 +1369,8 @@ fn format_live_response(response: &LiveResponse) -> String {
             "completion response exceeded the output bound; narrow the query".to_string()
         }
         "completion" | "palette" => format_live_completion(data),
-        "inspection" => format!(
-            "{}: {} = {}",
-            string_field(data, "path", "value"),
-            string_field(data, "static_type", "unknown"),
-            scalar_text(data.get("value").unwrap_or(&Value::Null))
-        ),
-        "state_inspection" => format!(
-            "{} live state value(s){}",
-            data.get("total").and_then(Value::as_u64).unwrap_or(0),
-            if data
-                .get("truncated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                " (view bounded)"
-            } else {
-                ""
-            }
-        ),
+        "inspection" => format_live_inspection(data),
+        "state_inspection" => format_live_state_inspection(data),
         "runtime_validation" => format_live_runtime_validation(data),
         "print" => format!(
             "{} = {}",
@@ -1380,6 +1386,11 @@ fn format_live_response(response: &LiveResponse) -> String {
             "{} -> {}",
             string_field(data, "path", "value"),
             scalar_text(data.get("value").unwrap_or(&Value::Null))
+        ),
+        "watch_error" => format!(
+            "{} watch error: {}",
+            string_field(data, "path", "value"),
+            string_field(data, "error", "unknown watch error")
         ),
         "watch_removed" => format_live_watch_removed(data),
         "watch_backpressure" => format!(
@@ -1437,6 +1448,125 @@ fn scalar_text(value: &Value) -> String {
         Value::String(value) => value.clone(),
         _ => "<structured value>".to_string(),
     }
+}
+
+fn format_live_inspection(data: &Value) -> String {
+    if data.get("kind").and_then(Value::as_str) == Some("predicate") {
+        let matches = data
+            .get("total_matches")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let suffix = if data
+            .get("scan_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || data
+                .get("matches_truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            " (bounded)"
+        } else {
+            ""
+        };
+        return format!(
+            "{}: {matches} match(es){suffix}",
+            string_field(data, "query", "predicate")
+        );
+    }
+    format!(
+        "{}: {} = {}",
+        string_field(data, "path", "value"),
+        string_field(data, "static_type", "unknown"),
+        scalar_text(data.get("value").unwrap_or(&Value::Null))
+    )
+}
+
+fn format_live_state_inspection(data: &Value) -> String {
+    let mut lines = vec![format!(
+        "{} live state value(s){}",
+        data.get("total").and_then(Value::as_u64).unwrap_or(0),
+        if data
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            " (view bounded)"
+        } else {
+            ""
+        }
+    )];
+    for item in data
+        .get("items")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        lines.push(format!(
+            "  {}: {} = {}",
+            string_field(item, "path", "value"),
+            string_field(item, "static_type", "unknown"),
+            scalar_text(item.get("value").unwrap_or(&Value::Null))
+        ));
+    }
+    for collection in data
+        .get("collections")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        lines.push(format!(
+            "  {} [{}/{}]",
+            string_field(collection, "path", "collection"),
+            collection
+                .get("active_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            collection
+                .get("capacity")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ));
+        for field in collection
+            .get("fields")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+        {
+            let name = string_field(field, "field", "element");
+            lines.push(format!(
+                "    {}: {}",
+                if name.is_empty() { "element" } else { name },
+                string_field(field, "type_name", "unknown")
+            ));
+        }
+    }
+    for state_struct in data
+        .get("structs")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        lines.push(format!(
+            "  {}: {}",
+            string_field(state_struct, "path", "state"),
+            string_field(state_struct, "type_name", "struct")
+        ));
+    }
+    if let Some(memory) = data.get("memory") {
+        lines.push(format!(
+            "  memory: {} bytes; snapshot: {} bytes",
+            memory
+                .get("total_capacity_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            memory
+                .get("snapshot_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ));
+    }
+    lines.join("\n")
 }
 
 fn format_live_help(data: &Value) -> String {
@@ -3062,18 +3192,45 @@ fn is_editable_workshop_path(path: &str) -> bool {
     normalized.starts_with("src/") || normalized.starts_with("tests/")
 }
 
-fn inspect_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
+fn inspect_workspace(
+    workspace: &Workspace,
+    capacities: &[String],
+    mobile_budget_bytes: u64,
+) -> Result<CommandResult, String> {
     let entry = workspace.root.join(&workspace.manifest.entry);
     let tests = workspace.root.join(&workspace.manifest.tests);
     let output = workspace.root.join(&workspace.manifest.output);
+    let capacity_overrides = parse_capacity_overrides(capacities)?;
+    let jit = compile_workspace_jit(workspace)?;
+    let memory = jit.state_memory_report(&capacity_overrides, mobile_budget_bytes)?;
+    let mut human = vec![format!(
+        "state memory: {} capacity bytes; {} snapshot bytes; {} mobile budget bytes",
+        memory.total_capacity_bytes, memory.snapshot_bytes, memory.mobile_budget_bytes
+    )];
+    if memory.projected_capacity_bytes != memory.total_capacity_bytes {
+        human.push(format!(
+            "projected capacity: {} bytes ({:+} bytes)",
+            memory.projected_capacity_bytes,
+            i128::from(memory.projected_capacity_bytes) - i128::from(memory.total_capacity_bytes)
+        ));
+    }
+    if !memory.largest_pools.is_empty() {
+        human.push("largest pools:".to_string());
+        human.extend(memory.largest_pools.iter().map(|pool| {
+            format!(
+                "  {}: {} bytes ({} x {})",
+                pool.path, pool.capacity_bytes, pool.capacity, pool.bytes_per_element
+            )
+        }));
+    }
+    human.extend(
+        memory
+            .warnings
+            .iter()
+            .map(|warning| format!("warning: {warning}")),
+    );
     Ok(CommandResult::success(
-        format!(
-            "workspace={} entry={} tests={} output={}",
-            workspace.root.display(),
-            entry.display(),
-            tests.display(),
-            output.display()
-        ),
+        human.join("\n"),
         json!({
             "name": workspace.manifest.name,
             "root": display_path(&workspace.root),
@@ -3081,8 +3238,30 @@ fn inspect_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
             "tests": display_path(&tests),
             "output": display_path(&output),
             "manifest_version": workspace.manifest.manifest_version,
+            "memory": memory,
         }),
     ))
+}
+
+fn parse_capacity_overrides(values: &[String]) -> Result<BTreeMap<String, u64>, String> {
+    let mut overrides = BTreeMap::new();
+    for value in values {
+        let (path, count) = value
+            .split_once('=')
+            .ok_or_else(|| format!("invalid capacity override '{value}'; expected PATH=COUNT"))?;
+        if path.is_empty() {
+            return Err(format!(
+                "invalid capacity override '{value}'; path cannot be empty"
+            ));
+        }
+        let count = count
+            .parse::<u64>()
+            .map_err(|error| format!("invalid capacity override '{value}': {error}"))?;
+        if overrides.insert(path.to_string(), count).is_some() {
+            return Err(format!("duplicate capacity override for '{path}'"));
+        }
+    }
+    Ok(overrides)
 }
 
 fn env_result(explicit: Option<&Path>) -> Result<CommandResult, String> {

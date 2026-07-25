@@ -234,9 +234,11 @@ fail-fast behavior. Invalid human commands remain nonfatal and return focus to t
 :edit tick
 :inspect
 :inspect score
-:watch score
+:inspect state.enemies[2].hp
+:inspect state.enemies[?hp >= 10]
+:watch score + state.enemies[2].hp
 :set score 10
-:print score
+:print score * 2
 :changes
 :undo
 :redo
@@ -307,8 +309,21 @@ validating or adjusting migrated state; the runtime then restores the prior disk
 
 ## Scratch and state transactions
 
-`:inspect`, `:set`, and `:do` accept compiler-indexed scalar paths (`i32`, `f32`, `f64`, or
-`bool`). `:do` is a semicolon-separated assignment transaction:
+Bare `:inspect` returns a bounded state tree containing scalar values, collection shapes,
+capacities/active counts, struct fields, and current memory totals. Explicit `:inspect`, `:print`,
+and `:watch` use compiler-indexed state queries. Queries support scalar paths, fixed collection
+indexes (`state.enemies[2].hp`), bounded predicates (`state.enemies[?hp >= 10]`), parentheses,
+and scalar arithmetic/comparison with normal precedence. Predicate scans stop after 4096 elements
+and return at most 64 matches with explicit truncation fields. Watches re-evaluate the same query
+between ticks and publish only changes. Predicate watches share one 4096-element scan budget per
+tick, and a watch that becomes invalid publishes one `watch_error` until it recovers or its error
+changes.
+
+Queries do not expose arbitrary addresses, lexical stacks, calls, or runtime reflection. Missing
+paths/fields, invalid indexes/types/operators, divide-by-zero, and unsupported syntax return stable
+diagnostics from the compiler metadata path. `:set` and `:do` remain intentionally narrower:
+they accept compiler-indexed scalar paths (`i32`, `f32`, `f64`, or `bool`) and literal/path values.
+`:do` is a semicolon-separated assignment transaction:
 
 ```text
 :do --preview
@@ -318,8 +333,8 @@ ready = true;
 ```
 
 All paths and values are validated before any assignment is written. Preview performs no write.
-Calls, arbitrary addresses, and unsupported expressions fail clearly instead of using a second
-parser or lowering pipeline.
+Calls, arbitrary addresses, and unsupported mutation expressions fail clearly instead of using a
+second compiler or runtime-reflection path.
 
 Named cells retain code and results only for the current development session:
 

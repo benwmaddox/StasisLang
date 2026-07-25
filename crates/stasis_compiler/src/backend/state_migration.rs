@@ -839,11 +839,13 @@ mod tests {
         let active = JitStateLayout {
             scalars: Vec::new(),
             collections: vec![collection(4)],
+            structs: Vec::new(),
             opaque: Vec::new(),
         };
         let incoming = JitStateLayout {
             scalars: Vec::new(),
             collections: vec![collection(8)],
+            structs: Vec::new(),
             opaque: Vec::new(),
         };
 
