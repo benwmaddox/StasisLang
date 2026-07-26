@@ -88,6 +88,16 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
+      - name: Install SDL development packages (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libsdl2-dev libsdl2-image-dev
+
+      - name: Install SDL development packages (macos)
+        if: runner.os == 'macOS'
+        run: brew install sdl2 sdl2_image
+
       - name: Setup MSVC dev environment (windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
