@@ -19,6 +19,8 @@ EXPORTS
     stasis_get_time_ms
     stasis_get_time_us
     stasis_sleep_ms
+    stasis_storage_load_i32
+    stasis_storage_save_i32
     stasis_audio_init
     stasis_audio_shutdown
     stasis_audio_is_available

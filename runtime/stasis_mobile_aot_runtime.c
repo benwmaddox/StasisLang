@@ -30,6 +30,8 @@ float stasis_gfx_measure_text_cached(int handle);
 int stasis_load_font(const char *path, int size);
 float stasis_measure_text(int font, const char *text);
 void stasis_sleep_ms(int ms);
+int stasis_storage_load_i32(const char *scope, const char *key, int fallback);
+int stasis_storage_save_i32(const char *scope, const char *key, int value);
 
 typedef union StasisScalarValue {
     int32_t i32_value;
@@ -447,6 +449,26 @@ float stasis_jit_measure_text(int32_t font, int32_t text) {
     return result;
 }
 void stasis_jit_sleep_ms(int32_t ms) { stasis_sleep_ms(ms); }
+int stasis_jit_storage_load_i32(int32_t scope, int32_t key, int32_t fallback) {
+    char *scope_value = resolve_text(scope);
+    char *key_value = resolve_text(key);
+    int result = scope_value == NULL || key_value == NULL
+        ? fallback
+        : stasis_storage_load_i32(scope_value, key_value, fallback);
+    free(scope_value);
+    free(key_value);
+    return result;
+}
+int stasis_jit_storage_save_i32(int32_t scope, int32_t key, int32_t value) {
+    char *scope_value = resolve_text(scope);
+    char *key_value = resolve_text(key);
+    int result = scope_value == NULL || key_value == NULL
+        ? 0
+        : stasis_storage_save_i32(scope_value, key_value, value);
+    free(scope_value);
+    free(key_value);
+    return result;
+}
 
 #define DEFINE_SCALAR_ACCESSORS(name, type, kind, member) \
 type stasis_jit_global_##name##_load(int32_t hash) { \

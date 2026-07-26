@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <ctype.h>
+#include <errno.h>
 #include <time.h>
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -102,6 +103,8 @@ STASIS_EXPORT int stasis_get_time_us(void);
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
 STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y, float r, float g, float b, float a);
 STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle);
+STASIS_EXPORT int stasis_storage_load_i32(const char* scope, const char* key, int fallback);
+STASIS_EXPORT int stasis_storage_save_i32(const char* scope, const char* key, int value);
 
 /* Global state */
 static SDL_Window* g_window = NULL;
@@ -4928,6 +4931,113 @@ STASIS_EXPORT void stasis_sleep_ms(int ms) {
         nanosleep(&delay, NULL);
 #endif
     }
+}
+
+static int stasis_storage_component_valid(const char* value) {
+    size_t length;
+    size_t index;
+    if (!value) return 0;
+    length = strlen(value);
+    if (length == 0 || length > 63) return 0;
+    for (index = 0; index < length; index += 1) {
+        unsigned char ch = (unsigned char)value[index];
+        if (!((ch >= 'A' && ch <= 'Z') ||
+              (ch >= 'a' && ch <= 'z') ||
+              (ch >= '0' && ch <= '9') ||
+              ch == '_' || ch == '-')) return 0;
+    }
+    return 1;
+}
+
+static int stasis_storage_i32_path(
+    const char* scope,
+    const char* key,
+    char* path,
+    size_t capacity,
+    char** owned_root
+) {
+    int written;
+    char* root;
+    if (!path || capacity == 0 || !owned_root ||
+        !stasis_storage_component_valid(scope) || !stasis_storage_component_valid(key)) {
+        return 0;
+    }
+    root = SDL_GetPrefPath("StasisLang", scope);
+    if (!root) return 0;
+    written = snprintf(path, capacity, "%s%s.i32", root, key);
+    if (written < 0 || (size_t)written >= capacity) {
+        SDL_free(root);
+        return 0;
+    }
+    *owned_root = root;
+    return 1;
+}
+
+STASIS_EXPORT int stasis_storage_load_i32(const char* scope, const char* key, int fallback) {
+    char path[1024];
+    char buffer[64];
+    char* root = NULL;
+    char* end = NULL;
+    long long parsed;
+    FILE* file;
+    int trailing;
+    if (!stasis_storage_i32_path(scope, key, path, sizeof(path), &root)) return fallback;
+    file = fopen(path, "rb");
+    SDL_free(root);
+    if (!file) return fallback;
+    if (!fgets(buffer, sizeof(buffer), file)) {
+        fclose(file);
+        return fallback;
+    }
+    trailing = fgetc(file);
+    fclose(file);
+    if (trailing != EOF) return fallback;
+    errno = 0;
+    parsed = strtoll(buffer, &end, 10);
+    if (errno != 0 || end == buffer) return fallback;
+    while (*end != '\0' && isspace((unsigned char)*end)) end += 1;
+    if (*end != '\0' || parsed < INT32_MIN || parsed > INT32_MAX) return fallback;
+    return (int)parsed;
+}
+
+STASIS_EXPORT int stasis_storage_save_i32(const char* scope, const char* key, int value) {
+    char path[1024];
+    char temp_path[1032];
+    char text[32];
+    char* root = NULL;
+    FILE* file;
+    int path_written;
+    int text_written;
+    int ok = 1;
+    if (!stasis_storage_i32_path(scope, key, path, sizeof(path), &root)) return 0;
+    SDL_free(root);
+    path_written = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
+    text_written = snprintf(text, sizeof(text), "%d\n", value);
+    if (path_written < 0 || (size_t)path_written >= sizeof(temp_path) ||
+        text_written < 0 || (size_t)text_written >= sizeof(text)) {
+        return 0;
+    }
+    file = fopen(temp_path, "wb");
+    if (!file) return 0;
+    if (fwrite(text, 1, (size_t)text_written, file) != (size_t)text_written) ok = 0;
+    if (ok && fflush(file) != 0) ok = 0;
+    if (fclose(file) != 0) ok = 0;
+    if (!ok) {
+        remove(temp_path);
+        return 0;
+    }
+#if defined(_WIN32)
+    if (!MoveFileExA(temp_path, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        remove(temp_path);
+        return 0;
+    }
+#else
+    if (rename(temp_path, path) != 0) {
+        remove(temp_path);
+        return 0;
+    }
+#endif
+    return 1;
 }
 
 /*

@@ -94,6 +94,8 @@ float stasis_jit_gfx_measure_text_cached(int32_t handle);
 int stasis_jit_load_font(int32_t path, int32_t size);
 float stasis_jit_measure_text(int32_t font, int32_t text);
 void stasis_jit_sleep_ms(int32_t ms);
+int stasis_jit_storage_load_i32(int32_t scope, int32_t key, int32_t fallback);
+int stasis_jit_storage_save_i32(int32_t scope, int32_t key, int32_t value);
 int stasis_mobile_json_escape(const char *input, char *output, size_t capacity);
 void stasis_mobile_aot_reset(void);
 

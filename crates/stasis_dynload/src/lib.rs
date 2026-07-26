@@ -482,6 +482,8 @@ struct StasisGraphicsAssetsApi {
     stasis_measure_text: usize,
     stasis_gfx_cache_text: usize,
     stasis_gfx_measure_text_cached: usize,
+    stasis_storage_load_i32: Option<usize>,
+    stasis_storage_save_i32: Option<usize>,
 }
 
 #[cfg(windows)]
@@ -512,6 +514,8 @@ impl StasisGraphicsAssetsApi {
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
             stasis_gfx_cache_text: lib.symbol_address("stasis_gfx_cache_text")?,
             stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
+            stasis_storage_load_i32: lib.symbol_address("stasis_storage_load_i32").ok(),
+            stasis_storage_save_i32: lib.symbol_address("stasis_storage_save_i32").ok(),
             _lib: lib,
         })
     }
@@ -2663,6 +2667,63 @@ pub extern "C" fn stasis_jit_gfx_release_sprite(handle: i32) {
     #[cfg(not(windows))]
     {
         let _ = handle;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_storage_load_i32(scope_id: i32, key_id: i32, fallback: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let (Ok(scope), Ok(key)) = (
+            jit_text_arg_to_cstring(scope_id),
+            jit_text_arg_to_cstring(key_id),
+        ) else {
+            return fallback;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return fallback;
+        };
+        let Some(address) = api.stasis_storage_load_i32 else {
+            return fallback;
+        };
+        let callback: extern "system" fn(*const c_char, *const c_char, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        return callback(scope.as_ptr(), key.as_ptr(), fallback);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = scope_id;
+        let _ = key_id;
+        fallback
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_storage_save_i32(scope_id: i32, key_id: i32, value: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let (Ok(scope), Ok(key)) = (
+            jit_text_arg_to_cstring(scope_id),
+            jit_text_arg_to_cstring(key_id),
+        ) else {
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let Some(address) = api.stasis_storage_save_i32 else {
+            return 0;
+        };
+        let callback: extern "system" fn(*const c_char, *const c_char, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        return callback(scope.as_ptr(), key.as_ptr(), value);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = scope_id;
+        let _ = key_id;
+        let _ = value;
+        0
     }
 }
 
