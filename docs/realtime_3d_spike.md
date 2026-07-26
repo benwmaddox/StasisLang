@@ -37,14 +37,16 @@ failing to load while 3D remains an opt-in desktop capability.
 Measurements were taken at a 720x960 logical/drawable size on Intel Arc OpenGL
 4.6. Each run included process startup, OBJ parsing, GPU upload, and 300 frames.
 
-| Scene | Expanded vertices | Native draws/frame | Wall result |
+| Scene | Uploaded / submitted vertices | 3D submissions/frame | Wall result |
 | --- | ---: | ---: | ---: |
-| Full Blender exports, per-square board | about 330k | about 75 | 41.4 FPS |
-| LOD meshes, two batched board meshes | about 78k | 13 | 55.4 FPS |
+| Full Blender exports, per-square board | about 200k / 331k | about 73 | 41.4 FPS |
+| LOD meshes, two batched board meshes | 77,922 / about 116k | 11 | 55.4 FPS |
 
-At gameplay scale the LOD/batched version preserved the silhouette and scene
-composition while recovering roughly 34% wall-frame throughput. The benchmark is
-directional rather than a GPU-only result because startup work is included.
+The first vertex count is unique mesh data uploaded once; the second includes
+repeated instances submitted for one frame. At gameplay scale the LOD/batched
+version preserved the silhouette and scene composition while recovering roughly
+34% wall-frame throughput. The benchmark is directional rather than a GPU-only
+result because startup work is included.
 
 Stasis already distinguishes logical, native, and drawable dimensions. The 3D
 pass renders to the drawable viewport, while the HUD uses logical coordinates and
