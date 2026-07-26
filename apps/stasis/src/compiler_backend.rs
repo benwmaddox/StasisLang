@@ -3044,8 +3044,9 @@ fn state_layout_runtime_fields(
 ) -> Result<Vec<PackagedRuntimeField>, String> {
     fn field_width(type_name: &str) -> Result<usize, String> {
         match type_name {
-            "bool" | "u16" | "u32" | "i32" | "f32" => Ok(4),
+            "bool" | "u32" | "i32" | "f32" => Ok(4),
             "u8" => Ok(1),
+            "u16" => Ok(2),
             "f64" => Ok(8),
             other => Err(format!("unsupported AOT state storage type '{other}'")),
         }
@@ -3202,6 +3203,22 @@ fn append_runtime_bridge_field_source(
             .map_err(|_| format!("packaged data field {field_name} is outside i32 range"))
     }
 
+    fn unsigned_literal(
+        value: &serde_json::Value,
+        field_name: &str,
+        max: u64,
+    ) -> Result<String, String> {
+        let value = value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+            .ok_or_else(|| {
+                format!("packaged data field {field_name} requires an unsigned integer")
+            })?;
+        (value <= max)
+            .then(|| value.to_string())
+            .ok_or_else(|| format!("packaged data field {field_name} is outside unsigned range"))
+    }
+
     fn float_literal(
         value: &serde_json::Value,
         field_name: &str,
@@ -3230,36 +3247,83 @@ fn append_runtime_bridge_field_source(
         .unwrap_or(0);
     let is_array = field.collection_path.is_some() || field.array_count > 1;
     match field.field_type.as_str() {
-        "u8" if is_array => {
+        "u8" => {
             let values = values_for_field(field)?;
             let initializer = if values.is_empty() {
                 "0".to_string()
             } else {
                 values
                     .iter()
-                    .map(|value| {
-                        let value = i32_literal(value, &field.name)?;
-                        let parsed = value.parse::<i32>().map_err(|error| error.to_string())?;
-                        u8::try_from(parsed)
-                            .map(|value| value.to_string())
-                            .map_err(|_| {
-                                format!("packaged data field {} is outside u8 range", field.name)
-                            })
-                    })
+                    .map(|value| unsigned_literal(value, &field.name, u64::from(u8::MAX)))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             };
             source.push_str(&format!(
                 "STASIS_EXPORT uint8_t {}[{}] = {{{initializer}}};\n",
-                field.name, field.array_count,
+                field.name,
+                if is_array { field.array_count } else { 1 },
             ));
             register_lines.push(format!(
                 "stasis_jit_register_global_u8_array({collection_hash}, {field_hash}, {name}, {len});",
                 name = field.name,
-                len = field.array_count
+                len = if is_array { field.array_count } else { 1 }
             ));
         }
-        "bool" | "u8" | "u16" | "u32" | "i32" => {
+        "u16" => {
+            let values = values_for_field(field)?;
+            let initializer = if values.is_empty() {
+                "0".to_string()
+            } else {
+                values
+                    .iter()
+                    .map(|value| unsigned_literal(value, &field.name, u64::from(u16::MAX)))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
+            };
+            source.push_str(&format!(
+                "STASIS_EXPORT uint16_t {}[{}] = {{{initializer}}};\n",
+                field.name,
+                if is_array { field.array_count } else { 1 },
+            ));
+            register_lines.push(format!(
+                "stasis_jit_register_global_u16_array({collection_hash}, {field_hash}, {name}, {len});",
+                name = field.name,
+                len = if is_array { field.array_count } else { 1 }
+            ));
+        }
+        "u32" => {
+            let values = values_for_field(field)?;
+            let initializer = if values.is_empty() {
+                "0".to_string()
+            } else {
+                values
+                    .iter()
+                    .map(|value| unsigned_literal(value, &field.name, u64::from(u32::MAX)))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
+            };
+            if is_array {
+                source.push_str(&format!(
+                    "STASIS_EXPORT uint32_t {}[{}] = {{{initializer}}};\n",
+                    field.name, field.array_count,
+                ));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_i32_array({collection_hash}, {field_hash}, (int32_t*){name}, {len});",
+                    name = field.name,
+                    len = field.array_count
+                ));
+            } else {
+                source.push_str(&format!(
+                    "STASIS_EXPORT uint32_t {} = {initializer};\n",
+                    field.name
+                ));
+                register_lines.push(format!(
+                    "stasis_jit_register_global_i32_ptr({scalar_hash}, (int32_t*)&{name});",
+                    name = field.name
+                ));
+            }
+        }
+        "bool" | "i32" => {
             let values = values_for_field(field)?;
             if is_array {
                 let initializer = if values.is_empty() {
@@ -3494,6 +3558,8 @@ fn build_engine_bundle_runtime_bridge_source(
 typedef signed int int32_t;\n\
 typedef signed long long int64_t;\n\
 typedef unsigned char uint8_t;\n\
+typedef unsigned short uint16_t;\n\
+typedef unsigned int uint32_t;\n\
 typedef unsigned long long uintptr_t;\n\
 #else\n\
 #include <stdint.h>\n\
@@ -3515,6 +3581,7 @@ void stasis_jit_register_global_i32_array(int32_t collection_hash, int32_t field
 void stasis_jit_register_global_f32_array(int32_t collection_hash, int32_t field_hash, float* ptr, int32_t len);\n\
 void stasis_jit_register_global_f64_array(int32_t collection_hash, int32_t field_hash, double* ptr, int32_t len);\n\
 void stasis_jit_register_global_u8_array(int32_t collection_hash, int32_t field_hash, uint8_t* ptr, int32_t len);\n\
+void stasis_jit_register_global_u16_array(int32_t collection_hash, int32_t field_hash, uint16_t* ptr, int32_t len);\n\
 void stasis_jit_register_code_ptr(int32_t fn_id_raw, int64_t code_ptr);\n\
 void stasis_jit_clear_string_literal_table(void);\n\
 void stasis_jit_upsert_string_literal(int32_t id, const char* value);\n",
@@ -4069,6 +4136,56 @@ mod tests {
     #[test]
     fn identifier_hash_matches_incremental_function() {
         assert_eq!(hash_identifier("on_code_swap"), -663_287_521);
+    }
+
+    #[test]
+    fn packaged_runtime_bridge_preserves_unsigned_storage_widths() {
+        let runtime_fields = vec![
+            PackagedRuntimeField {
+                name: "byte_value".to_string(),
+                size: 1,
+                field_type: "u8".to_string(),
+                array_count: 1,
+                initial_value: Some(serde_json::json!(255)),
+                collection_path: None,
+                collection_field: None,
+            },
+            PackagedRuntimeField {
+                name: "word_values".to_string(),
+                size: 4,
+                field_type: "u16".to_string(),
+                array_count: 2,
+                initial_value: Some(serde_json::json!([1, 65535])),
+                collection_path: Some("word_values".to_string()),
+                collection_field: Some(String::new()),
+            },
+            PackagedRuntimeField {
+                name: "wide_value".to_string(),
+                size: 4,
+                field_type: "u32".to_string(),
+                array_count: 1,
+                initial_value: Some(serde_json::json!(4294967295_u64)),
+                collection_path: None,
+                collection_field: None,
+            },
+        ];
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::Native,
+            &runtime_fields,
+            &[],
+            &[],
+            &[],
+        )
+        .expect("build runtime bridge");
+
+        assert!(source.contains("typedef unsigned short uint16_t;"));
+        assert!(source.contains("typedef unsigned int uint32_t;"));
+        assert!(source.contains("uint8_t byte_value[1] = {255};"));
+        assert!(source.contains("uint16_t word_values[2] = {1, 65535};"));
+        assert!(source.contains("uint32_t wide_value = 4294967295;"));
+        assert!(source.contains("stasis_jit_register_global_u8_array"));
+        assert!(source.contains("stasis_jit_register_global_u16_array"));
+        assert!(source.contains("(int32_t*)&wide_value"));
     }
 
     #[test]

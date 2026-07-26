@@ -1,6 +1,7 @@
 use super::emit::{CollectionInfoMap, GlobalPathTypeMap};
 use crate::frontend::types::{
-    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
+    TYPE_ID_U32, TYPE_ID_U8,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -362,7 +363,8 @@ fn build_struct_memory_report(
 fn storage_type_bytes(type_name: &str) -> Option<u64> {
     match type_name {
         "u8" => Some(1),
-        "i32" | "f32" | "bool" => Some(4),
+        "u16" => Some(2),
+        "u32" | "i32" | "f32" | "bool" => Some(4),
         "f64" => Some(8),
         _ => None,
     }
@@ -544,19 +546,16 @@ fn scalar_type_name(type_id: u16) -> Option<&'static str> {
         TYPE_ID_F32 => Some("f32"),
         TYPE_ID_F64 => Some("f64"),
         TYPE_ID_BOOL => Some("bool"),
+        TYPE_ID_U8 => Some("u8"),
+        TYPE_ID_U16 => Some("u16"),
+        TYPE_ID_U32 => Some("u32"),
         _ => None,
     }
 }
 
 fn collection_type_name(type_table: &TypeTable, type_id: u16) -> Option<&'static str> {
-    if type_table
-        .type_info(type_id)
-        .is_some_and(|info| info.name == "u8")
-    {
-        Some("u8")
-    } else {
-        scalar_type_name(type_id)
-    }
+    let _ = type_table;
+    scalar_type_name(type_id)
 }
 
 #[cfg(test)]
@@ -665,6 +664,37 @@ mod tests {
             .iter()
             .any(|warning| warning.contains("mobile snapshot budget")));
         assert!(report.entries.iter().all(|entry| entry.padding_bytes == 0));
+    }
+
+    #[test]
+    fn narrow_unsigned_state_reports_true_element_widths() {
+        let source = "global byte_value: u8;\nglobal word_value: u16;\nglobal wide_value: u32;\nglobal bytes: u8[2];\nglobal words: u16[2];\nglobal wides: u32[2];\nfunction main(): i32 { return 0; }\n";
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", source);
+        jit.compile_staged().expect("compile narrow layout fixture");
+        let report = build_state_memory_report(
+            &jit.state_layout(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            1024,
+        )
+        .expect("build narrow memory report");
+
+        for (path, expected_bytes) in [
+            ("byte_value", 1),
+            ("word_value", 2),
+            ("wide_value", 4),
+            ("bytes", 1),
+            ("words", 2),
+            ("wides", 4),
+        ] {
+            let entry = report
+                .entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .unwrap_or_else(|| panic!("missing report entry for {path}"));
+            assert_eq!(entry.element_bytes, expected_bytes, "{path}");
+        }
     }
 
     #[test]

@@ -335,14 +335,22 @@ fn parse_csv_cell(value: &str, field: &CsvBindingField) -> Result<Value, String>
                 field.path
             )),
         },
-        "u8" | "u16" | "u32" | "i32" => {
-            let number = trimmed
-                .parse::<i64>()
-                .map_err(|error| format!("field {} requires an integer: {error}", field.path))?;
-            i32::try_from(number)
-                .map_err(|_| format!("field {} is outside i32 range", field.path))?;
-            Ok(Value::Number(number.into()))
-        }
+        "i32" => trimmed
+            .parse::<i32>()
+            .map(|number| Value::Number(number.into()))
+            .map_err(|error| format!("field {} requires an i32: {error}", field.path)),
+        "u8" => trimmed
+            .parse::<u8>()
+            .map(|number| Value::Number(number.into()))
+            .map_err(|error| format!("field {} requires a u8: {error}", field.path)),
+        "u16" => trimmed
+            .parse::<u16>()
+            .map(|number| Value::Number(number.into()))
+            .map_err(|error| format!("field {} requires a u16: {error}", field.path)),
+        "u32" => trimmed
+            .parse::<u32>()
+            .map(|number| Value::Number(number.into()))
+            .map_err(|error| format!("field {} requires a u32: {error}", field.path)),
         "f32" | "f64" => {
             let number = trimmed
                 .parse::<f64>()
@@ -895,6 +903,25 @@ fn validate_unique_play_binding_targets(
     Ok(())
 }
 
+fn play_integer_bits(value: &Value, type_name: &str) -> Option<i32> {
+    match type_name {
+        "i32" => value.as_i64().and_then(|number| i32::try_from(number).ok()),
+        "u8" => value
+            .as_u64()
+            .and_then(|number| u8::try_from(number).ok())
+            .map(i32::from),
+        "u16" => value
+            .as_u64()
+            .and_then(|number| u16::try_from(number).ok())
+            .map(i32::from),
+        "u32" => value
+            .as_u64()
+            .and_then(|number| u32::try_from(number).ok())
+            .map(|number| number as i32),
+        _ => None,
+    }
+}
+
 fn apply_play_bound_table_array(
     field: &PlayStructFieldMetadata,
     collection_hash: i32,
@@ -910,7 +937,7 @@ fn apply_play_bound_table_array(
                 let value = if field.type_name == "bool" {
                     item.as_bool().map(|flag| i32::from(flag))
                 } else {
-                    item.as_i64().and_then(|number| i32::try_from(number).ok())
+                    play_integer_bits(item, &field.type_name)
                 };
                 if let Some(value) = value {
                     stasis_dynload::stasis_jit_global_i32_array_store(
@@ -1049,7 +1076,7 @@ fn apply_play_bound_array(field: &PlayStructFieldMetadata, path: &str, value: &V
             for (index, item) in items.iter().take(count).enumerate() {
                 let value = match field.type_name.as_str() {
                     "bool" => item.as_bool().map(|flag| if flag { 1 } else { 0 }),
-                    _ => item.as_i64().and_then(|number| i32::try_from(number).ok()),
+                    _ => play_integer_bits(item, &field.type_name),
                 };
                 let Some(value) = value else {
                     continue;
@@ -1116,7 +1143,7 @@ fn apply_play_bound_value(field: &PlayStructFieldMetadata, value: &Value, full_p
             stasis_dynload::stasis_jit_global_i32_store(path_hash, if flag { 1 } else { 0 });
         }
         "u8" | "u16" | "u32" | "i32" => {
-            let Some(number) = value.as_i64().and_then(|number| i32::try_from(number).ok()) else {
+            let Some(number) = play_integer_bits(value, &field.type_name) else {
                 return;
             };
             stasis_dynload::stasis_jit_global_i32_store(path_hash, number);
@@ -3325,6 +3352,14 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_mobile_runtime.h"
     ));
+    const STASIS_MOBILE_AOT_RUNTIME_SOURCE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_mobile_aot_runtime.c"
+    ));
+    const STASIS_MOBILE_AOT_RUNTIME_HEADER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_mobile_aot_runtime.h"
+    ));
     const STASIS_RUNTIME_CMAKE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/CMakeLists.txt"
@@ -3728,6 +3763,21 @@ mod tests {
     }
 
     #[test]
+    fn mobile_aot_runtime_supports_u16_storage() {
+        assert!(STASIS_MOBILE_AOT_RUNTIME_HEADER.contains("stasis_jit_register_global_u16_array"));
+        for required in [
+            "STASIS_VALUE_U16",
+            "sizeof(uint16_t)",
+            "((uint16_t *)entry->data)[i]",
+        ] {
+            assert!(
+                STASIS_MOBILE_AOT_RUNTIME_SOURCE.contains(required),
+                "mobile AOT runtime should contain {required}"
+            );
+        }
+    }
+
+    #[test]
     fn shipping_renderers_share_one_versioned_sdl_command_process() {
         let runtime_cmake = STASIS_RUNTIME_CMAKE.replace("\r\n", "\n");
         for required in [
@@ -3898,16 +3948,19 @@ mod tests {
 
         let mut json_loaded = 0i32;
         let mut screen_width = 0i32;
+        let mut wide_value = 0i32;
         let mut background_red = 0.0f32;
         let mut font_bytes = vec![0u8; 64];
 
         let json_loaded_hash = hash_global_path("state.config.json_loaded");
         let screen_width_hash = hash_global_path("state.config.screen_width");
+        let wide_value_hash = hash_global_path("state.config.wide_value");
         let background_red_hash = hash_global_path("state.config.background_red");
         let font_path_hash = hash_global_path("state.config.font_path");
 
         stasis_dynload::register_global_i32_ptr(json_loaded_hash, &mut json_loaded);
         stasis_dynload::register_global_i32_ptr(screen_width_hash, &mut screen_width);
+        stasis_dynload::register_global_i32_ptr(wide_value_hash, &mut wide_value);
         stasis_dynload::register_global_f32_ptr(background_red_hash, &mut background_red);
         stasis_dynload::register_global_u8_array(
             font_path_hash,
@@ -3940,6 +3993,12 @@ mod tests {
                     array_count: 1,
                 },
                 PlayStructFieldMetadata {
+                    json_path: "config.wide_value".to_string(),
+                    csv_column: None,
+                    type_name: "u32".to_string(),
+                    array_count: 1,
+                },
+                PlayStructFieldMetadata {
                     json_path: "config.font_path".to_string(),
                     csv_column: None,
                     type_name: "string".to_string(),
@@ -3951,6 +4010,7 @@ mod tests {
             "config": {
                 "json_loaded": true,
                 "screen_width": 800,
+                "wide_value": 4294967295_u64,
                 "background_red": 0.25,
                 "font_path": "C:/Windows/Fonts/consola.ttf"
             }
@@ -3960,6 +4020,7 @@ mod tests {
 
         assert_eq!(json_loaded, 1);
         assert_eq!(screen_width, 800);
+        assert_eq!(wide_value as u32, u32::MAX);
         assert!((background_red - 0.25).abs() < f32::EPSILON);
         assert_eq!(
             decode_zero_terminated_utf8(&font_bytes),
@@ -3998,7 +4059,7 @@ mod tests {
     #[test]
     fn parse_flat_csv_binding_supports_scalar_and_columnar_data() {
         let scalar = parse_flat_csv_binding(
-            "enabled,label\r\ntrue,\"Fast, tough\"\r\n",
+            "enabled,label,wide\r\ntrue,\"Fast, tough\",4294967295\r\n",
             &[
                 CsvBindingField {
                     path: "enabled".to_string(),
@@ -4012,12 +4073,18 @@ mod tests {
                     type_name: "string".to_string(),
                     array_count: 32,
                 },
+                CsvBindingField {
+                    path: "wide".to_string(),
+                    csv_column: None,
+                    type_name: "u32".to_string(),
+                    array_count: 1,
+                },
             ],
         )
         .expect("scalar CSV should parse");
         assert_eq!(
             scalar,
-            serde_json::json!({"enabled": true, "label": "Fast, tough"})
+            serde_json::json!({"enabled": true, "label": "Fast, tough", "wide": 4294967295_u64})
         );
 
         let arrays = parse_flat_csv_binding(

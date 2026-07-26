@@ -430,7 +430,8 @@ impl AotProcess {
         fn storage_width(type_name: &str) -> Result<usize, String> {
             match type_name {
                 "u8" => Ok(1),
-                "bool" | "u16" | "u32" | "i32" | "f32" => Ok(4),
+                "u16" => Ok(2),
+                "bool" | "u32" | "i32" | "f32" => Ok(4),
                 "f64" => Ok(8),
                 other => Err(format!("unsupported standalone AOT storage type '{other}'")),
             }
@@ -498,7 +499,7 @@ impl AotProcess {
                 scalar.type_name.clone(),
                 hash_global_path(&scalar.path),
                 0,
-                None,
+                matches!(scalar.type_name.as_str(), "u8" | "u16").then_some(1),
             ));
         }
         for collection in &layout.collections {
@@ -544,8 +545,10 @@ impl AotProcess {
                 "f32"
             } else if type_name == "f64" {
                 "f64"
-            } else if type_name == "u8" && len.is_some() {
+            } else if type_name == "u8" {
                 "u8"
+            } else if type_name == "u16" {
+                "u16"
             } else {
                 "i32"
             };
@@ -603,8 +606,10 @@ impl AotProcess {
                     "f32"
                 } else if type_name == "f64" {
                     "f64"
-                } else if type_name == "u8" && len.is_some() {
+                } else if type_name == "u8" {
                     "u8"
+                } else if type_name == "u16" {
+                    "u16"
                 } else {
                     "i32"
                 };
@@ -810,7 +815,11 @@ fn object_file_extension(target: &stasis_jit::AotTarget) -> &'static str {
 }
 
 fn aot_scalar_lane(type_id: TypeId, type_table: &TypeTable) -> Option<&'static str> {
-    if is_i32_abi_compatible_type(type_id, type_table) {
+    if type_table.unsigned_integer_bits(type_id) == Some(8) {
+        Some("u8")
+    } else if type_table.unsigned_integer_bits(type_id) == Some(16) {
+        Some("u16")
+    } else if is_i32_abi_compatible_type(type_id, type_table) {
         Some("i32")
     } else if type_id == TYPE_ID_F32 {
         Some("f32")
@@ -836,10 +845,7 @@ fn aot_array_lane(
                 TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed
             )
         });
-    let u8_storage = type_table
-        .type_info(type_id)
-        .is_some_and(|info| info.name == "u8");
-    if text_storage || u8_storage || path == "gfx_cmd_u8" {
+    if text_storage || path == "gfx_cmd_u8" {
         Some("u8")
     } else {
         aot_scalar_lane(type_id, type_table)
@@ -897,7 +903,7 @@ fn build_aot_direct_storage_bindings(
                 (path.clone(), String::new()),
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Symbol(aot_storage_symbol(path, "")),
-                    byte_lane: lane == "u8",
+                    storage_bytes: aot_lane_bytes(lane),
                     static_len: Some(info.len as usize),
                 },
             );
@@ -913,13 +919,22 @@ fn build_aot_direct_storage_bindings(
                 (path.clone(), field.clone()),
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Symbol(aot_storage_symbol(path, field)),
-                    byte_lane: lane == "u8",
+                    storage_bytes: aot_lane_bytes(lane),
                     static_len: Some(info.len as usize),
                 },
             );
         }
     }
     Ok(bindings)
+}
+
+fn aot_lane_bytes(lane: &str) -> u8 {
+    match lane {
+        "u8" => 1,
+        "u16" => 2,
+        "f64" => 8,
+        _ => 4,
+    }
 }
 
 fn compile_function_to_object_bytes(
@@ -1483,6 +1498,15 @@ mod tests {
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[],
                 expected_clif_markers: &[("main", &["brif", "jump"])],
+            },
+            ParityCorpusCase {
+                label: "deterministic_numerics",
+                source: include_str!("../../../../samples/deterministic_numerics/main.stasis"),
+                expected_exit: 0,
+                expected_extern_symbols: &[],
+                expected_string_literals: &[],
+                expected_collection_max_lengths: &[],
+                expected_clif_markers: &[("main", &["icmp", "sdiv"])],
             },
             ParityCorpusCase {
                 label: "struct_view_abi",
@@ -2307,10 +2331,60 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn aot_and_jit_execute_deterministic_numeric_sample() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let source = include_str!("../../../../samples/deterministic_numerics/main.stasis");
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", source);
+        jit.compile().expect("JIT compile");
+        let jit_result = jit.execute_i32_noarg_by_name("main").expect("JIT execute");
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", source);
+        aot.compile().expect("AOT compile");
+        let Some(aot_result) =
+            run_linked_i32_noarg_fixture(&aot, "main", "deterministic_numerics", &link_config)
+        else {
+            return;
+        };
+
+        assert_eq!(jit_result, 0);
+        assert_eq!(aot_result, jit_result);
+    }
+
     #[test]
     fn parity_corpus_covers_shared_lowering_shapes() {
         for case in parity_corpus_cases() {
             run_parity_corpus_case(case);
+        }
+    }
+
+    #[test]
+    fn deterministic_numeric_lowering_is_width_explicit_on_arm64_targets() {
+        let source =
+            include_str!("../../../../samples/deterministic_numerics/main.stasis").replacen(
+                "function main(): i32",
+                "function deterministic_numeric_probe(): i32",
+                1,
+            ) + "\nfunction main(): i32 { return deterministic_numeric_probe(); }\n";
+        for target in [
+            stasis_jit::AotTarget::android_arm64_default(),
+            stasis_jit::AotTarget::ios_arm64_default(),
+        ] {
+            let mut process = AotProcess::new();
+            process.set_target(target);
+            process.upsert_file("main.stasis", source.clone());
+            let clif = capture_aot_clif_by_function(&mut process);
+            let main = clif
+                .get("deterministic_numeric_probe")
+                .expect("deterministic numeric probe CLIF");
+            for marker in ["load.i8", "load.i16", "ireduce.i8", "ireduce.i16", "sdiv"] {
+                assert!(main.contains(marker), "missing {marker} in:\n{main}");
+            }
         }
     }
 

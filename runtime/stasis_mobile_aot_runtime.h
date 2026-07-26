@@ -19,6 +19,8 @@ void stasis_jit_register_global_f64_array(
     int32_t collection_hash, int32_t field_hash, double *ptr, int32_t len);
 void stasis_jit_register_global_u8_array(
     int32_t collection_hash, int32_t field_hash, uint8_t *ptr, int32_t len);
+void stasis_jit_register_global_u16_array(
+    int32_t collection_hash, int32_t field_hash, uint16_t *ptr, int32_t len);
 void stasis_jit_register_code_ptr(int32_t fn_id, int64_t code_ptr);
 void stasis_jit_clear_string_literal_table(void);
 void stasis_jit_upsert_string_literal(int32_t id, const char *value);

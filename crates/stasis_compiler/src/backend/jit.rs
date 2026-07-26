@@ -9,7 +9,8 @@ use crate::frontend::indexer::hash_text;
 use crate::frontend::lexer::{lex, TokenKind};
 use crate::frontend::parser::parse_string_literal_text;
 use crate::frontend::types::{
-    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_VOID,
+    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
+    TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::settings::{self, Configurable};
@@ -48,6 +49,8 @@ pub enum JitScalarValue {
     F64(f64),
     Bool(bool),
     U8(u8),
+    U16(u16),
+    U32(u32),
 }
 
 impl JitScalarValue {
@@ -58,6 +61,8 @@ impl JitScalarValue {
             Self::F64(_) => "f64",
             Self::Bool(_) => "bool",
             Self::U8(_) => "u8",
+            Self::U16(_) => "u16",
+            Self::U32(_) => "u32",
         }
     }
 }
@@ -761,6 +766,14 @@ impl JitProcess {
                 stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
                     as u8,
             )),
+            TYPE_ID_U16 => Ok(JitScalarValue::U16(
+                stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
+                    as u16,
+            )),
+            TYPE_ID_U32 => Ok(JitScalarValue::U32(
+                stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
+                    as u32,
+            )),
             _ => Err(format!(
                 "global collection path '{path}' field '{field}' is not a supported scalar"
             )),
@@ -838,6 +851,22 @@ impl JitProcess {
                     i32::from(value),
                 )
             }
+            (TYPE_ID_U16, JitScalarValue::U16(value)) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    i32::from(value),
+                )
+            }
+            (TYPE_ID_U32, JitScalarValue::U32(value)) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value as i32,
+                )
+            }
             (_, value) => {
                 return Err(format!(
                     "global collection path '{path}' field '{field}' does not accept {}",
@@ -864,6 +893,15 @@ impl JitProcess {
             TYPE_ID_BOOL => Ok(JitScalarValue::Bool(
                 stasis_dynload::stasis_jit_global_i32_load(path_hash) != 0,
             )),
+            TYPE_ID_U8 => Ok(JitScalarValue::U8(
+                stasis_dynload::stasis_jit_global_i32_array_load(path_hash, 0, 0) as u8,
+            )),
+            TYPE_ID_U16 => Ok(JitScalarValue::U16(
+                stasis_dynload::stasis_jit_global_i32_array_load(path_hash, 0, 0) as u16,
+            )),
+            TYPE_ID_U32 => Ok(JitScalarValue::U32(
+                stasis_dynload::stasis_jit_global_i32_load(path_hash) as u32,
+            )),
             _ => Err(format!("global path '{path}' is not a supported scalar")),
         }
     }
@@ -883,6 +921,15 @@ impl JitProcess {
             }
             (TYPE_ID_BOOL, JitScalarValue::Bool(value)) => {
                 stasis_dynload::stasis_jit_global_i32_store(path_hash, i32::from(value))
+            }
+            (TYPE_ID_U8, JitScalarValue::U8(value)) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(path_hash, 0, 0, i32::from(value))
+            }
+            (TYPE_ID_U16, JitScalarValue::U16(value)) => {
+                stasis_dynload::stasis_jit_global_i32_array_store(path_hash, 0, 0, i32::from(value))
+            }
+            (TYPE_ID_U32, JitScalarValue::U32(value)) => {
+                stasis_dynload::stasis_jit_global_i32_store(path_hash, value as i32)
             }
             (_, value) => {
                 return Err(format!(
@@ -1020,16 +1067,29 @@ impl JitProcess {
         } else {
             stasis_dynload::preflight_jit_f64_array_capacity
         };
+        let u16_capacity = if grow {
+            stasis_dynload::ensure_jit_u16_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_u16_array_capacity
+        };
+        let u8_capacity = if grow {
+            stasis_dynload::ensure_jit_u8_array_capacity
+        } else {
+            stasis_dynload::preflight_jit_u8_array_capacity
+        };
         if field.is_empty() && self.global_fixed_text_capacity(path).is_some() {
             return i32_capacity(collection_hash, field_hash, capacity);
         }
         match type_id {
-            TYPE_ID_I32 | TYPE_ID_BOOL => i32_capacity(collection_hash, field_hash, capacity),
+            TYPE_ID_I32 | TYPE_ID_BOOL | TYPE_ID_U32 => {
+                i32_capacity(collection_hash, field_hash, capacity)
+            }
             TYPE_ID_F32 => f32_capacity(collection_hash, field_hash, capacity),
             TYPE_ID_F64 => f64_capacity(collection_hash, field_hash, capacity),
             type_id if is_u8_type(self.compiler.types(), type_id) => {
-                i32_capacity(collection_hash, field_hash, capacity)
+                u8_capacity(collection_hash, field_hash, capacity)
             }
+            TYPE_ID_U16 => u16_capacity(collection_hash, field_hash, capacity),
             _ => Err(format!(
                 "global collection path '{path}' field '{field}' is not resizable"
             )),
@@ -1399,6 +1459,9 @@ fn scalar_type_name(type_id: u16) -> Option<&'static str> {
         TYPE_ID_F32 => Some("f32"),
         TYPE_ID_F64 => Some("f64"),
         TYPE_ID_BOOL => Some("bool"),
+        TYPE_ID_U8 => Some("u8"),
+        TYPE_ID_U16 => Some("u16"),
+        TYPE_ID_U32 => Some("u32"),
         _ => None,
     }
 }
@@ -1407,6 +1470,8 @@ fn jit_value_as_nonnegative_u64(value: JitScalarValue) -> Option<u64> {
     match value {
         JitScalarValue::I32(value) if value >= 0 => Some(value as u64),
         JitScalarValue::U8(value) => Some(u64::from(value)),
+        JitScalarValue::U16(value) => Some(u64::from(value)),
+        JitScalarValue::U32(value) => Some(u64::from(value)),
         _ => None,
     }
 }
@@ -1418,6 +1483,10 @@ fn negate_state_value(value: JitScalarValue) -> Result<JitScalarValue, String> {
             .map(JitScalarValue::I32)
             .ok_or_else(|| "state expression i32 negation overflow".to_string()),
         JitScalarValue::U8(value) => Ok(JitScalarValue::I32(-i32::from(value))),
+        JitScalarValue::U16(value) => Ok(JitScalarValue::I32(-i32::from(value))),
+        JitScalarValue::U32(_) => {
+            Err("state expression cannot negate an unsigned u32 value".to_string())
+        }
         JitScalarValue::F32(value) => Ok(JitScalarValue::F32(-value)),
         JitScalarValue::F64(value) => Ok(JitScalarValue::F64(-value)),
         JitScalarValue::Bool(_) => Err("state expression cannot negate a bool value".to_string()),
@@ -1429,17 +1498,26 @@ fn apply_state_binary(
     operator: BinaryOperator,
     right: JitScalarValue,
 ) -> Result<JitScalarValue, String> {
+    let integer_pair = state_integer_pair(left, right);
     if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
-        let equal = match (left, right) {
-            (JitScalarValue::Bool(left), JitScalarValue::Bool(right)) => left == right,
-            (left, right) => {
-                let (left, right) = state_numeric_pair(left, right).ok_or_else(|| {
+        let equal = if let Some((left, right, unsigned)) = integer_pair {
+            if unsigned {
+                left as u32 == right as u32
+            } else {
+                left == right
+            }
+        } else {
+            match (left, right) {
+                (JitScalarValue::Bool(left), JitScalarValue::Bool(right)) => left == right,
+                (left, right) => {
+                    let (left, right) = state_numeric_pair(left, right).ok_or_else(|| {
                     format!(
                         "state expression operator '{}' requires two numeric operands or two bool operands",
                         operator.text()
                     )
                 })?;
-                left == right
+                    left == right
+                }
             }
         };
         return Ok(JitScalarValue::Bool(if operator == BinaryOperator::Equal {
@@ -1455,6 +1533,27 @@ fn apply_state_binary(
             | BinaryOperator::Greater
             | BinaryOperator::GreaterEqual
     ) {
+        if let Some((left, right, unsigned)) = integer_pair {
+            let result = if unsigned {
+                let (left, right) = (left as u32, right as u32);
+                match operator {
+                    BinaryOperator::Less => left < right,
+                    BinaryOperator::LessEqual => left <= right,
+                    BinaryOperator::Greater => left > right,
+                    BinaryOperator::GreaterEqual => left >= right,
+                    _ => unreachable!("comparison operators are matched above"),
+                }
+            } else {
+                match operator {
+                    BinaryOperator::Less => left < right,
+                    BinaryOperator::LessEqual => left <= right,
+                    BinaryOperator::Greater => left > right,
+                    BinaryOperator::GreaterEqual => left >= right,
+                    _ => unreachable!("comparison operators are matched above"),
+                }
+            };
+            return Ok(JitScalarValue::Bool(result));
+        }
         let (left, right) = state_numeric_pair(left, right).ok_or_else(|| {
             format!(
                 "state expression operator '{}' requires numeric operands",
@@ -1485,9 +1584,69 @@ fn apply_state_binary(
         let right = state_value_as_f32(right).expect("numeric operands checked");
         return apply_state_f32(left, operator, right).map(JitScalarValue::F32);
     }
+    if let Some(bits) = state_unsigned_bits(left)
+        .into_iter()
+        .chain(state_unsigned_bits(right))
+        .max()
+    {
+        return apply_state_unsigned(left, operator, right, bits);
+    }
     let left = state_value_as_i32(left).expect("integer operands checked");
     let right = state_value_as_i32(right).expect("integer operands checked");
     apply_state_i32(left, operator, right).map(JitScalarValue::I32)
+}
+
+fn state_integer_pair(left: JitScalarValue, right: JitScalarValue) -> Option<(i32, i32, bool)> {
+    let unsigned = state_unsigned_bits(left).is_some() || state_unsigned_bits(right).is_some();
+    Some((
+        state_value_as_i32(left)?,
+        state_value_as_i32(right)?,
+        unsigned,
+    ))
+}
+
+fn state_unsigned_bits(value: JitScalarValue) -> Option<u8> {
+    match value {
+        JitScalarValue::U8(_) => Some(8),
+        JitScalarValue::U16(_) => Some(16),
+        JitScalarValue::U32(_) => Some(32),
+        _ => None,
+    }
+}
+
+fn apply_state_unsigned(
+    left: JitScalarValue,
+    operator: BinaryOperator,
+    right: JitScalarValue,
+    bits: u8,
+) -> Result<JitScalarValue, String> {
+    let left = state_value_as_i32(left)
+        .map(|value| value as u32)
+        .ok_or_else(|| "state expression requires integer operands".to_string())?;
+    let right = state_value_as_i32(right)
+        .map(|value| value as u32)
+        .ok_or_else(|| "state expression requires integer operands".to_string())?;
+    let value = match operator {
+        BinaryOperator::Add => left.wrapping_add(right),
+        BinaryOperator::Subtract => left.wrapping_sub(right),
+        BinaryOperator::Multiply => left.wrapping_mul(right),
+        BinaryOperator::Divide if right != 0 => left / right,
+        BinaryOperator::Remainder if right != 0 => left % right,
+        BinaryOperator::Divide | BinaryOperator::Remainder => {
+            return Err("state expression division by zero".to_string())
+        }
+        _ => {
+            return Err(format!(
+                "unsupported unsigned operator '{}'",
+                operator.text()
+            ))
+        }
+    };
+    Ok(match bits {
+        8 => JitScalarValue::U8(value as u8),
+        16 => JitScalarValue::U16(value as u16),
+        _ => JitScalarValue::U32(value),
+    })
 }
 
 fn state_numeric_pair(left: JitScalarValue, right: JitScalarValue) -> Option<(f64, f64)> {
@@ -1498,6 +1657,8 @@ fn state_value_as_f64(value: JitScalarValue) -> Option<f64> {
     match value {
         JitScalarValue::I32(value) => Some(f64::from(value)),
         JitScalarValue::U8(value) => Some(f64::from(value)),
+        JitScalarValue::U16(value) => Some(f64::from(value)),
+        JitScalarValue::U32(value) => Some(f64::from(value)),
         JitScalarValue::F32(value) => Some(f64::from(value)),
         JitScalarValue::F64(value) => Some(value),
         JitScalarValue::Bool(_) => None,
@@ -1508,6 +1669,8 @@ fn state_value_as_f32(value: JitScalarValue) -> Option<f32> {
     match value {
         JitScalarValue::I32(value) => Some(value as f32),
         JitScalarValue::U8(value) => Some(f32::from(value)),
+        JitScalarValue::U16(value) => Some(f32::from(value)),
+        JitScalarValue::U32(value) => Some(value as f32),
         JitScalarValue::F32(value) => Some(value),
         JitScalarValue::F64(_) | JitScalarValue::Bool(_) => None,
     }
@@ -1517,6 +1680,8 @@ fn state_value_as_i32(value: JitScalarValue) -> Option<i32> {
     match value {
         JitScalarValue::I32(value) => Some(value),
         JitScalarValue::U8(value) => Some(i32::from(value)),
+        JitScalarValue::U16(value) => Some(i32::from(value)),
+        JitScalarValue::U32(value) => Some(value as i32),
         JitScalarValue::F32(_) | JitScalarValue::F64(_) | JitScalarValue::Bool(_) => None,
     }
 }
@@ -1565,20 +1730,21 @@ fn apply_state_f64(left: f64, operator: BinaryOperator, right: f64) -> Result<f6
 }
 
 fn is_u8_type(type_table: &TypeTable, type_id: u16) -> bool {
-    type_table
-        .type_info(type_id)
-        .is_some_and(|info| info.name == "u8")
+    let _ = type_table;
+    type_id == TYPE_ID_U8
 }
 
 fn scalar_storage_kind(
-    type_table: &TypeTable,
+    _type_table: &TypeTable,
     type_id: u16,
 ) -> Option<stasis_dynload::JitStorageKind> {
     match type_id {
         TYPE_ID_I32 | TYPE_ID_BOOL => Some(stasis_dynload::JitStorageKind::I32),
         TYPE_ID_F32 => Some(stasis_dynload::JitStorageKind::F32),
         TYPE_ID_F64 => Some(stasis_dynload::JitStorageKind::F64),
-        type_id if is_u8_type(type_table, type_id) => Some(stasis_dynload::JitStorageKind::I32),
+        TYPE_ID_U8 => Some(stasis_dynload::JitStorageKind::U8),
+        TYPE_ID_U16 => Some(stasis_dynload::JitStorageKind::U16),
+        TYPE_ID_U32 => Some(stasis_dynload::JitStorageKind::I32),
         _ => None,
     }
 }
@@ -1589,6 +1755,9 @@ fn array_storage_kind(
 ) -> Option<stasis_dynload::JitStorageKind> {
     if is_u8_type(type_table, type_id) {
         return Some(stasis_dynload::JitStorageKind::U8);
+    }
+    if type_id == TYPE_ID_U16 {
+        return Some(stasis_dynload::JitStorageKind::U16);
     }
     if crate::backend::emit::is_i32_abi_compatible_type(type_id, type_table) {
         return Some(stasis_dynload::JitStorageKind::I32);
@@ -1651,7 +1820,7 @@ fn build_direct_storage_bindings(
                 (path.clone(), String::new()),
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Absolute(address),
-                    byte_lane: kind == stasis_dynload::JitStorageKind::U8,
+                    storage_bytes: storage_kind_bytes(kind),
                     static_len: None,
                 },
             );
@@ -1675,13 +1844,22 @@ fn build_direct_storage_bindings(
                 (path.clone(), field.clone()),
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Absolute(address),
-                    byte_lane: kind == stasis_dynload::JitStorageKind::U8,
+                    storage_bytes: storage_kind_bytes(kind),
                     static_len: None,
                 },
             );
         }
     }
     Ok(bindings)
+}
+
+fn storage_kind_bytes(kind: stasis_dynload::JitStorageKind) -> u8 {
+    match kind {
+        stasis_dynload::JitStorageKind::U8 => 1,
+        stasis_dynload::JitStorageKind::U16 => 2,
+        stasis_dynload::JitStorageKind::I32 | stasis_dynload::JitStorageKind::F32 => 4,
+        stasis_dynload::JitStorageKind::F64 => 8,
+    }
 }
 
 fn collect_current_string_literals(compiler: &Compiler) -> Result<HashMap<i32, String>, String> {
@@ -3800,6 +3978,122 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_unsigned_wrap_and_deterministic_fixed32_intrinsics() {
+        let source = include_str!("../../../../samples/deterministic_numerics/main.stasis");
+        let mut process = JitProcess::new();
+        process.upsert_file("main.stasis", source);
+        process
+            .compile()
+            .expect("compile deterministic numeric sample");
+        let result = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute deterministic numeric sample");
+        assert_eq!(
+            process
+                .read_global_collection_scalar("byte_values", "", 1)
+                .expect("read byte value"),
+            JitScalarValue::U8(255)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("word_values", "", 1)
+                .expect("read word value"),
+            JitScalarValue::U16(65_535)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("wide_values", "", 1)
+                .expect("read wide value"),
+            JitScalarValue::U32(u32::MAX)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("foreach_words", "", 1)
+                .expect("read foreach word"),
+            JitScalarValue::U16(0)
+        );
+        assert_eq!(
+            process.read_global_scalar("byte_value"),
+            Ok(JitScalarValue::U8(0))
+        );
+        assert_eq!(
+            process.read_global_scalar("word_value"),
+            Ok(JitScalarValue::U16(0))
+        );
+        assert_eq!(
+            process.read_global_scalar("wide_value"),
+            Ok(JitScalarValue::U32(u32::MAX))
+        );
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn state_expression_arithmetic_and_comparisons_preserve_unsigned_semantics() {
+        assert_eq!(
+            apply_state_binary(
+                JitScalarValue::U32(u32::MAX),
+                BinaryOperator::Divide,
+                JitScalarValue::I32(2),
+            ),
+            Ok(JitScalarValue::U32(i32::MAX as u32))
+        );
+        assert_eq!(
+            apply_state_binary(
+                JitScalarValue::U8(u8::MAX),
+                BinaryOperator::Add,
+                JitScalarValue::I32(1),
+            ),
+            Ok(JitScalarValue::U8(0))
+        );
+        assert_eq!(
+            apply_state_binary(
+                JitScalarValue::U32(u32::MAX),
+                BinaryOperator::Equal,
+                JitScalarValue::I32(-1),
+            ),
+            Ok(JitScalarValue::Bool(true))
+        );
+        assert_eq!(
+            apply_state_binary(
+                JitScalarValue::U8(u8::MAX),
+                BinaryOperator::Greater,
+                JitScalarValue::I32(-1),
+            ),
+            Ok(JitScalarValue::Bool(false))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn signed_numeric_intrinsics_reject_unsigned_arguments() {
+        for (intrinsic, expected_message) in [
+            (
+                "let result: i32 = fixed32_from_i32(wide)",
+                "requires exact i32 arguments",
+            ),
+            (
+                "let result: f32 = i32_to_f32(wide)",
+                "requires exact i32 argument",
+            ),
+        ] {
+            let mut process = JitProcess::new();
+            process.upsert_file(
+                "main.stasis",
+                format!(
+                    "function main(): i32 {{ let wide: u32 = 4294967295; {intrinsic}; return 0; }}\n"
+                ),
+            );
+            let error = process.compile().expect_err("reject unsigned argument");
+            let diagnostic = format!("{error:?}");
+            assert!(
+                diagnostic.contains(expected_message),
+                "unexpected diagnostic for {intrinsic}: {diagnostic}"
+            );
+        }
     }
 
     #[cfg(windows)]

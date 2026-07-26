@@ -68,7 +68,8 @@ enum {
     STASIS_VALUE_I32 = 1,
     STASIS_VALUE_F32 = 2,
     STASIS_VALUE_F64 = 3,
-    STASIS_VALUE_U8 = 4
+    STASIS_VALUE_U8 = 4,
+    STASIS_VALUE_U16 = 5
 };
 
 static StasisScalar scalars[STASIS_MOBILE_MAX_SCALARS];
@@ -134,6 +135,7 @@ static size_t value_size(int kind) {
     if (kind == STASIS_VALUE_F32) return sizeof(float);
     if (kind == STASIS_VALUE_F64) return sizeof(double);
     if (kind == STASIS_VALUE_U8) return sizeof(uint8_t);
+    if (kind == STASIS_VALUE_U16) return sizeof(uint16_t);
     return 0;
 }
 
@@ -239,6 +241,9 @@ void stasis_jit_register_global_f64_array(int32_t c, int32_t f, double *p, int32
 }
 void stasis_jit_register_global_u8_array(int32_t c, int32_t f, uint8_t *p, int32_t n) {
     register_array(c, f, STASIS_VALUE_U8, p, n);
+}
+void stasis_jit_register_global_u16_array(int32_t c, int32_t f, uint16_t *p, int32_t n) {
+    register_array(c, f, STASIS_VALUE_U16, p, n);
 }
 
 void stasis_jit_register_code_ptr(int32_t fn_id, int64_t code_ptr) {
@@ -490,6 +495,8 @@ int32_t stasis_jit_global_i32_array_load(int32_t c, int32_t f, int32_t i) {
     if (entry != NULL && (size_t)i < entry->length) return ((int32_t *)entry->data)[i];
     entry = find_array(c, f, STASIS_VALUE_U8, 0);
     if (entry != NULL && (size_t)i < entry->length) return ((uint8_t *)entry->data)[i];
+    entry = find_array(c, f, STASIS_VALUE_U16, 0);
+    if (entry != NULL && (size_t)i < entry->length) return ((uint16_t *)entry->data)[i];
     return 0;
 }
 
@@ -506,6 +513,11 @@ void stasis_jit_global_i32_array_store(
     entry = find_array(c, f, STASIS_VALUE_U8, 0);
     if (entry != NULL) {
         if ((size_t)i < entry->length) ((uint8_t *)entry->data)[i] = (uint8_t)value;
+        return;
+    }
+    entry = find_array(c, f, STASIS_VALUE_U16, 0);
+    if (entry != NULL) {
+        if ((size_t)i < entry->length) ((uint16_t *)entry->data)[i] = (uint16_t)value;
         return;
     }
     entry = find_array(c, f, STASIS_VALUE_I32, 1);

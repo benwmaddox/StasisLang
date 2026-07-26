@@ -742,6 +742,8 @@ fn default_scalar_value(type_name: &str) -> Result<JitScalarValue, String> {
         "f64" => Ok(JitScalarValue::F64(0.0)),
         "bool" => Ok(JitScalarValue::Bool(false)),
         "u8" => Ok(JitScalarValue::U8(0)),
+        "u16" => Ok(JitScalarValue::U16(0)),
+        "u32" => Ok(JitScalarValue::U32(0)),
         _ => Err(format!(
             "state migration cannot initialize unsupported scalar type '{type_name}'"
         )),
@@ -811,7 +813,9 @@ fn prepare_collection_growth(
 
 fn migration_type_bytes(type_name: &str) -> Result<usize, String> {
     match type_name {
-        "i32" | "f32" | "bool" | "u8" => Ok(4),
+        "u8" => Ok(1),
+        "u16" => Ok(2),
+        "u32" | "i32" | "f32" | "bool" => Ok(4),
         "f64" => Ok(8),
         _ => Err(format!(
             "unsupported collection migration type '{type_name}'"
