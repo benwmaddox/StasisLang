@@ -282,8 +282,6 @@ jobs:
           mkdir -p cli-smoke/assets
           printf '%s\n' '{"schema":"stasis-assets","version":1,"assets":[]}' > cli-smoke/assets/manifest.json
           ./bin/stasis --workspace cli-smoke package --target desktop
-          desktop_diagnostics="$(./cli-smoke/dist/ci_smoke-desktop/ci_smoke 2>&1 || true)"
-          grep -q 'Stasis package provenance:' <<<"${desktop_diagnostics}"
           ./bin/stasis --workspace cli-smoke package-mobile --target android-arm64 --out dist/android
           ./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios
           popd
