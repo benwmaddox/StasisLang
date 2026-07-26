@@ -174,6 +174,7 @@ struct AiAuditLog {
     file: fs::File,
     usage_path: PathBuf,
     usage_file: fs::File,
+    #[cfg(test)]
     timing_path: PathBuf,
     timing_file: fs::File,
     started_at: Instant,
@@ -213,6 +214,7 @@ impl AiAuditLog {
             file,
             usage_path,
             usage_file,
+            #[cfg(test)]
             timing_path,
             timing_file,
             started_at: now,
