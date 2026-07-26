@@ -435,6 +435,21 @@ fn integer_binary_result_type(
     }
 }
 
+fn unambiguous_call_params(
+    target: &str,
+    arg_count: usize,
+    call_signatures: &CallSignatureMap,
+) -> Option<Vec<TypeId>> {
+    let mut candidates = call_signatures
+        .get(target)?
+        .iter()
+        .filter(|signature| signature.params.len() == arg_count);
+    let first = candidates.next()?.params.clone();
+    candidates
+        .all(|candidate| candidate.params == first)
+        .then_some(first)
+}
+
 fn emit_integer_assignment_value(
     builder: &mut FunctionBuilder<'_>,
     lhs: Option<Value>,
@@ -5824,7 +5839,9 @@ pub(crate) fn emit_simple_statements(
                     }
                     let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
                     let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
-                    for arg in args {
+                    let expected_params =
+                        unambiguous_call_params(target, args.len(), call_signatures);
+                    for (arg_index, arg) in args.iter().enumerate() {
                         if let Some(struct_view) = try_emit_struct_view_value(
                             builder,
                             arg,
@@ -5848,7 +5865,9 @@ pub(crate) fn emit_simple_statements(
                         let binding = emit_simple_expression(
                             builder,
                             arg,
-                            None,
+                            expected_params
+                                .as_ref()
+                                .and_then(|params| params.get(arg_index).copied()),
                             values_by_name,
                             runtime_call_refs,
                             internal_calls,
@@ -7624,15 +7643,7 @@ pub(crate) fn emit_simple_expression(
         SimpleExpr::Call { target, args } => {
             let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
-            let expected_params = call_signatures.get(target).and_then(|signatures| {
-                let mut candidates = signatures
-                    .iter()
-                    .filter(|signature| signature.params.len() == args.len());
-                let first = candidates.next()?.params.clone();
-                candidates
-                    .all(|candidate| candidate.params == first)
-                    .then_some(first)
-            });
+            let expected_params = unambiguous_call_params(target, args.len(), call_signatures);
             for (arg_index, arg) in args.iter().enumerate() {
                 if let Some(struct_view) = try_emit_struct_view_value(
                     builder,

@@ -2365,16 +2365,23 @@ mod tests {
 
     #[test]
     fn deterministic_numeric_lowering_is_width_explicit_on_arm64_targets() {
-        let source = include_str!("../../../../samples/deterministic_numerics/main.stasis");
+        let source =
+            include_str!("../../../../samples/deterministic_numerics/main.stasis").replacen(
+                "function main(): i32",
+                "function deterministic_numeric_probe(): i32",
+                1,
+            ) + "\nfunction main(): i32 { return deterministic_numeric_probe(); }\n";
         for target in [
             stasis_jit::AotTarget::android_arm64_default(),
             stasis_jit::AotTarget::ios_arm64_default(),
         ] {
             let mut process = AotProcess::new();
             process.set_target(target);
-            process.upsert_file("main.stasis", source);
+            process.upsert_file("main.stasis", source.clone());
             let clif = capture_aot_clif_by_function(&mut process);
-            let main = clif.get("main").expect("main CLIF");
+            let main = clif
+                .get("deterministic_numeric_probe")
+                .expect("deterministic numeric probe CLIF");
             for marker in ["load.i8", "load.i16", "ireduce.i8", "ireduce.i16", "sdiv"] {
                 assert!(main.contains(marker), "missing {marker} in:\n{main}");
             }

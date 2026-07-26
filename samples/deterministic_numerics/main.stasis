@@ -14,6 +14,10 @@ function identity_wide(value: u32): u32 {
     return value;
 }
 
+function store_wide(value: u32): void {
+    wide_value = value;
+}
+
 function main(): i32 {
     let high: u32 = 4294967295;
     let signed_max: u32 = 2147483647;
@@ -30,7 +34,8 @@ function main(): i32 {
     byte_value += 1;
     word_value = 65535;
     word_value += 1;
-    wide_value = 4294967295;
+    wide_value = 0;
+    store_wide(4294967295);
     byte_values[1] = 255;
     word_values[1] = 65535;
     wide_values[1] = 4294967295;
