@@ -399,7 +399,17 @@ pub(crate) fn build_state_layout(
     let scalars = global_path_types
         .iter()
         .filter_map(|(path, type_id)| {
-            scalar_type_name(*type_id).map(|type_name| StateScalarLayout {
+            let type_name = scalar_type_name(type_table, *type_id)?;
+            let info = type_table.type_info(*type_id)?;
+            let prefix = format!("{path}.");
+            if info.category == TypeCategory::Named
+                && global_path_types
+                    .keys()
+                    .any(|candidate| candidate.starts_with(&prefix))
+            {
+                return None;
+            }
+            Some(StateScalarLayout {
                 path: path.clone(),
                 type_name: type_name.to_string(),
             })
@@ -480,7 +490,9 @@ pub(crate) fn build_state_layout(
     let opaque = global_path_types
         .iter()
         .filter_map(|(path, type_id)| {
-            if scalar_type_name(*type_id).is_some() || collection_paths.contains(path.as_str()) {
+            if scalar_type_name(type_table, *type_id).is_some()
+                || collection_paths.contains(path.as_str())
+            {
                 return None;
             }
             let info = type_table.type_info(*type_id)?;
@@ -540,7 +552,7 @@ pub(crate) fn build_state_layout(
     }
 }
 
-fn scalar_type_name(type_id: u16) -> Option<&'static str> {
+fn scalar_type_name(type_table: &TypeTable, type_id: u16) -> Option<&'static str> {
     match type_id {
         TYPE_ID_I32 => Some("i32"),
         TYPE_ID_F32 => Some("f32"),
@@ -549,13 +561,18 @@ fn scalar_type_name(type_id: u16) -> Option<&'static str> {
         TYPE_ID_U8 => Some("u8"),
         TYPE_ID_U16 => Some("u16"),
         TYPE_ID_U32 => Some("u32"),
+        _ if type_table
+            .type_info(type_id)
+            .is_some_and(|info| info.category == TypeCategory::Named) =>
+        {
+            Some("i32")
+        }
         _ => None,
     }
 }
 
 fn collection_type_name(type_table: &TypeTable, type_id: u16) -> Option<&'static str> {
-    let _ = type_table;
-    scalar_type_name(type_id)
+    scalar_type_name(type_table, type_id)
 }
 
 #[cfg(test)]
@@ -695,6 +712,38 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing report entry for {path}"));
             assert_eq!(entry.element_bytes, expected_bytes, "{path}");
         }
+    }
+
+    #[test]
+    fn enum_state_uses_i32_storage_lanes() {
+        let source = "enum Phase { Waiting, Playing }\n\
+                      struct Enemy { phase: Phase; hp: i32; }\n\
+                      struct Game { phase: Phase; enemies: Enemy[2]; }\n\
+                      global game: Game;\n\
+                      function main(): i32 { game.phase = Phase.Playing; game.enemies[0].phase = game.phase; return 0; }\n";
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", source);
+        jit.compile_staged().expect("compile enum state fixture");
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", source);
+        aot.compile().expect("compile enum AOT fixture");
+
+        let layout = jit.state_layout();
+        assert_eq!(layout, aot.state_layout());
+        assert!(layout
+            .scalars
+            .iter()
+            .any(|field| field.path == "game.phase" && field.type_name == "i32"));
+        let enemies = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "game.enemies")
+            .expect("enemy collection layout");
+        assert!(enemies
+            .fields
+            .iter()
+            .any(|field| field.field == "phase" && field.type_name == "i32"));
     }
 
     #[test]

@@ -1,5 +1,14 @@
 import "preview_adapter.stasis";
 
+enum GamePhase {
+    Playing,
+    Finished
+}
+
+struct PhaseSample {
+    phase: GamePhase;
+}
+
 global Input {
     touch_x: i32;
     touch_y: i32;
@@ -9,6 +18,7 @@ global Input {
 }
 
 global GameState {
+    phase: GamePhase;
     tick_count: i32;
     screen_w: i32;
     screen_h: i32;
@@ -23,6 +33,8 @@ global GameState {
     player_score: i32;
     ai_score: i32;
 }
+
+global phase_samples: PhaseSample[2];
 
 global Render {
     command_schema_version: i32;
@@ -84,6 +96,9 @@ function pong_game_main(): void {
 }
 
 function init(): void {
+    GameState.phase = GamePhase.Playing;
+    phase_samples[0].phase = GamePhase.Playing;
+    phase_samples[1].phase = GamePhase.Finished;
     GameState.tick_count = 0;
     GameState.screen_w = 360;
     GameState.screen_h = 640;
@@ -100,6 +115,9 @@ function init(): void {
 }
 
 function pong_game_tick(): void {
+    if (GameState.phase == phase_samples[1].phase) {
+        GameState.phase = GamePhase.Playing;
+    }
     GameState.tick_count += 1;
 
     update_input();
