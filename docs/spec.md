@@ -114,6 +114,12 @@ Rules:
 
 ### 4.3 Numeric Conversion Semantics
 
+Unsigned integers use exact fixed-width storage: `u8` is 1 byte, `u16` is 2 bytes, and
+`u32` is 4 bytes. Function parameters and returns use a zero-extended 32-bit ABI lane.
+Arithmetic in a declared unsigned target wraps modulo `2^N`; division, remainder, and
+ordering comparisons are unsigned. Integer literals assigned to an unsigned target must
+fit its range. `i32` remains signed two's-complement with signed division and remainder.
+
 Numeric conversion helpers use receiver-form methods in two categories:
 
 `from_*` conversions (mutating target):
@@ -144,6 +150,29 @@ let ticks_i32: i32 = DebugUI.swapFlashTicks.to_i32();
 let alpha: f32 = ticks_i32.to_f32();
 alpha /= 180.0;
 ```
+
+### 4.3.1 Deterministic Fixed-Point Intrinsics
+
+Strict cross-target gameplay math uses signed Q16.16 values carried in `i32`. The
+following compiler intrinsics emit integer Cranelift operations in both JIT and AOT:
+
+- `fixed32_from_i32(value)` converts an integer by shifting left 16 bits.
+- `fixed32_from_ratio(numerator, denominator)` creates a Q16.16 ratio.
+- `fixed32_mul(left, right)` multiplies two Q16.16 values.
+- `fixed32_div(left, right)` divides two Q16.16 values.
+- `fixed32_to_i32(value)` discards the fractional part.
+
+All division and conversion rounding is toward zero. Results wrap to the low 32 bits;
+division by zero traps. The representable range is `-32768.0` through
+`32767.9999847412109375`, in steps of `1 / 65536`. These rules are independent of host
+floating-point modes and are the strict deterministic numeric profile for replayable
+simulation.
+
+Ordinary `f32` and `f64`, including `sin_fast` and `cos_fast`, remain the
+platform-floating profile. JIT and AOT share lowering and are tested for same-target
+parity, but bit-identical results across CPU architectures are not claimed. Code that
+requires cross-architecture replay must keep simulation state transitions on integer or
+Q16.16 operations and may convert to floating point only at the presentation boundary.
 
 ### 4.4 Local Type Inference
 

@@ -2370,6 +2370,14 @@ fn parse_scalar_value(
             .parse::<u8>()
             .map(JitScalarValue::U8)
             .map_err(|error| format!("invalid u8 expression '{expression}': {error}")),
+        JitScalarValue::U16(_) => expression
+            .parse::<u16>()
+            .map(JitScalarValue::U16)
+            .map_err(|error| format!("invalid u16 expression '{expression}': {error}")),
+        JitScalarValue::U32(_) => expression
+            .parse::<u32>()
+            .map(JitScalarValue::U32)
+            .map_err(|error| format!("invalid u32 expression '{expression}': {error}")),
     }
 }
 

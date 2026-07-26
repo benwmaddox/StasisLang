@@ -6,7 +6,7 @@ use crate::frontend::parser::{
 };
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
-    TYPE_ID_VOID,
+    TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::ir::{
@@ -112,6 +112,7 @@ pub(crate) struct ForeachBinding {
     pub(crate) struct_type_id: Option<TypeId>,
     pub(crate) field_types: BTreeMap<String, TypeId>,
     pub(crate) u8_array_base_ptrs: BTreeMap<String, Value>,
+    pub(crate) u16_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) i32_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) f32_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) f64_array_base_ptrs: BTreeMap<String, Value>,
@@ -355,7 +356,10 @@ pub(crate) fn build_extern_symbol_candidates(
 }
 
 pub(crate) fn is_i32_abi_compatible_type(type_id: TypeId, type_table: &TypeTable) -> bool {
-    if type_id == TYPE_ID_I32 || type_id == TYPE_ID_BOOL {
+    if type_id == TYPE_ID_I32
+        || type_id == TYPE_ID_BOOL
+        || type_table.unsigned_integer_bits(type_id).is_some()
+    {
         return true;
     }
     let Some(type_info) = type_table.type_info(type_id) else {
@@ -393,13 +397,78 @@ pub(crate) fn is_i32_scalar_lane_type(type_id: TypeId, type_table: &TypeTable) -
 }
 
 pub(crate) fn is_i32_numeric_type(type_id: TypeId, type_table: &TypeTable) -> bool {
-    if type_id == TYPE_ID_I32 {
+    if type_table.is_integer(type_id) {
         return true;
     }
     let Some(type_info) = type_table.type_info(type_id) else {
         return false;
     };
     matches!(type_info.category, TypeCategory::Named)
+}
+
+fn normalize_unsigned_value(
+    builder: &mut FunctionBuilder<'_>,
+    value: Value,
+    type_id: TypeId,
+    type_table: &TypeTable,
+) -> Value {
+    match type_table.unsigned_integer_bits(type_id) {
+        Some(8) => builder.ins().band_imm(value, 0xff),
+        Some(16) => builder.ins().band_imm(value, 0xffff),
+        _ => value,
+    }
+}
+
+fn integer_binary_result_type(
+    expected_type: Option<TypeId>,
+    lhs: TypeId,
+    rhs: TypeId,
+    type_table: &TypeTable,
+) -> TypeId {
+    if let Some(expected) = expected_type.filter(|id| type_table.is_integer(*id)) {
+        return expected;
+    }
+    if lhs == rhs && type_table.is_integer(lhs) {
+        lhs
+    } else {
+        TYPE_ID_I32
+    }
+}
+
+fn emit_integer_assignment_value(
+    builder: &mut FunctionBuilder<'_>,
+    lhs: Option<Value>,
+    rhs: Value,
+    op: AssignOp,
+    type_table: &TypeTable,
+    type_id: TypeId,
+) -> Value {
+    let unsigned = type_table.unsigned_integer_bits(type_id).is_some();
+    let value = match op {
+        AssignOp::Set => rhs,
+        AssignOp::Add => builder
+            .ins()
+            .iadd(lhs.expect("compound assignment lhs"), rhs),
+        AssignOp::Sub => builder
+            .ins()
+            .isub(lhs.expect("compound assignment lhs"), rhs),
+        AssignOp::Mul => builder
+            .ins()
+            .imul(lhs.expect("compound assignment lhs"), rhs),
+        AssignOp::Div if unsigned => builder
+            .ins()
+            .udiv(lhs.expect("compound assignment lhs"), rhs),
+        AssignOp::Mod if unsigned => builder
+            .ins()
+            .urem(lhs.expect("compound assignment lhs"), rhs),
+        AssignOp::Div => builder
+            .ins()
+            .sdiv(lhs.expect("compound assignment lhs"), rhs),
+        AssignOp::Mod => builder
+            .ins()
+            .srem(lhs.expect("compound assignment lhs"), rhs),
+    };
+    normalize_unsigned_value(builder, value, type_id, type_table)
 }
 
 pub(crate) fn are_assignment_types_compatible(
@@ -713,7 +782,13 @@ pub(crate) fn resolve_global_path_type_id(
 pub(crate) fn is_primitive_scalar_type_id(type_id: TypeId) -> bool {
     matches!(
         type_id,
-        TYPE_ID_I32 | TYPE_ID_F32 | TYPE_ID_F64 | TYPE_ID_BOOL
+        TYPE_ID_I32
+            | TYPE_ID_F32
+            | TYPE_ID_F64
+            | TYPE_ID_BOOL
+            | TYPE_ID_U8
+            | TYPE_ID_U16
+            | TYPE_ID_U32
     )
 }
 
@@ -812,10 +887,8 @@ pub(crate) fn parse_top_level_constant_literal(
             type_name, name
         )
     })?;
-    if type_id == TYPE_ID_I32 {
-        let value = initializer
-            .parse::<i32>()
-            .map_err(|error| format!("invalid i32 initializer for constant '{}': {error}", name))?;
+    if type_table.is_integer(type_id) {
+        let value = parse_integer_initializer(name, initializer, type_id, type_table)?;
         return Ok(Some(ConstantValue::I32 { value, type_id }));
     }
     if type_id == TYPE_ID_F32 {
@@ -853,6 +926,37 @@ pub(crate) fn parse_top_level_constant_literal(
         return Ok(Some(ConstantValue::String { value, type_id }));
     }
     Ok(None)
+}
+
+fn parse_integer_initializer(
+    name: &str,
+    initializer: &str,
+    type_id: TypeId,
+    type_table: &TypeTable,
+) -> Result<i32, String> {
+    let Some(bits) = type_table.unsigned_integer_bits(type_id) else {
+        return initializer
+            .parse::<i32>()
+            .map_err(|error| format!("invalid i32 initializer for constant '{}': {error}", name));
+    };
+    let value = initializer.parse::<u64>().map_err(|error| {
+        format!(
+            "invalid u{bits} initializer for constant '{}': {error}",
+            name
+        )
+    })?;
+    let maximum = if bits == 32 {
+        u64::from(u32::MAX)
+    } else {
+        (1u64 << bits) - 1
+    };
+    if value > maximum {
+        return Err(format!(
+            "u{bits} initializer for constant '{}' is outside 0..={maximum}: {value}",
+            name
+        ));
+    }
+    Ok(value as u32 as i32)
 }
 
 pub(crate) fn parse_constant_string_initializer(
@@ -1158,7 +1262,7 @@ fn collection_element_shape(
     let type_name = type_name.trim();
     if matches!(
         type_name,
-        "i32" | "f32" | "f64" | "bool" | "u8" | "ascii" | "utf8"
+        "i32" | "f32" | "f64" | "bool" | "u8" | "u16" | "u32" | "ascii" | "utf8"
     ) {
         return Ok((type_name.to_string(), true));
     }
@@ -1431,7 +1535,7 @@ pub(crate) struct DirectStorageBindings {
 #[derive(Debug, Clone)]
 pub(crate) struct DirectArrayStorageBinding {
     pub(crate) slot: DirectStorageBinding,
-    pub(crate) byte_lane: bool,
+    pub(crate) storage_bytes: u8,
     pub(crate) static_len: Option<usize>,
 }
 
@@ -1450,7 +1554,7 @@ pub(crate) struct DirectStorageRefs {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DirectArrayStorageRef {
     pub(crate) slot: DirectStorageRef,
-    pub(crate) byte_lane: bool,
+    pub(crate) storage_bytes: u8,
     pub(crate) static_len: Option<usize>,
 }
 
@@ -2290,6 +2394,7 @@ pub(crate) fn declare_new_variable(
         .checked_add(1)
         .ok_or_else(|| "too many local variables".to_string())?;
     builder.declare_var(variable, clif_type_for_type_id(type_id, type_table)?);
+    let initial_value = normalize_unsigned_value(builder, initial_value, type_id, type_table);
     builder.def_var(variable, initial_value);
     Ok(variable)
 }
@@ -2352,7 +2457,7 @@ pub(crate) fn clif_type_for_type_id(
         TYPE_ID_I32 => Ok(types::I32),
         TYPE_ID_F32 => Ok(types::F32),
         TYPE_ID_F64 => Ok(types::F64),
-        TYPE_ID_BOOL => Ok(types::I32),
+        TYPE_ID_BOOL | TYPE_ID_U8 | TYPE_ID_U16 | TYPE_ID_U32 => Ok(types::I32),
         TYPE_ID_VOID => Err("void is not a value type".to_string()),
         other => {
             let Some(info) = type_table.type_info(other) else {
@@ -2614,7 +2719,7 @@ pub(crate) fn parse_let_statement(
                 parse_value_expression(expression_text)?
             } else if resolved_type_id == TYPE_ID_BOOL {
                 SimpleExpr::Bool(false)
-            } else if resolved_type_id == TYPE_ID_I32 {
+            } else if type_table.is_integer(resolved_type_id) {
                 SimpleExpr::Int(0)
             } else {
                 SimpleExpr::Float(0.0)
@@ -5095,7 +5200,9 @@ pub(crate) fn emit_simple_statements(
                                 }
                                 rhs.value
                             } else if is_i32_scalar_lane_type(local.type_id, type_table) {
-                                match op {
+                                let unsigned =
+                                    type_table.unsigned_integer_bits(local.type_id).is_some();
+                                let value = match op {
                                     AssignOp::Set => rhs.value,
                                     AssignOp::Add => {
                                         let lhs = builder.use_var(local.var);
@@ -5109,6 +5216,14 @@ pub(crate) fn emit_simple_statements(
                                         let lhs = builder.use_var(local.var);
                                         builder.ins().imul(lhs, rhs.value)
                                     }
+                                    AssignOp::Div if unsigned => {
+                                        let lhs = builder.use_var(local.var);
+                                        builder.ins().udiv(lhs, rhs.value)
+                                    }
+                                    AssignOp::Mod if unsigned => {
+                                        let lhs = builder.use_var(local.var);
+                                        builder.ins().urem(lhs, rhs.value)
+                                    }
                                     AssignOp::Div => {
                                         let lhs = builder.use_var(local.var);
                                         builder.ins().sdiv(lhs, rhs.value)
@@ -5117,7 +5232,8 @@ pub(crate) fn emit_simple_statements(
                                         let lhs = builder.use_var(local.var);
                                         builder.ins().srem(lhs, rhs.value)
                                     }
-                                }
+                                };
+                                normalize_unsigned_value(builder, value, local.type_id, type_table)
                             } else if local.type_id == TYPE_ID_F32 {
                                 match op {
                                     AssignOp::Set => rhs.value,
@@ -5349,49 +5465,18 @@ pub(crate) fn emit_simple_statements(
                                         base_hash, suffix, builder,
                                     );
                                     if is_i32_scalar_lane_type(field_type, type_table) {
-                                        let value = match op {
-                                            AssignOp::Set => rhs.value,
-                                            AssignOp::Add => {
-                                                let call = builder.ins().call(
-                                                    runtime_call_refs.global_i32_load,
-                                                    &[path_hash],
-                                                );
-                                                let lhs = builder.inst_results(call)[0];
-                                                builder.ins().iadd(lhs, rhs.value)
-                                            }
-                                            AssignOp::Sub => {
-                                                let call = builder.ins().call(
-                                                    runtime_call_refs.global_i32_load,
-                                                    &[path_hash],
-                                                );
-                                                let lhs = builder.inst_results(call)[0];
-                                                builder.ins().isub(lhs, rhs.value)
-                                            }
-                                            AssignOp::Mul => {
-                                                let call = builder.ins().call(
-                                                    runtime_call_refs.global_i32_load,
-                                                    &[path_hash],
-                                                );
-                                                let lhs = builder.inst_results(call)[0];
-                                                builder.ins().imul(lhs, rhs.value)
-                                            }
-                                            AssignOp::Div => {
-                                                let call = builder.ins().call(
-                                                    runtime_call_refs.global_i32_load,
-                                                    &[path_hash],
-                                                );
-                                                let lhs = builder.inst_results(call)[0];
-                                                builder.ins().sdiv(lhs, rhs.value)
-                                            }
-                                            AssignOp::Mod => {
-                                                let call = builder.ins().call(
-                                                    runtime_call_refs.global_i32_load,
-                                                    &[path_hash],
-                                                );
-                                                let lhs = builder.inst_results(call)[0];
-                                                builder.ins().srem(lhs, rhs.value)
-                                            }
+                                        let lhs = if *op == AssignOp::Set {
+                                            None
+                                        } else {
+                                            let call = builder.ins().call(
+                                                runtime_call_refs.global_i32_load,
+                                                &[path_hash],
+                                            );
+                                            Some(builder.inst_results(call)[0])
                                         };
+                                        let value = emit_integer_assignment_value(
+                                            builder, lhs, rhs.value, *op, type_table, field_type,
+                                        );
                                         builder.ins().call(
                                             runtime_call_refs.global_i32_store,
                                             &[path_hash, value],
@@ -5864,7 +5949,13 @@ pub(crate) fn emit_simple_statements(
                         "return expression expected {expected} but found {found}"
                     ));
                 }
-                builder.ins().return_(&[binding.value]);
+                let value = normalize_unsigned_value(
+                    builder,
+                    binding.value,
+                    expected_return_type,
+                    type_table,
+                );
+                builder.ins().return_(&[value]);
                 return Ok(true);
             }
             SimpleStmt::ReturnVoid => {
@@ -6145,11 +6236,13 @@ pub(crate) fn emit_simple_statements(
                 let mut loop_len_value = len_value;
                 let mut i32_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
                 let mut u8_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
+                let mut u16_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
                 let mut f32_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
                 let mut f64_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
                 if collection_info.element_type.is_some_and(|type_id| {
                     is_i32_abi_compatible_type(type_id, type_table)
                         && !is_u8_lane(type_table, type_id)
+                        && type_id != TYPE_ID_U16
                 }) {
                     let direct = matches!(collection_handle, ForeachCollectionHandle::PathHash(_))
                         .then(|| runtime_call_refs.direct_storage.as_ref())
@@ -6192,6 +6285,26 @@ pub(crate) fn emit_simple_statements(
                         loop_len_value =
                             emit_bounded_direct_array_len(builder, direct, loop_len_value);
                         u8_array_base_ptrs.insert(
+                            String::new(),
+                            emit_direct_slot_data_ptr(builder, direct.slot),
+                        );
+                    }
+                }
+                if collection_info.element_type == Some(TYPE_ID_U16) {
+                    if let Some(direct) =
+                        matches!(collection_handle, ForeachCollectionHandle::PathHash(_))
+                            .then(|| runtime_call_refs.direct_storage.as_ref())
+                            .flatten()
+                            .and_then(|bindings| {
+                                bindings
+                                    .arrays
+                                    .get(&(collection_path.clone(), String::new()))
+                            })
+                            .copied()
+                    {
+                        loop_len_value =
+                            emit_bounded_direct_array_len(builder, direct, loop_len_value);
+                        u16_array_base_ptrs.insert(
                             String::new(),
                             emit_direct_slot_data_ptr(builder, direct.slot),
                         );
@@ -6259,6 +6372,7 @@ pub(crate) fn emit_simple_statements(
                         .copied();
                     if is_i32_abi_compatible_type(*type_id, type_table)
                         && !is_u8_lane(type_table, *type_id)
+                        && *type_id != TYPE_ID_U16
                     {
                         let base = if let Some(direct) = direct {
                             loop_len_value =
@@ -6277,6 +6391,15 @@ pub(crate) fn emit_simple_statements(
                             loop_len_value =
                                 emit_bounded_direct_array_len(builder, direct, loop_len_value);
                             u8_array_base_ptrs.insert(
+                                suffix.clone(),
+                                emit_direct_slot_data_ptr(builder, direct.slot),
+                            );
+                        }
+                    } else if *type_id == TYPE_ID_U16 {
+                        if let Some(direct) = direct {
+                            loop_len_value =
+                                emit_bounded_direct_array_len(builder, direct, loop_len_value);
+                            u16_array_base_ptrs.insert(
                                 suffix.clone(),
                                 emit_direct_slot_data_ptr(builder, direct.slot),
                             );
@@ -6332,6 +6455,7 @@ pub(crate) fn emit_simple_statements(
                         struct_type_id: collection_struct_type_id,
                         field_types: collection_info.field_types.clone(),
                         u8_array_base_ptrs,
+                        u16_array_base_ptrs,
                         i32_array_base_ptrs,
                         f32_array_base_ptrs,
                         f64_array_base_ptrs,
@@ -7250,12 +7374,31 @@ pub(crate) fn emit_simple_expression(
 ) -> Result<ValueBinding, String> {
     match expression {
         SimpleExpr::Int(value) => {
-            let value = i32::try_from(*value).map_err(|_| {
-                format!("integer literal out of i32 range in return expression: {value}")
-            })?;
+            let literal_type = expected_type
+                .filter(|type_id| type_table.is_integer(*type_id))
+                .unwrap_or(TYPE_ID_I32);
+            let bits = type_table.unsigned_integer_bits(literal_type);
+            let value = match bits {
+                Some(bits) => {
+                    let maximum = if bits == 32 {
+                        i64::from(u32::MAX)
+                    } else {
+                        (1i64 << bits) - 1
+                    };
+                    if *value < 0 || *value > maximum {
+                        return Err(format!(
+                            "integer literal {value} is outside u{bits} range 0..={maximum}"
+                        ));
+                    }
+                    *value as u32 as i32
+                }
+                None => i32::try_from(*value).map_err(|_| {
+                    format!("integer literal out of i32 range in expression: {value}")
+                })?,
+            };
             Ok(ValueBinding {
                 value: builder.ins().iconst(types::I32, i64::from(value)),
-                type_id: TYPE_ID_I32,
+                type_id: literal_type,
             })
         }
         SimpleExpr::Float(value) => {
@@ -7481,7 +7624,16 @@ pub(crate) fn emit_simple_expression(
         SimpleExpr::Call { target, args } => {
             let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
-            for arg in args {
+            let expected_params = call_signatures.get(target).and_then(|signatures| {
+                let mut candidates = signatures
+                    .iter()
+                    .filter(|signature| signature.params.len() == args.len());
+                let first = candidates.next()?.params.clone();
+                candidates
+                    .all(|candidate| candidate.params == first)
+                    .then_some(first)
+            });
+            for (arg_index, arg) in args.iter().enumerate() {
                 if let Some(struct_view) = try_emit_struct_view_value(
                     builder,
                     arg,
@@ -7506,7 +7658,9 @@ pub(crate) fn emit_simple_expression(
                 let binding = emit_simple_expression(
                     builder,
                     arg,
-                    None,
+                    expected_params
+                        .as_ref()
+                        .and_then(|params| params.get(arg_index).copied()),
                     values_by_name,
                     runtime_call_refs,
                     internal_calls,
@@ -7521,6 +7675,62 @@ pub(crate) fn emit_simple_expression(
                 arg_values.push(binding.value);
                 arg_types.push(binding.type_id);
             }
+            if matches!(
+                target.as_str(),
+                "fixed32_from_i32"
+                    | "fixed32_to_i32"
+                    | "fixed32_mul"
+                    | "fixed32_div"
+                    | "fixed32_from_ratio"
+            ) {
+                let expected_arity = if target == "fixed32_from_i32" || target == "fixed32_to_i32" {
+                    1
+                } else {
+                    2
+                };
+                if arg_values.len() != expected_arity {
+                    return Err(format!(
+                        "deterministic numeric intrinsic '{target}' expects {expected_arity} argument(s), found {}",
+                        arg_values.len()
+                    ));
+                }
+                if let Some(type_id) = arg_types
+                    .iter()
+                    .copied()
+                    .find(|type_id| *type_id != TYPE_ID_I32)
+                {
+                    return Err(format!(
+                        "deterministic numeric intrinsic '{target}' requires exact i32 arguments, found type {type_id}"
+                    ));
+                }
+                let value = match target.as_str() {
+                    "fixed32_from_i32" => builder.ins().ishl_imm(arg_values[0], 16),
+                    "fixed32_to_i32" => {
+                        let scale = builder.ins().iconst(types::I32, 65_536);
+                        builder.ins().sdiv(arg_values[0], scale)
+                    }
+                    "fixed32_mul" => {
+                        let lhs = builder.ins().sextend(types::I64, arg_values[0]);
+                        let rhs = builder.ins().sextend(types::I64, arg_values[1]);
+                        let product = builder.ins().imul(lhs, rhs);
+                        let scale = builder.ins().iconst(types::I64, 65_536);
+                        let scaled = builder.ins().sdiv(product, scale);
+                        builder.ins().ireduce(types::I32, scaled)
+                    }
+                    "fixed32_div" | "fixed32_from_ratio" => {
+                        let lhs = builder.ins().sextend(types::I64, arg_values[0]);
+                        let numerator = builder.ins().ishl_imm(lhs, 16);
+                        let denominator = builder.ins().sextend(types::I64, arg_values[1]);
+                        let quotient = builder.ins().sdiv(numerator, denominator);
+                        builder.ins().ireduce(types::I32, quotient)
+                    }
+                    _ => unreachable!(),
+                };
+                return Ok(ValueBinding {
+                    value,
+                    type_id: TYPE_ID_I32,
+                });
+            }
             if target == "i32_to_f32" {
                 if arg_values.len() != 1 {
                     return Err(format!(
@@ -7528,9 +7738,9 @@ pub(crate) fn emit_simple_expression(
                         arg_values.len()
                     ));
                 }
-                if !is_i32_abi_compatible_type(arg_types[0], type_table) {
+                if arg_types[0] != TYPE_ID_I32 {
                     return Err(format!(
-                        "math intrinsic 'i32_to_f32' requires i32-compatible argument, found type {}",
+                        "math intrinsic 'i32_to_f32' requires exact i32 argument, found type {}",
                         arg_types[0]
                     ));
                 }
@@ -7636,45 +7846,101 @@ pub(crate) fn emit_simple_expression(
             let child_expected = match expected_type {
                 Some(TYPE_ID_F32) => Some(TYPE_ID_F32),
                 Some(TYPE_ID_F64) => Some(TYPE_ID_F64),
+                Some(type_id) if type_table.is_integer(type_id) => Some(type_id),
                 _ => None,
             };
-            let lhs_value = emit_simple_expression(
-                builder,
-                lhs,
-                child_expected,
-                values_by_name,
-                runtime_call_refs,
-                internal_calls,
-                call_signatures,
-                type_table,
-                global_path_types,
-                constant_values,
-                collection_infos,
-                named_struct_field_types,
-                foreach_bindings,
-            )?;
-            let rhs_value = emit_simple_expression(
-                builder,
-                rhs,
-                child_expected,
-                values_by_name,
-                runtime_call_refs,
-                internal_calls,
-                call_signatures,
-                type_table,
-                global_path_types,
-                constant_values,
-                collection_infos,
-                named_struct_field_types,
-                foreach_bindings,
-            )?;
+            let (lhs_value, rhs_value) =
+                if child_expected.is_none() && matches!(lhs.as_ref(), SimpleExpr::Int(_)) {
+                    let rhs_value = emit_simple_expression(
+                        builder,
+                        rhs,
+                        None,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?;
+                    let lhs_expected = type_table
+                        .unsigned_integer_bits(rhs_value.type_id)
+                        .is_some()
+                        .then_some(rhs_value.type_id);
+                    let lhs_value = emit_simple_expression(
+                        builder,
+                        lhs,
+                        lhs_expected,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?;
+                    (lhs_value, rhs_value)
+                } else {
+                    let lhs_value = emit_simple_expression(
+                        builder,
+                        lhs,
+                        child_expected,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?;
+                    let rhs_expected = child_expected.or_else(|| {
+                        type_table
+                            .unsigned_integer_bits(lhs_value.type_id)
+                            .is_some()
+                            .then_some(lhs_value.type_id)
+                    });
+                    let rhs_value = emit_simple_expression(
+                        builder,
+                        rhs,
+                        rhs_expected,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?;
+                    (lhs_value, rhs_value)
+                };
             if is_i32_numeric_type(lhs_value.type_id, type_table)
                 && is_i32_numeric_type(rhs_value.type_id, type_table)
             {
+                let result_type = integer_binary_result_type(
+                    expected_type,
+                    lhs_value.type_id,
+                    rhs_value.type_id,
+                    type_table,
+                );
+                let unsigned = type_table.unsigned_integer_bits(result_type).is_some();
                 let value = match op {
                     '+' => builder.ins().iadd(lhs_value.value, rhs_value.value),
                     '-' => builder.ins().isub(lhs_value.value, rhs_value.value),
                     '*' => builder.ins().imul(lhs_value.value, rhs_value.value),
+                    '/' if unsigned => builder.ins().udiv(lhs_value.value, rhs_value.value),
+                    '%' if unsigned => builder.ins().urem(lhs_value.value, rhs_value.value),
                     '/' => builder.ins().sdiv(lhs_value.value, rhs_value.value),
                     '%' => builder.ins().srem(lhs_value.value, rhs_value.value),
                     other => {
@@ -7684,8 +7950,8 @@ pub(crate) fn emit_simple_expression(
                     }
                 };
                 return Ok(ValueBinding {
-                    value,
-                    type_id: TYPE_ID_I32,
+                    value: normalize_unsigned_value(builder, value, result_type, type_table),
+                    type_id: result_type,
                 });
             }
 
@@ -7752,7 +8018,11 @@ pub(crate) fn coerce_numeric_operands_to_f32(
     let lhs_value = if lhs.type_id == TYPE_ID_F32 {
         lhs.value
     } else if is_i32_numeric_type(lhs.type_id, type_table) {
-        builder.ins().fcvt_from_sint(types::F32, lhs.value)
+        if type_table.unsigned_integer_bits(lhs.type_id).is_some() {
+            builder.ins().fcvt_from_uint(types::F32, lhs.value)
+        } else {
+            builder.ins().fcvt_from_sint(types::F32, lhs.value)
+        }
     } else {
         return Err(format!(
             "unsupported lhs type {} for '{}' expression",
@@ -7762,7 +8032,11 @@ pub(crate) fn coerce_numeric_operands_to_f32(
     let rhs_value = if rhs.type_id == TYPE_ID_F32 {
         rhs.value
     } else if is_i32_numeric_type(rhs.type_id, type_table) {
-        builder.ins().fcvt_from_sint(types::F32, rhs.value)
+        if type_table.unsigned_integer_bits(rhs.type_id).is_some() {
+            builder.ins().fcvt_from_uint(types::F32, rhs.value)
+        } else {
+            builder.ins().fcvt_from_sint(types::F32, rhs.value)
+        }
     } else {
         return Err(format!(
             "unsupported rhs type {} for '{}' expression",
@@ -7784,7 +8058,11 @@ pub(crate) fn coerce_numeric_operands_to_f64(
     } else if lhs.type_id == TYPE_ID_F32 {
         builder.ins().fpromote(types::F64, lhs.value)
     } else if is_i32_numeric_type(lhs.type_id, type_table) {
-        builder.ins().fcvt_from_sint(types::F64, lhs.value)
+        if type_table.unsigned_integer_bits(lhs.type_id).is_some() {
+            builder.ins().fcvt_from_uint(types::F64, lhs.value)
+        } else {
+            builder.ins().fcvt_from_sint(types::F64, lhs.value)
+        }
     } else {
         return Err(format!(
             "unsupported lhs type {} for '{}' expression",
@@ -7796,7 +8074,11 @@ pub(crate) fn coerce_numeric_operands_to_f64(
     } else if rhs.type_id == TYPE_ID_F32 {
         builder.ins().fpromote(types::F64, rhs.value)
     } else if is_i32_numeric_type(rhs.type_id, type_table) {
-        builder.ins().fcvt_from_sint(types::F64, rhs.value)
+        if type_table.unsigned_integer_bits(rhs.type_id).is_some() {
+            builder.ins().fcvt_from_uint(types::F64, rhs.value)
+        } else {
+            builder.ins().fcvt_from_sint(types::F64, rhs.value)
+        }
     } else {
         return Err(format!(
             "unsupported rhs type {} for '{}' expression",
@@ -7915,6 +8197,18 @@ pub(crate) fn emit_foreach_binding_load(
             });
         }
     }
+    if resolved == TYPE_ID_U16 {
+        if let Some(base_ptr) = binding.u16_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 1);
+            let address = builder.ins().iadd(base_ptr, byte_offset);
+            let word = builder.ins().load(types::I16, MemFlags::new(), address, 0);
+            return Ok(ValueBinding {
+                value: builder.ins().uextend(types::I32, word),
+                type_id: resolved,
+            });
+        }
+    }
     if is_i32_abi_compatible_type(resolved, type_table) {
         if let Some(base_ptr) = binding.i32_array_base_ptrs.get(suffix).copied() {
             let index_i64 = builder.ins().uextend(types::I64, index_value);
@@ -8018,69 +8312,27 @@ pub(crate) fn emit_foreach_binding_assignment(
     let index_value = builder.use_var(binding.index_var);
 
     if is_i32_scalar_lane_type(path_type, type_table) {
-        let value = match op {
-            AssignOp::Set => rhs.value,
-            AssignOp::Add => {
-                let lhs = emit_foreach_binding_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    binding,
-                    suffix,
-                )?
-                .value;
-                builder.ins().iadd(lhs, rhs.value)
-            }
-            AssignOp::Sub => {
-                let lhs = emit_foreach_binding_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    binding,
-                    suffix,
-                )?
-                .value;
-                builder.ins().isub(lhs, rhs.value)
-            }
-            AssignOp::Mul => {
-                let lhs = emit_foreach_binding_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    binding,
-                    suffix,
-                )?
-                .value;
-                builder.ins().imul(lhs, rhs.value)
-            }
-            AssignOp::Div => {
-                let lhs = emit_foreach_binding_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    binding,
-                    suffix,
-                )?
-                .value;
-                builder.ins().sdiv(lhs, rhs.value)
-            }
-            AssignOp::Mod => {
-                let lhs = emit_foreach_binding_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    binding,
-                    suffix,
-                )?
-                .value;
-                builder.ins().srem(lhs, rhs.value)
-            }
+        let lhs = if op == AssignOp::Set {
+            None
+        } else {
+            Some(
+                emit_foreach_binding_load(builder, runtime_call_refs, type_table, binding, suffix)?
+                    .value,
+            )
         };
+        let value =
+            emit_integer_assignment_value(builder, lhs, rhs.value, op, type_table, path_type);
         if let Some(base_ptr) = binding.u8_array_base_ptrs.get(suffix).copied() {
             let index_i64 = builder.ins().uextend(types::I64, index_value);
             let addr = builder.ins().iadd(base_ptr, index_i64);
             let byte = builder.ins().ireduce(types::I8, value);
             builder.ins().store(MemFlags::new(), byte, addr, 0);
+        } else if let Some(base_ptr) = binding.u16_array_base_ptrs.get(suffix).copied() {
+            let index_i64 = builder.ins().uextend(types::I64, index_value);
+            let byte_offset = builder.ins().ishl_imm(index_i64, 1);
+            let addr = builder.ins().iadd(base_ptr, byte_offset);
+            let word = builder.ins().ireduce(types::I16, value);
+            builder.ins().store(MemFlags::new(), word, addr, 0);
         } else if let Some(base_ptr) = binding.i32_array_base_ptrs.get(suffix).copied() {
             let index_i64 = builder.ins().uextend(types::I64, index_value);
             let byte_offset = builder.ins().ishl_imm(index_i64, 2);
@@ -8432,23 +8684,16 @@ pub(crate) fn emit_struct_view_field_assignment(
     builder.switch_to_block(aos_block);
     let path_hash = emit_local_struct_field_path_hash(base_hash, suffix, builder);
     if is_i32_scalar_lane_type(field_type, type_table) {
-        let value = match op {
-            AssignOp::Set => rhs.value,
-            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div | AssignOp::Mod => {
-                let call = builder
-                    .ins()
-                    .call(runtime_call_refs.global_i32_load, &[path_hash]);
-                let lhs = builder.inst_results(call)[0];
-                match op {
-                    AssignOp::Add => builder.ins().iadd(lhs, rhs.value),
-                    AssignOp::Sub => builder.ins().isub(lhs, rhs.value),
-                    AssignOp::Mul => builder.ins().imul(lhs, rhs.value),
-                    AssignOp::Div => builder.ins().sdiv(lhs, rhs.value),
-                    AssignOp::Mod => builder.ins().srem(lhs, rhs.value),
-                    AssignOp::Set => unreachable!(),
-                }
-            }
+        let lhs = if op == AssignOp::Set {
+            None
+        } else {
+            let call = builder
+                .ins()
+                .call(runtime_call_refs.global_i32_load, &[path_hash]);
+            Some(builder.inst_results(call)[0])
         };
+        let value =
+            emit_integer_assignment_value(builder, lhs, rhs.value, op, type_table, field_type);
         builder
             .ins()
             .call(runtime_call_refs.global_i32_store, &[path_hash, value]);
@@ -8529,24 +8774,17 @@ pub(crate) fn emit_struct_view_field_assignment(
     let field_hash = hash_foreach_field_suffix(suffix);
     let field_hash_value = builder.ins().iconst(types::I32, i64::from(field_hash));
     if is_i32_scalar_lane_type(field_type, type_table) {
-        let value = match op {
-            AssignOp::Set => rhs.value,
-            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div | AssignOp::Mod => {
-                let call = builder.ins().call(
-                    runtime_call_refs.global_i32_array_load,
-                    &[base_hash, field_hash_value, index_value],
-                );
-                let lhs = builder.inst_results(call)[0];
-                match op {
-                    AssignOp::Add => builder.ins().iadd(lhs, rhs.value),
-                    AssignOp::Sub => builder.ins().isub(lhs, rhs.value),
-                    AssignOp::Mul => builder.ins().imul(lhs, rhs.value),
-                    AssignOp::Div => builder.ins().sdiv(lhs, rhs.value),
-                    AssignOp::Mod => builder.ins().srem(lhs, rhs.value),
-                    AssignOp::Set => unreachable!(),
-                }
-            }
+        let lhs = if op == AssignOp::Set {
+            None
+        } else {
+            let call = builder.ins().call(
+                runtime_call_refs.global_i32_array_load,
+                &[base_hash, field_hash_value, index_value],
+            );
+            Some(builder.inst_results(call)[0])
         };
+        let value =
+            emit_integer_assignment_value(builder, lhs, rhs.value, op, type_table, field_type);
         builder.ins().call(
             runtime_call_refs.global_i32_array_store,
             &[base_hash, field_hash_value, index_value, value],
@@ -8802,10 +9040,11 @@ pub(crate) fn emit_local_indexed_collection_assignment(
         .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)));
 
     if is_i32_scalar_lane_type(path_type, type_table) {
-        let value = match op {
-            AssignOp::Set => rhs.value,
-            AssignOp::Add => {
-                let lhs = emit_local_indexed_collection_load(
+        let lhs = if op == AssignOp::Set {
+            None
+        } else {
+            Some(
+                emit_local_indexed_collection_load(
                     builder,
                     runtime_call_refs,
                     type_table,
@@ -8815,66 +9054,11 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                     suffix,
                     index_binding,
                 )?
-                .value;
-                builder.ins().iadd(lhs, rhs.value)
-            }
-            AssignOp::Sub => {
-                let lhs = emit_local_indexed_collection_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    named_struct_field_types,
-                    collection_name,
-                    collection_binding,
-                    suffix,
-                    index_binding,
-                )?
-                .value;
-                builder.ins().isub(lhs, rhs.value)
-            }
-            AssignOp::Mul => {
-                let lhs = emit_local_indexed_collection_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    named_struct_field_types,
-                    collection_name,
-                    collection_binding,
-                    suffix,
-                    index_binding,
-                )?
-                .value;
-                builder.ins().imul(lhs, rhs.value)
-            }
-            AssignOp::Div => {
-                let lhs = emit_local_indexed_collection_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    named_struct_field_types,
-                    collection_name,
-                    collection_binding,
-                    suffix,
-                    index_binding,
-                )?
-                .value;
-                builder.ins().sdiv(lhs, rhs.value)
-            }
-            AssignOp::Mod => {
-                let lhs = emit_local_indexed_collection_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    named_struct_field_types,
-                    collection_name,
-                    collection_binding,
-                    suffix,
-                    index_binding,
-                )?
-                .value;
-                builder.ins().srem(lhs, rhs.value)
-            }
+                .value,
+            )
         };
+        let value =
+            emit_integer_assignment_value(builder, lhs, rhs.value, op, type_table, path_type);
         builder.ins().call(
             runtime_call_refs.global_i32_array_store,
             &[collection_handle, field_hash, index_binding.value, value],
@@ -9061,7 +9245,7 @@ fn emit_direct_array_load(
     index: Value,
     type_id: TypeId,
     type_table: &TypeTable,
-    byte_lane: bool,
+    storage_bytes: u8,
     static_len: Option<usize>,
 ) -> Result<Value, String> {
     let data = emit_direct_slot_data_ptr(builder, slot_ref);
@@ -9099,12 +9283,12 @@ fn emit_direct_array_load(
         .ins()
         .brif(valid, valid_block, &[], invalid_block, &[]);
     builder.switch_to_block(valid_block);
-    let shift = if type_id == TYPE_ID_F64 {
-        3
-    } else if byte_lane {
-        0
-    } else {
-        2
+    let shift = match storage_bytes {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        8 => 3,
+        other => return Err(format!("unsupported direct array element width {other}")),
     };
     let byte_offset = if shift == 0 {
         index_i64
@@ -9112,9 +9296,12 @@ fn emit_direct_array_load(
         builder.ins().ishl_imm(index_i64, shift)
     };
     let address = builder.ins().iadd(data, byte_offset);
-    let value = if byte_lane {
+    let value = if storage_bytes == 1 {
         let byte = builder.ins().load(types::I8, MemFlags::new(), address, 0);
         builder.ins().uextend(types::I32, byte)
+    } else if storage_bytes == 2 {
+        let word = builder.ins().load(types::I16, MemFlags::new(), address, 0);
+        builder.ins().uextend(types::I32, word)
     } else {
         builder.ins().load(result_type, MemFlags::new(), address, 0)
     };
@@ -9140,8 +9327,8 @@ fn emit_direct_array_store(
     slot_ref: DirectStorageRef,
     index: Value,
     value: Value,
-    type_id: TypeId,
-    byte_lane: bool,
+    _type_id: TypeId,
+    storage_bytes: u8,
     static_len: Option<usize>,
 ) -> Result<(), String> {
     let data = emit_direct_slot_data_ptr(builder, slot_ref);
@@ -9168,12 +9355,12 @@ fn emit_direct_array_store(
         .ins()
         .brif(valid, store_block, &[], merge_block, &[]);
     builder.switch_to_block(store_block);
-    let shift = if type_id == TYPE_ID_F64 {
-        3
-    } else if byte_lane {
-        0
-    } else {
-        2
+    let shift = match storage_bytes {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        8 => 3,
+        other => return Err(format!("unsupported direct array element width {other}")),
     };
     let byte_offset = if shift == 0 {
         index_i64
@@ -9181,8 +9368,10 @@ fn emit_direct_array_store(
         builder.ins().ishl_imm(index_i64, shift)
     };
     let address = builder.ins().iadd(data, byte_offset);
-    let stored = if byte_lane {
+    let stored = if storage_bytes == 1 {
         builder.ins().ireduce(types::I8, value)
+    } else if storage_bytes == 2 {
+        builder.ins().ireduce(types::I16, value)
     } else {
         value
     };
@@ -9222,7 +9411,7 @@ pub(crate) fn emit_indexed_collection_load(
                 index_binding.value,
                 resolved,
                 type_table,
-                direct.byte_lane,
+                direct.storage_bytes,
                 direct.static_len,
             )?,
             type_id: resolved,
@@ -9306,10 +9495,11 @@ pub(crate) fn emit_indexed_collection_assignment(
         .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)));
 
     if is_i32_scalar_lane_type(path_type, type_table) {
-        let value = match op {
-            AssignOp::Set => rhs.value,
-            AssignOp::Add => {
-                let lhs = emit_indexed_collection_load(
+        let lhs = if op == AssignOp::Set {
+            None
+        } else {
+            Some(
+                emit_indexed_collection_load(
                     builder,
                     runtime_call_refs,
                     type_table,
@@ -9318,62 +9508,11 @@ pub(crate) fn emit_indexed_collection_assignment(
                     suffix,
                     index_binding,
                 )?
-                .value;
-                builder.ins().iadd(lhs, rhs.value)
-            }
-            AssignOp::Sub => {
-                let lhs = emit_indexed_collection_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    collection_path,
-                    collection_info,
-                    suffix,
-                    index_binding,
-                )?
-                .value;
-                builder.ins().isub(lhs, rhs.value)
-            }
-            AssignOp::Mul => {
-                let lhs = emit_indexed_collection_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    collection_path,
-                    collection_info,
-                    suffix,
-                    index_binding,
-                )?
-                .value;
-                builder.ins().imul(lhs, rhs.value)
-            }
-            AssignOp::Div => {
-                let lhs = emit_indexed_collection_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    collection_path,
-                    collection_info,
-                    suffix,
-                    index_binding,
-                )?
-                .value;
-                builder.ins().sdiv(lhs, rhs.value)
-            }
-            AssignOp::Mod => {
-                let lhs = emit_indexed_collection_load(
-                    builder,
-                    runtime_call_refs,
-                    type_table,
-                    collection_path,
-                    collection_info,
-                    suffix,
-                    index_binding,
-                )?
-                .value;
-                builder.ins().srem(lhs, rhs.value)
-            }
+                .value,
+            )
         };
+        let value =
+            emit_integer_assignment_value(builder, lhs, rhs.value, op, type_table, path_type);
         if let Some(direct) = direct_slot {
             emit_direct_array_store(
                 builder,
@@ -9381,7 +9520,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                 index_binding.value,
                 value,
                 path_type,
-                direct.byte_lane,
+                direct.storage_bytes,
                 direct.static_len,
             )?;
         } else {
@@ -9406,7 +9545,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                 index_binding.value,
                 rhs.value,
                 path_type,
-                direct.byte_lane,
+                direct.storage_bytes,
                 direct.static_len,
             )?;
         } else {
@@ -9486,7 +9625,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                 index_binding.value,
                 value,
                 path_type,
-                direct.byte_lane,
+                direct.storage_bytes,
                 direct.static_len,
             )?;
         } else {
@@ -9566,7 +9705,7 @@ pub(crate) fn emit_indexed_collection_assignment(
                 index_binding.value,
                 value,
                 path_type,
-                direct.byte_lane,
+                direct.storage_bytes,
                 direct.static_len,
             )?;
         } else {
@@ -9665,6 +9804,7 @@ pub(crate) fn emit_global_assignment(
         ));
     }
     if is_i32_scalar_lane_type(path_type, type_table) {
+        let unsigned = type_table.unsigned_integer_bits(path_type).is_some();
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add => {
@@ -9684,6 +9824,18 @@ pub(crate) fn emit_global_assignment(
                     emit_global_load(builder, runtime_call_refs, type_table, path, path_type)?
                         .value;
                 builder.ins().imul(lhs, rhs.value)
+            }
+            AssignOp::Div if unsigned => {
+                let lhs =
+                    emit_global_load(builder, runtime_call_refs, type_table, path, path_type)?
+                        .value;
+                builder.ins().udiv(lhs, rhs.value)
+            }
+            AssignOp::Mod if unsigned => {
+                let lhs =
+                    emit_global_load(builder, runtime_call_refs, type_table, path, path_type)?
+                        .value;
+                builder.ins().urem(lhs, rhs.value)
             }
             AssignOp::Div => {
                 let lhs =
@@ -9880,6 +10032,14 @@ fn emit_direct_scalar_load(
     type_table: &TypeTable,
 ) -> Result<Value, String> {
     let data = emit_direct_slot_data_ptr(builder, slot_ref);
+    if type_table.unsigned_integer_bits(type_id) == Some(8) {
+        let value = builder.ins().load(types::I8, MemFlags::new(), data, 0);
+        return Ok(builder.ins().uextend(types::I32, value));
+    }
+    if type_table.unsigned_integer_bits(type_id) == Some(16) {
+        let value = builder.ins().load(types::I16, MemFlags::new(), data, 0);
+        return Ok(builder.ins().uextend(types::I32, value));
+    }
     let clif_type = if is_i32_abi_compatible_type(type_id, type_table) {
         types::I32
     } else if type_id == TYPE_ID_F32 {
@@ -9907,6 +10067,11 @@ fn emit_global_scalar_store(
         .copied()
     {
         let data = emit_direct_slot_data_ptr(builder, slot_ref);
+        let value = match type_table.unsigned_integer_bits(type_id) {
+            Some(8) => builder.ins().ireduce(types::I8, value),
+            Some(16) => builder.ins().ireduce(types::I16, value),
+            _ => value,
+        };
         builder.ins().store(MemFlags::new(), value, data, 0);
         return Ok(());
     }
@@ -9955,42 +10120,91 @@ pub(crate) fn emit_simple_condition(
 ) -> Result<Value, String> {
     match condition {
         SimpleCondition::Comparison { lhs, op, rhs } => {
-            let lhs = emit_simple_expression(
-                builder,
-                lhs,
-                None,
-                values_by_name,
-                runtime_call_refs,
-                internal_calls,
-                call_signatures,
-                type_table,
-                global_path_types,
-                constant_values,
-                collection_infos,
-                named_struct_field_types,
-                foreach_bindings,
-            )?;
-            let rhs = emit_simple_expression(
-                builder,
-                rhs,
-                None,
-                values_by_name,
-                runtime_call_refs,
-                internal_calls,
-                call_signatures,
-                type_table,
-                global_path_types,
-                constant_values,
-                collection_infos,
-                named_struct_field_types,
-                foreach_bindings,
-            )?;
+            let (lhs, rhs) = if matches!(lhs, SimpleExpr::Int(_)) {
+                let rhs_value = emit_simple_expression(
+                    builder,
+                    rhs,
+                    None,
+                    values_by_name,
+                    runtime_call_refs,
+                    internal_calls,
+                    call_signatures,
+                    type_table,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    named_struct_field_types,
+                    foreach_bindings,
+                )?;
+                let lhs_expected = type_table
+                    .unsigned_integer_bits(rhs_value.type_id)
+                    .is_some()
+                    .then_some(rhs_value.type_id);
+                let lhs_value = emit_simple_expression(
+                    builder,
+                    lhs,
+                    lhs_expected,
+                    values_by_name,
+                    runtime_call_refs,
+                    internal_calls,
+                    call_signatures,
+                    type_table,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    named_struct_field_types,
+                    foreach_bindings,
+                )?;
+                (lhs_value, rhs_value)
+            } else {
+                let lhs_value = emit_simple_expression(
+                    builder,
+                    lhs,
+                    None,
+                    values_by_name,
+                    runtime_call_refs,
+                    internal_calls,
+                    call_signatures,
+                    type_table,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    named_struct_field_types,
+                    foreach_bindings,
+                )?;
+                let rhs_expected = type_table
+                    .unsigned_integer_bits(lhs_value.type_id)
+                    .is_some()
+                    .then_some(lhs_value.type_id);
+                let rhs_value = emit_simple_expression(
+                    builder,
+                    rhs,
+                    rhs_expected,
+                    values_by_name,
+                    runtime_call_refs,
+                    internal_calls,
+                    call_signatures,
+                    type_table,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    named_struct_field_types,
+                    foreach_bindings,
+                )?;
+                (lhs_value, rhs_value)
+            };
             if is_i32_abi_compatible_type(lhs.type_id, type_table)
                 && is_i32_abi_compatible_type(rhs.type_id, type_table)
             {
+                let unsigned = type_table.unsigned_integer_bits(lhs.type_id).is_some()
+                    || type_table.unsigned_integer_bits(rhs.type_id).is_some();
                 let intcc = match op {
                     ComparisonOp::Eq => IntCC::Equal,
                     ComparisonOp::Ne => IntCC::NotEqual,
+                    ComparisonOp::Lt if unsigned => IntCC::UnsignedLessThan,
+                    ComparisonOp::Le if unsigned => IntCC::UnsignedLessThanOrEqual,
+                    ComparisonOp::Gt if unsigned => IntCC::UnsignedGreaterThan,
+                    ComparisonOp::Ge if unsigned => IntCC::UnsignedGreaterThanOrEqual,
                     ComparisonOp::Lt => IntCC::SignedLessThan,
                     ComparisonOp::Le => IntCC::SignedLessThanOrEqual,
                     ComparisonOp::Gt => IntCC::SignedGreaterThan,
@@ -10479,7 +10693,7 @@ fn resolve_direct_storage_refs(
                     key.clone(),
                     DirectArrayStorageRef {
                         slot: resolve(module, func, &binding.slot)?,
-                        byte_lane: binding.byte_lane,
+                        storage_bytes: binding.storage_bytes,
                         static_len: binding.static_len,
                     },
                 ))
