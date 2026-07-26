@@ -53,6 +53,7 @@
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
 static void flush_sprites(void);
 static void render_postfx(void);
+static void render_queued_3d(void);
 #endif
 
 static void stasis_sdl_log_output(void* userdata, int category, SDL_LogPriority priority, const char* message) {
@@ -102,6 +103,23 @@ STASIS_EXPORT int stasis_get_time_us(void);
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
 STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y, float r, float g, float b, float a);
 STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle);
+STASIS_EXPORT int stasis_gfx_load_mesh_obj(const char* path);
+STASIS_EXPORT void stasis_gfx_release_mesh(int handle);
+STASIS_EXPORT void stasis_gfx_3d_camera(
+    float eye_x, float eye_y, float eye_z,
+    float target_x, float target_y, float target_z,
+    float fov_degrees);
+STASIS_EXPORT void stasis_gfx_3d_environment(
+    float key_x, float key_y, float key_z,
+    float ambient, float intensity,
+    float fog_r, float fog_g, float fog_b, float fog_density);
+STASIS_EXPORT void stasis_gfx_draw_mesh_3d(
+    int handle,
+    float x, float y, float z,
+    float scale_x, float scale_y, float scale_z,
+    float yaw_degrees,
+    float r, float g, float b,
+    float metallic, float roughness, float emission);
 
 /* Global state */
 static SDL_Window* g_window = NULL;
@@ -247,6 +265,63 @@ static int g_sprite_max_dimension = -1;
 static int g_sprite_max_pixels = -1;
 static int g_sprite_max_file_bytes = -1;
 static SpriteEntry g_sprite_fallback;
+
+/* Experimental generic real-time 3D resource and draw queue. The public Stasis
+ * API is intentionally model-agnostic; ChessTD-specific composition belongs in
+ * game code. This first spike targets the existing desktop GL backend. */
+#define STASIS_MESH_TABLE_CAPACITY 64
+#define STASIS_3D_DRAW_CAPACITY 512
+
+typedef struct {
+    float px, py, pz;
+    float nx, ny, nz;
+} StasisMeshVertex;
+
+typedef struct {
+    char* path;
+    StasisMeshVertex* vertices;
+    int vertex_count;
+    int used;
+    unsigned int generation;
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    GLuint vbo;
+#endif
+} StasisMeshEntry;
+
+typedef struct {
+    int handle;
+    float position[3];
+    float scale[3];
+    float yaw_degrees;
+    float color[3];
+    float metallic;
+    float roughness;
+    float emission;
+} StasisMeshDraw;
+
+static StasisMeshEntry g_meshes[STASIS_MESH_TABLE_CAPACITY];
+static StasisMeshDraw g_mesh_draws[STASIS_3D_DRAW_CAPACITY];
+static int g_mesh_draw_count = 0;
+static float g_3d_eye[3] = { 7.5f, 10.5f, 11.5f };
+static float g_3d_target[3] = { 0.0f, 0.0f, 0.0f };
+static float g_3d_fov_degrees = 34.0f;
+static float g_3d_key_direction[3] = { -0.45f, 0.85f, 0.25f };
+static float g_3d_ambient = 0.24f;
+static float g_3d_intensity = 1.35f;
+static float g_3d_fog_color[3] = { 0.025f, 0.055f, 0.075f };
+static float g_3d_fog_density = 0.018f;
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+static GLuint g_mesh_program = 0;
+static GLint g_mesh_mvp_loc = -1;
+static GLint g_mesh_model_loc = -1;
+static GLint g_mesh_color_loc = -1;
+static GLint g_mesh_material_loc = -1;
+static GLint g_mesh_eye_loc = -1;
+static GLint g_mesh_key_loc = -1;
+static GLint g_mesh_light_loc = -1;
+static GLint g_mesh_fog_loc = -1;
+static GLint g_mesh_fog_density_loc = -1;
+#endif
 
 /* Font rendering with stb_truetype. */
 #define MAX_FONTS 8
@@ -1629,6 +1704,697 @@ static GLuint link_program(GLuint vs, GLuint fs) {
         return 0;
     }
     return prog;
+}
+
+typedef struct {
+    float m[16];
+} StasisMat4;
+
+static StasisMat4 stasis_mat4_identity(void) {
+    StasisMat4 out = {{0}};
+    out.m[0] = 1.0f;
+    out.m[5] = 1.0f;
+    out.m[10] = 1.0f;
+    out.m[15] = 1.0f;
+    return out;
+}
+
+static StasisMat4 stasis_mat4_mul(StasisMat4 a, StasisMat4 b) {
+    StasisMat4 out = {{0}};
+    for (int column = 0; column < 4; column++) {
+        for (int row = 0; row < 4; row++) {
+            for (int inner = 0; inner < 4; inner++) {
+                out.m[column * 4 + row] +=
+                    a.m[inner * 4 + row] * b.m[column * 4 + inner];
+            }
+        }
+    }
+    return out;
+}
+
+static float stasis_vec3_length(float x, float y, float z) {
+    return sqrtf(x * x + y * y + z * z);
+}
+
+static void stasis_vec3_normalize(float* x, float* y, float* z) {
+    float length = stasis_vec3_length(*x, *y, *z);
+    if (length < 0.000001f) return;
+    *x /= length;
+    *y /= length;
+    *z /= length;
+}
+
+static StasisMat4 stasis_mat4_perspective(
+    float fov_degrees,
+    float aspect,
+    float near_plane,
+    float far_plane
+) {
+    StasisMat4 out = {{0}};
+    float radians = fov_degrees * 0.01745329251994329577f;
+    float f = 1.0f / tanf(radians * 0.5f);
+    out.m[0] = f / aspect;
+    out.m[5] = f;
+    out.m[10] = (far_plane + near_plane) / (near_plane - far_plane);
+    out.m[11] = -1.0f;
+    out.m[14] = (2.0f * far_plane * near_plane) / (near_plane - far_plane);
+    return out;
+}
+
+static StasisMat4 stasis_mat4_look_at(const float eye[3], const float target[3]) {
+    float fx = target[0] - eye[0];
+    float fy = target[1] - eye[1];
+    float fz = target[2] - eye[2];
+    stasis_vec3_normalize(&fx, &fy, &fz);
+
+    float sx = -fz;
+    float sy = 0.0f;
+    float sz = fx;
+    stasis_vec3_normalize(&sx, &sy, &sz);
+
+    float ux = sy * fz - sz * fy;
+    float uy = sz * fx - sx * fz;
+    float uz = sx * fy - sy * fx;
+
+    StasisMat4 out = stasis_mat4_identity();
+    out.m[0] = sx;
+    out.m[4] = sy;
+    out.m[8] = sz;
+    out.m[1] = ux;
+    out.m[5] = uy;
+    out.m[9] = uz;
+    out.m[2] = -fx;
+    out.m[6] = -fy;
+    out.m[10] = -fz;
+    out.m[12] = -(sx * eye[0] + sy * eye[1] + sz * eye[2]);
+    out.m[13] = -(ux * eye[0] + uy * eye[1] + uz * eye[2]);
+    out.m[14] = fx * eye[0] + fy * eye[1] + fz * eye[2];
+    return out;
+}
+
+static StasisMat4 stasis_mat4_model(const StasisMeshDraw* draw) {
+    float yaw = draw->yaw_degrees * 0.01745329251994329577f;
+    float cosine = cosf(yaw);
+    float sine = sinf(yaw);
+    StasisMat4 out = stasis_mat4_identity();
+    out.m[0] = cosine * draw->scale[0];
+    out.m[2] = -sine * draw->scale[0];
+    out.m[5] = draw->scale[1];
+    out.m[8] = sine * draw->scale[2];
+    out.m[10] = cosine * draw->scale[2];
+    out.m[12] = draw->position[0];
+    out.m[13] = draw->position[1];
+    out.m[14] = draw->position[2];
+    return out;
+}
+
+static void ensure_mesh_program(void) {
+    if (g_mesh_program != 0) return;
+    const char* vertex_source =
+        "#version 120\n"
+        "attribute vec3 a_pos;\n"
+        "attribute vec3 a_normal;\n"
+        "uniform mat4 u_mvp;\n"
+        "uniform mat4 u_model;\n"
+        "varying vec3 v_world;\n"
+        "varying vec3 v_normal;\n"
+        "void main(){ vec4 world=u_model*vec4(a_pos,1.0); v_world=world.xyz; "
+        "v_normal=normalize(mat3(u_model)*a_normal); gl_Position=u_mvp*vec4(a_pos,1.0); }\n";
+    const char* fragment_source =
+        "#version 120\n"
+        "varying vec3 v_world;\n"
+        "varying vec3 v_normal;\n"
+        "uniform vec3 u_color;\n"
+        "uniform vec3 u_eye;\n"
+        "uniform vec3 u_key;\n"
+        "uniform vec2 u_light;\n"
+        "uniform vec3 u_material;\n"
+        "uniform vec3 u_fog;\n"
+        "uniform float u_fog_density;\n"
+        "void main(){ vec3 n=normalize(v_normal); vec3 l=normalize(u_key); "
+        "vec3 v=normalize(u_eye-v_world); vec3 h=normalize(l+v); "
+        "float ndl=max(dot(n,l),0.0); float hemi=0.5+0.5*n.y; "
+        "float rough=clamp(u_material.y,0.04,1.0); "
+        "float specPower=mix(96.0,8.0,rough); "
+        "float spec=pow(max(dot(n,h),0.0),specPower)*mix(0.18,1.25,u_material.x); "
+        "float rim=pow(1.0-max(dot(n,v),0.0),3.0); "
+        "vec3 diffuse=u_color*(u_light.x*(0.55+0.45*hemi)+u_light.y*ndl); "
+        "vec3 color=diffuse+vec3(spec*u_light.y)+u_color*rim*0.22+u_color*u_material.z; "
+        "float distanceToEye=length(u_eye-v_world); "
+        "float fogAmount=1.0-exp(-u_fog_density*u_fog_density*distanceToEye*distanceToEye); "
+        "color=mix(color,u_fog,clamp(fogAmount,0.0,0.88)); "
+        "color=pow(max(color,vec3(0.0)),vec3(0.454545)); "
+        "gl_FragColor=vec4(color,1.0); }\n";
+
+    GLuint vertex = compile_shader(GL_VERTEX_SHADER, vertex_source);
+    GLuint fragment = compile_shader(GL_FRAGMENT_SHADER, fragment_source);
+    if (vertex == 0 || fragment == 0) {
+        if (vertex) glDeleteShader(vertex);
+        if (fragment) glDeleteShader(fragment);
+        return;
+    }
+    g_mesh_program = glCreateProgram();
+    glAttachShader(g_mesh_program, vertex);
+    glAttachShader(g_mesh_program, fragment);
+    glBindAttribLocation(g_mesh_program, 0, "a_pos");
+    glBindAttribLocation(g_mesh_program, 1, "a_normal");
+    glLinkProgram(g_mesh_program);
+    GLint linked = 0;
+    glGetProgramiv(g_mesh_program, GL_LINK_STATUS, &linked);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+    if (linked != GL_TRUE) {
+        char log[512];
+        glGetProgramInfoLog(g_mesh_program, sizeof(log), NULL, log);
+        SDL_Log("3D mesh program link error: %s", log);
+        glDeleteProgram(g_mesh_program);
+        g_mesh_program = 0;
+        return;
+    }
+    g_mesh_mvp_loc = glGetUniformLocation(g_mesh_program, "u_mvp");
+    g_mesh_model_loc = glGetUniformLocation(g_mesh_program, "u_model");
+    g_mesh_color_loc = glGetUniformLocation(g_mesh_program, "u_color");
+    g_mesh_material_loc = glGetUniformLocation(g_mesh_program, "u_material");
+    g_mesh_eye_loc = glGetUniformLocation(g_mesh_program, "u_eye");
+    g_mesh_key_loc = glGetUniformLocation(g_mesh_program, "u_key");
+    g_mesh_light_loc = glGetUniformLocation(g_mesh_program, "u_light");
+    g_mesh_fog_loc = glGetUniformLocation(g_mesh_program, "u_fog");
+    g_mesh_fog_density_loc = glGetUniformLocation(g_mesh_program, "u_fog_density");
+}
+
+static int mesh_handle_for_slot(int slot) {
+    if (slot < 0 || slot >= STASIS_MESH_TABLE_CAPACITY) return 0;
+    unsigned int generation = g_meshes[slot].generation & 0x00ffffffu;
+    return (int)((generation << 8) | (unsigned int)(slot + 1));
+}
+
+static StasisMeshEntry* mesh_get(int handle) {
+    if (handle <= 0) return NULL;
+    unsigned int raw = (unsigned int)handle;
+    int slot = (int)(raw & 0xffu) - 1;
+    unsigned int generation = raw >> 8;
+    if (slot < 0 || slot >= STASIS_MESH_TABLE_CAPACITY) return NULL;
+    StasisMeshEntry* entry = &g_meshes[slot];
+    if (!entry->used || entry->generation != generation) return NULL;
+    return entry;
+}
+
+static int mesh_upload_if_needed(StasisMeshEntry* entry) {
+    if (!entry || !entry->vertices || entry->vertex_count <= 0) return 0;
+    if (entry->vbo != 0) return 1;
+    glGenBuffers(1, &entry->vbo);
+    if (entry->vbo == 0) return 0;
+    glBindBuffer(GL_ARRAY_BUFFER, entry->vbo);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        sizeof(StasisMeshVertex) * (size_t)entry->vertex_count,
+        entry->vertices,
+        GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return glGetError() == GL_NO_ERROR;
+}
+
+static void render_queued_3d(void) {
+    if (g_mesh_draw_count <= 0) return;
+    if (g_use_sdl_renderer || g_gl_context == NULL) {
+        static int warned = 0;
+        if (!warned) {
+            SDL_Log("Stasis 3D draw queue requires the OpenGL backend in this experimental spike");
+            warned = 1;
+        }
+        g_mesh_draw_count = 0;
+        return;
+    }
+
+    ensure_mesh_program();
+    if (g_mesh_program == 0) {
+        g_mesh_draw_count = 0;
+        return;
+    }
+
+    const StasisDisplayViewport viewport = g_display_metrics.drawable_viewport;
+    glViewport(
+        (GLint)viewport.x,
+        (GLint)viewport.y,
+        (GLsizei)viewport.w,
+        (GLsizei)viewport.h);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_TRUE);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glDisable(GL_BLEND);
+
+    float aspect = viewport.h > 0.0f ? viewport.w / viewport.h : 1.0f;
+    StasisMat4 projection = stasis_mat4_perspective(
+        g_3d_fov_degrees, aspect, 0.05f, 120.0f);
+    StasisMat4 view = stasis_mat4_look_at(g_3d_eye, g_3d_target);
+    StasisMat4 view_projection = stasis_mat4_mul(projection, view);
+
+    glUseProgram(g_mesh_program);
+    glUniform3fv(g_mesh_eye_loc, 1, g_3d_eye);
+    glUniform3fv(g_mesh_key_loc, 1, g_3d_key_direction);
+    glUniform2f(g_mesh_light_loc, g_3d_ambient, g_3d_intensity);
+    glUniform3fv(g_mesh_fog_loc, 1, g_3d_fog_color);
+    glUniform1f(g_mesh_fog_density_loc, g_3d_fog_density);
+
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    for (int index = 0; index < g_mesh_draw_count; index++) {
+        StasisMeshDraw* draw = &g_mesh_draws[index];
+        StasisMeshEntry* mesh = mesh_get(draw->handle);
+        if (!mesh || !mesh_upload_if_needed(mesh)) continue;
+
+        StasisMat4 model = stasis_mat4_model(draw);
+        StasisMat4 mvp = stasis_mat4_mul(view_projection, model);
+        glUniformMatrix4fv(g_mesh_mvp_loc, 1, GL_FALSE, mvp.m);
+        glUniformMatrix4fv(g_mesh_model_loc, 1, GL_FALSE, model.m);
+        glUniform3fv(g_mesh_color_loc, 1, draw->color);
+        glUniform3f(
+            g_mesh_material_loc,
+            draw->metallic,
+            draw->roughness,
+            draw->emission);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh->vbo);
+        glVertexAttribPointer(
+            0, 3, GL_FLOAT, GL_FALSE, sizeof(StasisMeshVertex),
+            (void*)offsetof(StasisMeshVertex, px));
+        glVertexAttribPointer(
+            1, 3, GL_FLOAT, GL_FALSE, sizeof(StasisMeshVertex),
+            (void*)offsetof(StasisMeshVertex, nx));
+        glDrawArrays(GL_TRIANGLES, 0, mesh->vertex_count);
+    }
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glUseProgram(0);
+
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    setup_ortho();
+    g_mesh_draw_count = 0;
+}
+#endif
+
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+typedef struct {
+    float x, y, z;
+} StasisObjVec3;
+
+typedef struct {
+    int position;
+    int normal;
+} StasisObjIndex;
+
+static int stasis_obj_resolve_index(int index, int count) {
+    if (index > 0) return index - 1;
+    if (index < 0) return count + index;
+    return -1;
+}
+
+static StasisObjIndex stasis_obj_parse_index(char* token) {
+    StasisObjIndex out = {0, 0};
+    char* first_slash = strchr(token, '/');
+    if (!first_slash) {
+        out.position = atoi(token);
+        return out;
+    }
+    *first_slash = 0;
+    out.position = atoi(token);
+    char* second_slash = strchr(first_slash + 1, '/');
+    if (second_slash && second_slash[1] != 0) {
+        out.normal = atoi(second_slash + 1);
+    }
+    return out;
+}
+
+static int stasis_mesh_vertex_push(
+    StasisMeshVertex** vertices,
+    int* count,
+    int* capacity,
+    StasisMeshVertex vertex
+) {
+    if (*count >= *capacity) {
+        int next_capacity = *capacity > 0 ? *capacity * 2 : 4096;
+        StasisMeshVertex* next = (StasisMeshVertex*)realloc(
+            *vertices, sizeof(StasisMeshVertex) * (size_t)next_capacity);
+        if (!next) return 0;
+        *vertices = next;
+        *capacity = next_capacity;
+    }
+    (*vertices)[*count] = vertex;
+    *count += 1;
+    return 1;
+}
+
+static int stasis_obj_vec_push(
+    StasisObjVec3** values,
+    int* count,
+    int* capacity,
+    StasisObjVec3 value
+) {
+    if (*count >= *capacity) {
+        int next_capacity = *capacity > 0 ? *capacity * 2 : 1024;
+        StasisObjVec3* next = (StasisObjVec3*)realloc(
+            *values, sizeof(StasisObjVec3) * (size_t)next_capacity);
+        if (!next) return 0;
+        *values = next;
+        *capacity = next_capacity;
+    }
+    (*values)[*count] = value;
+    *count += 1;
+    return 1;
+}
+
+static void stasis_face_normal(
+    StasisObjVec3 a,
+    StasisObjVec3 b,
+    StasisObjVec3 c,
+    float* nx,
+    float* ny,
+    float* nz
+) {
+    float abx = b.x - a.x;
+    float aby = b.y - a.y;
+    float abz = b.z - a.z;
+    float acx = c.x - a.x;
+    float acy = c.y - a.y;
+    float acz = c.z - a.z;
+    *nx = aby * acz - abz * acy;
+    *ny = abz * acx - abx * acz;
+    *nz = abx * acy - aby * acx;
+    stasis_vec3_normalize(nx, ny, nz);
+}
+
+static StasisMeshVertex* stasis_load_obj_vertices(
+    const char* path,
+    int* out_vertex_count
+) {
+    *out_vertex_count = 0;
+    FILE* file = fopen(path, "rb");
+    if (!file) return NULL;
+
+    StasisObjVec3* positions = NULL;
+    StasisObjVec3* normals = NULL;
+    StasisMeshVertex* vertices = NULL;
+    int position_count = 0, position_capacity = 0;
+    int normal_count = 0, normal_capacity = 0;
+    int vertex_count = 0, vertex_capacity = 0;
+    int failed = 0;
+    char line[8192];
+
+    while (!failed && fgets(line, sizeof(line), file)) {
+        if (line[0] == 'v' && line[1] == ' ') {
+            StasisObjVec3 value;
+            if (sscanf(line + 2, "%f %f %f", &value.x, &value.y, &value.z) == 3) {
+                failed = !stasis_obj_vec_push(
+                    &positions, &position_count, &position_capacity, value);
+            }
+            continue;
+        }
+        if (line[0] == 'v' && line[1] == 'n' && line[2] == ' ') {
+            StasisObjVec3 value;
+            if (sscanf(line + 3, "%f %f %f", &value.x, &value.y, &value.z) == 3) {
+                stasis_vec3_normalize(&value.x, &value.y, &value.z);
+                failed = !stasis_obj_vec_push(
+                    &normals, &normal_count, &normal_capacity, value);
+            }
+            continue;
+        }
+        if (line[0] != 'f' || line[1] != ' ') continue;
+
+        StasisObjIndex face[64];
+        int face_count = 0;
+        char* context = NULL;
+        char* token = strtok_s(line + 2, " \t\r\n", &context);
+        while (token && face_count < 64) {
+            face[face_count++] = stasis_obj_parse_index(token);
+            token = strtok_s(NULL, " \t\r\n", &context);
+        }
+        if (face_count < 3) continue;
+
+        for (int tri = 1; tri + 1 < face_count; tri++) {
+            int face_indices[3] = {0, tri, tri + 1};
+            StasisObjVec3 triangle_positions[3];
+            int valid = 1;
+            for (int corner = 0; corner < 3; corner++) {
+                StasisObjIndex index = face[face_indices[corner]];
+                int position_index = stasis_obj_resolve_index(
+                    index.position, position_count);
+                if (position_index < 0 || position_index >= position_count) {
+                    valid = 0;
+                    break;
+                }
+                triangle_positions[corner] = positions[position_index];
+            }
+            if (!valid) continue;
+
+            float face_nx, face_ny, face_nz;
+            stasis_face_normal(
+                triangle_positions[0],
+                triangle_positions[1],
+                triangle_positions[2],
+                &face_nx, &face_ny, &face_nz);
+            for (int corner = 0; corner < 3; corner++) {
+                StasisObjIndex index = face[face_indices[corner]];
+                StasisMeshVertex vertex;
+                vertex.px = triangle_positions[corner].x;
+                vertex.py = triangle_positions[corner].y;
+                vertex.pz = triangle_positions[corner].z;
+                int normal_index = stasis_obj_resolve_index(
+                    index.normal, normal_count);
+                if (normal_index >= 0 && normal_index < normal_count) {
+                    vertex.nx = normals[normal_index].x;
+                    vertex.ny = normals[normal_index].y;
+                    vertex.nz = normals[normal_index].z;
+                } else {
+                    vertex.nx = face_nx;
+                    vertex.ny = face_ny;
+                    vertex.nz = face_nz;
+                }
+                if (!stasis_mesh_vertex_push(
+                        &vertices, &vertex_count, &vertex_capacity, vertex)) {
+                    failed = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    fclose(file);
+    free(positions);
+    free(normals);
+    if (failed || vertex_count <= 0) {
+        free(vertices);
+        return NULL;
+    }
+    *out_vertex_count = vertex_count;
+    return vertices;
+}
+
+STASIS_EXPORT int stasis_gfx_load_mesh_obj(const char* path) {
+    if (!path || !*path) return 0;
+    char resolved[1024];
+    if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+        SDL_Log("gfx_load_mesh_obj: asset_not_found path=%s", path);
+        return 0;
+    }
+
+    for (int slot = 0; slot < STASIS_MESH_TABLE_CAPACITY; slot++) {
+        StasisMeshEntry* cached = &g_meshes[slot];
+        if (cached->used && cached->path && strcmp(cached->path, resolved) == 0) {
+            return mesh_handle_for_slot(slot);
+        }
+    }
+
+    int slot = -1;
+    for (int index = 0; index < STASIS_MESH_TABLE_CAPACITY; index++) {
+        if (!g_meshes[index].used) {
+            slot = index;
+            break;
+        }
+    }
+    if (slot < 0) {
+        SDL_Log("gfx_load_mesh_obj: mesh_table_full capacity=%d", STASIS_MESH_TABLE_CAPACITY);
+        return 0;
+    }
+
+    int vertex_count = 0;
+    StasisMeshVertex* vertices = stasis_load_obj_vertices(resolved, &vertex_count);
+    if (!vertices) {
+        SDL_Log("gfx_load_mesh_obj: invalid_or_empty_obj path=%s", resolved);
+        return 0;
+    }
+
+    StasisMeshEntry* entry = &g_meshes[slot];
+    unsigned int next_generation = entry->generation + 1u;
+    if (next_generation == 0u || next_generation > 0x00ffffffu) {
+        next_generation = 1u;
+    }
+    memset(entry, 0, sizeof(*entry));
+#if defined(_WIN32)
+    entry->path = _strdup(resolved);
+#else
+    entry->path = strdup(resolved);
+#endif
+    entry->vertices = vertices;
+    entry->vertex_count = vertex_count;
+    entry->used = 1;
+    entry->generation = next_generation;
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (!g_use_sdl_renderer && g_gl_context != NULL) {
+        mesh_upload_if_needed(entry);
+    }
+#endif
+    SDL_Log(
+        "Stasis 3D mesh loaded: path=%s vertices=%d handle=%d",
+        resolved, vertex_count, mesh_handle_for_slot(slot));
+    return mesh_handle_for_slot(slot);
+}
+
+STASIS_EXPORT void stasis_gfx_release_mesh(int handle) {
+    StasisMeshEntry* entry = mesh_get(handle);
+    if (!entry) return;
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    if (entry->vbo != 0) {
+        glDeleteBuffers(1, &entry->vbo);
+    }
+#endif
+    free(entry->path);
+    free(entry->vertices);
+    unsigned int generation = entry->generation;
+    memset(entry, 0, sizeof(*entry));
+    entry->generation = generation;
+}
+
+STASIS_EXPORT void stasis_gfx_3d_camera(
+    float eye_x, float eye_y, float eye_z,
+    float target_x, float target_y, float target_z,
+    float fov_degrees
+) {
+    g_3d_eye[0] = eye_x;
+    g_3d_eye[1] = eye_y;
+    g_3d_eye[2] = eye_z;
+    g_3d_target[0] = target_x;
+    g_3d_target[1] = target_y;
+    g_3d_target[2] = target_z;
+    if (fov_degrees < 12.0f) fov_degrees = 12.0f;
+    if (fov_degrees > 90.0f) fov_degrees = 90.0f;
+    g_3d_fov_degrees = fov_degrees;
+}
+
+STASIS_EXPORT void stasis_gfx_3d_environment(
+    float key_x, float key_y, float key_z,
+    float ambient, float intensity,
+    float fog_r, float fog_g, float fog_b, float fog_density
+) {
+    stasis_vec3_normalize(&key_x, &key_y, &key_z);
+    g_3d_key_direction[0] = key_x;
+    g_3d_key_direction[1] = key_y;
+    g_3d_key_direction[2] = key_z;
+    g_3d_ambient = fmaxf(0.0f, fminf(2.0f, ambient));
+    g_3d_intensity = fmaxf(0.0f, fminf(4.0f, intensity));
+    g_3d_fog_color[0] = fmaxf(0.0f, fminf(1.0f, fog_r));
+    g_3d_fog_color[1] = fmaxf(0.0f, fminf(1.0f, fog_g));
+    g_3d_fog_color[2] = fmaxf(0.0f, fminf(1.0f, fog_b));
+    g_3d_fog_density = fmaxf(0.0f, fminf(0.25f, fog_density));
+}
+
+STASIS_EXPORT void stasis_gfx_draw_mesh_3d(
+    int handle,
+    float x, float y, float z,
+    float scale_x, float scale_y, float scale_z,
+    float yaw_degrees,
+    float r, float g, float b,
+    float metallic, float roughness, float emission
+) {
+    if (!mesh_get(handle) || g_mesh_draw_count >= STASIS_3D_DRAW_CAPACITY) return;
+    StasisMeshDraw* draw = &g_mesh_draws[g_mesh_draw_count++];
+    draw->handle = handle;
+    draw->position[0] = x;
+    draw->position[1] = y;
+    draw->position[2] = z;
+    draw->scale[0] = scale_x;
+    draw->scale[1] = scale_y;
+    draw->scale[2] = scale_z;
+    draw->yaw_degrees = yaw_degrees;
+    draw->color[0] = fmaxf(0.0f, fminf(1.0f, r));
+    draw->color[1] = fmaxf(0.0f, fminf(1.0f, g));
+    draw->color[2] = fmaxf(0.0f, fminf(1.0f, b));
+    draw->metallic = fmaxf(0.0f, fminf(1.0f, metallic));
+    draw->roughness = fmaxf(0.04f, fminf(1.0f, roughness));
+    draw->emission = fmaxf(0.0f, fminf(4.0f, emission));
+}
+#else
+STASIS_EXPORT int stasis_gfx_load_mesh_obj(const char* path) {
+    static int warned = 0;
+    (void)path;
+    if (!warned) {
+        SDL_Log("Stasis 3D meshes are unavailable in the SDL-only renderer");
+        warned = 1;
+    }
+    return 0;
+}
+
+STASIS_EXPORT void stasis_gfx_release_mesh(int handle) {
+    (void)handle;
+}
+
+STASIS_EXPORT void stasis_gfx_3d_camera(
+    float eye_x, float eye_y, float eye_z,
+    float target_x, float target_y, float target_z,
+    float fov_degrees
+) {
+    (void)eye_x;
+    (void)eye_y;
+    (void)eye_z;
+    (void)target_x;
+    (void)target_y;
+    (void)target_z;
+    (void)fov_degrees;
+}
+
+STASIS_EXPORT void stasis_gfx_3d_environment(
+    float key_x, float key_y, float key_z,
+    float ambient, float intensity,
+    float fog_r, float fog_g, float fog_b, float fog_density
+) {
+    (void)key_x;
+    (void)key_y;
+    (void)key_z;
+    (void)ambient;
+    (void)intensity;
+    (void)fog_r;
+    (void)fog_g;
+    (void)fog_b;
+    (void)fog_density;
+}
+
+STASIS_EXPORT void stasis_gfx_draw_mesh_3d(
+    int handle,
+    float x, float y, float z,
+    float scale_x, float scale_y, float scale_z,
+    float yaw_degrees,
+    float r, float g, float b,
+    float metallic, float roughness, float emission
+) {
+    (void)handle;
+    (void)x;
+    (void)y;
+    (void)z;
+    (void)scale_x;
+    (void)scale_y;
+    (void)scale_z;
+    (void)yaw_degrees;
+    (void)r;
+    (void)g;
+    (void)b;
+    (void)metallic;
+    (void)roughness;
+    (void)emission;
 }
 #endif
 
@@ -4217,6 +4983,14 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
     if ((flags & STASIS_RENDER_FLAG_CLEAR) != 0) {
         stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
     }
+
+    /* Real-time 3D occupies the depth-tested world layer. The existing
+     * deterministic 2D stream is then composited as lines, sprites and text. */
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+    render_queued_3d();
+#else
+    g_mesh_draw_count = 0;
+#endif
 
     /* lines: f32 header is 4 (clear rgba), then line payload */
     if (line_count > 0) {

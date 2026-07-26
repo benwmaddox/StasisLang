@@ -482,6 +482,11 @@ struct StasisGraphicsAssetsApi {
     stasis_measure_text: usize,
     stasis_gfx_cache_text: usize,
     stasis_gfx_measure_text_cached: usize,
+    stasis_gfx_load_mesh_obj: Option<usize>,
+    stasis_gfx_release_mesh: Option<usize>,
+    stasis_gfx_3d_camera: Option<usize>,
+    stasis_gfx_3d_environment: Option<usize>,
+    stasis_gfx_draw_mesh_3d: Option<usize>,
 }
 
 #[cfg(windows)]
@@ -512,6 +517,11 @@ impl StasisGraphicsAssetsApi {
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
             stasis_gfx_cache_text: lib.symbol_address("stasis_gfx_cache_text")?,
             stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
+            stasis_gfx_load_mesh_obj: lib.symbol_address("stasis_gfx_load_mesh_obj").ok(),
+            stasis_gfx_release_mesh: lib.symbol_address("stasis_gfx_release_mesh").ok(),
+            stasis_gfx_3d_camera: lib.symbol_address("stasis_gfx_3d_camera").ok(),
+            stasis_gfx_3d_environment: lib.symbol_address("stasis_gfx_3d_environment").ok(),
+            stasis_gfx_draw_mesh_3d: lib.symbol_address("stasis_gfx_draw_mesh_3d").ok(),
             _lib: lib,
         })
     }
@@ -2523,6 +2533,224 @@ pub extern "C" fn stasis_jit_gfx_release_sprite(handle: i32) {
     #[cfg(not(windows))]
     {
         let _ = handle;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_load_mesh_obj(path_id: i32) -> i32 {
+    #[cfg(windows)]
+    {
+        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+            eprintln!("gfx_load_mesh_obj failed: unknown string handle {path_id}");
+            return 0;
+        };
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0;
+        };
+        let Some(address) = api.stasis_gfx_load_mesh_obj else {
+            eprintln!("gfx_load_mesh_obj failed: runtime does not provide real-time 3D");
+            return 0;
+        };
+        let callback: extern "system" fn(*const c_char) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        return callback(path.as_ptr());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path_id;
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_release_mesh(handle: i32) {
+    #[cfg(windows)]
+    {
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return;
+        };
+        let Some(address) = api.stasis_gfx_release_mesh else {
+            return;
+        };
+        let callback: extern "system" fn(i32) = unsafe { std::mem::transmute(address) };
+        callback(handle);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = handle;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_3d_camera(
+    eye_x: f32,
+    eye_y: f32,
+    eye_z: f32,
+    target_x: f32,
+    target_y: f32,
+    target_z: f32,
+    fov_degrees: f32,
+) {
+    #[cfg(windows)]
+    {
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return;
+        };
+        let Some(address) = api.stasis_gfx_3d_camera else {
+            return;
+        };
+        let callback: extern "system" fn(f32, f32, f32, f32, f32, f32, f32) =
+            unsafe { std::mem::transmute(address) };
+        callback(
+            eye_x,
+            eye_y,
+            eye_z,
+            target_x,
+            target_y,
+            target_z,
+            fov_degrees,
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            eye_x,
+            eye_y,
+            eye_z,
+            target_x,
+            target_y,
+            target_z,
+            fov_degrees,
+        );
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_3d_environment(
+    key_x: f32,
+    key_y: f32,
+    key_z: f32,
+    ambient: f32,
+    intensity: f32,
+    fog_r: f32,
+    fog_g: f32,
+    fog_b: f32,
+    fog_density: f32,
+) {
+    #[cfg(windows)]
+    {
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return;
+        };
+        let Some(address) = api.stasis_gfx_3d_environment else {
+            return;
+        };
+        let callback: extern "system" fn(f32, f32, f32, f32, f32, f32, f32, f32, f32) =
+            unsafe { std::mem::transmute(address) };
+        callback(
+            key_x,
+            key_y,
+            key_z,
+            ambient,
+            intensity,
+            fog_r,
+            fog_g,
+            fog_b,
+            fog_density,
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            key_x,
+            key_y,
+            key_z,
+            ambient,
+            intensity,
+            fog_r,
+            fog_g,
+            fog_b,
+            fog_density,
+        );
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_draw_mesh_3d(
+    handle: i32,
+    x: f32,
+    y: f32,
+    z: f32,
+    scale_x: f32,
+    scale_y: f32,
+    scale_z: f32,
+    yaw_degrees: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    metallic: f32,
+    roughness: f32,
+    emission: f32,
+) {
+    #[cfg(windows)]
+    {
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return;
+        };
+        let Some(address) = api.stasis_gfx_draw_mesh_3d else {
+            return;
+        };
+        let callback: extern "system" fn(
+            i32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+        ) = unsafe { std::mem::transmute(address) };
+        callback(
+            handle,
+            x,
+            y,
+            z,
+            scale_x,
+            scale_y,
+            scale_z,
+            yaw_degrees,
+            r,
+            g,
+            b,
+            metallic,
+            roughness,
+            emission,
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            handle,
+            x,
+            y,
+            z,
+            scale_x,
+            scale_y,
+            scale_z,
+            yaw_degrees,
+            r,
+            g,
+            b,
+            metallic,
+            roughness,
+            emission,
+        );
     }
 }
 

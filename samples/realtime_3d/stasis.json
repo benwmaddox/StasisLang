@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "name": "realtime_3d",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build"
+}

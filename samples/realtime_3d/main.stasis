@@ -1,0 +1,134 @@
+import "../../src/stdlib/graphics.stasis";
+
+const WINDOW_W: i32 = 720;
+const WINDOW_H: i32 = 960;
+
+global cube_mesh: i32;
+global board_light_mesh: i32;
+global board_dark_mesh: i32;
+global king_mesh: i32;
+global boss_mesh: i32;
+global ui_font: i32;
+global title_run: i32;
+global subtitle_run: i32;
+global spin_degrees: i32;
+
+function main(): i32 {
+    init_window(WINDOW_W, WINDOW_H, "Stasis real-time 3D exploration");
+    cube_mesh = gfx_load_mesh_obj("assets/cube.obj");
+    board_light_mesh = gfx_load_mesh_obj("assets/board_light.obj");
+    board_dark_mesh = gfx_load_mesh_obj("assets/board_dark.obj");
+    king_mesh = gfx_load_mesh_obj("assets/king_lod.obj");
+    boss_mesh = gfx_load_mesh_obj("assets/boss_lod.obj");
+    ui_font = load_font("assets/Nunito-Bold.ttf", 24);
+    if (cube_mesh == 0) { return 11; }
+    if (board_light_mesh == 0 || board_dark_mesh == 0) { return 12; }
+    if (king_mesh == 0) { return 13; }
+    if (boss_mesh == 0) { return 14; }
+    if (ui_font == 0) { return 15; }
+    title_run = gfx_cache_text(ui_font, "CROWNWARD // REAL-TIME 3D");
+    subtitle_run = gfx_cache_text(ui_font, "Depth-tested Blender meshes + native Stasis HUD");
+    if (title_run == 0 || subtitle_run == 0) { return 16; }
+    spin_degrees = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    spin_degrees += 1;
+    if (spin_degrees >= 360) { spin_degrees = 0; }
+    return 0;
+}
+
+function draw_board(): void {
+    gfx_draw_mesh_3d(
+        board_light_mesh, 0.0, 0.0, 0.0,
+        1.0, 1.0, 1.0, 0.0,
+        0.34, 0.30, 0.24, 0.18, 0.58, 0.0
+    );
+    gfx_draw_mesh_3d(
+        board_dark_mesh, 0.0, 0.0, 0.0,
+        1.0, 1.0, 1.0, 0.0,
+        0.055, 0.085, 0.10, 0.72, 0.22, 0.0
+    );
+
+    // Brass/obsidian command dais and side architecture.
+    gfx_draw_mesh_3d(
+        cube_mesh, 0.0, -0.42, 0.0,
+        4.55, 0.12, 4.55, 0.0,
+        0.025, 0.035, 0.045, 0.82, 0.19, 0.0
+    );
+    gfx_draw_mesh_3d(
+        cube_mesh, 0.0, -0.66, 0.0,
+        4.85, 0.10, 4.85, 0.0,
+        0.28, 0.16, 0.045, 0.91, 0.16, 0.0
+    );
+    gfx_draw_mesh_3d(
+        cube_mesh, -5.2, 1.0, -2.8,
+        0.42, 1.7, 0.42, 0.0,
+        0.025, 0.055, 0.065, 0.78, 0.24, 0.0
+    );
+    gfx_draw_mesh_3d(
+        cube_mesh, 5.2, 1.0, -2.8,
+        0.42, 1.7, 0.42, 0.0,
+        0.025, 0.055, 0.065, 0.78, 0.24, 0.0
+    );
+    gfx_draw_mesh_3d(
+        cube_mesh, -5.2, 1.0, 2.8,
+        0.42, 1.7, 0.42, 0.0,
+        0.025, 0.055, 0.065, 0.78, 0.24, 0.0
+    );
+    gfx_draw_mesh_3d(
+        cube_mesh, 5.2, 1.0, 2.8,
+        0.42, 1.7, 0.42, 0.0,
+        0.025, 0.055, 0.065, 0.78, 0.24, 0.0
+    );
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.008, 0.016, 0.024, 1.0);
+
+    gfx_3d_camera(
+        8.4, 11.8, 14.8,
+        0.0, 0.15, 0.0,
+        31.0
+    );
+    gfx_3d_environment(
+        -0.52, 0.84, 0.24,
+        0.22, 1.55,
+        0.012, 0.040, 0.055, 0.022
+    );
+    draw_board();
+
+    let spin: f32;
+    spin.from_i32(spin_degrees);
+    gfx_draw_mesh_3d(
+        king_mesh, 0.0, -0.06, 1.65,
+        0.82, 0.82, 0.82, spin * 0.18,
+        0.94, 0.82, 0.56, 0.74, 0.16, 0.04
+    );
+    gfx_draw_mesh_3d(
+        boss_mesh, -1.8, -0.02, -1.7,
+        0.73, 0.73, 0.73, 155.0 + spin * 0.12,
+        0.30, 0.055, 0.43, 0.52, 0.24, 0.025
+    );
+    gfx_draw_mesh_3d(
+        boss_mesh, 2.0, -0.02, -2.2,
+        0.58, 0.58, 0.58, 205.0 - spin * 0.10,
+        0.08, 0.42, 0.46, 0.44, 0.18, 0.08
+    );
+
+    // Existing Stasis 2D commands remain a sharp resolution-independent HUD.
+    draw_line(28.0, 30.0, 692.0, 30.0, 0.76, 0.53, 0.22, 1.0);
+    draw_line(28.0, 92.0, 692.0, 92.0, 0.15, 0.62, 0.64, 0.82);
+    draw_text_cached(ui_font, title_run, 42.0, 42.0, 0.96, 0.86, 0.66, 1.0);
+    draw_text_cached(ui_font, subtitle_run, 42.0, 68.0, 0.47, 0.72, 0.73, 1.0);
+    draw_line(28.0, 862.0, 692.0, 862.0, 0.15, 0.62, 0.64, 0.72);
+    draw_line(28.0, 920.0, 692.0, 920.0, 0.76, 0.53, 0.22, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

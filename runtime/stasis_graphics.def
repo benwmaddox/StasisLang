@@ -66,6 +66,11 @@ EXPORTS
     stasis_gfx_cache_text
     stasis_gfx_draw_text_cached
     stasis_gfx_measure_text_cached
+    stasis_gfx_load_mesh_obj
+    stasis_gfx_release_mesh
+    stasis_gfx_3d_camera
+    stasis_gfx_3d_environment
+    stasis_gfx_draw_mesh_3d
     stasis_gfx_get_resource_lifecycle
     stasis_list_directory
     stasis_list_directory_struct

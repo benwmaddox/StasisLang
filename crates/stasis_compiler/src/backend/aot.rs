@@ -2125,6 +2125,42 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_resolves_realtime_3d_runtime_shims() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            r#"extern function gfx_load_mesh_obj(path: string): i32;
+extern function gfx_release_mesh(handle: i32): void;
+extern function gfx_3d_camera(eye_x: f32, eye_y: f32, eye_z: f32, target_x: f32, target_y: f32, target_z: f32, fov_degrees: f32): void;
+extern function gfx_3d_environment(key_x: f32, key_y: f32, key_z: f32, ambient: f32, intensity: f32, fog_r: f32, fog_g: f32, fog_b: f32, fog_density: f32): void;
+extern function gfx_draw_mesh_3d(handle: i32, x: f32, y: f32, z: f32, scale_x: f32, scale_y: f32, scale_z: f32, yaw_degrees: f32, r: f32, g: f32, b: f32, metallic: f32, roughness: f32, emission: f32): void;
+function main(): i32 { gfx_release_mesh(0); return 0; }
+"#,
+        );
+        process.compile().expect("compile");
+
+        let analysis = process
+            .compile_analysis_cache
+            .as_ref()
+            .expect("compile analysis cache");
+        let resolved: BTreeMap<_, _> = analysis
+            .resolved_extern_signatures
+            .iter()
+            .map(|signature| (signature.name.as_str(), signature.symbol.as_str()))
+            .collect();
+
+        for (name, symbol) in [
+            ("gfx_load_mesh_obj", "stasis_jit_gfx_load_mesh_obj"),
+            ("gfx_release_mesh", "stasis_jit_gfx_release_mesh"),
+            ("gfx_3d_camera", "stasis_jit_gfx_3d_camera"),
+            ("gfx_3d_environment", "stasis_jit_gfx_3d_environment"),
+            ("gfx_draw_mesh_3d", "stasis_jit_gfx_draw_mesh_3d"),
+        ] {
+            assert_eq!(resolved.get(name).copied(), Some(symbol));
+        }
+    }
+
+    #[test]
     fn aot_engine_bundle_manifest_includes_collection_max_lengths() {
         let mut process = AotProcess::new();
         process.upsert_file(

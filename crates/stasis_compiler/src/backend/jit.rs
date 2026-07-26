@@ -1469,6 +1469,21 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "gfx_release_sprite" | "stasis_gfx_release_sprite" => {
             function_address(stasis_dynload::stasis_jit_gfx_release_sprite as *const ())
         }
+        "gfx_load_mesh_obj" | "stasis_gfx_load_mesh_obj" => {
+            function_address(stasis_dynload::stasis_jit_gfx_load_mesh_obj as *const ())
+        }
+        "gfx_release_mesh" | "stasis_gfx_release_mesh" => {
+            function_address(stasis_dynload::stasis_jit_gfx_release_mesh as *const ())
+        }
+        "gfx_3d_camera" | "stasis_gfx_3d_camera" => {
+            function_address(stasis_dynload::stasis_jit_gfx_3d_camera as *const ())
+        }
+        "gfx_3d_environment" | "stasis_gfx_3d_environment" => {
+            function_address(stasis_dynload::stasis_jit_gfx_3d_environment as *const ())
+        }
+        "gfx_draw_mesh_3d" | "stasis_gfx_draw_mesh_3d" => {
+            function_address(stasis_dynload::stasis_jit_gfx_draw_mesh_3d as *const ())
+        }
         "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => {
             function_address(stasis_dynload::stasis_jit_gfx_dump_bmp as *const ())
         }

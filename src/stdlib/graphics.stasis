@@ -22,6 +22,26 @@ function get_time_us(): i32 { return host_time_us(); }
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 extern function gfx_release_sprite(handle: i32): void;
 extern function gfx_poll_reload(handle: i32): bool;
+extern function gfx_load_mesh_obj(path: string): i32;
+extern function gfx_release_mesh(handle: i32): void;
+extern function gfx_3d_camera(
+    eye_x: f32, eye_y: f32, eye_z: f32,
+    target_x: f32, target_y: f32, target_z: f32,
+    fov_degrees: f32
+): void;
+extern function gfx_3d_environment(
+    key_x: f32, key_y: f32, key_z: f32,
+    ambient: f32, intensity: f32,
+    fog_r: f32, fog_g: f32, fog_b: f32, fog_density: f32
+): void;
+extern function gfx_draw_mesh_3d(
+    handle: i32,
+    x: f32, y: f32, z: f32,
+    scale_x: f32, scale_y: f32, scale_z: f32,
+    yaw_degrees: f32,
+    r: f32, g: f32, b: f32,
+    metallic: f32, roughness: f32, emission: f32
+): void;
 extern function gfx_dump_bmp(path: string): i32;
 extern function gfx_dump_png(path: string): i32;
 extern function load_font(path: string, size: i32): i32;
