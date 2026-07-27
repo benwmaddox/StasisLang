@@ -1303,7 +1303,12 @@ impl LiveWorkspace {
 
     fn rebuild_completion(&mut self, jit: &JitProcess) {
         let mut items = live_command_completions();
-        items.extend(self.completion_items.iter().map(live_completion_item));
+        items.extend(
+            self.completion_items
+                .iter()
+                .filter(|item| !is_static_type_field(item))
+                .map(live_completion_item),
+        );
         items.extend(
             jit.global_scalar_paths()
                 .into_iter()
@@ -1352,6 +1357,16 @@ impl LiveWorkspace {
             context,
         )
     }
+}
+
+fn is_static_type_field(item: &WorkshopCompletionItem) -> bool {
+    item.kind == "field"
+        && item.scope.is_none()
+        && item.owner.as_deref().is_some_and(|owner| {
+            item.text
+                .strip_prefix(owner)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+        })
 }
 
 fn completion_query_from_snapshot(
@@ -4118,6 +4133,48 @@ mod tests {
                 .count(),
             1
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn static_type_fields_are_hidden_at_root_and_available_while_editing() {
+        let (root, config) = project();
+        fs::write(
+            root.join("src/main.stasis"),
+            "struct Player { hp: i32; }\nstruct Enemy { hp: i32; }\nstruct Game { enemies: Enemy[2]; }\nglobal player: Player;\nglobal game: Game;\nfunction main(): i32 { player.hp = 7; game.enemies[0].hp = 37; return 0; }\nfunction tick(): i32 { return player.hp; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+        )
+        .expect("source");
+        let (jit, _) = compile(&config);
+        jit.execute_i32_noarg_by_name("main").expect("run main");
+        let (kind, printed) = print_scalar(&jit, "game.enemies[0].hp").expect("print hp");
+        assert_eq!(kind, "print");
+        assert_eq!(printed["static_type"], "i32");
+        assert_eq!(printed["value"]["value"], 37);
+        let (_, server) = stasis_runner::live::live_session(8);
+        let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+
+        let root_query = workspace.completion.query("Player.h", 8, 10);
+        assert!(root_query.items.iter().all(|item| item.text != "Player.hp"));
+        assert_eq!(
+            workspace.completion.query("player.h", 8, 10).items[0].text,
+            "player.hp"
+        );
+
+        let tick = workspace
+            .source_items
+            .iter()
+            .find(|item| item.name == "tick")
+            .expect("tick item");
+        let buffer = "function tick(): i32 { return Player.h";
+        let context = CompletionContext {
+            owner: Some("tick".into()),
+            file: Some(tick.file.clone()),
+            owner_signature: Some(tick.signature.clone()),
+            source_offset: Some(tick.source_spans[0].start as usize + buffer.len()),
+            expected_type: None,
+        };
+        let edit_query = workspace.completion_query(buffer, buffer.len(), 10, &context);
+        assert!(edit_query.items.iter().any(|item| item.text == "Player.hp"));
         fs::remove_dir_all(root).ok();
     }
 

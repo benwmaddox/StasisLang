@@ -1003,7 +1003,13 @@ impl LiveTui {
         if line.trim_start().starts_with(":edit") {
             return self.open_definition(&line);
         }
-        match self.terminal.feed_line(&line) {
+        let evaluated_line = (!self.terminal.has_pending_input()
+            && !line.trim_start().starts_with([':', '{']))
+        .then(|| format!(":print {line}"));
+        match self
+            .terminal
+            .feed_line(evaluated_line.as_deref().unwrap_or(&line))
+        {
             Ok(TerminalInput::Continue { prompt }) => {
                 self.prompt = prompt;
                 self.status = "multiline compatibility input; finish with :end".to_string();
@@ -2852,6 +2858,44 @@ fn write_at(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn root_prompt_submits_a_bare_expression_for_printing() {
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
+
+        app.submit_line("game.enemies[0].hp".to_string())
+            .expect("submit expression");
+
+        let requests = server.drain(8);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].command,
+            LiveCommand::Print { expression } if expression == "game.enemies[0].hp"
+        ));
+        assert_eq!(
+            app.transcript.back().map(String::as_str),
+            Some("stasis> game.enemies[0].hp")
+        );
+    }
+
+    #[test]
+    fn bare_lines_inside_a_multiline_command_remain_source() {
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
+
+        app.submit_line(":do".to_string()).expect("start block");
+        app.submit_line("game.score = 7;".to_string())
+            .expect("add source line");
+        app.submit_line(":end".to_string()).expect("finish block");
+
+        let requests = server.drain(8);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].command,
+            LiveCommand::Do { code, preview: false } if code == "game.score = 7;"
+        ));
+    }
 
     #[test]
     fn live_ai_write_is_rejected_until_references_were_checked() {

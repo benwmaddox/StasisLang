@@ -1064,6 +1064,10 @@ impl TerminalBuffer {
         self.pending.take().is_some()
     }
 
+    pub fn has_pending_input(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub fn completion_context(&self) -> CompletionContext {
         let Some(PendingMultiline {
             command: PendingCommand::Edit { target, .. },
