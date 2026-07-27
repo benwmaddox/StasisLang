@@ -15,6 +15,7 @@ import android.view.WindowInsets;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
+import java.io.File;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 
@@ -41,6 +42,7 @@ public final class MainActivity extends Activity {
     private long lastHudUpdateNanos;
 
     private static native String nativeCompileProject(String projectRoot);
+    private static native int nativeSetStorageRoot(String storageRoot);
     private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
             int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
@@ -52,6 +54,9 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (nativeSetStorageRoot(new File(getFilesDir(), "stasis_preferences").getAbsolutePath()) == 0) {
+            throw new IllegalStateException("Unable to initialize preference storage");
+        }
         Window window = getWindow();
         window.setStatusBarColor(Color.BLACK);
         window.setNavigationBarColor(Color.BLACK);

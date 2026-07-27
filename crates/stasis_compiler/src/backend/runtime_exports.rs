@@ -44,6 +44,8 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_reject_code_swap",
     "stasis_jit_sin_fast",
     "stasis_jit_sleep_ms",
+    "stasis_jit_storage_load_i32",
+    "stasis_jit_storage_save_i32",
     "stasis_jit_sys_memcpy_f32",
     "stasis_jit_sys_memcpy_i32",
     "stasis_jit_sys_memcpy_u8",
@@ -63,6 +65,7 @@ mod tests {
     #[test]
     fn aot_runtime_export_contract_requires_exact_symbol_matches() {
         assert!(is_aot_runtime_export_symbol("stasis_jit_gfx_load_sprite"));
+        assert!(is_aot_runtime_export_symbol("stasis_jit_storage_load_i32"));
         assert!(is_aot_runtime_export_symbol(
             "stasis_jit_gfx_release_sprite"
         ));

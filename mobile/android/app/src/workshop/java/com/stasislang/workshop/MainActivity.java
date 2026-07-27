@@ -343,6 +343,7 @@ public final class MainActivity extends Activity {
 
     private static native String nativeStatus();
     private static native String nativeCompileProject(String projectRoot);
+    private static native int nativeSetStorageRoot(String storageRoot);
     private static native String nativeSourceItems(String projectRoot);
     private static native String nativeFindReferences(String projectRoot, String symbol, int limit);
     private static native String nativeSemanticEdit(String projectRoot, String requestJson,
@@ -377,6 +378,9 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (nativeSetStorageRoot(new File(getFilesDir(), "stasis_preferences").getAbsolutePath()) == 0) {
+            throw new IllegalStateException("Unable to initialize preference storage");
+        }
         AndroidCrashStore.install(this);
         JSONObject crashState = AndroidCrashStore.noteLaunch(this);
         restartLoopRecoveryActive = crashState.optBoolean("restart_loop_detected", false);

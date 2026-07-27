@@ -117,6 +117,13 @@ float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }
 int stasis_load_font(const char *path, int size) { return path ? size : 0; }
 float stasis_measure_text(int font, const char *text) { return text ? (float)font : 0.0f; }
 void stasis_sleep_ms(int ms) { (void)ms; }
+int stasis_storage_load_i32(const char *scope, const char *key, int fallback) {
+    return scope && key ? fallback : 0;
+}
+int stasis_storage_save_i32(const char *scope, const char *key, int value) {
+    (void)value;
+    return scope && key;
+}
 
 static int32_t hash_path(const char *path);
 

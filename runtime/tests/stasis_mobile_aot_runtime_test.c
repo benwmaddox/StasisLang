@@ -17,6 +17,10 @@ static int32_t add_two(int32_t left, int32_t right) {
 }
 
 static char last_sprite_path[64];
+static char saved_scope[64];
+static char saved_key[64];
+static int saved_value;
+static int has_saved_value;
 
 int stasis_audio_init(int rate, int channels, int latency) {
     return rate > 0 && channels == 2 && latency > 0;
@@ -48,6 +52,23 @@ float stasis_measure_text(int font, const char *text) {
     return text != NULL ? (float)font : 0.0f;
 }
 void stasis_sleep_ms(int ms) { (void)ms; }
+int stasis_storage_load_i32(const char *scope, const char *key, int fallback) {
+    if (has_saved_value && scope != NULL && key != NULL &&
+        strcmp(scope, saved_scope) == 0 && strcmp(key, saved_key) == 0) {
+        return saved_value;
+    }
+    return fallback;
+}
+int stasis_storage_save_i32(const char *scope, const char *key, int value) {
+    if (scope == NULL || key == NULL) return 0;
+    strncpy(saved_scope, scope, sizeof(saved_scope) - 1);
+    saved_scope[sizeof(saved_scope) - 1] = '\0';
+    strncpy(saved_key, key, sizeof(saved_key) - 1);
+    saved_key[sizeof(saved_key) - 1] = '\0';
+    saved_value = value;
+    has_saved_value = 1;
+    return 1;
+}
 
 int main(void) {
     int32_t external = 4;
@@ -99,6 +120,14 @@ int main(void) {
     CHECK(stasis_jit_gfx_load_sprite(23, 32, 32) == 1);
     CHECK(strcmp(last_sprite_path, "sprite.bmp") == 0);
     CHECK(stasis_jit_gfx_dump_png(23) == 1);
+
+    stasis_jit_upsert_string_literal(40, "sample_game");
+    stasis_jit_upsert_string_literal(41, "unlocked_tier");
+    CHECK(stasis_jit_storage_load_i32(40, 41, 1) == 1);
+    CHECK(stasis_jit_storage_save_i32(40, 41, 4) == 1);
+    CHECK(stasis_jit_storage_load_i32(40, 41, 1) == 4);
+    CHECK(strcmp(saved_scope, "sample_game") == 0);
+    CHECK(strcmp(saved_key, "unlocked_tier") == 0);
 
     owned = stasis_jit_global_i32_array_ptr(21, 0, 4);
     CHECK(owned != NULL);
