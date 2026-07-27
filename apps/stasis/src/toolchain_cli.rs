@@ -4128,12 +4128,15 @@ mod tests {
         let config =
             fs::read_to_string(ios.join("ios/StasisMobile.xcconfig")).expect("read Xcode config");
         assert!(project.contains("stasis_mobile_runtime.c in Sources"));
+        assert!(project.contains("stasis_platform_storage.c in Sources"));
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
         assert!(config.contains("STASIS_GRAPHICS_SDL_ONLY=1"));
         assert!(ios.join("runtime/stasis_display_scale.h").is_file());
         assert!(ios.join("runtime/stasis_asset_path.h").is_file());
         assert!(ios.join("runtime/stasis_render_contract.h").is_file());
         assert!(ios.join("runtime/stasis_renderer_lifecycle.h").is_file());
+        assert!(ios.join("runtime/stasis_platform_storage.c").is_file());
+        assert!(ios.join("runtime/stasis_platform_storage.h").is_file());
         assert!(config.contains("@executable_path/Frameworks"));
         assert!(project.contains("Embed SDL frameworks"));
         assert!(ios
