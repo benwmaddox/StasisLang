@@ -1,7 +1,8 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 
-use crate::backend::emit::parse_simple_statements_from_block;
+use crate::backend::emit::{parse_simple_statements_from_block, SimpleStmt};
+use crate::data_flow::{build_function_data_flow_summaries, FunctionDataFlowSummary};
 use crate::frontend::indexer::{hash_text, index_file};
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::ir::hir::{Block, FunctionHIR};
@@ -37,6 +38,14 @@ pub struct FunctionMeta {
 struct SymbolEntry {
     name_hash: u64,
     function_id: FunctionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StatementCacheKey {
+    path: String,
+    name_hash: u64,
+    signature_hash: u64,
+    body_hash: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -184,6 +193,11 @@ pub struct Compiler {
     symbols: SymbolTable,
     deps: DependencyGraph,
     types: TypeTable,
+    parsed_statements: Vec<Vec<SimpleStmt>>,
+    statement_cache: HashMap<StatementCacheKey, Vec<SimpleStmt>>,
+    data_flow_summaries: Vec<FunctionDataFlowSummary>,
+    #[cfg(test)]
+    statement_parse_count: usize,
     last_source_diagnostic: Option<crate::SourceDiagnostic>,
 }
 
@@ -222,6 +236,8 @@ impl Compiler {
         self.last_source_diagnostic = None;
         let previous_hashes = self.capture_previous_hashes();
         self.functions.clear();
+        self.parsed_statements.clear();
+        self.data_flow_summaries.clear();
         self.symbols.clear();
         self.deps = DependencyGraph;
 
@@ -297,6 +313,48 @@ impl Compiler {
             self.functions[callee as usize].dependents.push(caller);
         }
 
+        let mut next_statement_cache = HashMap::new();
+        let mut parsed_statements = Vec::with_capacity(self.functions.len());
+        for function in &self.functions {
+            let file = &self.files[function.file_id as usize];
+            let key = StatementCacheKey {
+                path: file.path.clone(),
+                name_hash: function.name_hash,
+                signature_hash: function.signature_hash,
+                body_hash: function.body_hash,
+            };
+            let statements = if let Some(cached) = self.statement_cache.get(&key) {
+                cached.clone()
+            } else {
+                #[cfg(test)]
+                {
+                    self.statement_parse_count += 1;
+                }
+                let body = file
+                    .content
+                    .get(function.source_range.start as usize..function.source_range.end as usize)
+                    .ok_or_else(|| {
+                        CompileError::Invariant(format!(
+                            "function '{}' body range is invalid",
+                            function.name
+                        ))
+                    })?;
+                parse_simple_statements_from_block(body, &mut self.types)
+                    .map_err(CompileError::Backend)?
+            };
+            next_statement_cache.insert(key, statements.clone());
+            parsed_statements.push(statements);
+        }
+        self.statement_cache = next_statement_cache;
+        self.parsed_statements = parsed_statements;
+        self.data_flow_summaries = build_function_data_flow_summaries(
+            &self.files,
+            &self.functions,
+            &self.parsed_statements,
+            &self.types,
+        )
+        .map_err(CompileError::Backend)?;
+
         self.propagate_dirty_from_signature_changes(&signature_changed_ids);
         let dirty_functions = self
             .functions
@@ -369,6 +427,10 @@ impl Compiler {
         &self.functions
     }
 
+    pub fn function_data_flow_summaries(&self) -> &[FunctionDataFlowSummary] {
+        &self.data_flow_summaries
+    }
+
     pub fn types(&self) -> &TypeTable {
         &self.types
     }
@@ -435,8 +497,16 @@ impl Compiler {
                 CompileError::Invariant("function body range out of bounds".to_string())
             })?
             .to_string();
-        let statements = parse_simple_statements_from_block(&body, &mut self.types)
-            .map_err(CompileError::Backend)?;
+        let statements = self
+            .parsed_statements
+            .get(function.id as usize)
+            .cloned()
+            .ok_or_else(|| {
+                CompileError::Invariant(format!(
+                    "function '{}' has no parsed statement artifact",
+                    function.name
+                ))
+            })?;
         Ok(FunctionHIR {
             blocks: vec![Block { source: body }],
             statements,
@@ -519,6 +589,27 @@ mod tests {
             .expect("second compile");
         assert_eq!(second.index.dirty_functions, 0);
         assert_eq!(second.emit.emitted_functions, 0);
+    }
+
+    #[test]
+    fn structured_statements_are_cached_by_function_body() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
+        );
+        compiler.index_pass().expect("first index");
+        assert_eq!(compiler.statement_parse_count, 2);
+
+        compiler.index_pass().expect("unchanged index");
+        assert_eq!(compiler.statement_parse_count, 2);
+
+        compiler.upsert_file(
+            "sample.stasis",
+            "function helper(): i32 { return 2; }\nfunction main(): i32 { return helper(); }\n",
+        );
+        compiler.index_pass().expect("changed index");
+        assert_eq!(compiler.statement_parse_count, 3);
     }
 
     #[test]
@@ -801,5 +892,115 @@ mod tests {
             .expect("compile should succeed");
 
         assert_eq!(statement_counts, vec![2]);
+    }
+
+    #[test]
+    fn data_flow_summaries_include_field_subsets_nested_calls_and_loop_bounds() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            r#"
+struct Enemy { hp: i32; active: bool; }
+struct State { score: i32; enemies: Enemy[4]; }
+global state: State;
+extern function host_emit(value: i32): void;
+
+function damage_all(): void {
+    foreach (let enemy in state.enemies) {
+        enemy.damage(1);
+    }
+}
+
+function damage(enemy: Enemy, amount: i32): void {
+    enemy.hp -= amount;
+}
+
+function damage_view(enemies: Enemy[4]): void {
+    foreach (let enemy in enemies) {
+        enemy.damage(1);
+    }
+}
+
+function damage_all_function_form(): void {
+    foreach (let enemy in state.enemies) {
+        damage(enemy, 1);
+    }
+}
+
+function tick(): i32 {
+    damage_all();
+    damage_all_function_form();
+    damage_view(state.enemies);
+    for (let i: i32 = 0; i < 3; i += 1) {
+        state.score += state.enemies[i].hp;
+    }
+    let score_f32: f32 = i32_to_f32(state.score);
+    host_emit(state.score);
+    return state.score;
+}
+"#,
+        );
+
+        compiler.index_pass().expect("index pass");
+        let summaries = compiler.function_data_flow_summaries();
+        let tick = summaries
+            .iter()
+            .find(|summary| summary.function == "tick")
+            .expect("tick summary");
+
+        assert_eq!(tick.schema_version, 1);
+        assert_eq!(
+            tick.direct.calls,
+            vec!["damage_all", "damage_all_function_form", "damage_view"]
+        );
+        assert_eq!(tick.direct.host_calls, vec!["host_emit"]);
+        assert_eq!(
+            tick.direct.reads,
+            vec!["state.enemies[*].hp", "state.score"]
+        );
+        assert_eq!(tick.direct.writes, vec!["state.score"]);
+        assert_eq!(tick.direct.bounded_iterations[0].max_iterations, Some(3));
+        assert_eq!(
+            tick.aggregate.writes,
+            vec!["state.enemies[*].hp", "state.score"]
+        );
+        assert!(tick.aggregate.calls.contains(&"damage_all".to_string()));
+        let damage = summaries
+            .iter()
+            .find(|summary| summary.function == "damage")
+            .expect("damage summary");
+        assert_eq!(damage.direct.parameter_reads, vec!["enemy.hp"]);
+        assert_eq!(damage.direct.parameter_writes, vec!["enemy.hp"]);
+        let damage_view = summaries
+            .iter()
+            .find(|summary| summary.function == "damage_view")
+            .expect("parameter foreach summary");
+        assert_eq!(damage_view.direct.bounded_iterations[0].bound, "enemies");
+        assert_eq!(
+            damage_view.direct.bounded_iterations[0].reads,
+            vec!["enemies.length"]
+        );
+        assert_eq!(
+            damage_view.direct.bounded_iterations[0].max_iterations,
+            Some(4)
+        );
+        assert_eq!(
+            damage_view.aggregate.parameter_writes,
+            vec!["enemies[*].hp"]
+        );
+        assert!(tick.aggregate.bounded_iterations.iter().any(|iteration| {
+            iteration.bound == "state.enemies" && iteration.max_iterations == Some(4)
+        }));
+        for name in ["damage_all", "damage_all_function_form"] {
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.function == name)
+                .expect("nested caller summary");
+            assert_eq!(summary.aggregate.writes, vec!["state.enemies[*].hp"]);
+            assert!(!summary
+                .direct
+                .reads
+                .contains(&"state.enemies[*]".to_string()));
+        }
     }
 }

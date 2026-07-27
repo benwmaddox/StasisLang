@@ -1285,6 +1285,7 @@ Archived priority override (2026-02-13, historical):
 - Current progress:
 - Rust-native compiler flow runs explicit index then emit stages (`Compiler::index_pass`, `Compiler::emit_pass_with`) and emit work is restricted to dirty function ids only.
 - Regression coverage now includes signature-only changes, body-only changes, unchanged-source no-op, and mixed-file body edit gating in `crates/stasis_compiler::compiler::tests::*`.
+- Compiler indexing now caches one structured statement artifact by function identity/body hash and shares it with lowering and schema-v1 function data-flow summaries; unchanged functions skip body reparse while direct/transitive state effects remain available to language tooling and `stasis inspect`.
 - Status: `done`
 - Slice CS3: Implement O(1) function symbol lookup via open-addressed hash table in `.stasis`.
 - Language: `.stasis`.

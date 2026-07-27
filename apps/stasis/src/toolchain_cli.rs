@@ -3205,6 +3205,14 @@ fn inspect_workspace(
     let capacity_overrides = parse_capacity_overrides(capacities)?;
     let jit = compile_workspace_jit(workspace)?;
     let memory = jit.state_memory_report(&capacity_overrides, mobile_budget_bytes)?;
+    let mut data_flow = jit.function_data_flow_summaries().to_vec();
+    let canonical_root = workspace
+        .root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.root.clone());
+    for summary in &mut data_flow {
+        summary.file = relative_display(&canonical_root, Path::new(&summary.file));
+    }
     let mut human = vec![format!(
         "state memory: {} capacity bytes; {} snapshot bytes; {} mobile budget bytes",
         memory.total_capacity_bytes, memory.snapshot_bytes, memory.mobile_budget_bytes
@@ -3231,6 +3239,20 @@ fn inspect_workspace(
             .iter()
             .map(|warning| format!("warning: {warning}")),
     );
+    if !data_flow.is_empty() {
+        human.push("function data flow:".to_string());
+        human.extend(data_flow.iter().map(|summary| {
+            format!(
+                "  {}: reads=[{}] writes=[{}] calls=[{}] host_calls=[{}] bounded_iterations={}",
+                summary.function,
+                summary.direct.reads.join(", "),
+                summary.direct.writes.join(", "),
+                summary.direct.calls.join(", "),
+                summary.direct.host_calls.join(", "),
+                summary.direct.bounded_iterations.len()
+            )
+        }));
+    }
     Ok(CommandResult::success(
         human.join("\n"),
         json!({
@@ -3241,6 +3263,10 @@ fn inspect_workspace(
             "output": display_path(&output),
             "manifest_version": workspace.manifest.manifest_version,
             "memory": memory,
+            "function_data_flow": {
+                "schema_version": stasis_compiler::data_flow::FUNCTION_DATA_FLOW_SCHEMA_VERSION,
+                "functions": data_flow,
+            },
         }),
     ))
 }
@@ -3544,6 +3570,35 @@ mod tests {
     use super::*;
     use stasis_ai::live_tool_specs;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn inspect_exposes_compiler_function_data_flow() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/function_data_flow");
+        let workspace = load_workspace(Some(&root)).expect("load sample workspace");
+        let result = inspect_workspace(&workspace, &[], MAX_STATE_SNAPSHOT_BYTES as u64)
+            .expect("inspect sample workspace");
+        let functions = result.data["function_data_flow"]["functions"]
+            .as_array()
+            .expect("data-flow functions");
+        let tick = functions
+            .iter()
+            .find(|summary| summary["function"] == "tick")
+            .expect("tick summary");
+
+        assert_eq!(tick["schema_version"], 1);
+        assert_eq!(tick["file"], "src/main.stasis");
+        assert_eq!(
+            tick["signature_hash"]
+                .as_str()
+                .expect("signature hash")
+                .len(),
+            16
+        );
+        assert_eq!(tick["direct"]["calls"], json!(["sum_enemy_health"]));
+        assert_eq!(tick["direct"]["host_calls"], json!(["print_i32"]));
+        assert_eq!(tick["direct"]["bounded_iterations"][0]["max_iterations"], 3);
+        assert!(result.human.contains("function data flow:"));
+    }
 
     #[test]
     fn invalid_interactive_command_does_not_poison_terminal_buffer() {

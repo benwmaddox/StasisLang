@@ -3,6 +3,7 @@
 
 pub mod backend;
 pub mod compiler;
+pub mod data_flow;
 pub mod frontend;
 pub mod ir;
 
