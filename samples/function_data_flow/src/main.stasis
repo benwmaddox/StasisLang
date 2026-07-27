@@ -1,0 +1,44 @@
+struct Enemy {
+    hp: i32;
+    active: bool;
+}
+
+struct SimulationState {
+    score: i32;
+    enemies: Enemy[4];
+}
+
+global state: SimulationState;
+
+extern function print_i32(value: i32): void;
+
+function sum_enemy_health(): void {
+    foreach (let enemy in state.enemies) {
+        if (enemy.active) {
+            state.score += enemy.hp;
+        }
+    }
+}
+
+function tick(): i32 {
+    for (let i: i32 = 0; i < 3; i += 1) {
+        state.enemies[i].hp += 1;
+    }
+    sum_enemy_health();
+    print_i32(state.score);
+    return state.score;
+}
+
+function main(): i32 {
+    state.score = 0;
+    state.enemies[0].hp = 1;
+    state.enemies[0].active = true;
+    state.enemies[1].hp = 2;
+    state.enemies[1].active = true;
+    state.enemies[2].hp = 3;
+    state.enemies[2].active = true;
+    state.enemies[3].hp = 4;
+    state.enemies[3].active = true;
+    tick();
+    return 0;
+}

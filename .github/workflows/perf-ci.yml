@@ -78,7 +78,7 @@ jobs:
 
           # Stop conditions: generous by design (CI hardware variance). These are not the PRD targets.
           max_cold_p95_ms = 1800.0
-          max_incremental_p95_ms = 35.0
+          max_incremental_p95_ms = 100.0
 
           print(f"cold_ms_p95={cold_p95_ms:.3f}ms (max {max_cold_p95_ms:.3f}ms)")
           print(

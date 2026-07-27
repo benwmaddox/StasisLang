@@ -177,9 +177,14 @@ impl JitProcess {
         self.compiler.upsert_file(path, content);
     }
 
+    pub fn function_data_flow_summaries(&self) -> &[crate::data_flow::FunctionDataFlowSummary] {
+        self.compiler.function_data_flow_summaries()
+    }
+
     pub fn set_required_emit_roots(&mut self, roots: &[String]) {
         self.required_emit_roots.clear();
         self.required_emit_roots.extend_from_slice(roots);
+        self.compiler.set_analysis_required_roots(roots);
     }
 
     pub fn set_local_runtime_helper_trampolines(&mut self, enabled: bool) {
