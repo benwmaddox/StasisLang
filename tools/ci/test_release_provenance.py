@@ -6,12 +6,18 @@ import sys
 import tempfile
 import unittest
 
+from tools.generate_release_provenance import RUNTIME_FILES
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
+    def test_mobile_preference_host_is_part_of_release_provenance(self):
+        self.assertIn("stasis_platform_storage.c", RUNTIME_FILES)
+        self.assertIn("stasis_platform_storage.h", RUNTIME_FILES)
+
     def test_package_verifier_detects_runtime_substitution(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

@@ -3352,6 +3352,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_mobile_runtime.h"
     ));
+    const STASIS_MOBILE_MAIN_SOURCE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../mobile/shells/common/stasis_mobile_main.c"
+    ));
     const STASIS_MOBILE_AOT_RUNTIME_SOURCE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_mobile_aot_runtime.c"
@@ -3741,6 +3745,11 @@ mod tests {
             STASIS_RUNTIME_CMAKE
                 .contains("configure_stasis_target(stasis_mobile_runtime ON TRUE OFF)"),
             "mobile target should be static, SDL-only, and exclude the SDL desktop main shim"
+        );
+        assert!(
+            STASIS_RUNTIME_CMAKE.contains("stasis_platform_storage.c")
+                && STASIS_MOBILE_MAIN_SOURCE.contains("stasis_storage_set_root(root)"),
+            "mobile packages must link and configure the app-private preference host"
         );
         assert!(
             !STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_dynload")
