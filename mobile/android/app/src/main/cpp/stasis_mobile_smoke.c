@@ -11,6 +11,7 @@
 #include "stasis_display_scale.h"
 #include "stasis_render_contract.h"
 #include "stasis_mobile_aot_runtime.h"
+#include "stasis_platform_storage.h"
 #if STASIS_ANDROID_PUBLISHED_AOT
 #include "published_aot_symbols.h"
 #endif
@@ -41,6 +42,7 @@ typedef char *(*stasis_android_bridge_resolve_font_fn)(const char *project_root,
 typedef char *(*stasis_android_bridge_source_items_fn)(const char *project_root, const char *entry_file);
 typedef char *(*stasis_android_bridge_find_references_fn)(const char *project_root, const char *entry_file, const char *symbol, uintptr_t limit);
 typedef char *(*stasis_android_bridge_semantic_edit_fn)(const char *project_root, const char *entry_file, const char *request_json, int dry_run, int validate, int run_tests);
+typedef int (*stasis_android_bridge_set_storage_root_fn)(const char *storage_root);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
 typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
@@ -85,6 +87,7 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_source_items_fn source_items;
     stasis_android_bridge_find_references_fn find_references;
     stasis_android_bridge_semantic_edit_fn semantic_edit;
+    stasis_android_bridge_set_storage_root_fn set_storage_root;
     stasis_android_bridge_free_string_fn free_string;
     int attempted;
 } RustBridgeApi;
@@ -1330,6 +1333,8 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_find_references_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_find_references");
     rust_bridge_api.semantic_edit =
             (stasis_android_bridge_semantic_edit_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_semantic_edit");
+    rust_bridge_api.set_storage_root =
+            (stasis_android_bridge_set_storage_root_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_set_storage_root");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
     if (rust_bridge_api.compile_project == NULL ||
@@ -1340,6 +1345,27 @@ static RustBridgeApi *load_rust_bridge_api(void) {
     }
 
     return &rust_bridge_api;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeSetStorageRoot(
+        JNIEnv *env, jclass activity_class, jstring storage_root) {
+    (void)activity_class;
+    if (storage_root == NULL) return 0;
+    const char *root = (*env)->GetStringUTFChars(env, storage_root, NULL);
+    if (root == NULL) return 0;
+    int configured = stasis_storage_set_root(root);
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge != NULL && bridge->set_storage_root != NULL) {
+        configured = bridge->set_storage_root(root) && configured;
+    }
+#if !STASIS_ANDROID_PUBLISHED_AOT
+    else {
+        configured = 0;
+    }
+#endif
+    (*env)->ReleaseStringUTFChars(env, storage_root, root);
+    return configured;
 }
 
 static CodexBridgeApi *load_codex_bridge_api(void) {

@@ -5,7 +5,10 @@ option(STASIS_ANDROID_SMOKE_ONLY "Build the standalone Android native smoke entr
 option(STASIS_ANDROID_PUBLISHED_AOT "Link compiler-produced AOT objects for published Android builds" OFF)
 set(STASIS_PUBLISHED_AOT_DIR "" CACHE PATH "Directory containing generated published Stasis AOT objects")
 
-add_library(stasis_mobile_smoke SHARED stasis_mobile_smoke.c stasis_android_sprite.c)
+add_library(stasis_mobile_smoke SHARED
+    stasis_mobile_smoke.c
+    stasis_android_sprite.c
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../runtime/stasis_platform_storage.c")
 target_include_directories(stasis_mobile_smoke PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../runtime")
 
 find_library(log_lib log)

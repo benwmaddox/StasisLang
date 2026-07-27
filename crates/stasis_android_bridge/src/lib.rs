@@ -2093,6 +2093,24 @@ pub extern "C" fn stasis_android_bridge_run_tick_frame_v1(
 }
 
 #[no_mangle]
+pub extern "C" fn stasis_android_bridge_set_storage_root(storage_root: *const c_char) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
+        if storage_root.is_null() {
+            return Err("null storage root".to_string());
+        }
+        let root = CStr::from_ptr(storage_root)
+            .to_str()
+            .map_err(|error| format!("storage root was not UTF-8: {error}"))?;
+        if root.is_empty() {
+            return Err("empty storage root".to_string());
+        }
+        stasis_dynload::set_preference_storage_root(Some(PathBuf::from(root)));
+        Ok(())
+    }));
+    matches!(result, Ok(Ok(()))) as i32
+}
+
+#[no_mangle]
 pub extern "C" fn stasis_android_bridge_last_frame_error() -> *mut c_char {
     let message = LAST_FRAME_ERROR.with(|slot| {
         slot.borrow()

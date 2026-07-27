@@ -201,6 +201,15 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         target_link_libraries(stasis_mobile_aot_runtime_test PRIVATE m)
     endif()
     add_test(NAME stasis_mobile_aot_runtime_contract COMMAND stasis_mobile_aot_runtime_test)
+    if(UNIX)
+        add_executable(
+            stasis_platform_storage_test
+            tests/stasis_platform_storage_test.c
+            stasis_platform_storage.c
+        )
+        target_include_directories(stasis_platform_storage_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME stasis_platform_storage_contract COMMAND stasis_platform_storage_test)
+    endif()
 endif()
 
 if(STASIS_BUILD_SYS)

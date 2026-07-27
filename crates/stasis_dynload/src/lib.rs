@@ -2670,6 +2670,113 @@ pub extern "C" fn stasis_jit_gfx_release_sprite(handle: i32) {
     }
 }
 
+fn configured_preference_storage_root() -> &'static Mutex<Option<PathBuf>> {
+    static ROOT: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    ROOT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(not(windows))]
+fn preference_storage_root() -> Option<PathBuf> {
+    if let Some(root) = configured_preference_storage_root()
+        .lock()
+        .expect("preference storage root mutex poisoned")
+        .clone()
+    {
+        return Some(root);
+    }
+    if let Some(root) = std::env::var_os("STASIS_STORAGE_DIR").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(root));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map(|root| root.join("Library/Application Support/StasisLang"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(root) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
+            return Some(PathBuf::from(root).join("StasisLang"));
+        }
+        std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map(|root| root.join(".local/share/StasisLang"))
+    }
+}
+
+pub fn set_preference_storage_root(root: Option<PathBuf>) {
+    *configured_preference_storage_root()
+        .lock()
+        .expect("preference storage root mutex poisoned") = root;
+}
+
+#[cfg(not(windows))]
+fn preference_component_valid(value: &[u8]) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+#[cfg(not(windows))]
+fn preference_i32_path(scope: &[u8], key: &[u8]) -> Option<PathBuf> {
+    if !preference_component_valid(scope) || !preference_component_valid(key) {
+        return None;
+    }
+    let scope = std::str::from_utf8(scope).ok()?;
+    let key = std::str::from_utf8(key).ok()?;
+    Some(
+        preference_storage_root()?
+            .join(scope)
+            .join(format!("{key}.i32")),
+    )
+}
+
+#[cfg(not(windows))]
+fn portable_storage_load_i32(scope: &[u8], key: &[u8], fallback: i32) -> i32 {
+    let Some(path) = preference_i32_path(scope, key) else {
+        return fallback;
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return fallback;
+    };
+    if bytes.len() > 63 {
+        return fallback;
+    }
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return fallback;
+    };
+    text.trim().parse::<i32>().unwrap_or(fallback)
+}
+
+#[cfg(not(windows))]
+fn portable_storage_save_i32(scope: &[u8], key: &[u8], value: i32) -> bool {
+    let Some(path) = preference_i32_path(scope, key) else {
+        return false;
+    };
+    let Some(directory) = path.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(directory).is_err() {
+        return false;
+    }
+    let temporary = path.with_extension("i32.tmp");
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temporary)?;
+        writeln!(file, "{value}")?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+        return false;
+    }
+    true
+}
+
 #[no_mangle]
 pub extern "C" fn stasis_jit_storage_load_i32(scope_id: i32, key_id: i32, fallback: i32) -> i32 {
     #[cfg(windows)]
@@ -2692,9 +2799,11 @@ pub extern "C" fn stasis_jit_storage_load_i32(scope_id: i32, key_id: i32, fallba
     }
     #[cfg(not(windows))]
     {
-        let _ = scope_id;
-        let _ = key_id;
-        fallback
+        let (Some(scope), Some(key)) = (jit_text_arg_bytes(scope_id), jit_text_arg_bytes(key_id))
+        else {
+            return fallback;
+        };
+        portable_storage_load_i32(&scope, &key, fallback)
     }
 }
 
@@ -2720,10 +2829,11 @@ pub extern "C" fn stasis_jit_storage_save_i32(scope_id: i32, key_id: i32, value:
     }
     #[cfg(not(windows))]
     {
-        let _ = scope_id;
-        let _ = key_id;
-        let _ = value;
-        0
+        let (Some(scope), Some(key)) = (jit_text_arg_bytes(scope_id), jit_text_arg_bytes(key_id))
+        else {
+            return 0;
+        };
+        portable_storage_save_i32(&scope, &key, value) as i32
     }
 }
 
@@ -4353,6 +4463,35 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .expect("dynload test lock mutex poisoned")
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn portable_preferences_persist_and_fail_closed() {
+        let _guard = test_lock();
+        let root = std::env::temp_dir().join(format!(
+            "stasis_dynload_preferences_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        set_preference_storage_root(Some(root.clone()));
+
+        assert_eq!(portable_storage_load_i32(b"game", b"tier", 1), 1);
+        assert!(portable_storage_save_i32(b"game", b"tier", 4));
+        assert_eq!(portable_storage_load_i32(b"game", b"tier", 1), 4);
+        assert!(!portable_storage_save_i32(b"../game", b"tier", 5));
+        clear_jit_string_literal_table();
+        upsert_jit_string_literal(700, "game");
+        upsert_jit_string_literal(701, "tier");
+        assert_eq!(stasis_jit_storage_save_i32(700, 701, 6), 1);
+        assert_eq!(stasis_jit_storage_load_i32(700, 701, 1), 6);
+        std::fs::write(root.join("game/tier.i32"), "surprise\n").expect("write corrupt value");
+        assert_eq!(portable_storage_load_i32(b"game", b"tier", 2), 2);
+
+        clear_jit_string_literal_table();
+        set_preference_storage_root(None);
+        std::fs::remove_dir_all(root).expect("remove preference fixture");
     }
 
     #[cfg(windows)]
