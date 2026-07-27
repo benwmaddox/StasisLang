@@ -25,9 +25,19 @@ project to open it. The deterministic `--live-script` and `--live-json` clients 
 without the TUI.
 
 At the root prompt, a bare scalar expression is evaluated against the current live state and its
-typed value is returned in the transcript. For example, entering `game.enemies[0].hp` is equivalent
-to `:print game.enemies[0].hp`. Explicit commands, JSON requests, and lines inside `:do ... :end`
+typed value is returned in the transcript. For example, entering `game.enemies[0].hp` returns that
+enemy's current HP. Bare input uses a dedicated live `evaluate` request; `:print` remains an explicit
+one-time observation command. Explicit commands, JSON requests, and lines inside `:do ... :end`
 keep their existing behavior.
+
+This first evaluation slice is intentionally side-effect-free and limited to the compiler-backed
+live scalar-expression surface. The prompt is designed to grow into a live-runtime REPL: later
+slices may compile a transient evaluation entry point that can call Stasis functions and return a
+typed or structured result, followed by explicit command execution that may mutate runtime state
+and then return data. Evaluation results stay separate from guest stdout. Transient evaluation must
+run at a between-tick boundary and must not overload `on_code_swap`, whose only responsibility is
+restoring application invariants after a durable code swap. Source edits continue through the
+existing compile, test, atomic apply, and rollback transaction.
 
 ### Subscription-backed AI
 

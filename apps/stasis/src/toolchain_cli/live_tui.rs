@@ -1003,13 +1003,18 @@ impl LiveTui {
         if line.trim_start().starts_with(":edit") {
             return self.open_definition(&line);
         }
-        let evaluated_line = (!self.terminal.has_pending_input()
-            && !line.trim_start().starts_with([':', '{']))
-        .then(|| format!(":print {line}"));
-        match self
-            .terminal
-            .feed_line(evaluated_line.as_deref().unwrap_or(&line))
-        {
+        if !self.terminal.has_pending_input() && !line.trim_start().starts_with([':', '{']) {
+            let request_id = self.next_request();
+            if let Err(error) = self.client.submit(LiveRequest::new(
+                request_id,
+                LiveCommand::Evaluate { expression: line },
+            )) {
+                self.status = format!("live expression queued failed: {error}");
+                self.push_transcript(format!("error: {error}"));
+            }
+            return Ok(());
+        }
+        match self.terminal.feed_line(&line) {
             Ok(TerminalInput::Continue { prompt }) => {
                 self.prompt = prompt;
                 self.status = "multiline compatibility input; finish with :end".to_string();
@@ -2860,7 +2865,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn root_prompt_submits_a_bare_expression_for_printing() {
+    fn root_prompt_submits_a_bare_expression_for_evaluation() {
         let (client, server) = stasis_runner::live::live_session(8);
         let mut app = LiveTui::new(client, std::env::temp_dir());
 
@@ -2871,7 +2876,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(matches!(
             &requests[0].command,
-            LiveCommand::Print { expression } if expression == "game.enemies[0].hp"
+            LiveCommand::Evaluate { expression } if expression == "game.enemies[0].hp"
         ));
         assert_eq!(
             app.transcript.back().map(String::as_str),

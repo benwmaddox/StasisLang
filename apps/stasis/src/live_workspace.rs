@@ -761,6 +761,7 @@ impl LiveWorkspace {
                 preview,
             } => set_scalar(jit, &path, &expression, preview),
             LiveCommand::Print { expression } => print_scalar(jit, &expression),
+            LiveCommand::Evaluate { expression } => evaluate_expression(jit, &expression),
             LiveCommand::Do { code, preview } => apply_scalar_transaction(jit, &code, preview),
             LiveCommand::CellPut { name, code } => {
                 self.scratch.put(&name, code)?;
@@ -2332,6 +2333,13 @@ fn concise_state_path_is_visible(path: &str, all_paths: &HashSet<String>) -> boo
 
 fn print_scalar(jit: &JitProcess, expression: &str) -> Result<(&'static str, Value), String> {
     Ok(("print", jit.inspect_state_query(expression)?))
+}
+
+fn evaluate_expression(
+    jit: &JitProcess,
+    expression: &str,
+) -> Result<(&'static str, Value), String> {
+    Ok(("evaluation", jit.inspect_state_query(expression)?))
 }
 
 fn set_scalar(
@@ -4146,10 +4154,11 @@ mod tests {
         .expect("source");
         let (jit, _) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("run main");
-        let (kind, printed) = print_scalar(&jit, "game.enemies[0].hp").expect("print hp");
-        assert_eq!(kind, "print");
-        assert_eq!(printed["static_type"], "i32");
-        assert_eq!(printed["value"]["value"], 37);
+        let (kind, evaluation) =
+            evaluate_expression(&jit, "game.enemies[0].hp").expect("evaluate hp");
+        assert_eq!(kind, "evaluation");
+        assert_eq!(evaluation["static_type"], "i32");
+        assert_eq!(evaluation["value"]["value"], 37);
         let (_, server) = stasis_runner::live::live_session(8);
         let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
 

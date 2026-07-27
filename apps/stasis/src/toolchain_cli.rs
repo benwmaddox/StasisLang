@@ -1475,7 +1475,7 @@ fn format_live_response(response: &LiveResponse) -> String {
         "inspection" => format_live_inspection(data),
         "state_inspection" => format_live_state_inspection(data),
         "runtime_validation" => format_live_runtime_validation(data),
-        "print" => format!(
+        "print" | "evaluation" => format!(
             "{} = {}",
             string_field(data, "static_type", "value"),
             scalar_text(data.get("value").unwrap_or(&Value::Null))
