@@ -48,6 +48,10 @@ pub struct FunctionDataFlowSummary {
     pub(crate) internal_direct_fingerprint: u64,
     #[serde(skip)]
     pub(crate) internal_syntax_fingerprint: u64,
+    #[serde(skip)]
+    internal_function_id: u32,
+    #[serde(skip)]
+    internal_signature_hash: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -140,6 +144,46 @@ pub(crate) fn build_function_data_flow_summaries(
     previous: &[FunctionDataFlowSummary],
     previous_context_fingerprint: u64,
 ) -> Result<(Option<Vec<FunctionDataFlowSummary>>, u64), String> {
+    let metadata_free = files.iter().all(|file| {
+        !["struct", "global", "const", "extern"]
+            .iter()
+            .any(|keyword| file.content.contains(keyword))
+    });
+    let mut previous_by_id = vec![None; functions.len()];
+    let previous_ids_are_valid = previous.iter().all(|summary| {
+        let Some(slot) = previous_by_id.get_mut(summary.internal_function_id as usize) else {
+            return false;
+        };
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(summary);
+        true
+    });
+    if metadata_free
+        && previous_ids_are_valid
+        && previous.len() == included_function_ids.len()
+        && functions
+            .iter()
+            .filter(|function| included_function_ids.contains(&function.id))
+            .all(|function| {
+                let file = &files[function.file_id as usize];
+                previous_by_id[function.id as usize].is_some_and(|summary| {
+                    summary.internal_signature_hash == function.signature_hash
+                        && summary.file == file.path
+                        && summary.function == function.name
+                        && summary.source_start == function.source_range.start
+                        && summary.source_end == function.source_range.end
+                        && (!changed_function_ids.contains(&function.id)
+                            || summary.internal_syntax_fingerprint
+                                == effect_syntax_fingerprint(
+                                    &statements_by_id[function.id as usize],
+                                ))
+                })
+            })
+    {
+        return Ok((None, previous_context_fingerprint));
+    }
     let previous_by_key: BTreeMap<_, _> = previous
         .iter()
         .map(|summary| {
@@ -153,38 +197,6 @@ pub(crate) fn build_function_data_flow_summaries(
             )
         })
         .collect();
-    let metadata_free = files.iter().all(|file| {
-        !["struct", "global", "const", "extern"]
-            .iter()
-            .any(|keyword| file.content.contains(keyword))
-    });
-    if metadata_free
-        && previous.len() == included_function_ids.len()
-        && functions
-            .iter()
-            .filter(|function| included_function_ids.contains(&function.id))
-            .all(|function| {
-                let file = &files[function.file_id as usize];
-                let signature_hash = format!("{:016x}", function.signature_hash);
-                previous_by_key
-                    .get(&(
-                        file.path.as_str(),
-                        function.name.as_str(),
-                        signature_hash.as_str(),
-                    ))
-                    .is_some_and(|summary| {
-                        summary.source_start == function.source_range.start
-                            && summary.source_end == function.source_range.end
-                            && (!changed_function_ids.contains(&function.id)
-                                || summary.internal_syntax_fingerprint
-                                    == effect_syntax_fingerprint(
-                                        &statements_by_id[function.id as usize],
-                                    ))
-                    })
-            })
-    {
-        return Ok((None, previous_context_fingerprint));
-    }
     let context = build_context(files, functions, types)?;
     let reuse_candidate = previous.len() == included_function_ids.len()
         && previous_context_fingerprint == context.fingerprint;
@@ -314,6 +326,8 @@ pub(crate) fn build_function_data_flow_summaries(
             aggregate,
             internal_direct_fingerprint,
             internal_syntax_fingerprint,
+            internal_function_id: function.id,
+            internal_signature_hash: function.signature_hash,
         });
     }
     out.sort_by(|left, right| {
