@@ -185,6 +185,9 @@ pub enum LiveCommand {
     Print {
         expression: String,
     },
+    Evaluate {
+        expression: String,
+    },
     Do {
         code: String,
         #[serde(default)]
@@ -1064,6 +1067,10 @@ impl TerminalBuffer {
         self.pending.take().is_some()
     }
 
+    pub fn has_pending_input(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub fn completion_context(&self) -> CompletionContext {
         let Some(PendingMultiline {
             command: PendingCommand::Edit { target, .. },
@@ -1367,6 +1374,23 @@ fn split_terminal_args(line: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evaluate_has_a_stable_json_contract() {
+        let request = LiveRequest::new(
+            9,
+            LiveCommand::Evaluate {
+                expression: "game.enemies[0].hp".into(),
+            },
+        );
+        let json = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(json["type"], "evaluate");
+        assert_eq!(json["expression"], "game.enemies[0].hp");
+        assert_eq!(
+            serde_json::from_value::<LiveRequest>(json).expect("round trip"),
+            request
+        );
+    }
 
     #[test]
     fn edit_batch_has_a_stable_json_contract() {

@@ -24,6 +24,21 @@ Status: the first desktop feel slice is implemented. Run `stasis tui src/main.st
 project to open it. The deterministic `--live-script` and `--live-json` clients remain available
 without the TUI.
 
+At the root prompt, a bare scalar expression is evaluated against the current live state and its
+typed value is returned in the transcript. For example, entering `game.enemies[0].hp` returns that
+enemy's current HP. Bare input uses a dedicated live `evaluate` request; `:print` remains an explicit
+one-time observation command. Explicit commands, JSON requests, and lines inside `:do ... :end`
+keep their existing behavior.
+
+This first evaluation slice is intentionally side-effect-free and limited to the compiler-backed
+live scalar-expression surface. The prompt is designed to grow into a live-runtime REPL: later
+slices may compile a transient evaluation entry point that can call Stasis functions and return a
+typed or structured result, followed by explicit command execution that may mutate runtime state
+and then return data. Evaluation results stay separate from guest stdout. Transient evaluation must
+run at a between-tick boundary and must not overload `on_code_swap`, whose only responsibility is
+restoring application invariants after a durable code swap. Source edits continue through the
+existing compile, test, atomic apply, and rollback transaction.
+
 ### Subscription-backed AI
 
 `stasis ai "PROMPT"` starts the live runtime, executes one AI change, and exits after the atomic
@@ -268,9 +283,11 @@ itself.
 
 The palette includes functions, structs, enum variants, globals, state paths, parameters,
 explicitly typed locals, fields, and receiver-qualified members such as `hero.hp` or
-`hero.damage`. Scoped candidates carry compiler-owned file, semantic-owner, visibility-span, and
-type metadata, so locals from another function or an out-of-scope block are excluded. Each row
-stays concise with kind and type/signature/source context. `:palette QUERY [--page N --limit N]
+`hero.damage`. Root search omits static `Type.field` catalog entries that cannot be evaluated
+without an instance; definition editing retains them as useful type context. Scoped candidates
+carry compiler-owned file, semantic-owner, visibility-span, and type metadata, so locals from
+another function or an out-of-scope block are excluded. Each row stays concise with kind and
+type/signature/source context. `:palette QUERY [--page N --limit N]
 [--owner OWNER --file FILE --signature SIGNATURE --offset N --expected-type TYPE]` exposes the same deterministic,
 bounded ranking to scripts and future desktop clients. Press Ctrl-C or enter `:abort` to discard a
 multiline buffer without submitting it. Symbol results are paged; selectors accept `--file`,

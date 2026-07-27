@@ -1003,6 +1003,17 @@ impl LiveTui {
         if line.trim_start().starts_with(":edit") {
             return self.open_definition(&line);
         }
+        if !self.terminal.has_pending_input() && !line.trim_start().starts_with([':', '{']) {
+            let request_id = self.next_request();
+            if let Err(error) = self.client.submit(LiveRequest::new(
+                request_id,
+                LiveCommand::Evaluate { expression: line },
+            )) {
+                self.status = format!("live expression queued failed: {error}");
+                self.push_transcript(format!("error: {error}"));
+            }
+            return Ok(());
+        }
         match self.terminal.feed_line(&line) {
             Ok(TerminalInput::Continue { prompt }) => {
                 self.prompt = prompt;
@@ -2852,6 +2863,44 @@ fn write_at(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn root_prompt_submits_a_bare_expression_for_evaluation() {
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
+
+        app.submit_line("game.enemies[0].hp".to_string())
+            .expect("submit expression");
+
+        let requests = server.drain(8);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].command,
+            LiveCommand::Evaluate { expression } if expression == "game.enemies[0].hp"
+        ));
+        assert_eq!(
+            app.transcript.back().map(String::as_str),
+            Some("stasis> game.enemies[0].hp")
+        );
+    }
+
+    #[test]
+    fn bare_lines_inside_a_multiline_command_remain_source() {
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut app = LiveTui::new(client, std::env::temp_dir());
+
+        app.submit_line(":do".to_string()).expect("start block");
+        app.submit_line("game.score = 7;".to_string())
+            .expect("add source line");
+        app.submit_line(":end".to_string()).expect("finish block");
+
+        let requests = server.drain(8);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].command,
+            LiveCommand::Do { code, preview: false } if code == "game.score = 7;"
+        ));
+    }
 
     #[test]
     fn live_ai_write_is_rejected_until_references_were_checked() {
