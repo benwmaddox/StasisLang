@@ -30,7 +30,7 @@ stasis check
 stasis test
 stasis run --headless
 stasis run --watch
-stasis run --interactive
+stasis tui src/main.stasis
 stasis build --mode dev
 stasis build --mode release
 stasis package --target desktop
@@ -75,7 +75,7 @@ guide, and a minimal `CLAUDE.md` that points to `AGENTS.md`.
   `i32` result is the process exit code. Headless execution is the default.
 - `run --watch`: launch the existing graphical runner and hot-swap pipeline for game projects.
   Because it is an unbounded graphical session, watch mode rejects `--json` and `--headless`.
-- `run --interactive`: keep the graphical runner and tick loop alive while a desktop terminal uses
+- `tui ENTRY`: launch the same entry-relative graphical hot-swap workflow as `play` while a desktop terminal uses
   the runner's versioned LiveSession protocol for background-prepared code-aware symbol edits and
   typed between-tick inspection or mutation. The terminal includes history, a Ctrl-P command
   palette with live fuzzy compiler-backed symbol/member completion, keyboard navigation and

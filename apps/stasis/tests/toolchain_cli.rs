@@ -1226,7 +1226,7 @@ fn semantic_symbol_cli_reapplies_edit_when_revert_tests_fail() {
 
 #[cfg(windows)]
 #[test]
-fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
+fn tui_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     let parent = temp_dir("interactive_live");
     fs::create_dir_all(&parent).expect("create temp parent");
     let project = parent.join("demo");
@@ -1254,8 +1254,8 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
 
     let output = stasis(
         &[
-            "run",
-            "--interactive",
+            "tui",
+            "src/main.stasis",
             "--live-script",
             "live.commands",
             "--live-json",
@@ -1312,8 +1312,8 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     .expect("write failing live script");
     let failed = stasis(
         &[
-            "run",
-            "--interactive",
+            "tui",
+            "src/main.stasis",
             "--live-script",
             "failed-live.commands",
             "--live-json",
@@ -1340,8 +1340,8 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     .expect("write human live script");
     let human = stasis(
         &[
-            "run",
-            "--interactive",
+            "tui",
+            "src/main.stasis",
             "--live-script",
             "human-live.commands",
         ],
@@ -1371,8 +1371,8 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     .expect("write unfinished live script");
     let unfinished = stasis(
         &[
-            "run",
-            "--interactive",
+            "tui",
+            "src/main.stasis",
             "--live-script",
             "unfinished-live.commands",
         ],
@@ -1390,14 +1390,83 @@ fn interactive_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     fs::remove_dir_all(parent).ok();
 }
 
+#[cfg(windows)]
+#[test]
+fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
+    let parent = temp_dir("tui_asset_root");
+    let project = parent.join("demo");
+    fs::create_dir_all(project.join("src")).expect("create source directory");
+    fs::create_dir_all(project.join("assets")).expect("create asset directory");
+
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/render_parity");
+    let main_source = fs::read_to_string(sample.join("main.stasis"))
+        .expect("read render parity entry")
+        .replace("\"assets/", "\"../assets/");
+    fs::write(project.join("src/main.stasis"), main_source).expect("write nested entry");
+    fs::copy(
+        sample.join("frame.stasis"),
+        project.join("src/frame.stasis"),
+    )
+    .expect("copy frame module");
+    for asset in [
+        "opaque.svg",
+        "translucent.svg",
+        "full_canvas.svg",
+        "parity.ttf",
+    ] {
+        fs::copy(
+            sample.join("assets").join(asset),
+            project.join("assets").join(asset),
+        )
+        .expect("copy render asset");
+    }
+    fs::write(
+        project.join("stasis.json"),
+        "{\n  \"manifest_version\": 1,\n  \"name\": \"tui_asset_root\",\n  \"entry\": \"src/main.stasis\",\n  \"tests\": \"tests\",\n  \"output\": \"build\"\n}\n",
+    )
+    .expect("write manifest");
+    fs::write(project.join("live.commands"), ":quit\n").expect("write live script");
+
+    let output = stasis(
+        &[
+            "tui",
+            "demo/src/main.stasis",
+            "--live-script",
+            "live.commands",
+            "--live-json",
+        ],
+        &parent,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"kind\":\"quitting\""));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("failed to open"));
+
+    let removed_alias = stasis(&["run", "--interactive"], &project);
+    assert_eq!(removed_alias.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&removed_alias.stderr).contains("unexpected argument"));
+
+    fs::remove_dir_all(parent).ok();
+}
+
 #[test]
 #[cfg(windows)]
 fn state_inspection_sample_browses_state_and_watches_live_runtime() {
-    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/state_inspection");
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
 
     let output = stasis(
-        &["run", "--interactive", "--live-script", "live.commands"],
-        &sample,
+        &[
+            "tui",
+            "samples/state_inspection/src/main.stasis",
+            "--live-script",
+            "live.commands",
+        ],
+        &repository,
     );
 
     assert_eq!(

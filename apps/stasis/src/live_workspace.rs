@@ -381,13 +381,14 @@ impl LiveWorkspace {
     }
 
     pub(crate) fn consumes_self_write(&mut self, path: &Path) -> bool {
-        let Some(expected_hash) = self.self_write_hashes.get(path) else {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let Some(expected_hash) = self.self_write_hashes.get(&path) else {
             return false;
         };
-        let matches = std::fs::read_to_string(path)
+        let matches = std::fs::read_to_string(&path)
             .is_ok_and(|source| workshop_source_hash(&source) == *expected_hash);
         if !matches {
-            self.self_write_hashes.remove(path);
+            self.self_write_hashes.remove(&path);
         }
         matches
     }
@@ -1277,10 +1278,10 @@ impl LiveWorkspace {
             } else {
                 &change.after_source
             };
-            self.self_write_hashes.insert(
-                self.config.project_root.join(&change.file),
-                workshop_source_hash(source),
-            );
+            let path = self.config.project_root.join(&change.file);
+            let path = path.canonicalize().unwrap_or(path);
+            self.self_write_hashes
+                .insert(path, workshop_source_hash(source));
         }
     }
 
