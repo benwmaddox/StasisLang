@@ -1614,11 +1614,34 @@ pub fn run_live_in_process(
     server: stasis_runner::live::LiveSessionServer,
     config: LiveRunConfig,
 ) -> Result<(), String> {
-    run_play_in_process_inner(
+    run_live_in_process_with_data(
         watch_file,
         watch_dir,
         None,
         None,
+        tick_sleep_micros,
+        max_ticks,
+        server,
+        config,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_live_in_process_with_data(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    server: stasis_runner::live::LiveSessionServer,
+    config: LiveRunConfig,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
         None,
         tick_sleep_micros,
         max_ticks,

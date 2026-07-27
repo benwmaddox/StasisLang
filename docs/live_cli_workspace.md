@@ -1,10 +1,15 @@
 # Interactive live workspace
 
-`stasis run --interactive` starts the manifest entry in the normal in-process graphical runner
+`stasis tui ENTRY` starts an explicit entry in the normal in-process graphical runner
 and opens a desktop-focused local terminal prompt. Rendering remains on the main thread. Terminal
 input enters the bounded `stasis_runner::live` protocol queue and every request is observed or
 committed at a normalized between-tick boundary. Android Workshop shares compiler-owned semantic
 edit and receipt contracts, but intentionally keeps its own mobile interaction model.
+
+Like `play ENTRY`, `tui ENTRY` watches the entry file's parent directory by default and uses that
+directory as the source-relative graphical asset root. The project root remains independently
+owned by semantic edits, tests, receipts, and build output. `run --interactive` remains a
+compatibility alias for the manifest entry.
 
 The default terminal is a human workspace view, not a protocol dump. It prints concise scalar,
 symbol, edit, scratch, status, and diagnostic lines; large semantic plans are summarized by changed
@@ -16,7 +21,7 @@ The project must provide the graphical lifecycle entry points `main`, `tick`, an
 
 ## Persistent TUI
 
-Status: the first desktop feel slice is implemented. Run `stasis run --interactive` in a Stasis
+Status: the first desktop feel slice is implemented. Run `stasis tui src/main.stasis` in a Stasis
 project to open it. The deterministic `--live-script` and `--live-json` clients remain available
 without the TUI.
 
@@ -374,5 +379,5 @@ request queue, compiler indexes, edit plans, tick boundaries, and response objec
 Run a repeatable session without Cargo or repository-only tools:
 
 ```text
-stasis run --interactive --live-script live.commands --live-json
+stasis tui src/main.stasis --live-script live.commands --live-json
 ```

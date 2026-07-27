@@ -203,6 +203,12 @@ Run Brickout Revenge v1 (Windows in-process dev runner):
 cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis
 ```
 
+Open the same entry-relative graphical workflow with the persistent live-workspace TUI:
+
+```powershell
+cargo run -p stasis --release -- tui samples\brickout_revenge\brickout_revenge_v1.stasis
+```
+
 Edit and save any `.stasis` file in the current import/dependency graph. You should see output like:
 
 ```text

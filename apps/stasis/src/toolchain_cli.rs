@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
-    run_jit_tests_in_directory_with_session, run_live_in_process, run_play_in_process,
-    run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
+    run_jit_tests_in_directory_with_session, run_live_in_process, run_live_in_process_with_data,
+    run_play_in_process, run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
 };
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
@@ -67,6 +67,7 @@ const COMMANDS: &[&str] = &[
     "ai",
     "validate",
     "run",
+    "tui",
     "build",
     "package",
     "package-mobile",
@@ -85,7 +86,7 @@ const COMMANDS: &[&str] = &[
     name = "stasis",
     version,
     about = "The batteries-included Stasis toolchain",
-    long_about = "Create, format, check, test, run, build, inspect, and package Stasis projects without invoking Cargo."
+    long_about = "Create, format, check, test, run, live-edit, build, inspect, and package Stasis projects without invoking Cargo."
 )]
 struct ToolchainCli {
     #[arg(
@@ -183,6 +184,27 @@ enum ToolchainCommand {
         /// Emit versioned live response envelopes as JSON lines.
         #[arg(long, requires = "interactive")]
         live_json: bool,
+    },
+    /// Run one graphical entry with hot swap and the live-workspace TUI.
+    Tui {
+        #[arg(value_name = "ENTRY")]
+        entry: PathBuf,
+        /// Override the watched directory; defaults to the entry file's parent.
+        #[arg(long, value_name = "PATH")]
+        watch_dir: Option<PathBuf>,
+        /// Override the project data and struct-metadata files.
+        #[arg(long, num_args = 2, value_names = ["DATA_PATH", "STRUCT_META_PATH"])]
+        data_bind: Vec<PathBuf>,
+        /// Read live commands from a deterministic script instead of opening the TUI.
+        #[arg(long, value_name = "PATH")]
+        live_script: Option<PathBuf>,
+        /// Emit versioned live response envelopes as JSON lines.
+        #[arg(long)]
+        live_json: bool,
+        #[arg(long, default_value_t = 16_000)]
+        tick_sleep_us: u64,
+        #[arg(long)]
+        ticks: Option<u64>,
     },
     /// Build the project for development or as a release executable.
     Build {
@@ -583,6 +605,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Validate { .. } => "validate",
         ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
+        ToolchainCommand::Tui { .. } => "tui",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
         ToolchainCommand::PackageMobile { .. } => "package-mobile",
@@ -680,6 +703,30 @@ fn execute(
                         run_workspace_watch(&workspace)
                     } else {
                         run_workspace(&workspace, headless)
+                    }
+                }
+                ToolchainCommand::Tui {
+                    entry,
+                    watch_dir,
+                    data_bind,
+                    live_script,
+                    live_json,
+                    tick_sleep_us,
+                    ticks,
+                } => {
+                    if json_output {
+                        Err("--json cannot be combined with tui; use --live-json for the response stream".to_string())
+                    } else {
+                        run_workspace_tui(
+                            &workspace,
+                            &entry,
+                            watch_dir.as_deref(),
+                            &data_bind,
+                            live_script.as_deref(),
+                            live_json,
+                            tick_sleep_us,
+                            ticks,
+                        )
                     }
                 }
                 ToolchainCommand::Build { mode, out } => {
@@ -1177,7 +1224,47 @@ fn run_workspace_live(
     script: Option<&Path>,
     json_lines: bool,
 ) -> Result<CommandResult, String> {
-    let entry = workspace.root.join(&workspace.manifest.entry);
+    run_workspace_tui(
+        workspace,
+        Path::new(&workspace.manifest.entry),
+        None,
+        &[],
+        script,
+        json_lines,
+        16_000,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_workspace_tui(
+    workspace: &Workspace,
+    entry: &Path,
+    watch_dir: Option<&Path>,
+    data_bind: &[PathBuf],
+    script: Option<&Path>,
+    json_lines: bool,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+) -> Result<CommandResult, String> {
+    if !data_bind.is_empty() && data_bind.len() != 2 {
+        return Err("--data-bind requires DATA_PATH and STRUCT_META_PATH".to_string());
+    }
+    validate_relative_path("TUI entry", entry)?;
+    let entry_path = workspace.root.join(entry);
+    validate_workspace_destination(workspace, "TUI entry", &entry_path)?;
+    if !entry_path.is_file() {
+        return Err(format!("TUI entry is not a file: {}", entry_path.display()));
+    }
+    validate_optional_workspace_path(workspace, "watch directory", watch_dir)?;
+    validate_optional_workspace_path(workspace, "live script", script)?;
+    for path in data_bind {
+        validate_relative_path("data binding", path)?;
+        validate_workspace_destination(workspace, "data binding", &workspace.root.join(path))?;
+    }
+    let data_json = data_bind.first().map(|path| workspace.root.join(path));
+    let data_meta = data_bind.get(1).map(|path| workspace.root.join(path));
+    let watch_dir = watch_dir.map(|path| workspace.root.join(path));
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
     let script = script.map(|path| workspace.root.join(path));
     let terminal_root = workspace.root.clone();
@@ -1186,11 +1273,19 @@ fn run_workspace_live(
     });
     let config = LiveRunConfig::new(
         workspace.root.clone(),
-        PathBuf::from(&workspace.manifest.entry),
+        entry.to_path_buf(),
         PathBuf::from(&workspace.manifest.output),
     );
-    let run_result =
-        run_live_in_process(&entry, Some(&workspace.root), 16_000, None, server, config);
+    let run_result = run_live_in_process_with_data(
+        &entry_path,
+        watch_dir.as_deref(),
+        data_json.as_deref(),
+        data_meta.as_deref(),
+        tick_sleep_micros,
+        max_ticks,
+        server,
+        config,
+    );
     if !terminal.is_finished() {
         return match run_result {
             Ok(()) => Err("live runner ended before the terminal session completed".to_string()),
