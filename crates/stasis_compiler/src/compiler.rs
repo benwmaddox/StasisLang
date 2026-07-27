@@ -194,8 +194,11 @@ pub struct Compiler {
     deps: DependencyGraph,
     types: TypeTable,
     parsed_statements: Vec<Vec<SimpleStmt>>,
+    parsed_statement_ids: BTreeSet<FunctionId>,
     statement_cache: HashMap<StatementCacheKey, Vec<SimpleStmt>>,
+    analysis_required_roots: Vec<String>,
     data_flow_summaries: Vec<FunctionDataFlowSummary>,
+    data_flow_context_fingerprint: u64,
     #[cfg(test)]
     statement_parse_count: usize,
     last_source_diagnostic: Option<crate::SourceDiagnostic>,
@@ -237,7 +240,7 @@ impl Compiler {
         let previous_hashes = self.capture_previous_hashes();
         self.functions.clear();
         self.parsed_statements.clear();
-        self.data_flow_summaries.clear();
+        self.parsed_statement_ids.clear();
         self.symbols.clear();
         self.deps = DependencyGraph;
 
@@ -313,9 +316,40 @@ impl Compiler {
             self.functions[callee as usize].dependents.push(caller);
         }
 
-        let mut next_statement_cache = HashMap::new();
-        let mut parsed_statements = Vec::with_capacity(self.functions.len());
-        for function in &self.functions {
+        self.parsed_statements = vec![Vec::new(); self.functions.len()];
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+            &self.functions,
+            &self.analysis_required_roots,
+        );
+        self.prepare_statement_artifacts(&reachable.iter().copied().collect::<Vec<_>>())?;
+
+        self.propagate_dirty_from_signature_changes(&signature_changed_ids);
+        let dirty_functions = self
+            .functions
+            .iter()
+            .filter(|function| function.dirty)
+            .count();
+        Ok(IndexPassResult {
+            parsed_functions: self.functions.len(),
+            dirty_functions,
+            signature_changed_functions: signature_changed_ids.len(),
+        })
+    }
+
+    fn prepare_statement_artifacts(&mut self, function_ids: &[FunctionId]) -> CompileResult<()> {
+        if function_ids
+            .iter()
+            .all(|function_id| self.parsed_statement_ids.contains(function_id))
+        {
+            return Ok(());
+        }
+        let mut next_statement_cache = HashMap::with_capacity(function_ids.len());
+        let mut changed_function_ids = BTreeSet::new();
+        for function_id in function_ids {
+            if self.parsed_statement_ids.contains(function_id) {
+                continue;
+            }
+            let function = &self.functions[*function_id as usize];
             let file = &self.files[function.file_id as usize];
             let key = StatementCacheKey {
                 path: file.path.clone(),
@@ -326,6 +360,7 @@ impl Compiler {
             let statements = if let Some(cached) = self.statement_cache.get(&key) {
                 cached.clone()
             } else {
+                changed_function_ids.insert(*function_id);
                 #[cfg(test)]
                 {
                     self.statement_parse_count += 1;
@@ -343,29 +378,26 @@ impl Compiler {
                     .map_err(CompileError::Backend)?
             };
             next_statement_cache.insert(key, statements.clone());
-            parsed_statements.push(statements);
+            self.parsed_statements[*function_id as usize] = statements;
+            self.parsed_statement_ids.insert(*function_id);
         }
         self.statement_cache = next_statement_cache;
-        self.parsed_statements = parsed_statements;
-        self.data_flow_summaries = build_function_data_flow_summaries(
+        let (summaries, context_fingerprint) = build_function_data_flow_summaries(
             &self.files,
             &self.functions,
             &self.parsed_statements,
+            &self.parsed_statement_ids,
+            &changed_function_ids,
             &self.types,
+            &self.data_flow_summaries,
+            self.data_flow_context_fingerprint,
         )
         .map_err(CompileError::Backend)?;
-
-        self.propagate_dirty_from_signature_changes(&signature_changed_ids);
-        let dirty_functions = self
-            .functions
-            .iter()
-            .filter(|function| function.dirty)
-            .count();
-        Ok(IndexPassResult {
-            parsed_functions: self.functions.len(),
-            dirty_functions,
-            signature_changed_functions: signature_changed_ids.len(),
-        })
+        if let Some(summaries) = summaries {
+            self.data_flow_summaries = summaries;
+        }
+        self.data_flow_context_fingerprint = context_fingerprint;
+        Ok(())
     }
 
     pub fn emit_pass_with<F>(&mut self, emit_function: &mut F) -> CompileResult<EmitPassResult>
@@ -389,6 +421,7 @@ impl Compiler {
     where
         F: FnMut(&FunctionMeta, &FunctionHIR, &TypeTable) -> Result<(), String>,
     {
+        self.prepare_statement_artifacts(function_ids)?;
         let mut emitted_functions = 0usize;
         let mut emitted_ids: Vec<FunctionId> = Vec::with_capacity(function_ids.len());
         for function_id in function_ids {
@@ -429,6 +462,11 @@ impl Compiler {
 
     pub fn function_data_flow_summaries(&self) -> &[FunctionDataFlowSummary] {
         &self.data_flow_summaries
+    }
+
+    pub fn set_analysis_required_roots(&mut self, roots: &[String]) {
+        self.analysis_required_roots.clear();
+        self.analysis_required_roots.extend_from_slice(roots);
     }
 
     pub fn types(&self) -> &TypeTable {
@@ -1001,6 +1039,240 @@ function tick(): i32 {
                 .direct
                 .reads
                 .contains(&"state.enemies[*]".to_string()));
+        }
+    }
+
+    #[test]
+    fn data_flow_does_not_claim_a_bound_when_the_loop_body_writes_its_index() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "loop.stasis",
+            r#"
+function tick(): i32 {
+    for (let i: i32 = 0; i < 3; i += 1) {
+        i -= 1;
+    }
+    return 0;
+}
+"#,
+        );
+
+        compiler.index_pass().expect("index pass");
+        let tick = compiler
+            .function_data_flow_summaries()
+            .iter()
+            .find(|summary| summary.function == "tick")
+            .expect("tick summary");
+        assert_eq!(tick.direct.bounded_iterations[0].max_iterations, None);
+    }
+
+    #[test]
+    fn data_flow_resolves_receiver_overloads_before_aggregating_effects() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "overloads.stasis",
+            r#"
+struct Enemy { hp: i32; }
+struct Player { score: i32; }
+struct State { enemy: Enemy; player: Player; }
+global state: State;
+
+function touch(enemy: Enemy): void { enemy.hp += 1; }
+function touch(player: Player): void { player.score += 1; }
+
+function tick(): i32 {
+    touch(state.enemy);
+    touch(state.player);
+    return 0;
+}
+"#,
+        );
+
+        compiler.index_pass().expect("index pass");
+        let tick = compiler
+            .function_data_flow_summaries()
+            .iter()
+            .find(|summary| summary.function == "tick")
+            .expect("tick summary");
+        assert_eq!(
+            tick.aggregate.writes,
+            vec!["state.enemy.hp", "state.player.score"]
+        );
+    }
+
+    #[test]
+    fn data_flow_skips_unreachable_unsupported_bodies() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "dead.stasis",
+            r#"
+function main(): i32 { return 0; }
+function unreachable(): i32 { while (true) { return 1; } }
+"#,
+        );
+
+        compiler
+            .index_pass()
+            .expect("unreachable body stays deferred");
+        assert_eq!(
+            compiler
+                .function_data_flow_summaries()
+                .iter()
+                .map(|summary| summary.function.as_str())
+                .collect::<Vec<_>>(),
+            vec!["main"]
+        );
+    }
+
+    #[test]
+    fn data_flow_rebuilds_when_fixed_capacity_metadata_changes() {
+        let mut compiler = Compiler::new();
+        for capacity in [4, 8] {
+            compiler.upsert_file(
+                "capacity.stasis",
+                format!(
+                    "struct Enemy {{ hp: i32; }}\nstruct State {{ enemies: Enemy[{capacity}]; }}\nglobal state: State;\nfunction tick(): i32 {{ foreach (let enemy in state.enemies) {{ enemy.hp += 1; }} return 0; }}\n"
+                ),
+            );
+            compiler.index_pass().expect("index pass");
+            let tick = compiler
+                .function_data_flow_summaries()
+                .iter()
+                .find(|summary| summary.function == "tick")
+                .expect("tick summary");
+            assert_eq!(
+                tick.direct.bounded_iterations[0].max_iterations,
+                Some(capacity)
+            );
+        }
+    }
+
+    #[test]
+    fn data_flow_aggregates_every_member_of_a_mutual_call_cycle() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "cycle.stasis",
+            r#"
+struct State { left: i32; right: i32; }
+global state: State;
+function left(view: State): void { view.left += 1; right(view); }
+function right(view: State): void { view.right += 1; left(view); }
+function tick(): i32 { left(state); return 0; }
+"#,
+        );
+
+        compiler.index_pass().expect("index pass");
+        for name in ["left", "right"] {
+            let summary = compiler
+                .function_data_flow_summaries()
+                .iter()
+                .find(|summary| summary.function == name)
+                .expect("cycle summary");
+            assert_eq!(
+                summary.aggregate.parameter_writes,
+                vec!["view.left", "view.right"]
+            );
+        }
+        let tick = compiler
+            .function_data_flow_summaries()
+            .iter()
+            .find(|summary| summary.function == "tick")
+            .expect("tick summary");
+        assert_eq!(tick.aggregate.writes, vec!["state.left", "state.right"]);
+    }
+
+    #[test]
+    fn data_flow_resolves_overloads_with_nested_intrinsic_arguments() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "nested_overload.stasis",
+            r#"
+struct State { integer: i32; float: i32; }
+global state: State;
+function choose(value: i32): void { state.integer += value; }
+function choose(value: f32): void { state.float += 1; }
+function tick(): i32 { choose(i32_to_f32(state.integer)); return 0; }
+"#,
+        );
+
+        compiler.index_pass().expect("index pass");
+        let tick = compiler
+            .function_data_flow_summaries()
+            .iter()
+            .find(|summary| summary.function == "tick")
+            .expect("tick summary");
+        assert!(tick.aggregate.writes.contains(&"state.float".to_string()));
+        assert!(!tick.aggregate.writes.contains(&"state.integer".to_string()));
+    }
+
+    #[test]
+    fn data_flow_rebuilds_when_only_a_resolved_call_site_changes() {
+        let mut compiler = Compiler::new();
+        for (argument, expected) in [
+            ("state.enemy", "state.enemy.hp"),
+            ("state.pilot", "state.pilot.score"),
+        ] {
+            compiler.upsert_file(
+                "call_site.stasis",
+                format!(
+                    "struct Enemy {{ hp: i32; }}\nstruct Player {{ score: i32; }}\nstruct State {{ enemy: Enemy; pilot: Player; }}\nglobal state: State;\nfunction touch(value: Enemy): void {{ value.hp += 1; }}\nfunction touch(value: Player): void {{ value.score += 1; }}\nfunction tick(): i32 {{ touch({argument}); return 0; }}\n"
+                ),
+            );
+            compiler.index_pass().expect("index pass");
+            let tick = compiler
+                .function_data_flow_summaries()
+                .iter()
+                .find(|summary| summary.function == "tick")
+                .expect("tick summary");
+            assert_eq!(tick.aggregate.writes, vec![expected]);
+        }
+    }
+
+    #[test]
+    fn data_flow_resolves_overloads_with_nested_fixed32_intrinsics() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "fixed32_overload.stasis",
+            r#"
+struct State { integer: i32; float: i32; }
+global state: State;
+function choose(value: i32): void { state.integer += value; }
+function choose(value: f32): void { state.float += 1; }
+function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
+"#,
+        );
+
+        compiler.index_pass().expect("index pass");
+        let tick = compiler
+            .function_data_flow_summaries()
+            .iter()
+            .find(|summary| summary.function == "tick")
+            .expect("tick summary");
+        assert!(tick.aggregate.writes.contains(&"state.integer".to_string()));
+        assert!(!tick.aggregate.writes.contains(&"state.float".to_string()));
+    }
+
+    #[test]
+    fn data_flow_fast_reuse_distinguishes_nested_call_grouping() {
+        let mut compiler = Compiler::new();
+        for (expression, expected, rejected) in [
+            ("outer(inner(1), 2)", "left", "right"),
+            ("outer(inner(1, 2))", "right", "left"),
+        ] {
+            compiler.upsert_file(
+                "grouping.stasis",
+                format!(
+                    "function left(): void {{ return; }}\nfunction right(): void {{ return; }}\nfunction inner(a: i32): i32 {{ return a; }}\nfunction inner(a: i32, b: i32): i32 {{ return b; }}\nfunction outer(a: i32, b: i32): void {{ left(); }}\nfunction outer(a: i32): void {{ right(); }}\nfunction tick(): i32 {{ {expression}; return 0; }}\n"
+                ),
+            );
+            compiler.index_pass().expect("index pass");
+            let tick = compiler
+                .function_data_flow_summaries()
+                .iter()
+                .find(|summary| summary.function == "tick")
+                .expect("tick summary");
+            assert!(tick.aggregate.calls.contains(&expected.to_string()));
+            assert!(!tick.aggregate.calls.contains(&rejected.to_string()));
         }
     }
 }

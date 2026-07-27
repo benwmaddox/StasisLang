@@ -1,11 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::backend::emit::{
-    eval_const_i64, AssignOp, AssignTarget, ComparisonOp, SimpleCondition, SimpleExpr, SimpleStmt,
+    collect_supported_call_signatures, eval_const_i64, resolve_call_signature, AssignOp,
+    AssignTarget, CallSignatureMap, ComparisonOp, ResolvedExternCallSignature, SimpleCondition,
+    SimpleExpr, SimpleStmt,
 };
 use crate::compiler::{FunctionMeta, SourceFile};
 use crate::frontend::parser::{parse_top_level_extern_functions, parse_top_level_type_layout};
-use crate::frontend::types::{TypeCategory, TypeTable};
+use crate::frontend::types::{
+    TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+};
 
 pub const FUNCTION_DATA_FLOW_SCHEMA_VERSION: u32 = 1;
 
@@ -39,9 +44,13 @@ pub struct FunctionDataFlowSummary {
     pub signature_hash: String,
     pub direct: FunctionDataFlowEffects,
     pub aggregate: FunctionDataFlowEffects,
+    #[serde(skip)]
+    pub(crate) internal_direct_fingerprint: u64,
+    #[serde(skip)]
+    pub(crate) internal_syntax_fingerprint: u64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct EffectSets {
     reads: BTreeSet<String>,
     writes: BTreeSet<String>,
@@ -53,9 +62,9 @@ struct EffectSets {
     call_sites: Vec<CallSite>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CallSite {
-    target: String,
+    target_id: u32,
     arguments: Vec<Option<String>>,
 }
 
@@ -107,73 +116,204 @@ impl EffectSets {
     }
 }
 
-struct AnalysisContext {
+struct AnalysisContext<'a> {
     globals: BTreeSet<String>,
     constants: BTreeMap<String, i64>,
-    internal_functions: BTreeSet<String>,
-    internal_view_parameters: BTreeMap<String, BTreeSet<usize>>,
     view_parameters_by_function: BTreeMap<u32, BTreeSet<usize>>,
     fixed_parameter_capacities: BTreeMap<u32, BTreeMap<usize, u64>>,
     extern_functions: BTreeSet<String>,
     collection_capacities: BTreeMap<String, u64>,
+    path_types: BTreeMap<String, TypeId>,
+    field_types: BTreeMap<TypeId, BTreeMap<String, TypeId>>,
+    call_signatures: CallSignatureMap,
+    fingerprint: u64,
+    types: &'a TypeTable,
 }
 
 pub(crate) fn build_function_data_flow_summaries(
     files: &[SourceFile],
     functions: &[FunctionMeta],
     statements_by_id: &[Vec<SimpleStmt>],
+    included_function_ids: &BTreeSet<u32>,
+    changed_function_ids: &BTreeSet<u32>,
     types: &TypeTable,
-) -> Result<Vec<FunctionDataFlowSummary>, String> {
+    previous: &[FunctionDataFlowSummary],
+    previous_context_fingerprint: u64,
+) -> Result<(Option<Vec<FunctionDataFlowSummary>>, u64), String> {
+    let previous_by_key: BTreeMap<_, _> = previous
+        .iter()
+        .map(|summary| {
+            (
+                (
+                    summary.file.as_str(),
+                    summary.function.as_str(),
+                    summary.signature_hash.as_str(),
+                ),
+                summary,
+            )
+        })
+        .collect();
+    let metadata_free = files.iter().all(|file| {
+        !["struct", "global", "const", "extern"]
+            .iter()
+            .any(|keyword| file.content.contains(keyword))
+    });
+    if metadata_free
+        && previous.len() == included_function_ids.len()
+        && functions
+            .iter()
+            .filter(|function| included_function_ids.contains(&function.id))
+            .all(|function| {
+                let file = &files[function.file_id as usize];
+                let signature_hash = format!("{:016x}", function.signature_hash);
+                previous_by_key
+                    .get(&(
+                        file.path.as_str(),
+                        function.name.as_str(),
+                        signature_hash.as_str(),
+                    ))
+                    .is_some_and(|summary| {
+                        summary.source_start == function.source_range.start
+                            && summary.source_end == function.source_range.end
+                            && (!changed_function_ids.contains(&function.id)
+                                || summary.internal_syntax_fingerprint
+                                    == effect_syntax_fingerprint(
+                                        &statements_by_id[function.id as usize],
+                                    ))
+                    })
+            })
+    {
+        return Ok((None, previous_context_fingerprint));
+    }
     let context = build_context(files, functions, types)?;
+    let reuse_candidate = previous.len() == included_function_ids.len()
+        && previous_context_fingerprint == context.fingerprint;
     let mut direct_by_id = Vec::with_capacity(functions.len());
     for function in functions {
-        let statements = statements_by_id
-            .get(function.id as usize)
-            .ok_or_else(|| format!("function '{}' has no statement artifact", function.name))?;
-        let mut effects = EffectSets::default();
-        let mut locals = function.param_names.iter().cloned().collect();
-        let view_parameters = context.view_parameters_by_function.get(&function.id);
-        let aliases = function
-            .param_names
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| view_parameters.is_some_and(|positions| positions.contains(index)))
-            .map(|(index, name)| (name.clone(), format!("${index}")))
-            .collect();
-        analyze_statements(
-            &statements,
-            function.id,
-            &function.name,
-            &context,
-            &mut locals,
-            &aliases,
-            &mut effects,
-        );
-        direct_by_id.push(effects);
+        if !included_function_ids.contains(&function.id) {
+            direct_by_id.push(EffectSets::default());
+            continue;
+        }
+        if reuse_candidate && !changed_function_ids.contains(&function.id) {
+            direct_by_id.push(EffectSets::default());
+        } else {
+            direct_by_id.push(analyze_function_effects(
+                function,
+                statements_by_id,
+                &context,
+            )?);
+        }
     }
-
+    let can_reuse_aggregates = reuse_candidate
+        && changed_function_ids
+            .iter()
+            .filter(|function_id| included_function_ids.contains(function_id))
+            .all(|function| {
+                let function = &functions[*function as usize];
+                let file = &files[function.file_id as usize];
+                let signature_hash = format!("{:016x}", function.signature_hash);
+                previous_by_key
+                    .get(&(
+                        file.path.as_str(),
+                        function.name.as_str(),
+                        signature_hash.as_str(),
+                    ))
+                    .is_some_and(|summary| {
+                        summary.direct
+                            == direct_by_id[function.id as usize].to_effects(&function.param_names)
+                            && summary.internal_direct_fingerprint
+                                == effect_fingerprint(&direct_by_id[function.id as usize])
+                    })
+            });
+    if !can_reuse_aggregates && reuse_candidate {
+        for function in functions {
+            if included_function_ids.contains(&function.id)
+                && !changed_function_ids.contains(&function.id)
+            {
+                direct_by_id[function.id as usize] =
+                    analyze_function_effects(function, statements_by_id, &context)?;
+            }
+        }
+    }
+    if can_reuse_aggregates
+        && functions
+            .iter()
+            .filter(|function| included_function_ids.contains(&function.id))
+            .all(|function| {
+                let file = &files[function.file_id as usize];
+                let signature_hash = format!("{:016x}", function.signature_hash);
+                previous_by_key
+                    .get(&(
+                        file.path.as_str(),
+                        function.name.as_str(),
+                        signature_hash.as_str(),
+                    ))
+                    .is_some_and(|summary| {
+                        summary.source_start == function.source_range.start
+                            && summary.source_end == function.source_range.end
+                    })
+            })
+    {
+        return Ok((None, context.fingerprint));
+    }
+    let aggregate_by_id = if can_reuse_aggregates {
+        None
+    } else {
+        Some(build_aggregate_effects(&direct_by_id)?)
+    };
     let mut out = Vec::with_capacity(functions.len());
     for function in functions {
-        let mut aggregate = EffectSets::default();
-        collect_aggregate_effects(
-            function.id,
-            functions,
-            &direct_by_id,
-            &mut BTreeSet::new(),
-            &BTreeMap::new(),
-            true,
-            &mut aggregate,
-        );
+        if !included_function_ids.contains(&function.id) {
+            continue;
+        }
         let file = &files[function.file_id as usize];
+        let signature_hash = format!("{:016x}", function.signature_hash);
+        let aggregate = if let Some(aggregate_by_id) = &aggregate_by_id {
+            aggregate_by_id[function.id as usize].to_effects(&function.param_names)
+        } else {
+            previous_by_key[&(
+                file.path.as_str(),
+                function.name.as_str(),
+                signature_hash.as_str(),
+            )]
+                .aggregate
+                .clone()
+        };
+        let direct = if can_reuse_aggregates && !changed_function_ids.contains(&function.id) {
+            previous_by_key[&(
+                file.path.as_str(),
+                function.name.as_str(),
+                signature_hash.as_str(),
+            )]
+                .direct
+                .clone()
+        } else {
+            direct_by_id[function.id as usize].to_effects(&function.param_names)
+        };
+        let internal_direct_fingerprint =
+            if can_reuse_aggregates && !changed_function_ids.contains(&function.id) {
+                previous_by_key[&(
+                    file.path.as_str(),
+                    function.name.as_str(),
+                    signature_hash.as_str(),
+                )]
+                    .internal_direct_fingerprint
+            } else {
+                effect_fingerprint(&direct_by_id[function.id as usize])
+            };
+        let internal_syntax_fingerprint =
+            effect_syntax_fingerprint(&statements_by_id[function.id as usize]);
         out.push(FunctionDataFlowSummary {
             schema_version: FUNCTION_DATA_FLOW_SCHEMA_VERSION,
             function: function.name.clone(),
             file: file.path.clone(),
             source_start: function.source_range.start,
             source_end: function.source_range.end,
-            signature_hash: format!("{:016x}", function.signature_hash),
-            direct: direct_by_id[function.id as usize].to_effects(&function.param_names),
-            aggregate: aggregate.to_effects(&function.param_names),
+            signature_hash,
+            direct,
+            aggregate,
+            internal_direct_fingerprint,
+            internal_syntax_fingerprint,
         });
     }
     out.sort_by(|left, right| {
@@ -182,54 +322,254 @@ pub(crate) fn build_function_data_flow_summaries(
             .then(left.source_start.cmp(&right.source_start))
             .then(left.function.cmp(&right.function))
     });
-    Ok(out)
+    Ok((Some(out), context.fingerprint))
 }
 
-fn build_context(
+fn analyze_function_effects(
+    function: &FunctionMeta,
+    statements_by_id: &[Vec<SimpleStmt>],
+    context: &AnalysisContext<'_>,
+) -> Result<EffectSets, String> {
+    let statements = statements_by_id
+        .get(function.id as usize)
+        .ok_or_else(|| format!("function '{}' has no statement artifact", function.name))?;
+    let mut effects = EffectSets::default();
+    let mut locals = function.param_names.iter().cloned().collect();
+    let mut local_types: BTreeMap<String, TypeId> = function
+        .param_names
+        .iter()
+        .cloned()
+        .zip(function.params.iter().copied())
+        .collect();
+    let view_parameters = context.view_parameters_by_function.get(&function.id);
+    let aliases = function
+        .param_names
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| view_parameters.is_some_and(|positions| positions.contains(index)))
+        .map(|(index, name)| (name.clone(), format!("${index}")))
+        .collect();
+    analyze_statements(
+        statements,
+        function.id,
+        &function.name,
+        context,
+        &mut locals,
+        &mut local_types,
+        &aliases,
+        &mut effects,
+    );
+    Ok(effects)
+}
+
+fn effect_fingerprint(effects: &EffectSets) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    effects.call_sites.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn effect_syntax_fingerprint(statements: &[SimpleStmt]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hash_statement_shapes(statements, &mut hasher);
+    hasher.finish()
+}
+
+fn hash_statement_shapes(statements: &[SimpleStmt], hasher: &mut DefaultHasher) {
+    statements.len().hash(hasher);
+    for statement in statements {
+        std::mem::discriminant(statement).hash(hasher);
+        match statement {
+            SimpleStmt::Let {
+                name,
+                type_id,
+                expression,
+            } => {
+                name.hash(hasher);
+                type_id.hash(hasher);
+                hash_expression_shape(expression, hasher);
+            }
+            SimpleStmt::Assign {
+                target,
+                op,
+                expression,
+            } => {
+                format!("{target:?}|{op:?}").hash(hasher);
+                hash_expression_shape(expression, hasher);
+            }
+            SimpleStmt::Convert {
+                target,
+                kind,
+                source,
+            } => {
+                format!("{target:?}|{kind:?}").hash(hasher);
+                hash_expression_shape(source, hasher);
+            }
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => {
+                hash_condition_shape(condition, hasher);
+                hash_statement_shapes(then_statements, hasher);
+                else_statements.is_some().hash(hasher);
+                if let Some(else_statements) = else_statements {
+                    hash_statement_shapes(else_statements, hasher);
+                }
+            }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                format!("{init:?}|{condition:?}|{step:?}").hash(hasher);
+                hash_statement_shapes(body_statements, hasher);
+            }
+            SimpleStmt::Foreach {
+                item_name,
+                index_name,
+                collection_path,
+                body_statements,
+            } => {
+                item_name.hash(hasher);
+                index_name.hash(hasher);
+                collection_path.hash(hasher);
+                hash_statement_shapes(body_statements, hasher);
+            }
+            SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
+                hash_expression_shape(expression, hasher)
+            }
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+        }
+    }
+}
+
+fn hash_condition_shape(condition: &SimpleCondition, hasher: &mut DefaultHasher) {
+    std::mem::discriminant(condition).hash(hasher);
+    match condition {
+        SimpleCondition::Comparison { lhs, op, rhs } => {
+            format!("{op:?}").hash(hasher);
+            hash_expression_shape(lhs, hasher);
+            hash_expression_shape(rhs, hasher);
+        }
+        SimpleCondition::Expr(expression) => hash_expression_shape(expression, hasher),
+        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+            hash_condition_shape(lhs, hasher);
+            hash_condition_shape(rhs, hasher);
+        }
+        SimpleCondition::Not(inner) => hash_condition_shape(inner, hasher),
+    }
+}
+
+fn hash_expression_shape(expression: &SimpleExpr, hasher: &mut DefaultHasher) {
+    std::mem::discriminant(expression).hash(hasher);
+    match expression {
+        SimpleExpr::Int(_)
+        | SimpleExpr::Float(_)
+        | SimpleExpr::Bool(_)
+        | SimpleExpr::StringLiteral(_) => {}
+        SimpleExpr::Condition(condition) => hash_condition_shape(condition, hasher),
+        SimpleExpr::Identifier(path) => path.hash(hasher),
+        SimpleExpr::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            collection_path.hash(hasher);
+            hash_expression_shape(index, hasher);
+            suffix.hash(hasher);
+        }
+        SimpleExpr::Call { target, args } => {
+            target.hash(hasher);
+            args.len().hash(hasher);
+            for argument in args {
+                hash_expression_shape(argument, hasher);
+            }
+        }
+        SimpleExpr::Binary { lhs, op, rhs } => {
+            op.hash(hasher);
+            hash_expression_shape(lhs, hasher);
+            hash_expression_shape(rhs, hasher);
+        }
+    }
+}
+
+fn build_context<'a>(
     files: &[SourceFile],
-    functions: &[FunctionMeta],
-    types: &TypeTable,
-) -> Result<AnalysisContext, String> {
+    functions: &'a [FunctionMeta],
+    types: &'a TypeTable,
+) -> Result<AnalysisContext<'a>, String> {
     let mut globals = BTreeSet::new();
     let mut constants = BTreeMap::new();
     let mut extern_functions = BTreeSet::new();
+    let mut resolved_externs = Vec::new();
     let mut structs = BTreeMap::new();
     let mut global_types = Vec::new();
     for file in files {
-        let layout = parse_top_level_type_layout(&file.content)?;
-        for constant in layout.constants {
-            if let Ok(value) = constant.value_text.trim().parse::<i64>() {
-                constants.insert(constant.name, value);
+        if ["struct", "global", "const"]
+            .iter()
+            .any(|keyword| file.content.contains(keyword))
+        {
+            let layout = parse_top_level_type_layout(&file.content)?;
+            for constant in layout.constants {
+                if let Ok(value) = constant.value_text.trim().parse::<i64>() {
+                    constants.insert(constant.name, value);
+                }
+            }
+            for structure in layout.structs {
+                structs.insert(structure.name.clone(), structure.fields);
+            }
+            for global in layout.globals {
+                globals.insert(global.name.clone());
+                global_types.push((global.name, global.type_name));
+            }
+            for block in layout.global_blocks {
+                globals.insert(block.name.clone());
+                structs.insert(block.name.clone(), block.fields);
+                global_types.push((block.name.clone(), block.name));
             }
         }
-        for structure in layout.structs {
-            structs.insert(structure.name.clone(), structure.fields);
-        }
-        for global in layout.globals {
-            globals.insert(global.name.clone());
-            global_types.push((global.name, global.type_name));
-        }
-        for block in layout.global_blocks {
-            globals.insert(block.name.clone());
-            structs.insert(block.name.clone(), block.fields);
-            global_types.push((block.name.clone(), block.name));
-        }
-        for external in parse_top_level_extern_functions(&file.content)? {
-            extern_functions.insert(external.name);
+        if file.content.contains("extern") {
+            for external in parse_top_level_extern_functions(&file.content)? {
+                extern_functions.insert(external.name.clone());
+                let params: Option<Vec<TypeId>> = external
+                    .params
+                    .iter()
+                    .map(|parameter| types.resolve(&parameter.type_name))
+                    .collect();
+                if let (Some(params), Some(return_type)) =
+                    (params, types.resolve(&external.return_type_name))
+                {
+                    resolved_externs.push(ResolvedExternCallSignature {
+                        name: external.name,
+                        symbol: external.symbol_name,
+                        params,
+                        return_type,
+                    });
+                }
+            }
         }
     }
     let mut collection_capacities = BTreeMap::new();
-    for (path, type_name) in global_types {
+    let mut path_types = BTreeMap::new();
+    for (path, type_name) in &global_types {
         collect_collection_capacities(
-            &path,
-            &type_name,
+            path,
+            type_name,
             &structs,
             &constants,
             &mut collection_capacities,
             &mut BTreeSet::new(),
         );
+        collect_path_types(
+            path,
+            type_name,
+            &structs,
+            types,
+            &mut path_types,
+            &mut BTreeSet::new(),
+        );
     }
-    let mut internal_view_parameters: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
     let mut view_parameters_by_function = BTreeMap::new();
     let mut fixed_parameter_capacities = BTreeMap::new();
     for function in functions {
@@ -241,10 +581,6 @@ fn build_context(
                 .is_some_and(|info| !matches!(info.category, TypeCategory::Builtin))
             {
                 positions.insert(index);
-                internal_view_parameters
-                    .entry(function.name.clone())
-                    .or_default()
-                    .insert(index);
             }
             if let Some(capacity) = types
                 .fixed_collection_len(*type_id)
@@ -256,19 +592,79 @@ fn build_context(
         view_parameters_by_function.insert(function.id, positions);
         fixed_parameter_capacities.insert(function.id, capacities);
     }
+    let field_types = structs
+        .iter()
+        .filter_map(|(name, fields)| {
+            let owner = types.resolve(name)?;
+            let fields = fields
+                .iter()
+                .filter_map(|field| {
+                    types
+                        .resolve(&field.type_name)
+                        .map(|ty| (field.name.clone(), ty))
+                })
+                .collect();
+            Some((owner, fields))
+        })
+        .collect();
+    let call_signatures = collect_supported_call_signatures(functions, &resolved_externs, types);
+    let mut fingerprint_hasher = DefaultHasher::new();
+    format!("{structs:?}|{global_types:?}|{constants:?}|{resolved_externs:?}")
+        .hash(&mut fingerprint_hasher);
+    let fingerprint = fingerprint_hasher.finish();
     Ok(AnalysisContext {
         globals,
         constants,
-        internal_functions: functions
-            .iter()
-            .map(|function| function.name.clone())
-            .collect(),
-        internal_view_parameters,
         view_parameters_by_function,
         fixed_parameter_capacities,
         extern_functions,
         collection_capacities,
+        path_types,
+        field_types,
+        call_signatures,
+        fingerprint,
+        types,
     })
+}
+
+fn collect_path_types(
+    path: &str,
+    type_name: &str,
+    structs: &BTreeMap<String, Vec<crate::frontend::parser::ParsedField>>,
+    types: &TypeTable,
+    paths: &mut BTreeMap<String, TypeId>,
+    visiting: &mut BTreeSet<String>,
+) {
+    if let Some(type_id) = types.resolve(type_name) {
+        paths.insert(path.to_string(), type_id);
+    }
+    if let Some((element_type, _)) = split_array_type(type_name) {
+        collect_path_types(
+            &format!("{path}[*]"),
+            element_type,
+            structs,
+            types,
+            paths,
+            visiting,
+        );
+        return;
+    }
+    if !visiting.insert(type_name.to_string()) {
+        return;
+    }
+    if let Some(fields) = structs.get(type_name) {
+        for field in fields {
+            collect_path_types(
+                &format!("{path}.{}", field.name),
+                &field.type_name,
+                structs,
+                types,
+                paths,
+                visiting,
+            );
+        }
+    }
+    visiting.remove(type_name);
 }
 
 fn collect_collection_capacities(
@@ -332,8 +728,9 @@ fn analyze_statements(
     statements: &[SimpleStmt],
     function_id: u32,
     function: &str,
-    context: &AnalysisContext,
+    context: &AnalysisContext<'_>,
     locals: &mut BTreeSet<String>,
+    local_types: &mut BTreeMap<String, TypeId>,
     aliases: &BTreeMap<String, String>,
     effects: &mut EffectSets,
 ) {
@@ -341,42 +738,59 @@ fn analyze_statements(
         match statement {
             SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
             SimpleStmt::Let {
-                name, expression, ..
+                name,
+                type_id,
+                expression,
             } => {
-                analyze_expression(expression, context, locals, aliases, effects);
+                let inferred_type =
+                    type_id.or_else(|| expression_type(expression, context, local_types, aliases));
+                analyze_expression(expression, context, locals, local_types, aliases, effects);
                 locals.insert(name.clone());
+                if let Some(type_id) = inferred_type {
+                    local_types.insert(name.clone(), type_id);
+                }
             }
             SimpleStmt::Assign {
                 target,
                 op,
                 expression,
             } => {
-                analyze_expression(expression, context, locals, aliases, effects);
+                analyze_expression(expression, context, locals, local_types, aliases, effects);
                 analyze_assignment_target(
                     target,
                     *op != AssignOp::Set,
                     context,
                     locals,
+                    local_types,
                     aliases,
                     effects,
                 );
             }
             SimpleStmt::Convert { target, source, .. } => {
-                analyze_expression(source, context, locals, aliases, effects);
-                analyze_assignment_target(target, false, context, locals, aliases, effects);
+                analyze_expression(source, context, locals, local_types, aliases, effects);
+                analyze_assignment_target(
+                    target,
+                    false,
+                    context,
+                    locals,
+                    local_types,
+                    aliases,
+                    effects,
+                );
             }
             SimpleStmt::If {
                 condition,
                 then_statements,
                 else_statements,
             } => {
-                analyze_condition(condition, context, locals, aliases, effects);
+                analyze_condition(condition, context, locals, local_types, aliases, effects);
                 analyze_nested_statements(
                     then_statements,
                     function_id,
                     function,
                     context,
                     locals,
+                    local_types,
                     aliases,
                     effects,
                 );
@@ -387,6 +801,7 @@ fn analyze_statements(
                         function,
                         context,
                         locals,
+                        local_types,
                         aliases,
                         effects,
                     );
@@ -399,17 +814,26 @@ fn analyze_statements(
                 body_statements,
             } => {
                 let mut loop_locals = locals.clone();
+                let mut loop_local_types = local_types.clone();
                 analyze_statements(
                     std::slice::from_ref(init.as_ref()),
                     function_id,
                     function,
                     context,
                     &mut loop_locals,
+                    &mut loop_local_types,
                     aliases,
                     effects,
                 );
                 let mut bound_reads = EffectSets::default();
-                analyze_condition(condition, context, &loop_locals, aliases, &mut bound_reads);
+                analyze_condition(
+                    condition,
+                    context,
+                    &loop_locals,
+                    &loop_local_types,
+                    aliases,
+                    &mut bound_reads,
+                );
                 effects.merge(&bound_reads);
                 effects.bounded_iterations.insert(FunctionBoundedIteration {
                     function: function.to_string(),
@@ -419,6 +843,7 @@ fn analyze_statements(
                         init,
                         condition,
                         step,
+                        body_statements,
                         &context.constants,
                     ),
                     reads: bound_reads.reads.into_iter().collect(),
@@ -429,6 +854,7 @@ fn analyze_statements(
                     function,
                     context,
                     &loop_locals,
+                    &loop_local_types,
                     aliases,
                     effects,
                 );
@@ -438,6 +864,7 @@ fn analyze_statements(
                     function,
                     context,
                     &mut loop_locals,
+                    &mut loop_local_types,
                     aliases,
                     effects,
                 );
@@ -482,6 +909,7 @@ fn analyze_statements(
                     .unwrap_or_default(),
                 });
                 let mut loop_locals = locals.clone();
+                let mut loop_local_types = local_types.clone();
                 loop_locals.insert(item_name.clone());
                 if let Some(index_name) = index_name {
                     loop_locals.insert(index_name.clone());
@@ -490,18 +918,28 @@ fn analyze_statements(
                 if state_collection.is_some() {
                     loop_aliases.insert(item_name.clone(), format!("{normalized}[*]"));
                 }
+                if let Some(collection_type) =
+                    path_type(collection_path, context, local_types, aliases)
+                {
+                    if let Some(element_type) =
+                        context.types.indexed_element_type_id(collection_type)
+                    {
+                        loop_local_types.insert(item_name.clone(), element_type);
+                    }
+                }
                 analyze_nested_statements(
                     body_statements,
                     function_id,
                     function,
                     context,
                     &loop_locals,
+                    &loop_local_types,
                     &loop_aliases,
                     effects,
                 );
             }
             SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
-                analyze_expression(expression, context, locals, aliases, effects);
+                analyze_expression(expression, context, locals, local_types, aliases, effects);
             }
         }
     }
@@ -511,8 +949,9 @@ fn analyze_nested_statements(
     statements: &[SimpleStmt],
     function_id: u32,
     function: &str,
-    context: &AnalysisContext,
+    context: &AnalysisContext<'_>,
     locals: &BTreeSet<String>,
+    local_types: &BTreeMap<String, TypeId>,
     aliases: &BTreeMap<String, String>,
     effects: &mut EffectSets,
 ) {
@@ -522,6 +961,7 @@ fn analyze_nested_statements(
         function,
         context,
         &mut locals.clone(),
+        &mut local_types.clone(),
         aliases,
         effects,
     );
@@ -530,8 +970,9 @@ fn analyze_nested_statements(
 fn analyze_assignment_target(
     target: &AssignTarget,
     reads_existing: bool,
-    context: &AnalysisContext,
+    context: &AnalysisContext<'_>,
     locals: &BTreeSet<String>,
+    local_types: &BTreeMap<String, TypeId>,
     aliases: &BTreeMap<String, String>,
     effects: &mut EffectSets,
 ) {
@@ -544,7 +985,7 @@ fn analyze_assignment_target(
             index,
             suffix,
         } => {
-            analyze_expression(index, context, locals, aliases, effects);
+            analyze_expression(index, context, locals, local_types, aliases, effects);
             normalize_state_path(collection_path, context, locals, aliases)
                 .map(|path| indexed_state_path(&path, suffix))
         }
@@ -559,8 +1000,9 @@ fn analyze_assignment_target(
 
 fn analyze_expression(
     expression: &SimpleExpr,
-    context: &AnalysisContext,
+    context: &AnalysisContext<'_>,
     locals: &BTreeSet<String>,
+    local_types: &BTreeMap<String, TypeId>,
     aliases: &BTreeMap<String, String>,
     effects: &mut EffectSets,
 ) {
@@ -570,7 +1012,7 @@ fn analyze_expression(
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_) => {}
         SimpleExpr::Condition(condition) => {
-            analyze_condition(condition, context, locals, aliases, effects)
+            analyze_condition(condition, context, locals, local_types, aliases, effects)
         }
         SimpleExpr::Identifier(path) => {
             if let Some(path) = normalize_state_path(path, context, locals, aliases) {
@@ -582,16 +1024,17 @@ fn analyze_expression(
             index,
             suffix,
         } => {
-            analyze_expression(index, context, locals, aliases, effects);
+            analyze_expression(index, context, locals, local_types, aliases, effects);
             if let Some(path) = normalize_state_path(collection_path, context, locals, aliases) {
                 effects.insert_read(indexed_state_path(&path, suffix));
             }
         }
         SimpleExpr::Call { target, args } => {
-            if context.internal_functions.contains(target) {
+            let target_id = resolve_internal_call(target, args, context, local_types, aliases);
+            if let Some(target_id) = target_id {
                 effects.calls.insert(target.clone());
                 effects.call_sites.push(CallSite {
-                    target: target.clone(),
+                    target_id,
                     arguments: args
                         .iter()
                         .map(|argument| expression_effect_path(argument, context, locals, aliases))
@@ -601,66 +1044,179 @@ fn analyze_expression(
                 effects.host_calls.insert(target.clone());
             }
             for (index, argument) in args.iter().enumerate() {
-                let is_view = context
-                    .internal_view_parameters
-                    .get(target)
+                let is_view = target_id
+                    .and_then(|target_id| context.view_parameters_by_function.get(&target_id))
                     .is_some_and(|positions| positions.contains(&index));
                 if is_view {
-                    analyze_view_argument(argument, context, locals, aliases, effects);
+                    analyze_view_argument(argument, context, locals, local_types, aliases, effects);
                 } else {
-                    analyze_expression(argument, context, locals, aliases, effects);
+                    analyze_expression(argument, context, locals, local_types, aliases, effects);
                 }
             }
         }
         SimpleExpr::Binary { lhs, rhs, .. } => {
-            analyze_expression(lhs, context, locals, aliases, effects);
-            analyze_expression(rhs, context, locals, aliases, effects);
+            analyze_expression(lhs, context, locals, local_types, aliases, effects);
+            analyze_expression(rhs, context, locals, local_types, aliases, effects);
         }
     }
 }
 
 fn analyze_view_argument(
     expression: &SimpleExpr,
-    context: &AnalysisContext,
+    context: &AnalysisContext<'_>,
     locals: &BTreeSet<String>,
+    local_types: &BTreeMap<String, TypeId>,
     aliases: &BTreeMap<String, String>,
     effects: &mut EffectSets,
 ) {
     match expression {
         SimpleExpr::Identifier(_) => {}
         SimpleExpr::IndexedPath { index, .. } => {
-            analyze_expression(index, context, locals, aliases, effects)
+            analyze_expression(index, context, locals, local_types, aliases, effects)
         }
-        _ => analyze_expression(expression, context, locals, aliases, effects),
+        _ => analyze_expression(expression, context, locals, local_types, aliases, effects),
     }
 }
 
 fn analyze_condition(
     condition: &SimpleCondition,
-    context: &AnalysisContext,
+    context: &AnalysisContext<'_>,
     locals: &BTreeSet<String>,
+    local_types: &BTreeMap<String, TypeId>,
     aliases: &BTreeMap<String, String>,
     effects: &mut EffectSets,
 ) {
     match condition {
         SimpleCondition::Comparison { lhs, rhs, .. } => {
-            analyze_expression(lhs, context, locals, aliases, effects);
-            analyze_expression(rhs, context, locals, aliases, effects);
+            analyze_expression(lhs, context, locals, local_types, aliases, effects);
+            analyze_expression(rhs, context, locals, local_types, aliases, effects);
         }
         SimpleCondition::Expr(expression) => {
-            analyze_expression(expression, context, locals, aliases, effects)
+            analyze_expression(expression, context, locals, local_types, aliases, effects)
         }
         SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-            analyze_condition(lhs, context, locals, aliases, effects);
-            analyze_condition(rhs, context, locals, aliases, effects);
+            analyze_condition(lhs, context, locals, local_types, aliases, effects);
+            analyze_condition(rhs, context, locals, local_types, aliases, effects);
         }
-        SimpleCondition::Not(inner) => analyze_condition(inner, context, locals, aliases, effects),
+        SimpleCondition::Not(inner) => {
+            analyze_condition(inner, context, locals, local_types, aliases, effects)
+        }
     }
+}
+
+fn resolve_internal_call(
+    target: &str,
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+    aliases: &BTreeMap<String, String>,
+) -> Option<u32> {
+    let argument_types: Vec<TypeId> = args
+        .iter()
+        .map(|argument| expression_type(argument, context, local_types, aliases))
+        .collect::<Option<_>>()?;
+    resolve_call_signature(
+        target,
+        &argument_types,
+        &context.call_signatures,
+        context.types,
+        &context.field_types,
+    )
+    .ok()?
+    .function_id
+}
+
+fn expression_type(
+    expression: &SimpleExpr,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+    aliases: &BTreeMap<String, String>,
+) -> Option<TypeId> {
+    match expression {
+        SimpleExpr::Int(_) => Some(TYPE_ID_I32),
+        SimpleExpr::Float(_) => Some(TYPE_ID_F32),
+        SimpleExpr::Bool(_) | SimpleExpr::Condition(_) => Some(TYPE_ID_BOOL),
+        SimpleExpr::StringLiteral(_) => context.types.string_literal_type_id(),
+        SimpleExpr::Identifier(path) => path_type(path, context, local_types, aliases),
+        SimpleExpr::IndexedPath {
+            collection_path,
+            suffix,
+            ..
+        } => {
+            let collection = path_type(collection_path, context, local_types, aliases)?;
+            let element = context.types.indexed_element_type_id(collection)?;
+            field_suffix_type(element, suffix, &context.field_types)
+        }
+        SimpleExpr::Call { target, args } => match target.as_str() {
+            "i32_to_f32" | "sin_fast" | "cos_fast" => Some(TYPE_ID_F32),
+            "f32_to_i32" | "fixed32_from_i32" | "fixed32_to_i32" | "fixed32_mul"
+            | "fixed32_div" | "fixed32_from_ratio" => Some(TYPE_ID_I32),
+            _ => {
+                let argument_types: Vec<TypeId> = args
+                    .iter()
+                    .map(|argument| expression_type(argument, context, local_types, aliases))
+                    .collect::<Option<_>>()?;
+                resolve_call_signature(
+                    target,
+                    &argument_types,
+                    &context.call_signatures,
+                    context.types,
+                    &context.field_types,
+                )
+                .ok()
+                .map(|signature| signature.return_type)
+            }
+        },
+        SimpleExpr::Binary { lhs, rhs, .. } => {
+            let lhs = expression_type(lhs, context, local_types, aliases)?;
+            let rhs = expression_type(rhs, context, local_types, aliases)?;
+            if lhs == TYPE_ID_F64 || rhs == TYPE_ID_F64 {
+                Some(TYPE_ID_F64)
+            } else if lhs == TYPE_ID_F32 || rhs == TYPE_ID_F32 {
+                Some(TYPE_ID_F32)
+            } else {
+                Some(lhs)
+            }
+        }
+    }
+}
+
+fn path_type(
+    path: &str,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+    aliases: &BTreeMap<String, String>,
+) -> Option<TypeId> {
+    if let Some(type_id) = context.path_types.get(path) {
+        return Some(*type_id);
+    }
+    let root = root_name(path);
+    let root_type = local_types.get(root).copied().or_else(|| {
+        aliases
+            .get(root)
+            .and_then(|alias| context.path_types.get(alias).copied())
+    })?;
+    let suffix = path.strip_prefix(root)?.trim_start_matches('.');
+    field_suffix_type(root_type, suffix, &context.field_types)
+}
+
+fn field_suffix_type(
+    mut type_id: TypeId,
+    suffix: &str,
+    field_types: &BTreeMap<TypeId, BTreeMap<String, TypeId>>,
+) -> Option<TypeId> {
+    if suffix.is_empty() {
+        return Some(type_id);
+    }
+    for field in suffix.trim_start_matches('.').split('.') {
+        type_id = *field_types.get(&type_id)?.get(field)?;
+    }
+    Some(type_id)
 }
 
 fn normalize_state_path(
     path: &str,
-    context: &AnalysisContext,
+    context: &AnalysisContext<'_>,
     locals: &BTreeSet<String>,
     aliases: &BTreeMap<String, String>,
 ) -> Option<String> {
@@ -704,52 +1260,161 @@ fn expression_effect_path(
     }
 }
 
-fn collect_aggregate_effects(
-    function_id: u32,
-    functions: &[FunctionMeta],
-    direct_by_id: &[EffectSets],
-    visiting: &mut BTreeSet<u32>,
-    substitutions: &BTreeMap<usize, String>,
-    retain_unmapped_parameters: bool,
-    aggregate: &mut EffectSets,
-) {
-    if !visiting.insert(function_id) {
-        return;
+fn build_aggregate_effects(direct_by_id: &[EffectSets]) -> Result<Vec<EffectSets>, String> {
+    let components = strongly_connected_components(direct_by_id);
+    let mut component_by_function = vec![0usize; direct_by_id.len()];
+    for (component_id, component) in components.iter().enumerate() {
+        for function_id in component {
+            component_by_function[*function_id] = component_id;
+        }
     }
-    let Some(function) = functions.get(function_id as usize) else {
-        visiting.remove(&function_id);
-        return;
-    };
-    if let Some(direct) = direct_by_id.get(function_id as usize) {
-        merge_substituted_effects(direct, substitutions, retain_unmapped_parameters, aggregate);
+    let mut component_edges = vec![BTreeSet::new(); components.len()];
+    for (function_id, direct) in direct_by_id.iter().enumerate() {
+        let source = component_by_function[function_id];
         for call_site in &direct.call_sites {
-            for dependency in function.dependencies.iter().filter(|dependency| {
-                functions
-                    .get(**dependency as usize)
-                    .is_some_and(|callee| callee.name == call_site.target)
-            }) {
-                let child_substitutions = call_site
-                    .arguments
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, path)| {
-                        substitute_path(path.as_deref()?, substitutions, retain_unmapped_parameters)
-                            .map(|path| (index, path))
-                    })
-                    .collect();
-                collect_aggregate_effects(
-                    *dependency,
-                    functions,
-                    direct_by_id,
-                    visiting,
-                    &child_substitutions,
-                    false,
-                    aggregate,
-                );
+            let target = call_site.target_id as usize;
+            if target < direct_by_id.len() {
+                let target = component_by_function[target];
+                if source != target {
+                    component_edges[source].insert(target);
+                }
             }
         }
     }
-    visiting.remove(&function_id);
+    let mut component_order = Vec::with_capacity(components.len());
+    let mut state = vec![0u8; components.len()];
+    for root in 0..components.len() {
+        if state[root] != 0 {
+            continue;
+        }
+        let mut stack = vec![(root, false)];
+        while let Some((component_id, expanded)) = stack.pop() {
+            if expanded {
+                state[component_id] = 2;
+                component_order.push(component_id);
+                continue;
+            }
+            if state[component_id] != 0 {
+                continue;
+            }
+            state[component_id] = 1;
+            stack.push((component_id, true));
+            for target in component_edges[component_id].iter().rev() {
+                if state[*target] == 0 {
+                    stack.push((*target, false));
+                }
+            }
+        }
+    }
+
+    let mut aggregate_by_id = vec![EffectSets::default(); direct_by_id.len()];
+    for component_id in component_order {
+        let component = &components[component_id];
+        let cyclic = component.len() > 1
+            || direct_by_id[component[0]]
+                .call_sites
+                .iter()
+                .any(|call_site| call_site.target_id as usize == component[0]);
+        let mut converged = false;
+        for _ in 0..component.len().saturating_add(1) {
+            let mut next = Vec::with_capacity(component.len());
+            for function_id in component {
+                let direct = &direct_by_id[*function_id];
+                let mut aggregate = EffectSets::default();
+                merge_substituted_effects(direct, &BTreeMap::new(), true, &mut aggregate);
+                for call_site in &direct.call_sites {
+                    let Some(child) = aggregate_by_id.get(call_site.target_id as usize) else {
+                        continue;
+                    };
+                    let child_substitutions = call_site
+                        .arguments
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, path)| path.clone().map(|path| (index, path)))
+                        .collect();
+                    merge_substituted_effects(child, &child_substitutions, false, &mut aggregate);
+                }
+                next.push(aggregate);
+            }
+            if component
+                .iter()
+                .zip(&next)
+                .all(|(function_id, aggregate)| aggregate_by_id[*function_id] == *aggregate)
+            {
+                converged = true;
+                break;
+            }
+            for (function_id, aggregate) in component.iter().zip(next) {
+                aggregate_by_id[*function_id] = aggregate;
+            }
+            if !cyclic {
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            return Err(format!(
+                "function data-flow cycle did not converge for function ids {:?}",
+                component
+            ));
+        }
+    }
+    Ok(aggregate_by_id)
+}
+
+fn strongly_connected_components(direct_by_id: &[EffectSets]) -> Vec<Vec<usize>> {
+    let mut visited = vec![false; direct_by_id.len()];
+    let mut finish = Vec::with_capacity(direct_by_id.len());
+    for root in 0..direct_by_id.len() {
+        if visited[root] {
+            continue;
+        }
+        visited[root] = true;
+        let mut stack = vec![(root, 0usize)];
+        while let Some((function_id, edge_index)) = stack.pop() {
+            if let Some(call_site) = direct_by_id[function_id].call_sites.get(edge_index) {
+                stack.push((function_id, edge_index + 1));
+                let child = call_site.target_id as usize;
+                if child < direct_by_id.len() && !visited[child] {
+                    visited[child] = true;
+                    stack.push((child, 0));
+                }
+            } else {
+                finish.push(function_id);
+            }
+        }
+    }
+    let mut reverse = vec![Vec::new(); direct_by_id.len()];
+    for (function_id, direct) in direct_by_id.iter().enumerate() {
+        for call_site in &direct.call_sites {
+            let child = call_site.target_id as usize;
+            if child < reverse.len() {
+                reverse[child].push(function_id);
+            }
+        }
+    }
+    visited.fill(false);
+    let mut components = Vec::new();
+    for root in finish.into_iter().rev() {
+        if visited[root] {
+            continue;
+        }
+        visited[root] = true;
+        let mut component = Vec::new();
+        let mut stack = vec![root];
+        while let Some(function_id) = stack.pop() {
+            component.push(function_id);
+            for parent in &reverse[function_id] {
+                if !visited[*parent] {
+                    visited[*parent] = true;
+                    stack.push(*parent);
+                }
+            }
+        }
+        component.sort_unstable();
+        components.push(component);
+    }
+    components
 }
 
 fn merge_substituted_effects(
@@ -853,6 +1518,7 @@ fn static_for_max_iterations(
     init: &SimpleStmt,
     condition: &SimpleCondition,
     step: &SimpleStmt,
+    body_statements: &[SimpleStmt],
     constants: &BTreeMap<String, i64>,
 ) -> Option<u64> {
     let (variable, start) = match init {
@@ -866,6 +1532,9 @@ fn static_for_max_iterations(
         } => (name.as_str(), eval_integer(expression, constants)?),
         _ => return None,
     };
+    if statements_write_local(body_statements, variable) {
+        return None;
+    }
     let (op, end) = match condition {
         SimpleCondition::Comparison {
             lhs: SimpleExpr::Identifier(name),
@@ -905,6 +1574,38 @@ fn static_for_max_iterations(
     let distance = u64::try_from(distance).ok()?;
     let increment = u64::try_from(increment).ok()?;
     Some((distance + increment - 1) / increment)
+}
+
+fn statements_write_local(statements: &[SimpleStmt], name: &str) -> bool {
+    statements.iter().any(|statement| match statement {
+        SimpleStmt::Assign { target, .. } | SimpleStmt::Convert { target, .. } => {
+            matches!(target, AssignTarget::Local(path) if path == name)
+        }
+        SimpleStmt::If {
+            then_statements,
+            else_statements,
+            ..
+        } => {
+            statements_write_local(then_statements, name)
+                || else_statements
+                    .as_deref()
+                    .is_some_and(|statements| statements_write_local(statements, name))
+        }
+        SimpleStmt::For {
+            init,
+            step,
+            body_statements,
+            ..
+        } => {
+            statements_write_local(std::slice::from_ref(init.as_ref()), name)
+                || statements_write_local(std::slice::from_ref(step.as_ref()), name)
+                || statements_write_local(body_statements, name)
+        }
+        SimpleStmt::Foreach {
+            body_statements, ..
+        } => statements_write_local(body_statements, name),
+        _ => false,
+    })
 }
 
 fn eval_integer(expression: &SimpleExpr, constants: &BTreeMap<String, i64>) -> Option<i64> {
