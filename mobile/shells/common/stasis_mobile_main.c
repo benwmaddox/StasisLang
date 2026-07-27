@@ -7,7 +7,6 @@
 #include "published_aot_symbols.h"
 #include "stasis_package_provenance.h"
 #include "stasis_mobile_runtime.h"
-#include "stasis_platform_storage.h"
 
 static int configure_asset_root(void) {
 #if defined(__APPLE__) && !defined(__ANDROID__)
@@ -32,25 +31,11 @@ static int configure_asset_root(void) {
 #endif
 }
 
-static int configure_storage_root(void) {
-    char *root = SDL_GetPrefPath("StasisLang", "@STASIS_APP_NAME@");
-    if (root == NULL) {
-        return -1;
-    }
-    int configured = stasis_storage_set_root(root);
-    SDL_free(root);
-    return configured ? 0 : -1;
-}
-
 int SDL_main(int argc, char **argv) {
     (void)argc;
     (void)argv;
     if (configure_asset_root() != 0) {
         SDL_Log("Stasis could not configure the bundled asset root");
-        return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
-    }
-    if (configure_storage_root() != 0) {
-        SDL_Log("Stasis could not configure app-private preference storage");
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
     SDL_Log(

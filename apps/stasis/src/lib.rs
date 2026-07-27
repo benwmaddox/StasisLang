@@ -3747,9 +3747,12 @@ mod tests {
             "mobile target should be static, SDL-only, and exclude the SDL desktop main shim"
         );
         assert!(
-            STASIS_RUNTIME_CMAKE.contains("stasis_platform_storage.c")
-                && STASIS_MOBILE_MAIN_SOURCE.contains("stasis_storage_set_root(root)"),
-            "mobile packages must link and configure the app-private preference host"
+            STASIS_GRAPHICS_SOURCE.contains("stasis_storage_load_i32")
+                && STASIS_GRAPHICS_SOURCE.contains("stasis_storage_save_i32")
+                && !STASIS_RUNTIME_CMAKE
+                    .contains("stasis_mobile_aot_runtime.c\n        stasis_platform_storage.c")
+                && !STASIS_MOBILE_MAIN_SOURCE.contains("stasis_storage_set_root"),
+            "graphical mobile packages must use the single SDL preference host"
         );
         assert!(
             !STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_dynload")

@@ -4128,7 +4128,7 @@ mod tests {
         let config =
             fs::read_to_string(ios.join("ios/StasisMobile.xcconfig")).expect("read Xcode config");
         assert!(project.contains("stasis_mobile_runtime.c in Sources"));
-        assert!(project.contains("stasis_platform_storage.c in Sources"));
+        assert!(!project.contains("stasis_platform_storage.c in Sources"));
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
         assert!(config.contains("STASIS_GRAPHICS_SDL_ONLY=1"));
         assert!(ios.join("runtime/stasis_display_scale.h").is_file());
