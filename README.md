@@ -203,11 +203,15 @@ Run Brickout Revenge v1 (Windows in-process dev runner):
 cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis
 ```
 
-Open the workspace-backed state-inspection sample with the persistent live-workspace TUI:
+From a directory containing `stasis.json`, open its manifest `entry` with the persistent
+live-workspace TUI:
 
 ```powershell
-cargo run -p stasis --release -- tui samples\state_inspection\src\main.stasis
+stasis tui
 ```
+
+Pass an entry path to override the manifest for that invocation, for example
+`stasis tui samples\state_inspection\src\main.stasis`.
 
 Edit and save any `.stasis` file in the current import/dependency graph. You should see output like:
 
