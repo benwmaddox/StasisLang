@@ -52,6 +52,8 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_mobile_aot_runtime.h",
     "stasis_mobile_runtime.c",
     "stasis_mobile_runtime.h",
+    "stasis_platform_storage.c",
+    "stasis_platform_storage.h",
     "stb_truetype.h",
 ];
 const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md");
@@ -4084,6 +4086,8 @@ mod tests {
         assert!(runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
         assert!(android.join("runtime/stasis_display_scale.h").is_file());
         assert!(android.join("runtime/stasis_asset_path.h").is_file());
+        assert!(android.join("runtime/stasis_platform_storage.c").is_file());
+        assert!(android.join("runtime/stasis_platform_storage.h").is_file());
         assert!(android.join("runtime/stasis_render_contract.h").is_file());
         assert!(android
             .join("runtime/stasis_renderer_lifecycle.h")

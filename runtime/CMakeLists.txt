@@ -139,6 +139,7 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         stasis_mobile_runtime STATIC
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
+        stasis_platform_storage.c
     )
     configure_stasis_target(stasis_mobile_runtime ON TRUE OFF)
     target_include_directories(stasis_mobile_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -148,7 +149,7 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
     )
     install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
     install(
-        FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
+        FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h stasis_platform_storage.h
         DESTINATION include
     )
 endif()

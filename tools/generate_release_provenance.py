@@ -24,6 +24,8 @@ RUNTIME_FILES = (
     "stasis_mobile_aot_runtime.h",
     "stasis_mobile_runtime.c",
     "stasis_mobile_runtime.h",
+    "stasis_platform_storage.c",
+    "stasis_platform_storage.h",
     "stb_truetype.h",
 )
 
