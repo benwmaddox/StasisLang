@@ -1,5 +1,7 @@
 use crate::backend::emit::{DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage};
-use crate::backend::state_layout::{build_state_layout, build_state_memory_report};
+use crate::backend::state_layout::{
+    build_state_layout, build_state_memory_report, is_named_scalar_state_path,
+};
 use crate::backend::state_query::{
     parse_state_query, BinaryOperator, ScalarExpression, StateQuery, StateValueReference,
 };
@@ -902,6 +904,9 @@ impl JitProcess {
             TYPE_ID_U32 => Ok(JitScalarValue::U32(
                 stasis_dynload::stasis_jit_global_i32_load(path_hash) as u32,
             )),
+            type_id if self.is_named_i32_state_scalar(path, type_id) => Ok(JitScalarValue::I32(
+                stasis_dynload::stasis_jit_global_i32_load(path_hash),
+            )),
             _ => Err(format!("global path '{path}' is not a supported scalar")),
         }
     }
@@ -930,6 +935,11 @@ impl JitProcess {
             }
             (TYPE_ID_U32, JitScalarValue::U32(value)) => {
                 stasis_dynload::stasis_jit_global_i32_store(path_hash, value as i32)
+            }
+            (type_id, JitScalarValue::I32(value))
+                if self.is_named_i32_state_scalar(path, type_id) =>
+            {
+                stasis_dynload::stasis_jit_global_i32_store(path_hash, value)
             }
             (_, value) => {
                 return Err(format!(
@@ -967,6 +977,19 @@ impl JitProcess {
             .as_ref()
             .and_then(|analysis| analysis.global_path_types.get(path).copied())
             .ok_or_else(|| format!("global path '{path}' was not found in compiler metadata"))
+    }
+
+    fn is_named_i32_state_scalar(&self, path: &str, type_id: u16) -> bool {
+        self.compile_analysis_cache
+            .as_ref()
+            .is_some_and(|analysis| {
+                is_named_scalar_state_path(
+                    path,
+                    type_id,
+                    &analysis.global_path_types,
+                    self.compiler.types(),
+                )
+            })
     }
 
     fn global_collection_value_type(&self, path: &str, field: &str) -> Result<(u16, i32), String> {
@@ -1776,7 +1799,11 @@ fn build_direct_storage_bindings(
         if collection_infos.contains_key(path) {
             continue;
         }
-        if let Some(kind) = scalar_storage_kind(type_table, *type_id) {
+        let kind = scalar_storage_kind(type_table, *type_id).or_else(|| {
+            is_named_scalar_state_path(path, *type_id, global_path_types, type_table)
+                .then_some(stasis_dynload::JitStorageKind::I32)
+        });
+        if let Some(kind) = kind {
             let path_hash = crate::backend::emit::hash_global_path(path);
             let address = stasis_dynload::direct_scalar_storage_slot_address(kind, path_hash)?;
             if provision {

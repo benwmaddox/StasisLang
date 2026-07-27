@@ -55,6 +55,7 @@ struct CapturedMigrationState {
 #[derive(Debug, Clone)]
 struct CollectionFieldLayout {
     type_name: String,
+    storage_type_name: String,
     capacity: u32,
 }
 
@@ -74,12 +75,28 @@ pub fn plan_state_migration(
     let active_scalars = active
         .scalars
         .iter()
-        .map(|entry| (entry.path.clone(), entry.type_name.clone()))
+        .map(|entry| {
+            (
+                entry.path.clone(),
+                (
+                    entry.type_name.clone(),
+                    entry.storage_type_name().to_string(),
+                ),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     let incoming_scalars = incoming
         .scalars
         .iter()
-        .map(|entry| (entry.path.clone(), entry.type_name.clone()))
+        .map(|entry| {
+            (
+                entry.path.clone(),
+                (
+                    entry.type_name.clone(),
+                    entry.storage_type_name().to_string(),
+                ),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     let active_collections = collection_field_layouts(active)?;
     let incoming_collections = collection_field_layouts(incoming)?;
@@ -151,17 +168,22 @@ pub fn plan_state_migration(
             ));
             affected_roots.insert(migration_root(path));
         }
-        for (path, incoming_type) in &incoming_scalars {
+        for (path, (incoming_type, incoming_storage_type)) in &incoming_scalars {
             if path.ends_with(".max_length") {
                 continue;
             }
             match active_scalars.get(path) {
-                Some(active_type) if active_type == incoming_type => steps.push(scalar_step(
-                    StateMigrationStepKind::Copy,
-                    path,
-                    incoming_type,
-                )),
-                Some(active_type) => {
+                Some((active_type, active_storage_type))
+                    if active_type == incoming_type
+                        && active_storage_type == incoming_storage_type =>
+                {
+                    steps.push(scalar_step(
+                        StateMigrationStepKind::Copy,
+                        path,
+                        incoming_storage_type,
+                    ));
+                }
+                Some((active_type, _)) => {
                     rejections.push(format!(
                         "state path '{path}' changed type '{active_type}' -> '{incoming_type}'"
                     ));
@@ -171,20 +193,20 @@ pub fn plan_state_migration(
                     steps.push(scalar_step(
                         StateMigrationStepKind::Initialize,
                         path,
-                        incoming_type,
+                        incoming_storage_type,
                     ));
                     affected_roots.insert(migration_root(path));
                 }
             }
         }
-        for (path, active_type) in &active_scalars {
+        for (path, (_, active_storage_type)) in &active_scalars {
             if path.ends_with(".max_length") || incoming_scalars.contains_key(path) {
                 continue;
             }
             steps.push(scalar_step(
                 StateMigrationStepKind::Remove,
                 path,
-                active_type,
+                active_storage_type,
             ));
             warnings.push(format!("removed state path '{path}' will be discarded"));
             affected_roots.insert(migration_root(path));
@@ -192,13 +214,16 @@ pub fn plan_state_migration(
 
         for ((path, field), incoming_field) in &incoming_collections {
             match active_collections.get(&(path.clone(), field.clone())) {
-                Some(active_field) if active_field.type_name == incoming_field.type_name => {
+                Some(active_field)
+                    if active_field.type_name == incoming_field.type_name
+                        && active_field.storage_type_name == incoming_field.storage_type_name =>
+                {
                     let elements = active_field.capacity.min(incoming_field.capacity);
                     steps.push(collection_step(
                         StateMigrationStepKind::Copy,
                         path,
                         field,
-                        &incoming_field.type_name,
+                        &incoming_field.storage_type_name,
                         0,
                         elements,
                         active_field.capacity,
@@ -219,7 +244,7 @@ pub fn plan_state_migration(
                             StateMigrationStepKind::Initialize,
                             path,
                             field,
-                            &incoming_field.type_name,
+                            &incoming_field.storage_type_name,
                             active_field.capacity,
                             incoming_field.capacity - active_field.capacity,
                             active_field.capacity,
@@ -242,7 +267,7 @@ pub fn plan_state_migration(
                         StateMigrationStepKind::Initialize,
                         path,
                         field,
-                        &incoming_field.type_name,
+                        &incoming_field.storage_type_name,
                         0,
                         incoming_field.capacity,
                         0,
@@ -260,7 +285,7 @@ pub fn plan_state_migration(
                 StateMigrationStepKind::Remove,
                 path,
                 field,
-                &active_field.type_name,
+                &active_field.storage_type_name,
                 0,
                 active_field.capacity,
                 active_field.capacity,
@@ -475,6 +500,7 @@ fn collection_field_layouts(
                 (collection.path.clone(), field.field.clone()),
                 CollectionFieldLayout {
                     type_name: field.type_name.clone(),
+                    storage_type_name: field.storage_type_name().to_string(),
                     capacity,
                 },
             );
@@ -828,6 +854,90 @@ mod tests {
     use super::*;
     use crate::backend::jit::{JitStateCollectionFieldLayout, JitStateCollectionLayout};
 
+    fn enum_state_layout(
+        type_name: &str,
+        include_score: bool,
+        include_enemies: bool,
+    ) -> JitStateLayout {
+        let enum_declaration = if type_name == "i32" {
+            String::new()
+        } else {
+            format!("enum {type_name} {{ Waiting, Playing }}\n")
+        };
+        let initializer = if type_name == "i32" {
+            "1".to_string()
+        } else {
+            format!("{type_name}.Playing")
+        };
+        let score_field = if include_score { "score: i32; " } else { "" };
+        let enemy_declaration = if include_enemies {
+            format!("struct Enemy {{ phase: {type_name}; hp: i32; }}\n")
+        } else {
+            String::new()
+        };
+        let enemies_field = if include_enemies {
+            "enemies: Enemy[2]; "
+        } else {
+            ""
+        };
+        let enemy_assignment = if include_enemies {
+            "game.enemies[0].phase = game.phase; "
+        } else {
+            ""
+        };
+        let source = format!(
+            "{enum_declaration}\
+             {enemy_declaration}\
+             struct Game {{ phase: {type_name}; {score_field}{enemies_field}}}\n\
+             global game: Game;\n\
+             function main(): i32 {{ game.phase = {initializer}; {enemy_assignment}return 0; }}\n"
+        );
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", source);
+        jit.compile_staged()
+            .expect("compile enum migration fixture");
+        jit.state_layout()
+    }
+
+    #[test]
+    fn enum_identity_changes_reject_state_migration() {
+        let active = enum_state_layout("Phase", false, true);
+        for incoming_type in ["Mode", "i32"] {
+            let incoming = enum_state_layout(incoming_type, false, true);
+            let preview = plan_state_migration(&active, &incoming, Vec::new(), false, None)
+                .expect("plan enum identity rejection");
+
+            assert!(!preview.state_layout_compatible);
+            let rejection = preview.rejection.as_deref().expect("enum type rejection");
+            assert!(rejection.contains(&format!(
+                "state path 'game.phase' changed type 'Phase' -> '{incoming_type}'"
+            )));
+            assert!(rejection.contains(&format!(
+                "collection state path 'game.enemies[].phase' changed type 'Phase' -> '{incoming_type}'"
+            )));
+        }
+    }
+
+    #[test]
+    fn unchanged_enum_identity_migrates_through_i32_storage() {
+        let active = enum_state_layout("Phase", false, false);
+        let incoming = enum_state_layout("Phase", true, false);
+        let preview = plan_state_migration(&active, &incoming, Vec::new(), false, None)
+            .expect("plan compatible enum migration");
+
+        assert!(
+            preview.state_layout_compatible,
+            "{}",
+            preview.rejection.as_deref().unwrap_or("missing rejection")
+        );
+        assert!(preview.migration_steps.iter().any(|step| {
+            step.kind == StateMigrationStepKind::Copy
+                && step.path == "game.phase"
+                && step.field.is_none()
+                && step.type_name == "i32"
+        }));
+    }
+
     #[test]
     fn non_migratable_collection_shape_rejects_before_activation() {
         let collection = |capacity| JitStateCollectionLayout {
@@ -838,6 +948,7 @@ mod tests {
             fields: vec![JitStateCollectionFieldLayout {
                 field: "value".to_string(),
                 type_name: "i32".to_string(),
+                storage_type_name: "i32".to_string(),
             }],
         };
         let active = JitStateLayout {
