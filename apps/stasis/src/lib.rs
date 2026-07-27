@@ -2041,17 +2041,23 @@ fn run_play_in_process_inner(
         )?;
 
         let run_tick = live.as_ref().is_none_or(LiveWorkspace::should_run_tick);
+        let mut tick_micros = 0;
         if run_tick {
+            let tick_started = Instant::now();
             let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
+            tick_micros = tick_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
             if tick_rc != 0 {
                 break;
             }
         }
+        let render_started = Instant::now();
         let render_rc = stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?;
+        let render_micros = render_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
         if render_rc != 0 {
             break;
         }
 
+        gfx.host_set_performance_metrics(tick_micros, render_micros)?;
         gfx.gfx_submit_u8(&gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
         if tick_sleep_micros > 0 {
             let ms = (tick_sleep_micros / 1000) as i32;
@@ -3407,6 +3413,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_graphics.c"
     ));
+    const STASIS_RUNNER_SOURCE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_runner.c"
+    ));
     const STASIS_MOBILE_RUNTIME_SOURCE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_mobile_runtime.c"
@@ -3465,6 +3475,27 @@ mod tests {
     fn process_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn windows_performance_hud_uses_frame_work_and_60_fps_budget() {
+        for required in [
+            "event.key.keysym.sym == SDLK_F3",
+            "stasis_host_set_performance_metrics",
+            "g_perf_pending_guest_render_us",
+            "stasis_perf_elapsed_us(g_perf_render_started_counter, now)",
+            "budget@60fps=%d%%",
+            "const double total_ms = tick_ms + render_ms",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "Windows performance HUD contract should contain {required}"
+            );
+        }
+        assert!(
+            STASIS_RUNNER_SOURCE.contains("host_set_performance_metrics(tick_us, render_us)"),
+            "Windows AOT runner should feed tick and render timing into the shared HUD"
+        );
     }
 
     fn with_env_var_set(key: &str, value: &str, f: impl FnOnce()) {

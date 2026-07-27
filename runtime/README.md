@@ -65,6 +65,10 @@ captures use the drawable resolution.
    cargo run -p stasis --release -- play samples\asteroids.stasis
    ```
 
+Press `F3` in a Windows play window to toggle the performance HUD. It reports
+five-second average tick, render, and total times plus total use of the 60 fps
+frame budget.
+
 ## Android (NDK)
 
 Android uses the canonical SDL renderer process. `STASIS_GRAPHICS_SDL_ONLY`
