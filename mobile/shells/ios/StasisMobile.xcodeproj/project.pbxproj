@@ -12,7 +12,6 @@
 		100000000000000000000005 /* stasis_graphics.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* stasis_graphics.c */; };
 		100000000000000000000006 /* published_aot_bindings.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* published_aot_bindings.c */; };
 		100000000000000000000007 /* stasis_game in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* stasis_game */; };
-		100000000000000000000008 /* stasis_platform_storage.c in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000A /* stasis_platform_storage.c */; };
 
 		300000000000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -24,7 +23,6 @@
 				100000000000000000000004 /* stasis_mobile_aot_runtime.c in Sources */,
 				100000000000000000000005 /* stasis_graphics.c in Sources */,
 				100000000000000000000006 /* published_aot_bindings.c in Sources */,
-				100000000000000000000008 /* stasis_platform_storage.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -55,8 +53,6 @@
 		200000000000000000000007 /* stasis_game */ = {isa = PBXFileReference; lastKnownFileType = folder; path = StasisMobile/stasis_game; sourceTree = "<group>"; };
 		200000000000000000000008 /* StasisMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StasisMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		200000000000000000000009 /* StasisMobile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = StasisMobile.xcconfig; sourceTree = "<group>"; };
-		20000000000000000000000A /* stasis_platform_storage.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_platform_storage.c; sourceTree = "<group>"; };
-		20000000000000000000000B /* stasis_platform_storage.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ../runtime/stasis_platform_storage.h; sourceTree = "<group>"; };
 
 		400000000000000000000001 = {
 			isa = PBXGroup;
@@ -67,8 +63,6 @@
 				200000000000000000000004 /* stasis_mobile_aot_runtime.c */,
 				200000000000000000000005 /* stasis_graphics.c */,
 				200000000000000000000006 /* published_aot_bindings.c */,
-				20000000000000000000000A /* stasis_platform_storage.c */,
-				20000000000000000000000B /* stasis_platform_storage.h */,
 				200000000000000000000007 /* stasis_game */,
 				200000000000000000000009 /* StasisMobile.xcconfig */,
 				400000000000000000000002 /* Products */,
