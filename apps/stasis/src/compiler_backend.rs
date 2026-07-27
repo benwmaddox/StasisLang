@@ -3082,10 +3082,11 @@ fn state_layout_runtime_fields(
                 .get(parent)
                 .map(|capacity| serde_json::json!(capacity))
         });
+        let storage_type_name = scalar.storage_type_name();
         fields.push(PackagedRuntimeField {
             name: scalar.path.replace('.', "__"),
-            size: field_width(&scalar.type_name)?,
-            field_type: scalar.type_name.clone(),
+            size: field_width(storage_type_name)?,
+            field_type: storage_type_name.to_string(),
             array_count: 1,
             initial_value,
             collection_path: None,
@@ -3103,7 +3104,8 @@ fn state_layout_runtime_fields(
             )
         })?;
         for field in &collection.fields {
-            let width = field_width(&field.type_name)?;
+            let storage_type_name = field.storage_type_name();
+            let width = field_width(storage_type_name)?;
             let name = if field.field.is_empty() {
                 collection.path.replace('.', "__")
             } else {
@@ -3118,7 +3120,7 @@ fn state_layout_runtime_fields(
                 size: width.checked_mul(array_count).ok_or_else(|| {
                     format!("AOT state storage size overflow for '{}'", collection.path)
                 })?,
-                field_type: field.type_name.clone(),
+                field_type: storage_type_name.to_string(),
                 array_count,
                 initial_value: None,
                 collection_path: Some(collection.path.clone()),
@@ -4136,6 +4138,46 @@ mod tests {
     #[test]
     fn identifier_hash_matches_incremental_function() {
         assert_eq!(hash_identifier("on_code_swap"), -663_287_521);
+    }
+
+    #[test]
+    fn aot_direct_storage_source_uses_enum_i32_lanes() {
+        let layout = StateLayout {
+            scalars: vec![stasis_compiler::backend::state_layout::StateScalarLayout {
+                path: "game.phase".to_string(),
+                type_name: "GamePhase".to_string(),
+                storage_type_name: "i32".to_string(),
+            }],
+            collections: vec![
+                stasis_compiler::backend::state_layout::StateCollectionLayout {
+                    path: "game.samples".to_string(),
+                    capacity: 2,
+                    element_shape: "GamePhase".to_string(),
+                    fully_migratable: false,
+                    fields: vec![
+                        stasis_compiler::backend::state_layout::StateCollectionFieldLayout {
+                            field: String::new(),
+                            type_name: "GamePhase".to_string(),
+                            storage_type_name: "i32".to_string(),
+                        },
+                    ],
+                },
+            ],
+            structs: Vec::new(),
+            opaque: Vec::new(),
+        };
+
+        let (source, register_lines) =
+            build_aot_direct_storage_source(&layout).expect("build enum storage source");
+
+        assert!(source.contains("STASIS_EXPORT int32_t game__phase = 0;"));
+        assert!(source.contains("STASIS_EXPORT int32_t game__samples[2] = {0};"));
+        assert!(register_lines
+            .iter()
+            .any(|line| line.contains("stasis_jit_register_global_i32_ptr")));
+        assert!(register_lines
+            .iter()
+            .any(|line| line.contains("stasis_jit_register_global_i32_array")));
     }
 
     #[test]
