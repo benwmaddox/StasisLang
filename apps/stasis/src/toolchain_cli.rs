@@ -3565,13 +3565,17 @@ fn copy_file(source: &Path, destination: &Path) -> Result<(), String> {
 fn validate_project_name(name: &str) -> Result<(), String> {
     let valid = !name.is_empty()
         && name.len() <= 64
+        && name.trim_matches(' ') == name
         && name
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == ' ');
     if valid {
         Ok(())
     } else {
-        Err("project name must be 1-64 ASCII letters, digits, '-' or '_'".to_string())
+        Err(
+            "project name must be 1-64 ASCII letters, digits, spaces, '-' or '_', without leading or trailing spaces"
+                .to_string(),
+        )
     }
 }
 
@@ -4190,7 +4194,11 @@ mod tests {
             mobile_package_id("123-game"),
             "com.stasislang.game123x2dgame"
         );
-        for name in ["mobile_game", "123-game"] {
+        assert_eq!(
+            mobile_package_id("Chess TD"),
+            "com.stasislang.gamechessx20td"
+        );
+        for name in ["mobile_game", "123-game", "Chess TD"] {
             let package_id = mobile_package_id(name);
             let component = package_id.rsplit('.').next().expect("package component");
             assert!(component
@@ -4198,6 +4206,17 @@ mod tests {
                 .next()
                 .is_some_and(|value| value.is_ascii_alphabetic()));
             assert!(component.chars().all(|value| value.is_ascii_alphanumeric()));
+        }
+    }
+
+    #[test]
+    fn project_names_allow_internal_ascii_spaces() {
+        assert!(validate_project_name("Chess TD").is_ok());
+        for invalid in [" Chess TD", "Chess TD ", "Chess\tTD", "Chess/TD"] {
+            assert!(
+                validate_project_name(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
         }
     }
 
