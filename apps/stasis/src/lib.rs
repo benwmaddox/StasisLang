@@ -1582,6 +1582,42 @@ pub fn run_play_in_process(
         tick_sleep_micros,
         max_ticks,
         None,
+        None,
+    )
+}
+
+fn resolve_play_window_title(watch_file: &Path, configured_title: Option<&str>) -> String {
+    configured_title
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            watch_file
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "stasis".to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_window_title(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: &str,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        None,
+        tick_sleep_micros,
+        max_ticks,
+        Some(window_title),
+        None,
     )
 }
 
@@ -1602,6 +1638,7 @@ pub fn run_play_in_process_with_input_script(
         input_script,
         tick_sleep_micros,
         max_ticks,
+        None,
         None,
     )
 }
@@ -1645,6 +1682,7 @@ pub fn run_live_in_process_with_data(
         None,
         tick_sleep_micros,
         max_ticks,
+        None,
         Some((server, config)),
     )
 }
@@ -1658,6 +1696,7 @@ fn run_play_in_process_inner(
     input_script: Option<&Path>,
     tick_sleep_micros: u64,
     max_ticks: Option<u64>,
+    window_title: Option<&str>,
     live: Option<(stasis_runner::live::LiveSessionServer, LiveRunConfig)>,
 ) -> Result<(), String> {
     if !cfg!(windows) {
@@ -1787,10 +1826,11 @@ fn run_play_in_process_inner(
     );
 
     let gfx = stasis_dynload::StasisGraphicsApi::load_default()?;
-    let title = watch_file
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "stasis".to_string());
+    let configured_title = window_title.or_else(|| {
+        live.as_ref()
+            .and_then(|(_, config)| config.window_title.as_deref())
+    });
+    let title = resolve_play_window_title(watch_file, configured_title);
     // Create a small default window up-front so runtime calls (fonts/sprites) succeed during guest main().
     // Guest `init_window(...)` requests will be applied immediately after main returns.
     let _ = gfx.init_window(800, 600, &title)?;
@@ -5275,6 +5315,17 @@ mod tests {
     fn resolve_play_watch_dir_defaults_to_dot_for_basename_entry() {
         let resolved = resolve_play_watch_dir(Path::new("flappy.stasis"), None);
         assert_eq!(resolved, PathBuf::from("."));
+    }
+
+    #[test]
+    fn resolve_play_window_title_prefers_project_name_and_falls_back_to_entry() {
+        let entry = Path::new("src/main.stasis");
+        assert_eq!(
+            resolve_play_window_title(entry, Some("Chess TD")),
+            "Chess TD"
+        );
+        assert_eq!(resolve_play_window_title(entry, None), "main.stasis");
+        assert_eq!(resolve_play_window_title(entry, Some("")), "main.stasis");
     }
 
     #[test]

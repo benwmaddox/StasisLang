@@ -76,9 +76,11 @@ guide, and a minimal `CLAUDE.md` that points to `AGENTS.md`.
 - `run [--headless]`: JIT-compile and execute no-argument `main(): i32` or `main(): void`; an
   `i32` result is the process exit code. Headless execution is the default.
 - `run --watch`: launch the existing graphical runner and hot-swap pipeline for game projects.
-  Because it is an unbounded graphical session, watch mode rejects `--json` and `--headless`.
+  The window title uses the manifest project name. Because it is an unbounded graphical session,
+  watch mode rejects `--json` and `--headless`.
 - `tui [ENTRY]`: launch the same entry-relative graphical hot-swap workflow as `play`, using the
-  manifest `entry` when no override is supplied, while a desktop terminal uses
+  manifest `entry` when no override is supplied and the manifest project name as the window title,
+  while a desktop terminal uses
   the runner's versioned LiveSession protocol for background-prepared code-aware symbol edits and
   typed between-tick inspection or mutation. The terminal includes history, a Ctrl-P command
   palette with live fuzzy compiler-backed symbol/member completion, keyboard navigation and

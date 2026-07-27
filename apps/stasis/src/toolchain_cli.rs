@@ -4,7 +4,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
     run_jit_tests_in_directory_with_session, run_live_in_process, run_live_in_process_with_data,
-    run_play_in_process, run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
+    run_play_in_process_with_window_title, run_self_host_aot_cli_with_options, LiveRunConfig,
+    StasisTestRunSession,
 };
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
@@ -1149,7 +1150,15 @@ fn run_workspace(workspace: &Workspace, _headless: bool) -> Result<CommandResult
 
 fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
     let entry = workspace.root.join(&workspace.manifest.entry);
-    run_play_in_process(&entry, Some(&workspace.root), None, None, 16_000, None)?;
+    run_play_in_process_with_window_title(
+        &entry,
+        Some(&workspace.root),
+        None,
+        None,
+        16_000,
+        None,
+        &workspace.manifest.name,
+    )?;
     Ok(CommandResult::success(
         "graphical watch session ended",
         json!({"backend": "jit", "headless": false, "watch": true}),
@@ -1176,7 +1185,8 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
         workspace.root.clone(),
         PathBuf::from(&workspace.manifest.entry),
         PathBuf::from(&workspace.manifest.output),
-    );
+    )
+    .with_window_title(&workspace.manifest.name);
     let run_result =
         run_live_in_process(&entry, Some(&workspace.root), 16_000, None, server, config);
     if let Err(error) = run_result {
@@ -1237,7 +1247,8 @@ fn run_workspace_tui(
         workspace.root.clone(),
         entry_relative,
         PathBuf::from(&workspace.manifest.output),
-    );
+    )
+    .with_window_title(&workspace.manifest.name);
     let run_result = run_live_in_process_with_data(
         &entry_path,
         watch_dir.as_deref(),
