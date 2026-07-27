@@ -1447,6 +1447,20 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"kind\":\"quitting\""));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("failed to open"));
 
+    let manifest_entry = stasis(
+        &["tui", "--live-script", "live.commands", "--live-json"],
+        &project,
+    );
+    assert_eq!(
+        manifest_entry.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&manifest_entry.stdout),
+        String::from_utf8_lossy(&manifest_entry.stderr)
+    );
+    assert!(String::from_utf8_lossy(&manifest_entry.stdout).contains("\"kind\":\"quitting\""));
+    assert!(!String::from_utf8_lossy(&manifest_entry.stderr).contains("failed to open"));
+
     let removed_alias = stasis(&["run", "--interactive"], &project);
     assert_eq!(removed_alias.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&removed_alias.stderr).contains("unexpected argument"));

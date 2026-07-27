@@ -178,8 +178,9 @@ enum ToolchainCommand {
     },
     /// Run one graphical entry with hot swap and the live-workspace TUI.
     Tui {
+        /// Override the entry declared in stasis.json.
         #[arg(value_name = "ENTRY")]
-        entry: PathBuf,
+        entry: Option<PathBuf>,
         /// Override the watched directory; defaults to the entry file's parent.
         #[arg(long, value_name = "PATH")]
         watch_dir: Option<PathBuf>,
@@ -637,7 +638,7 @@ fn execute(
         ),
         other => {
             let workspace_path = workspace_arg.as_deref().or(match &other {
-                ToolchainCommand::Tui { entry, .. } => Some(entry.as_path()),
+                ToolchainCommand::Tui { entry, .. } => entry.as_deref(),
                 _ => None,
             });
             let workspace = load_workspace(workspace_path)?;
@@ -697,9 +698,12 @@ fn execute(
                     if json_output {
                         Err("--json cannot be combined with tui; use --live-json for the response stream".to_string())
                     } else {
+                        let entry = entry
+                            .as_deref()
+                            .unwrap_or_else(|| Path::new(&workspace.manifest.entry));
                         run_workspace_tui(
                             &workspace,
-                            &entry,
+                            entry,
                             watch_dir.as_deref(),
                             &data_bind,
                             live_script.as_deref(),
@@ -4032,6 +4036,30 @@ mod tests {
                 headless: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn tui_entry_is_optional_and_accepts_an_override() {
+        let manifest_entry =
+            ToolchainCli::try_parse_from(["stasis", "tui"]).expect("parse manifest TUI entry");
+        assert!(matches!(
+            manifest_entry.command,
+            ToolchainCommand::Tui { entry: None, .. }
+        ));
+
+        let explicit_entry = ToolchainCli::try_parse_from([
+            "stasis",
+            "tui",
+            "samples/state_inspection/src/main.stasis",
+        ])
+        .expect("parse explicit TUI entry");
+        assert!(matches!(
+            explicit_entry.command,
+            ToolchainCommand::Tui {
+                entry: Some(ref entry),
+                ..
+            } if entry == Path::new("samples/state_inspection/src/main.stasis")
         ));
     }
 
