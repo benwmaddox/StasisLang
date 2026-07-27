@@ -8,8 +8,7 @@ edit and receipt contracts, but intentionally keeps its own mobile interaction m
 
 Like `play ENTRY`, `tui ENTRY` watches the entry file's parent directory by default and uses that
 directory as the source-relative graphical asset root. The project root remains independently
-owned by semantic edits, tests, receipts, and build output. `run --interactive` remains a
-compatibility alias for the manifest entry.
+owned by semantic edits, tests, receipts, and build output.
 
 The default terminal is a human workspace view, not a protocol dump. It prints concise scalar,
 symbol, edit, scratch, status, and diagnostic lines; large semantic plans are summarized by changed

@@ -83,9 +83,6 @@ guide, and a minimal `CLAUDE.md` that points to `AGENTS.md`.
   `--live-json` for complete schema-v1 response envelopes or `--live-script PATH` for a
   deterministic command script. See
   [Interactive live workspace](live_cli_workspace.md).
-- `run --interactive`: compatibility spelling that opens the manifest entry through the same TUI
-  session contract. New game-development instructions should use `tui ENTRY` so the graphical
-  entry and its source-relative asset root are explicit.
 - `build --mode dev`: compile through JIT and write `build/dev-build.json` as a deterministic
   receipt.
 - `build --mode release`: use the shared Cranelift AOT pipeline and write the native executable to

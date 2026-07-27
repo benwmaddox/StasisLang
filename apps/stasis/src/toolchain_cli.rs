@@ -175,15 +175,6 @@ enum ToolchainCommand {
         /// Explicitly select the headless runtime (currently the default).
         #[arg(long)]
         headless: bool,
-        /// Keep the graphical game running while accepting live workspace commands.
-        #[arg(long, conflicts_with_all = ["watch", "headless"])]
-        interactive: bool,
-        /// Read interactive commands from a deterministic script instead of stdin.
-        #[arg(long, value_name = "PATH", requires = "interactive")]
-        live_script: Option<PathBuf>,
-        /// Emit versioned live response envelopes as JSON lines.
-        #[arg(long, requires = "interactive")]
-        live_json: bool,
     },
     /// Run one graphical entry with hot swap and the live-workspace TUI.
     Tui {
@@ -645,7 +636,11 @@ fn execute(
                 .to_string(),
         ),
         other => {
-            let workspace = load_workspace(workspace_arg.as_deref())?;
+            let workspace_path = workspace_arg.as_deref().or(match &other {
+                ToolchainCommand::Tui { entry, .. } => Some(entry.as_path()),
+                _ => None,
+            });
+            let workspace = load_workspace(workspace_path)?;
             match other {
                 ToolchainCommand::Fmt { check } => format_workspace(&workspace, check),
                 ToolchainCommand::Check => check_workspace(&workspace),
@@ -679,23 +674,8 @@ fn execute(
                     &tick,
                     &render,
                 ),
-                ToolchainCommand::Run {
-                    watch,
-                    headless,
-                    interactive,
-                    live_script,
-                    live_json,
-                } => {
-                    if interactive && json_output {
-                        Err("--json cannot be combined with --interactive; use --live-json for the response stream".to_string())
-                    } else if interactive {
-                        validate_optional_workspace_path(
-                            &workspace,
-                            "live script",
-                            live_script.as_deref(),
-                        )?;
-                        run_workspace_live(&workspace, live_script.as_deref(), live_json)
-                    } else if watch && json_output {
+                ToolchainCommand::Run { watch, headless } => {
+                    if watch && json_output {
                         Err("--json cannot be combined with --watch; watch mode is an unbounded event stream".to_string())
                     } else if watch && headless {
                         Err("--headless cannot be combined with --watch; watch mode uses the graphical hot-swap runner".to_string())
@@ -1219,23 +1199,6 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
     ))
 }
 
-fn run_workspace_live(
-    workspace: &Workspace,
-    script: Option<&Path>,
-    json_lines: bool,
-) -> Result<CommandResult, String> {
-    run_workspace_tui(
-        workspace,
-        Path::new(&workspace.manifest.entry),
-        None,
-        &[],
-        script,
-        json_lines,
-        16_000,
-        None,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn run_workspace_tui(
     workspace: &Workspace,
@@ -1250,12 +1213,7 @@ fn run_workspace_tui(
     if !data_bind.is_empty() && data_bind.len() != 2 {
         return Err("--data-bind requires DATA_PATH and STRUCT_META_PATH".to_string());
     }
-    validate_relative_path("TUI entry", entry)?;
-    let entry_path = workspace.root.join(entry);
-    validate_workspace_destination(workspace, "TUI entry", &entry_path)?;
-    if !entry_path.is_file() {
-        return Err(format!("TUI entry is not a file: {}", entry_path.display()));
-    }
+    let (entry_path, entry_relative) = resolve_tui_entry(workspace, entry)?;
     validate_optional_workspace_path(workspace, "watch directory", watch_dir)?;
     validate_optional_workspace_path(workspace, "live script", script)?;
     for path in data_bind {
@@ -1273,7 +1231,7 @@ fn run_workspace_tui(
     });
     let config = LiveRunConfig::new(
         workspace.root.clone(),
-        entry.to_path_buf(),
+        entry_relative,
         PathBuf::from(&workspace.manifest.output),
     );
     let run_result = run_live_in_process_with_data(
@@ -1301,6 +1259,39 @@ fn run_workspace_tui(
         "interactive live session ended",
         json!({"backend": "jit", "headless": false, "interactive": true}),
     ))
+}
+
+fn resolve_tui_entry(workspace: &Workspace, entry: &Path) -> Result<(PathBuf, PathBuf), String> {
+    if entry.as_os_str().is_empty() {
+        return Err("TUI entry must not be empty".to_string());
+    }
+    let workspace_candidate = if entry.is_absolute() {
+        entry.to_path_buf()
+    } else {
+        workspace.root.join(entry)
+    };
+    let launch_candidate = absolute_path(entry)?;
+    let entry_path = if workspace_candidate.is_file() {
+        workspace_candidate
+    } else {
+        launch_candidate
+    };
+    validate_workspace_destination(workspace, "TUI entry", &entry_path)?;
+    if !entry_path.is_file() {
+        return Err(format!("TUI entry is not a file: {}", entry_path.display()));
+    }
+    let root = workspace
+        .root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve workspace root: {error}"))?;
+    let entry_path = entry_path
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve TUI entry: {error}"))?;
+    let entry_relative = entry_path
+        .strip_prefix(&root)
+        .map_err(|_| "TUI entry resolves outside the workspace".to_string())?
+        .to_path_buf();
+    Ok((entry_path, entry_relative))
 }
 
 fn run_live_terminal(
