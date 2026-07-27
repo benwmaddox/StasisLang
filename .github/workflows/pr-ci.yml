@@ -100,3 +100,48 @@ jobs:
 
       - name: Bootstrap Compile Smoke (compiler .stasis)
         run: cargo test -p stasis_compiler -- --nocapture
+
+  android-package-link:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Stasis
+        uses: actions/checkout@v4
+
+      - name: Checkout SDL2
+        uses: actions/checkout@v4
+        with:
+          repository: libsdl-org/SDL
+          ref: 5d249570393f7a37e037abf22cd6012a4cc56a71
+          path: target/android-link-deps/SDL
+
+      - name: Checkout SDL2_image
+        uses: actions/checkout@v4
+        with:
+          repository: libsdl-org/SDL_image
+          ref: 12cb2e40330d256d9b1329647be8f366546d715c
+          path: target/android-link-deps/SDL_image
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android native toolchain
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Package and link generated Android game
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+          STASIS_SDL2_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
+          STASIS_SDL2_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
+        run: |
+          cargo run -p stasis -- --workspace samples/mobile_storage_link package-mobile --target android-arm64 --out dist/android --development-build
+          gradle -p samples/mobile_storage_link/dist/android/android :app:assembleDebug --no-daemon --max-workers=2 --console=plain
+          test -f samples/mobile_storage_link/dist/android/android/app/build/outputs/apk/debug/app-debug.apk
