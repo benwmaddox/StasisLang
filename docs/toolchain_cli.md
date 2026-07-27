@@ -30,7 +30,7 @@ stasis check
 stasis test
 stasis run --headless
 stasis run --watch
-stasis tui src/main.stasis
+stasis tui
 stasis build --mode dev
 stasis build --mode release
 stasis package --target desktop
@@ -60,7 +60,9 @@ project root and nested directories. `--workspace PATH` selects a project explic
 }
 ```
 
-Manifest paths must be project-relative and cannot contain `..`. Generated projects include a
+The project `name` may contain internal ASCII spaces, so display names such as `Chess TD` are
+valid; leading or trailing spaces are rejected. Manifest paths must be project-relative and cannot
+contain `..`. Generated projects include a
 runnable `main()`, a real `.test.stasis` test, an `AGENTS.md` theory-building and semantic-edit
 guide, and a minimal `CLAUDE.md` that points to `AGENTS.md`.
 
@@ -75,7 +77,8 @@ guide, and a minimal `CLAUDE.md` that points to `AGENTS.md`.
   `i32` result is the process exit code. Headless execution is the default.
 - `run --watch`: launch the existing graphical runner and hot-swap pipeline for game projects.
   Because it is an unbounded graphical session, watch mode rejects `--json` and `--headless`.
-- `tui ENTRY`: launch the same entry-relative graphical hot-swap workflow as `play` while a desktop terminal uses
+- `tui [ENTRY]`: launch the same entry-relative graphical hot-swap workflow as `play`, using the
+  manifest `entry` when no override is supplied, while a desktop terminal uses
   the runner's versioned LiveSession protocol for background-prepared code-aware symbol edits and
   typed between-tick inspection or mutation. The terminal includes history, a Ctrl-P command
   palette with live fuzzy compiler-backed symbol/member completion, keyboard navigation and
