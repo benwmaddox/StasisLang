@@ -34,6 +34,7 @@ void stasis_jit_global_f64_store(int32_t hash, double value);
 int32_t stasis_jit_global_i32_array_load(int32_t c, int32_t f, int32_t i);
 void stasis_jit_global_i32_array_store(int32_t c, int32_t f, int32_t i, int32_t value);
 int32_t *stasis_jit_global_i32_array_ptr(int32_t c, int32_t f, int32_t len);
+uint8_t *stasis_jit_global_u8_array_ptr(int32_t c, int32_t f, int32_t len);
 float stasis_jit_global_f32_array_load(int32_t c, int32_t f, int32_t i);
 void stasis_jit_global_f32_array_store(int32_t c, int32_t f, int32_t i, float value);
 float *stasis_jit_global_f32_array_ptr(int32_t c, int32_t f, int32_t len);

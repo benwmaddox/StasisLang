@@ -1,4 +1,5 @@
 #include "stasis_mobile_runtime.h"
+#include "stasis_render_contract.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -35,6 +36,15 @@ static int host_request_calls;
 static int32_t host_request_sequences[8];
 static int gfx_submit_calls;
 static int shutdown_calls;
+static int32_t game_host_i32[768];
+static float game_host_f32[64];
+static int32_t game_gfx_cmd_i32[STASIS_RENDER_I32_COUNT];
+static float game_gfx_cmd_f32[STASIS_RENDER_F32_COUNT];
+static uint8_t game_gfx_cmd_u8[STASIS_RENDER_U8_COUNT];
+static int32_t game_host_req_seq;
+static int32_t game_host_req_flags;
+static int32_t game_host_req_window_w_px;
+static int32_t game_host_req_window_h_px;
 
 int stasis_init_window(int width, int height, const char *title) {
     assert(width == 1280);
@@ -70,6 +80,8 @@ void stasis_end_frame(void) {
 void stasis_host_get_frame(int32_t *out_i32, float *out_f32) {
     assert(out_i32 != NULL);
     assert(out_f32 != NULL);
+    assert(out_i32 == game_host_i32);
+    assert(out_f32 == game_host_f32);
     host_frame_calls += 1;
 }
 
@@ -90,6 +102,11 @@ void stasis_gfx_submit_u8(
     const uint8_t *cmd_u8
 ) {
     assert(cmd_i32 != NULL && cmd_f32 != NULL && cmd_u8 != NULL);
+    assert(cmd_i32 == game_gfx_cmd_i32);
+    assert(cmd_f32 == game_gfx_cmd_f32);
+    assert(cmd_u8 == game_gfx_cmd_u8);
+    assert(cmd_i32[STASIS_RENDER_I_MAGIC] == STASIS_RENDER_V1_MAGIC);
+    assert(cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_V1_VERSION);
     gfx_submit_calls += 1;
     stasis_begin_frame();
     stasis_end_frame();
@@ -129,15 +146,29 @@ static int32_t hash_path(const char *path);
 
 static int32_t game_main(void) {
     main_calls += 1;
-    stasis_jit_global_i32_store(hash_path("host_req_seq"), 1);
-    stasis_jit_global_i32_store(hash_path("host_req_flags"), 1);
-    stasis_jit_global_i32_store(hash_path("host_req_window_w_px"), 960);
-    stasis_jit_global_i32_store(hash_path("host_req_window_h_px"), 540);
+    game_host_req_seq = 1;
+    game_host_req_flags = 1;
+    game_host_req_window_w_px = 960;
+    game_host_req_window_h_px = 540;
     return main_result;
 }
 
 static void bind_runtime(void) {
     bind_runtime_calls += 1;
+    stasis_jit_register_global_i32_array(hash_path("host_i32"), 0, game_host_i32, 768);
+    stasis_jit_register_global_f32_array(hash_path("host_f32"), 0, game_host_f32, 64);
+    stasis_jit_register_global_i32_array(
+        hash_path("gfx_cmd_i32"), 0, game_gfx_cmd_i32, STASIS_RENDER_I32_COUNT);
+    stasis_jit_register_global_f32_array(
+        hash_path("gfx_cmd_f32"), 0, game_gfx_cmd_f32, STASIS_RENDER_F32_COUNT);
+    stasis_jit_register_global_u8_array(
+        hash_path("gfx_cmd_u8"), 0, game_gfx_cmd_u8, STASIS_RENDER_U8_COUNT);
+    stasis_jit_register_global_i32_ptr(hash_path("host_req_seq"), &game_host_req_seq);
+    stasis_jit_register_global_i32_ptr(hash_path("host_req_flags"), &game_host_req_flags);
+    stasis_jit_register_global_i32_ptr(
+        hash_path("host_req_window_w_px"), &game_host_req_window_w_px);
+    stasis_jit_register_global_i32_ptr(
+        hash_path("host_req_window_h_px"), &game_host_req_window_h_px);
 }
 
 static int32_t game_tick(void) {
@@ -147,6 +178,8 @@ static int32_t game_tick(void) {
 
 static int32_t game_render(void) {
     render_calls += 1;
+    game_gfx_cmd_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_V1_MAGIC;
+    game_gfx_cmd_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_V1_VERSION;
     return render_result;
 }
 
@@ -191,6 +224,15 @@ static void reset_fakes(void) {
     memset(host_request_sequences, 0, sizeof(host_request_sequences));
     gfx_submit_calls = 0;
     shutdown_calls = 0;
+    memset(game_host_i32, 0, sizeof(game_host_i32));
+    memset(game_host_f32, 0, sizeof(game_host_f32));
+    memset(game_gfx_cmd_i32, 0, sizeof(game_gfx_cmd_i32));
+    memset(game_gfx_cmd_f32, 0, sizeof(game_gfx_cmd_f32));
+    memset(game_gfx_cmd_u8, 0, sizeof(game_gfx_cmd_u8));
+    game_host_req_seq = 0;
+    game_host_req_flags = 0;
+    game_host_req_window_w_px = 0;
+    game_host_req_window_h_px = 0;
 }
 
 static void test_rejects_invalid_configuration(void) {

@@ -553,6 +553,13 @@ int32_t *stasis_jit_global_i32_array_ptr(int32_t c, int32_t f, int32_t len) {
     return (int32_t *)ensure_array(entry, (size_t)len);
 }
 
+uint8_t *stasis_jit_global_u8_array_ptr(int32_t c, int32_t f, int32_t len) {
+    StasisArray *entry;
+    if (len <= 0) return NULL;
+    entry = find_array(c, f, STASIS_VALUE_U8, 1);
+    return (uint8_t *)ensure_array(entry, (size_t)len);
+}
+
 static int32_t collection_meta_hash(int32_t hash, int32_t kind) {
     const char *suffix = kind == 1 ? ".length" : kind == 2 ? ".max_length" :
         kind == 3 ? ".char_length" : NULL;

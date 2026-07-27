@@ -100,6 +100,7 @@ int main(void) {
     CHECK(external_array[2] == 12);
 
     stasis_jit_register_global_u8_array(22, 0, external_u8, 4);
+    CHECK(stasis_jit_global_u8_array_ptr(22, 0, 4) == external_u8);
     stasis_jit_global_i32_array_store(22, 0, 1, 258);
     CHECK(external_u8[1] == 2);
     CHECK(stasis_jit_global_i32_array_load(22, 0, 1) == 2);
