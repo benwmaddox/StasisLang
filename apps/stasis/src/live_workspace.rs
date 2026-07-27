@@ -44,6 +44,7 @@ pub struct LiveRunConfig {
     pub project_root: PathBuf,
     pub entry: PathBuf,
     pub output: PathBuf,
+    pub window_title: Option<String>,
 }
 
 impl LiveRunConfig {
@@ -52,7 +53,13 @@ impl LiveRunConfig {
             project_root,
             entry,
             output,
+            window_title: None,
         }
+    }
+
+    pub fn with_window_title(mut self, window_title: impl Into<String>) -> Self {
+        self.window_title = Some(window_title.into());
+        self
     }
 }
 
