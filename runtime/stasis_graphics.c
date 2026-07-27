@@ -100,6 +100,7 @@ static void log_package_provenance(void) {
 
 STASIS_EXPORT void stasis_set_window_size(int width, int height);
 STASIS_EXPORT int stasis_get_time_us(void);
+STASIS_EXPORT int stasis_load_font(const char* path, int font_size);
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
 STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y, float r, float g, float b, float a);
 STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle);
@@ -126,6 +127,7 @@ static int g_density_generation = 0;
 static bool g_window_resized = false;
 static StasisRendererLifecycle g_resource_lifecycle;
 static bool g_resource_frame_ready = false;
+static bool g_force_debug_overlay = false;
 static bool g_postfx_enabled = false;
 static bool g_postfx_applied_this_frame = false;
 static bool g_screenshot_taken = false;
@@ -145,6 +147,20 @@ static float g_postfx_phase = 0.0f;
 static float g_postfx_speed = 0.0f;
 static float g_postfx_color[3] = {0.05f, 0.85f, 0.78f};
 static bool g_postfx_force_disable = false;
+
+#define STASIS_PERF_SAMPLE_CAPACITY 360
+typedef struct {
+    uint64_t captured_counter;
+    uint64_t tick_us;
+    uint64_t render_us;
+} StasisPerfSample;
+static StasisPerfSample g_perf_samples[STASIS_PERF_SAMPLE_CAPACITY];
+static int g_perf_sample_count = 0;
+static int g_perf_sample_next = 0;
+static uint64_t g_perf_pending_tick_us = 0;
+static uint64_t g_perf_pending_guest_render_us = 0;
+static uint64_t g_perf_render_started_counter = 0;
+static int g_perf_font_handle = -1;
 
 /* ============================================================
  * Input snapshot (mouse + touch) - per-frame deterministic view
@@ -209,6 +225,8 @@ static void setup_ortho(void);
 static void reset_line_program(void);
 static void reset_sprite_program(void);
 #endif
+static int stasis_perf_font(void);
+static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finished_counter);
 
 /* Sprite atlas bookkeeping (paths + rasterized sprites). */
 #define SPRITE_TABLE_INITIAL_CAPACITY 256
@@ -576,6 +594,11 @@ static void stasis_pump_events(void) {
                 if (event.key.keysym.sym == SDLK_ESCAPE) {
                     g_should_quit = true;
                 }
+                if (event.key.keysym.sym == SDLK_F3 && event.key.repeat == 0) {
+                    g_force_debug_overlay = !g_force_debug_overlay;
+                    if (g_force_debug_overlay) (void)stasis_perf_font();
+                    SDL_Log("performance HUD %s (F3 toggles)", g_force_debug_overlay ? "on" : "off");
+                }
                 break;
             case SDL_WINDOWEVENT:
                 if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
@@ -849,6 +872,12 @@ STASIS_EXPORT void stasis_host_bulk_apply_requests(
     }
 }
 
+STASIS_EXPORT void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_t render_us)
+{
+    g_perf_pending_tick_us = tick_us;
+    g_perf_pending_guest_render_us = render_us;
+}
+
 typedef int (*stasis_tick_fn)(void);
 
 STASIS_EXPORT int stasis_host_bulk_step(
@@ -878,12 +907,17 @@ STASIS_EXPORT int stasis_host_bulk_step(
 
     stasis_host_bulk_apply_requests(host_req_seq, host_req_flags, host_req_window_w_px, host_req_window_h_px);
 
+    const uint64_t tick_started = SDL_GetPerformanceCounter();
     const int tick_result = tick_fn();
+    const uint64_t tick_finished = SDL_GetPerformanceCounter();
     if (tick_result != 0)
     {
         return tick_result;
     }
 
+    stasis_host_set_performance_metrics(
+        stasis_perf_elapsed_us(tick_started, tick_finished),
+        0);
     stasis_gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
     return 0;
 }
@@ -1168,7 +1202,6 @@ static struct {
 static LineVertex g_line_vertices[MAX_LINES * 2];
 static int g_line_count = 0;
 static int g_debug_frame_counter = 0;
-static bool g_force_debug_overlay = false;
 
 /* Simple shader + buffer for line rendering */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -3972,11 +4005,133 @@ STASIS_EXPORT void stasis_begin_frame(void) {
     }
 }
 
+static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finished_counter) {
+    const uint64_t frequency = SDL_GetPerformanceFrequency();
+    if (started_counter == 0 || finished_counter < started_counter || frequency == 0) return 0;
+    return ((finished_counter - started_counter) * 1000000u) / frequency;
+}
+
+static void stasis_perf_finish_render_sample(void) {
+    const uint64_t now = SDL_GetPerformanceCounter();
+    StasisPerfSample* sample = &g_perf_samples[g_perf_sample_next];
+    sample->captured_counter = now;
+    sample->tick_us = g_perf_pending_tick_us;
+    sample->render_us = g_perf_pending_guest_render_us
+        + stasis_perf_elapsed_us(g_perf_render_started_counter, now);
+    g_perf_sample_next = (g_perf_sample_next + 1) % STASIS_PERF_SAMPLE_CAPACITY;
+    if (g_perf_sample_count < STASIS_PERF_SAMPLE_CAPACITY) {
+        g_perf_sample_count++;
+    }
+    g_perf_render_started_counter = 0;
+}
+
+static void stasis_perf_averages(double* tick_ms, double* render_ms) {
+    const uint64_t now = SDL_GetPerformanceCounter();
+    const uint64_t frequency = SDL_GetPerformanceFrequency();
+    const uint64_t window = frequency * 5u;
+    uint64_t tick_total = 0;
+    uint64_t render_total = 0;
+    int samples = 0;
+
+    for (int i = 0; i < g_perf_sample_count; i++) {
+        const StasisPerfSample* sample = &g_perf_samples[i];
+        if (sample->captured_counter == 0 || now < sample->captured_counter) continue;
+        if (now - sample->captured_counter > window) continue;
+        tick_total += sample->tick_us;
+        render_total += sample->render_us;
+        samples++;
+    }
+
+    if (samples == 0) {
+        *tick_ms = 0.0;
+        *render_ms = 0.0;
+        return;
+    }
+    *tick_ms = (double)tick_total / (double)samples / 1000.0;
+    *render_ms = (double)render_total / (double)samples / 1000.0;
+}
+
+static int stasis_perf_font(void) {
+    if (g_perf_font_handle >= 0) return g_perf_font_handle;
+#if defined(_WIN32)
+    const char* windows_dir = getenv("WINDIR");
+    char path[1024];
+    if (windows_dir && *windows_dir) {
+        snprintf(path, sizeof(path), "%s/Fonts/segoeui.ttf", windows_dir);
+    } else {
+        snprintf(path, sizeof(path), "C:/Windows/Fonts/segoeui.ttf");
+    }
+    g_perf_font_handle = stasis_load_font(path, 15);
+#else
+    g_perf_font_handle = 0;
+#endif
+    return g_perf_font_handle;
+}
+
+static void stasis_perf_draw_overlay(void) {
+    if (!g_force_debug_overlay) return;
+    const int font = stasis_perf_font();
+    if (font <= 0) return;
+
+    double tick_ms = 0.0;
+    double render_ms = 0.0;
+    stasis_perf_averages(&tick_ms, &render_ms);
+    const double total_ms = tick_ms + render_ms;
+    const int budget_percent = (int)(total_ms * 6.0 + 0.5);
+    char text[160];
+    snprintf(
+        text,
+        sizeof(text),
+        "tick=%.2f ms  render=%.2f ms  total=%.2f ms  budget@60fps=%d%%  [F3]",
+        tick_ms,
+        render_ms,
+        total_ms,
+        budget_percent);
+
+    float r = 1.0f;
+    float g = 1.0f;
+    float b = 1.0f;
+    if (budget_percent >= 100) {
+        r = 0.73f; g = 0.41f; b = 1.0f;
+    } else if (budget_percent >= 80) {
+        r = 1.0f; g = 0.36f; b = 0.36f;
+    } else if (budget_percent >= 50) {
+        r = 1.0f; g = 0.84f; b = 0.40f;
+    }
+
+    const int background_width = g_window_width > 690 ? 680 : g_window_width - 16;
+    if (g_use_sdl_renderer) {
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(g_renderer, 20, 28, 38, 170);
+        SDL_Rect background = { 8, 8, background_width, 28 };
+        if (background.w > 0) SDL_RenderFillRect(g_renderer, &background);
+    } else {
+#if !defined(STASIS_GRAPHICS_SDL_ONLY)
+        flush_lines();
+        flush_sprites();
+        if (background_width > 0) {
+            glDisable(GL_TEXTURE_2D);
+            glColor4f(0.08f, 0.11f, 0.15f, 0.67f);
+            glBegin(GL_QUADS);
+            glVertex2f(8.0f, 8.0f);
+            glVertex2f(8.0f + (float)background_width, 8.0f);
+            glVertex2f(8.0f + (float)background_width, 36.0f);
+            glVertex2f(8.0f, 36.0f);
+            glEnd();
+        }
+#endif
+    }
+
+    stasis_draw_text(font, text, 13.0f, 12.0f, 0.0f, 0.0f, 0.0f, 0.9f);
+    stasis_draw_text(font, text, 12.0f, 11.0f, r, g, b, 1.0f);
+}
+
 /*
  * End frame: flush lines, swap buffers, poll events
  */
 STASIS_EXPORT void stasis_end_frame(void) {
     if (!g_resource_frame_ready) {
+        g_perf_render_started_counter = 0;
         g_line_count = 0;
         g_events_pumped_this_frame = 0;
         return;
@@ -3996,6 +4151,7 @@ STASIS_EXPORT void stasis_end_frame(void) {
 
         /* Capture before present so we read the current render target. */
         capture_scheduled_screenshot();
+        stasis_perf_finish_render_sample();
         SDL_RenderPresent(g_renderer);
         g_line_count = 0;
     } else {
@@ -4008,6 +4164,7 @@ STASIS_EXPORT void stasis_end_frame(void) {
         }
         /* Capture after all draws (including postfx) but before swap. */
         capture_scheduled_screenshot();
+        stasis_perf_finish_render_sample();
         SDL_GL_SwapWindow(g_window);
 #else
         /* STASIS_GRAPHICS_SDL_ONLY should never create a GL context. */
@@ -4181,6 +4338,7 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
         }
         return;
     }
+    g_perf_render_started_counter = SDL_GetPerformanceCounter();
 
     const int32_t flags = cmd_i32[STASIS_RENDER_I_FLAGS];
     const int32_t gfx_cmd_max_lines = STASIS_RENDER_MAX_LINES;
@@ -4301,7 +4459,10 @@ static void stasis_gfx_submit_v1(const int32_t* cmd_i32, const float* cmd_f32, c
 
     /* Present only if requested (lets benchmarks exclude swap/vsync). */
     if ((flags & STASIS_RENDER_FLAG_PRESENT) != 0) {
+        stasis_perf_draw_overlay();
         stasis_end_frame();
+    } else {
+        g_perf_render_started_counter = 0;
     }
 }
 

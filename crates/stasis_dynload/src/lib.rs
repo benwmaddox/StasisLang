@@ -273,6 +273,8 @@ pub struct StasisGraphicsApi {
     #[cfg(windows)]
     stasis_host_bulk_apply_requests: usize,
     #[cfg(windows)]
+    stasis_host_set_performance_metrics: usize,
+    #[cfg(windows)]
     stasis_gfx_submit_u8: usize,
     #[cfg(windows)]
     stasis_sleep_ms: usize,
@@ -311,6 +313,8 @@ impl StasisGraphicsApi {
             let stasis_host_bulk_init = lib.symbol_address("stasis_host_bulk_init")?;
             let stasis_host_bulk_apply_requests =
                 lib.symbol_address("stasis_host_bulk_apply_requests")?;
+            let stasis_host_set_performance_metrics =
+                lib.symbol_address("stasis_host_set_performance_metrics")?;
             let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
             let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
             Ok(Self {
@@ -319,6 +323,7 @@ impl StasisGraphicsApi {
                 stasis_host_get_frame,
                 stasis_host_bulk_init,
                 stasis_host_bulk_apply_requests,
+                stasis_host_set_performance_metrics,
                 stasis_gfx_submit_u8,
                 stasis_sleep_ms,
             })
@@ -419,6 +424,26 @@ impl StasisGraphicsApi {
             let _ = host_req_window_w_px;
             let _ = host_req_window_h_px;
             Err("stasis_graphics host_bulk_apply_requests is only supported on windows in stasis_dynload".to_string())
+        }
+    }
+
+    pub fn host_set_performance_metrics(
+        &self,
+        tick_micros: u64,
+        render_micros: u64,
+    ) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(u64, u64) =
+                unsafe { std::mem::transmute(self.stasis_host_set_performance_metrics) };
+            callback(tick_micros, render_micros);
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = tick_micros;
+            let _ = render_micros;
+            Err("stasis_graphics performance metrics are only supported on windows in stasis_dynload".to_string())
         }
     }
 
