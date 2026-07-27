@@ -481,7 +481,8 @@ impl AotProcess {
         let mut registrations = Vec::new();
 
         for scalar in &layout.scalars {
-            let width = storage_width(&scalar.type_name)?;
+            let storage_type_name = scalar.storage_type_name();
+            let width = storage_width(storage_type_name)?;
             let mut bytes = vec![0; width];
             if let Some(collection_path) = scalar.path.strip_suffix(".max_length") {
                 if let Some(collection) = layout
@@ -496,10 +497,10 @@ impl AotProcess {
             let data_id = define_standalone_storage_data(&mut module, &symbol, bytes)?;
             registrations.push((
                 data_id,
-                scalar.type_name.clone(),
+                storage_type_name.to_string(),
                 hash_global_path(&scalar.path),
                 0,
-                matches!(scalar.type_name.as_str(), "u8" | "u16").then_some(1),
+                matches!(storage_type_name, "u8" | "u16").then_some(1),
             ));
         }
         for collection in &layout.collections {
@@ -510,7 +511,8 @@ impl AotProcess {
                 )
             })?;
             for field in &collection.fields {
-                let width = storage_width(&field.type_name)?;
+                let storage_type_name = field.storage_type_name();
+                let width = storage_width(storage_type_name)?;
                 let size = len.checked_mul(width).ok_or_else(|| {
                     format!(
                         "standalone AOT storage size overflow for '{}.{}'",
@@ -521,7 +523,7 @@ impl AotProcess {
                 let data_id = define_standalone_storage_data(&mut module, &symbol, vec![0; size])?;
                 registrations.push((
                     data_id,
-                    field.type_name.clone(),
+                    storage_type_name.to_string(),
                     hash_global_path(&collection.path),
                     hash_foreach_field_suffix(&field.field),
                     Some(collection.capacity),

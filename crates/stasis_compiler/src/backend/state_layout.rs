@@ -19,6 +19,18 @@ pub struct StateLayout {
 pub struct StateScalarLayout {
     pub path: String,
     pub type_name: String,
+    #[serde(default)]
+    pub storage_type_name: String,
+}
+
+impl StateScalarLayout {
+    pub fn storage_type_name(&self) -> &str {
+        if self.storage_type_name.is_empty() {
+            &self.type_name
+        } else {
+            &self.storage_type_name
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -34,6 +46,18 @@ pub struct StateCollectionLayout {
 pub struct StateCollectionFieldLayout {
     pub field: String,
     pub type_name: String,
+    #[serde(default)]
+    pub storage_type_name: String,
+}
+
+impl StateCollectionFieldLayout {
+    pub fn storage_type_name(&self) -> &str {
+        if self.storage_type_name.is_empty() {
+            &self.type_name
+        } else {
+            &self.storage_type_name
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -161,11 +185,12 @@ pub fn build_state_memory_report(
         .scalars
         .iter()
         .map(|scalar| {
-            let element_bytes = storage_type_bytes(&scalar.type_name).unwrap_or(0);
+            let storage_type_name = scalar.storage_type_name();
+            let element_bytes = storage_type_bytes(storage_type_name).unwrap_or(0);
             if element_bytes == 0 {
                 warnings.push(format!(
-                    "state path '{}' has unsupported static type '{}'",
-                    scalar.path, scalar.type_name
+                    "state path '{}' has unsupported storage type '{}'",
+                    scalar.path, storage_type_name
                 ));
             }
             StateMemoryEntry {
@@ -173,7 +198,7 @@ pub fn build_state_memory_report(
                 field: String::new(),
                 kind: "scalar".to_string(),
                 type_name: scalar.type_name.clone(),
-                alignment_bytes: storage_type_alignment(&scalar.type_name).unwrap_or(1),
+                alignment_bytes: storage_type_alignment(storage_type_name).unwrap_or(1),
                 element_bytes,
                 padding_bytes: 0,
                 capacity: 1,
@@ -203,11 +228,12 @@ pub fn build_state_memory_report(
             .map(|count| count.min(old_capacity));
         let mut bytes_per_element = 0u64;
         for field in &collection.fields {
-            let element_bytes = storage_type_bytes(&field.type_name).unwrap_or(0);
+            let storage_type_name = field.storage_type_name();
+            let element_bytes = storage_type_bytes(storage_type_name).unwrap_or(0);
             if element_bytes == 0 {
                 warnings.push(format!(
-                    "collection path '{}' field '{}' has unsupported static type '{}'",
-                    collection.path, field.field, field.type_name
+                    "collection path '{}' field '{}' has unsupported storage type '{}'",
+                    collection.path, field.field, storage_type_name
                 ));
             }
             bytes_per_element = bytes_per_element
@@ -218,7 +244,7 @@ pub fn build_state_memory_report(
                 field: field.field.clone(),
                 kind: "collection_field".to_string(),
                 type_name: field.type_name.clone(),
-                alignment_bytes: storage_type_alignment(&field.type_name).unwrap_or(1),
+                alignment_bytes: storage_type_alignment(storage_type_name).unwrap_or(1),
                 element_bytes,
                 padding_bytes: 0,
                 capacity: old_capacity,
@@ -399,19 +425,17 @@ pub(crate) fn build_state_layout(
     let scalars = global_path_types
         .iter()
         .filter_map(|(path, type_id)| {
-            let type_name = scalar_type_name(type_table, *type_id)?;
             let info = type_table.type_info(*type_id)?;
-            let prefix = format!("{path}.");
+            let storage_type_name = scalar_storage_type_name(type_table, *type_id)?;
             if info.category == TypeCategory::Named
-                && global_path_types
-                    .keys()
-                    .any(|candidate| candidate.starts_with(&prefix))
+                && !is_named_scalar_state_path(path, *type_id, global_path_types, type_table)
             {
                 return None;
             }
             Some(StateScalarLayout {
                 path: path.clone(),
-                type_name: type_name.to_string(),
+                type_name: info.name.clone(),
+                storage_type_name: storage_type_name.to_string(),
             })
         })
         .collect();
@@ -419,22 +443,24 @@ pub(crate) fn build_state_layout(
         .iter()
         .map(|(path, info)| {
             let mut fields = Vec::new();
-            if let Some(type_name) = info
+            if let Some((type_name, storage_type_name)) = info
                 .element_type
-                .and_then(|type_id| collection_type_name(type_table, type_id))
+                .and_then(|type_id| state_value_type_names(type_table, type_id))
             {
                 fields.push(StateCollectionFieldLayout {
                     field: String::new(),
-                    type_name: type_name.to_string(),
+                    type_name,
+                    storage_type_name,
                 });
             }
             fields.extend(info.field_types.iter().filter_map(|(field, type_id)| {
-                collection_type_name(type_table, *type_id).map(|type_name| {
-                    StateCollectionFieldLayout {
+                state_value_type_names(type_table, *type_id).map(
+                    |(type_name, storage_type_name)| StateCollectionFieldLayout {
                         field: field.clone(),
-                        type_name: type_name.to_string(),
-                    }
-                })
+                        type_name,
+                        storage_type_name,
+                    },
+                )
             }));
             StateCollectionLayout {
                 path: path.clone(),
@@ -466,6 +492,7 @@ pub(crate) fn build_state_layout(
                 collection.fields.push(StateCollectionFieldLayout {
                     field: String::new(),
                     type_name: "u8".to_string(),
+                    storage_type_name: "u8".to_string(),
                 });
             }
             collection.fully_migratable = true;
@@ -479,6 +506,7 @@ pub(crate) fn build_state_layout(
             fields: vec![StateCollectionFieldLayout {
                 field: String::new(),
                 type_name: "u8".to_string(),
+                storage_type_name: "u8".to_string(),
             }],
         });
     }
@@ -490,7 +518,7 @@ pub(crate) fn build_state_layout(
     let opaque = global_path_types
         .iter()
         .filter_map(|(path, type_id)| {
-            if scalar_type_name(type_table, *type_id).is_some()
+            if scalar_storage_type_name(type_table, *type_id).is_some()
                 || collection_paths.contains(path.as_str())
             {
                 return None;
@@ -552,7 +580,21 @@ pub(crate) fn build_state_layout(
     }
 }
 
-fn scalar_type_name(type_table: &TypeTable, type_id: u16) -> Option<&'static str> {
+pub(crate) fn is_named_scalar_state_path(
+    path: &str,
+    type_id: u16,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> bool {
+    type_table
+        .type_info(type_id)
+        .is_some_and(|info| info.category == TypeCategory::Named)
+        && !global_path_types
+            .keys()
+            .any(|candidate| candidate.starts_with(&format!("{path}.")))
+}
+
+fn scalar_storage_type_name(type_table: &TypeTable, type_id: u16) -> Option<&'static str> {
     match type_id {
         TYPE_ID_I32 => Some("i32"),
         TYPE_ID_F32 => Some("f32"),
@@ -571,8 +613,10 @@ fn scalar_type_name(type_table: &TypeTable, type_id: u16) -> Option<&'static str
     }
 }
 
-fn collection_type_name(type_table: &TypeTable, type_id: u16) -> Option<&'static str> {
-    scalar_type_name(type_table, type_id)
+fn state_value_type_names(type_table: &TypeTable, type_id: u16) -> Option<(String, String)> {
+    let info = type_table.type_info(type_id)?;
+    let storage_type_name = scalar_storage_type_name(type_table, type_id)?;
+    Some((info.name.clone(), storage_type_name.to_string()))
 }
 
 #[cfg(test)]
@@ -731,19 +775,17 @@ mod tests {
 
         let layout = jit.state_layout();
         assert_eq!(layout, aot.state_layout());
-        assert!(layout
-            .scalars
-            .iter()
-            .any(|field| field.path == "game.phase" && field.type_name == "i32"));
+        assert!(layout.scalars.iter().any(|field| field.path == "game.phase"
+            && field.type_name == "Phase"
+            && field.storage_type_name() == "i32"));
         let enemies = layout
             .collections
             .iter()
             .find(|collection| collection.path == "game.enemies")
             .expect("enemy collection layout");
-        assert!(enemies
-            .fields
-            .iter()
-            .any(|field| field.field == "phase" && field.type_name == "i32"));
+        assert!(enemies.fields.iter().any(|field| field.field == "phase"
+            && field.type_name == "Phase"
+            && field.storage_type_name() == "i32"));
     }
 
     #[test]
