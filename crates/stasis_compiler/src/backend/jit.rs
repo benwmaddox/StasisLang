@@ -3980,6 +3980,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_rejects_swapped_ui_axis_enum_argument() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "enum UiHorizontal { Left, Center, Right }\nenum UiVertical { Top, Center, Bottom }\nfunction ui_place_x(parent_x: f32, horizontal: UiHorizontal): f32 { return parent_x; }\nfunction main(): i32 { let x: f32 = ui_place_x(0.0, UiVertical.Top); return 0; }\n",
+        );
+        process
+            .compile()
+            .expect_err("swapped UI axis enum argument must fail");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_i32_ui_axis_argument() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "enum UiHorizontal { Left, Center, Right }\nfunction ui_place_x(parent_x: f32, horizontal: UiHorizontal): f32 { return parent_x; }\nfunction main(): i32 { let x: f32 = ui_place_x(0.0, 1); return 0; }\n",
+        );
+        process
+            .compile()
+            .expect_err("i32 UI axis argument must fail");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_allows_i32_return_from_named_i32_abi_expression() {
         let mut process = JitProcess::new();
         process.upsert_file(

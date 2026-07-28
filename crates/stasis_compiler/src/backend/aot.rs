@@ -2253,6 +2253,33 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn aot_process_links_and_executes_immediate_axis_layout_sample() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+
+        let mut process = AotProcess::new();
+        process.set_import_base_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+        process.upsert_file(
+            "src/stdlib/ui_axis_layout.stasis",
+            include_str!("../../../../src/stdlib/ui_axis_layout.stasis"),
+        );
+        process.upsert_file(
+            "samples/immediate_axis_layout/main.stasis",
+            include_str!("../../../../samples/immediate_axis_layout/main.stasis"),
+        );
+        process
+            .compile()
+            .expect("compile immediate axis layout sample");
+        assert_eq!(
+            run_linked_i32_noarg_fixture(&process, "main", "immediate_axis_layout", &link_config,),
+            Some(0),
+            "axis layout sample assertions failed"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn aot_process_links_and_executes_internal_i32_call() {
         let Some(link_config) = resolve_link_config_for_smoke() else {
             return;

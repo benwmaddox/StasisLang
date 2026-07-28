@@ -1520,6 +1520,39 @@ Archived priority override (2026-02-13, historical):
 - Host-set misuse cannot produce partial state mutation or silent nondeterminism.
 - Status: `planned (post-S10b)`
 
+### S17 - Immediate Axis Placement and Float Presentation Geometry
+
+- Source requirements: `docs/immediate_layout_prd.md`.
+- Selection: explicitly selected by the user after PR #349 merged.
+- Language ownership: `.stasis` for placement helpers, tests, and representative UI composition; Rust/C host code for coordinated HostFrame and graphics-command ABI migration.
+- AP1 - Typed scalar axis placement:
+  - Add distinct `UiHorizontal` and `UiVertical` enums.
+  - Add allocation-free `ui_place_x` and `ui_place_y` scalar-return helpers.
+  - Verify all axis choices, fractional and oversized bounds, and compile-time rejection of swapped enum types.
+  - Add a representative sample that reaches Cranelift IR, builds as an executable, runs, and asserts behavior.
+  - Status: `complete`.
+- AP1.5 - Reachable AOT runtime surface:
+  - Declare runtime helpers in AOT objects only when emitted operations reference them; do not make pure arithmetic/layout objects advertise the full JIT helper surface.
+  - Keep JIT runtime registration independent from the narrower AOT object dependency set.
+  - Verify object symbol tables for a pure function and representative helper-using functions, then link and run without unrelated runtime imports.
+  - Status: `planned after AP1` (explicitly selected during AP1 executable verification).
+- AP2 - Float presentation boundary:
+  - Migrate canonical logical/safe/pointer/sprite geometry to `f32`.
+  - Remove pre-1.0 compatibility display/input APIs and active HostFrame alias fields.
+  - Bump HostFrame and graphics command versions and migrate every host, decoder, fixture, and parity path atomically.
+  - Status: `planned after AP1.5`.
+- AP3 - Representative menu adoption:
+  - Cache text run widths during initialization.
+  - Center a menu title, anchor a button within an adjusted region, center its label, and reuse scalar bounds for hit testing.
+  - Status: `planned after AP2`.
+- Done gate:
+  - All PRD acceptance criteria pass through JIT/AOT and the real renderer boundary as applicable.
+- AP1 work summary:
+  - Theory gained: enum variants must be interned with their declared nominal type before call checking; the swapped-axis fixture exposed the old `i32` fallback, and distinct enum calls now predictably fail before lowering.
+  - Good: the realistic menu/button sample exposed both enum typing and AOT linkage behavior while the slice was still narrow.
+  - Bad: the original AOT smoke path could report success by skipping when no linker or runtime symbols were available.
+  - Adjustment: executable slice tests must use an explicit discovered linker and the runtime fixture helper until AP1.5 removes unrelated AOT imports.
+
 ## PR Sequence
 
 1. PR-A: S0-S2

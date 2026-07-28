@@ -832,7 +832,7 @@ pub(crate) fn collect_top_level_constant_values(
             )
         })?;
         for parsed_enum in parsed.enums {
-            let enum_type_id = type_table.resolve(&parsed_enum.name).unwrap_or(TYPE_ID_I32);
+            let enum_type_id = type_table.resolve_or_intern(&parsed_enum.name)?;
             let mut next_value: i32 = 0;
             for variant in parsed_enum.variants {
                 let value = if let Some(explicit) = variant.value {
