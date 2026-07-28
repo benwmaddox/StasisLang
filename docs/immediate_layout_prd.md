@@ -44,7 +44,7 @@ V1 must:
 3. Use different enum types for horizontal and vertical placement.
 4. Express margins and padding by adjusting the available region before placement.
 5. Work entirely with supported scalar parameters, locals, and returns.
-6. Support cached text placement using existing cached width measurement and explicit line height.
+6. Support cached text placement using width measured and stored during resource initialization plus an explicit line height.
 7. Support buttons, icons, HUD labels, menu titles, and similar immediate-mode drawing.
 8. Compose with existing flex rows, columns, and grids without replacing them.
 9. Perform no allocation and no host-side UI registration.
@@ -237,18 +237,22 @@ The enum-typed signatures prevent ordinary callers from supplying arbitrary inte
 ```stasis
 global ui_font: i32;
 global menu_title_run: i32;
+global menu_title_width: f32;
 global play_label_run: i32;
+global play_label_width: f32;
 global button_sprite: i32;
 
 function menu_load_ui(): void {
     ui_font = load_font("assets/ui.ttf", 28);
     menu_title_run = gfx_cache_text(ui_font, "BRICKOUT REVENGE");
+    menu_title_width = gfx_measure_text_cached(menu_title_run);
     play_label_run = gfx_cache_text(ui_font, "PLAY");
+    play_label_width = gfx_measure_text_cached(play_label_run);
     button_sprite = gfx_load_sprite("assets/button.png", 256, 96);
 }
 ```
 
-Caching is separate from placement. Per-frame code reads cached width and calculates coordinates using scalar values.
+The host call that measures a cached run occurs during initialization or an explicit resource update. Stasis-owned width scalars are stored alongside the run handles. Per-frame code reads those scalars and makes no text-measurement host call.
 
 ### 7.2 Menu title centered horizontally
 
@@ -260,7 +264,7 @@ function menu_draw_title(): void {
     let safe_y: f32 = gfx_safe_viewport_y();
     let safe_w: f32 = gfx_safe_viewport_width();
 
-    let title_w: f32 = gfx_measure_text_cached(menu_title_run);
+    let title_w: f32 = menu_title_width;
     let title_h: f32 = 32.0;
 
     let title_x: f32 = ui_place_x(
@@ -365,7 +369,7 @@ let content_y: f32 = button_y + pad_y;
 let content_w: f32 = button_w - pad_x * 2.0;
 let content_h: f32 = button_h - pad_y * 2.0;
 
-let label_w: f32 = gfx_measure_text_cached(play_label_run);
+let label_w: f32 = play_label_width;
 let label_h: f32 = 28.0;
 
 let label_x: f32 = ui_place_x(
@@ -514,7 +518,19 @@ The new API therefore composes with the existing array-based flex implementation
 
 ### 8.1 Width
 
-Per-frame UI should use cached runs and `gfx_measure_text_cached`. Text caching occurs during initialization or an explicit resource update, not during the rendering hot path.
+Text caching and width measurement occur together during initialization or an explicit resource update:
+
+```stasis
+title_run = gfx_cache_text(ui_font, "BRICKOUT REVENGE");
+title_width = gfx_measure_text_cached(title_run);
+```
+
+Per-frame UI uses the Stasis-owned `title_width` scalar. It must not call `gfx_measure_text_cached`, because that binding crosses the host boundary and the graphics stdlib excludes host calls from rendering hot paths.
+
+Each reusable text resource therefore has two distinct values:
+
+- cached run handle: `i32`, used for drawing
+- cached measured width: `f32`, used for layout
 
 ### 8.2 Height
 
@@ -655,7 +671,7 @@ bottom_child_edge == parent_bottom
 At least one test or sample must:
 
 1. read or define scalar parent bounds
-2. measure a cached text run or use an explicit test width
+2. use a width cached during initialization or an explicit test width
 3. center text horizontally
 4. derive an inset available region and place a button at its top-left
 5. center a label inside that button
@@ -670,17 +686,19 @@ Tests must verify that:
 - sprite command encoding and host decoding agree on the new geometry representation
 - fractional sprite positions and sizes survive command submission until renderer rasterization
 - odd and adjacent sprite bounds follow the documented backend snapping policy without gaps introduced by independent truncation
-- legacy callers receive a deterministic migration diagnostic or are updated in the same slice
+- legacy callers receive a deterministic migration diagnostic or are updated in the same checklist-selected migration group
 
 ### 12.6 End-to-end compiler gate
 
-The completed implementation slice must include a representative `.stasis` program that reaches Cranelift IR, builds into an executable, runs, and verifies behavior with assertions.
+Completed implementation work must include a representative `.stasis` program that reaches Cranelift IR, builds into an executable, runs, and verifies behavior with assertions.
 
 All test commands remain bounded to 300 seconds, with lingering processes checked after each run.
 
-## 13. Delivery Plan
+## 13. Implementation Areas
 
-### Slice 1: Float presentation boundary
+`docs/build_checklist.md` is the authoritative source for implementation selection, grouping, and ordering. This PRD defines required implementation areas only. When this work is selected, the checklist must sequence these areas according to repository priorities and migration constraints.
+
+### Float presentation boundary
 
 - expose safe and input viewport geometry as `f32` to Stasis layout callers
 - migrate sprite x/y/width/height parameters and command storage to `f32`
@@ -688,14 +706,14 @@ All test commands remain bounded to 300 seconds, with lingering processes checke
 - update existing sprite callers and parity fixtures
 - verify fractional geometry through a real renderer path
 
-### Slice 2: Typed scalar axis placement
+### Typed scalar axis placement
 
 - add `UiHorizontal` and `UiVertical`
 - add `ui_place_x` and `ui_place_y`
 - add deterministic axis and type-safety tests
 - run an end-to-end executable fixture
 
-### Slice 3: One real menu adoption
+### One real menu adoption
 
 - replace one menu title's manual centering calculation
 - anchor one button using the shared axis functions
@@ -703,7 +721,7 @@ All test commands remain bounded to 300 seconds, with lingering processes checke
 - use the same button bounds for drawing and hit testing
 - add visual or command-buffer verification where practical
 
-No further layout abstraction is required before these slices prove the API.
+No further layout abstraction is required before these implementation areas prove the API. Their order in this document is descriptive, not authoritative.
 
 ## 14. Acceptance Criteria
 
