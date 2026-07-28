@@ -237,6 +237,7 @@ impl Compiler {
 
     pub fn index_pass(&mut self) -> CompileResult<IndexPassResult> {
         self.last_source_diagnostic = None;
+        crate::performance::tick_budget_us(&self.files).map_err(CompileError::Frontend)?;
         let previous_hashes = self.capture_previous_hashes();
         self.functions.clear();
         self.parsed_statements.clear();
@@ -986,7 +987,10 @@ function tick(): i32 {
             .find(|summary| summary.function == "tick")
             .expect("tick summary");
 
-        assert_eq!(tick.schema_version, 1);
+        assert_eq!(
+            tick.schema_version,
+            crate::data_flow::FUNCTION_DATA_FLOW_SCHEMA_VERSION
+        );
         assert_eq!(
             tick.direct.calls,
             vec!["damage_all", "damage_all_function_form", "damage_view"]

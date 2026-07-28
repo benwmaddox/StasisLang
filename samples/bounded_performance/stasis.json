@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "name": "bounded_performance",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build"
+}

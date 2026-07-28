@@ -153,6 +153,113 @@ fn inspect_reports_compiler_state_memory_and_capacity_projection() {
 }
 
 #[test]
+fn inspect_reports_nested_costs_tick_budget_layout_and_mobile_estimates() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/bounded_performance");
+    let inspected = stasis(&["--json", "inspect"], &project);
+    assert_eq!(
+        inspected.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&inspected.stdout),
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let result = json_stdout(&inspected);
+    let performance = &result["result"]["performance"];
+    assert_eq!(performance["schema_version"], 1);
+    assert_eq!(performance["tick_budget_us"], 1);
+    let expensive = performance["functions"]
+        .as_array()
+        .and_then(|functions| {
+            functions
+                .iter()
+                .find(|function| function["function"] == "expensive_scan")
+        })
+        .expect("expensive scan report");
+    assert_eq!(expensive["worst_nested_iteration_product"], 512);
+    assert_eq!(expensive["structural_bound_complete"], true);
+    assert!(expensive["fields_scanned"]
+        .as_array()
+        .is_some_and(|fields| fields.iter().any(|field| {
+            field["path"] == "particles[*].score"
+                && field["conservative_max_visits"] == 512
+                && field["conservative_max_bytes"] == 2048
+        })));
+    assert!(expensive["fields_scanned"]
+        .as_array()
+        .is_some_and(|fields| fields.iter().any(|field| {
+            field["path"] == "values[*]"
+                && field["element_bytes"] == 4
+                && field["conservative_max_visits"] == 5
+        })));
+    assert!(expensive["pools_iterated"]
+        .as_array()
+        .is_some_and(|pools| pools
+            .iter()
+            .any(|pool| { pool["path"] == "values" && pool["bytes_per_element"] == 4 })));
+    assert!(expensive["pools_iterated"]
+        .as_array()
+        .is_some_and(|pools| pools.iter().any(|pool| pool["path"] == "particles")));
+
+    let layout = performance["layout_choices"]
+        .as_array()
+        .and_then(|layouts| layouts.iter().find(|layout| layout["path"] == "particles"))
+        .expect("particle layout choice");
+    assert_eq!(layout["active_layout"], "soa");
+    assert!(layout["aos_padding_bytes_per_element"]
+        .as_u64()
+        .is_some_and(|padding| padding > 0));
+    assert!(performance["mobile"]["aot_object_code_bytes"]
+        .as_u64()
+        .is_some_and(|bytes| bytes > 0));
+    assert!(performance["mobile"]["package_estimate_bytes"]
+        .as_u64()
+        .is_some_and(|bytes| bytes > 512 * 1024));
+}
+
+#[cfg(windows)]
+#[test]
+fn play_reports_real_tick_budget_average_p99_and_overruns() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/bounded_performance");
+    let entry = project.join("src/main.stasis");
+    let output = stasis(
+        &[
+            "play",
+            entry.to_str().expect("entry path"),
+            "--watch-dir",
+            project.to_str().expect("project path"),
+            "--ticks",
+            "3",
+        ],
+        &project,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report_line = stdout
+        .lines()
+        .find(|line| line.contains("[tick-budget]"))
+        .expect("tick budget report");
+    let report = &report_line[report_line.find("[tick-budget]").expect("report marker")..];
+    assert!(report.contains("generation=0 budget_us=1 samples=3"));
+    assert!(report.contains("average_us="));
+    assert!(report.contains("p99_us="));
+    let overruns = report
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("overruns="))
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("overrun count");
+    assert!(
+        overruns > 0,
+        "expected real tick work to exceed 1 us: {report}"
+    );
+}
+
+#[test]
 fn fresh_runtime_validation_runs_in_a_separate_cli_process() {
     let parent = temp_dir("fresh_validation");
     fs::create_dir_all(&parent).expect("create temp parent");
