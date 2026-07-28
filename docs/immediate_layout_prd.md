@@ -20,6 +20,8 @@ It returns one `f32` coordinate. The caller uses those returned coordinates for 
 
 This design matches the Stasis language surface implemented today. It uses ordinary scalar locals and scalar returns. It does not require function-local arrays, local struct materialization, array returns, hidden allocation, or a retained UI tree.
 
+`f32` is the canonical type for presentation geometry across the proposed public path. Positions, sizes, offsets, pointer coordinates, text measurement, flex results, and sprite geometry remain `f32` until a platform renderer explicitly rasterizes them.
+
 ## 2. Problem
 
 Stasis games currently repeat placement calculations such as:
@@ -48,6 +50,8 @@ V1 must:
 8. Compose with existing flex rows, columns, and grids without replacing them.
 9. Perform no allocation and no host-side UI registration.
 10. Produce deterministic JIT and AOT behavior.
+11. Remove avoidable `i32`/`f32` conversions from the public presentation path.
+12. Expose layout-facing viewport and sprite geometry as `f32`, updating host/runtime definitions where required.
 
 ## 4. Non-Goals
 
@@ -67,6 +71,7 @@ V1 does not provide:
 - automatic overflow resolution
 - style ownership
 - animation ownership
+- replacing integer handles, counts, indices, enum representations, or physical device metadata with floats
 
 Flat arrays remain valid for existing global-backed bulk layout storage, such as the outputs consumed by `flex_row`. They are not required by the v1 single-item placement API.
 
@@ -125,6 +130,45 @@ let rect: f32[4];
 ```
 
 `Type[]` parameters are supported Stasis views, but this placement API does not need them.
+
+### 5.7 Presentation geometry uses `f32`
+
+The canonical public presentation types are:
+
+| Value | Type |
+|---|---|
+| Layout x/y | `f32` |
+| Layout width/height | `f32` |
+| Layout offsets and padding | `f32` |
+| Pointer x/y used for hit testing | `f32` |
+| Measured text width and line-box height | `f32` |
+| Line endpoints | `f32` |
+| Sprite x/y/width/height | `f32` |
+| Resource handles | `i32` |
+| Counts and array indices | `i32` |
+| Physical pixel counts retained only as host metadata | `i32` |
+
+Raw platform dimensions may originate as integers because physical pixels are discrete. The host snapshot may continue storing those raw values as `i32`. The layout-facing Stasis API converts them once and exposes `f32`; callers must not repeat that conversion at every use.
+
+### 5.8 Sprite geometry remains floating point through submission
+
+The current sprite API and command stream use `i32` geometry. The implementation associated with this PRD should migrate sprite x, y, width, and height to `f32` rather than hiding four conversions inside a convenience wrapper:
+
+```stasis
+function gfx_draw_sprite(
+    handle: i32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    rot_deg: i32,
+    alpha: i32
+): void;
+```
+
+Sprite handles, rotation policy, and alpha remain unchanged. The graphics command-buffer version and host decoder must change together so sprite geometry is carried in the floating-point command stream or an equivalently typed representation.
+
+Rounding and rasterization then occur in one platform rendering layer. Stasis layout and widget code do not choose an integer rounding policy independently.
 
 ## 6. Required API
 
@@ -212,9 +256,9 @@ The title is centered within the safe viewport and placed 24 units below its top
 
 ```stasis
 function menu_draw_title(): void {
-    let safe_x: f32 = gfx_safe_viewport_x().to_f32();
-    let safe_y: f32 = gfx_safe_viewport_y().to_f32();
-    let safe_w: f32 = gfx_safe_viewport_width().to_f32();
+    let safe_x: f32 = gfx_safe_viewport_x();
+    let safe_y: f32 = gfx_safe_viewport_y();
+    let safe_w: f32 = gfx_safe_viewport_width();
 
     let title_w: f32 = gfx_measure_text_cached(menu_title_run);
     let title_h: f32 = 32.0;
@@ -256,10 +300,10 @@ This creates scalar button bounds 20 units from the safe viewport's left edge an
 
 ```stasis
 function menu_draw_play_button(): void {
-    let safe_x: f32 = gfx_safe_viewport_x().to_f32();
-    let safe_y: f32 = gfx_safe_viewport_y().to_f32();
-    let safe_w: f32 = gfx_safe_viewport_width().to_f32();
-    let safe_h: f32 = gfx_safe_viewport_height().to_f32();
+    let safe_x: f32 = gfx_safe_viewport_x();
+    let safe_y: f32 = gfx_safe_viewport_y();
+    let safe_w: f32 = gfx_safe_viewport_width();
+    let safe_h: f32 = gfx_safe_viewport_height();
 
     let button_w: f32 = 180.0;
     let button_h: f32 = 56.0;
@@ -282,10 +326,10 @@ function menu_draw_play_button(): void {
 
     gfx_draw_sprite(
         button_sprite,
-        button_x.to_i32(),
-        button_y.to_i32(),
-        button_w.to_i32(),
-        button_h.to_i32(),
+        button_x,
+        button_y,
+        button_w,
+        button_h,
         0,
         255
     );
@@ -490,13 +534,39 @@ V1 exposes enough scalar information for the caller to detect fit. It does not w
 Adaptive menus and HUDs can read safe viewport scalars directly:
 
 ```stasis
-let safe_x: f32 = gfx_safe_viewport_x().to_f32();
-let safe_y: f32 = gfx_safe_viewport_y().to_f32();
-let safe_w: f32 = gfx_safe_viewport_width().to_f32();
-let safe_h: f32 = gfx_safe_viewport_height().to_f32();
+let safe_x: f32 = gfx_safe_viewport_x();
+let safe_y: f32 = gfx_safe_viewport_y();
+let safe_w: f32 = gfx_safe_viewport_width();
+let safe_h: f32 = gfx_safe_viewport_height();
 ```
 
-No `f32[4]` wrapper is required.
+These public layout-facing functions return `f32`. A raw host snapshot may still store safe viewport values as `i32`; the wrapper owns that one boundary conversion. No `f32[4]` wrapper is required.
+
+Window and logical presentation dimensions follow the same public rule:
+
+```stasis
+function gfx_window_width(): f32;
+function gfx_window_height(): f32;
+function gfx_logical_width(): f32;
+function gfx_logical_height(): f32;
+function gfx_safe_viewport_x(): f32;
+function gfx_safe_viewport_y(): f32;
+function gfx_safe_viewport_width(): f32;
+function gfx_safe_viewport_height(): f32;
+```
+
+Window creation and resize requests may continue accepting `i32` because they request discrete host pixels. Screen, native, and drawable queries may also retain explicitly named raw integer forms for platform integration. The public functions used as layout inputs return `f32`.
+
+Layout-facing input viewport accessors follow the same rule:
+
+```stasis
+function input_viewport_x_px(): f32;
+function input_viewport_y_px(): f32;
+function input_viewport_w_px(): f32;
+function input_viewport_h_px(): f32;
+```
+
+Native and drawable pixel counts may retain explicit integer APIs when callers genuinely need discrete device pixels. They are not used directly as layout coordinates without conversion through a layout-facing boundary.
 
 ### 9.2 Fixed-design canvas
 
@@ -506,7 +576,9 @@ The axis functions do not silently choose letterboxing or convert input coordina
 
 ### 9.3 Pixel snapping
 
-Placement remains in `f32`. Conversion or snapping occurs at the final paint boundary so nested calculations do not accumulate rounding error.
+Placement and graphics submission remain in `f32`. Conversion or snapping occurs inside the platform renderer at rasterization so nested calculations and Stasis command construction do not accumulate rounding error.
+
+If a backend requires integer raster bounds, it must use one documented edge-based policy. It should derive width from snapped right and left edges rather than independently truncating x and width, which can introduce seams.
 
 ## 10. Rendering and Interaction Boundaries
 
@@ -537,6 +609,8 @@ V1 does not define click timing or pointer capture. A later interaction layer sh
 - Placement performs no allocation.
 - Placement makes no host calls.
 - Cached width measurement remains the only text-width dependency.
+- Viewport integers are converted to `f32` once at the host/stdlib boundary, not once per caller.
+- Sprite submission does not convert x, y, width, or height back to `i32` in Stasis code.
 - Diagnostic behavior uses the same placement path.
 - JIT and AOT results are equivalent within documented floating-point tolerance.
 
@@ -585,7 +659,18 @@ At least one test or sample must:
 5. center a label inside that button
 6. verify the calculated values
 
-### 12.5 End-to-end compiler gate
+### 12.5 Graphics boundary tests
+
+Tests must verify that:
+
+- layout-facing safe and input viewport accessors return `f32`
+- pointer, text, line, flex, placement, and sprite geometry share the `f32` presentation path
+- sprite command encoding and host decoding agree on the new geometry representation
+- fractional sprite positions and sizes survive command submission until renderer rasterization
+- odd and adjacent sprite bounds follow the documented backend snapping policy without gaps introduced by independent truncation
+- legacy callers receive a deterministic migration diagnostic or are updated in the same slice
+
+### 12.6 End-to-end compiler gate
 
 The completed implementation slice must include a representative `.stasis` program that reaches Cranelift IR, builds into an executable, runs, and verifies behavior with assertions.
 
@@ -593,14 +678,22 @@ All test commands remain bounded to 300 seconds, with lingering processes checke
 
 ## 13. Delivery Plan
 
-### Slice 1: Typed scalar axis placement
+### Slice 1: Float presentation boundary
+
+- expose safe and input viewport geometry as `f32` to Stasis layout callers
+- migrate sprite x/y/width/height parameters and command storage to `f32`
+- update the graphics command-buffer version and every host decoder together
+- update existing sprite callers and parity fixtures
+- verify fractional geometry through a real renderer path
+
+### Slice 2: Typed scalar axis placement
 
 - add `UiHorizontal` and `UiVertical`
 - add `ui_place_x` and `ui_place_y`
 - add deterministic axis and type-safety tests
 - run an end-to-end executable fixture
 
-### Slice 2: One real menu adoption
+### Slice 3: One real menu adoption
 
 - replace one menu title's manual centering calculation
 - anchor one button using the shared axis functions
@@ -608,7 +701,7 @@ All test commands remain bounded to 300 seconds, with lingering processes checke
 - use the same button bounds for drawing and hit testing
 - add visual or command-buffer verification where practical
 
-No further abstraction is required before these two slices prove the API.
+No further layout abstraction is required before these slices prove the API.
 
 ## 14. Acceptance Criteria
 
@@ -626,6 +719,10 @@ V1 is complete when:
 10. One real menu title, button, and centered button label demonstrate the API.
 11. Drawing and hit testing reuse the same scalar button bounds.
 12. Tests execute the representative path through Cranelift and verify results.
+13. Layout-facing safe and input viewport accessors return `f32` without caller-side conversion.
+14. Sprite x/y/width/height remain `f32` through Stasis command submission.
+15. The graphics command-buffer version and all host decoders agree on the migrated sprite representation.
+16. Raw physical pixel counts, handles, counts, and indices remain `i32` where integer semantics are intrinsic.
 
 ## 15. Deferred Extensions
 
@@ -654,6 +751,8 @@ Text width comes from cached measurement, text height from an explicit line box,
 ### Rationale
 
 Stasis currently supports scalar locals and returns cleanly, while `Type[]` is a view over existing fixed storage rather than local temporary array construction. A scalar-return API expresses the needed calculation without pretending that local rectangle values are available.
+
+Using `f32` throughout presentation geometry also matches cached text measurement, pointer input, line commands, flex layout, and scaled canvases. Keeping sprite geometry or layout-facing viewport accessors as `i32` would insert conversion and rounding decisions into ordinary UI code without providing a meaningful performance benefit.
 
 The nearest tempting alternative is an output `f32[]` rectangle API. Although array views are supported, that design requires pre-existing storage and makes a simple calculation appear to create a local rectangle. It also encourages unnecessary global scratch layout state.
 
