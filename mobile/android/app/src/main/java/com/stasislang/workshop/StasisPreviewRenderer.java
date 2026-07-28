@@ -225,7 +225,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         if (pendingCapture != null) {
             pendingCapture.onCaptured(null, "a newer preview capture replaced this request",
                     new LogicalFrameSnapshot(new int[0], new float[0], new int[0],
-                            new int[0], new float[0], new byte[0]));
+                            new float[0], new int[0], new float[0], new byte[0]));
         }
         pendingCapture = callback;
     }

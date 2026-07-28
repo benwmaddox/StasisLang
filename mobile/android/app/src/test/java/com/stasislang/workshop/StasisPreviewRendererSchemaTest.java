@@ -13,6 +13,23 @@ import org.junit.Test;
 
 public final class StasisPreviewRendererSchemaTest {
     @Test
+    public void replacedCaptureIncludesEmptyTypedSpriteLanes() {
+        StasisPreviewRenderer renderer = new StasisPreviewRenderer(
+                new StasisPreviewRenderer.TextureProvider() {
+                    @Override public void onResourceGenerationChanged(
+                            int surfaceGeneration, int rendererGeneration,
+                            boolean discardGpuHandles, String transitionReason) {}
+                    @Override public int textureFor(int handle) { return 0; }
+                }, ignored -> {});
+        StasisPreviewRenderer.LogicalFrameSnapshot[] replaced = {null};
+        renderer.requestCapture((bitmap, error, snapshot) -> replaced[0] = snapshot);
+        renderer.requestCapture((bitmap, error, snapshot) -> {});
+
+        assertEquals(0, replaced[0].sprites.length);
+        assertEquals(0, replaced[0].spriteValues.length);
+    }
+
+    @Test
     public void productionSchemaMatchesNativeContract() {
         assertEquals(12_320, StasisPreviewRenderer.I_TEXT_BASE);
         assertEquals(80_004, StasisPreviewRenderer.F_SPRITE_BASE);

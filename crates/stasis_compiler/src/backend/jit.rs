@@ -3482,8 +3482,7 @@ mod tests {
             stasis_dynload::stasis_jit_global_i32_load(hash_global_path("model_escape_down"));
         let first_went_down =
             stasis_dynload::stasis_jit_global_i32_load(hash_global_path("model_first_went_down"));
-        let first_x =
-            stasis_dynload::stasis_jit_global_f32_load(hash_global_path("model_first_x_px"));
+        let first_x = stasis_dynload::stasis_jit_global_f32_load(hash_global_path("model_first_x"));
         let latched =
             stasis_dynload::stasis_jit_global_i32_load(hash_global_path("last_tick_code"));
         assert_eq!(pointer_count, 1);
