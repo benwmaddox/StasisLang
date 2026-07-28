@@ -93,24 +93,10 @@ struct CallSite {
     target_id: u32,
     arguments: Vec<Option<String>>,
     max_invocations: Option<u64>,
+    outer_nesting_depth: u32,
 }
 
 impl EffectSets {
-    fn merge(&mut self, other: &Self) {
-        self.reads.extend(other.reads.iter().cloned());
-        self.writes.extend(other.writes.iter().cloned());
-        self.parameter_reads
-            .extend(other.parameter_reads.iter().cloned());
-        self.parameter_writes
-            .extend(other.parameter_writes.iter().cloned());
-        self.calls.extend(other.calls.iter().cloned());
-        self.host_calls.extend(other.host_calls.iter().cloned());
-        merge_host_call_costs(&mut self.host_call_costs, &other.host_call_costs, Some(1));
-        self.bounded_iterations
-            .extend(other.bounded_iterations.iter().cloned());
-        self.call_sites.extend(other.call_sites.iter().cloned());
-    }
-
     fn insert_read(&mut self, path: String) {
         self.record_scanned_path(&path);
         if path.starts_with('$') {
@@ -178,6 +164,29 @@ impl EffectSets {
                 .or_insert(Some(0)),
             multiplier,
         );
+    }
+
+    fn record_call_site(&mut self, target_id: u32, arguments: Vec<Option<String>>) {
+        let max_invocations = self
+            .active_iterations
+            .last()
+            .and_then(|id| self.iteration_products.get(id).copied())
+            .unwrap_or(Some(1));
+        let outer_nesting_depth = u32::try_from(self.active_iterations.len()).unwrap_or(u32::MAX);
+        if let Some(existing) = self.call_sites.iter_mut().find(|call_site| {
+            call_site.target_id == target_id
+                && call_site.arguments == arguments
+                && call_site.outer_nesting_depth == outer_nesting_depth
+        }) {
+            merge_host_call_cost(&mut existing.max_invocations, max_invocations);
+            return;
+        }
+        self.call_sites.push(CallSite {
+            target_id,
+            arguments,
+            max_invocations,
+            outer_nesting_depth,
+        });
     }
 }
 
@@ -950,7 +959,6 @@ fn analyze_statements(
                     aliases,
                     &mut bound_reads,
                 );
-                effects.merge(&bound_reads);
                 let max_iterations = static_for_max_iterations(
                     init,
                     condition,
@@ -978,6 +986,14 @@ fn analyze_statements(
                     scanned_paths: Vec::new(),
                 });
                 effects.active_iterations.push(iteration_id);
+                analyze_condition(
+                    condition,
+                    context,
+                    &loop_locals,
+                    &loop_local_types,
+                    aliases,
+                    effects,
+                );
                 analyze_nested_statements(
                     body_statements,
                     function_id,
@@ -990,7 +1006,6 @@ fn analyze_statements(
                     nesting_depth.saturating_add(1),
                     max_iteration_product,
                 );
-                effects.active_iterations.pop();
                 analyze_statements(
                     std::slice::from_ref(step.as_ref()),
                     function_id,
@@ -1000,9 +1015,10 @@ fn analyze_statements(
                     &mut loop_local_types,
                     aliases,
                     effects,
-                    nesting_depth,
-                    parent_iteration_product,
+                    nesting_depth.saturating_add(1),
+                    max_iteration_product,
                 );
+                effects.active_iterations.pop();
             }
             SimpleStmt::Foreach {
                 item_name,
@@ -1189,18 +1205,12 @@ fn analyze_expression(
             let target_id = resolve_internal_call(target, args, context, local_types, aliases);
             if let Some(target_id) = target_id {
                 effects.calls.insert(target.clone());
-                effects.call_sites.push(CallSite {
+                effects.record_call_site(
                     target_id,
-                    arguments: args
-                        .iter()
+                    args.iter()
                         .map(|argument| expression_effect_path(argument, context, locals, aliases))
                         .collect(),
-                    max_invocations: effects
-                        .active_iterations
-                        .last()
-                        .and_then(|id| effects.iteration_products.get(id).copied())
-                        .unwrap_or(Some(1)),
-                });
+                );
             } else if context.extern_functions.contains(target) {
                 effects.host_calls.insert(target.clone());
                 effects.record_host_call(target);
@@ -1478,12 +1488,19 @@ fn build_aggregate_effects(direct_by_id: &[EffectSets]) -> Result<Vec<EffectSets
                 .iter()
                 .any(|call_site| call_site.target_id as usize == component[0]);
         let mut converged = false;
-        for _ in 0..component.len().saturating_add(1) {
+        for _ in 0..component.len().saturating_add(2) {
             let mut next = Vec::with_capacity(component.len());
             for function_id in component {
                 let direct = &direct_by_id[*function_id];
                 let mut aggregate = EffectSets::default();
-                merge_substituted_effects(direct, &BTreeMap::new(), true, Some(1), &mut aggregate);
+                merge_substituted_effects(
+                    direct,
+                    &BTreeMap::new(),
+                    true,
+                    Some(1),
+                    0,
+                    &mut aggregate,
+                );
                 for call_site in &direct.call_sites {
                     let Some(child) = aggregate_by_id.get(call_site.target_id as usize) else {
                         continue;
@@ -1494,17 +1511,23 @@ fn build_aggregate_effects(direct_by_id: &[EffectSets]) -> Result<Vec<EffectSets
                         .enumerate()
                         .filter_map(|(index, path)| path.clone().map(|path| (index, path)))
                         .collect();
-                    let multiplier =
-                        if cyclic && component.contains(&(call_site.target_id as usize)) {
-                            None
-                        } else {
-                            call_site.max_invocations
-                        };
+                    let recursive_edge =
+                        cyclic && component.contains(&(call_site.target_id as usize));
+                    let multiplier = if recursive_edge {
+                        None
+                    } else {
+                        call_site.max_invocations
+                    };
                     merge_substituted_effects(
                         child,
                         &child_substitutions,
                         false,
                         multiplier,
+                        if recursive_edge {
+                            0
+                        } else {
+                            call_site.outer_nesting_depth
+                        },
                         &mut aggregate,
                     );
                 }
@@ -1596,6 +1619,7 @@ fn merge_substituted_effects(
     substitutions: &BTreeMap<usize, String>,
     retain_unmapped_parameters: bool,
     host_call_multiplier: Option<u64>,
+    outer_nesting_depth: u32,
     aggregate: &mut EffectSets,
 ) {
     aggregate.reads.extend(direct.reads.iter().cloned());
@@ -1621,6 +1645,10 @@ fn merge_substituted_effects(
     }
     for iteration in &direct.bounded_iterations {
         let mut iteration = iteration.clone();
+        iteration.max_iteration_product = host_call_multiplier
+            .zip(iteration.max_iteration_product)
+            .and_then(|(multiplier, product)| multiplier.checked_mul(product));
+        iteration.nesting_depth = iteration.nesting_depth.saturating_add(outer_nesting_depth);
         if let Some(bound) =
             substitute_path(&iteration.bound, substitutions, retain_unmapped_parameters)
         {

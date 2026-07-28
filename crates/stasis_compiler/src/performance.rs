@@ -170,7 +170,7 @@ fn function_cost(
     layout: &StateLayout,
     memory: &StateMemoryReport,
 ) -> Result<FunctionCostReport, String> {
-    let iterations = &summary.direct.bounded_iterations;
+    let iterations = &summary.aggregate.bounded_iterations;
     let worst_nested_iteration_product = iterations
         .iter()
         .filter_map(|iteration| iteration.max_iteration_product)
@@ -442,7 +442,7 @@ function helper(value: i32): void {
     print_i32(value);
 }
 
-function tick(): i32 {
+function scan(): i32 {
     let total: i32 = 0;
     foreach (let value in values) {
         total += value;
@@ -456,9 +456,33 @@ function tick(): i32 {
     }
     return total;
 }
+
+function tick(): i32 {
+    scan();
+    scan();
+    return 0;
+}
+
+function stepped(): i32 {
+    for (let i: i32 = 0; i < 4; print_i32(i)) {
+        i += 1;
+    }
+    return 0;
+}
+
+function recursive(): void {
+    foreach (let value in values) {
+        print_i32(value);
+    }
+    recursive();
+}
 "#;
         let mut jit = JitProcess::new();
-        jit.set_required_emit_roots(&["tick".to_string()]);
+        jit.set_required_emit_roots(&[
+            "tick".to_string(),
+            "stepped".to_string(),
+            "recursive".to_string(),
+        ]);
         jit.upsert_file("costs.stasis", source);
         jit.compile().expect("compile bounded repeated scans");
         let memory = jit
@@ -474,14 +498,35 @@ function tick(): i32 {
             .expect("tick costs");
         assert_eq!(tick.pools_iterated.len(), 2);
         assert_eq!(tick.fields_scanned[0].path, "values[*]");
-        assert_eq!(tick.fields_scanned[0].conservative_max_visits, 24);
+        assert_eq!(tick.fields_scanned[0].conservative_max_visits, 48);
         assert_eq!(
             tick.host_calls
                 .iter()
                 .find(|cost| cost.function == "print_i32")
                 .expect("transitive host call")
                 .max_invocations,
-            Some(8)
+            Some(16)
         );
+        assert!(tick
+            .bounded_iterations
+            .iter()
+            .all(|iteration| iteration.max_iteration_product == Some(8)));
+
+        let stepped = report
+            .functions
+            .iter()
+            .find(|function| function.function == "stepped")
+            .expect("for-step costs");
+        assert_eq!(stepped.host_calls[0].function, "print_i32");
+        assert_eq!(stepped.host_calls[0].max_invocations, None);
+
+        let recursive = report
+            .functions
+            .iter()
+            .find(|function| function.function == "recursive")
+            .expect("recursive costs");
+        assert!(!recursive.structural_bound_complete);
+        assert_eq!(recursive.host_calls[0].function, "print_i32");
+        assert_eq!(recursive.host_calls[0].max_invocations, None);
     }
 }
