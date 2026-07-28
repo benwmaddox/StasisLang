@@ -1654,6 +1654,49 @@ mod tests {
         }
     }
 
+    fn undefined_runtime_symbols(process: &AotProcess) -> BTreeSet<String> {
+        process
+            .object_bytes
+            .iter()
+            .flat_map(|bytes| {
+                let object = File::parse(bytes.as_slice()).expect("parse AOT object");
+                object
+                    .symbols()
+                    .filter(|symbol| symbol.is_undefined())
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .filter(|name| name.starts_with("stasis_jit_"))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pure_aot_function_exposes_no_runtime_helper_symbols() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "pure.stasis",
+            "function main(): i32 { let x: f32 = 10.0 + 2.5; if (x == 12.5) { return 0; } return 1; }\n",
+        );
+        process.compile().expect("compile pure AOT fixture");
+
+        assert_eq!(undefined_runtime_symbols(&process), BTreeSet::new());
+    }
+
+    #[test]
+    fn print_aot_function_exposes_only_referenced_runtime_helper_symbol() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "print.stasis",
+            "function main(): i32 { print_int(7); return 0; }\n",
+        );
+        process.compile().expect("compile print AOT fixture");
+
+        assert_eq!(
+            undefined_runtime_symbols(&process),
+            BTreeSet::from(["stasis_jit_print_i32".to_string()])
+        );
+    }
+
     #[test]
     fn standalone_aot_storage_defines_and_registers_direct_symbols() {
         let mut process = AotProcess::new();
@@ -2271,11 +2314,27 @@ mod tests {
         process
             .compile()
             .expect("compile immediate axis layout sample");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_immediate_axis_layout_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let exe_path = temp_root.join("immediate_axis_layout.exe");
+        process
+            .link_executable_for_i32_noarg_function("main", &exe_path, &link_config)
+            .expect("link immediate axis layout without runtime library");
+
+        let status = Command::new(&exe_path)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", exe_path.display()));
         assert_eq!(
-            run_linked_i32_noarg_fixture(&process, "main", "immediate_axis_layout", &link_config,),
+            status.code(),
             Some(0),
             "axis layout sample assertions failed"
         );
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[cfg(windows)]

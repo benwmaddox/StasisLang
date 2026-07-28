@@ -1535,7 +1535,7 @@ Archived priority override (2026-02-13, historical):
   - Declare runtime helpers in AOT objects only when emitted operations reference them; do not make pure arithmetic/layout objects advertise the full JIT helper surface.
   - Keep JIT runtime registration independent from the narrower AOT object dependency set.
   - Verify object symbol tables for a pure function and representative helper-using functions, then link and run without unrelated runtime imports.
-  - Status: `planned after AP1` (explicitly selected during AP1 executable verification).
+  - Status: `complete` (explicitly selected during AP1 executable verification).
 - AP2 - Float presentation boundary:
   - Migrate canonical logical/safe/pointer/sprite geometry to `f32`.
   - Remove pre-1.0 compatibility display/input APIs and active HostFrame alias fields.
@@ -1552,6 +1552,11 @@ Archived priority override (2026-02-13, historical):
   - Good: the realistic menu/button sample exposed both enum typing and AOT linkage behavior while the slice was still narrow.
   - Bad: the original AOT smoke path could report success by skipping when no linker or runtime symbols were available.
   - Adjustment: executable slice tests must use an explicit discovered linker and the runtime fixture helper until AP1.5 removes unrelated AOT imports.
+- AP1.5 work summary:
+  - Theory gained: JIT dispatch/storage registration and AOT object imports are separate ownership concerns; structured HIR call targets plus AOT direct-call/direct-storage guarantees are sufficient to avoid advertising the JIT surface from pure objects.
+  - Good: symbol-table tests turned the 49-helper linker failure into a precise dependency contract, and the layout sample now links and runs without the runtime library.
+  - Bad: the first narrowing treated collection views like direct AOT globals and exposed the distinction only in the parity corpus.
+  - Adjustment: retain collection helper families for functions whose ABI accepts collection/view handles, and keep direct-storage globals independent from that rule.
 
 ## PR Sequence
 

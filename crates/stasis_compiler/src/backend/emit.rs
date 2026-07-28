@@ -1742,13 +1742,34 @@ where
     let function_id = module
         .declare_function(symbol, Linkage::Export, &context.func.signature)
         .map_err(|error| format!("failed to declare function {symbol}: {error}"))?;
-    let runtime_call_imports = build_runtime_call_import_ids(
-        &mut module,
-        runtime_helper_linkage,
-        call_signatures,
-        type_table,
-        named_struct_field_types,
-    )?;
+    let referenced_call_targets = collect_call_targets_from_hir(hir);
+    let uses_collection_runtime = meta.params.iter().any(|type_id| {
+        named_struct_field_types.contains_key(type_id)
+            || type_table.type_info(*type_id).is_some_and(|info| {
+                matches!(
+                    info.category,
+                    TypeCategory::ArrayFixed | TypeCategory::ArrayView
+                )
+            })
+    });
+    let runtime_call_imports = match backend_mode {
+        SharedCompileBackendMode::Jit => build_runtime_call_import_ids(
+            &mut module,
+            runtime_helper_linkage,
+            call_signatures,
+            type_table,
+            named_struct_field_types,
+        )?,
+        SharedCompileBackendMode::AotDirect => build_aot_runtime_call_import_ids(
+            &mut module,
+            function_id,
+            uses_collection_runtime,
+            &referenced_call_targets,
+            call_signatures,
+            type_table,
+            named_struct_field_types,
+        )?,
+    };
 
     let mut function_builder_context = FunctionBuilderContext::new();
     {
@@ -6689,6 +6710,101 @@ pub(crate) enum SimpleExpr {
     },
 }
 
+fn collect_call_targets_from_hir(hir: &FunctionHIR) -> BTreeSet<String> {
+    fn expression(value: &SimpleExpr, out: &mut BTreeSet<String>) {
+        match value {
+            SimpleExpr::Condition(condition) => condition_targets(condition, out),
+            SimpleExpr::IndexedPath { index, .. } => expression(index, out),
+            SimpleExpr::Call { target, args } => {
+                out.insert(target.clone());
+                for argument in args {
+                    expression(argument, out);
+                }
+            }
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                expression(lhs, out);
+                expression(rhs, out);
+            }
+            SimpleExpr::Int(_)
+            | SimpleExpr::Float(_)
+            | SimpleExpr::Bool(_)
+            | SimpleExpr::StringLiteral(_)
+            | SimpleExpr::Identifier(_) => {}
+        }
+    }
+
+    fn condition_targets(condition: &SimpleCondition, out: &mut BTreeSet<String>) {
+        match condition {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                expression(lhs, out);
+                expression(rhs, out);
+            }
+            SimpleCondition::Expr(expression_value) => expression(expression_value, out),
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                condition_targets(lhs, out);
+                condition_targets(rhs, out);
+            }
+            SimpleCondition::Not(inner) => condition_targets(inner, out),
+        }
+    }
+
+    fn statement(value: &SimpleStmt, out: &mut BTreeSet<String>) {
+        match value {
+            SimpleStmt::Let {
+                expression: value, ..
+            }
+            | SimpleStmt::Assign {
+                expression: value, ..
+            }
+            | SimpleStmt::Expr(value)
+            | SimpleStmt::Return(value) => expression(value, out),
+            SimpleStmt::Convert { source, .. } => expression(source, out),
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => {
+                condition_targets(condition, out);
+                for nested in then_statements {
+                    statement(nested, out);
+                }
+                if let Some(nested_statements) = else_statements {
+                    for nested in nested_statements {
+                        statement(nested, out);
+                    }
+                }
+            }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                statement(init, out);
+                condition_targets(condition, out);
+                statement(step, out);
+                for nested in body_statements {
+                    statement(nested, out);
+                }
+            }
+            SimpleStmt::Foreach {
+                body_statements, ..
+            } => {
+                for nested in body_statements {
+                    statement(nested, out);
+                }
+            }
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+        }
+    }
+
+    let mut targets = BTreeSet::new();
+    for statement_value in &hir.statements {
+        statement(statement_value, &mut targets);
+    }
+    targets
+}
+
 pub(crate) fn eval_const_i64(expression: &SimpleExpr) -> Option<i64> {
     match expression {
         SimpleExpr::Int(value) => Some(*value),
@@ -10412,6 +10528,160 @@ pub(crate) fn emit_bool_constant(builder: &mut FunctionBuilder<'_>, value: bool)
     let literal = if value { 1 } else { 0 };
     let i32_value = builder.ins().iconst(types::I32, literal);
     builder.ins().icmp_imm(IntCC::NotEqual, i32_value, 0)
+}
+
+fn build_aot_runtime_call_import_ids(
+    module: &mut impl Module,
+    fallback: FuncId,
+    uses_collection_runtime: bool,
+    referenced_call_targets: &BTreeSet<String>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+) -> Result<RuntimeCallImportIds, String> {
+    let linkage = RuntimeHelperLinkage::Imported;
+    let print_i32 = if referenced_call_targets
+        .iter()
+        .any(|target| matches!(target.as_str(), "print_i32" | "print_int" | "print_char"))
+    {
+        declare_void_call_import(module, "stasis_jit_print_i32", linkage, 1)?
+    } else {
+        fallback
+    };
+    let print_string = if referenced_call_targets.contains("print_string") {
+        declare_void_call_import(module, "stasis_jit_print_string", linkage, 1)?
+    } else {
+        fallback
+    };
+    let sin_fast = if referenced_call_targets.contains("sin_fast") {
+        declare_direct_f32_unary_import(module, "stasis_jit_sin_fast", linkage)?
+    } else {
+        fallback
+    };
+    let cos_fast = if referenced_call_targets.contains("cos_fast") {
+        declare_direct_f32_unary_import(module, "stasis_jit_cos_fast", linkage)?
+    } else {
+        fallback
+    };
+    let referenced_extern_signatures: CallSignatureMap = call_signatures
+        .iter()
+        .filter(|(target, _)| referenced_call_targets.contains(*target))
+        .map(|(target, signatures)| (target.clone(), signatures.clone()))
+        .collect();
+    macro_rules! collection_import {
+        ($declaration:expr) => {
+            if uses_collection_runtime {
+                $declaration?
+            } else {
+                fallback
+            }
+        };
+    }
+
+    Ok(RuntimeCallImportIds {
+        call_i32_0: fallback,
+        call_i32_1: fallback,
+        call_i32_2: fallback,
+        call_i32_3: fallback,
+        call_i32_4: fallback,
+        call_i32_5: fallback,
+        call_i32_6: fallback,
+        call_i32_7: fallback,
+        call_i32_8: fallback,
+        call_i32_f32_1: fallback,
+        call_i32_f32_2: fallback,
+        call_i32_f32_3: fallback,
+        call_i32_f32_4: fallback,
+        call_i32_f32_5: fallback,
+        call_i32_f32_6: fallback,
+        call_i32_f32_7: fallback,
+        call_i32_f32_8: fallback,
+        call_f32_0: fallback,
+        call_f32_1: fallback,
+        call_f32_2: fallback,
+        call_f32_3: fallback,
+        call_f32_4: fallback,
+        call_f32_5: fallback,
+        call_f32_6: fallback,
+        call_f32_7: fallback,
+        call_f32_8: fallback,
+        call_f32_i32_1: fallback,
+        print_i32,
+        print_string,
+        lookup_code_ptr: fallback,
+        sin_fast,
+        cos_fast,
+        global_i32_load: fallback,
+        global_i32_store: fallback,
+        global_f32_load: fallback,
+        global_f32_store: fallback,
+        global_f64_load: fallback,
+        global_f64_store: fallback,
+        global_i32_array_load: collection_import!(declare_i32_array_load_import(
+            module,
+            "stasis_jit_global_i32_array_load",
+            linkage,
+        )),
+        global_i32_array_store: collection_import!(declare_i32_array_store_import(
+            module,
+            "stasis_jit_global_i32_array_store",
+            linkage,
+        )),
+        global_i32_array_ptr: collection_import!(declare_i32_array_ptr_import(
+            module,
+            "stasis_jit_global_i32_array_ptr",
+            linkage,
+        )),
+        global_f32_array_load: collection_import!(declare_f32_array_load_import(
+            module,
+            "stasis_jit_global_f32_array_load",
+            linkage,
+        )),
+        global_f32_array_store: collection_import!(declare_f32_array_store_import(
+            module,
+            "stasis_jit_global_f32_array_store",
+            linkage,
+        )),
+        global_f32_array_ptr: collection_import!(declare_f32_array_ptr_import(
+            module,
+            "stasis_jit_global_f32_array_ptr",
+            linkage,
+        )),
+        global_f64_array_load: collection_import!(declare_f64_array_load_import(
+            module,
+            "stasis_jit_global_f64_array_load",
+            linkage,
+        )),
+        global_f64_array_store: collection_import!(declare_f64_array_store_import(
+            module,
+            "stasis_jit_global_f64_array_store",
+            linkage,
+        )),
+        global_f64_array_ptr: collection_import!(declare_f64_array_ptr_import(
+            module,
+            "stasis_jit_global_f64_array_ptr",
+            linkage,
+        )),
+        collection_i32_load: collection_import!(declare_i32_call_import(
+            module,
+            "stasis_jit_collection_i32_load",
+            linkage,
+            2,
+        )),
+        collection_i32_store: collection_import!(declare_void_call_import(
+            module,
+            "stasis_jit_collection_i32_store",
+            linkage,
+            3,
+        )),
+        extern_calls: declare_extern_call_imports(
+            module,
+            &referenced_extern_signatures,
+            type_table,
+            named_struct_field_types,
+            linkage,
+        )?,
+    })
 }
 
 pub(crate) fn build_runtime_call_import_ids(
