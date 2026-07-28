@@ -898,10 +898,11 @@ impl IncrementalCompilerBackend {
     }
 
     fn source_cache_has_function(&self, function_name: &str) -> bool {
-        let needle = format!("function {function_name}(");
         self.source_by_path
             .values()
-            .any(|source| source.contains(&needle))
+            .filter_map(|source| parse_top_level_functions(source).ok())
+            .flatten()
+            .any(|function| function.name == function_name)
     }
 
     fn collect_cached_function_entries(&self) -> Result<Vec<EngineFunctionEntry>, String> {
@@ -8302,6 +8303,107 @@ mod tests {
             351
         );
         // Runtime bindings intentionally remain valid until the test process exits.
+        std::mem::forget(library);
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_performance_sample_links_and_executes_aot_if_real_link_available() {
+        let Some(linker_path) = find_lld_link() else {
+            return;
+        };
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root =
+            std::env::temp_dir().join(format!("stasis_bounded_performance_aot_{stamp}"));
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../samples/bounded_performance/src/main.stasis");
+        let mut backend = IncrementalCompilerBackend::with_aot_config(
+            AotCompileConfig::default(),
+            temp_root.join("artifacts"),
+        );
+        let result = backend.compile(CompileRequest::new(
+            RequestId(17_201),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(
+            result.status,
+            CompileStatus::Success,
+            "{:?}",
+            result.diagnostics
+        );
+        let bundle = backend
+            .last_aot_engine_bundle()
+            .expect("AOT engine bundle")
+            .clone();
+        let manifest = backend
+            .read_engine_bundle_manifest(&bundle.manifest_path)
+            .expect("read manifest");
+        let runtime_fields = merge_runtime_fields(
+            backend.last_state_layout.as_ref().expect("state layout"),
+            &[],
+        )
+        .expect("derive AOT storage fields");
+        let aliases = ["main", "tick", "render"]
+            .into_iter()
+            .map(|name| PackagedFunctionAlias {
+                alias: name,
+                target_symbol: resolve_engine_bundle_symbol(&manifest, name)
+                    .expect("resolve entrypoint"),
+                returns_i32: true,
+            })
+            .collect::<Vec<_>>();
+        let function_symbols = manifest
+            .functions
+            .iter()
+            .map(|row| row.symbol.clone())
+            .collect::<Vec<_>>();
+        let bridge = emit_engine_bundle_runtime_bridge_object(
+            &backend,
+            &runtime_fields,
+            &function_symbols,
+            &aliases,
+            &[],
+        )
+        .expect("compile runtime bridge");
+        let mut objects = bundle
+            .object_paths_by_function
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        objects.push(bridge);
+        let linked = temp_root.join("bounded_performance.dll");
+        let dynload = ensure_stasis_dynload_link_library().expect("stasis dynload link library");
+        stasis_jit::link_objects_to_dynamic_library(
+            &objects,
+            &linked,
+            &[
+                "main".to_string(),
+                "tick".to_string(),
+                "stasis_aot_bind_runtime_globals".to_string(),
+            ],
+            &AotLinkConfig {
+                linker_path: Some(linker_path),
+                runtime_lib_paths: vec![dynload.clone()],
+                target: stasis_jit::AotTarget::default(),
+            },
+        )
+        .expect("link bounded-performance AOT bundle");
+        stage_stasis_dynload_runtime(&dynload, &linked).expect("stage runtime");
+
+        let library = DynamicLibrary::load(&linked).expect("load AOT bundle");
+        let bind = library
+            .symbol_address("stasis_aot_bind_runtime_globals")
+            .expect("resolve runtime binding");
+        stasis_dynload::invoke_noarg_void(bind).expect("bind runtime globals");
+        let main = library.symbol_address("main").expect("resolve main");
+        let tick = library.symbol_address("tick").expect("resolve tick");
+        assert_eq!(stasis_dynload::invoke_noarg_i32(main).expect("run main"), 0);
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick).expect("run tick"), 0);
         std::mem::forget(library);
         fs::remove_dir_all(&temp_root).ok();
     }

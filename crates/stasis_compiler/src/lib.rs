@@ -6,6 +6,7 @@ pub mod compiler;
 pub mod data_flow;
 pub mod frontend;
 pub mod ir;
+pub mod performance;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;

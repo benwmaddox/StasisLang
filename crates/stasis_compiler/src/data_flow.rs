@@ -12,7 +12,7 @@ use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
 };
 
-pub const FUNCTION_DATA_FLOW_SCHEMA_VERSION: u32 = 1;
+pub const FUNCTION_DATA_FLOW_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FunctionDataFlowEffects {
@@ -22,7 +22,16 @@ pub struct FunctionDataFlowEffects {
     pub parameter_writes: Vec<String>,
     pub calls: Vec<String>,
     pub host_calls: Vec<String>,
+    #[serde(default)]
+    pub host_call_costs: Vec<FunctionHostCallCost>,
     pub bounded_iterations: Vec<FunctionBoundedIteration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct FunctionHostCallCost {
+    pub function: String,
+    pub max_invocations: Option<u64>,
+    pub scope: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -31,7 +40,15 @@ pub struct FunctionBoundedIteration {
     pub kind: String,
     pub bound: String,
     pub max_iterations: Option<u64>,
+    #[serde(default)]
+    pub nesting_depth: u32,
+    #[serde(default)]
+    pub max_iteration_product: Option<u64>,
+    #[serde(default)]
+    pub source_order: u32,
     pub reads: Vec<String>,
+    #[serde(default)]
+    pub scanned_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -62,14 +79,20 @@ struct EffectSets {
     parameter_writes: BTreeSet<String>,
     calls: BTreeSet<String>,
     host_calls: BTreeSet<String>,
+    host_call_costs: BTreeMap<String, Option<u64>>,
     bounded_iterations: BTreeSet<FunctionBoundedIteration>,
     call_sites: Vec<CallSite>,
+    iteration_scans: BTreeMap<u32, Vec<String>>,
+    iteration_products: BTreeMap<u32, Option<u64>>,
+    active_iterations: Vec<u32>,
+    next_iteration_id: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CallSite {
     target_id: u32,
     arguments: Vec<Option<String>>,
+    max_invocations: Option<u64>,
 }
 
 impl EffectSets {
@@ -82,12 +105,14 @@ impl EffectSets {
             .extend(other.parameter_writes.iter().cloned());
         self.calls.extend(other.calls.iter().cloned());
         self.host_calls.extend(other.host_calls.iter().cloned());
+        merge_host_call_costs(&mut self.host_call_costs, &other.host_call_costs, Some(1));
         self.bounded_iterations
             .extend(other.bounded_iterations.iter().cloned());
         self.call_sites.extend(other.call_sites.iter().cloned());
     }
 
     fn insert_read(&mut self, path: String) {
+        self.record_scanned_path(&path);
         if path.starts_with('$') {
             self.parameter_reads.insert(path);
         } else {
@@ -96,6 +121,7 @@ impl EffectSets {
     }
 
     fn insert_write(&mut self, path: String) {
+        self.record_scanned_path(&path);
         if path.starts_with('$') {
             self.parameter_writes.insert(path);
         } else {
@@ -111,6 +137,15 @@ impl EffectSets {
             parameter_writes: public_parameter_paths(&self.parameter_writes, parameter_names),
             calls: self.calls.iter().cloned().collect(),
             host_calls: self.host_calls.iter().cloned().collect(),
+            host_call_costs: self
+                .host_call_costs
+                .iter()
+                .map(|(function, max_invocations)| FunctionHostCallCost {
+                    function: function.clone(),
+                    max_invocations: *max_invocations,
+                    scope: "direct".to_string(),
+                })
+                .collect(),
             bounded_iterations: self
                 .bounded_iterations
                 .iter()
@@ -118,6 +153,51 @@ impl EffectSets {
                 .collect(),
         }
     }
+
+    fn record_scanned_path(&mut self, path: &str) {
+        if !path.contains("[*]") || path.ends_with(".length") {
+            return;
+        }
+        if let Some(iteration_id) = self.active_iterations.last().copied() {
+            self.iteration_scans
+                .entry(iteration_id)
+                .or_default()
+                .push(path.to_string());
+        }
+    }
+
+    fn record_host_call(&mut self, function: &str) {
+        let multiplier = self
+            .active_iterations
+            .last()
+            .and_then(|id| self.iteration_products.get(id).copied())
+            .unwrap_or(Some(1));
+        merge_host_call_cost(
+            self.host_call_costs
+                .entry(function.to_string())
+                .or_insert(Some(0)),
+            multiplier,
+        );
+    }
+}
+
+fn merge_host_call_costs(
+    target: &mut BTreeMap<String, Option<u64>>,
+    source: &BTreeMap<String, Option<u64>>,
+    multiplier: Option<u64>,
+) {
+    for (function, count) in source {
+        let scaled = multiplier
+            .zip(*count)
+            .and_then(|(multiplier, count)| multiplier.checked_mul(count));
+        merge_host_call_cost(target.entry(function.clone()).or_insert(Some(0)), scaled);
+    }
+}
+
+fn merge_host_call_cost(target: &mut Option<u64>, value: Option<u64>) {
+    *target = target
+        .zip(value)
+        .and_then(|(target, value)| target.checked_add(value));
 }
 
 struct AnalysisContext<'a> {
@@ -372,7 +452,21 @@ fn analyze_function_effects(
         &mut local_types,
         &aliases,
         &mut effects,
+        0,
+        Some(1),
     );
+    effects.bounded_iterations = effects
+        .bounded_iterations
+        .iter()
+        .cloned()
+        .map(|mut iteration| {
+            iteration.scanned_paths = effects
+                .iteration_scans
+                .get(&iteration.source_order)
+                .map_or_else(Vec::new, |paths| paths.iter().cloned().collect());
+            iteration
+        })
+        .collect();
     Ok(effects)
 }
 
@@ -747,6 +841,8 @@ fn analyze_statements(
     local_types: &mut BTreeMap<String, TypeId>,
     aliases: &BTreeMap<String, String>,
     effects: &mut EffectSets,
+    nesting_depth: u32,
+    parent_iteration_product: Option<u64>,
 ) {
     for statement in statements {
         match statement {
@@ -807,6 +903,8 @@ fn analyze_statements(
                     local_types,
                     aliases,
                     effects,
+                    nesting_depth,
+                    parent_iteration_product,
                 );
                 if let Some(else_statements) = else_statements {
                     analyze_nested_statements(
@@ -818,6 +916,8 @@ fn analyze_statements(
                         local_types,
                         aliases,
                         effects,
+                        nesting_depth,
+                        parent_iteration_product,
                     );
                 }
             }
@@ -838,6 +938,8 @@ fn analyze_statements(
                     &mut loop_local_types,
                     aliases,
                     effects,
+                    nesting_depth,
+                    parent_iteration_product,
                 );
                 let mut bound_reads = EffectSets::default();
                 analyze_condition(
@@ -849,19 +951,33 @@ fn analyze_statements(
                     &mut bound_reads,
                 );
                 effects.merge(&bound_reads);
+                let max_iterations = static_for_max_iterations(
+                    init,
+                    condition,
+                    step,
+                    body_statements,
+                    &context.constants,
+                );
+                let max_iteration_product = parent_iteration_product
+                    .zip(max_iterations)
+                    .and_then(|(parent, current)| parent.checked_mul(current));
+                let iteration_id = effects.next_iteration_id;
+                effects.next_iteration_id = effects.next_iteration_id.saturating_add(1);
+                effects
+                    .iteration_products
+                    .insert(iteration_id, max_iteration_product);
                 effects.bounded_iterations.insert(FunctionBoundedIteration {
                     function: function.to_string(),
                     kind: "for".to_string(),
                     bound: display_condition(condition),
-                    max_iterations: static_for_max_iterations(
-                        init,
-                        condition,
-                        step,
-                        body_statements,
-                        &context.constants,
-                    ),
+                    max_iterations,
+                    nesting_depth,
+                    max_iteration_product,
+                    source_order: iteration_id,
                     reads: bound_reads.reads.into_iter().collect(),
+                    scanned_paths: Vec::new(),
                 });
+                effects.active_iterations.push(iteration_id);
                 analyze_nested_statements(
                     body_statements,
                     function_id,
@@ -871,7 +987,10 @@ fn analyze_statements(
                     &loop_local_types,
                     aliases,
                     effects,
+                    nesting_depth.saturating_add(1),
+                    max_iteration_product,
                 );
+                effects.active_iterations.pop();
                 analyze_statements(
                     std::slice::from_ref(step.as_ref()),
                     function_id,
@@ -881,6 +1000,8 @@ fn analyze_statements(
                     &mut loop_local_types,
                     aliases,
                     effects,
+                    nesting_depth,
+                    parent_iteration_product,
                 );
             }
             SimpleStmt::Foreach {
@@ -900,27 +1021,40 @@ fn analyze_statements(
                 } else if normalized.starts_with('$') {
                     effects.insert_read(bound_path.clone());
                 }
+                let max_iterations = context
+                    .collection_capacities
+                    .get(&normalized)
+                    .copied()
+                    .or_else(|| {
+                        symbolic_parameter_index(&normalized).and_then(|index| {
+                            context
+                                .fixed_parameter_capacities
+                                .get(&function_id)?
+                                .get(&index)
+                                .copied()
+                        })
+                    });
+                let max_iteration_product = parent_iteration_product
+                    .zip(max_iterations)
+                    .and_then(|(parent, current)| parent.checked_mul(current));
+                let iteration_id = effects.next_iteration_id;
+                effects.next_iteration_id = effects.next_iteration_id.saturating_add(1);
+                effects
+                    .iteration_products
+                    .insert(iteration_id, max_iteration_product);
                 effects.bounded_iterations.insert(FunctionBoundedIteration {
                     function: function.to_string(),
                     kind: "foreach".to_string(),
                     bound: normalized.clone(),
-                    max_iterations: context
-                        .collection_capacities
-                        .get(&normalized)
-                        .copied()
-                        .or_else(|| {
-                            symbolic_parameter_index(&normalized).and_then(|index| {
-                                context
-                                    .fixed_parameter_capacities
-                                    .get(&function_id)?
-                                    .get(&index)
-                                    .copied()
-                            })
-                        }),
+                    max_iterations,
+                    nesting_depth,
+                    max_iteration_product,
+                    source_order: iteration_id,
                     reads: (context.globals.contains(root_name(&normalized))
                         || normalized.starts_with('$'))
                     .then_some(vec![bound_path])
                     .unwrap_or_default(),
+                    scanned_paths: Vec::new(),
                 });
                 let mut loop_locals = locals.clone();
                 let mut loop_local_types = local_types.clone();
@@ -941,6 +1075,7 @@ fn analyze_statements(
                         loop_local_types.insert(item_name.clone(), element_type);
                     }
                 }
+                effects.active_iterations.push(iteration_id);
                 analyze_nested_statements(
                     body_statements,
                     function_id,
@@ -950,7 +1085,10 @@ fn analyze_statements(
                     &loop_local_types,
                     &loop_aliases,
                     effects,
+                    nesting_depth.saturating_add(1),
+                    max_iteration_product,
                 );
+                effects.active_iterations.pop();
             }
             SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
                 analyze_expression(expression, context, locals, local_types, aliases, effects);
@@ -968,6 +1106,8 @@ fn analyze_nested_statements(
     local_types: &BTreeMap<String, TypeId>,
     aliases: &BTreeMap<String, String>,
     effects: &mut EffectSets,
+    nesting_depth: u32,
+    parent_iteration_product: Option<u64>,
 ) {
     analyze_statements(
         statements,
@@ -978,6 +1118,8 @@ fn analyze_nested_statements(
         &mut local_types.clone(),
         aliases,
         effects,
+        nesting_depth,
+        parent_iteration_product,
     );
 }
 
@@ -1053,9 +1195,15 @@ fn analyze_expression(
                         .iter()
                         .map(|argument| expression_effect_path(argument, context, locals, aliases))
                         .collect(),
+                    max_invocations: effects
+                        .active_iterations
+                        .last()
+                        .and_then(|id| effects.iteration_products.get(id).copied())
+                        .unwrap_or(Some(1)),
                 });
             } else if context.extern_functions.contains(target) {
                 effects.host_calls.insert(target.clone());
+                effects.record_host_call(target);
             }
             for (index, argument) in args.iter().enumerate() {
                 let is_view = target_id
@@ -1335,7 +1483,7 @@ fn build_aggregate_effects(direct_by_id: &[EffectSets]) -> Result<Vec<EffectSets
             for function_id in component {
                 let direct = &direct_by_id[*function_id];
                 let mut aggregate = EffectSets::default();
-                merge_substituted_effects(direct, &BTreeMap::new(), true, &mut aggregate);
+                merge_substituted_effects(direct, &BTreeMap::new(), true, Some(1), &mut aggregate);
                 for call_site in &direct.call_sites {
                     let Some(child) = aggregate_by_id.get(call_site.target_id as usize) else {
                         continue;
@@ -1346,7 +1494,19 @@ fn build_aggregate_effects(direct_by_id: &[EffectSets]) -> Result<Vec<EffectSets
                         .enumerate()
                         .filter_map(|(index, path)| path.clone().map(|path| (index, path)))
                         .collect();
-                    merge_substituted_effects(child, &child_substitutions, false, &mut aggregate);
+                    let multiplier =
+                        if cyclic && component.contains(&(call_site.target_id as usize)) {
+                            None
+                        } else {
+                            call_site.max_invocations
+                        };
+                    merge_substituted_effects(
+                        child,
+                        &child_substitutions,
+                        false,
+                        multiplier,
+                        &mut aggregate,
+                    );
                 }
                 next.push(aggregate);
             }
@@ -1435,6 +1595,7 @@ fn merge_substituted_effects(
     direct: &EffectSets,
     substitutions: &BTreeMap<usize, String>,
     retain_unmapped_parameters: bool,
+    host_call_multiplier: Option<u64>,
     aggregate: &mut EffectSets,
 ) {
     aggregate.reads.extend(direct.reads.iter().cloned());
@@ -1443,6 +1604,11 @@ fn merge_substituted_effects(
     aggregate
         .host_calls
         .extend(direct.host_calls.iter().cloned());
+    merge_host_call_costs(
+        &mut aggregate.host_call_costs,
+        &direct.host_call_costs,
+        host_call_multiplier,
+    );
     for path in &direct.parameter_reads {
         if let Some(path) = substitute_path(path, substitutions, retain_unmapped_parameters) {
             aggregate.insert_read(path);
@@ -1462,6 +1628,11 @@ fn merge_substituted_effects(
         }
         iteration.reads = iteration
             .reads
+            .iter()
+            .filter_map(|path| substitute_path(path, substitutions, retain_unmapped_parameters))
+            .collect();
+        iteration.scanned_paths = iteration
+            .scanned_paths
             .iter()
             .filter_map(|path| substitute_path(path, substitutions, retain_unmapped_parameters))
             .collect();
@@ -1503,8 +1674,18 @@ fn public_iteration(
         bound: public_parameter_path(&iteration.bound, parameter_names)
             .unwrap_or_else(|| iteration.bound.clone()),
         max_iterations: iteration.max_iterations,
+        nesting_depth: iteration.nesting_depth,
+        max_iteration_product: iteration.max_iteration_product,
+        source_order: iteration.source_order,
         reads: iteration
             .reads
+            .iter()
+            .map(|path| {
+                public_parameter_path(path, parameter_names).unwrap_or_else(|| path.clone())
+            })
+            .collect(),
+        scanned_paths: iteration
+            .scanned_paths
             .iter()
             .map(|path| {
                 public_parameter_path(path, parameter_names).unwrap_or_else(|| path.clone())
@@ -1720,5 +1901,61 @@ mod tests {
         assert_eq!(tick.direct.host_calls, vec!["print_i32"]);
         assert_eq!(tick.direct.bounded_iterations[0].max_iterations, Some(3));
         assert!(tick.aggregate.writes.contains(&"state.score".to_string()));
+    }
+
+    #[test]
+    fn nested_loop_products_and_deepest_field_scans_are_bounded() {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../samples/bounded_performance/src/main.stasis");
+        let source = std::fs::read_to_string(&sample).expect("read bounded-cost sample");
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&["main".to_string(), "tick".to_string()]);
+        jit.upsert_file(sample.to_string_lossy(), source);
+        jit.compile().expect("compile bounded-cost sample");
+        assert_eq!(jit.execute_i32_noarg_by_name("main").expect("run main"), 0);
+
+        let scan = jit
+            .function_data_flow_summaries()
+            .iter()
+            .find(|summary| summary.function == "expensive_scan")
+            .expect("expensive scan summary");
+        let inner = scan
+            .direct
+            .bounded_iterations
+            .iter()
+            .find(|iteration| iteration.nesting_depth == 1)
+            .expect("nested loop");
+        assert_eq!(inner.max_iterations, Some(16));
+        assert_eq!(inner.max_iteration_product, Some(512));
+        assert!(inner
+            .scanned_paths
+            .contains(&"particles[*].score".to_string()));
+        let outer = scan
+            .direct
+            .bounded_iterations
+            .iter()
+            .find(|iteration| iteration.nesting_depth == 0)
+            .expect("outer loop");
+        assert_eq!(outer.max_iteration_product, Some(32));
+        assert!(outer.scanned_paths.is_empty());
+    }
+
+    #[test]
+    fn host_call_cost_uses_lexical_nested_iteration_product() {
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&["tick".to_string()]);
+        jit.upsert_file(
+            "host_cost.stasis",
+            "extern function print_i32(value: i32): void;\nfunction tick(): i32 { for (let x: i32 = 0; x < 2; x += 1) { for (let y: i32 = 0; y < 3; y += 1) { print_i32(x + y); } } return 0; }\n",
+        );
+        jit.compile().expect("compile host-call cost fixture");
+        let tick = jit
+            .function_data_flow_summaries()
+            .iter()
+            .find(|summary| summary.function == "tick")
+            .expect("tick summary");
+        assert_eq!(tick.direct.host_call_costs.len(), 1);
+        assert_eq!(tick.direct.host_call_costs[0].function, "print_i32");
+        assert_eq!(tick.direct.host_call_costs[0].max_invocations, Some(6));
     }
 }

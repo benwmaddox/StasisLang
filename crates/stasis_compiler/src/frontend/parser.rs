@@ -19,10 +19,32 @@ pub struct ParsedLocalBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFunctionSignature {
     pub name: String,
+    pub annotations: Vec<ParsedFunctionAnnotation>,
     pub params: Vec<ParsedParam>,
     pub return_type_name: String,
     pub signature_range: Range<usize>,
     pub body_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedFunctionAnnotation {
+    pub name: String,
+    pub has_parentheses: bool,
+    pub arguments: Vec<ParsedFunctionAnnotationArgument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedFunctionAnnotationArgument {
+    pub kind: ParsedFunctionAnnotationArgumentKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParsedFunctionAnnotationArgumentKind {
+    Integer,
+    String,
+    Identifier,
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,7 +423,8 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
         }
         let signature_start = tokens[cursor].start;
         cursor += 1;
-        cursor = skip_function_annotations(source, &tokens, cursor)?;
+        let (next_cursor, _, annotations) = parse_function_annotations(source, &tokens, cursor)?;
+        cursor = next_cursor;
         let name = token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
         cursor += 1;
         expect(&tokens, cursor, TokenKind::LParen)?;
@@ -462,6 +485,7 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
         let body_range = body_start_token.start..body_end_token.end;
         out.push(ParsedFunctionSignature {
             name,
+            annotations,
             params,
             return_type_name,
             signature_range: signature_start..signature_end,
@@ -535,7 +559,7 @@ pub fn parse_top_level_extern_functions(
         }
 
         cursor += 1;
-        let (after_annotations, annotation_symbol) =
+        let (after_annotations, annotation_symbol, _) =
             parse_function_annotations(source, &tokens, cursor)?;
         cursor = after_annotations;
         let name = token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
@@ -924,21 +948,13 @@ fn parse_braced_fields(
     Ok((fields, cursor))
 }
 
-fn skip_function_annotations(
-    source: &str,
-    tokens: &[Token],
-    cursor: usize,
-) -> Result<usize, String> {
-    let (next_cursor, _) = parse_function_annotations(source, tokens, cursor)?;
-    Ok(next_cursor)
-}
-
 fn parse_function_annotations(
     source: &str,
     tokens: &[Token],
     mut cursor: usize,
-) -> Result<(usize, Option<String>), String> {
+) -> Result<(usize, Option<String>, Vec<ParsedFunctionAnnotation>), String> {
     let mut extern_symbol: Option<String> = None;
+    let mut annotations = Vec::new();
     while tokens
         .get(cursor)
         .copied()
@@ -948,20 +964,59 @@ fn parse_function_annotations(
         let name = expect(tokens, cursor, TokenKind::Identifier)?;
         let annotation_name = token_text(source, name);
         cursor += 1;
-        if tokens
+        let has_parentheses = tokens
             .get(cursor)
-            .is_some_and(|token| token.kind == TokenKind::LParen)
-        {
+            .is_some_and(|token| token.kind == TokenKind::LParen);
+        let mut arguments = Vec::new();
+        if has_parentheses {
             if annotation_name == "extern" {
                 let parsed = parse_extern_symbol_annotation(source, tokens, cursor)?;
                 if parsed.is_some() {
                     extern_symbol = parsed;
                 }
             }
-            cursor = skip_parenthesized_tokens(tokens, cursor)?;
+            let next_cursor = skip_parenthesized_tokens(tokens, cursor)?;
+            let mut expects_argument = true;
+            for token in &tokens[cursor + 1..next_cursor - 1] {
+                if token.kind == TokenKind::Comma {
+                    if expects_argument {
+                        return Err(format!(
+                            "annotation '@{annotation_name}' has an empty argument"
+                        ));
+                    }
+                    expects_argument = true;
+                    continue;
+                }
+                if !expects_argument {
+                    return Err(format!(
+                        "annotation '@{annotation_name}' expects ',' between arguments"
+                    ));
+                }
+                arguments.push(ParsedFunctionAnnotationArgument {
+                    kind: match token.kind {
+                        TokenKind::Integer => ParsedFunctionAnnotationArgumentKind::Integer,
+                        TokenKind::StringLiteral => ParsedFunctionAnnotationArgumentKind::String,
+                        TokenKind::Identifier => ParsedFunctionAnnotationArgumentKind::Identifier,
+                        _ => ParsedFunctionAnnotationArgumentKind::Other,
+                    },
+                    text: token_text(source, *token).to_string(),
+                });
+                expects_argument = false;
+            }
+            if expects_argument && !arguments.is_empty() {
+                return Err(format!(
+                    "annotation '@{annotation_name}' has a trailing comma"
+                ));
+            }
+            cursor = next_cursor;
         }
+        annotations.push(ParsedFunctionAnnotation {
+            name: annotation_name.to_string(),
+            has_parentheses,
+            arguments,
+        });
     }
-    Ok((cursor, extern_symbol))
+    Ok((cursor, extern_symbol, annotations))
 }
 
 fn parse_extern_symbol_annotation(

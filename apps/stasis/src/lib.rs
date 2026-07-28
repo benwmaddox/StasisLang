@@ -40,7 +40,7 @@ use stasis_runner::swap::contracts::{
     TextSource,
 };
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -50,6 +50,87 @@ use std::time::Instant;
 use watch::WatchService;
 
 const SWAP_FLASH_TICKS_MAX: u32 = 180;
+const TICK_BUDGET_SAMPLE_LIMIT: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TickBudgetDiagnostics {
+    generation: u64,
+    budget_us: u64,
+    sample_count: u64,
+    total_us: u128,
+    overruns: u64,
+    recent_us: VecDeque<u64>,
+}
+
+impl TickBudgetDiagnostics {
+    fn new(budget_us: u64, generation: u64) -> Self {
+        Self {
+            generation,
+            budget_us,
+            sample_count: 0,
+            total_us: 0,
+            overruns: 0,
+            recent_us: VecDeque::with_capacity(TICK_BUDGET_SAMPLE_LIMIT),
+        }
+    }
+
+    fn record(&mut self, elapsed_us: u64) {
+        self.sample_count = self.sample_count.saturating_add(1);
+        self.total_us = self.total_us.saturating_add(u128::from(elapsed_us));
+        if elapsed_us > self.budget_us {
+            self.overruns = self.overruns.saturating_add(1);
+        }
+        if self.recent_us.len() == TICK_BUDGET_SAMPLE_LIMIT {
+            self.recent_us.pop_front();
+        }
+        self.recent_us.push_back(elapsed_us);
+    }
+
+    fn average_us(&self) -> u64 {
+        if self.sample_count == 0 {
+            return 0;
+        }
+        u64::try_from(self.total_us / u128::from(self.sample_count)).unwrap_or(u64::MAX)
+    }
+
+    fn p99_us(&self) -> u64 {
+        let mut samples = self.recent_us.iter().copied().collect::<Vec<_>>();
+        if samples.is_empty() {
+            return 0;
+        }
+        samples.sort_unstable();
+        let rank = samples.len().saturating_mul(99).div_ceil(100);
+        samples[rank.saturating_sub(1)]
+    }
+
+    fn report(&self) -> String {
+        format!(
+            "[tick-budget] generation={} budget_us={} samples={} average_us={} p99_us={} overruns={}",
+            self.generation,
+            self.budget_us,
+            self.sample_count,
+            self.average_us(),
+            self.p99_us(),
+            self.overruns
+        )
+    }
+}
+
+fn update_tick_budget_after_swap(
+    current: &mut Option<TickBudgetDiagnostics>,
+    generation: &mut u64,
+    candidate_budget_us: Option<u64>,
+    committed: bool,
+) -> Option<String> {
+    if !committed {
+        return None;
+    }
+    let completed = current.take().map(|diagnostics| diagnostics.report());
+    *generation = generation.saturating_add(1);
+    *current =
+        candidate_budget_us.map(|budget_us| TickBudgetDiagnostics::new(budget_us, *generation));
+    completed
+}
 
 #[derive(Debug, Clone, Default)]
 struct PendingAotCompileMetadata {
@@ -1842,6 +1923,10 @@ fn run_play_in_process_inner(
     let _ = jit
         .compile()
         .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
+    let mut tick_budget_generation = 0u64;
+    let mut tick_budget = jit
+        .tick_budget_us()?
+        .map(|budget| TickBudgetDiagnostics::new(budget, tick_budget_generation));
     load_and_apply_play_data_bindings(&data_binding_paths, Some(&jit))?;
     let package = jit
         .build_engine_package(&EngineEntrypoints::runtime_default())
@@ -1957,6 +2042,13 @@ fn run_play_in_process_inner(
             match candidate.compile_staged() {
                 Ok(_) => {
                     let compile_ms = t_compile.elapsed().as_millis();
+                    let candidate_tick_budget = match candidate.tick_budget_us() {
+                        Ok(value) => value,
+                        Err(error) => {
+                            println!("[swap] compile rejected: {error}");
+                            continue;
+                        }
+                    };
 
                     let t_pkg = Instant::now();
                     match candidate.build_engine_package(&EngineEntrypoints::runtime_default()) {
@@ -1993,6 +2085,14 @@ fn run_play_in_process_inner(
                                 Ok(entrypoints) => {
                                     tick_code_ptr = entrypoints.tick_code_ptr;
                                     render_code_ptr = entrypoints.render_code_ptr;
+                                    if let Some(report) = update_tick_budget_after_swap(
+                                        &mut tick_budget,
+                                        &mut tick_budget_generation,
+                                        candidate_tick_budget,
+                                        true,
+                                    ) {
+                                        println!("{report}");
+                                    }
                                     if let Some(live) = live.as_mut() {
                                         live.refresh_after_external_edit(&jit);
                                     }
@@ -2046,6 +2146,9 @@ fn run_play_in_process_inner(
             let tick_started = Instant::now();
             let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
             tick_micros = tick_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            if let Some(budget) = tick_budget.as_mut() {
+                budget.record(tick_micros);
+            }
             if tick_rc != 0 {
                 break;
             }
@@ -2080,6 +2183,10 @@ fn run_play_in_process_inner(
                 break;
             }
         }
+    }
+
+    if let Some(budget) = tick_budget {
+        println!("{}", budget.report());
     }
 
     Ok(())
@@ -3408,6 +3515,52 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn tick_budget_diagnostics_report_bounded_average_p99_and_overruns() {
+        let mut diagnostics = TickBudgetDiagnostics::new(100, 7);
+        for sample in [25, 50, 75, 100, 125] {
+            diagnostics.record(sample);
+        }
+        assert_eq!(diagnostics.average_us(), 75);
+        assert_eq!(diagnostics.p99_us(), 125);
+        assert_eq!(diagnostics.overruns, 1);
+        assert_eq!(
+            diagnostics.report(),
+            "[tick-budget] generation=7 budget_us=100 samples=5 average_us=75 p99_us=125 overruns=1"
+        );
+
+        for sample in 0..(TICK_BUDGET_SAMPLE_LIMIT + 10) {
+            diagnostics.record(sample as u64);
+        }
+        assert_eq!(diagnostics.recent_us.len(), TICK_BUDGET_SAMPLE_LIMIT);
+    }
+
+    #[test]
+    fn tick_budget_generations_advance_only_after_committed_swaps() {
+        let mut generation = 0;
+        let mut current = Some(TickBudgetDiagnostics::new(100, generation));
+        current.as_mut().expect("generation zero").record(75);
+
+        assert_eq!(
+            update_tick_budget_after_swap(&mut current, &mut generation, Some(80), false),
+            None
+        );
+        assert_eq!(generation, 0);
+        assert_eq!(
+            current.as_ref().expect("preserved generation").sample_count,
+            1
+        );
+
+        let completed =
+            update_tick_budget_after_swap(&mut current, &mut generation, Some(80), true)
+                .expect("generation zero report");
+        assert!(completed.contains("generation=0 budget_us=100 samples=1"));
+        let next = current.as_ref().expect("generation one");
+        assert_eq!(generation, 1);
+        assert_eq!(next.generation, 1);
+        assert_eq!(next.sample_count, 0);
+    }
 
     const STASIS_GRAPHICS_SOURCE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

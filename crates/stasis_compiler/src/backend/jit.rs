@@ -181,6 +181,10 @@ impl JitProcess {
         self.compiler.function_data_flow_summaries()
     }
 
+    pub fn tick_budget_us(&self) -> Result<Option<u64>, String> {
+        crate::performance::tick_budget_us(self.compiler.files())
+    }
+
     pub fn set_required_emit_roots(&mut self, roots: &[String]) {
         self.required_emit_roots.clear();
         self.required_emit_roots.extend_from_slice(roots);
@@ -611,6 +615,22 @@ impl JitProcess {
             &active_counts,
             capacity_overrides,
             mobile_budget_bytes,
+        )
+    }
+
+    pub fn performance_cost_report(
+        &self,
+        memory: &JitStateMemoryReport,
+        aot_object_code_bytes: u64,
+        literal_data_bytes: u64,
+    ) -> Result<crate::performance::PerformanceCostReport, String> {
+        crate::performance::build_performance_cost_report(
+            self.compiler.files(),
+            self.compiler.function_data_flow_summaries(),
+            &self.state_layout(),
+            memory,
+            aot_object_code_bytes,
+            literal_data_bytes,
         )
     }
 

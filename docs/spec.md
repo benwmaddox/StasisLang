@@ -772,6 +772,37 @@ query contract between ticks.
 `samples/state_inspection/` is the representative executable fixture for static reporting, state
 tree browsing, indexed/predicate expressions, and change-only watches.
 
+### 14.3.2 Bounded cost, tick budget, and layout reporting
+
+`stasis inspect` exposes schema-versioned structural cost evidence from the same reachable
+statement artifacts and state layout used by lowering. Each function reports bounded loops,
+zero-based nesting depth, the maximum nested iteration product, conservative field visits and bytes
+scanned across enclosing loop boundaries, pools iterated, and reachable host-call names. An unknown loop bound remains explicit and makes the
+function's structural bound incomplete; the compiler must not replace it with a guessed value.
+
+`function @tick_budget_us(N) tick(): i32` declares a positive runtime budget in microseconds.
+The annotation is valid only on `tick`, and duplicates or malformed values fail deterministically.
+The development play loop keeps at most 4096 recent samples, reports whole-run average and overrun
+count, and calculates p99 from the bounded recent window. Measured wall-clock time is diagnostic
+evidence only and is kept separate from compile-time iteration and byte bounds.
+
+Collection layout reports make the compiler's active `soa` choice explicit. They also calculate an
+`aos` choice with stride, per-element padding, total bytes, the active singleton field groups, and
+the corresponding whole-record AoS group. The recommendation and reason fields expose the
+compiler-visible choice without silently changing lowering. `aos_candidate` means the cost model
+found a plausible alternative that still requires an explicit future lowering slice; it never
+claims the current runtime is AoS. This avoids treating SoA as universally optimal while preserving
+the current truthful runtime storage contract.
+
+Mobile estimates report exact Android-arm64 AOT object bytes, exact literal bytes, projected state
+and command-buffer capacity, a peak-state recommendation, and a visibly labeled package estimate.
+The package estimate is game payload plus a 512 KiB SDL runtime-shell allowance; it is not a claim
+about final signed APK/IPA compression or store metadata.
+
+`samples/bounded_performance/` is the representative executable fixture. Its 32 by 16 nested scan,
+mixed-width particle fields, capacity, host call, and tick budget provide deterministic acceptance
+evidence for the report.
+
 ### 14.4 Development File-Change Boundary Contracts
 
 During development, file-change handling uses explicit role ownership and message boundaries.

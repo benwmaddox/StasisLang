@@ -7,6 +7,7 @@ use stasis::{
     run_play_in_process_with_window_title, run_self_host_aot_cli_with_options, LiveRunConfig,
     StasisTestRunSession,
 };
+use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::frontend::workshop::{
@@ -17,6 +18,7 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
     WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
+use stasis_jit::AotTarget;
 pub(super) use stasis_runner::live::LiveValidationRequirement as RuntimeValidationRequirement;
 use stasis_runner::live::{
     compare_live_validation_values, live_session, LiveCommand, LiveRequest, LiveResponse,
@@ -932,7 +934,7 @@ fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
-    jit.set_required_emit_roots(&["main".to_string()]);
+    jit.set_required_emit_roots(&runtime_analysis_roots());
     let mut sources = BTreeMap::new();
     for file in files {
         let path = workspace.root.join(&file.path);
@@ -957,6 +959,43 @@ fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
         }
     })?;
     Ok(jit)
+}
+
+fn compile_workspace_mobile_costs(workspace: &Workspace) -> Result<(u64, u64), String> {
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
+    let mut aot = AotProcess::new();
+    aot.set_target(AotTarget::android_arm64_default());
+    aot.set_required_emit_roots(&runtime_analysis_roots());
+    for file in files {
+        let path = workspace.root.join(&file.path);
+        let path = path.canonicalize().unwrap_or(path);
+        aot.upsert_file(path.to_string_lossy().to_string(), file.source);
+    }
+    aot.compile().map_err(|error| format!("{error:?}"))?;
+    let code_bytes = aot
+        .artifacts()
+        .iter()
+        .try_fold(0u64, |total, artifact| {
+            total.checked_add(artifact.object_bytes_len as u64)
+        })
+        .ok_or_else(|| "AOT object byte estimate overflow".to_string())?;
+    let literal_bytes = aot
+        .string_literals()
+        .values()
+        .try_fold(0u64, |total, literal| {
+            total.checked_add(literal.len() as u64)
+        })
+        .ok_or_else(|| "literal data byte estimate overflow".to_string())?;
+    Ok((code_bytes, literal_bytes))
+}
+
+fn runtime_analysis_roots() -> Vec<String> {
+    ["main", "tick", "render", "on_code_swap"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 fn validate_fresh_runtime(
@@ -3306,6 +3345,9 @@ fn inspect_workspace(
     let capacity_overrides = parse_capacity_overrides(capacities)?;
     let jit = compile_workspace_jit(workspace)?;
     let memory = jit.state_memory_report(&capacity_overrides, mobile_budget_bytes)?;
+    let (aot_object_code_bytes, literal_data_bytes) = compile_workspace_mobile_costs(workspace)?;
+    let performance =
+        jit.performance_cost_report(&memory, aot_object_code_bytes, literal_data_bytes)?;
     let mut data_flow = jit.function_data_flow_summaries().to_vec();
     let canonical_root = workspace
         .root
@@ -3354,6 +3396,65 @@ fn inspect_workspace(
             )
         }));
     }
+    if let Some(budget_us) = performance.tick_budget_us {
+        human.push(format!(
+            "tick budget: {budget_us} us (runtime average/p99 reported by play)"
+        ));
+    }
+    if !performance.functions.is_empty() {
+        human.push("bounded performance costs:".to_string());
+        human.extend(performance.functions.iter().map(|function| {
+            format!(
+                "  {}: nested_product={} fields={} bytes_scanned={} pools={} host_calls=[{}]{}",
+                function.function,
+                function
+                    .worst_nested_iteration_product
+                    .map_or_else(|| "unknown".to_string(), |value| value.to_string()),
+                function.fields_scanned.len(),
+                function.conservative_max_bytes_scanned,
+                function.pools_iterated.len(),
+                function
+                    .host_calls
+                    .iter()
+                    .map(|call| format!(
+                        "{}:{}",
+                        call.function,
+                        call.max_invocations
+                            .map_or_else(|| "unknown".to_string(), |count| count.to_string())
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if function.structural_bound_complete {
+                    ""
+                } else {
+                    " (incomplete bound)"
+                }
+            )
+        }));
+    }
+    if !performance.layout_choices.is_empty() {
+        human.push("layout choices (active lowering remains explicit SoA):".to_string());
+        human.extend(performance.layout_choices.iter().map(|layout| {
+            format!(
+                "  {}: SoA={} bytes; AoS={} bytes (stride {}, padding {}/element); recommendation={}",
+                layout.path,
+                layout.soa_bytes,
+                layout.aos_bytes,
+                layout.aos_stride_bytes,
+                layout.aos_padding_bytes_per_element,
+                layout.recommendation
+            )
+        }));
+    }
+    human.push(format!(
+        "mobile estimate: code={} data={} state={} buffers={} package={} peak_state_recommendation={}",
+        performance.mobile.aot_object_code_bytes,
+        performance.mobile.literal_data_bytes,
+        performance.mobile.state_capacity_bytes,
+        performance.mobile.command_buffer_bytes,
+        performance.mobile.package_estimate_bytes,
+        performance.mobile.peak_state_recommendation_bytes
+    ));
     Ok(CommandResult::success(
         human.join("\n"),
         json!({
@@ -3368,6 +3469,7 @@ fn inspect_workspace(
                 "schema_version": stasis_compiler::data_flow::FUNCTION_DATA_FLOW_SCHEMA_VERSION,
                 "functions": data_flow,
             },
+            "performance": performance,
         }),
     ))
 }
@@ -3690,7 +3792,10 @@ mod tests {
             .find(|summary| summary["function"] == "tick")
             .expect("tick summary");
 
-        assert_eq!(tick["schema_version"], 1);
+        assert_eq!(
+            tick["schema_version"],
+            stasis_compiler::data_flow::FUNCTION_DATA_FLOW_SCHEMA_VERSION
+        );
         assert_eq!(tick["file"], "src/main.stasis");
         assert_eq!(
             tick["signature_hash"]
