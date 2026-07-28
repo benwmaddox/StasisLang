@@ -9,6 +9,41 @@ global menu_button_h: f32;
 global menu_label_x: f32;
 global menu_label_y: f32;
 
+function menu_title_x_for(safe_x: f32, safe_w: f32, title_w: f32): f32 {
+    return ui_place_x(safe_x, safe_w, title_w, UiHorizontal.Center);
+}
+
+function menu_button_x_for(safe_x: f32, safe_w: f32): f32 {
+    return ui_place_x(safe_x + 20.0, safe_w - 40.0, 180.0, UiHorizontal.Left);
+}
+
+function menu_button_y_for(safe_y: f32, safe_h: f32): f32 {
+    return ui_place_y(safe_y + 140.0, safe_h - 160.0, 56.0, UiVertical.Top);
+}
+
+function menu_label_x_for(button_x: f32, label_w: f32): f32 {
+    return ui_place_x(button_x + 16.0, 148.0, label_w, UiHorizontal.Center);
+}
+
+function menu_label_y_for(button_y: f32): f32 {
+    return ui_place_y(button_y + 8.0, 40.0, 28.0, UiVertical.Center) + 1.0;
+}
+
+function menu_point_in_button(
+    point_x: f32,
+    point_y: f32,
+    button_x: f32,
+    button_y: f32,
+    button_w: f32,
+    button_h: f32
+): bool {
+    return
+        point_x >= button_x &&
+        point_x < button_x + button_w &&
+        point_y >= button_y &&
+        point_y < button_y + button_h;
+}
+
 function menu_layout(
     safe_x: f32,
     safe_y: f32,
@@ -17,40 +52,24 @@ function menu_layout(
     title_w: f32,
     label_w: f32
 ): void {
-    menu_title_x = ui_place_x(safe_x, safe_w, title_w, UiHorizontal.Center);
+    menu_title_x = menu_title_x_for(safe_x, safe_w, title_w);
     menu_title_y = ui_place_y(safe_y + 24.0, 72.0, 32.0, UiVertical.Top);
 
     menu_button_w = 180.0;
     menu_button_h = 56.0;
-    let button_area_x: f32 = safe_x + 20.0;
-    let button_area_y: f32 = safe_y + 140.0;
-    let button_area_w: f32 = safe_w - 40.0;
-    let button_area_h: f32 = safe_h - 160.0;
-    menu_button_x = ui_place_x(
-        button_area_x,
-        button_area_w,
-        menu_button_w,
-        UiHorizontal.Left
-    );
-    menu_button_y = ui_place_y(
-        button_area_y,
-        button_area_h,
-        menu_button_h,
-        UiVertical.Top
-    );
-
-    let content_x: f32 = menu_button_x + 16.0;
-    let content_y: f32 = menu_button_y + 8.0;
-    let content_w: f32 = menu_button_w - 32.0;
-    let content_h: f32 = menu_button_h - 16.0;
-    menu_label_x = ui_place_x(content_x, content_w, label_w, UiHorizontal.Center);
-    menu_label_y = ui_place_y(content_y, content_h, 28.0, UiVertical.Center) + 1.0;
+    menu_button_x = menu_button_x_for(safe_x, safe_w);
+    menu_button_y = menu_button_y_for(safe_y, safe_h);
+    menu_label_x = menu_label_x_for(menu_button_x, label_w);
+    menu_label_y = menu_label_y_for(menu_button_y);
 }
 
 function menu_button_contains(point_x: f32, point_y: f32): bool {
-    return
-        point_x >= menu_button_x &&
-        point_x < menu_button_x + menu_button_w &&
-        point_y >= menu_button_y &&
-        point_y < menu_button_y + menu_button_h;
+    return menu_point_in_button(
+        point_x,
+        point_y,
+        menu_button_x,
+        menu_button_y,
+        menu_button_w,
+        menu_button_h
+    );
 }

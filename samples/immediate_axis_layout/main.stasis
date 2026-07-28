@@ -37,11 +37,18 @@ function update_menu_layout(): void {
 
 function tick(): i32 {
     update_menu_layout();
-    if (input_pointer_count() > 0 && input_pointer_went_up(0)) {
-        menu_play_clicked = menu_button_contains(
-            input_pointer_x_logical(0),
-            input_pointer_y_logical(0)
-        );
+    menu_play_clicked = false;
+    let pointer_count: i32 = input_pointer_count();
+    let i: i32 = 0;
+    for (i = 0; i < pointer_count; i = i + 1) {
+        if (input_pointer_went_up(i)) {
+            if (menu_button_contains(
+                input_pointer_x_logical(i),
+                input_pointer_y_logical(i)
+            )) {
+                menu_play_clicked = true;
+            }
+        }
     }
     return 0;
 }

@@ -1566,7 +1566,7 @@ Archived priority override (2026-02-13, historical):
   - Theory gained: immediate-mode UI needs persistent resource metrics but not persistent layout objects; the representative menu caches run handles and widths once, then derives one set of scalar bounds from the current safe viewport for drawing and hit testing each frame.
   - Good: separating host-independent geometry from the rendered entry kept the same realistic path executable under both JIT and AOT while the play command exercised the real graphics boundary.
   - Bad: local screenshot capture initially looked like a sample presentation failure, but the unchanged render-parity sample reproduced the same missing-capture behavior in this environment.
-  - Adjustment: distinguish renderer startup/command submission evidence from screenshot-hook evidence by immediately running the known-good parity scene when capture infrastructure fails.
+  - Adjustment: distinguish renderer startup/command submission evidence from screenshot-hook evidence by immediately running the known-good parity scene when capture infrastructure fails, and iterate all reported pointer slots because desktop touch transitions do not occupy the mouse slot.
 
 ## PR Sequence
 
