@@ -2123,8 +2123,8 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "reject_code_swap" | "stasis_jit_reject_code_swap" => {
             function_address(stasis_dynload::stasis_jit_reject_code_swap as *const ())
         }
-        "stasis_jit_render_v1_trace" => {
-            function_address(stasis_dynload::stasis_jit_render_v1_trace as *const ())
+        "stasis_jit_render_v2_trace" => {
+            function_address(stasis_dynload::stasis_jit_render_v2_trace as *const ())
         }
         _ => return None,
     };

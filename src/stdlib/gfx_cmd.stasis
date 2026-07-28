@@ -1,14 +1,14 @@
 import "graphics.stasis";
 import "stdlib.stasis";
 
-// Graphics command buffer (v1 prototype)
+// Graphics command buffer (v2)
 //
 // Policy:
 // - Ordering: fixed by field order in this layout: clear -> lines -> sprites -> present.
-// - Coordinates: host pixels.
+// - Coordinates: logical presentation units.
 
 const GFX_CMD_MAGIC: i32 = 0x47584631; // 'GXF1'
-const GFX_CMD_VERSION: i32 = 1;
+const GFX_CMD_VERSION: i32 = 2;
 
 // i32 header indices
 const GFX_I_MAGIC: i32 = 0;
@@ -31,7 +31,8 @@ const GFX_FLAG_PRESENT: i32 = 2;
 const GFX_MAX_LINES: i32 = 10000;
 const GFX_LINE_STRIDE_F32: i32 = 8;
 const GFX_MAX_SPRITES: i32 = 4096;
-const GFX_SPRITE_STRIDE_I32: i32 = 7; // handle,x,y,w,h,rot_deg,a
+const GFX_SPRITE_STRIDE_I32: i32 = 3; // handle,rot_deg,a
+const GFX_SPRITE_STRIDE_F32: i32 = 4; // x,y,w,h
 
 const GFX_MAX_TEXT: i32 = 2048;
 const GFX_TEXT_STRIDE_I32: i32 = 3; // font, byte_offset, byte_len
@@ -44,7 +45,8 @@ const GFX_F_CLEAR_G: i32 = 1;
 const GFX_F_CLEAR_B: i32 = 2;
 const GFX_F_CLEAR_A: i32 = 3;
 const GFX_F_LINE_BASE: i32 = 4;
-const GFX_F_TEXT_BASE: i32 = GFX_F_LINE_BASE + GFX_MAX_LINES * GFX_LINE_STRIDE_F32;
+const GFX_F_SPRITE_BASE: i32 = GFX_F_LINE_BASE + GFX_MAX_LINES * GFX_LINE_STRIDE_F32;
+const GFX_F_TEXT_BASE: i32 = GFX_F_SPRITE_BASE + GFX_MAX_SPRITES * GFX_SPRITE_STRIDE_F32;
 
 const GFX_I_TEXT_BASE: i32 = GFX_I_SPRITE_BASE + GFX_MAX_SPRITES * GFX_SPRITE_STRIDE_I32;
 
@@ -96,21 +98,22 @@ function gfx_cmd_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32
     gfx_cmd_i32[GFX_I_LINE_COUNT] = i + 1;
 }
 
-function gfx_cmd_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): void {
+function gfx_cmd_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
     let i: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
     if (i >= GFX_MAX_SPRITES) {
         gfx_cmd_i32[GFX_I_DROPPED_SPRITES] = gfx_cmd_i32[GFX_I_DROPPED_SPRITES] + 1;
         return;
     }
 
-    let base: i32 = GFX_I_SPRITE_BASE + i * GFX_SPRITE_STRIDE_I32;
-    gfx_cmd_i32[base + 0] = handle;
-    gfx_cmd_i32[base + 1] = x;
-    gfx_cmd_i32[base + 2] = y;
-    gfx_cmd_i32[base + 3] = w;
-    gfx_cmd_i32[base + 4] = h;
-    gfx_cmd_i32[base + 5] = rot_deg;
-    gfx_cmd_i32[base + 6] = a;
+    let base_i: i32 = GFX_I_SPRITE_BASE + i * GFX_SPRITE_STRIDE_I32;
+    let base_f: i32 = GFX_F_SPRITE_BASE + i * GFX_SPRITE_STRIDE_F32;
+    gfx_cmd_i32[base_i + 0] = handle;
+    gfx_cmd_i32[base_i + 1] = rot_deg;
+    gfx_cmd_i32[base_i + 2] = a;
+    gfx_cmd_f32[base_f + 0] = x;
+    gfx_cmd_f32[base_f + 1] = y;
+    gfx_cmd_f32[base_f + 2] = w;
+    gfx_cmd_f32[base_f + 3] = h;
 
     gfx_cmd_i32[GFX_I_SPRITE_COUNT] = i + 1;
 }

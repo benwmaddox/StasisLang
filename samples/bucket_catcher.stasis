@@ -215,7 +215,7 @@ function update_input(): void {
     // This is not passive hover tracking. Keyboard input also requires window focus.
     let count: i32 = input_pointer_count();
     if (count > 0 && input_pointer_is_down(0)) {
-        state.bucket_target_x = f32_to_i32(input_pointer_x_px(0));
+        state.bucket_target_x = f32_to_i32(input_pointer_x_logical(0));
     }
 
     // Keyboard input: steer left/right with arrow keys.
@@ -280,10 +280,10 @@ function draw_bucket(): void {
 
     gfx_draw_sprite(
         state.bucket_sprite,
-        x0,
-        y0,
-        state.config.bucket_width,
-        state.config.bucket_height,
+        i32_to_f32(x0),
+        i32_to_f32(y0),
+        i32_to_f32(state.config.bucket_width),
+        i32_to_f32(state.config.bucket_height),
         0,
         255
     );
@@ -294,10 +294,10 @@ function draw_balls(): void {
         if (ball.active) {
             gfx_draw_sprite(
                 state.ball_sprite,
-                ball.x - state.config.ball_radius,
-                ball.y - state.config.ball_radius,
-                state.config.ball_radius * 2,
-                state.config.ball_radius * 2,
+                i32_to_f32(ball.x - state.config.ball_radius),
+                i32_to_f32(ball.y - state.config.ball_radius),
+                i32_to_f32(state.config.ball_radius * 2),
+                i32_to_f32(state.config.ball_radius * 2),
                 0,
                 255
             );

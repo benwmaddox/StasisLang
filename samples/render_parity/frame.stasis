@@ -1,20 +1,25 @@
 const PARITY_WINDOW_W: i32 = 640;
 const PARITY_WINDOW_H: i32 = 360;
 const PARITY_GFX_MAGIC: i32 = 1196967473;
-const PARITY_GFX_VERSION: i32 = 1;
+const PARITY_GFX_VERSION: i32 = 2;
 const PARITY_GFX_FLAG_CLEAR: i32 = 1;
 const PARITY_GFX_FLAG_PRESENT: i32 = 2;
 const PARITY_GFX_I_SPRITE_BASE: i32 = 32;
-const PARITY_GFX_I_TEXT_BASE: i32 = 28704;
-const PARITY_GFX_F_TEXT_BASE: i32 = 80004;
+const PARITY_GFX_I_TEXT_BASE: i32 = 12320;
+const PARITY_GFX_F_SPRITE_BASE: i32 = 80004;
+const PARITY_GFX_F_TEXT_BASE: i32 = 96388;
 
-function parity_add_sprite(cmd_i32: i32[], handle: i32, x: i32, y: i32, w: i32, h: i32, rotation: i32, alpha: i32): void {
+function parity_add_sprite(cmd_i32: i32[], handle: i32, rotation: i32, alpha: i32): void {
     let index: i32 = cmd_i32[4];
-    let base: i32 = PARITY_GFX_I_SPRITE_BASE + index * 7;
-    cmd_i32[base] = handle; cmd_i32[base + 1] = x; cmd_i32[base + 2] = y;
-    cmd_i32[base + 3] = w; cmd_i32[base + 4] = h;
-    cmd_i32[base + 5] = rotation; cmd_i32[base + 6] = alpha;
+    let base_i: i32 = PARITY_GFX_I_SPRITE_BASE + index * 3;
+    cmd_i32[base_i] = handle; cmd_i32[base_i + 1] = rotation; cmd_i32[base_i + 2] = alpha;
     cmd_i32[4] = index + 1;
+}
+
+function parity_add_sprite_geometry(cmd_f32: f32[], index: i32, x: f32, y: f32, w: f32, h: f32): void {
+    let base_f: i32 = PARITY_GFX_F_SPRITE_BASE + index * 4;
+    cmd_f32[base_f] = x; cmd_f32[base_f + 1] = y;
+    cmd_f32[base_f + 2] = w; cmd_f32[base_f + 3] = h;
 }
 
 function parity_add_direct_label(cmd_i32: i32[], cmd_f32: f32[], cmd_u8: u8[], font: i32): void {
@@ -65,11 +70,16 @@ function build_parity_frame(
     cmd_f32[16] = 0.10; cmd_f32[17] = 0.85;
     cmd_f32[18] = 1.0; cmd_f32[19] = 0.85;
 
-    parity_add_sprite(cmd_i32, canvas_sprite, 0, 0, PARITY_WINDOW_W, PARITY_WINDOW_H, 0, 96);
-    parity_add_sprite(cmd_i32, 0, 32, 48, 64, 64, 0, 255);
-    parity_add_sprite(cmd_i32, opaque_sprite, 136, 44, 96, 72, 0, 255);
-    parity_add_sprite(cmd_i32, translucent_sprite, 272, 44, 96, 72, 0, 180);
-    parity_add_sprite(cmd_i32, opaque_sprite, 440, 36, 112, 84, 27, 180);
+    parity_add_sprite(cmd_i32, canvas_sprite, 0, 96);
+    parity_add_sprite_geometry(cmd_f32, 0, 0.0, 0.0, 640.0, 360.0);
+    parity_add_sprite(cmd_i32, 0, 0, 255);
+    parity_add_sprite_geometry(cmd_f32, 1, 32.0, 48.0, 64.0, 64.0);
+    parity_add_sprite(cmd_i32, opaque_sprite, 0, 255);
+    parity_add_sprite_geometry(cmd_f32, 2, 136.0, 44.0, 96.0, 72.0);
+    parity_add_sprite(cmd_i32, translucent_sprite, 0, 180);
+    parity_add_sprite_geometry(cmd_f32, 3, 272.0, 44.0, 96.0, 72.0);
+    parity_add_sprite(cmd_i32, opaque_sprite, 27, 180);
+    parity_add_sprite_geometry(cmd_f32, 4, 440.0, 36.0, 112.0, 84.0);
     parity_add_direct_label(cmd_i32, cmd_f32, cmd_u8, font);
     parity_add_cached_label(cmd_i32, cmd_f32, font, cached_label);
 }

@@ -12,12 +12,7 @@ const HOST_MAX_POINTERS: i32 = 8;
 
 // i32 layout
 const HOST_I_TIME_MS: i32 = 0;
-const HOST_I_WINDOW_W_PX: i32 = 1;
-const HOST_I_WINDOW_H_PX: i32 = 2;
-const HOST_I_VIEWPORT_X_PX: i32 = 3;
-const HOST_I_VIEWPORT_Y_PX: i32 = 4;
-const HOST_I_VIEWPORT_W_PX: i32 = 5;
-const HOST_I_VIEWPORT_H_PX: i32 = 6;
+// 1..6 removed with pre-1.0 window/viewport compatibility aliases.
 const HOST_I_POINTER_COUNT: i32 = 7;
 const HOST_I_DROPPED_POINTERS: i32 = 8;
 const HOST_I_QUIT_REQUESTED: i32 = 9;
@@ -36,18 +31,12 @@ const HOST_I_WINDOW_FOCUSED: i32 = 17;
 const HOST_I_WINDOW_MINIMIZED: i32 = 18;
 const HOST_I_TIME_US: i32 = 19;
 
-// Display metrics. Window width/height remain compatibility aliases for the
-// logical canvas; native and drawable extents may change independently.
-const HOST_I_LOGICAL_W_PX: i32 = 20;
-const HOST_I_LOGICAL_H_PX: i32 = 21;
+// Physical display metrics. Logical and safe geometry live in the f32 lane.
 const HOST_I_NATIVE_W_PX: i32 = 22;
 const HOST_I_NATIVE_H_PX: i32 = 23;
 const HOST_I_DRAWABLE_W_PX: i32 = 24;
 const HOST_I_DRAWABLE_H_PX: i32 = 25;
-const HOST_I_SAFE_X_PX: i32 = 26;
-const HOST_I_SAFE_Y_PX: i32 = 27;
-const HOST_I_SAFE_W_PX: i32 = 28;
-const HOST_I_SAFE_H_PX: i32 = 29;
+// 20,21 and 26..29 removed with integer presentation geometry.
 const HOST_I_DISPLAY_GENERATION: i32 = 30;
 const HOST_I_DENSITY_GENERATION: i32 = 31;
 
@@ -65,6 +54,12 @@ const HOST_F_POINTER_BASE: i32 = 0;
 const HOST_F_POINTER_STRIDE: i32 = 6; // x_px, y_px, dx_px, dy_px, x_n, y_n
 const HOST_F_CONTENT_SCALE: i32 = 48;
 const HOST_F_RASTER_SCALE: i32 = 49;
+const HOST_F_LOGICAL_W: i32 = 50;
+const HOST_F_LOGICAL_H: i32 = 51;
+const HOST_F_SAFE_X: i32 = 52;
+const HOST_F_SAFE_Y: i32 = 53;
+const HOST_F_SAFE_W: i32 = 54;
+const HOST_F_SAFE_H: i32 = 55;
 const HOST_F32_COUNT: i32 = 64;
 
 global host_i32: i32[768];
@@ -72,16 +67,6 @@ global host_f32: f32[64];
 
 function host_tick_index(): i32 { return host_i32[HOST_I_TICK_INDEX]; }
 function host_time_ms(): i32 { return host_i32[HOST_I_TIME_MS]; }
-function host_window_w_px(): i32 { return host_i32[HOST_I_WINDOW_W_PX]; }
-function host_window_h_px(): i32 { return host_i32[HOST_I_WINDOW_H_PX]; }
-function host_viewport_x_px(): i32 { return host_i32[HOST_I_VIEWPORT_X_PX]; }
-function host_viewport_y_px(): i32 { return host_i32[HOST_I_VIEWPORT_Y_PX]; }
-function host_viewport_w_px(): i32 { return host_i32[HOST_I_VIEWPORT_W_PX]; }
-function host_viewport_h_px(): i32 { return host_i32[HOST_I_VIEWPORT_H_PX]; }
-function host_viewport_x_px_f32(): f32 { return i32_to_f32(host_i32[HOST_I_VIEWPORT_X_PX]); }
-function host_viewport_y_px_f32(): f32 { return i32_to_f32(host_i32[HOST_I_VIEWPORT_Y_PX]); }
-function host_viewport_w_px_f32(): f32 { return i32_to_f32(host_i32[HOST_I_VIEWPORT_W_PX]); }
-function host_viewport_h_px_f32(): f32 { return i32_to_f32(host_i32[HOST_I_VIEWPORT_H_PX]); }
 function host_pointer_count(): i32 { return host_i32[HOST_I_POINTER_COUNT]; }
 function host_dropped_pointers(): i32 { return host_i32[HOST_I_DROPPED_POINTERS]; }
 function host_quit_requested(): bool { return host_i32[HOST_I_QUIT_REQUESTED] != 0; }
@@ -94,16 +79,16 @@ function host_tick_hz(): i32 { return host_i32[HOST_I_TICK_HZ]; }
 function host_window_focused(): bool { return host_i32[HOST_I_WINDOW_FOCUSED] != 0; }
 function host_window_minimized(): bool { return host_i32[HOST_I_WINDOW_MINIMIZED] != 0; }
 function host_time_us(): i32 { return host_i32[HOST_I_TIME_US]; }
-function host_logical_w_px(): i32 { return host_i32[HOST_I_LOGICAL_W_PX]; }
-function host_logical_h_px(): i32 { return host_i32[HOST_I_LOGICAL_H_PX]; }
+function host_logical_width(): f32 { return host_f32[HOST_F_LOGICAL_W]; }
+function host_logical_height(): f32 { return host_f32[HOST_F_LOGICAL_H]; }
 function host_native_w_px(): i32 { return host_i32[HOST_I_NATIVE_W_PX]; }
 function host_native_h_px(): i32 { return host_i32[HOST_I_NATIVE_H_PX]; }
 function host_drawable_w_px(): i32 { return host_i32[HOST_I_DRAWABLE_W_PX]; }
 function host_drawable_h_px(): i32 { return host_i32[HOST_I_DRAWABLE_H_PX]; }
-function host_safe_x_px(): i32 { return host_i32[HOST_I_SAFE_X_PX]; }
-function host_safe_y_px(): i32 { return host_i32[HOST_I_SAFE_Y_PX]; }
-function host_safe_w_px(): i32 { return host_i32[HOST_I_SAFE_W_PX]; }
-function host_safe_h_px(): i32 { return host_i32[HOST_I_SAFE_H_PX]; }
+function host_safe_x(): f32 { return host_f32[HOST_F_SAFE_X]; }
+function host_safe_y(): f32 { return host_f32[HOST_F_SAFE_Y]; }
+function host_safe_width(): f32 { return host_f32[HOST_F_SAFE_W]; }
+function host_safe_height(): f32 { return host_f32[HOST_F_SAFE_H]; }
 function host_display_generation(): i32 { return host_i32[HOST_I_DISPLAY_GENERATION]; }
 function host_density_generation(): i32 { return host_i32[HOST_I_DENSITY_GENERATION]; }
 function host_content_scale(): f32 { return host_f32[HOST_F_CONTENT_SCALE]; }
@@ -130,19 +115,19 @@ function host_pointer_went_up(index: i32): bool {
     return host_i32[HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE + 3] != 0;
 }
 
-function host_pointer_x_px(index: i32): f32 {
+function host_pointer_x_logical(index: i32): f32 {
     return host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 0];
 }
 
-function host_pointer_y_px(index: i32): f32 {
+function host_pointer_y_logical(index: i32): f32 {
     return host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 1];
 }
 
-function host_pointer_dx_px(index: i32): f32 {
+function host_pointer_dx_logical(index: i32): f32 {
     return host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 2];
 }
 
-function host_pointer_dy_px(index: i32): f32 {
+function host_pointer_dy_logical(index: i32): f32 {
     return host_f32[HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE + 3];
 }
 

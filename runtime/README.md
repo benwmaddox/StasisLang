@@ -130,7 +130,7 @@ The library exports these functions for Stasis programs:
 | `stasis_draw_lines_f32(lines, count)` | Batch: queue `count` lines from an `f32` array (8 floats per line) |
 | `stasis_gfx_load_sprite(path, max_w, max_h)` | Load and bake an image into the sprite atlas system; returns handle |
 | `stasis_gfx_draw_sprite(handle, x, y, sx, sy, rot, r, g, b, a)` | Draw baked sprite (centered) with scale/rotation/tint |
-| `stasis_gfx_draw_sprites_i32(cmds, count)` | Batch: draw `count` sprites from an `i32` array (7 ints per sprite) |
+| `stasis_gfx_draw_sprites(cmd_i32, cmd_f32, count)` | Batch: draw sprites from typed state and logical-geometry arrays |
 | `stasis_gfx_debug_bake_hash(path)` | Debug: bake SVG on CPU and return a pixel hash |
 | `stasis_gfx_debug_enable_hash(enabled)` | Debug: enable per-frame draw-call hash (for verifying batch equivalence) |
 | `stasis_gfx_debug_get_frame_hash()` | Debug: get current frame hash (0 if disabled) |
@@ -141,7 +141,6 @@ The library exports these functions for Stasis programs:
 | `stasis_should_quit()` | Pump input/events (once per frame) and report quit state |
 | `stasis_input_pointer_count()` | Number of pointers tracked this frame (mouse + active touches) |
 | `stasis_input_pointer_*` | Pointer snapshot queries (pos, deltas, edge flags) |
-| `stasis_input_viewport_*_px` | Viewport rectangle (currently full window) |
 | `stasis_audio_is_available()` | Initialize audio if needed; returns 1 on success |
 | `stasis_audio_get_sample_rate()` | Current audio sample rate (Hz) |
 | `stasis_audio_get_channels()` | Current audio channels (v1: 2) |

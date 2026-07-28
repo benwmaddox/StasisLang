@@ -33,8 +33,9 @@ struct Sprites {
 // Build render lists as pure data, then submit in bulk once per tick.
 // This is the preferred hot-path model: no per-draw host calls.
 struct GfxState {
-    // Packed sprite stream: [handle,x,y,w,h,rot_deg,a] * 256
-    sprites_i32: i32[1792];
+    // Split sprite stream: [handle,rot_deg,a] and [x,y,w,h] * 256
+    sprites_i32: i32[768];
+    sprites_f32: f32[1024];
     sprite_count: i32;
 
     // Packed line stream: [x1,y1,x2,y2,r,g,b,a] * 512
@@ -63,14 +64,15 @@ function render_begin(): void {
 function render_push_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): void {
     let i: i32 = state.gfx.sprite_count;
     if (i >= 256) { return; }
-    let base: i32 = i * 7;
-    state.gfx.sprites_i32[base + 0] = handle;
-    state.gfx.sprites_i32[base + 1] = x;
-    state.gfx.sprites_i32[base + 2] = y;
-    state.gfx.sprites_i32[base + 3] = w;
-    state.gfx.sprites_i32[base + 4] = h;
-    state.gfx.sprites_i32[base + 5] = rot_deg;
-    state.gfx.sprites_i32[base + 6] = a;
+    let base_i: i32 = i * 3;
+    let base_f: i32 = i * 4;
+    state.gfx.sprites_i32[base_i + 0] = handle;
+    state.gfx.sprites_i32[base_i + 1] = rot_deg;
+    state.gfx.sprites_i32[base_i + 2] = a;
+    state.gfx.sprites_f32[base_f + 0].from_i32(x);
+    state.gfx.sprites_f32[base_f + 1].from_i32(y);
+    state.gfx.sprites_f32[base_f + 2].from_i32(w);
+    state.gfx.sprites_f32[base_f + 3].from_i32(h);
     state.gfx.sprite_count = i + 1;
 }
 
@@ -172,7 +174,7 @@ function tick(): i32 {
     clear(0.05, 0.05, 0.15, 1.0);
     
     //update_game(dt, delta_ms);
-    gfx_draw_sprites(state.gfx.sprites_i32, state.gfx.sprite_count);
+    gfx_draw_sprites(state.gfx.sprites_i32, state.gfx.sprites_f32, state.gfx.sprite_count);
     draw_lines(state.gfx.lines_f32, state.gfx.line_count);
     draw_frame();
 

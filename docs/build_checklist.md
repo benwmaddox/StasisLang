@@ -1540,7 +1540,7 @@ Archived priority override (2026-02-13, historical):
   - Migrate canonical logical/safe/pointer/sprite geometry to `f32`.
   - Remove pre-1.0 compatibility display/input APIs and active HostFrame alias fields.
   - Bump HostFrame and graphics command versions and migrate every host, decoder, fixture, and parity path atomically.
-  - Status: `planned after AP1.5`.
+  - Status: `complete`.
 - AP3 - Representative menu adoption:
   - Cache text run widths during initialization.
   - Center a menu title, anchor a button within an adjusted region, center its label, and reuse scalar bounds for hit testing.
@@ -1557,6 +1557,11 @@ Archived priority override (2026-02-13, historical):
   - Good: symbol-table tests turned the 49-helper linker failure into a precise dependency contract, and the layout sample now links and runs without the runtime library.
   - Bad: the first narrowing treated collection views like direct AOT globals and exposed the distinction only in the parity corpus.
   - Adjustment: retain collection helper families for functions whose ABI accepts collection/view handles, and keep direct-storage globals independent from that rule.
+- AP2 work summary:
+  - Theory gained: logical geometry is one typed path from HostFrame through layout and command submission; splitting sprite identity/state into the integer lane and geometry into the float lane preserves that invariant while physical raster dimensions remain explicit integer metadata.
+  - Good: versioning HostFrame and the render command together made stale producers and decoders mechanically discoverable across desktop, Android, fixtures, and samples.
+  - Bad: the first mechanical capacity migration missed the Android Java renderer and briefly assigned the sprite float base to the text base in one duplicated runtime module.
+  - Adjustment: future command-ABI changes must audit every language implementation by semantic field names and assert all derived bases/capacities in each platform test, not rely on numeric replacement alone.
 
 ## PR Sequence
 

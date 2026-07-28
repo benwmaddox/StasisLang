@@ -37,17 +37,13 @@ EXPORTS
     stasis_input_pointer_is_down
     stasis_input_pointer_went_down
     stasis_input_pointer_went_up
-    stasis_input_pointer_x_px
-    stasis_input_pointer_y_px
-    stasis_input_pointer_dx_px
-    stasis_input_pointer_dy_px
+    stasis_input_pointer_x_logical
+    stasis_input_pointer_y_logical
+    stasis_input_pointer_dx_logical
+    stasis_input_pointer_dy_logical
     stasis_input_pointer_x_n
     stasis_input_pointer_y_n
     stasis_input_dropped_pointers
-    stasis_input_viewport_x_px
-    stasis_input_viewport_y_px
-    stasis_input_viewport_w_px
-    stasis_input_viewport_h_px
     stasis_host_get_frame
     stasis_gfx_notify_file_changed
     stasis_gfx_load_sprite
@@ -56,7 +52,7 @@ EXPORTS
     stasis_gfx_submit
     stasis_gfx_submit_u8
     stasis_gfx_poll_reload
-    stasis_gfx_draw_sprites_i32
+    stasis_gfx_draw_sprites
     stasis_gfx_debug_bake_hash
     stasis_gfx_debug_enable_hash
     stasis_gfx_debug_get_frame_hash

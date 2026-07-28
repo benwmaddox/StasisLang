@@ -27,5 +27,5 @@ if(STASIS_ANDROID_PUBLISHED_AOT)
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../runtime/stasis_mobile_aot_runtime.c")
     target_include_directories(stasis_mobile_smoke PRIVATE "${STASIS_PUBLISHED_AOT_DIR}")
     target_compile_definitions(stasis_mobile_smoke PRIVATE
-        STASIS_ANDROID_PUBLISHED_AOT=1 STASIS_RENDER_V1_DIRECT=1)
+        STASIS_ANDROID_PUBLISHED_AOT=1 STASIS_RENDER_V2_DIRECT=1)
 endif()
