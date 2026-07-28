@@ -14,13 +14,12 @@ The v1 system is deliberately scalar. Each placement function receives:
 - the parent size
 - the child size
 - a strongly typed placement choice
-- an explicit offset
 
 It returns one `f32` coordinate. The caller uses those returned coordinates for text, sprites, buttons, hit testing, or as inputs to another layout calculation.
 
 This design matches the Stasis language surface implemented today. It uses ordinary scalar locals and scalar returns. It does not require function-local arrays, local struct materialization, array returns, hidden allocation, or a retained UI tree.
 
-`f32` is the canonical type for presentation geometry across the proposed public path. Positions, sizes, offsets, pointer coordinates, text measurement, flex results, and sprite geometry remain `f32` until a platform renderer explicitly rasterizes them.
+`f32` is the canonical type for presentation geometry across the proposed public path. Positions, sizes, padding, pointer coordinates, text measurement, flex results, and sprite geometry remain `f32` until a platform renderer explicitly rasterizes them.
 
 ## 2. Problem
 
@@ -43,7 +42,7 @@ V1 must:
 1. Calculate a child x coordinate from horizontal placement inputs.
 2. Calculate a child y coordinate from vertical placement inputs.
 3. Use different enum types for horizontal and vertical placement.
-4. Use ordinary screen-coordinate offset signs.
+4. Express margins and padding by adjusting the available region before placement.
 5. Work entirely with supported scalar parameters, locals, and returns.
 6. Support cached text placement using existing cached width measurement and explicit line height.
 7. Support buttons, icons, HUD labels, menu titles, and similar immediate-mode drawing.
@@ -101,16 +100,23 @@ enum UiVertical {
 
 The implementation compares enum members directly. It does not convert them to `i32` unless an actual integer ABI boundary requires it, in which case it uses explicit `enum_to_i32` conversion.
 
-### 5.3 Offsets have one meaning
+### 5.3 The available region owns margins and padding
 
-Offsets are added after alignment:
+Placement functions do not accept an offset. Callers express margins and padding by deriving the region in which content is allowed to appear:
 
-- positive x moves right
-- negative x moves left
-- positive y moves down
-- negative y moves up
+```stasis
+let content_x: f32 = parent_x + left_padding;
+let content_width: f32 = parent_width - left_padding - right_padding;
+```
 
-A button aligned to `UiHorizontal.Right` with `offset_x = -20.0` sits 20 units left of the parent's right edge.
+Alignment then has one stable meaning within that adjusted region. This avoids negative right/bottom offsets and avoids an ambiguous direction for center offsets.
+
+An art-directed visual nudge is a separate operation applied explicitly after placement:
+
+```stasis
+let label_y: f32 = ui_place_y(content_y, content_h, label_h, UiVertical.Center);
+label_y += label_optical_y;
+```
 
 ### 5.4 Layout is pure calculation
 
@@ -139,7 +145,7 @@ The canonical public presentation types are:
 |---|---|
 | Layout x/y | `f32` |
 | Layout width/height | `f32` |
-| Layout offsets and padding | `f32` |
+| Layout margins, padding, and optical nudges | `f32` |
 | Pointer x/y used for hit testing | `f32` |
 | Measured text width and line-box height | `f32` |
 | Line endpoints | `f32` |
@@ -179,8 +185,7 @@ function ui_place_x(
     parent_x: f32,
     parent_width: f32,
     child_width: f32,
-    horizontal: UiHorizontal,
-    offset_x: f32
+    horizontal: UiHorizontal
 ): f32;
 ```
 
@@ -190,8 +195,6 @@ Behavior:
 Left:   parent_x
 Center: parent_x + (parent_width - child_width) * 0.5
 Right:  parent_x + parent_width - child_width
-
-result = aligned_x + offset_x
 ```
 
 ### 6.2 Vertical placement
@@ -201,8 +204,7 @@ function ui_place_y(
     parent_y: f32,
     parent_height: f32,
     child_height: f32,
-    vertical: UiVertical,
-    offset_y: f32
+    vertical: UiVertical
 ): f32;
 ```
 
@@ -212,8 +214,6 @@ Behavior:
 Top:    parent_y
 Center: parent_y + (parent_height - child_height) * 0.5
 Bottom: parent_y + parent_height - child_height
-
-result = aligned_y + offset_y
 ```
 
 ### 6.3 Oversized children
@@ -267,16 +267,16 @@ function menu_draw_title(): void {
         safe_x,
         safe_w,
         title_w,
-        UiHorizontal.Center,
-        0.0
+        UiHorizontal.Center
     );
 
+    let title_area_y: f32 = safe_y + 24.0;
+    let title_area_h: f32 = 96.0 - 24.0;
     let title_y: f32 = ui_place_y(
-        safe_y,
-        96.0,
+        title_area_y,
+        title_area_h,
         title_h,
-        UiVertical.Top,
-        24.0
+        UiVertical.Top
     );
 
     draw_text_cached(
@@ -294,7 +294,7 @@ function menu_draw_title(): void {
 
 The caller never manually calculates the centered x coordinate.
 
-### 7.3 Button anchored top-left with offsets
+### 7.3 Button anchored top-left within an adjusted region
 
 This creates scalar button bounds 20 units from the safe viewport's left edge and 140 units below its top edge.
 
@@ -308,20 +308,23 @@ function menu_draw_play_button(): void {
     let button_w: f32 = 180.0;
     let button_h: f32 = 56.0;
 
+    let button_area_x: f32 = safe_x + 20.0;
+    let button_area_y: f32 = safe_y + 140.0;
+    let button_area_w: f32 = safe_w - 20.0;
+    let button_area_h: f32 = safe_h - 140.0;
+
     let button_x: f32 = ui_place_x(
-        safe_x,
-        safe_w,
+        button_area_x,
+        button_area_w,
         button_w,
-        UiHorizontal.Left,
-        20.0
+        UiHorizontal.Left
     );
 
     let button_y: f32 = ui_place_y(
-        safe_y,
-        safe_h,
+        button_area_y,
+        button_area_h,
         button_h,
-        UiVertical.Top,
-        140.0
+        UiVertical.Top
     );
 
     gfx_draw_sprite(
@@ -336,15 +339,17 @@ function menu_draw_play_button(): void {
 }
 ```
 
-The same button anchored top-right uses:
+For a 20-unit margin on both horizontal edges, define the available region once and select either edge:
 
 ```stasis
+let button_area_x: f32 = safe_x + 20.0;
+let button_area_w: f32 = safe_w - 40.0;
+
 let button_x: f32 = ui_place_x(
-    safe_x,
-    safe_w,
+    button_area_x,
+    button_area_w,
     button_w,
-    UiHorizontal.Right,
-    -20.0
+    UiHorizontal.Right
 );
 ```
 
@@ -367,17 +372,16 @@ let label_x: f32 = ui_place_x(
     content_x,
     content_w,
     label_w,
-    UiHorizontal.Center,
-    0.0
+    UiHorizontal.Center
 );
 
 let label_y: f32 = ui_place_y(
     content_y,
     content_h,
     label_h,
-    UiVertical.Center,
-    1.0
+    UiVertical.Center
 );
+label_y += 1.0;
 
 draw_text_cached(
     ui_font,
@@ -391,7 +395,7 @@ draw_text_cached(
 );
 ```
 
-The one-unit y offset is an explicit optical correction. The shared placement function does not hide font- or button-specific heuristics.
+The one-unit y change is an explicit optical nudge after placement. The available region still represents button padding, and the shared placement function does not hide font- or button-specific heuristics.
 
 ### 7.5 Fit detection with scalars
 
@@ -492,17 +496,16 @@ let label_x: f32 = ui_place_x(
     button_x,
     button_w,
     label_w,
-    UiHorizontal.Center,
-    0.0
+    UiHorizontal.Center
 );
 
 let label_y: f32 = ui_place_y(
     button_y,
     button_h,
     label_h,
-    UiVertical.Center,
-    1.0
+    UiVertical.Center
 );
+label_y += 1.0;
 ```
 
 The new API therefore composes with the existing array-based flex implementation without requiring new rectangle arrays for individual placement.
@@ -521,7 +524,7 @@ The height represents layout space, not glyph ink bounds or a baseline coordinat
 
 ### 8.3 Optical adjustment
 
-Art-directed correction uses ordinary placement offsets. It is explicit at the call site or in a game-owned style value.
+Art-directed correction is applied explicitly after placement as a signed nudge at the call site or from a game-owned style value. It is not part of the placement API.
 
 ### 8.4 Overflow
 
@@ -621,7 +624,6 @@ V1 does not define click timing or pointer capture. A later interaction layer sh
 Horizontal tests cover:
 
 - left, center, and right placement
-- positive and negative offsets
 - zero-size parent and child
 - child larger than parent
 - fractional values and odd sizes
@@ -643,9 +645,9 @@ Compiler tests verify that:
 Representative assertions include:
 
 ```text
-centered_child_center == parent_center + offset
-right_child_edge == parent_right + offset_x
-bottom_child_edge == parent_bottom + offset_y
+centered_child_center == parent_center
+right_child_edge == parent_right
+bottom_child_edge == parent_bottom
 ```
 
 ### 12.4 Realistic composition
@@ -655,7 +657,7 @@ At least one test or sample must:
 1. read or define scalar parent bounds
 2. measure a cached text run or use an explicit test width
 3. center text horizontally
-4. place a button at top-left with offsets
+4. derive an inset available region and place a button at its top-left
 5. center a label inside that button
 6. verify the calculated values
 
@@ -710,7 +712,7 @@ V1 is complete when:
 1. `ui_place_x` returns correct left, center, and right positions.
 2. `ui_place_y` returns correct top, center, and bottom positions.
 3. Horizontal and vertical choices use distinct enum types end to end.
-4. Offsets always use screen-coordinate signs.
+4. Margins and padding adjust the available region before placement; placement accepts no offset.
 5. Oversized children follow the documented alignment formulas without implicit clamping.
 6. Realistic examples use supported scalar locals and returns.
 7. No v1 example or API requires function-local fixed arrays or local struct materialization.
