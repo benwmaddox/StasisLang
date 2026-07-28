@@ -258,6 +258,35 @@ pub fn invoke_i32_i32_i32_i32_to_void(
     }
 }
 
+pub fn invoke_i32_i32_i32_f32_to_void(
+    address: usize,
+    arg0: i32,
+    arg1: i32,
+    arg2: i32,
+    arg3: f32,
+) -> Result<(), String> {
+    if address == 0 {
+        return Err("cannot invoke null function pointer".to_string());
+    }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
+    #[cfg(windows)]
+    {
+        let callback: extern "system" fn(i32, i32, i32, f32) =
+            unsafe { std::mem::transmute(address) };
+        callback(arg0, arg1, arg2, arg3);
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let callback: extern "C" fn(i32, i32, i32, f32) = unsafe { std::mem::transmute(address) };
+        callback(arg0, arg1, arg2, arg3);
+        Ok(())
+    }
+}
+
 // ============================================================
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
@@ -2384,25 +2413,27 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     }
 }
 
-pub const STASIS_RENDER_I32_COUNT: usize = 34_848;
-pub const STASIS_RENDER_F32_COUNT: usize = 92_292;
+pub const STASIS_RENDER_I32_COUNT: usize = 18_464;
+pub const STASIS_RENDER_F32_COUNT: usize = 108_676;
 pub const STASIS_RENDER_U8_COUNT: usize = 65_536;
 const STASIS_RENDER_MAGIC: i32 = 0x4758_4631;
-const STASIS_RENDER_VERSION: i32 = 1;
+const STASIS_RENDER_VERSION: i32 = 2;
 const STASIS_RENDER_HEADER_I32_COUNT: usize = 10;
 const STASIS_RENDER_SPRITE_BASE: usize = 32;
 const STASIS_RENDER_MAX_LINES: usize = 10_000;
 const STASIS_RENDER_LINE_STRIDE: usize = 8;
 const STASIS_RENDER_MAX_SPRITES: usize = 4_096;
-const STASIS_RENDER_SPRITE_STRIDE: usize = 7;
-const STASIS_RENDER_TEXT_BASE_I32: usize = 28_704;
-const STASIS_RENDER_TEXT_BASE_F32: usize = 80_004;
+const STASIS_RENDER_SPRITE_STRIDE_I32: usize = 3;
+const STASIS_RENDER_SPRITE_BASE_F32: usize = 80_004;
+const STASIS_RENDER_SPRITE_STRIDE_F32: usize = 4;
+const STASIS_RENDER_TEXT_BASE_I32: usize = 12_320;
+const STASIS_RENDER_TEXT_BASE_F32: usize = 96_388;
 const STASIS_RENDER_MAX_TEXT: usize = 2_048;
 const STASIS_RENDER_TEXT_STRIDE_I32: usize = 3;
 const STASIS_RENDER_TEXT_STRIDE_F32: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RenderV1ActiveCounts {
+pub struct RenderV2ActiveCounts {
     pub lines: usize,
     pub sprites: usize,
     pub text: usize,
@@ -2422,11 +2453,11 @@ fn global_path_hash(path: &str) -> i32 {
 ///
 /// The destination retains production offsets so the Android GLES adapter consumes the exact
 /// same ABI as the SDL renderer without copying unused command capacity.
-pub fn copy_jit_render_v1_active(
+pub fn copy_jit_render_v2_active(
     out_i32: &mut [i32],
     out_f32: &mut [f32],
     out_u8: &mut [u8],
-) -> Result<RenderV1ActiveCounts, String> {
+) -> Result<RenderV2ActiveCounts, String> {
     if out_i32.len() < STASIS_RENDER_I32_COUNT
         || out_f32.len() < STASIS_RENDER_F32_COUNT
         || out_u8.len() < STASIS_RENDER_U8_COUNT
@@ -2455,10 +2486,10 @@ pub fn copy_jit_render_v1_active(
     let source_f32 = unsafe { std::slice::from_raw_parts(f32_ptr, STASIS_RENDER_F32_COUNT) };
     let source_u8 = unsafe { std::slice::from_raw_parts(u8_ptr, STASIS_RENDER_U8_COUNT) };
     if source_i32[0] != STASIS_RENDER_MAGIC || source_i32[1] != STASIS_RENDER_VERSION {
-        return Err("JIT frame is not production gfx_cmd v1".to_string());
+        return Err("JIT frame is not production gfx_cmd v2".to_string());
     }
 
-    let counts = RenderV1ActiveCounts {
+    let counts = RenderV2ActiveCounts {
         lines: source_i32[3].clamp(0, STASIS_RENDER_MAX_LINES as i32) as usize,
         sprites: source_i32[4].clamp(0, STASIS_RENDER_MAX_SPRITES as i32) as usize,
         text: source_i32[7].clamp(0, STASIS_RENDER_MAX_TEXT as i32) as usize,
@@ -2466,7 +2497,7 @@ pub fn copy_jit_render_v1_active(
     };
     out_i32[..STASIS_RENDER_HEADER_I32_COUNT]
         .copy_from_slice(&source_i32[..STASIS_RENDER_HEADER_I32_COUNT]);
-    let sprite_end = STASIS_RENDER_SPRITE_BASE + counts.sprites * STASIS_RENDER_SPRITE_STRIDE;
+    let sprite_end = STASIS_RENDER_SPRITE_BASE + counts.sprites * STASIS_RENDER_SPRITE_STRIDE_I32;
     out_i32[STASIS_RENDER_SPRITE_BASE..sprite_end]
         .copy_from_slice(&source_i32[STASIS_RENDER_SPRITE_BASE..sprite_end]);
     let text_i32_end = STASIS_RENDER_TEXT_BASE_I32 + counts.text * STASIS_RENDER_TEXT_STRIDE_I32;
@@ -2476,6 +2507,10 @@ pub fn copy_jit_render_v1_active(
     out_f32[..4].copy_from_slice(&source_f32[..4]);
     let line_end = 4 + counts.lines * STASIS_RENDER_LINE_STRIDE;
     out_f32[4..line_end].copy_from_slice(&source_f32[4..line_end]);
+    let sprite_f32_end =
+        STASIS_RENDER_SPRITE_BASE_F32 + counts.sprites * STASIS_RENDER_SPRITE_STRIDE_F32;
+    out_f32[STASIS_RENDER_SPRITE_BASE_F32..sprite_f32_end]
+        .copy_from_slice(&source_f32[STASIS_RENDER_SPRITE_BASE_F32..sprite_f32_end]);
     let text_f32_end = STASIS_RENDER_TEXT_BASE_F32 + counts.text * STASIS_RENDER_TEXT_STRIDE_F32;
     out_f32[STASIS_RENDER_TEXT_BASE_F32..text_f32_end]
         .copy_from_slice(&source_f32[STASIS_RENDER_TEXT_BASE_F32..text_f32_end]);
@@ -2484,7 +2519,7 @@ pub fn copy_jit_render_v1_active(
 }
 
 unsafe extern "C" {
-    fn stasis_render_v1_trace_native(
+    fn stasis_render_v2_trace_native(
         cmd_i32: *const i32,
         cmd_f32: *const f32,
         cmd_u8: *const u8,
@@ -2492,7 +2527,7 @@ unsafe extern "C" {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn stasis_jit_render_v1_trace(
+pub unsafe extern "C" fn stasis_jit_render_v2_trace(
     cmd_i32_id: i32,
     cmd_i32_len: i32,
     cmd_f32_id: i32,
@@ -2512,7 +2547,7 @@ pub unsafe extern "C" fn stasis_jit_render_v1_trace(
     if cmd_i32.is_null() || cmd_f32.is_null() || cmd_u8.is_null() {
         return 0;
     }
-    stasis_render_v1_trace_native(cmd_i32, cmd_f32, cmd_u8) as i32
+    stasis_render_v2_trace_native(cmd_i32, cmd_f32, cmd_u8) as i32
 }
 
 fn jit_text_buffer_is_registered(value_id: i32) -> bool {
@@ -4588,7 +4623,7 @@ mod tests {
 
         // Safety: invalid lengths must be rejected before any pointer is resolved.
         let trace = unsafe {
-            stasis_jit_render_v1_trace(
+            stasis_jit_render_v2_trace(
                 101,
                 i32::MAX,
                 102,

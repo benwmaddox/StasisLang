@@ -90,12 +90,12 @@ function draw_lines(lines: f32[], count: i32): void {
     gfx_cmd_lines_from(lines, count);
 }
 
-function gfx_draw_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rot_deg: i32, a: i32): void {
+function gfx_draw_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
     gfx_cmd_sprite(handle, x, y, w, h, rot_deg, a);
 }
 
-function gfx_draw_sprites(cmds: i32[], count: i32): void {
-    gfx_cmd_sprites_from(cmds, count);
+function gfx_draw_sprites(cmd_i32: i32[], cmd_f32: f32[], count: i32): void {
+    gfx_cmd_sprites_from(cmd_i32, cmd_f32, count);
 }
 
 /* Text positioning uses a top-left origin, matching sprite placement. */
@@ -107,19 +107,17 @@ function draw_text_cached(font: i32, run_handle: i32, x: f32, y: f32, r: f32, g:
     gfx_cmd_text_cached(font, run_handle, x, y, r, g, b, a);
 }
 
-function gfx_window_width(): i32 { return host_window_w_px(); }
-function gfx_window_height(): i32 { return host_window_h_px(); }
 function gfx_window_resized(): bool { return host_resized(); }
-function gfx_logical_width(): i32 { return host_logical_w_px(); }
-function gfx_logical_height(): i32 { return host_logical_h_px(); }
-function gfx_native_width(): i32 { return host_native_w_px(); }
-function gfx_native_height(): i32 { return host_native_h_px(); }
-function gfx_drawable_width(): i32 { return host_drawable_w_px(); }
-function gfx_drawable_height(): i32 { return host_drawable_h_px(); }
-function gfx_safe_viewport_x(): i32 { return host_safe_x_px(); }
-function gfx_safe_viewport_y(): i32 { return host_safe_y_px(); }
-function gfx_safe_viewport_width(): i32 { return host_safe_w_px(); }
-function gfx_safe_viewport_height(): i32 { return host_safe_h_px(); }
+function gfx_logical_width(): f32 { return host_logical_width(); }
+function gfx_logical_height(): f32 { return host_logical_height(); }
+function gfx_native_width_px(): i32 { return host_native_w_px(); }
+function gfx_native_height_px(): i32 { return host_native_h_px(); }
+function gfx_drawable_width_px(): i32 { return host_drawable_w_px(); }
+function gfx_drawable_height_px(): i32 { return host_drawable_h_px(); }
+function gfx_safe_viewport_x(): f32 { return host_safe_x(); }
+function gfx_safe_viewport_y(): f32 { return host_safe_y(); }
+function gfx_safe_viewport_width(): f32 { return host_safe_width(); }
+function gfx_safe_viewport_height(): f32 { return host_safe_height(); }
 function gfx_content_scale(): f32 { return host_content_scale(); }
 function gfx_raster_scale(): f32 { return host_raster_scale(); }
 function gfx_display_generation(): i32 { return host_display_generation(); }
@@ -143,14 +141,10 @@ function input_pointer_id(index: i32): i32 { return host_pointer_id(index); }
 function input_pointer_is_down(index: i32): bool { return host_pointer_is_down(index); }
 function input_pointer_went_down(index: i32): bool { return host_pointer_went_down(index); }
 function input_pointer_went_up(index: i32): bool { return host_pointer_went_up(index); }
-function input_pointer_x_px(index: i32): f32 { return host_pointer_x_px(index); }
-function input_pointer_y_px(index: i32): f32 { return host_pointer_y_px(index); }
-function input_pointer_dx_px(index: i32): f32 { return host_pointer_dx_px(index); }
-function input_pointer_dy_px(index: i32): f32 { return host_pointer_dy_px(index); }
+function input_pointer_x_logical(index: i32): f32 { return host_pointer_x_logical(index); }
+function input_pointer_y_logical(index: i32): f32 { return host_pointer_y_logical(index); }
+function input_pointer_dx_logical(index: i32): f32 { return host_pointer_dx_logical(index); }
+function input_pointer_dy_logical(index: i32): f32 { return host_pointer_dy_logical(index); }
 function input_pointer_x_n(index: i32): f32 { return host_pointer_x_n(index); }
 function input_pointer_y_n(index: i32): f32 { return host_pointer_y_n(index); }
 function input_dropped_pointers(): i32 { return host_dropped_pointers(); }
-function input_viewport_x_px(): i32 { return host_viewport_x_px(); }
-function input_viewport_y_px(): i32 { return host_viewport_y_px(); }
-function input_viewport_w_px(): i32 { return host_viewport_w_px(); }
-function input_viewport_h_px(): i32 { return host_viewport_h_px(); }

@@ -1,6 +1,6 @@
 # Render parity gate
 
-`samples/render_parity` is the framework-owned gfx_cmd v1 conformance scene. It
+`samples/render_parity` is the framework-owned gfx_cmd v2 conformance scene. It
 does not depend on a game. One frame contains a clear, two overlapping lines,
 the procedural fallback sprite, opaque and translucent SVGs, a full-canvas SVG,
 a rotated/scaled sprite, direct UTF-8 text, cached text, and present.
@@ -25,8 +25,8 @@ cargo test -p stasis_compiler parity_corpus_covers_shared_lowering_shapes -- --n
 ```
 
 The `renderer_command_trace` case compiles
-`samples/render_parity/trace.stasis`. It asserts the exact gfx_cmd v1 trace
-`829981937` in JIT, links and executes the AOT object where the host linker is
+`samples/render_parity/trace.stasis`. It asserts the exact gfx_cmd v2 trace
+`3891526461` as an unsigned trace (`-403440835` as the Stasis `i32` result) in JIT, links and executes the AOT object where the host linker is
 available, and requires both results to match. Display and density metadata are
 present in the fixture but intentionally excluded from the backend-independent
 trace.

@@ -1375,13 +1375,11 @@ const PLAY_INPUT_MAX_POINTERS: usize = 8;
 const PLAY_INPUT_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const HOST_I_POINTER_COUNT: usize = 7;
 const HOST_I_DROPPED_POINTERS: usize = 8;
-const HOST_I_WINDOW_W_PX: usize = 1;
-const HOST_I_WINDOW_H_PX: usize = 2;
-const HOST_I_VIEWPORT_W_PX: usize = 5;
-const HOST_I_VIEWPORT_H_PX: usize = 6;
 const HOST_I_POINTER_BASE: usize = 544;
 const HOST_I_POINTER_STRIDE: usize = 4;
 const HOST_F_POINTER_STRIDE: usize = 6;
+const HOST_F_LOGICAL_W: usize = 50;
+const HOST_F_LOGICAL_H: usize = 51;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1561,22 +1559,13 @@ fn apply_play_input_frame(
     host_f32: &mut [f32],
 ) -> Result<(), String> {
     if host_i32.len() < HOST_I_POINTER_BASE + PLAY_INPUT_MAX_POINTERS * HOST_I_POINTER_STRIDE
-        || host_f32.len() < PLAY_INPUT_MAX_POINTERS * HOST_F_POINTER_STRIDE
+        || host_f32.len() <= HOST_F_LOGICAL_H
     {
         return Err("host frame buffers are too small for input-script pointers".to_string());
     }
-    // The graphics runtime pumps its first event snapshot while servicing the
-    // first host frame, after the viewport fields have already been copied.
-    // On that one Windows frame, the window dimensions are the exact viewport.
-    let mut viewport_w = host_i32[HOST_I_VIEWPORT_W_PX];
-    let mut viewport_h = host_i32[HOST_I_VIEWPORT_H_PX];
-    if viewport_w <= 0 {
-        viewport_w = host_i32[HOST_I_WINDOW_W_PX];
-    }
-    if viewport_h <= 0 {
-        viewport_h = host_i32[HOST_I_WINDOW_H_PX];
-    }
-    if viewport_w <= 0 || viewport_h <= 0 {
+    let viewport_w = host_f32[HOST_F_LOGICAL_W];
+    let viewport_h = host_f32[HOST_F_LOGICAL_H];
+    if viewport_w <= 0.0 || viewport_h <= 0.0 {
         return Err("input-script requires positive host viewport dimensions".to_string());
     }
 
@@ -1608,7 +1597,7 @@ fn apply_play_input_frame(
         }
     }
     for (slot, pointer) in timeline.pointers.iter().enumerate() {
-        if pointer.x > viewport_w as f32 || pointer.y > viewport_h as f32 {
+        if pointer.x > viewport_w || pointer.y > viewport_h {
             return Err(format!(
                 "input-script frame {frame} pointer {} is outside the {}x{} viewport",
                 pointer.id, viewport_w, viewport_h
@@ -1627,8 +1616,8 @@ fn apply_play_input_frame(
         host_f32[f32_base + 1] = pointer.y;
         host_f32[f32_base + 2] = dx;
         host_f32[f32_base + 3] = dy;
-        host_f32[f32_base + 4] = (pointer.x / viewport_w as f32).clamp(0.0, 1.0);
-        host_f32[f32_base + 5] = (pointer.y / viewport_h as f32).clamp(0.0, 1.0);
+        host_f32[f32_base + 4] = (pointer.x / viewport_w).clamp(0.0, 1.0);
+        host_f32[f32_base + 5] = (pointer.y / viewport_h).clamp(0.0, 1.0);
     }
     Ok(())
 }
@@ -1852,8 +1841,8 @@ fn run_play_in_process_inner(
     // Allocate and register all global buffers used by HostFrame / gfx_cmd + window requests.
     let mut host_i32: Vec<i32> = vec![0; 768];
     let mut host_f32: Vec<f32> = vec![0.0; 64];
-    let mut gfx_cmd_i32: Vec<i32> = vec![0; 34848];
-    let mut gfx_cmd_f32: Vec<f32> = vec![0.0; 92292];
+    let mut gfx_cmd_i32: Vec<i32> = vec![0; 18464];
+    let mut gfx_cmd_f32: Vec<f32> = vec![0.0; 108676];
     let mut gfx_cmd_u8: Vec<u8> = vec![0; 65536];
 
     let mut host_req_seq: i32 = 0;
@@ -3882,8 +3871,8 @@ mod tests {
         let mut timeline = validate_play_input_script(document).expect("valid static bounds");
         let mut host_i32 = vec![0; 768];
         let mut host_f32 = vec![0.0; 64];
-        host_i32[HOST_I_VIEWPORT_W_PX] = 180;
-        host_i32[HOST_I_VIEWPORT_H_PX] = 120;
+        host_f32[HOST_F_LOGICAL_W] = 180.0;
+        host_f32[HOST_F_LOGICAL_H] = 120.0;
         assert!(
             apply_play_input_frame(&mut timeline, 1, &mut host_i32, &mut host_f32)
                 .expect_err("viewport bound should fail")
@@ -3892,7 +3881,7 @@ mod tests {
     }
 
     #[test]
-    fn input_script_uses_window_dimensions_before_first_viewport_snapshot() {
+    fn input_script_uses_logical_dimensions_from_first_snapshot() {
         let document = PlayInputScriptDocument {
             version: 1,
             frames: vec![PlayInputFrame {
@@ -3903,11 +3892,11 @@ mod tests {
         let mut timeline = validate_play_input_script(document).expect("valid script");
         let mut host_i32 = vec![0; 768];
         let mut host_f32 = vec![0.0; 64];
-        host_i32[HOST_I_WINDOW_W_PX] = 360;
-        host_i32[HOST_I_WINDOW_H_PX] = 720;
+        host_f32[HOST_F_LOGICAL_W] = 360.0;
+        host_f32[HOST_F_LOGICAL_H] = 720.0;
 
         apply_play_input_frame(&mut timeline, 1, &mut host_i32, &mut host_f32)
-            .expect("window fallback should accept first-frame input");
+            .expect("logical dimensions should accept first-frame input");
         assert_eq!(host_f32[4], 0.5);
         assert_eq!(host_f32[5], 0.5);
     }
@@ -3924,8 +3913,8 @@ mod tests {
         let mut timeline = validate_play_input_script(document).expect("valid script");
         let mut host_i32 = vec![99; 768];
         let mut host_f32 = vec![99.0; 64];
-        host_i32[HOST_I_VIEWPORT_W_PX] = 180;
-        host_i32[HOST_I_VIEWPORT_H_PX] = 120;
+        host_f32[HOST_F_LOGICAL_W] = 180.0;
+        host_f32[HOST_F_LOGICAL_H] = 120.0;
 
         apply_play_input_frame(&mut timeline, 1, &mut host_i32, &mut host_f32).expect("frame one");
         assert_eq!(host_i32[HOST_I_POINTER_COUNT], 1);
@@ -4040,15 +4029,16 @@ mod tests {
     fn shipping_renderers_share_one_versioned_sdl_command_process() {
         let runtime_cmake = STASIS_RUNTIME_CMAKE.replace("\r\n", "\n");
         for required in [
-            "STASIS_RENDER_V1_MAGIC 0x47584631",
-            "STASIS_RENDER_V1_VERSION 1",
-            "STASIS_RENDER_V1_TRACE_VERSION 1",
+            "STASIS_RENDER_V2_MAGIC 0x47584631",
+            "STASIS_RENDER_V2_VERSION 2",
+            "STASIS_RENDER_V2_TRACE_VERSION 2",
+            "STASIS_RENDER_SPRITE_F32_STRIDE 4",
             "STASIS_RENDER_I32_COUNT",
             "STASIS_RENDER_F32_COUNT",
-            "stasis_render_v1_validate",
-            "stasis_render_v1_validation_name",
-            "stasis_render_v1_is_valid",
-            "stasis_render_v1_trace",
+            "stasis_render_v2_validate",
+            "stasis_render_v2_validation_name",
+            "stasis_render_v2_is_valid",
+            "stasis_render_v2_trace",
         ] {
             assert!(
                 STASIS_RENDER_CONTRACT_HEADER.contains(required),
@@ -4062,7 +4052,7 @@ mod tests {
             "shipping runtime should default to the canonical SDL backend"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("stasis_render_v1_validate(cmd_i32, cmd_f32)")
+            STASIS_GRAPHICS_SOURCE.contains("stasis_render_v2_validate(cmd_i32, cmd_f32)")
                 && STASIS_GRAPHICS_SOURCE.contains("STASIS_RENDER_FLAG_PRESENT")
                 && STASIS_GRAPHICS_SOURCE
                     .contains("SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, \"linear\")")

@@ -1,11 +1,11 @@
-function @extern("stasis_jit_render_v1_trace") native_render_trace(
+function @extern("stasis_jit_render_v2_trace") native_render_trace(
     cmd_i32: i32[], cmd_i32_len: i32,
     cmd_f32: f32[], cmd_f32_len: i32,
     cmd_u8: u8[], cmd_u8_len: i32
 ): i32;
 
-global cmd_i32: i32[34848];
-global cmd_f32: f32[92292];
+global cmd_i32: i32[18464];
+global cmd_f32: f32[108676];
 global cmd_u8: u8[65536];
 
 function main(): i32 {
@@ -19,5 +19,5 @@ function main(): i32 {
 
     build_parity_frame(cmd_i32, cmd_f32, cmd_u8, 3, 1, 2, 1, 1);
 
-    return native_render_trace(cmd_i32, 34848, cmd_f32, 92292, cmd_u8, 65536);
+    return native_render_trace(cmd_i32, 18464, cmd_f32, 108676, cmd_u8, 65536);
 }

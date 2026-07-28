@@ -3604,8 +3604,8 @@ void stasis_jit_upsert_string_literal(int32_t id, const char* value);\n",
     source.push_str(
         "STASIS_EXPORT int32_t host_i32[768] = {0};\n\
 STASIS_EXPORT float host_f32[64] = {0};\n\
-STASIS_EXPORT int32_t gfx_cmd_i32[34848] = {0};\n\
-STASIS_EXPORT float gfx_cmd_f32[92292] = {0};\n\
+STASIS_EXPORT int32_t gfx_cmd_i32[18464] = {0};\n\
+STASIS_EXPORT float gfx_cmd_f32[108676] = {0};\n\
 STASIS_EXPORT uint8_t gfx_cmd_u8[65536] = {0};\n\
 STASIS_EXPORT int32_t host_req_seq = 0;\n\
 STASIS_EXPORT int32_t host_req_flags = 0;\n\
@@ -3621,10 +3621,10 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
             "stasis_jit_register_global_f32_array({host_f32_hash}, 0, host_f32, 64);"
         ),
         format!(
-            "stasis_jit_register_global_i32_array({gfx_cmd_i32_hash}, 0, gfx_cmd_i32, 34848);"
+            "stasis_jit_register_global_i32_array({gfx_cmd_i32_hash}, 0, gfx_cmd_i32, 18464);"
         ),
         format!(
-            "stasis_jit_register_global_f32_array({gfx_cmd_f32_hash}, 0, gfx_cmd_f32, 92292);"
+            "stasis_jit_register_global_f32_array({gfx_cmd_f32_hash}, 0, gfx_cmd_f32, 108676);"
         ),
         format!(
             "stasis_jit_register_global_u8_array({gfx_cmd_u8_hash}, 0, gfx_cmd_u8, 65536);"
@@ -3682,25 +3682,23 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
     if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
         source.push_str(
             "STASIS_EXPORT void stasis_init(int width, int height) {\n\
-    host_i32[1] = width;\n\
-    host_i32[2] = height;\n\
-    host_i32[5] = width;\n\
-    host_i32[6] = height;\n\
     host_i32[12] = width;\n\
     host_i32[13] = height;\n\
-    host_i32[14] = 2;\n\
-    host_i32[20] = width;\n\
-    host_i32[21] = height;\n\
+    host_i32[14] = 3;\n\
     host_i32[22] = width;\n\
     host_i32[23] = height;\n\
     host_i32[24] = width;\n\
     host_i32[25] = height;\n\
-    host_i32[28] = width;\n\
-    host_i32[29] = height;\n\
     host_i32[30] = 1;\n\
     host_i32[31] = 1;\n\
     host_f32[48] = 1.0f;\n\
     host_f32[49] = 1.0f;\n\
+    host_f32[50] = (float)width;\n\
+    host_f32[51] = (float)height;\n\
+    host_f32[52] = 0.0f;\n\
+    host_f32[53] = 0.0f;\n\
+    host_f32[54] = (float)width;\n\
+    host_f32[55] = (float)height;\n\
     host_req_window_w_px = width;\n\
     host_req_window_h_px = height;\n\
     main();\n\
@@ -4361,7 +4359,8 @@ mod tests {
 
         assert!(!source.contains("StasisDirectStorageSlot"));
         assert!(source.contains("STASIS_EXPORT void stasis_init(int width, int height)"));
-        assert!(source.contains("host_i32[1] = width;"));
+        assert!(source.contains("host_i32[14] = 3;"));
+        assert!(source.contains("host_f32[50] = (float)width;"));
         assert!(source.contains("STASIS_EXPORT void stasis_tick(float dt)"));
         assert!(source.contains("host_i32[10] = host_i32[10] + 1;"));
         assert!(source.contains("STASIS_EXPORT void stasis_render(void)"));
@@ -5618,7 +5617,12 @@ mod tests {
             vec![source],
             TargetMode::JitDev,
         ));
-        assert_eq!(result.status, CompileStatus::Success);
+        assert_eq!(
+            result.status,
+            CompileStatus::Success,
+            "brickout diagnostics: {:?}",
+            result.diagnostics
+        );
         let jit_overrides = result
             .jit_code_ptr_overrides
             .as_ref()
@@ -5725,7 +5729,12 @@ mod tests {
             vec![source],
             TargetMode::JitDev,
         ));
-        assert_eq!(result.status, CompileStatus::Success);
+        assert_eq!(
+            result.status,
+            CompileStatus::Success,
+            "brickout diagnostics: {:?}",
+            result.diagnostics
+        );
         let package = backend
             .last_jit_engine_package()
             .expect("jit engine package should be present");
@@ -6056,8 +6065,12 @@ mod tests {
         let store_ptr = library
             .symbol_address("stasis_jit_global_i32_array_store")
             .expect("resolve host_i32 store");
+        let store_f32_ptr = library
+            .symbol_address("stasis_jit_global_f32_array_store")
+            .expect("resolve host_f32 store");
 
         let host_i32 = hash_global_path("host_i32");
+        let host_f32 = hash_global_path("host_f32");
         let field = 0;
         let store = |index: i32, value: i32| {
             stasis_dynload::invoke_i32_i32_i32_i32_to_void(
@@ -6065,17 +6078,27 @@ mod tests {
             )
             .expect("invoke host_i32 store");
         };
+        let store_f32 = |index: i32, value: f32| {
+            stasis_dynload::invoke_i32_i32_i32_f32_to_void(
+                store_f32_ptr,
+                host_f32,
+                field,
+                index,
+                value,
+            )
+            .expect("invoke host_f32 store");
+        };
 
         // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
         // Indices from src/runtime/host_frame.stasis.
         let t0_ms: i32 = 12345;
         store(0, t0_ms); // HOST_I_TIME_MS
-        store(1, 360); // HOST_I_WINDOW_W_PX
-        store(2, 720); // HOST_I_WINDOW_H_PX
-        store(3, 0); // HOST_I_VIEWPORT_X_PX
-        store(4, 0); // HOST_I_VIEWPORT_Y_PX
-        store(5, 360); // HOST_I_VIEWPORT_W_PX
-        store(6, 720); // HOST_I_VIEWPORT_H_PX
+        store_f32(50, 360.0); // HOST_F_LOGICAL_W
+        store_f32(51, 720.0); // HOST_F_LOGICAL_H
+        store_f32(52, 0.0); // HOST_F_SAFE_X
+        store_f32(53, 0.0); // HOST_F_SAFE_Y
+        store_f32(54, 360.0); // HOST_F_SAFE_W
+        store_f32(55, 720.0); // HOST_F_SAFE_H
         store(7, 0); // HOST_I_POINTER_COUNT
         store(8, 0); // HOST_I_DROPPED_POINTERS
         store(9, 0); // HOST_I_QUIT_REQUESTED
@@ -6174,21 +6197,25 @@ mod tests {
         assert_ne!(tick_ptr, 0);
 
         let host_i32 = hash_global_path("host_i32");
+        let host_f32 = hash_global_path("host_f32");
         let field = 0;
         let store = |index: i32, value: i32| {
             stasis_dynload::stasis_jit_global_i32_array_store(host_i32, field, index, value);
+        };
+        let store_f32 = |index: i32, value: f32| {
+            stasis_dynload::stasis_jit_global_f32_array_store(host_f32, field, index, value);
         };
 
         // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
         // Indices from src/host_frame.stasis.
         let t0_ms: i32 = 12345;
         store(0, t0_ms); // HOST_I_TIME_MS
-        store(1, 360); // HOST_I_WINDOW_W_PX
-        store(2, 720); // HOST_I_WINDOW_H_PX
-        store(3, 0); // HOST_I_VIEWPORT_X_PX
-        store(4, 0); // HOST_I_VIEWPORT_Y_PX
-        store(5, 360); // HOST_I_VIEWPORT_W_PX
-        store(6, 720); // HOST_I_VIEWPORT_H_PX
+        store_f32(50, 360.0); // HOST_F_LOGICAL_W
+        store_f32(51, 720.0); // HOST_F_LOGICAL_H
+        store_f32(52, 0.0); // HOST_F_SAFE_X
+        store_f32(53, 0.0); // HOST_F_SAFE_Y
+        store_f32(54, 360.0); // HOST_F_SAFE_W
+        store_f32(55, 720.0); // HOST_F_SAFE_H
         store(7, 0); // HOST_I_POINTER_COUNT
         store(8, 0); // HOST_I_DROPPED_POINTERS
         store(9, 0); // HOST_I_QUIT_REQUESTED
@@ -6520,8 +6547,12 @@ mod tests {
         let store_ptr = library
             .symbol_address("stasis_jit_global_i32_array_store")
             .expect("resolve host_i32 store");
+        let store_f32_ptr = library
+            .symbol_address("stasis_jit_global_f32_array_store")
+            .expect("resolve host_f32 store");
 
         let host_i32 = hash_global_path("host_i32");
+        let host_f32 = hash_global_path("host_f32");
         let field = 0;
         let store = |index: i32, value: i32| {
             stasis_dynload::invoke_i32_i32_i32_i32_to_void(
@@ -6529,17 +6560,27 @@ mod tests {
             )
             .expect("invoke host_i32 store");
         };
+        let store_f32 = |index: i32, value: f32| {
+            stasis_dynload::invoke_i32_i32_i32_f32_to_void(
+                store_f32_ptr,
+                host_f32,
+                field,
+                index,
+                value,
+            )
+            .expect("invoke host_f32 store");
+        };
 
         // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
         // Indices from src/host_frame.stasis.
         let t0_ms: i32 = 12345;
         store(0, t0_ms); // HOST_I_TIME_MS
-        store(1, 360); // HOST_I_WINDOW_W_PX
-        store(2, 720); // HOST_I_WINDOW_H_PX
-        store(3, 0); // HOST_I_VIEWPORT_X_PX
-        store(4, 0); // HOST_I_VIEWPORT_Y_PX
-        store(5, 360); // HOST_I_VIEWPORT_W_PX
-        store(6, 720); // HOST_I_VIEWPORT_H_PX
+        store_f32(50, 360.0); // HOST_F_LOGICAL_W
+        store_f32(51, 720.0); // HOST_F_LOGICAL_H
+        store_f32(52, 0.0); // HOST_F_SAFE_X
+        store_f32(53, 0.0); // HOST_F_SAFE_Y
+        store_f32(54, 360.0); // HOST_F_SAFE_W
+        store_f32(55, 720.0); // HOST_F_SAFE_H
         store(7, 0); // HOST_I_POINTER_COUNT
         store(8, 0); // HOST_I_DROPPED_POINTERS
         store(9, 0); // HOST_I_QUIT_REQUESTED
@@ -6872,8 +6913,12 @@ mod tests {
         let store_ptr = library
             .symbol_address("stasis_jit_global_i32_array_store")
             .expect("resolve host_i32 store");
+        let store_f32_ptr = library
+            .symbol_address("stasis_jit_global_f32_array_store")
+            .expect("resolve host_f32 store");
 
         let host_i32 = hash_global_path("host_i32");
+        let host_f32 = hash_global_path("host_f32");
         let field = 0;
         let store = |index: i32, value: i32| {
             stasis_dynload::invoke_i32_i32_i32_i32_to_void(
@@ -6881,17 +6926,27 @@ mod tests {
             )
             .expect("invoke host_i32 store");
         };
+        let store_f32 = |index: i32, value: f32| {
+            stasis_dynload::invoke_i32_i32_i32_f32_to_void(
+                store_f32_ptr,
+                host_f32,
+                field,
+                index,
+                value,
+            )
+            .expect("invoke host_f32 store");
+        };
 
         // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
         // Indices from src/host_frame.stasis.
         let t0_ms: i32 = 12345;
         store(0, t0_ms); // HOST_I_TIME_MS
-        store(1, 360); // HOST_I_WINDOW_W_PX
-        store(2, 720); // HOST_I_WINDOW_H_PX
-        store(3, 0); // HOST_I_VIEWPORT_X_PX
-        store(4, 0); // HOST_I_VIEWPORT_Y_PX
-        store(5, 360); // HOST_I_VIEWPORT_W_PX
-        store(6, 720); // HOST_I_VIEWPORT_H_PX
+        store_f32(50, 360.0); // HOST_F_LOGICAL_W
+        store_f32(51, 720.0); // HOST_F_LOGICAL_H
+        store_f32(52, 0.0); // HOST_F_SAFE_X
+        store_f32(53, 0.0); // HOST_F_SAFE_Y
+        store_f32(54, 360.0); // HOST_F_SAFE_W
+        store_f32(55, 720.0); // HOST_F_SAFE_H
         store(7, 0); // HOST_I_POINTER_COUNT
         store(8, 0); // HOST_I_DROPPED_POINTERS
         store(9, 0); // HOST_I_QUIT_REQUESTED

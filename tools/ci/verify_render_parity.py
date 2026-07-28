@@ -358,7 +358,7 @@ def verify_runtime_evidence(
 ) -> None:
     log = _read_runtime_log(log_path)
     trace_match = re.search(
-        r"Stasis render contract v1 trace=(\d+)\s+flags=3\s+lines=2\s+sprites=5\s+text=2",
+        r"Stasis render contract v2 trace=(\d+)\s+flags=3\s+lines=2\s+sprites=5\s+text=2",
         log,
     )
     if trace_match is None or int(trace_match.group(1)) != int(manifest["command_trace"]):

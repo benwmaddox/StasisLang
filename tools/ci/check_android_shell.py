@@ -1284,7 +1284,8 @@ def main() -> int:
     assert "gamePreview.touchActive()" in activity
     assert "MotionEvent" in activity
     assert "LINE_F32_STRIDE = 8" in preview_renderer
-    assert "SPRITE_I32_STRIDE = 7" in preview_renderer
+    assert "SPRITE_I32_STRIDE = 3" in preview_renderer
+    assert "SPRITE_F32_STRIDE = 4" in preview_renderer
     assert "TEXT_I32_STRIDE = 3" in preview_renderer
     assert "drawColorBatch" in preview_renderer
     assert "drawPreparedTextureBatch" in preview_renderer
@@ -1409,7 +1410,7 @@ def main() -> int:
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
     assert "bytes_i32 < (jlong)(STASIS_RENDER_I32_COUNT * sizeof(int32_t))" in native
-    assert 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v1")' in native
+    assert 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v2")' in native
     assert "#define STASIS_RENDER_COMMAND_STRIDE 13" in native
     assert '"Render.command_schema_version"' in native
     assert '"Render.command" #index "_rotation_degrees"' in native

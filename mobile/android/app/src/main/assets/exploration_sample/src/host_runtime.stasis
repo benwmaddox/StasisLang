@@ -1,9 +1,7 @@
 @link("stasis_graphics");
 
-const HOST_I_WINDOW_W: i32 = 1;
-const HOST_I_WINDOW_H: i32 = 2;
-const HOST_I_VIEWPORT_W: i32 = 5;
-const HOST_I_VIEWPORT_H: i32 = 6;
+const HOST_F_LOGICAL_W: i32 = 50;
+const HOST_F_LOGICAL_H: i32 = 51;
 const HOST_I_POINTER_COUNT: i32 = 7;
 const HOST_I_POINTER_BASE: i32 = 544;
 const HOST_I_POINTER_STRIDE: i32 = 4;
@@ -19,7 +17,7 @@ global host_i32: i32[768];
 global host_f32: f32[64];
 
 const GFX_MAGIC: i32 = 1196967473;
-const GFX_VERSION: i32 = 1;
+const GFX_VERSION: i32 = 2;
 const GFX_FLAG_CLEAR: i32 = 1;
 const GFX_FLAG_PRESENT: i32 = 2;
 const GFX_I_FLAGS: i32 = 2;
@@ -27,8 +25,9 @@ const GFX_I_LINE_COUNT: i32 = 3;
 const GFX_I_SPRITE_COUNT: i32 = 4;
 const GFX_I_SPRITE_BASE: i32 = 32;
 const GFX_F_LINE_BASE: i32 = 4;
-global gfx_cmd_i32: i32[34848];
-global gfx_cmd_f32: f32[92292];
+const GFX_F_SPRITE_BASE: i32 = 80004;
+global gfx_cmd_i32: i32[18464];
+global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
 
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
@@ -40,9 +39,7 @@ function exploration_host_request_window(): void {
 }
 
 function exploration_host_sync_input(): void {
-    Input.screen_w = host_i32[HOST_I_VIEWPORT_W]; Input.screen_h = host_i32[HOST_I_VIEWPORT_H];
-    if (Input.screen_w <= 0) { Input.screen_w = host_i32[HOST_I_WINDOW_W]; }
-    if (Input.screen_h <= 0) { Input.screen_h = host_i32[HOST_I_WINDOW_H]; }
+    Input.screen_w.from_f32(host_f32[HOST_F_LOGICAL_W]); Input.screen_h.from_f32(host_f32[HOST_F_LOGICAL_H]);
     if (Input.screen_w <= 0) { Input.screen_w = 360; }
     if (Input.screen_h <= 0) { Input.screen_h = 640; }
     Input.touch_active = 0;
@@ -66,10 +63,11 @@ function exploration_host_begin_frame(): void {
 function exploration_host_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rotation: i32, alpha: i32): void {
     let index: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
     if (index >= 4096) { return; }
-    let base: i32 = GFX_I_SPRITE_BASE + index * 7;
-    gfx_cmd_i32[base] = handle; gfx_cmd_i32[base + 1] = x; gfx_cmd_i32[base + 2] = y;
-    gfx_cmd_i32[base + 3] = w; gfx_cmd_i32[base + 4] = h;
-    gfx_cmd_i32[base + 5] = rotation; gfx_cmd_i32[base + 6] = alpha;
+    let i_base: i32 = GFX_I_SPRITE_BASE + index * 3;
+    let f_base: i32 = GFX_F_SPRITE_BASE + index * 4;
+    gfx_cmd_i32[i_base] = handle; gfx_cmd_i32[i_base + 1] = rotation; gfx_cmd_i32[i_base + 2] = alpha;
+    gfx_cmd_f32[f_base].from_i32(x); gfx_cmd_f32[f_base + 1].from_i32(y);
+    gfx_cmd_f32[f_base + 2].from_i32(w); gfx_cmd_f32[f_base + 3].from_i32(h);
     gfx_cmd_i32[GFX_I_SPRITE_COUNT] = index + 1;
 }
 

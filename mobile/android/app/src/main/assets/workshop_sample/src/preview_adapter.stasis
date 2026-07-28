@@ -1,22 +1,23 @@
 @link("stasis_graphics");
 global host_i32: i32[768];
 global host_f32: f32[64];
-global gfx_cmd_i32: i32[34848];
-global gfx_cmd_f32: f32[92292];
+global gfx_cmd_i32: i32[18464];
+global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
 global PongHost { ball_sprite: i32; paddle_sprite: i32; center_sprite: i32; }
 extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 
 function pong_host_sprite(index: i32, handle: i32, x: i32, y: i32, w: i32, h: i32): void {
-    let base: i32 = 32 + index * 7;
-    gfx_cmd_i32[base] = handle; gfx_cmd_i32[base + 1] = x; gfx_cmd_i32[base + 2] = y;
-    gfx_cmd_i32[base + 3] = w; gfx_cmd_i32[base + 4] = h;
-    gfx_cmd_i32[base + 5] = 0; gfx_cmd_i32[base + 6] = 255;
+    let i_base: i32 = 32 + index * 3;
+    let f_base: i32 = 80004 + index * 4;
+    gfx_cmd_i32[i_base] = handle; gfx_cmd_i32[i_base + 1] = 0; gfx_cmd_i32[i_base + 2] = 255;
+    gfx_cmd_f32[f_base].from_i32(x); gfx_cmd_f32[f_base + 1].from_i32(y);
+    gfx_cmd_f32[f_base + 2].from_i32(w); gfx_cmd_f32[f_base + 3].from_i32(h);
 }
 
 function pong_host_render(): void {
     pong_game_render();
-    gfx_cmd_i32[0] = 1196967473; gfx_cmd_i32[1] = 1; gfx_cmd_i32[2] = 1;
+    gfx_cmd_i32[0] = 1196967473; gfx_cmd_i32[1] = 2; gfx_cmd_i32[2] = 1;
     gfx_cmd_i32[3] = 0; gfx_cmd_i32[4] = 0; gfx_cmd_i32[7] = 0; gfx_cmd_i32[9] = 0;
     gfx_cmd_f32[0] = 0.0588; gfx_cmd_f32[1] = 0.0667;
     gfx_cmd_f32[2] = 0.1098; gfx_cmd_f32[3] = 1.0;
@@ -24,8 +25,8 @@ function pong_host_render(): void {
     pong_host_sprite(1, PongHost.paddle_sprite, Render.command2_x, Render.command2_y, Render.command2_w, Render.command2_h);
     pong_host_sprite(2, PongHost.center_sprite, Render.command4_x, Render.command4_y, Render.command4_w, Render.command4_h);
     pong_host_sprite(3, PongHost.ball_sprite, Render.command3_x, Render.command3_y, Render.command3_w, Render.command3_h);
-    let ball_base: i32 = 53;
-    gfx_cmd_i32[ball_base + 5] = (GameState.tick_count * 3) % 360;
+    let ball_base: i32 = 41;
+    gfx_cmd_i32[ball_base + 1] = (GameState.tick_count * 3) % 360;
     gfx_cmd_i32[4] = 4;
     gfx_cmd_i32[2] = 3;
 }
@@ -40,7 +41,7 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    Input.screen_w = host_i32[5]; Input.screen_h = host_i32[6];
+    Input.screen_w.from_f32(host_f32[50]); Input.screen_h.from_f32(host_f32[51]);
     Input.touch_active = host_i32[545];
     let touch_x: i32; touch_x.from_f32(host_f32[0]); Input.touch_x = touch_x;
     let touch_y: i32; touch_y.from_f32(host_f32[1]); Input.touch_y = touch_y;

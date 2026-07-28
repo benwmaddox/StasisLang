@@ -108,7 +108,7 @@ typedef struct CodexBridgeApi {
 } CodexBridgeApi;
 
 static CodexBridgeApi codex_bridge_api = {0};
-#if STASIS_ANDROID_PUBLISHED_AOT && !STASIS_RENDER_V1_DIRECT
+#if STASIS_ANDROID_PUBLISHED_AOT && !STASIS_RENDER_V2_DIRECT
 typedef struct PublishedRenderCommand {
     int32_t kind;
     int32_t x;
@@ -314,7 +314,7 @@ static int stasis_published_run_tick_frame(int touch_x, int touch_y, int touch_a
     return 0;
 }
 
-static int stasis_published_run_tick_frame_v1(
+static int stasis_published_run_tick_frame_v2(
         int touch_x, int touch_y, int touch_active, int screen_w, int screen_h,
         int32_t *out_i32, float *out_f32, uint8_t *out_u8) {
     int32_t legacy[STASIS_RENDER_FRAME_I32_CAPACITY] = {0};
@@ -323,8 +323,8 @@ static int stasis_published_run_tick_frame_v1(
             legacy, STASIS_RENDER_FRAME_I32_CAPACITY);
     if (status != 0) return status;
     (void)out_u8;
-    out_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_V1_MAGIC;
-    out_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_V1_VERSION;
+    out_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_V2_MAGIC;
+    out_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_V2_VERSION;
     out_i32[STASIS_RENDER_I_FLAGS] = STASIS_RENDER_FLAG_CLEAR | STASIS_RENDER_FLAG_PRESENT;
     out_i32[STASIS_RENDER_I_LINE_COUNT] = 0;
     out_i32[STASIS_RENDER_I_SPRITE_COUNT] = 0;
@@ -369,15 +369,17 @@ static int stasis_published_run_tick_frame_v1(
         } else if (legacy[base] == 2) {
             int32_t sprite = out_i32[STASIS_RENDER_I_SPRITE_COUNT];
             if (sprite >= STASIS_RENDER_MAX_SPRITES) continue;
-            int32_t sprite_base = STASIS_RENDER_I_SPRITE_BASE +
+            int32_t sprite_i32_base = STASIS_RENDER_I_SPRITE_BASE +
                     sprite * STASIS_RENDER_SPRITE_I32_STRIDE;
-            out_i32[sprite_base + 0] = legacy[base + 6];
-            out_i32[sprite_base + 1] = legacy[base + 1];
-            out_i32[sprite_base + 2] = legacy[base + 2];
-            out_i32[sprite_base + 3] = legacy[base + 3];
-            out_i32[sprite_base + 4] = legacy[base + 4];
-            out_i32[sprite_base + 5] = legacy[base + 7];
-            out_i32[sprite_base + 6] = legacy[base + 8];
+            int32_t sprite_f32_base = STASIS_RENDER_F_SPRITE_BASE +
+                    sprite * STASIS_RENDER_SPRITE_F32_STRIDE;
+            out_i32[sprite_i32_base + 0] = legacy[base + 6];
+            out_i32[sprite_i32_base + 1] = legacy[base + 7];
+            out_i32[sprite_i32_base + 2] = legacy[base + 8];
+            out_f32[sprite_f32_base + 0] = (float)legacy[base + 1];
+            out_f32[sprite_f32_base + 1] = (float)legacy[base + 2];
+            out_f32[sprite_f32_base + 2] = (float)legacy[base + 3];
+            out_f32[sprite_f32_base + 3] = (float)legacy[base + 4];
             out_i32[STASIS_RENDER_I_SPRITE_COUNT] = sprite + 1;
         }
     }
@@ -385,7 +387,7 @@ static int stasis_published_run_tick_frame_v1(
 }
 #endif
 
-#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V1_DIRECT
+#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V2_DIRECT
 #define STASIS_PUBLISHED_MAX_FONTS 64
 #define STASIS_PUBLISHED_MAX_TEXT_RUNS 4096
 typedef struct PublishedFontResource { char path[256]; int32_t size; } PublishedFontResource;
@@ -497,10 +499,10 @@ int stasis_get_time_us(void) {
             ? (int)(now.tv_sec * 1000000 + now.tv_nsec / 1000) : 0;
 }
 
-static int published_v1_initialized;
-static int32_t *published_v1_i32;
-static float *published_v1_f32;
-static uint8_t *published_v1_u8;
+static int published_v2_initialized;
+static int32_t *published_v2_i32;
+static float *published_v2_f32;
+static uint8_t *published_v2_u8;
 static int32_t published_host_i32[768];
 static float published_host_f32[64];
 static int32_t published_previous_touch_x;
@@ -568,28 +570,18 @@ static void stasis_published_write_host_frame(
     int32_t was_down = published_has_previous_input && published_previous_touch_active != 0;
     int32_t is_down = touch_active != 0;
     published_host_i32[0] = stasis_get_time_ms();
-    published_host_i32[1] = logical_w;
-    published_host_i32[2] = logical_h;
-    published_host_i32[5] = logical_w;
-    published_host_i32[6] = logical_h;
     published_host_i32[7] = 1;
     published_host_i32[11] = display_changed;
     published_host_i32[12] = screen_w;
     published_host_i32[13] = screen_h;
-    published_host_i32[14] = 2;
+    published_host_i32[14] = 3;
     published_host_i32[16] = 60;
     published_host_i32[17] = 1;
     published_host_i32[19] = stasis_get_time_us();
-    published_host_i32[20] = logical_w;
-    published_host_i32[21] = logical_h;
     published_host_i32[22] = screen_w;
     published_host_i32[23] = screen_h;
     published_host_i32[24] = screen_w;
     published_host_i32[25] = screen_h;
-    published_host_i32[26] = 0;
-    published_host_i32[27] = 0;
-    published_host_i32[28] = logical_w;
-    published_host_i32[29] = logical_h;
     published_host_i32[30] = published_display_generation;
     published_host_i32[31] = published_density_generation;
     published_host_i32[544] = 0;
@@ -604,28 +596,34 @@ static void stasis_published_write_host_frame(
     published_host_f32[5] = logical_h > 0 ? logical_touch_y / (float)logical_h : 0.0f;
     published_host_f32[48] = published_display_metrics.content_scale;
     published_host_f32[49] = published_display_metrics.raster_scale;
+    published_host_f32[50] = (float)logical_w;
+    published_host_f32[51] = (float)logical_h;
+    published_host_f32[52] = 0.0f;
+    published_host_f32[53] = 0.0f;
+    published_host_f32[54] = (float)logical_w;
+    published_host_f32[55] = (float)logical_h;
     published_previous_touch_x = touch_x;
     published_previous_touch_y = touch_y;
     published_previous_touch_active = touch_active;
     published_has_previous_input = 1;
 }
 
-static int stasis_published_run_tick_frame_v1(
+static int stasis_published_run_tick_frame_v2(
         int touch_x, int touch_y, int touch_active, int screen_w, int screen_h,
         int32_t *out_i32, float *out_f32, uint8_t *out_u8) {
-    if (published_v1_initialized &&
-            (out_i32 != published_v1_i32 || out_f32 != published_v1_f32 || out_u8 != published_v1_u8)) {
-        published_v1_initialized = 0;
-        published_v1_i32 = NULL;
-        published_v1_f32 = NULL;
-        published_v1_u8 = NULL;
+    if (published_v2_initialized &&
+            (out_i32 != published_v2_i32 || out_f32 != published_v2_f32 || out_u8 != published_v2_u8)) {
+        published_v2_initialized = 0;
+        published_v2_i32 = NULL;
+        published_v2_f32 = NULL;
+        published_v2_u8 = NULL;
         published_font_count = 0;
         published_text_run_count = 0;
         published_has_previous_input = 0;
         memset(published_host_i32, 0, sizeof(published_host_i32));
         memset(published_host_f32, 0, sizeof(published_host_f32));
     }
-    if (!published_v1_initialized) {
+    if (!published_v2_initialized) {
         published_resource_error[0] = '\0';
         stasis_mobile_aot_reset();
         STASIS_AOT_BIND_RUNTIME_GLOBALS();
@@ -639,19 +637,19 @@ static int stasis_published_run_tick_frame_v1(
                 stasis_published_hash_path("gfx_cmd_f32"), 0, out_f32, STASIS_RENDER_F32_COUNT);
         stasis_jit_register_global_u8_array(
                 stasis_published_hash_path("gfx_cmd_u8"), 0, out_u8, STASIS_RENDER_U8_COUNT);
-        published_v1_i32 = out_i32;
-        published_v1_f32 = out_f32;
-        published_v1_u8 = out_u8;
+        published_v2_i32 = out_i32;
+        published_v2_f32 = out_f32;
+        published_v2_u8 = out_u8;
         stasis_published_write_host_frame(touch_x, touch_y, touch_active, screen_w, screen_h);
         if (STASIS_AOT_MAIN() != 0) return -1;
         if (published_resource_error[0] != '\0') return -1;
-        published_v1_initialized = 1;
+        published_v2_initialized = 1;
     }
     stasis_published_write_host_frame(touch_x, touch_y, touch_active, screen_w, screen_h);
     if (STASIS_AOT_TICK() != 0 || STASIS_AOT_RENDER() != 0) return -1;
     if (published_resource_error[0] != '\0') return -1;
     published_host_i32[10] += 1;
-    if (!stasis_render_v1_is_valid(out_i32)) return -1;
+    if (!stasis_render_v2_is_valid(out_i32)) return -1;
     out_i32[STASIS_RENDER_I_LOGICAL_W] = published_display_metrics.logical_w;
     out_i32[STASIS_RENDER_I_LOGICAL_H] = published_display_metrics.logical_h;
     out_i32[STASIS_RENDER_I_NATIVE_W] = published_display_metrics.native_w;
@@ -1312,7 +1310,7 @@ static RustBridgeApi *load_rust_bridge_api(void) {
     rust_bridge_api.run_tick =
             (stasis_android_bridge_run_tick_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick");
     rust_bridge_api.run_tick_frame =
-            (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v1");
+            (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v2");
     rust_bridge_api.last_frame_error =
             (stasis_android_bridge_last_frame_error_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_last_frame_error");
     rust_bridge_api.inspect_runtime_state =
@@ -1672,7 +1670,7 @@ JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeResolveCachedText(
         JNIEnv *env, jclass activity_class, jstring project_root, jint handle) {
     (void)activity_class;
-#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V1_DIRECT
+#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V2_DIRECT
     (void)project_root;
     if (handle <= 0 || handle > published_text_run_count) {
         return (*env)->NewStringUTF(env,
@@ -1721,7 +1719,7 @@ JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeResolveFont(
         JNIEnv *env, jclass activity_class, jstring project_root, jint handle) {
     (void)activity_class;
-#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V1_DIRECT
+#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V2_DIRECT
     (void)project_root;
     if (handle <= 0 || handle > published_font_count) {
         return (*env)->NewStringUTF(env,
@@ -1838,7 +1836,7 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
     (void)activity_class;
 #if STASIS_ANDROID_PUBLISHED_AOT
     (void)project_root;
-#if !STASIS_RENDER_V1_DIRECT
+#if !STASIS_RENDER_V2_DIRECT
     stasis_published_init_globals();
 #endif
     return (*env)->NewStringUTF(env, "CompilePlanned: reload=PublishedAot files=0 functions=0 hash=0000000000000000 manifest=published_aot state=compiled status=0");
@@ -1986,7 +1984,7 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
 
 #if STASIS_ANDROID_PUBLISHED_AOT
     (void)project_root;
-    int status = stasis_published_run_tick_frame_v1(
+    int status = stasis_published_run_tick_frame_v2(
             (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h,
             values_i32, values_f32, values_u8);
 #else
@@ -2011,9 +2009,9 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
         if (last_traced_frame != values_i32 ||
                 last_display_generation != values_i32[STASIS_RENDER_I_DISPLAY_GENERATION] ||
                 last_density_generation != values_i32[STASIS_RENDER_I_DENSITY_GENERATION]) {
-            uint32_t trace = stasis_render_v1_trace(values_i32, values_f32, values_u8);
+            uint32_t trace = stasis_render_v2_trace(values_i32, values_f32, values_u8);
             __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG,
-                    "Stasis preview gfx_cmd v1 trace=%u flags=%d lines=%d sprites=%d text=%d "
+                    "Stasis preview gfx_cmd v2 trace=%u flags=%d lines=%d sprites=%d text=%d "
                     "logical=%dx%d native=%dx%d drawable=%dx%d display_gen=%d density_gen=%d",
                     trace, values_i32[STASIS_RENDER_I_FLAGS],
                     values_i32[STASIS_RENDER_I_LINE_COUNT],
@@ -2039,7 +2037,7 @@ JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeLastFrameError(
         JNIEnv *env, jclass activity_class) {
     (void)activity_class;
-#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V1_DIRECT
+#if STASIS_ANDROID_PUBLISHED_AOT && STASIS_RENDER_V2_DIRECT
     const char *message = published_resource_error[0] == '\0'
             ? "native preview frame failed" : published_resource_error;
     return (*env)->NewStringUTF(env, message);

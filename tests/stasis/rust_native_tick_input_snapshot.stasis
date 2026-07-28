@@ -5,7 +5,7 @@ global snapshot_mode: i32;
 global model_pointer_count: i32;
 global model_escape_down: bool;
 global model_first_went_down: bool;
-global model_first_x_px: f32;
+global model_first_x: f32;
 
 function apply_test_snapshot(): void {
     if (snapshot_mode == 1) {
@@ -28,10 +28,10 @@ function refresh_input_model_for_test(): void {
     model_pointer_count = host_pointer_count();
     model_escape_down = host_key_down(41);
     model_first_went_down = false;
-    model_first_x_px = 0.0;
+    model_first_x = 0.0;
     if (model_pointer_count > 0) {
         model_first_went_down = host_pointer_went_down(0);
-        model_first_x_px = host_pointer_x_px(0);
+        model_first_x = host_pointer_x_logical(0);
     }
     return;
 }
@@ -43,7 +43,7 @@ function tick(): i32 {
         last_tick_code = -1;
         return last_tick_code;
     }
-    if (model_escape_down && model_first_went_down && model_first_x_px > 9.5) {
+    if (model_escape_down && model_first_went_down && model_first_x > 9.5) {
         last_tick_code = 1;
         return last_tick_code;
     }

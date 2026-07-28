@@ -92,9 +92,13 @@ function main(): i32 {
     maximize_window_for_desktop();
 
     print_string("WINDOW_SIZE ");
-    print_int(gfx_window_width());
+    let logical_w: i32;
+    logical_w.from_f32(gfx_logical_width());
+    print_int(logical_w);
     print_string(" ");
-    print_int(gfx_window_height());
+    let logical_h: i32;
+    logical_h.from_f32(gfx_logical_height());
+    print_int(logical_h);
     print_string("\n");
     return 0;
 }

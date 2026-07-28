@@ -1480,15 +1480,15 @@ mod tests {
             ParityCorpusCase {
                 label: "renderer_command_trace",
                 source: RENDER_TRACE_FIXTURE,
-                expected_exit: 829_981_937,
+                expected_exit: -403_440_835,
                 expected_extern_symbols: &[(
                     "native_render_trace",
-                    "stasis_jit_render_v1_trace",
+                    "stasis_jit_render_v2_trace",
                 )],
                 expected_string_literals: &[],
                 expected_collection_max_lengths: &[
-                    ("cmd_i32", 34_848),
-                    ("cmd_f32", 92_292),
+                    ("cmd_i32", 18_464),
+                    ("cmd_f32", 108_676),
                     ("cmd_u8", 65_536),
                 ],
                 expected_clif_markers: &[("main", &["call"])],

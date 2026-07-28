@@ -120,7 +120,7 @@ def main() -> int:
         },
         "runtime_sources": runtime_sources,
         "mobile_shell_sources": mobile_shell_sources,
-        "command_buffer": {"name": "gfx_cmd", "version": 1},
+        "command_buffer": {"name": "gfx_cmd", "version": 2},
         "backends": ["sdl2"],
         "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
         "dependencies": dependencies,
