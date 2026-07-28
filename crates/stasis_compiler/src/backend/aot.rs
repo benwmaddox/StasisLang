@@ -2308,8 +2308,12 @@ mod tests {
             include_str!("../../../../src/stdlib/ui_axis_layout.stasis"),
         );
         process.upsert_file(
-            "samples/immediate_axis_layout/main.stasis",
-            include_str!("../../../../samples/immediate_axis_layout/main.stasis"),
+            "samples/immediate_axis_layout/layout.stasis",
+            include_str!("../../../../samples/immediate_axis_layout/layout.stasis"),
+        );
+        process.upsert_file(
+            "samples/immediate_axis_layout/verify.stasis",
+            include_str!("../../../../samples/immediate_axis_layout/verify.stasis"),
         );
         process
             .compile()

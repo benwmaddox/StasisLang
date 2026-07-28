@@ -1544,7 +1544,7 @@ Archived priority override (2026-02-13, historical):
 - AP3 - Representative menu adoption:
   - Cache text run widths during initialization.
   - Center a menu title, anchor a button within an adjusted region, center its label, and reuse scalar bounds for hit testing.
-  - Status: `planned after AP2`.
+  - Status: `complete`.
 - Done gate:
   - All PRD acceptance criteria pass through JIT/AOT and the real renderer boundary as applicable.
 - AP1 work summary:
@@ -1562,6 +1562,11 @@ Archived priority override (2026-02-13, historical):
   - Good: versioning HostFrame and the render command together made stale producers and decoders mechanically discoverable across desktop, Android, fixtures, and samples.
   - Bad: the first mechanical capacity migration missed the Android Java renderer and briefly assigned the sprite float base to the text base in one duplicated runtime module.
   - Adjustment: future command-ABI changes must audit every language implementation by semantic field names and assert all derived bases/capacities in each platform test, not rely on numeric replacement alone.
+- AP3 work summary:
+  - Theory gained: immediate-mode UI needs persistent resource metrics but not persistent layout objects; the representative menu caches run handles and widths once, then derives one set of scalar bounds from the current safe viewport for drawing and hit testing each frame.
+  - Good: separating host-independent geometry from the rendered entry kept the same realistic path executable under both JIT and AOT while the play command exercised the real graphics boundary.
+  - Bad: local screenshot capture initially looked like a sample presentation failure, but the unchanged render-parity sample reproduced the same missing-capture behavior in this environment.
+  - Adjustment: distinguish renderer startup/command submission evidence from screenshot-hook evidence by immediately running the known-good parity scene when capture infrastructure fails.
 
 ## PR Sequence
 

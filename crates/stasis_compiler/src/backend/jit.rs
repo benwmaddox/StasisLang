@@ -2553,6 +2553,28 @@ mod tests {
     }
 
     #[test]
+    fn jit_process_executes_representative_immediate_axis_layout() {
+        let mut process = JitProcess::new();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        process.upsert_file(
+            repository
+                .join("samples/immediate_axis_layout/verify.stasis")
+                .to_string_lossy()
+                .into_owned(),
+            include_str!("../../../../samples/immediate_axis_layout/verify.stasis"),
+        );
+        process
+            .compile()
+            .expect("compile immediate axis layout sample");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute immediate axis layout sample"),
+            0
+        );
+    }
+
+    #[test]
     fn jit_process_supports_local_annotation_only_type_during_emit() {
         let mut process = JitProcess::new();
         process.upsert_file(
