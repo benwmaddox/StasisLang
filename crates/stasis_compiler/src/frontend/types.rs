@@ -469,10 +469,7 @@ fn are_i32_scalar_abi_compatible(argument: &TypeKey, parameter: &TypeKey) -> boo
         ) | (
             TypeKey::Builtin(BuiltinType::Bool),
             TypeKey::Builtin(BuiltinType::I32)
-        ) | (TypeKey::Builtin(BuiltinType::I32), TypeKey::Named(_))
-            | (TypeKey::Builtin(BuiltinType::Bool), TypeKey::Named(_))
-            | (TypeKey::Named(_), TypeKey::Builtin(BuiltinType::I32))
-            | (TypeKey::Named(_), TypeKey::Builtin(BuiltinType::Bool))
+        )
     )
 }
 
