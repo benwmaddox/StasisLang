@@ -2308,8 +2308,8 @@ mod tests {
             include_str!("../../../../src/stdlib/ui_axis_layout.stasis"),
         );
         process.upsert_file(
-            "samples/immediate_axis_layout/layout.stasis",
-            include_str!("../../../../samples/immediate_axis_layout/layout.stasis"),
+            "samples/immediate_axis_layout/placement.stasis",
+            include_str!("../../../../samples/immediate_axis_layout/placement.stasis"),
         );
         process.upsert_file(
             "samples/immediate_axis_layout/verify.stasis",
@@ -2318,6 +2318,10 @@ mod tests {
         process
             .compile()
             .expect("compile immediate axis layout sample");
+        assert!(
+            process.state_layout().scalars.is_empty(),
+            "pure AOT placement fixture must not require runtime storage registration"
+        );
 
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

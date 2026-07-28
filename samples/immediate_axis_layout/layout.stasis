@@ -1,4 +1,4 @@
-import "../../src/stdlib/ui_axis_layout.stasis";
+import "placement.stasis";
 
 global menu_title_x: f32;
 global menu_title_y: f32;
@@ -8,41 +8,6 @@ global menu_button_w: f32;
 global menu_button_h: f32;
 global menu_label_x: f32;
 global menu_label_y: f32;
-
-function menu_title_x_for(safe_x: f32, safe_w: f32, title_w: f32): f32 {
-    return ui_place_x(safe_x, safe_w, title_w, UiHorizontal.Center);
-}
-
-function menu_button_x_for(safe_x: f32, safe_w: f32): f32 {
-    return ui_place_x(safe_x + 20.0, safe_w - 40.0, 180.0, UiHorizontal.Left);
-}
-
-function menu_button_y_for(safe_y: f32, safe_h: f32): f32 {
-    return ui_place_y(safe_y + 140.0, safe_h - 160.0, 56.0, UiVertical.Top);
-}
-
-function menu_label_x_for(button_x: f32, label_w: f32): f32 {
-    return ui_place_x(button_x + 16.0, 148.0, label_w, UiHorizontal.Center);
-}
-
-function menu_label_y_for(button_y: f32): f32 {
-    return ui_place_y(button_y + 8.0, 40.0, 28.0, UiVertical.Center) + 1.0;
-}
-
-function menu_point_in_button(
-    point_x: f32,
-    point_y: f32,
-    button_x: f32,
-    button_y: f32,
-    button_w: f32,
-    button_h: f32
-): bool {
-    return
-        point_x >= button_x &&
-        point_x < button_x + button_w &&
-        point_y >= button_y &&
-        point_y < button_y + button_h;
-}
 
 function menu_layout(
     safe_x: f32,

@@ -2558,14 +2558,18 @@ mod tests {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         process.upsert_file(
             repository
-                .join("samples/immediate_axis_layout/verify.stasis")
+                .join("samples/immediate_axis_layout/verify_jit.stasis")
                 .to_string_lossy()
                 .into_owned(),
-            include_str!("../../../../samples/immediate_axis_layout/verify.stasis"),
+            include_str!("../../../../samples/immediate_axis_layout/verify_jit.stasis"),
         );
         process
             .compile()
             .expect("compile immediate axis layout sample");
+        assert!(
+            !process.state_layout().scalars.is_empty(),
+            "JIT composition fixture must cover shared scalar menu bounds"
+        );
         assert_eq!(
             process
                 .execute_i32_noarg_by_name("main")
