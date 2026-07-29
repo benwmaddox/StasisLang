@@ -38,7 +38,9 @@ rebuilds all active sprites, the procedural fallback, every active font atlas, a
 cached text geometry. A failure keeps the lifecycle retryable and withholds that
 game frame. The Android GLES adapter first presents a context-local `STASIS LOADING`
 marker drawn only with clears and scissor rectangles, before shaders, fonts,
-textures, or game assets. It then restores resources referenced by the production command frame in bounded
+textures, or game assets. Surface setup redraws rather than erases the marker, and
+the marker remains visible for at least 250 ms before restoration starts. It then
+restores resources referenced by the production command frame in bounded
 8 ms batches. Resources not reached in a batch use the procedural fallback (or
 temporarily omit text), so subsequent requested frames progressively replace them
 without blocking the UI for the entire asset set. A provider or GL failure marks
