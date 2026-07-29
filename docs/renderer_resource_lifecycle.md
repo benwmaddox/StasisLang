@@ -15,11 +15,14 @@ Every renderer moves through the same states:
 - `RestoreFailed`: the frame is withheld and the complete restore is retried on the
   next frame.
 
-Surface resize and orientation advance `surface_generation`. Renderer/context
-creation, foreground recovery, `SDL_RENDER_TARGETS_RESET`, and
+Surface resize and orientation advance `surface_generation` without invalidating
+device-local resources. Renderer/context creation, `SDL_RENDER_TARGETS_RESET`, and
 `SDL_RENDER_DEVICE_RESET` advance both `surface_generation` and
 `renderer_generation`. Generations skip zero. A sprite, fallback texture, font
-atlas, or text texture can be submitted only when both generations match.
+atlas, or text texture can be submitted only when its renderer generation matches.
+Android pause/resume is a visibility transition: the Workshop asks GLSurfaceView to
+preserve its EGL context and retains textures when that context survives. A later
+`onSurfaceCreated` callback is the authoritative signal that the context was lost.
 
 The native SDL runtime retains sprite paths, logical raster requests, decoded font
 bytes, font metrics, and cached text bytes/quads. Android Workshop and Published
@@ -30,16 +33,20 @@ handles before rebuilding them.
 
 ## Restore transaction
 
-Before the first post-transition frame is presented, the native renderer rebuilds
-all active sprites, the procedural fallback, every active font atlas, and cached
-text geometry. A failure keeps the lifecycle retryable and withholds presentation.
-The Android GLES adapter restores from the complete production command frame; every
-referenced sprite, fallback, cached-text, and direct-text texture is resolved during
-that frame. A provider or GL failure marks the restore failed and retries it on the
-next requested frame.
+Before the first post-context-loss game frame is presented, the native renderer
+rebuilds all active sprites, the procedural fallback, every active font atlas, and
+cached text geometry. A failure keeps the lifecycle retryable and withholds that
+game frame. The Android GLES adapter first presents a context-local `STASIS LOADING`
+marker drawn only with clears and scissor rectangles, before shaders, fonts,
+textures, or game assets. It then restores resources referenced by the production command frame in bounded
+8 ms batches. Resources not reached in a batch use the procedural fallback (or
+temporarily omit text), so subsequent requested frames progressively replace them
+without blocking the UI for the entire asset set. A provider or GL failure marks
+the restore failed and retries it on the next requested frame.
 
-This path covers desktop/mobile resize, orientation, Android background/resume,
-Activity recreation, SDL target reset, and SDL device reset. The legacy desktop GL
+This path covers Android context loss and Activity recreation, plus SDL target and
+device resets. Resize, orientation, and Android background/resume retain resources
+when the graphics context remains valid. The legacy desktop GL
 backend remains a conformance-only adapter; its supported resize path resets GL
 program state, while shipping desktop and mobile packages use SDL.
 
@@ -51,6 +58,9 @@ and failure. `stasis_gfx_get_resource_lifecycle` exposes state, both generations
 attempt/failure counters, and the last reason for build audits. Android preview
 errors expose the same fields in the visible resource error and under the
 `StasisRenderer` log tag.
+Android also emits `resource_restore_timing` with wall time, sprite resolution,
+decode, upload, text rasterization, restored counts, and the number of budget
+deferrals. This makes asset-heavy games such as Chess TD diagnosable from logcat.
 
 ## Verification
 

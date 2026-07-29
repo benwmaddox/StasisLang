@@ -8,6 +8,7 @@ final class RendererResourceLifecycle {
     private int restoreAttempts;
     private int restoreFailures;
     private State state = State.UNAVAILABLE;
+    private State stateBeforePause = State.UNAVAILABLE;
     private String reason = "none";
 
     void onRendererCreated() {
@@ -20,21 +21,19 @@ final class RendererResourceLifecycle {
     void onSurfaceChanged() {
         if (state == State.UNAVAILABLE) return;
         surfaceGeneration = nextGeneration(surfaceGeneration);
-        state = State.RESTORE_PENDING;
         reason = "surface_changed";
     }
 
     void onPause() {
         if (state == State.UNAVAILABLE) return;
+        stateBeforePause = state;
         state = State.PAUSED;
         reason = "background";
     }
 
     void onResume() {
         if (state != State.PAUSED) return;
-        surfaceGeneration = nextGeneration(surfaceGeneration);
-        rendererGeneration = nextGeneration(rendererGeneration);
-        state = State.RESTORE_PENDING;
+        state = stateBeforePause == State.READY ? State.READY : State.RESTORE_PENDING;
         reason = "foreground";
     }
 

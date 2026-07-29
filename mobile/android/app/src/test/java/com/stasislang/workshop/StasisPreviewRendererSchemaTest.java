@@ -13,6 +13,11 @@ import org.junit.Test;
 
 public final class StasisPreviewRendererSchemaTest {
     @Test
+    public void twoLineContextRestoreLabelNeedsNoTextureOrFontAsset() {
+        assertTrue(StasisPreviewRenderer.isValidRestoreLabel());
+    }
+
+    @Test
     public void replacedCaptureIncludesEmptyTypedSpriteLanes() {
         StasisPreviewRenderer renderer = new StasisPreviewRenderer(
                 new StasisPreviewRenderer.TextureProvider() {
