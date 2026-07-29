@@ -18,7 +18,7 @@ $entries = @(
     "samples/brickout_revenge/brickout_revenge_v1.stasis",
     "samples/brickout_revenge/brickout_revenge_v1_cmd.stasis",
     "mobile/android/app/src/main/assets/workshop_sample/src/main.stasis",
-    "mobile/android/app/src/main/assets/exploration_sample/src/main.stasis"
+    "mobile/android/app/src/main/assets/exploration_sample/src/host_aot.stasis"
 )
 $forbiddenPattern = '\b(gfx_load_sprite|gfx_release_sprite|gfx_draw_sprite|gfx_cache_text|gfx_measure_text_cached|gfx_measure_text_cached_height|draw_text|draw_text_cached)\b'
 
