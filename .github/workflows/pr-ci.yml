@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check Stasis src layout
         run: python tools/ci/check_stasis_src_layout.py
@@ -58,7 +58,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check Stasis src layout
         run: python tools/ci/check_stasis_src_layout.py
@@ -107,7 +107,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Stasis
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -115,14 +115,14 @@ jobs:
           gradle-version: "8.9"
 
       - name: Checkout SDL2
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: libsdl-org/SDL
           ref: 5d249570393f7a37e037abf22cd6012a4cc56a71
           path: target/android-link-deps/SDL
 
       - name: Checkout SDL2_image
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: libsdl-org/SDL_image
           ref: 12cb2e40330d256d9b1329647be8f366546d715c
