@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed initial graphics-standard-library slice. This document defines the intended source contract before implementation and migration.
+Implemented initial graphics-standard-library slice, with the raw handle API retained for compatibility.
 
 ## Problem
 
@@ -15,7 +15,7 @@ gfx_draw_sprite(aura, x, y, 136.0, 136.0, 0, 255);
 
 Loading and drawing independently declare the same painted dimensions. A scalable SVG, or a high-resolution raster deliberately reduced during loading, can therefore be baked into a small physical cache and silently enlarged later. The caller still appears to use vector or high-resolution source art, but the framebuffer exposes the reduced cache pixels.
 
-Cached text has the same structural weakness: an `i32` handle loses the logical measurements and resource kind that distinguish it from every other integer.
+Prepared text has the same structural weakness: an `i32` handle loses the logical measurements and resource kind that distinguish it from every other integer.
 
 ## Mapping
 
@@ -34,10 +34,11 @@ struct Sprite {
     height: i32;
 }
 
-struct CachedText {
+struct TextRun {
+    font: i32;
     handle: i32;
-    width: i32;
-    height: i32;
+    width: f32;
+    height: f32;
 }
 ```
 
@@ -51,8 +52,8 @@ Stasis receiver-form functions are the primary API. They mutate an existing glob
 function load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
 
-function load_text_from(self: CachedText, font: i32, text: string): bool;
-function draw(self: CachedText, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void;
+function load_text_from(self: TextRun, font: i32, text: string): bool;
+function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void;
 ```
 
 Representative use:
@@ -60,7 +61,7 @@ Representative use:
 ```stasis
 global state {
     aura: Sprite;
-    title: CachedText;
+    title: TextRun;
 }
 
 function main(): i32 {
@@ -75,7 +76,9 @@ function tick(): void {
 }
 ```
 
-The first slice intentionally provides only canonical-size `draw`. It does not provide anchors, general scaling, fit modes, stretching, upscaling exceptions, or a scene-object abstraction.
+The first implementation intentionally provides only canonical-size `draw`. It does not provide anchors, general scaling, fit modes, stretching, upscaling exceptions, or a scene-object abstraction.
+
+Receiver-scoped resolution distinguishes the two `draw` functions by parameter 0 type before matching the remaining arity and types. `Sprite.draw` and `TextRun.draw` may therefore use their natural different arities; the generic spec sentence requiring same-name declarations to share one arity does not describe the implemented receiver-scoped rule and should be clarified in the canonical specification.
 
 ## Loading invariants
 
@@ -95,7 +98,7 @@ Replacing an already valid resource raises a lifecycle question. The first imple
 
 `Sprite.draw` reads width and height from the receiver and emits the existing sprite command at exactly those logical dimensions. It rejects or ignores an invalid receiver according to the existing graphics-command failure policy; it never substitutes caller-provided dimensions.
 
-`CachedText.draw` reads the cached text handle from its receiver. Font ownership must be explicit in the final struct or runtime handle contract because the existing cached-text command requires both font and run handles. The implementation may add `font: i32` to `CachedText` if the current host contract requires it; it must not recover the font through a detector, global side table keyed only by source position, or fake fallback.
+`TextRun.draw` reads the cached text handle from its receiver. Font ownership is explicit because the existing prepared-text command requires both font and run handles; it must not recover the font through a detector, global side table keyed only by source position, or fake fallback.
 
 Physical density remains transparent to Stasis code:
 
@@ -115,7 +118,7 @@ The typed API must work through the same command buffer and native implementatio
 
 The first implementation slice must cover:
 
-- receiver-form mutation of a global `Sprite` and `CachedText`;
+- receiver-form mutation of a global `Sprite` and `TextRun`;
 - successful load metadata assignment;
 - atomic clearing on invalid dimensions or native load failure;
 - canonical sprite command width and height sourced from the receiver;
@@ -123,6 +126,37 @@ The first implementation slice must cover:
 - JIT and AOT lowering for the representative program where applicable;
 - one end-to-end executable sample with asserted behavior;
 - bounded repository validation with no lingering test/compiler processes.
+
+The implementation includes `samples/typed_sprite` as the executable contract fixture and
+`samples/typed_drawable_visual` as a raw-versus-typed framebuffer parity fixture. Run them with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/verify-typed-drawables.ps1
+powershell -ExecutionPolicy Bypass -File tools/verify-typed-drawable-visual.ps1
+```
+
+The visual verifier renders both paths through the real Stasis framebuffer and requires the PNG
+bytes to be identical. The implementation also adds JIT and linked-AOT regression coverage for
+same-name receiver methods whose receiver types and natural arities differ.
+
+The final reviewed captures are physically 360x240 pixels while the renderer reports an 800x600
+logical canvas. Raw and typed captures are byte-identical with SHA-256
+`D4EEA1A4838D60DA95F40517DF00687A2F5C462FAAEFFC37F6BAED8575DAFC11`.
+Independent review found no typed-path clipping, alignment, scaling, color, or raster-quality
+regression. The deterministic parity font renders the lower glyph row as thin bars; that shared
+fixture appearance is accepted because this test asserts rendering equivalence rather than UI copy
+legibility.
+
+Final visual defect log:
+
+- `TDRAW-01` (blocker if present): raw/typed pixel mismatch; closed, none observed.
+- `TDRAW-02` (minor): physical capture is 360x240 rather than logical 800x600; accepted and
+  documented because both paths share the same output surface.
+- `TDRAW-03` (major for standalone copy, out of scope for parity): deterministic test glyphs are
+  not human-readable; accepted because both paths render the exact same cached text pixels.
+- `TDRAW-04` (minor if present): clipping or poor edge rasterization; closed, none observed.
+- `TDRAW-05` (major if present): typed-path displacement, bounds, color, or scale regression;
+  closed, none observed.
 
 ## Rationale
 

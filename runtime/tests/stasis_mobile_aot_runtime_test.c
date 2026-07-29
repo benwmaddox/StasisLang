@@ -47,6 +47,7 @@ int stasis_gfx_dump_png(const char *path) { return path != NULL; }
 int stasis_gfx_cache_text(int font, const char *text) { return font + (text != NULL); }
 int stasis_gfx_poll_reload(int handle) { return handle; }
 float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }
+float stasis_gfx_measure_text_cached_height(int handle) { return (float)handle + 1.0f; }
 int stasis_load_font(const char *path, int size) { return path != NULL ? size : 0; }
 float stasis_measure_text(int font, const char *text) {
     return text != NULL ? (float)font : 0.0f;

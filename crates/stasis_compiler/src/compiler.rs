@@ -34,6 +34,7 @@ pub struct FunctionMeta {
     pub dirty: bool,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SymbolEntry {
     name_hash: u64,
@@ -48,27 +49,18 @@ struct StatementCacheKey {
     body_hash: u64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct SymbolTable {
     slots: Vec<Option<SymbolEntry>>,
     len: usize,
 }
 
+#[cfg(test)]
 impl SymbolTable {
     const MIN_CAPACITY: usize = 8;
     const LOAD_FACTOR_NUMERATOR: usize = 7;
     const LOAD_FACTOR_DENOMINATOR: usize = 10;
-
-    fn clear(&mut self) {
-        if self.slots.is_empty() {
-            self.slots = vec![None; Self::MIN_CAPACITY];
-            self.len = 0;
-            return;
-        }
-
-        self.slots.fill(None);
-        self.len = 0;
-    }
 
     fn insert(&mut self, name_hash: u64, function_id: FunctionId) {
         self.ensure_capacity_for_insert();
@@ -190,7 +182,6 @@ pub struct CompileReport {
 pub struct Compiler {
     files: Vec<SourceFile>,
     functions: Vec<FunctionMeta>,
-    symbols: SymbolTable,
     deps: DependencyGraph,
     types: TypeTable,
     parsed_statements: Vec<Vec<SimpleStmt>>,
@@ -242,10 +233,10 @@ impl Compiler {
         self.functions.clear();
         self.parsed_statements.clear();
         self.parsed_statement_ids.clear();
-        self.symbols.clear();
         self.deps = DependencyGraph;
 
         let mut dependency_hashes_by_function: Vec<Vec<u64>> = Vec::new();
+        let mut overload_ids_by_name_hash: HashMap<u64, Vec<(u64, FunctionId)>> = HashMap::new();
         let mut signature_changed_ids: Vec<FunctionId> = Vec::new();
 
         for file_id in 0..self.files.len() {
@@ -267,7 +258,17 @@ impl Compiler {
             for indexed_function in indexed {
                 let function_id = self.functions.len() as FunctionId;
                 self.files[file_id].functions.push(function_id);
-                self.symbols.insert(indexed_function.name_hash, function_id);
+                let overloads = overload_ids_by_name_hash
+                    .entry(indexed_function.name_hash)
+                    .or_default();
+                if let Some((_, existing_id)) = overloads
+                    .iter_mut()
+                    .find(|(signature_hash, _)| *signature_hash == indexed_function.signature_hash)
+                {
+                    *existing_id = function_id;
+                } else {
+                    overloads.push((indexed_function.signature_hash, function_id));
+                }
 
                 let previous = previous_hashes
                     .get(&(file_id as u32, indexed_function.name_hash))
@@ -305,9 +306,11 @@ impl Compiler {
         {
             let caller = caller_index as FunctionId;
             for dependency_hash in dependency_hashes {
-                if let Some(callee) = self.symbols.get(dependency_hash) {
-                    if caller != callee {
-                        unique_edges.insert((caller, callee));
+                if let Some(callees) = overload_ids_by_name_hash.get(&dependency_hash) {
+                    for (_, callee) in callees {
+                        if caller != *callee {
+                            unique_edges.insert((caller, *callee));
+                        }
                     }
                 }
             }

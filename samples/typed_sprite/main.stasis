@@ -1,0 +1,53 @@
+import "../../src/stdlib/graphics.stasis";
+
+global sample_sprite: Sprite;
+global invalid_sample_sprite: Sprite;
+global sample_text: TextRun;
+global invalid_sample_text: TextRun;
+
+function main(): i32 {
+    invalid_sample_sprite.handle = 99;
+    invalid_sample_sprite.width = 8;
+    invalid_sample_sprite.height = 8;
+    if (invalid_sample_sprite.load_sprite_from("unused.svg", 0, 92)) { return 1; }
+    if (invalid_sample_sprite.handle != 0) { return 2; }
+    if (invalid_sample_sprite.width != 0 || invalid_sample_sprite.height != 0) { return 3; }
+
+    invalid_sample_text.font = 9;
+    invalid_sample_text.handle = 12;
+    invalid_sample_text.width = 40.0;
+    invalid_sample_text.height = 18.0;
+    if (invalid_sample_text.load_text_from(0, "unused")) { return 4; }
+    if (invalid_sample_text.font != 0 || invalid_sample_text.handle != 0) { return 5; }
+    if (invalid_sample_text.width != 0.0 || invalid_sample_text.height != 0.0) { return 6; }
+
+    sample_sprite.handle = 41;
+    sample_sprite.width = 136;
+    sample_sprite.height = 92;
+
+    gfx_cmd_begin();
+    sample_sprite.draw(12.5, 23.5, 211, 17);
+
+    sample_text.font = 3;
+    sample_text.handle = 8;
+    sample_text.width = 91.5;
+    sample_text.height = 24.0;
+    sample_text.draw(31.0, 42.0, 0.9, 0.8, 0.7, 0.6);
+
+    if (gfx_cmd_sprite_count() != 1) { return 7; }
+    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 0] != 41) { return 8; }
+    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 1] != 17) { return 9; }
+    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 2] != 211) { return 10; }
+    if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 0] != 12.5) { return 11; }
+    if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 1] != 23.5) { return 12; }
+    if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] != 136.0) { return 13; }
+    if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] != 92.0) { return 14; }
+    if (gfx_cmd_text_count() != 1) { return 15; }
+    if (gfx_cmd_i32[GFX_I_TEXT_BASE + 0] != 3) { return 16; }
+    if (gfx_cmd_i32[GFX_I_TEXT_BASE + 1] != 0 - 8) { return 17; }
+    if (gfx_cmd_f32[GFX_F_TEXT_BASE + 0] != 31.0) { return 18; }
+    if (gfx_cmd_f32[GFX_F_TEXT_BASE + 1] != 42.0) { return 19; }
+    if (gfx_cmd_f32[GFX_F_TEXT_BASE + 2] != 0.9) { return 20; }
+    if (gfx_cmd_f32[GFX_F_TEXT_BASE + 5] != 0.6) { return 21; }
+    return 0;
+}
