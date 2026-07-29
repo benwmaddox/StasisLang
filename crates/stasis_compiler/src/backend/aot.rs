@@ -1,5 +1,5 @@
 use crate::backend::emit::*;
-use crate::backend::state_layout::{build_state_layout, StateLayout};
+use crate::backend::state_layout::{build_state_layout, is_named_scalar_state_path, StateLayout};
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{
@@ -887,6 +887,13 @@ fn build_aot_direct_storage_bindings(
     let mut bindings = DirectStorageBindings::default();
     for (path, type_id) in global_path_types {
         if collection_infos.contains_key(path) {
+            continue;
+        }
+        if type_table
+            .type_info(*type_id)
+            .is_some_and(|info| info.category == TypeCategory::Named)
+            && !is_named_scalar_state_path(path, *type_id, global_path_types, type_table)
+        {
             continue;
         }
         if aot_scalar_lane(*type_id, type_table).is_some() {
@@ -2354,6 +2361,22 @@ mod tests {
         );
         let report = process.compile().expect("AOT compile nested receiver");
         assert!(report.emit.emitted_functions >= 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_process_links_and_executes_nested_struct_receiver_call() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let source = "struct Sprite { handle: i32; }\nstruct GameState { aura: Sprite; sprites: Sprite[2]; }\nglobal state: GameState;\nfunction set_handle(self: Sprite, value: i32): void { self.handle = value; }\nfunction main(): i32 { state.aura.set_handle(37); state.sprites[1].set_handle(5); return state.aura.handle + state.sprites[1].handle; }\n";
+        let mut process = AotProcess::new();
+        process.upsert_file("sample.stasis", source);
+        process.compile().expect("AOT compile nested receiver");
+        let result =
+            run_linked_i32_noarg_fixture(&process, "main", "nested_struct_receiver", &link_config)
+                .expect("nested receiver fixture must link and execute");
+        assert_eq!(result, 42);
     }
 
     #[cfg(windows)]
