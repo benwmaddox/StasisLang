@@ -2373,11 +2373,9 @@ mod tests {
         let mut process = AotProcess::new();
         process.upsert_file("sample.stasis", source);
         process.compile().expect("AOT compile nested receiver");
-        let Some(result) =
+        let result =
             run_linked_i32_noarg_fixture(&process, "main", "nested_struct_receiver", &link_config)
-        else {
-            return;
-        };
+                .expect("nested receiver fixture must link and execute");
         assert_eq!(result, 42);
     }
 
