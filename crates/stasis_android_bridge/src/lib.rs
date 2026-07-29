@@ -201,6 +201,12 @@ pub fn resolve_android_workshop_sprite_asset(
                 handle.get()
             ));
         }
+        AssetFormat::Font { .. } => {
+            return Err(format!(
+                "asset handle {} identifies a font, not a sprite",
+                handle.get()
+            ));
+        }
     };
     Ok(serde_json::json!({
         "status": "ok",
@@ -2453,6 +2459,27 @@ mod tests {
 
         let error = resolve_android_workshop_sprite_asset(&root, 7).expect_err("missing handle");
         assert!(error.contains("is not in the manifest"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_bridge_rejects_font_handle_as_sprite() {
+        let root = temp_project("font_asset_as_sprite");
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        let bytes = b"representative font bytes";
+        fs::write(root.join("assets/ui.ttf"), bytes).expect("write font");
+        let hash = stasis_assets::sha256_bytes(bytes);
+        fs::write(
+            root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
+            format!(r#"{{"schema":"stasis-assets","version":1,"assets":[{{"id":"ui","path":"assets/ui.ttf","content_sha256":"{hash}","format":{{"kind":"font","encoding":"ttf"}},"dependencies":[]}}]}}"#),
+        )
+        .expect("write manifest");
+
+        let manifest = load_android_workshop_asset_manifest(&root).expect("load manifest");
+        let handle = manifest.by_id("ui").expect("font entry").handle.as_i32();
+        let error = resolve_android_workshop_sprite_asset(&root, handle)
+            .expect_err("font handle must not resolve as a sprite");
+        assert!(error.contains("identifies a font, not a sprite"));
         fs::remove_dir_all(root).ok();
     }
 
