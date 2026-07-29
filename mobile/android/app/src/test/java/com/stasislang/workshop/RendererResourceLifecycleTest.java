@@ -73,4 +73,18 @@ public final class RendererResourceLifecycleTest {
         assertFalse(lifecycle.canPresent());
         assertTrue(lifecycle.beginRestore());
     }
+
+    @Test
+    public void deferredRestoreKeepsWithholdingGameFramesWithoutCountingFailure() {
+        RendererResourceLifecycle lifecycle = new RendererResourceLifecycle();
+        lifecycle.onRendererCreated();
+        assertTrue(lifecycle.beginRestore());
+
+        lifecycle.deferRestore();
+
+        assertEquals(RendererResourceLifecycle.State.RESTORE_PENDING, lifecycle.state());
+        assertFalse(lifecycle.canPresent());
+        assertEquals(0, lifecycle.restoreFailures());
+        assertTrue(lifecycle.beginRestore());
+    }
 }

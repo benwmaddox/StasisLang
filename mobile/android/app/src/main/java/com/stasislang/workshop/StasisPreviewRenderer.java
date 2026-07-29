@@ -87,6 +87,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
         default String consumeFailure() { return null; }
 
+        default boolean isRestoreComplete() { return true; }
+
         default void onFrameStart() {}
 
         default void onDisplayMetricsChanged(float rasterScale, int densityGeneration) {}
@@ -316,11 +318,20 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (hasFrame) prepareFrameResources();
             String resourceFailure = textures.consumeFailure();
             int glError = GLES20.glGetError();
-            boolean restored = resourceFailure == null && glError == GLES20.GL_NO_ERROR;
+            boolean restoreComplete = textures.isRestoreComplete();
+            boolean restored = resourceFailure == null && glError == GLES20.GL_NO_ERROR
+                    && restoreComplete;
             if (restoring) {
-                resourceLifecycle.finishRestore(restored);
+                if (resourceFailure == null && glError == GLES20.GL_NO_ERROR
+                        && !restoreComplete) {
+                    resourceLifecycle.deferRestore();
+                } else {
+                    resourceLifecycle.finishRestore(restored);
+                }
             } else if (!restored) {
-                resourceLifecycle.resourceFailed();
+                if (resourceFailure != null || glError != GLES20.GL_NO_ERROR) {
+                    resourceLifecycle.resourceFailed();
+                }
             }
             if (restoring) {
                 if (restored) {
@@ -328,7 +339,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                             + resourceLifecycle.surfaceGeneration() + " renderer_generation="
                             + resourceLifecycle.rendererGeneration() + " reason="
                             + resourceLifecycle.reason());
-                } else {
+                } else if (resourceFailure != null || glError != GLES20.GL_NO_ERROR) {
                     Log.e(LOG_TAG, "resource restore failed backend=gles surface_generation="
                             + resourceLifecycle.surfaceGeneration() + " renderer_generation="
                             + resourceLifecycle.rendererGeneration() + " reason="
@@ -336,6 +347,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                             + (resourceFailure == null ? "gl_error_" + glError : resourceFailure));
                 }
             }
+            if (!restoreComplete && resourceFailure == null
+                    && glError == GLES20.GL_NO_ERROR) drawRestorePlaceholder();
             if (hasFrame && restored && resourceLifecycle.canPresent()) drawFrame();
             capture = pendingCapture;
             pendingCapture = null;
