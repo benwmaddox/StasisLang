@@ -60,6 +60,23 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private static final int COLOR_VERTEX_BYTES = COLOR_VERTEX_FLOATS * 4;
     private static final int TEXTURE_VERTEX_BYTES = TEXTURE_VERTEX_FLOATS * 4;
     private static final int MAX_CAPTURE_PIXELS = 8_000_000;
+    private static final String[] RESTORE_LABEL = {
+            "   01110 11111 01110 01110 11111 01110   ",
+            "   10001 00100 10001 10001 00100 10001   ",
+            "   10000 00100 10001 10000 00100 10000   ",
+            "   01110 00100 11111 01110 00100 01110   ",
+            "   00001 00100 10001 00001 00100 00001   ",
+            "   10001 00100 10001 10001 00100 10001   ",
+            "   01110 00100 10001 01110 11111 01110   ",
+            "                                         ",
+            "10000 01110 01110 11110 11111 10001 01110",
+            "10000 10001 10001 10001 00100 11001 10001",
+            "10000 10001 10001 10001 00100 10101 10000",
+            "10000 10001 11111 10001 00100 10011 10111",
+            "10000 10001 10001 10001 00100 10001 10001",
+            "10000 10001 10001 10001 00100 10001 10001",
+            "11111 01110 10001 11110 11111 10001 01110"
+    };
 
     interface TextureProvider {
         void onResourceGenerationChanged(int surfaceGeneration, int rendererGeneration,
@@ -192,6 +209,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int displayGeneration = -1;
     private int densityGeneration = -1;
     private CaptureCallback pendingCapture;
+    private boolean restorePlaceholderPending;
 
     StasisPreviewRenderer(TextureProvider textures, TimingListener timing) {
         this.textures = textures;
@@ -235,19 +253,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     synchronized void onHostResumed() {
-        RendererResourceLifecycle.State before = resourceLifecycle.state();
         resourceLifecycle.onResume();
-        if (before == RendererResourceLifecycle.State.PAUSED) {
-            textures.onResourceGenerationChanged(
-                    resourceLifecycle.surfaceGeneration(),
-                    resourceLifecycle.rendererGeneration(), false, resourceLifecycle.reason());
-        }
     }
 
     @Override
     public synchronized void onSurfaceCreated(javax.microedition.khronos.opengles.GL10 gl,
             javax.microedition.khronos.egl.EGLConfig config) {
         resourceLifecycle.onRendererCreated();
+        restorePlaceholderPending = true;
+        drawRestorePlaceholder();
         colorProgram = createProgram(VERTEX_SHADER, FRAGMENT_SHADER);
         colorPosition = GLES20.glGetAttribLocation(colorProgram, "aPosition");
         colorValue = GLES20.glGetAttribLocation(colorProgram, "aColor");
@@ -273,9 +287,6 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         resourceLifecycle.onSurfaceChanged();
         surfaceWidth = Math.max(1, width);
         surfaceHeight = Math.max(1, height);
-        textures.onResourceGenerationChanged(
-                resourceLifecycle.surfaceGeneration(),
-                resourceLifecycle.rendererGeneration(), false, resourceLifecycle.reason());
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
         GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
@@ -289,6 +300,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         CaptureCallback capture;
         LogicalFrameSnapshot capturedFrame;
         synchronized (this) {
+            if (restorePlaceholderPending) {
+                restorePlaceholderPending = false;
+                drawRestorePlaceholder();
+                timing.onRendered(System.nanoTime() - started);
+                return;
+            }
             boolean restoring = resourceLifecycle.beginRestore();
             textures.beginRestoreAttempt();
             while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
@@ -323,6 +340,44 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         }
         captureIfRequested(capture, capturedFrame);
         timing.onRendered(System.nanoTime() - started);
+    }
+
+    private void drawRestorePlaceholder() {
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+        GLES20.glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        int columns = RESTORE_LABEL[0].length();
+        int cell = Math.max(2, Math.min(surfaceWidth / (columns + 8), surfaceHeight / 60));
+        int labelWidth = columns * cell;
+        int labelHeight = RESTORE_LABEL.length * cell;
+        int originX = (surfaceWidth - labelWidth) / 2;
+        int originY = (surfaceHeight - labelHeight) / 2;
+        GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glClearColor(66.0f / 255.0f, 153.0f / 255.0f, 225.0f / 255.0f, 1.0f);
+        for (int row = 0; row < RESTORE_LABEL.length; row += 1) {
+            String pixels = RESTORE_LABEL[row];
+            for (int column = 0; column < pixels.length(); column += 1) {
+                if (pixels.charAt(column) != '1') continue;
+                GLES20.glScissor(originX + column * cell,
+                        originY + (RESTORE_LABEL.length - row - 1) * cell, cell, cell);
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            }
+        }
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+    }
+
+    static boolean isValidRestoreLabel() {
+        if (RESTORE_LABEL.length != 15 || RESTORE_LABEL[0].isEmpty()) return false;
+        int width = RESTORE_LABEL[0].length();
+        for (String row : RESTORE_LABEL) {
+            if (row.length() != width) return false;
+            for (int index = 0; index < width; index += 1) {
+                char pixel = row.charAt(index);
+                if (pixel != '0' && pixel != '1' && pixel != ' ') return false;
+            }
+        }
+        return true;
     }
 
     private void drawFrame() {

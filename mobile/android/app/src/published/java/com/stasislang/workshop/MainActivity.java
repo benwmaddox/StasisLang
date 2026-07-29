@@ -260,6 +260,7 @@ public final class MainActivity extends Activity {
             super(activity);
             this.activity = activity;
             setEGLContextClientVersion(2);
+            setPreserveEGLContextOnPause(true);
             renderer = new StasisPreviewRenderer(
                     new PublishedSpriteCatalog(activity, activity.getAssets()),
                     activity::recordRenderTimeNanos);

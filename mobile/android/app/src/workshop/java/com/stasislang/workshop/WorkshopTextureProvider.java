@@ -6,6 +6,7 @@ import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.opengl.GLES20;
 import android.util.SparseArray;
+import android.util.Log;
 
 import org.json.JSONObject;
 
@@ -14,11 +15,15 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 
 final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProvider {
+    private static final String LOG_TAG = "StasisRenderer";
     private static final long MANIFEST_CHECK_INTERVAL_NANOS = 500_000_000L;
+    private static final long RESTORE_BUDGET_NANOS = 8_000_000L;
     private final MainActivity activity;
     private final SparseArray<SpriteTexture> textures = new SparseArray<>();
+    private final HashMap<String, SpriteTexture> spriteTexturesByHash = new HashMap<>();
     private final SparseArray<TextTexture> textTextures = new SparseArray<>();
     private final SparseArray<FontInfo> fonts = new SparseArray<>();
     private final ArrayList<DynamicTextTexture> dynamicTextTextures = new ArrayList<>();
@@ -36,6 +41,17 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private int fallbackRendererGeneration;
     private String lastFailure;
     private String transitionReason = "none";
+    private boolean reportRestoreTiming;
+    private long restoreStartedNanos;
+    private long spriteResolveNanos;
+    private long spriteDecodeNanos;
+    private long spriteUploadNanos;
+    private long textRasterNanos;
+    private int restoredSprites;
+    private int restoredTextRuns;
+    private long restoreDeadlineNanos;
+    private boolean restoreDeferred;
+    private int deferredResources;
 
     WorkshopTextureProvider(MainActivity activity) {
         this.activity = activity;
@@ -49,6 +65,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         surfaceGeneration = nextSurfaceGeneration;
         rendererGeneration = nextRendererGeneration;
         transitionReason = nextTransitionReason;
+        reportRestoreTiming = true;
+        restoreStartedNanos = 0L;
         setProjectRoot(activity.projectRootPath());
         manifestStamp = Long.MIN_VALUE;
         nextManifestCheckNanos = 0L;
@@ -57,12 +75,40 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     @Override
     public void beginRestoreAttempt() {
         lastFailure = null;
+        if (reportRestoreTiming) {
+            long now = System.nanoTime();
+            restoreDeadlineNanos = now + RESTORE_BUDGET_NANOS;
+            restoreDeferred = false;
+            if (restoreStartedNanos == 0L) {
+                restoreStartedNanos = now;
+                spriteResolveNanos = 0L;
+                spriteDecodeNanos = 0L;
+                spriteUploadNanos = 0L;
+                textRasterNanos = 0L;
+                restoredSprites = 0;
+                restoredTextRuns = 0;
+                deferredResources = 0;
+            }
+        }
     }
 
     @Override
     public String consumeFailure() {
         String failure = lastFailure;
         lastFailure = null;
+        if (reportRestoreTiming && !restoreDeferred) {
+            long total = Math.max(0L, System.nanoTime() - restoreStartedNanos);
+            Log.i(LOG_TAG, "resource_restore_timing reason=" + transitionReason
+                    + " total_ms=" + millis(total)
+                    + " sprite_resolve_ms=" + millis(spriteResolveNanos)
+                    + " sprite_decode_ms=" + millis(spriteDecodeNanos)
+                    + " sprite_upload_ms=" + millis(spriteUploadNanos)
+                    + " text_raster_ms=" + millis(textRasterNanos)
+                    + " sprites=" + restoredSprites + " text_runs=" + restoredTextRuns
+                    + " deferred=" + deferredResources);
+            reportRestoreTiming = failure != null;
+            if (!reportRestoreTiming) restoreStartedNanos = 0L;
+        }
         return failure;
     }
 
@@ -95,12 +141,16 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         }
         if (cached != null && !cached.matches(surfaceGeneration, rendererGeneration)) {
             textures.remove(handle);
+            releaseSpriteIfUnreferenced(cached);
             cached = null;
         }
+        if (deferRestoreResource()) return fallbackTexture();
         JSONObject resolved = null;
         try {
+            long resolveStarted = System.nanoTime();
             resolved = new JSONObject(MainActivity.nativeResolveSpriteAsset(
                     projectRootPath, handle));
+            if (reportRestoreTiming) spriteResolveNanos += System.nanoTime() - resolveStarted;
             if (!"ok".equals(resolved.optString("status"))) {
                 throw new IOException(resolved.optString("error", "sprite resolution failed"));
             }
@@ -109,16 +159,30 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                 cached.checkedManifestStamp = manifestStamp;
                 return cached.texture;
             }
+            SpriteTexture shared = spriteTexturesByHash.get(hash);
+            if (shared != null && shared.matches(surfaceGeneration, rendererGeneration)) {
+                shared.checkedManifestStamp = manifestStamp;
+                textures.put(handle, shared);
+                releaseSpriteIfUnreferenced(cached);
+                return shared.texture;
+            }
+            long decodeStarted = System.nanoTime();
             Bitmap bitmap = decode(resolved, rasterScale);
+            if (reportRestoreTiming) spriteDecodeNanos += System.nanoTime() - decodeStarted;
             int uploaded;
             try {
+                long uploadStarted = System.nanoTime();
                 uploaded = upload(bitmap);
+                if (reportRestoreTiming) spriteUploadNanos += System.nanoTime() - uploadStarted;
             } finally {
                 bitmap.recycle();
             }
-            textures.put(handle, new SpriteTexture(uploaded, hash, manifestStamp,
-                    surfaceGeneration, rendererGeneration));
-            if (cached != null) deleteTexture(cached.texture);
+            if (reportRestoreTiming) restoredSprites += 1;
+            SpriteTexture replacement = new SpriteTexture(uploaded, hash, manifestStamp,
+                    surfaceGeneration, rendererGeneration);
+            textures.put(handle, replacement);
+            spriteTexturesByHash.put(hash, replacement);
+            releaseSpriteIfUnreferenced(cached);
             return uploaded;
         } catch (Exception error) {
             recordFailure("sprite", handle,
@@ -159,7 +223,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                 cached.texture, cached.width, cached.height);
         }
         if (cached != null) textTextures.remove(runHandle);
+        if (deferRestoreResource()) return 0L;
         try {
+            long rasterStarted = System.nanoTime();
             JSONObject resolved = new JSONObject(MainActivity.nativeResolveCachedText(
                     activity.projectRootPath(), runHandle));
             if (!"ok".equals(resolved.optString("status"))) {
@@ -186,6 +252,10 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                     Math.max(1, Math.round(height / rasterScale)),
                     surfaceGeneration, rendererGeneration);
             textTextures.put(runHandle, cached);
+            if (reportRestoreTiming) {
+                textRasterNanos += System.nanoTime() - rasterStarted;
+                restoredTextRuns += 1;
+            }
             return StasisPreviewRenderer.packTexture(texture, cached.width, cached.height);
         } catch (Exception error) {
             recordFailure("cached_text", runHandle, "<resolved-cached-text>", 0, 0, error);
@@ -204,7 +274,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                         cached.texture.texture, cached.texture.width, cached.texture.height);
             }
         }
+        if (deferRestoreResource()) return 0L;
         try {
+            long rasterStarted = System.nanoTime();
             if (dynamicTextTextures.size() >= 4096) throw new IOException("dynamic text cache is full");
             byte[] bytes = new byte[length];
             for (int index = 0; index < length; index += 1) bytes[index] = utf8.get(offset + index);
@@ -213,6 +285,10 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                     fontInfo, new String(bytes, StandardCharsets.UTF_8), rasterScale,
                     surfaceGeneration, rendererGeneration);
             dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
+            if (reportRestoreTiming) {
+                textRasterNanos += System.nanoTime() - rasterStarted;
+                restoredTextRuns += 1;
+            }
             return StasisPreviewRenderer.packTexture(texture.texture, texture.width, texture.height);
         } catch (Exception error) {
             recordFailure("text", font, "<resolved-font>", 0, 0, error);
@@ -283,10 +359,13 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     }
 
     private void clearTextures(boolean deleteGpuHandles) {
-        for (int index = 0; index < textures.size(); index++) {
-            if (deleteGpuHandles) deleteTexture(textures.valueAt(index).texture);
+        if (deleteGpuHandles) {
+            for (SpriteTexture texture : spriteTexturesByHash.values()) {
+                deleteTexture(texture.texture);
+            }
         }
         textures.clear();
+        spriteTexturesByHash.clear();
         for (int index = 0; index < textTextures.size(); index++) {
             if (deleteGpuHandles) deleteTexture(textTextures.valueAt(index).texture);
         }
@@ -315,6 +394,27 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private void deleteTexture(int texture) {
         deletedTexture[0] = texture;
         GLES20.glDeleteTextures(1, deletedTexture, 0);
+    }
+
+    private void releaseSpriteIfUnreferenced(SpriteTexture candidate) {
+        if (candidate == null) return;
+        for (int index = 0; index < textures.size(); index += 1) {
+            if (textures.valueAt(index) == candidate) return;
+        }
+        if (spriteTexturesByHash.remove(candidate.contentHash, candidate)) {
+            deleteTexture(candidate.texture);
+        }
+    }
+
+    private static String millis(long nanos) {
+        return String.format(java.util.Locale.US, "%.3f", nanos / 1_000_000.0);
+    }
+
+    private boolean deferRestoreResource() {
+        if (!reportRestoreTiming || System.nanoTime() < restoreDeadlineNanos) return false;
+        restoreDeferred = true;
+        deferredResources += 1;
+        return true;
     }
 
     private static Bitmap decode(JSONObject resolved, float rasterScale) throws Exception {

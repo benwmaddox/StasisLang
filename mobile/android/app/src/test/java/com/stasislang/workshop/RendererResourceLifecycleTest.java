@@ -27,18 +27,50 @@ public final class RendererResourceLifecycleTest {
     }
 
     @Test
-    public void repeatedPauseResumeAndRecreationAdvanceGenerations() {
+    public void pauseResumePreservesResourcesAndRecreationAdvancesGenerations() {
         RendererResourceLifecycle lifecycle = new RendererResourceLifecycle();
         lifecycle.onRendererCreated();
+        assertTrue(lifecycle.beginRestore());
+        lifecycle.finishRestore(true);
         lifecycle.onPause();
         assertEquals(RendererResourceLifecycle.State.PAUSED, lifecycle.state());
         lifecycle.onResume();
-        assertEquals(2, lifecycle.surfaceGeneration());
-        assertEquals(2, lifecycle.rendererGeneration());
+        assertEquals(RendererResourceLifecycle.State.READY, lifecycle.state());
+        assertEquals(1, lifecycle.surfaceGeneration());
+        assertEquals(1, lifecycle.rendererGeneration());
         assertEquals("foreground", lifecycle.reason());
         lifecycle.onRendererCreated();
-        assertEquals(3, lifecycle.surfaceGeneration());
-        assertEquals(3, lifecycle.rendererGeneration());
+        assertEquals(2, lifecycle.surfaceGeneration());
+        assertEquals(2, lifecycle.rendererGeneration());
         assertFalse(lifecycle.canPresent());
+    }
+
+    @Test
+    public void surfaceResizeKeepsRendererReadyAndGpuResourcesValid() {
+        RendererResourceLifecycle lifecycle = new RendererResourceLifecycle();
+        lifecycle.onRendererCreated();
+        assertTrue(lifecycle.beginRestore());
+        lifecycle.finishRestore(true);
+
+        lifecycle.onSurfaceChanged();
+
+        assertEquals(RendererResourceLifecycle.State.READY, lifecycle.state());
+        assertEquals(2, lifecycle.surfaceGeneration());
+        assertEquals(1, lifecycle.rendererGeneration());
+        assertTrue(lifecycle.canPresent());
+        assertEquals("surface_changed", lifecycle.reason());
+    }
+
+    @Test
+    public void pauseBeforeInitialRestoreStillRequiresRestoreAfterResume() {
+        RendererResourceLifecycle lifecycle = new RendererResourceLifecycle();
+        lifecycle.onRendererCreated();
+
+        lifecycle.onPause();
+        lifecycle.onResume();
+
+        assertEquals(RendererResourceLifecycle.State.RESTORE_PENDING, lifecycle.state());
+        assertFalse(lifecycle.canPresent());
+        assertTrue(lifecycle.beginRestore());
     }
 }

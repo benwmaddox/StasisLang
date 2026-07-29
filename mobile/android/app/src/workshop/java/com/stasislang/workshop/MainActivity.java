@@ -11673,6 +11673,7 @@ public final class MainActivity extends Activity {
             super(activity);
             this.activity = activity;
             setEGLContextClientVersion(2);
+            setPreserveEGLContextOnPause(true);
             renderer = new StasisPreviewRenderer(
                     new WorkshopTextureProvider(activity),
                     activity::recordRenderTimeNanos);
