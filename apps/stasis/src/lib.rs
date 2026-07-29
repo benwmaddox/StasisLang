@@ -3946,6 +3946,7 @@ mod tests {
 
     #[test]
     fn graphics_runtime_presents_asset_free_loading_on_sdl_and_opengl() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
         for required in [
             "static void stasis_present_gpu_loading(void)",
             "SDL_RenderPresent(g_renderer);",
@@ -3953,19 +3954,19 @@ mod tests {
             "g_use_sdl_renderer ? \"sdl\" : \"gl\"",
         ] {
             assert!(
-                STASIS_GRAPHICS_SOURCE.contains(required),
+                graphics_source.contains(required),
                 "shared graphics loading screen should contain {required}"
             );
         }
         assert_eq!(
-            STASIS_GRAPHICS_SOURCE
+            graphics_source
                 .matches("stasis_present_gpu_loading();")
                 .count(),
             3,
             "loading should be invoked at startup and both real SDL reset events"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("SDL_PumpEvents();\n    stasis_present_gpu_loading();"),
+            graphics_source.contains("SDL_PumpEvents();\n    stasis_present_gpu_loading();"),
             "every desktop backend must pump initial window messages before presenting loading"
         );
         assert!(
