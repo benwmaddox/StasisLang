@@ -4008,6 +4008,22 @@ mod tests {
                     .contains("SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0)"),
             "mobile pause should continue polling events and pause the audio device"
         );
+        for required in [
+            "static void stasis_present_restore_loading(void)",
+            "Stasis renderer loading screen presented",
+            "stasis_renderer_lifecycle_resume(&g_resource_lifecycle);",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "mobile renderer lifecycle should contain {required}"
+            );
+        }
+        assert!(
+            !STASIS_GRAPHICS_SOURCE.contains(
+                "stasis_renderer_lifecycle_resume(&g_resource_lifecycle);\n                    stasis_invalidate_renderer_resources(0);"
+            ),
+            "ordinary foreground resume must not invalidate a surviving SDL renderer"
+        );
     }
 
     #[test]

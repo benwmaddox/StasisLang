@@ -161,6 +161,23 @@ static uint64_t g_perf_pending_tick_us = 0;
 static uint64_t g_perf_pending_guest_render_us = 0;
 static uint64_t g_perf_render_started_counter = 0;
 static int g_perf_font_handle = -1;
+static const char* g_restore_label[] = {
+    "   01110 11111 01110 01110 11111 01110   ",
+    "   10001 00100 10001 10001 00100 10001   ",
+    "   10000 00100 10001 10000 00100 10000   ",
+    "   01110 00100 11111 01110 00100 01110   ",
+    "   00001 00100 10001 00001 00100 00001   ",
+    "   10001 00100 10001 10001 00100 10001   ",
+    "   01110 00100 10001 01110 11111 01110   ",
+    "                                         ",
+    "10000 01110 01110 11110 11111 10001 01110",
+    "10000 10001 10001 10001 00100 11001 10001",
+    "10000 10001 10001 10001 00100 10101 10000",
+    "10000 10001 11111 10001 00100 10011 10111",
+    "10000 10001 10001 10001 00100 10001 10001",
+    "10000 10001 10001 10001 00100 10001 10001",
+    "11111 01110 10001 11110 11111 10001 01110"
+};
 
 /* ============================================================
  * Input snapshot (mouse + touch) - per-frame deterministic view
@@ -217,6 +234,7 @@ static void stasis_sync_display_metrics(void);
 static void stasis_reset_text_cache(void);
 static void stasis_invalidate_renderer_resources(int discard_gpu_handles);
 static int stasis_restore_renderer_resources(void);
+static void stasis_present_restore_loading(void);
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 #if !defined(STASIS_GRAPHICS_SDL_ONLY)
@@ -332,6 +350,44 @@ static void stasis_invalidate_renderer_resources(int discard_gpu_handles) {
     g_resource_frame_ready = false;
 }
 
+static void stasis_present_restore_loading(void) {
+    if (!g_use_sdl_renderer || !g_renderer) return;
+    const int rows = (int)(sizeof(g_restore_label) / sizeof(g_restore_label[0]));
+    const int columns = (int)strlen(g_restore_label[0]);
+    int cell_w = g_window_width / (columns + 8);
+    int cell_h = g_window_height / 60;
+    int cell = cell_w < cell_h ? cell_w : cell_h;
+    if (cell < 2) cell = 2;
+    const int origin_x = (g_window_width - columns * cell) / 2;
+    const int origin_y = (g_window_height - rows * cell) / 2;
+
+    SDL_SetRenderTarget(g_renderer, NULL);
+    SDL_RenderSetLogicalSize(g_renderer, g_window_width, g_window_height);
+    SDL_RenderSetClipRect(g_renderer, NULL);
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(g_renderer, 15, 20, 28, 255);
+    SDL_RenderClear(g_renderer);
+    SDL_SetRenderDrawColor(g_renderer, 66, 153, 225, 255);
+    for (int row = 0; row < rows; row++) {
+        const char* pixels = g_restore_label[row];
+        for (int column = 0; column < columns; column++) {
+            if (pixels[column] != '1') continue;
+            SDL_Rect pixel = {
+                origin_x + column * cell,
+                origin_y + row * cell,
+                cell,
+                cell
+            };
+            SDL_RenderFillRect(g_renderer, &pixel);
+        }
+    }
+    SDL_RenderPresent(g_renderer);
+    SDL_Log("Stasis renderer loading screen presented: backend=sdl reason=%s surface_generation=%u renderer_generation=%u",
+        stasis_renderer_reason_name(g_resource_lifecycle.reason),
+        g_resource_lifecycle.surface_generation,
+        g_resource_lifecycle.renderer_generation);
+}
+
 static int stasis_input_valid_index(int idx) {
     return idx >= 0 && idx < STASIS_MAX_POINTERS;
 }
@@ -400,7 +456,6 @@ static void stasis_sync_display_metrics(void) {
     if (dimensions_changed && g_use_sdl_renderer &&
         g_resource_lifecycle.state != STASIS_RENDERER_UNAVAILABLE) {
         stasis_renderer_lifecycle_surface_changed(&g_resource_lifecycle);
-        stasis_invalidate_renderer_resources(0);
     }
     g_display_metrics = next;
     g_drawable_width = drawable_w;
@@ -618,6 +673,7 @@ static void stasis_pump_events(void) {
                 stasis_renderer_lifecycle_renderer_reset(
                     &g_resource_lifecycle, STASIS_RENDERER_REASON_TARGETS_RESET);
                 stasis_invalidate_renderer_resources(0);
+                stasis_present_restore_loading();
                 SDL_Log("Stasis renderer resources invalidated: backend=sdl reason=targets_reset surface_generation=%u renderer_generation=%u",
                     g_resource_lifecycle.surface_generation,
                     g_resource_lifecycle.renderer_generation);
@@ -626,6 +682,7 @@ static void stasis_pump_events(void) {
                 stasis_renderer_lifecycle_renderer_reset(
                     &g_resource_lifecycle, STASIS_RENDERER_REASON_DEVICE_RESET);
                 stasis_invalidate_renderer_resources(0);
+                stasis_present_restore_loading();
                 SDL_Log("Stasis renderer resources invalidated: backend=sdl reason=device_reset surface_generation=%u renderer_generation=%u",
                     g_resource_lifecycle.surface_generation,
                     g_resource_lifecycle.renderer_generation);
@@ -638,7 +695,6 @@ static void stasis_pump_events(void) {
             case SDL_APP_DIDENTERFOREGROUND:
                 if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED) {
                     stasis_renderer_lifecycle_resume(&g_resource_lifecycle);
-                    stasis_invalidate_renderer_resources(0);
                 }
                 break;
             case SDL_MOUSEBUTTONDOWN:
@@ -3644,6 +3700,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     stasis_sync_display_metrics();
     stasis_renderer_lifecycle_initialize(&g_resource_lifecycle);
     g_resource_frame_ready = true;
+    stasis_present_restore_loading();
     SDL_Log("Stasis display metrics: logical=%dx%d native=%dx%d drawable=%dx%d scale=%.2f",
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
@@ -5225,7 +5282,6 @@ STASIS_EXPORT void stasis_mobile_set_paused(int paused) {
         g_resource_frame_ready = false;
     } else if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED) {
         stasis_renderer_lifecycle_resume(&g_resource_lifecycle);
-        stasis_invalidate_renderer_resources(0);
     }
 }
 

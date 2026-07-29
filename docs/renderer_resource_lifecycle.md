@@ -63,6 +63,12 @@ errors expose the same fields in the visible resource error and under the
 Android also emits `resource_restore_timing` with wall time, sprite resolution,
 decode, upload, text rasterization, restored counts, and the number of budget
 deferrals. This makes asset-heavy games such as Chess TD diagnosable from logcat.
+Generated SDL mobile packages present the same asset-free `STASIS LOADING` pixel
+marker immediately after renderer creation and again on SDL target/device reset.
+The marker remains in the presented framebuffer while the synchronous SDL resource
+transaction rebuilds every sprite, fallback, font atlas, and cached text run. A
+normal game frame is presented only after that transaction succeeds. Ordinary
+Android foreground resume preserves resources unless SDL reports an actual reset.
 
 ## Verification
 
