@@ -76,6 +76,10 @@ function tick(): void {
 }
 ```
 
+Receiver calls may target nested fields directly. Prefer one root application
+state global per entry file and keep drawable resources beneath it; separate
+globals remain appropriate only for fixed host ABI surfaces.
+
 The first implementation intentionally provides only canonical-size `draw`. It does not provide anchors, general scaling, fit modes, stretching, upscaling exceptions, or a scene-object abstraction.
 
 Receiver-scoped resolution distinguishes the two `draw` functions by parameter 0 type before matching the remaining arity and types. `Sprite.draw` and `TextRun.draw` may therefore use their natural different arities; the generic spec sentence requiring same-name declarations to share one arity does not describe the implemented receiver-scoped rule and should be clarified in the canonical specification.

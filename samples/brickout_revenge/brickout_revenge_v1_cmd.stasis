@@ -2480,16 +2480,16 @@ function main(): i32 {
     state.layout.ui_h = 0.0;
     state.layout.ui_mode = 0;
 
-    load_sprite_from(state.sprites.paddle, "assets/paddle.svg", 128, 24);
-    load_sprite_from(state.sprites.ball, "assets/ball.svg", 32, 32);
-    load_sprite_from(state.sprites.brick_basic_base, "assets/brick_basic.svg", 160, 64);
-    load_sprite_from(state.sprites.brick_basic_turret, "assets/brick_basic_turret.svg", 160, 64);
-    load_sprite_from(state.sprites.brick_basic_fx, "assets/brick_basic_fx.svg", 160, 64);
-    load_sprite_from(state.sprites.brick_armored_base, "assets/brick_armored.svg", 160, 64);
-    load_sprite_from(state.sprites.brick_armored_turret, "assets/brick_armored_turret.svg", 160, 64);
-    load_sprite_from(state.sprites.brick_armored_fx, "assets/brick_armored_fx.svg", 160, 64);
-    load_sprite_from(state.sprites.brick_reflector_base, "assets/brick_reflector.svg", 160, 64);
-    load_sprite_from(state.sprites.brick_reflector_fx, "assets/brick_reflector_fx.svg", 160, 64);
+    state.sprites.paddle.load_sprite_from("assets/paddle.svg", 128, 24);
+    state.sprites.ball.load_sprite_from("assets/ball.svg", 32, 32);
+    state.sprites.brick_basic_base.load_sprite_from("assets/brick_basic.svg", 160, 64);
+    state.sprites.brick_basic_turret.load_sprite_from("assets/brick_basic_turret.svg", 160, 64);
+    state.sprites.brick_basic_fx.load_sprite_from("assets/brick_basic_fx.svg", 160, 64);
+    state.sprites.brick_armored_base.load_sprite_from("assets/brick_armored.svg", 160, 64);
+    state.sprites.brick_armored_turret.load_sprite_from("assets/brick_armored_turret.svg", 160, 64);
+    state.sprites.brick_armored_fx.load_sprite_from("assets/brick_armored_fx.svg", 160, 64);
+    state.sprites.brick_reflector_base.load_sprite_from("assets/brick_reflector.svg", 160, 64);
+    state.sprites.brick_reflector_fx.load_sprite_from("assets/brick_reflector_fx.svg", 160, 64);
 
     if (state.initialized == 0) {
         // Use get_time_ms() so non-libc hosts (e.g. wasm) don't need C's time().

@@ -74,6 +74,8 @@ struct GameState {
     spawn_timer_ticks: i32;
 
     ui_font: i32;
+    bucket_sprite: Sprite;
+    ball_sprite: Sprite;
     ui_ascii: ascii[64];
     ui_text: utf8[64];
 
@@ -82,8 +84,6 @@ struct GameState {
 
 // Single global state block (instructional style).
 global state: GameState;
-global bucket_sprite: Sprite;
-global ball_sprite: Sprite;
 
 function seed_rng(seed: i32): void {
     // Park-Miller "minimal standard" RNG (31-bit, no overflow with i32 math).
@@ -165,12 +165,12 @@ function ensure_window(): bool {
 
     // Fonts depend on the graphics context, so load them after the window exists.
     state.ui_font = load_font(state.config.font_path, state.config.font_size_pixels);
-    bucket_sprite.load_sprite_from(
+    state.bucket_sprite.load_sprite_from(
         state.config.bucket_sprite_path,
         state.config.bucket_width,
         state.config.bucket_height
     );
-    ball_sprite.load_sprite_from(
+    state.ball_sprite.load_sprite_from(
         state.config.ball_sprite_path,
         state.config.ball_radius * 2,
         state.config.ball_radius * 2
@@ -182,13 +182,13 @@ function ensure_window(): bool {
         print_string("\n");
         return false;
     }
-    if (bucket_sprite.handle == 0) {
+    if (state.bucket_sprite.handle == 0) {
         print_string("error: failed to load bucket sprite: ");
         print_string(state.config.bucket_sprite_path);
         print_string("\n");
         return false;
     }
-    if (ball_sprite.handle == 0) {
+    if (state.ball_sprite.handle == 0) {
         print_string("error: failed to load ball sprite: ");
         print_string(state.config.ball_sprite_path);
         print_string("\n");
@@ -278,13 +278,13 @@ function draw_bucket(): void {
     let x0: i32 = state.bucket_x - state.config.bucket_width / 2;
     let y0: i32 = state.config.screen_height - state.config.bucket_bottom_padding - state.config.bucket_height;
 
-    bucket_sprite.draw(i32_to_f32(x0), i32_to_f32(y0), 255, 0);
+    state.bucket_sprite.draw(i32_to_f32(x0), i32_to_f32(y0), 255, 0);
 }
 
 function draw_balls(): void {
     foreach (let ball in state.balls) {
         if (ball.active) {
-            ball_sprite.draw(
+            state.ball_sprite.draw(
                 i32_to_f32(ball.x - state.config.ball_radius),
                 i32_to_f32(ball.y - state.config.ball_radius),
                 255,
@@ -307,7 +307,7 @@ function draw_ui(): void {
 }
 
 function is_ready_to_run(): bool {
-    return state.config.json_loaded && state.ui_font != 0 && bucket_sprite.handle != 0 && ball_sprite.handle != 0;
+    return state.config.json_loaded && state.ui_font != 0 && state.bucket_sprite.handle != 0 && state.ball_sprite.handle != 0;
 }
 
 function tick(): i32 {

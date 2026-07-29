@@ -19,11 +19,17 @@ global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
 global host_req_seq: i32;
 
-global opaque_resource: Sprite;
-global translucent_resource: Sprite;
-global canvas_resource: Sprite;
-global parity_font: i32;
-global cached_label_resource: TextRun;
+struct ParityState {
+    opaque: Sprite;
+    translucent: Sprite;
+    canvas: Sprite;
+    font: i32;
+    label: TextRun;
+}
+
+// Command buffers and host_req_* are fixed host ABI globals. Application-owned
+// resources stay under the single root state.
+global state: ParityState;
 
 function main(): i32 {
     host_req_flags = 1;
@@ -31,16 +37,16 @@ function main(): i32 {
     host_req_window_h_px = PARITY_WINDOW_H;
     host_req_seq += 1;
 
-    opaque_resource.load_sprite_from("assets/opaque.svg", 96, 72);
-    translucent_resource.load_sprite_from("assets/translucent.svg", 96, 72);
-    canvas_resource.load_sprite_from("assets/full_canvas.svg", PARITY_WINDOW_W, PARITY_WINDOW_H);
-    parity_font = load_font("assets/parity.ttf", 24);
-    if (opaque_resource.handle == 0) { return 11; }
-    if (translucent_resource.handle == 0) { return 12; }
-    if (canvas_resource.handle == 0) { return 13; }
-    if (parity_font == 0) { return 14; }
-    cached_label_resource.load_text_from(parity_font, "cached parity");
-    if (cached_label_resource.handle == 0) { return 15; }
+    state.opaque.load_sprite_from("assets/opaque.svg", 96, 72);
+    state.translucent.load_sprite_from("assets/translucent.svg", 96, 72);
+    state.canvas.load_sprite_from("assets/full_canvas.svg", PARITY_WINDOW_W, PARITY_WINDOW_H);
+    state.font = load_font("assets/parity.ttf", 24);
+    if (state.opaque.handle == 0) { return 11; }
+    if (state.translucent.handle == 0) { return 12; }
+    if (state.canvas.handle == 0) { return 13; }
+    if (state.font == 0) { return 14; }
+    state.label.load_text_from(state.font, "cached parity");
+    if (state.label.handle == 0) { return 15; }
     return 0;
 }
 
@@ -51,8 +57,8 @@ function tick(): i32 {
 function render(): i32 {
     build_parity_frame(
         gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8,
-        canvas_resource.handle, opaque_resource.handle, translucent_resource.handle,
-        parity_font, cached_label_resource.handle
+        state.canvas.handle, state.opaque.handle, state.translucent.handle,
+        state.font, state.label.handle
     );
     return 0;
 }
