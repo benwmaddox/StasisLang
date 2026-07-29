@@ -1743,15 +1743,8 @@ where
         .declare_function(symbol, Linkage::Export, &context.func.signature)
         .map_err(|error| format!("failed to declare function {symbol}: {error}"))?;
     let referenced_call_targets = collect_call_targets_from_hir(hir);
-    let uses_collection_runtime = meta.params.iter().any(|type_id| {
-        named_struct_field_types.contains_key(type_id)
-            || type_table.type_info(*type_id).is_some_and(|info| {
-                matches!(
-                    info.category,
-                    TypeCategory::ArrayFixed | TypeCategory::ArrayView
-                )
-            })
-    });
+    let uses_runtime_storage = !global_path_types.is_empty();
+    let uses_collection_runtime = !collection_infos.is_empty();
     let runtime_call_imports = match backend_mode {
         SharedCompileBackendMode::Jit => build_runtime_call_import_ids(
             &mut module,
@@ -1763,6 +1756,7 @@ where
         SharedCompileBackendMode::AotDirect => build_aot_runtime_call_import_ids(
             &mut module,
             function_id,
+            uses_runtime_storage,
             uses_collection_runtime,
             &referenced_call_targets,
             call_signatures,
@@ -10533,6 +10527,7 @@ pub(crate) fn emit_bool_constant(builder: &mut FunctionBuilder<'_>, value: bool)
 fn build_aot_runtime_call_import_ids(
     module: &mut impl Module,
     fallback: FuncId,
+    uses_runtime_storage: bool,
     uses_collection_runtime: bool,
     referenced_call_targets: &BTreeSet<String>,
     call_signatures: &CallSignatureMap,
@@ -10568,16 +10563,15 @@ fn build_aot_runtime_call_import_ids(
         .filter(|(target, _)| referenced_call_targets.contains(*target))
         .map(|(target, signatures)| (target.clone(), signatures.clone()))
         .collect();
-    macro_rules! collection_import {
-        ($declaration:expr) => {
-            if uses_collection_runtime {
+    macro_rules! storage_import {
+        ($used:expr, $declaration:expr) => {
+            if $used {
                 $declaration?
             } else {
                 fallback
             }
         };
     }
-
     Ok(RuntimeCallImportIds {
         call_i32_0: fallback,
         call_i32_1: fallback,
@@ -10611,69 +10605,77 @@ fn build_aot_runtime_call_import_ids(
         lookup_code_ptr: fallback,
         sin_fast,
         cos_fast,
-        global_i32_load: fallback,
-        global_i32_store: fallback,
-        global_f32_load: fallback,
-        global_f32_store: fallback,
-        global_f64_load: fallback,
-        global_f64_store: fallback,
-        global_i32_array_load: collection_import!(declare_i32_array_load_import(
-            module,
-            "stasis_jit_global_i32_array_load",
-            linkage,
-        )),
-        global_i32_array_store: collection_import!(declare_i32_array_store_import(
-            module,
-            "stasis_jit_global_i32_array_store",
-            linkage,
-        )),
-        global_i32_array_ptr: collection_import!(declare_i32_array_ptr_import(
-            module,
-            "stasis_jit_global_i32_array_ptr",
-            linkage,
-        )),
-        global_f32_array_load: collection_import!(declare_f32_array_load_import(
-            module,
-            "stasis_jit_global_f32_array_load",
-            linkage,
-        )),
-        global_f32_array_store: collection_import!(declare_f32_array_store_import(
-            module,
-            "stasis_jit_global_f32_array_store",
-            linkage,
-        )),
-        global_f32_array_ptr: collection_import!(declare_f32_array_ptr_import(
-            module,
-            "stasis_jit_global_f32_array_ptr",
-            linkage,
-        )),
-        global_f64_array_load: collection_import!(declare_f64_array_load_import(
-            module,
-            "stasis_jit_global_f64_array_load",
-            linkage,
-        )),
-        global_f64_array_store: collection_import!(declare_f64_array_store_import(
-            module,
-            "stasis_jit_global_f64_array_store",
-            linkage,
-        )),
-        global_f64_array_ptr: collection_import!(declare_f64_array_ptr_import(
-            module,
-            "stasis_jit_global_f64_array_ptr",
-            linkage,
-        )),
-        collection_i32_load: collection_import!(declare_i32_call_import(
-            module,
-            "stasis_jit_collection_i32_load",
-            linkage,
-            2,
-        )),
-        collection_i32_store: collection_import!(declare_void_call_import(
-            module,
-            "stasis_jit_collection_i32_store",
-            linkage,
-            3,
-        )),
+        // Direct storage handles known standalone globals, but dynamic paths and
+        // bounds fallbacks still use the runtime registry. Never alias a runtime
+        // helper to the current function: their ABIs are unrelated.
+        global_i32_load: storage_import!(
+            uses_runtime_storage,
+            declare_i32_call_import(module, "stasis_jit_global_i32_load", linkage, 1)
+        ),
+        global_i32_store: storage_import!(
+            uses_runtime_storage,
+            declare_void_call_import(module, "stasis_jit_global_i32_store", linkage, 2,)
+        ),
+        global_f32_load: storage_import!(
+            uses_runtime_storage,
+            declare_f32_global_load_import(module, "stasis_jit_global_f32_load", linkage,)
+        ),
+        global_f32_store: storage_import!(
+            uses_runtime_storage,
+            declare_f32_global_store_import(module, "stasis_jit_global_f32_store", linkage,)
+        ),
+        global_f64_load: storage_import!(
+            uses_runtime_storage,
+            declare_f64_global_load_import(module, "stasis_jit_global_f64_load", linkage,)
+        ),
+        global_f64_store: storage_import!(
+            uses_runtime_storage,
+            declare_f64_global_store_import(module, "stasis_jit_global_f64_store", linkage,)
+        ),
+        global_i32_array_load: storage_import!(
+            uses_collection_runtime,
+            declare_i32_array_load_import(module, "stasis_jit_global_i32_array_load", linkage,)
+        ),
+        global_i32_array_store: storage_import!(
+            uses_collection_runtime,
+            declare_i32_array_store_import(module, "stasis_jit_global_i32_array_store", linkage,)
+        ),
+        global_i32_array_ptr: storage_import!(
+            uses_collection_runtime,
+            declare_i32_array_ptr_import(module, "stasis_jit_global_i32_array_ptr", linkage,)
+        ),
+        global_f32_array_load: storage_import!(
+            uses_collection_runtime,
+            declare_f32_array_load_import(module, "stasis_jit_global_f32_array_load", linkage,)
+        ),
+        global_f32_array_store: storage_import!(
+            uses_collection_runtime,
+            declare_f32_array_store_import(module, "stasis_jit_global_f32_array_store", linkage,)
+        ),
+        global_f32_array_ptr: storage_import!(
+            uses_collection_runtime,
+            declare_f32_array_ptr_import(module, "stasis_jit_global_f32_array_ptr", linkage,)
+        ),
+        global_f64_array_load: storage_import!(
+            uses_collection_runtime,
+            declare_f64_array_load_import(module, "stasis_jit_global_f64_array_load", linkage,)
+        ),
+        global_f64_array_store: storage_import!(
+            uses_collection_runtime,
+            declare_f64_array_store_import(module, "stasis_jit_global_f64_array_store", linkage,)
+        ),
+        global_f64_array_ptr: storage_import!(
+            uses_collection_runtime,
+            declare_f64_array_ptr_import(module, "stasis_jit_global_f64_array_ptr", linkage,)
+        ),
+        collection_i32_load: storage_import!(
+            uses_collection_runtime,
+            declare_i32_call_import(module, "stasis_jit_collection_i32_load", linkage, 2,)
+        ),
+        collection_i32_store: storage_import!(
+            uses_collection_runtime,
+            declare_void_call_import(module, "stasis_jit_collection_i32_store", linkage, 3,)
+        ),
         extern_calls: declare_extern_call_imports(
             module,
             &referenced_extern_signatures,
