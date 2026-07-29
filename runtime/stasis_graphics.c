@@ -104,6 +104,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size);
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
 STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y, float r, float g, float b, float a);
 STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle);
+STASIS_EXPORT float stasis_gfx_measure_text_cached_height(int run_handle);
 STASIS_EXPORT int stasis_storage_load_i32(const char* scope, const char* key, int fallback);
 STASIS_EXPORT int stasis_storage_save_i32(const char* scope, const char* key, int value);
 
@@ -6046,6 +6047,14 @@ STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle) {
     if (!run->active) return 0.0f;
     if (!stasis_ensure_font_ready(run->font_handle)) return 0.0f;
     return run->width;
+}
+
+STASIS_EXPORT float stasis_gfx_measure_text_cached_height(int run_handle) {
+    if (run_handle <= 0 || run_handle > STASIS_MAX_TEXT_RUNS) return 0.0f;
+    StasisTextRun* run = &g_text_runs[run_handle - 1];
+    if (!run->active) return 0.0f;
+    if (!stasis_ensure_font_ready(run->font_handle)) return 0.0f;
+    return run->height;
 }
 
 /* Load a TrueType font from disk */

@@ -536,6 +536,7 @@ struct StasisGraphicsAssetsApi {
     stasis_measure_text: usize,
     stasis_gfx_cache_text: usize,
     stasis_gfx_measure_text_cached: usize,
+    stasis_gfx_measure_text_cached_height: usize,
     stasis_storage_load_i32: Option<usize>,
     stasis_storage_save_i32: Option<usize>,
 }
@@ -568,6 +569,8 @@ impl StasisGraphicsAssetsApi {
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
             stasis_gfx_cache_text: lib.symbol_address("stasis_gfx_cache_text")?,
             stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
+            stasis_gfx_measure_text_cached_height: lib
+                .symbol_address("stasis_gfx_measure_text_cached_height")?,
             stasis_storage_load_i32: lib.symbol_address("stasis_storage_load_i32").ok(),
             stasis_storage_save_i32: lib.symbol_address("stasis_storage_save_i32").ok(),
             _lib: lib,
@@ -2642,6 +2645,7 @@ pub struct EmbeddedGraphicsHost {
     pub measure_text: fn(i32, &[u8]) -> f32,
     pub cache_text: fn(i32, &[u8]) -> i32,
     pub measure_text_cached: fn(i32) -> f32,
+    pub measure_text_cached_height: fn(i32) -> f32,
     pub poll_reload: fn(i32) -> i32,
 }
 
@@ -3063,6 +3067,27 @@ pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_measure_text_cached_height(run_handle: i32) -> f32 {
+    if let Some(host) = embedded_graphics_host() {
+        return (host.measure_text_cached_height)(run_handle);
+    }
+    #[cfg(windows)]
+    {
+        let Ok(api) = stasis_graphics_assets_api() else {
+            return 0.0;
+        };
+        let callback: extern "system" fn(i32) -> f32 =
+            unsafe { std::mem::transmute(api.stasis_gfx_measure_text_cached_height) };
+        return callback(run_handle);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = run_handle;
+        0.0
+    }
+}
+
 // AOT engine bundles may be linked and executed headlessly; keep this as a no-op so tests don't
 // block on sleeps during deterministic quality-gate runs.
 #[no_mangle]
@@ -3097,6 +3122,11 @@ pub extern "C" fn stasis_gfx_cache_text(font: i32, text_id: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn stasis_gfx_measure_text_cached(run_handle: i32) -> f32 {
     stasis_jit_gfx_measure_text_cached(run_handle)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_gfx_measure_text_cached_height(run_handle: i32) -> f32 {
+    stasis_jit_gfx_measure_text_cached_height(run_handle)
 }
 
 #[no_mangle]

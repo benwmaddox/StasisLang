@@ -2033,6 +2033,11 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         | "stasis_jit_gfx_measure_text_cached" => {
             function_address(stasis_dynload::stasis_jit_gfx_measure_text_cached as *const ())
         }
+        "gfx_measure_text_cached_height"
+        | "stasis_gfx_measure_text_cached_height"
+        | "stasis_jit_gfx_measure_text_cached_height" => {
+            function_address(stasis_dynload::stasis_jit_gfx_measure_text_cached_height as *const ())
+        }
         "time" | "stasis_time" | "stasis_jit_time" | "stasis_get_time_ms" => {
             function_address(stasis_dynload::stasis_get_time_ms as *const ())
         }
@@ -5321,6 +5326,21 @@ mod tests {
             .execute_i32_twoarg_by_name("main", 10, 20)
             .expect("execute in memory");
         assert_eq!(value, 9);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_resolves_receiver_methods_with_different_arities() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sprite { handle: i32; }\nstruct TextRun { handle: i32; }\nglobal sprite: Sprite;\nglobal text: TextRun;\nfunction draw(self: Sprite, x: f32, alpha: i32): void { self.handle = alpha; }\nfunction draw(self: TextRun, x: f32, r: f32, g: f32, b: f32, a: f32): void { self.handle = 7; }\nfunction main(): i32 { sprite.draw(1.0, 255); text.draw(2.0, 1.0, 1.0, 1.0, 1.0); return sprite.handle + text.handle; }\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute in memory");
+        assert_eq!(value, 262);
     }
 
     #[test]

@@ -27,6 +27,7 @@ int stasis_gfx_dump_png(const char *path);
 int stasis_gfx_cache_text(int font, const char *text);
 int stasis_gfx_poll_reload(int handle);
 float stasis_gfx_measure_text_cached(int handle);
+float stasis_gfx_measure_text_cached_height(int handle);
 int stasis_load_font(const char *path, int size);
 float stasis_measure_text(int font, const char *text);
 void stasis_sleep_ms(int ms);
@@ -435,6 +436,10 @@ int stasis_jit_gfx_cache_text(int32_t font, int32_t text) {
 int stasis_jit_gfx_poll_reload(int32_t handle) { return stasis_gfx_poll_reload(handle); }
 float stasis_jit_gfx_measure_text_cached(int32_t handle) {
     return stasis_gfx_measure_text_cached(handle);
+}
+
+float stasis_jit_gfx_measure_text_cached_height(int32_t handle) {
+    return stasis_gfx_measure_text_cached_height(handle);
 }
 int stasis_jit_load_font(int32_t path, int32_t size) {
     char *value = resolve_text(path);
