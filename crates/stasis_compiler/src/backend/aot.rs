@@ -2345,6 +2345,17 @@ mod tests {
         assert_eq!(aot_result, jit_result);
     }
 
+    #[test]
+    fn aot_process_compiles_nested_struct_receiver_call() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sprite { handle: i32; }\nstruct GameState { aura: Sprite; sprites: Sprite[2]; }\nglobal state: GameState;\nfunction set_handle(self: Sprite, value: i32): void { self.handle = value; }\nfunction main(): i32 { state.aura.set_handle(37); state.sprites[1].set_handle(5); return state.aura.handle + state.sprites[1].handle; }\n",
+        );
+        let report = process.compile().expect("AOT compile nested receiver");
+        assert!(report.emit.emitted_functions >= 2);
+    }
+
     #[cfg(windows)]
     #[test]
     fn aot_process_links_and_executes_immediate_axis_layout_sample() {

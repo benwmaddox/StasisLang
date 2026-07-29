@@ -507,6 +507,17 @@ enemy.damage(5);
 hero.damage(5);
 ```
 
+The receiver may be any global-backed struct view, including nested fields and
+indexed elements:
+
+```stasis
+state.ui.aura.draw(24.0, 36.0, 255, 0);
+state.enemies[i].damage(5);
+```
+
+Entry files should normally group application-owned mutable state beneath one
+root global. Fixed host ABI globals are an explicit exception.
+
 Function form remains supported indefinitely:
 
 ```stasis

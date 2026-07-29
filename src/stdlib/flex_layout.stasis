@@ -74,9 +74,8 @@ function flex_measure_text_box(out_size: f32[], font: i32, text: string, line_h:
     flex_measure_box(out_size, text_w, line_h, pad_x, pad_y);
 }
 
-function flex_measure_text_run_box(out_size: f32[], run_handle: i32, line_h: f32, pad_x: f32, pad_y: f32): void {
-    let text_w: f32 = gfx_measure_text_cached(run_handle);
-    flex_measure_box(out_size, text_w, line_h, pad_x, pad_y);
+function flex_measure_text_run_box(out_size: f32[], run: TextRun, line_h: f32, pad_x: f32, pad_y: f32): void {
+    flex_measure_box(out_size, run.width, line_h, pad_x, pad_y);
 }
 
 function flex_main_total(item_main: f32[], count: i32, gap: f32): f32 {

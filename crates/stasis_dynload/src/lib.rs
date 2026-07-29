@@ -3122,6 +3122,101 @@ pub extern "C" fn stasis_jit_gfx_measure_text_cached_height(run_handle: i32) -> 
     }
 }
 
+fn struct_field_path_hash(base_hash: i32, suffix: &str) -> i32 {
+    let mut hash = base_hash as u32;
+    hash ^= u32::from(b'.');
+    hash = hash.wrapping_mul(16_777_619);
+    for byte in suffix.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash as i32
+}
+
+fn struct_view_i32_load(base: i32, index: i32, suffix: &str) -> i32 {
+    if index < 0 {
+        stasis_jit_global_i32_load(struct_field_path_hash(base, suffix))
+    } else {
+        stasis_jit_global_i32_array_load(base, global_path_hash(suffix), index)
+    }
+}
+
+fn struct_view_i32_store(base: i32, index: i32, len: i32, suffix: &str, value: i32) {
+    if index < 0 {
+        stasis_jit_global_i32_store(struct_field_path_hash(base, suffix), value);
+    } else if index < len {
+        stasis_jit_global_i32_array_store(base, global_path_hash(suffix), index, value);
+    }
+}
+
+fn struct_view_f32_store(base: i32, index: i32, len: i32, suffix: &str, value: f32) {
+    if index < 0 {
+        stasis_jit_global_f32_store(struct_field_path_hash(base, suffix), value);
+    } else if index < len {
+        stasis_jit_global_f32_array_store(base, global_path_hash(suffix), index, value);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_sprite_load_from(
+    base: i32,
+    index: i32,
+    len: i32,
+    path_id: i32,
+    width: i32,
+    height: i32,
+) -> i32 {
+    if width <= 0 || height <= 0 || (index >= 0 && index >= len) {
+        return 0;
+    }
+    let loaded_handle = stasis_jit_gfx_load_sprite(path_id, width, height);
+    if loaded_handle <= 0 {
+        return 0;
+    }
+    let old_handle = struct_view_i32_load(base, index, "handle");
+    struct_view_i32_store(base, index, len, "handle", loaded_handle);
+    struct_view_i32_store(base, index, len, "width", width);
+    struct_view_i32_store(base, index, len, "height", height);
+    if old_handle > 0 && old_handle != loaded_handle {
+        stasis_jit_gfx_release_sprite(old_handle);
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_text_run_load_from(
+    base: i32,
+    index: i32,
+    len: i32,
+    font: i32,
+    text_id: i32,
+) -> i32 {
+    if font <= 0 || (index >= 0 && index >= len) {
+        return 0;
+    }
+    let loaded_handle = stasis_jit_gfx_cache_text(font, text_id);
+    if loaded_handle <= 0 {
+        return 0;
+    }
+    struct_view_i32_store(base, index, len, "font", font);
+    struct_view_i32_store(base, index, len, "handle", loaded_handle);
+    struct_view_f32_store(
+        base,
+        index,
+        len,
+        "width",
+        stasis_jit_gfx_measure_text_cached(loaded_handle),
+    );
+    struct_view_f32_store(
+        base,
+        index,
+        len,
+        "height",
+        stasis_jit_gfx_measure_text_cached_height(loaded_handle),
+    );
+    1
+}
+
 // AOT engine bundles may be linked and executed headlessly; keep this as a no-op so tests don't
 // block on sleeps during deterministic quality-gate runs.
 #[no_mangle]

@@ -7140,43 +7140,6 @@ impl ExprParser<'_> {
                         }
                         _ => Err("expected ')' after call arguments".to_string()),
                     }
-                } else if matches!(self.tokens.get(self.cursor), Some(ExprToken::Dot))
-                    && matches!(
-                        self.tokens.get(self.cursor + 1),
-                        Some(ExprToken::Identifier(_))
-                    )
-                    && matches!(self.tokens.get(self.cursor + 2), Some(ExprToken::LParen))
-                {
-                    let receiver = name.clone();
-                    self.cursor += 1;
-                    let Some(ExprToken::Identifier(segment_name)) =
-                        self.tokens.get(self.cursor).cloned()
-                    else {
-                        return Err("expected identifier after '.' in receiver call".to_string());
-                    };
-                    self.cursor += 1;
-                    self.cursor += 1;
-                    let mut args = vec![SimpleExpr::Identifier(receiver)];
-                    if !matches!(self.tokens.get(self.cursor), Some(ExprToken::RParen)) {
-                        loop {
-                            args.push(self.parse_precedence(0)?);
-                            if matches!(self.tokens.get(self.cursor), Some(ExprToken::Comma)) {
-                                self.cursor += 1;
-                                continue;
-                            }
-                            break;
-                        }
-                    }
-                    match self.tokens.get(self.cursor) {
-                        Some(ExprToken::RParen) => {
-                            self.cursor += 1;
-                            Ok(SimpleExpr::Call {
-                                target: segment_name,
-                                args,
-                            })
-                        }
-                        _ => Err("expected ')' after call arguments".to_string()),
-                    }
                 } else {
                     self.parse_identifier_access_chain(name)
                 }
@@ -7214,6 +7177,42 @@ impl ExprParser<'_> {
         let mut suffix = String::new();
         loop {
             if matches!(self.tokens.get(self.cursor), Some(ExprToken::Dot)) {
+                if let (Some(ExprToken::Identifier(method)), Some(ExprToken::LParen)) = (
+                    self.tokens.get(self.cursor + 1).cloned(),
+                    self.tokens.get(self.cursor + 2),
+                ) {
+                    self.cursor += 3;
+                    let receiver = if let Some(index) = index_expr {
+                        SimpleExpr::IndexedPath {
+                            collection_path,
+                            index: Box::new(index),
+                            suffix,
+                        }
+                    } else {
+                        SimpleExpr::Identifier(collection_path)
+                    };
+                    let mut args = vec![receiver];
+                    if !matches!(self.tokens.get(self.cursor), Some(ExprToken::RParen)) {
+                        loop {
+                            args.push(self.parse_precedence(0)?);
+                            if matches!(self.tokens.get(self.cursor), Some(ExprToken::Comma)) {
+                                self.cursor += 1;
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    return match self.tokens.get(self.cursor) {
+                        Some(ExprToken::RParen) => {
+                            self.cursor += 1;
+                            Ok(SimpleExpr::Call {
+                                target: method,
+                                args,
+                            })
+                        }
+                        _ => Err("expected ')' after receiver call arguments".to_string()),
+                    };
+                }
                 self.cursor += 1;
                 let Some(ExprToken::Identifier(segment)) = self.tokens.get(self.cursor).cloned()
                 else {

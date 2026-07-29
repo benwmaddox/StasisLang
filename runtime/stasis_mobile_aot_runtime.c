@@ -441,6 +441,69 @@ float stasis_jit_gfx_measure_text_cached(int32_t handle) {
 float stasis_jit_gfx_measure_text_cached_height(int32_t handle) {
     return stasis_gfx_measure_text_cached_height(handle);
 }
+
+static int32_t stasis_struct_field_hash(int32_t base, const char *suffix) {
+    uint32_t hash = (uint32_t)base;
+    const unsigned char *cursor = (const unsigned char *)suffix;
+    hash ^= (uint32_t)'.';
+    hash *= 16777619u;
+    while (*cursor != 0) {
+        hash ^= (uint32_t)*cursor++;
+        hash *= 16777619u;
+    }
+    return (int32_t)hash;
+}
+
+static int32_t stasis_suffix_hash(const char *suffix) {
+    uint32_t hash = 2166136261u;
+    const unsigned char *cursor = (const unsigned char *)suffix;
+    while (*cursor != 0) {
+        hash ^= (uint32_t)*cursor++;
+        hash *= 16777619u;
+    }
+    return (int32_t)hash;
+}
+
+static int32_t stasis_struct_i32_load(int32_t base, int32_t index, const char *suffix) {
+    if (index < 0) return stasis_jit_global_i32_load(stasis_struct_field_hash(base, suffix));
+    return stasis_jit_global_i32_array_load(base, stasis_suffix_hash(suffix), index);
+}
+
+static void stasis_struct_i32_store(int32_t base, int32_t index, int32_t len, const char *suffix, int32_t value) {
+    if (index < 0) stasis_jit_global_i32_store(stasis_struct_field_hash(base, suffix), value);
+    else if (index < len) stasis_jit_global_i32_array_store(base, stasis_suffix_hash(suffix), index, value);
+}
+
+static void stasis_struct_f32_store(int32_t base, int32_t index, int32_t len, const char *suffix, float value) {
+    if (index < 0) stasis_jit_global_f32_store(stasis_struct_field_hash(base, suffix), value);
+    else if (index < len) stasis_jit_global_f32_array_store(base, stasis_suffix_hash(suffix), index, value);
+}
+
+int stasis_jit_sprite_load_from(int32_t base, int32_t index, int32_t len, int32_t path, int32_t width, int32_t height) {
+    int32_t loaded_handle;
+    int32_t old_handle;
+    if (width <= 0 || height <= 0 || (index >= 0 && index >= len)) return 0;
+    loaded_handle = stasis_jit_gfx_load_sprite(path, width, height);
+    if (loaded_handle <= 0) return 0;
+    old_handle = stasis_struct_i32_load(base, index, "handle");
+    stasis_struct_i32_store(base, index, len, "handle", loaded_handle);
+    stasis_struct_i32_store(base, index, len, "width", width);
+    stasis_struct_i32_store(base, index, len, "height", height);
+    if (old_handle > 0 && old_handle != loaded_handle) stasis_jit_gfx_release_sprite(old_handle);
+    return 1;
+}
+
+int stasis_jit_text_run_load_from(int32_t base, int32_t index, int32_t len, int32_t font, int32_t text) {
+    int32_t loaded_handle;
+    if (font <= 0 || (index >= 0 && index >= len)) return 0;
+    loaded_handle = stasis_jit_gfx_cache_text(font, text);
+    if (loaded_handle <= 0) return 0;
+    stasis_struct_i32_store(base, index, len, "font", font);
+    stasis_struct_i32_store(base, index, len, "handle", loaded_handle);
+    stasis_struct_f32_store(base, index, len, "width", stasis_jit_gfx_measure_text_cached(loaded_handle));
+    stasis_struct_f32_store(base, index, len, "height", stasis_jit_gfx_measure_text_cached_height(loaded_handle));
+    return 1;
+}
 int stasis_jit_load_font(int32_t path, int32_t size) {
     char *value = resolve_text(path);
     int result = value == NULL ? 0 : stasis_load_font(value, size);

@@ -21,7 +21,7 @@ import "../../src/stdlib/audio.stasis";
 // - begin_frame(), end_frame(): bracket GPU work
 // - gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
 // - gfx_cmd_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
-// - gfx_load_sprite(path: string, max_w: i32, max_h: i32) -> i32
+// - Sprite.load_sprite_from(path: string, width: i32, height: i32) -> bool
 // - gfx_cmd_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): top-left
 // - gfx_poll_reload(handle: i32) -> bool
 // - gfx_logical_width() -> f32
@@ -241,16 +241,16 @@ struct Timers {
 }
 
 struct BrickoutSprites {
-    paddle: i32;
-    ball: i32;
-    brick_basic_base: i32;
-    brick_basic_turret: i32;
-    brick_basic_fx: i32;
-    brick_armored_base: i32;
-    brick_armored_turret: i32;
-    brick_armored_fx: i32;
-    brick_reflector_base: i32;
-    brick_reflector_fx: i32;
+    paddle: Sprite;
+    ball: Sprite;
+    brick_basic_base: Sprite;
+    brick_basic_turret: Sprite;
+    brick_basic_fx: Sprite;
+    brick_armored_base: Sprite;
+    brick_armored_turret: Sprite;
+    brick_armored_fx: Sprite;
+    brick_reflector_base: Sprite;
+    brick_reflector_fx: Sprite;
 }
 
 struct TapPulse {
@@ -1555,7 +1555,7 @@ function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, 
     screen_y_i.from_f32(screen_y);
     let top_left_x: i32 = screen_x_i - (screen_w / 2);
     let top_left_y: i32 = screen_y_i - (screen_h / 2);
-    gfx_cmd_sprite(handle, top_left_x, top_left_y, screen_w, screen_h, rot_deg, alpha);
+    gfx_cmd_sprite(handle, i32_to_f32(top_left_x), i32_to_f32(top_left_y), i32_to_f32(screen_w), i32_to_f32(screen_h), rot_deg, alpha);
 }
 
 function draw_bricks(): void {
@@ -1570,23 +1570,23 @@ function draw_bricks(): void {
 
     foreach (let brick in state.bricks) {
         if (brick.active) {
-            let h_base: i32 = state.sprites.brick_basic_base;
-            let h_turret: i32 = state.sprites.brick_basic_turret;
-            let h_fx: i32 = state.sprites.brick_basic_fx;
+            let h_base: i32 = state.sprites.brick_basic_base.handle;
+            let h_turret: i32 = state.sprites.brick_basic_turret.handle;
+            let h_fx: i32 = state.sprites.brick_basic_fx.handle;
             if (brick.brick_type == BrickType.Basic) {
-                h_base = state.sprites.brick_basic_base;
-                h_turret = state.sprites.brick_basic_turret;
-                h_fx = state.sprites.brick_basic_fx;
+                h_base = state.sprites.brick_basic_base.handle;
+                h_turret = state.sprites.brick_basic_turret.handle;
+                h_fx = state.sprites.brick_basic_fx.handle;
             }
             if (brick.brick_type == BrickType.Armored) {
-                h_base = state.sprites.brick_armored_base;
-                h_turret = state.sprites.brick_armored_turret;
-                h_fx = state.sprites.brick_armored_fx;
+                h_base = state.sprites.brick_armored_base.handle;
+                h_turret = state.sprites.brick_armored_turret.handle;
+                h_fx = state.sprites.brick_armored_fx.handle;
             }
             if (brick.brick_type == BrickType.Reflector) {
-                h_base = state.sprites.brick_reflector_base;
+                h_base = state.sprites.brick_reflector_base.handle;
                 h_turret = 0;
-                h_fx = state.sprites.brick_reflector_fx;
+                h_fx = state.sprites.brick_reflector_fx.handle;
             }
 
             let cx: f32 = brick.x + brick.width / 2.0;
@@ -1647,13 +1647,13 @@ function draw_bricks(): void {
 function draw_balls(): void {
     foreach (let ball in state.balls) {
         if (ball.active) {
-            if (state.sprites.ball == 0) {
+            if (state.sprites.ball.handle == 0) {
                 let bx: f32 = ball.x;
                 let by: f32 = ball.y;
                 let br: f32 = ball.radius;
                 play_draw_circle(bx, by, br, 1.0, 0.3, 1.0, 1.0);
             } else {
-                play_draw_sprite(state.sprites.ball, ball.x, ball.y, ball.radius * 2.0, ball.radius * 2.0, 0, 255);
+                play_draw_sprite(state.sprites.ball.handle, ball.x, ball.y, ball.radius * 2.0, ball.radius * 2.0, 0, 255);
             }
 
             // Ball HP bar
@@ -1686,7 +1686,7 @@ function draw_balls(): void {
 }
 
 function draw_paddle(): void {
-    if (state.sprites.paddle == 0) {
+    if (state.sprites.paddle.handle == 0) {
         let half_w: f32 = state.paddle.width / 2.0;
         let half_h: f32 = state.paddle.height / 2.0;
         let px: f32 = state.paddle.x - half_w;
@@ -1695,7 +1695,7 @@ function draw_paddle(): void {
         let ph: f32 = state.paddle.height;
         play_draw_filled_rect(px, py, pw, ph, 0.3, 1.0, 1.0, 1.0);
     } else {
-        play_draw_sprite(state.sprites.paddle, state.paddle.x, state.paddle.y, state.paddle.width, state.paddle.height, 0, 255);
+        play_draw_sprite(state.sprites.paddle.handle, state.paddle.x, state.paddle.y, state.paddle.width, state.paddle.height, 0, 255);
     }
 }
 
@@ -2106,9 +2106,9 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
                 slots_done = true;
             } else {
                 draw_rect(x + UI_MENU_PAD, sy, slot_w, UI_MENU_SLOT_H, 0.3, 0.6, 0.8, 0.8);
-                let icon_handle: i32 = state.sprites.brick_basic_base;
-                if (i == 1) { icon_handle = state.sprites.brick_armored_base; }
-                if (i == 2) { icon_handle = state.sprites.brick_reflector_base; }
+                let icon_handle: i32 = state.sprites.brick_basic_base.handle;
+                if (i == 1) { icon_handle = state.sprites.brick_armored_base.handle; }
+                if (i == 2) { icon_handle = state.sprites.brick_reflector_base.handle; }
                 if (icon_handle != 0) {
                     let icon_size: f32 = UI_MENU_SLOT_H - 10.0;
                     let max_size: f32 = slot_w - 12.0;
@@ -2124,7 +2124,7 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
                         icon_w_i.from_f32(icon_size);
                         let icon_h_i: i32;
                         icon_h_i.from_f32(icon_size);
-                        gfx_cmd_sprite(icon_handle, icon_x_i, icon_y_i, icon_w_i, icon_h_i, 0, 255);
+                        gfx_cmd_sprite(icon_handle, i32_to_f32(icon_x_i), i32_to_f32(icon_y_i), i32_to_f32(icon_w_i), i32_to_f32(icon_h_i), 0, 255);
                     }
                 }
                 let selected: bool = false;
@@ -2229,16 +2229,16 @@ function draw_ui(): void {
 
 function draw_frame(): void {
     // Hot reload during development (no flags for now)
-    if (state.sprites.paddle == 0) { } else { gfx_poll_reload(state.sprites.paddle); }
-    if (state.sprites.ball == 0) { } else { gfx_poll_reload(state.sprites.ball); }
-    if (state.sprites.brick_basic_base == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_base); }
-    if (state.sprites.brick_basic_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_turret); }
-    if (state.sprites.brick_basic_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_fx); }
-    if (state.sprites.brick_armored_base == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_base); }
-    if (state.sprites.brick_armored_turret == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_turret); }
-    if (state.sprites.brick_armored_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_fx); }
-    if (state.sprites.brick_reflector_base == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_base); }
-    if (state.sprites.brick_reflector_fx == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_fx); }
+    if (state.sprites.paddle.handle == 0) { } else { gfx_poll_reload(state.sprites.paddle.handle); }
+    if (state.sprites.ball.handle == 0) { } else { gfx_poll_reload(state.sprites.ball.handle); }
+    if (state.sprites.brick_basic_base.handle == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_base.handle); }
+    if (state.sprites.brick_basic_turret.handle == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_turret.handle); }
+    if (state.sprites.brick_basic_fx.handle == 0) { } else { gfx_poll_reload(state.sprites.brick_basic_fx.handle); }
+    if (state.sprites.brick_armored_base.handle == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_base.handle); }
+    if (state.sprites.brick_armored_turret.handle == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_turret.handle); }
+    if (state.sprites.brick_armored_fx.handle == 0) { } else { gfx_poll_reload(state.sprites.brick_armored_fx.handle); }
+    if (state.sprites.brick_reflector_base.handle == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_base.handle); }
+    if (state.sprites.brick_reflector_fx.handle == 0) { } else { gfx_poll_reload(state.sprites.brick_reflector_fx.handle); }
 
     draw_bricks();
     draw_balls();
@@ -2480,16 +2480,16 @@ function main(): i32 {
     state.layout.ui_h = 0.0;
     state.layout.ui_mode = 0;
 
-    state.sprites.paddle = gfx_load_sprite("assets/paddle.svg", 128, 24);
-    state.sprites.ball = gfx_load_sprite("assets/ball.svg", 32, 32);
-    state.sprites.brick_basic_base = gfx_load_sprite("assets/brick_basic.svg", 160, 64);
-    state.sprites.brick_basic_turret = gfx_load_sprite("assets/brick_basic_turret.svg", 160, 64);
-    state.sprites.brick_basic_fx = gfx_load_sprite("assets/brick_basic_fx.svg", 160, 64);
-    state.sprites.brick_armored_base = gfx_load_sprite("assets/brick_armored.svg", 160, 64);
-    state.sprites.brick_armored_turret = gfx_load_sprite("assets/brick_armored_turret.svg", 160, 64);
-    state.sprites.brick_armored_fx = gfx_load_sprite("assets/brick_armored_fx.svg", 160, 64);
-    state.sprites.brick_reflector_base = gfx_load_sprite("assets/brick_reflector.svg", 160, 64);
-    state.sprites.brick_reflector_fx = gfx_load_sprite("assets/brick_reflector_fx.svg", 160, 64);
+    state.sprites.paddle.load_sprite_from("assets/paddle.svg", 128, 24);
+    state.sprites.ball.load_sprite_from("assets/ball.svg", 32, 32);
+    state.sprites.brick_basic_base.load_sprite_from("assets/brick_basic.svg", 160, 64);
+    state.sprites.brick_basic_turret.load_sprite_from("assets/brick_basic_turret.svg", 160, 64);
+    state.sprites.brick_basic_fx.load_sprite_from("assets/brick_basic_fx.svg", 160, 64);
+    state.sprites.brick_armored_base.load_sprite_from("assets/brick_armored.svg", 160, 64);
+    state.sprites.brick_armored_turret.load_sprite_from("assets/brick_armored_turret.svg", 160, 64);
+    state.sprites.brick_armored_fx.load_sprite_from("assets/brick_armored_fx.svg", 160, 64);
+    state.sprites.brick_reflector_base.load_sprite_from("assets/brick_reflector.svg", 160, 64);
+    state.sprites.brick_reflector_fx.load_sprite_from("assets/brick_reflector_fx.svg", 160, 64);
 
     if (state.initialized == 0) {
         // Use get_time_ms() so non-libc hosts (e.g. wasm) don't need C's time().
@@ -2530,7 +2530,7 @@ function tick(): i32 {
     state.timers.frame_start = get_time_ms();
     let bench_start_us: i32 = get_time_us();
 
-    if (host_key_down(Scancode.Escape)) {
+    if (host_key_down(41)) {
         state.running = 0;
     }
 

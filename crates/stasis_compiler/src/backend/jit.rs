@@ -2038,6 +2038,12 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         | "stasis_jit_gfx_measure_text_cached_height" => {
             function_address(stasis_dynload::stasis_jit_gfx_measure_text_cached_height as *const ())
         }
+        "stasis_jit_sprite_load_from" => {
+            function_address(stasis_dynload::stasis_jit_sprite_load_from as *const ())
+        }
+        "stasis_jit_text_run_load_from" => {
+            function_address(stasis_dynload::stasis_jit_text_run_load_from as *const ())
+        }
         "time" | "stasis_time" | "stasis_jit_time" | "stasis_get_time_ms" => {
             function_address(stasis_dynload::stasis_get_time_ms as *const ())
         }
@@ -5311,6 +5317,21 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute in memory");
         assert_eq!(value, 7);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_nested_struct_receiver_call() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sprite { handle: i32; }\nstruct GameState { aura: Sprite; sprites: Sprite[2]; }\nglobal state: GameState;\nfunction set_handle(self: Sprite, value: i32): void { self.handle = value; }\nfunction main(): i32 { state.aura.set_handle(37); state.sprites[1].set_handle(5); return state.aura.handle + state.sprites[1].handle; }\n",
+        );
+        process.compile().expect("compile nested receiver");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute nested receiver");
+        assert_eq!(value, 42);
     }
 
     #[cfg(windows)]

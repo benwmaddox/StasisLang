@@ -93,6 +93,8 @@ int stasis_jit_gfx_cache_text(int32_t font, int32_t text);
 int stasis_jit_gfx_poll_reload(int32_t handle);
 float stasis_jit_gfx_measure_text_cached(int32_t handle);
 float stasis_jit_gfx_measure_text_cached_height(int32_t handle);
+int stasis_jit_sprite_load_from(int32_t base, int32_t index, int32_t len, int32_t path, int32_t width, int32_t height);
+int stasis_jit_text_run_load_from(int32_t base, int32_t index, int32_t len, int32_t font, int32_t text);
 int stasis_jit_load_font(int32_t path, int32_t size);
 float stasis_jit_measure_text(int32_t font, int32_t text);
 void stasis_jit_sleep_ms(int32_t ms);

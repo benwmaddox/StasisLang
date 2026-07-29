@@ -1,24 +1,28 @@
 import "../../src/stdlib/graphics.stasis";
 import "layout.stasis";
 
-global menu_font: i32;
-global menu_title_run: i32;
-global menu_title_width: f32;
-global menu_play_run: i32;
-global menu_play_width: f32;
-global menu_button_sprite: i32;
-global menu_play_clicked: bool;
+struct MenuState {
+    font: i32;
+    title: TextRun;
+    title_width: f32;
+    play: TextRun;
+    play_width: f32;
+    button: Sprite;
+    play_clicked: bool;
+}
+
+global state: MenuState;
 
 function main(): i32 {
     init_window(360, 720, "Immediate Axis Layout");
-    menu_font = load_font("../render_parity/assets/parity.ttf", 24);
-    menu_title_run = gfx_cache_text(menu_font, "STASIS MENU");
-    menu_title_width = gfx_measure_text_cached(menu_title_run);
-    menu_play_run = gfx_cache_text(menu_font, "PLAY");
-    menu_play_width = gfx_measure_text_cached(menu_play_run);
-    menu_button_sprite = gfx_load_sprite("../render_parity/assets/opaque.svg", 180, 56);
-    menu_play_clicked = false;
-    if (menu_font == 0 || menu_title_run == 0 || menu_play_run == 0 || menu_button_sprite == 0) {
+    state.font = load_font("../render_parity/assets/parity.ttf", 24);
+    state.title.load_text_from(state.font, "STASIS MENU");
+    state.title_width = state.title.width;
+    state.play.load_text_from(state.font, "PLAY");
+    state.play_width = state.play.width;
+    state.button.load_sprite_from("../render_parity/assets/opaque.svg", 180, 56);
+    state.play_clicked = false;
+    if (state.font == 0 || state.title.handle == 0 || state.play.handle == 0 || state.button.handle == 0) {
         return 1;
     }
     return 0;
@@ -30,14 +34,14 @@ function update_menu_layout(): void {
         gfx_safe_viewport_y(),
         gfx_safe_viewport_width(),
         gfx_safe_viewport_height(),
-        menu_title_width,
-        menu_play_width
+        state.title_width,
+        state.play_width
     );
 }
 
 function tick(): i32 {
     update_menu_layout();
-    menu_play_clicked = false;
+    state.play_clicked = false;
     let pointer_count: i32 = input_pointer_count();
     let i: i32 = 0;
     for (i = 0; i < pointer_count; i = i + 1) {
@@ -46,7 +50,7 @@ function tick(): i32 {
                 input_pointer_x_logical(i),
                 input_pointer_y_logical(i)
             )) {
-                menu_play_clicked = true;
+                state.play_clicked = true;
             }
         }
     }
@@ -57,21 +61,13 @@ function render(): i32 {
     begin_frame();
     clear(0.04, 0.06, 0.10, 1.0);
     update_menu_layout();
-    draw_text_cached(
-        menu_font, menu_title_run, menu_title_x, menu_title_y,
+    state.title.draw(
+        menu_title_x, menu_title_y,
         1.0, 0.9, 0.7, 1.0
     );
-    gfx_draw_sprite(
-        menu_button_sprite,
-        menu_button_x,
-        menu_button_y,
-        menu_button_w,
-        menu_button_h,
-        0,
-        255
-    );
-    draw_text_cached(
-        menu_font, menu_play_run, menu_label_x, menu_label_y,
+    state.button.draw(menu_button_x, menu_button_y, 255, 0);
+    state.play.draw(
+        menu_label_x, menu_label_y,
         1.0, 1.0, 1.0, 1.0
     );
     end_frame();
