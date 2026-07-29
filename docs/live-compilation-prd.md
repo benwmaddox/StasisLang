@@ -2,7 +2,7 @@
 
 ## Project
 
-Stasis Live Compilation & Hot Swap System (File-Level, In-Process, Tick-Based)
+Stasis Live Compilation & Atomic Generation Swap System (File-Level, In-Process, Tick-Based)
 
 ## 1. Purpose & Goals
 
@@ -31,9 +31,10 @@ Android workshop requirements are tracked in `docs/android_workshop_prd.md`. Tha
 
 This system does not aim to:
 
-- support arbitrary runtime schema/layout changes (future possibility)
+- support unbounded or semantically ambiguous runtime schema/layout migration
 - implement full symbol-level dependency invalidation
-- automatically infer state migrations
+- infer semantic transformations beyond the compiler's deterministic path/type/capacity migration
+  rules
 - replace a full debugger
 - optimize production builds beyond baseline Cranelift AOT
 
@@ -60,18 +61,18 @@ Game Process
  |  |- Game loop (tick-based)
  |  |- Global Data
  |  |- Debug UI
- |  \- Function Pointer Table
+ |  \- Atomic ActiveGeneration reference
  |
  |- Compiler Service
  |  |- In-memory file database
  |  |- File-level incremental pipeline
- |  |- Semantic hashing
- |  \- Swap decision logic
+ |  |- Semantic/HIR caches
+ |  \- Complete-generation build decisions
  |
  \- Codegen Service (Cranelift JIT/AOT)
-    |- Code generation
-    |- Executable memory management
-    \- Code versioning
+    |- Shared direct-call JIT/AOT lowering
+    |- Complete module finalization
+    \- Generation-owned executable memory
 ```
 
 Disk I/O is not part of the hot path.
@@ -82,11 +83,13 @@ Disk I/O is not part of the hot path.
 
 - Invalidation unit: file
 - Correctness unit: file
-- Emission unit: function
+- Lowering/cache unit: function
+- Publication unit: complete reachable generation
 - Dead-code pruning unit: function + struct metadata (reachability-based)
 
 Semantic analysis always runs for the entire file.
-Code generation is gated per function.
+Semantic and target-independent lowering work may be gated per function. Every accepted development
+build still finalizes one complete reachable machine-code generation.
 Pruning is symbol-level and happens before Cranelift emission.
 
 ### 4.2 File-Level Pipeline
@@ -100,12 +103,14 @@ Raw Text
  -> Reachability Mark (functions + structs)
  -> Prune Unreachable Symbols
  -> Per-function semantic hashing
- -> Per-function codegen (gated)
+ -> Per-function lowering/cache lookup
+ -> Complete direct-call module finalization
 ```
 
 Reachability roots:
 - `main`
 - `tick` (when present)
+- `render` (when present)
 - `on_code_swap` (when present)
 - host-required exported entry symbols
 
@@ -120,16 +125,20 @@ Each function produces:
 
 Rules:
 
-- If `fnBodyHash` unchanged -> reuse machine code
+- If `fnBodyHash` is unchanged -> reuse target-independent analysis/lowering inputs when safe
 - If layout-affecting semantic fact changes -> full file re-codegen
-- Semantic hash comparison gates backend work only
+- Semantic hashes never reuse live machine code, relocations, or pointers from another generation
 
-### 4.4 Layout Stability Rule
+### 4.4 Generation Compatibility Rule
 
 Hot swap is permitted only if:
 
-- global struct layouts are unchanged
-- function signatures are unchanged (initial implementation constraint)
+- every required host export keeps its declared ABI and phase policy
+- the target and host-set versions remain compatible
+- global state layout is unchanged or the compiler-owned bounded migration plan is compatible
+
+Ordinary internal functions are not compatibility boundaries. They may be added, removed, renamed,
+or change signature because the complete reachable generation and all callers are rebuilt together.
 
 If violated:
 
@@ -175,21 +184,24 @@ alpha /= 180.0;
 Dev/runtime hot-swap mode uses Cranelift JIT.
 Production build mode uses Cranelift AOT outputs.
 
-### 5.1 Function Pointer Table ABI
+### 5.1 Complete Generation ABI
 
-All runtime calls use:
-
-```text
-FnId -> code_ptr
-```
+Every reachable Stasis-to-Stasis call uses a direct call inside one finalized JIT/AOT module. Only
+explicit lifecycle and host-required exports cross the runtime boundary. The runtime snapshots one
+immutable `ActiveGeneration` owning the complete export map, state bindings, and executable memory
+for an execution window.
 
 Rules:
 
-- `FnId` stable across recompiles
-- Call sites use indirect calls
-- No direct calls to raw compiled addresses
+- The compiler discovers host exports from lifecycle roots and the selected host-set manifest.
+- All host exports are published by one atomic owning-reference exchange; independent pointer swaps
+  are forbidden.
+- Internal body pointers never leave the generation and cannot be cached by the host.
+- `FnId` may identify symbols in diagnostics and caches, but is not a runtime dispatch key.
+- A `tick()` and its following `render()` use the same captured generation.
+- JIT and AOT share one direct-call lowering contract.
 
-This enables atomic swaps without patching call sites.
+The detailed ABI and lifetime contract is `docs/jit_generation_contract.md`.
 
 ### 5.2 Runtime API
 
@@ -236,13 +248,13 @@ The runtime API:
 
 ### 6.1 Two-Phase Commit
 
-Phase 1 - Background Compilation
+Phase 1 - Background Generation Build
 
 - File changes ingested
 - Semantics computed
-- Changed functions identified
-- Cranelift compiles changed functions
-- Results stored as a pending patch
+- Reachable functions and host exports resolved
+- Cranelift compiles and finalizes the complete direct-call module
+- Results transferred as one immutable `PendingGeneration`
 
 Phase 2 - Commit (Main Thread, Between Ticks)
 
@@ -250,20 +262,21 @@ Occurs strictly between ticks.
 
 Order:
 
-1. Finish the active generation's `tick()` and `render()`.
-2. Snapshot active bounded state when layout migration or the swap hook can mutate it.
-3. Activate candidate storage and migrate compatible struct/global fields.
-4. Run the candidate `on_code_swap()` when present.
-5. Atomically publish candidate storage bindings and function pointers.
-6. Retire the old code generation and signal runtime feedback.
+1. Finish the active generation's complete `tick()` + `render()` execution window.
+2. Revalidate that the candidate is current and compatible.
+3. Allocate isolated candidate storage and migrate compatible struct/global fields.
+4. Run the candidate `on_code_swap()` against isolated candidate state when present.
+5. Preflight all fallible work.
+6. Atomically replace the one owning `ActiveGeneration` reference.
+7. Release the old generation when its last execution-window reference ends.
 
 If any step fails, swap is aborted.
 
 This commit exists only for a pending code generation. It is not part of ordinary gameplay tick
 semantics: the host does not infer gameplay changes, and Stasis programs expose no
 `commit_tick`, `normalize_tick`, or `validate_tick` lifecycle functions. The first candidate
-`tick()` runs only after migration and publication succeed; rejection restores the old code and
-state before another tick begins.
+`tick()` runs only after migration and publication succeed; rejection destroys isolated candidate
+code/state while the old active generation remains unchanged.
 
 ## 7. Swap Hook (User-Defined)
 
@@ -288,10 +301,12 @@ function on_code_swap(): void {
 Properties:
 
 - Optional
-- Runs once per successful swap attempt
+- Runs at most once after a candidate enters hook execution; an attempt may later reject, trap, or
+  become superseded
+- A successfully published candidate with a hook runs it exactly once
 - Runs between ticks
 - Executes as candidate code before publication and before the next `tick()`
-- May mutate global data
+- May mutate only isolated candidate global data
 - Must not invoke gameplay entrypoints
 
 ### 7.3 Enforcement Rules
@@ -405,32 +420,50 @@ Rules:
 
 When a source file changes during development, ownership is:
 
-- Runtime/Main Thread: owns tick loop, safe-point detection, and final swap commit; never performs parsing/semantic/codegen work inline with tick execution.
-- Compiler Service Thread: owns lex/parse/index/semantic/hash analysis for changed files and produces either diagnostics or a staged swap candidate; it never activates candidate runtime state.
-- Codegen Service (Cranelift): owns JIT code emission for dev mode and AOT emission for prod mode; never mutates runtime state directly.
-- Swap Coordinator: owns two-phase commit transaction boundaries, all-or-nothing swap rules, and generation retirement scheduling after successful commit.
+- Runtime/Main Thread: owns the tick loop, execution-window generation snapshot, safe-point detection,
+  isolated state migration/hook transaction, and one-reference publication. It never parses, checks,
+  lowers, generates, links, or finalizes code.
+- Compiler Service Thread: owns an immutable source snapshot, lex/parse/index/semantic/hash analysis,
+  reachability, and complete `PendingGeneration` construction. It never reads or mutates runtime
+  values.
+- Codegen Service (Cranelift): owns shared direct-call JIT/AOT emission and complete module
+  finalization. It transfers an owning artifact rather than per-function pointers.
+- Swap Coordinator: owns request ordering, cancellation/supersession, message transport, and
+  all-or-nothing commit orchestration.
 
 ### 12.2 High-Level Interface Contracts (Development Mode)
 
 Interfaces are message-based and versioned. No cross-thread shared mutable compiler/runtime objects.
 
 - `FileChangeEvent`: producer file watcher/input bridge; consumer compiler service; fields `path`, `revision`, `text_source`, `change_kind`.
-- `CompileRequest`: producer swap coordinator; consumer compiler service; fields `request_id`, `changed_files[]`, `target_mode=jit-dev`.
-- `CompileResult`: producer compiler service; consumer swap coordinator; fields `request_id`, `status`, `diagnostics[]`, `layout_hash`, `fn_patch_set`, optional `hook_symbol`.
-- `SwapCommitRequest`: producer swap coordinator; consumer runtime/main thread safe-point gate; fields `request_id`, `layout_hash`, `fn_patch_set`, `hook_symbol`.
-- `SwapCommitResult`: producer runtime/main thread; consumer swap coordinator + UI/status bridge; fields `request_id`, `status`, `swapped_fn_ids[]`, `new_generation`, `error`.
+- `BuildGeneration`: producer swap coordinator; consumer compiler service; fields `request_id`,
+  `revision`, immutable `source_snapshot_id`, `target`, `host_set`, and immutable active ABI/layout
+  contract.
+- `BuildFinished`: producer compiler service; consumer swap coordinator; fields `request_id`,
+  `revision`, `status`, `diagnostics[]`, and optional owning `pending_generation`.
+- `CommitGeneration`: producer swap coordinator; consumer runtime/main thread safe-point gate; fields
+  `request_id` and owning `pending_generation`.
+- `CommitFinished`: producer runtime/main thread; consumer swap coordinator + UI/status bridge;
+  fields `request_id`, `status`, optional `active_generation_number`, and optional diagnostic.
+- `CancelBuild`: producer swap coordinator; consumer compiler service; fields `request_id` and
+  `superseded_by_request_id`.
 
 ### 12.3 Development Change Sequence (Single File Save)
 
 1. Watcher emits `FileChangeEvent`.
-2. Swap coordinator coalesces pending events and emits `CompileRequest`.
+2. Swap coordinator coalesces pending events, supersedes older requests, and emits
+   `BuildGeneration`.
 3. Compiler service runs full-file semantic pass.
-4. Compiler/codegen returns `CompileResult` with diagnostics or a patch plus its staged JIT candidate.
-5. If diagnostics exist, patch is discarded and old code remains active.
+4. Compiler/codegen returns `BuildFinished` with diagnostics or one finalized
+   `PendingGeneration`.
+5. If diagnostics exist or the result is stale, the candidate is discarded and old code remains
+   active.
 6. If eligible, coordinator waits for between-ticks safe point.
-7. Main thread runs the shared bounded state-migration transaction and `on_code_swap()` (if present).
-8. Main thread atomically activates the candidate runtime and pointer-table update, then records the new generation.
-9. Runtime publishes `SwapCommitResult`; debug UI updates swap indicator only on success.
+7. Main thread creates isolated candidate state, runs bounded migration and candidate
+   `on_code_swap()` (if present), and preflights publication.
+8. Main thread atomically replaces the complete `ActiveGeneration` reference and assigns the next
+   successful generation number.
+9. Runtime publishes `CommitFinished`; debug UI updates swap indicator only on success.
 
 Failure at any sequence step aborts commit and preserves old code/data.
 
@@ -447,59 +480,71 @@ Constraints:
 
 ## 13. Code Memory Management
 
-- Executable memory allocated per generation
-- Each successful swap increments generation
-- Old generations retired after safe window
-- Memory freed in bulk
+- Executable memory, exports, metadata, and state bindings share one generation owner.
+- Each successful one-reference publication increments the generation number.
+- Execution windows hold an owning reference; old code is freed in bulk after the last reference
+  ends, not after a fixed tick delay.
+- Fibers, suspended Stasis frames, cached code pointers, and callbacks retaining guest pointers are
+  unsupported and rejected deterministically.
+- Steady operation owns at most active + current pending + one transient retiring generation; a
+  superseded pending generation is released immediately.
 
 ## 14. Performance Targets
 
-| Scenario               | Target   |
-| ---------------------- | -------- |
-| Single function edit   | 10-25 ms |
-| Multiple function edit | 15-40 ms |
-| Comment-only change    | <15 ms   |
-| Swap commit            | <1 tick  |
+| Scenario | Initial p95 gate |
+| --- | ---: |
+| Complete 100-function trivial generation | 25 ms background |
+| Complete 1,000-function trivial generation | 150 ms background |
+| Complete 5,000-function trivial generation | 2,500 ms background |
+| Desktop owning-reference publication | 0.25 ms |
+| Android arm64 owning-reference publication | 1.0 ms |
 
-Disk I/O must not be on hot path.
+Edit-to-visible latency is background build time plus at most two tick intervals. Compilation may
+take many ticks while the old generation keeps running; it may not stall the runtime thread. The
+full measurement and executable-memory budgets are in `docs/jit_generation_contract.md`. Disk I/O
+must not be on the hot path.
 
 ## 15. Development Phases
 
-Phase 0:
-- Pointer table only
+Phase G0:
+- Lock the complete-generation ABI, lifecycle, matrix, budgets, and deletion list.
 
-Phase 1:
-- In-process compiler, file-level semantics
+Phase G1:
+- Emit one complete direct-call JIT module through shared JIT/AOT lowering.
 
-Phase 2:
-- Per-function codegen gating
+Phase G2:
+- Publish one owning generation reference between windows and retire by ownership.
 
-Phase 3:
-- Cranelift JIT (dev), swap hook, swap indicator
+Phase G3:
+- Prove the complete edit/failure transition matrix with deterministic executable fixtures.
 
-Phase 4:
-- Cranelift AOT (prod) artifact path
-Phase 5 (Optional):
-- LSP integration, live data inspection
+Phase G4:
+- Enforce the desktop/Android JIT/AOT platform and performance matrix.
+
+The prior pointer-table/patch-set phases describe migration substrate only. They are not retained as
+a compatibility path and are deleted by G1-G2.
 
 ## 16. Key Risks & Mitigations
 
-| Risk                   | Mitigation                                        |
-| ---------------------- | ------------------------------------------------- |
-| Stale code execution   | Atomic pointer swaps                              |
-| Partial state mutation | Swap hook transactional                           |
-| Developer confusion    | Swap indicator                                    |
-| Complexity creep       | File-level only                                   |
-| Inlining side effects  | Inline supported but inline change forces rebuild |
+| Risk | Mitigation |
+| --- | --- |
+| Mixed-generation execution | One immutable generation snapshot per execution window |
+| Stale build publication | Monotonic request IDs plus current-revision check at commit |
+| Partial state mutation | Isolated candidate state and fallible work before publication |
+| Use-after-free code | Owning execution-window references and no retained guest pointers |
+| Runtime frame stalls | Complete build/finalization restricted to compiler thread |
+| Complexity creep | Complete reachable module; no partial-dispatch compatibility path |
 
 ## 17. Success Criteria
 
 System is successful when:
 
-- Save -> new logic runs next tick
+- Save -> the latest complete successful generation runs after a safe-point publication
 - Game state persists
 - Swap confirmation is visible
 - Errors are safe and clear
+- A tick/render window never mixes generations
+- Internal calls contain no runtime dispatch lookup
 - Architecture remains understandable
 
 ## 18. Summary
@@ -513,4 +558,6 @@ This system is intentionally:
 - fast
 - developer-trust-focused
 
-It provides a robust, file-level hot reload pipeline with per-function efficiency, an explicit swap hook, and a deterministic tick-based UI confirmation mechanism.
+It provides a robust, file-correct hot reload pipeline with reusable semantic work, complete
+direct-call generations, an explicit transactional swap hook, and deterministic tick-based UI
+confirmation.

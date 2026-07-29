@@ -32,9 +32,8 @@ When this work is complete:
   lowering and compile-analysis logic.
 - `jit.rs` mostly owns:
   - host/runtime symbol addresses
-  - JIT module finalization into executable memory
-  - code pointer / dispatch-table publication
-  - JIT-only runtime table refresh
+  - complete JIT module finalization into generation-owned executable memory
+  - construction of the immutable host-export map
 - `aot.rs` mostly owns:
   - extern binding policy for the linked runtime
   - direct-call/import policy where needed
@@ -90,16 +89,16 @@ It should answer:
    - `ObjectModule`
 
 2. How do internal calls lower?
-   - JIT runtime dispatch helper path
-   - AOT direct/imported call path
+   - Both JIT and AOT use module-local direct calls.
+   - Backend policy declares/finalizes symbols but cannot select a runtime dispatch path.
 
 3. How are externs resolved?
    - JIT: resolve to concrete host addresses
    - AOT: resolve to the symbol names exported by the linked runtime
 
-4. How is the compiled function finalized?
-   - JIT: define, finalize, publish code pointer
-   - AOT: define, finish module, emit object bytes
+4. How is the complete module finalized?
+   - JIT: define all reachable bodies, finalize, and return one owned pending generation
+   - AOT: define all reachable bodies, finish the module, and emit one linked artifact set
 
 Everything else should stay in shared code.
 
@@ -121,8 +120,8 @@ Everything else should stay in shared code.
 
 - lookup of host symbol addresses
 - registration of concrete symbol pointers in `JITBuilder`
-- final code pointer extraction
-- dispatch-table publication and runtime refresh
+- complete module finalization
+- host-export address extraction into generation-owned metadata
 
 ### AOT-only code may own
 
@@ -147,7 +146,7 @@ families.
 
 3. Calls
    - shared signature matching and argument lowering
-   - backend policy decides only internal-call execution mode
+   - shared module-local direct-call declarations and emission
 
 4. Control flow
    - `if`, `for`, `foreach`, `return`, `continue`
@@ -166,8 +165,8 @@ The shared compile path should converge on something conceptually like this:
 
 ```rust
 struct SharedCompileInputs<'a> {
-    meta: &'a FunctionMeta,
-    hir: &'a FunctionHIR,
+    reachable_functions: &'a [FunctionHIR],
+    host_exports: &'a HostExportManifest,
     analysis: &'a CompileAnalysisCache,
     type_table: &'a mut TypeTable,
 }
@@ -177,24 +176,19 @@ trait BackendCompilePolicy {
     type Artifact;
 
     fn module(&mut self) -> &mut Self::ModuleT;
-    fn internal_call_mode(&mut self, self_function_id: FunctionId, self_func_id: FuncId)
-        -> InternalCallMode<'_>;
-    fn finalize(
-        &mut self,
-        function_id: FuncId,
-        context: &mut cranelift_codegen::Context,
-    ) -> Result<Self::Artifact, String>;
+    fn finalize_module(self, exports: &[DeclaredHostExport]) -> Result<Self::Artifact, String>;
 }
 
-fn compile_function_with_policy<P: BackendCompilePolicy>(
+fn compile_generation_with_policy<P: BackendCompilePolicy>(
     inputs: SharedCompileInputs<'_>,
-    policy: &mut P,
+    policy: P,
 ) -> Result<P::Artifact, String>;
 ```
 
 The exact types can differ, but the seam should look like this:
 
-- shared compile function owns compile mechanics
+- shared compile function predeclares all reachable functions, owns per-function compile mechanics,
+  and emits direct internal references in one module
 - backend policy owns only the narrow behavior that truly differs
 
 ## Current Remaining Divergences To Eliminate
@@ -210,7 +204,9 @@ The exact types can differ, but the seam should look like this:
    - AOT still needs a stricter shared resolution policy for link targets
 
 3. Internal-call mode differences
-   - these should remain, but only as an explicit policy seam
+   - the historical JIT dispatch-helper mode is obsolete
+   - both backends must use the shared direct-call path described in
+     `docs/jit_generation_contract.md`
 
 4. Separate AOT helper tool path
    - if retained, it should not become a second lowering implementation
@@ -232,7 +228,7 @@ Recommended implementation order:
 
 1. Share compile-analysis and extern/import policy.
 2. Extract one shared per-function compile pipeline.
-3. Reduce internal-call divergence to an explicit policy switch only.
+3. Remove the JIT internal-dispatch policy switch and finalize complete direct-call generations.
 4. Add parity and architecture regressions to keep the split stable.
 
 This order improves correctness first, then performs the larger mechanical
