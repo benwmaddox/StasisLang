@@ -2318,6 +2318,35 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn aot_and_jit_execute_receiver_overloads_with_different_arities() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let source = "function draw(self: i32, x: f32, alpha: i32): i32 { return self + alpha; }\nfunction draw(self: f32, x: f32, r: f32, g: f32, b: f32, a: f32): i32 { return 7; }\nfunction main(): i32 { let sprite: i32 = 5; let text: f32 = 2.0; return sprite.draw(1.0, 30) + text.draw(2.0, 1.0, 1.0, 1.0, 1.0); }\n";
+
+        let mut jit = JitProcess::new();
+        jit.upsert_file("sample.stasis", source);
+        jit.compile().expect("JIT compile");
+        let jit_result = jit.execute_i32_noarg_by_name("main").expect("JIT execute");
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("sample.stasis", source);
+        aot.compile().expect("AOT compile");
+        let Some(aot_result) = run_linked_i32_noarg_fixture(
+            &aot,
+            "main",
+            "receiver_overloads_different_arities",
+            &link_config,
+        ) else {
+            return;
+        };
+
+        assert_eq!(jit_result, 42);
+        assert_eq!(aot_result, jit_result);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn aot_process_links_and_executes_immediate_axis_layout_sample() {
         let Some(link_config) = resolve_link_config_for_smoke() else {
             return;

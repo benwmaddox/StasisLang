@@ -30,6 +30,71 @@ extern function measure_text(font: i32, text: string): f32;
 // Cache text into a host-side glyph run; intended for startup/init, not per-tick.
 function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
 function @extern("stasis_gfx_measure_text_cached") gfx_measure_text_cached(run_handle: i32): f32;
+function @extern("stasis_gfx_measure_text_cached_height") gfx_measure_text_cached_height(run_handle: i32): f32;
+
+struct Sprite {
+    handle: i32;
+    width: i32;
+    height: i32;
+}
+
+struct TextRun {
+    font: i32;
+    handle: i32;
+    width: f32;
+    height: f32;
+}
+
+function load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool {
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+
+    let loaded_handle: i32 = gfx_load_sprite(path, width, height);
+    if (loaded_handle <= 0) {
+        return false;
+    }
+
+    let old_handle: i32 = self.handle;
+    self.handle = loaded_handle;
+    self.width = width;
+    self.height = height;
+    if (old_handle > 0 && old_handle != loaded_handle) {
+        gfx_release_sprite(old_handle);
+    }
+    return true;
+}
+
+function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
+    if (self.handle <= 0 || self.width <= 0 || self.height <= 0) { return; }
+    let width: f32 = 0.0;
+    let height: f32 = 0.0;
+    width.from_i32(self.width);
+    height.from_i32(self.height);
+    gfx_cmd_sprite(self.handle, x, y, width, height, rotation, alpha);
+}
+
+function load_text_from(self: TextRun, font: i32, text: string): bool {
+    if (font <= 0) {
+        return false;
+    }
+
+    let loaded_handle: i32 = gfx_cache_text(font, text);
+    if (loaded_handle <= 0) {
+        return false;
+    }
+
+    self.font = font;
+    self.handle = loaded_handle;
+    self.width = gfx_measure_text_cached(loaded_handle);
+    self.height = gfx_measure_text_cached_height(loaded_handle);
+    return true;
+}
+
+function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+    if (self.font <= 0 || self.handle <= 0) { return; }
+    gfx_cmd_text_cached(self.font, self.handle, x, y, r, g, b, a);
+}
 
 // Deprecated controls/debug: kept as stubs so older samples compile; host-owned behavior should move to snapshot/commands.
 function set_postfx(strength: f32, phase: f32, speed: f32, r: f32, g: f32, b: f32): void {

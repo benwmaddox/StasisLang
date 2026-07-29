@@ -515,7 +515,9 @@ damage(enemy, 5);
 ### 7.4 Arity Rule
 
 Arity overloading is not supported.
-If declarations share a function name, they must use the same parameter count.
+If declarations share a function name and parameter 0 type, they must use the same parameter count.
+
+Receiver-scoped declarations with different parameter 0 types may use their natural different arities. Resolution selects compatible candidates using the full argument count and types, including the receiver type.
 
 ### 7.5 Struct and Array Returns
 

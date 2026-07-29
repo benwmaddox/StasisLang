@@ -633,6 +633,7 @@ struct EmbeddedTextRun {
     font: i32,
     text: String,
     measured_width: f32,
+    measured_height: f32,
 }
 
 struct EmbeddedResourceCatalog {
@@ -660,6 +661,7 @@ fn install_embedded_resource_host(project_root: &Path) -> Result<(), String> {
         measure_text: embedded_measure_text,
         cache_text: embedded_cache_text,
         measure_text_cached: embedded_measure_text_cached,
+        measure_text_cached_height: embedded_measure_text_cached_height,
         poll_reload: |_| 0,
     }));
     Ok(())
@@ -868,6 +870,7 @@ fn embedded_cache_text(font: i32, text: &[u8]) -> i32 {
         font,
         text: text.to_string(),
         measured_width,
+        measured_height: font_entry.size as f32,
     });
     handle
 }
@@ -879,6 +882,15 @@ fn embedded_measure_text_cached(handle: i32) -> f32 {
     slot.as_ref()
         .and_then(|catalog| catalog.text_runs.iter().find(|run| run.handle == handle))
         .map_or(0.0, |run| run.measured_width)
+}
+
+fn embedded_measure_text_cached_height(handle: i32) -> f32 {
+    let Ok(slot) = embedded_resource_catalog().lock() else {
+        return 0.0;
+    };
+    slot.as_ref()
+        .and_then(|catalog| catalog.text_runs.iter().find(|run| run.handle == handle))
+        .map_or(0.0, |run| run.measured_height)
 }
 
 fn resolve_embedded_text_run(
@@ -3481,8 +3493,12 @@ function render(): void {}
                 font: 1,
                 text: "refresh".to_string(),
                 measured_width: 75.6,
+                measured_height: 18.0,
             });
         }
+
+        assert_eq!(embedded_measure_text_cached(1), 75.6);
+        assert_eq!(embedded_measure_text_cached_height(1), 18.0);
 
         let refreshed = prepare_embedded_resource_catalog(&root, true)
             .expect("prepare refreshed embedded resource catalog");
@@ -3491,6 +3507,7 @@ function render(): void {}
         assert_eq!(refreshed.fonts[0].handle, 1);
         assert_eq!(refreshed.text_runs.len(), 1);
         assert_eq!(refreshed.text_runs[0].text, "refresh");
+        assert_eq!(refreshed.text_runs[0].measured_height, 18.0);
         fs::remove_dir_all(&root).ok();
     }
 
