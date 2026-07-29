@@ -19,7 +19,8 @@ Core direction:
 - Cranelift AOT for production builds.
 - File-level incremental compilation.
 - Symbol-level reachability pruning before lowering (functions + struct metadata).
-- Reachability roots: `main`, `tick`, `on_code_swap` (when present), and host-required exported entries.
+- Reachability roots: lifecycle entries present in the program (`main`, `tick`, `render`,
+  `on_code_swap`) and host-required exported entries.
 - Hot swap only between ticks.
 - Rust host/runtime with a Rust-implemented compiler pipeline.
 
@@ -527,6 +528,17 @@ Stasis treats these as strongly typed references/views, not implicit by-value co
 - Struct/array returns must reference global-backed storage (for example a global struct field/element path).
 - Struct-typed temporaries are not materialized as standalone local value objects in Stasis.
 
+### 7.6 Compiled Call Generations
+
+Within one compiled JIT or AOT generation, every resolved Stasis-to-Stasis call is a direct call to
+the callee in that generation. This includes recursion and mutually recursive functions. Runtime
+lookup by function ID is not part of Stasis call semantics.
+
+Only lifecycle and host-required exports cross the host boundary. Their signatures are stable ABI
+contracts. Ordinary internal functions may be added, removed, renamed, or change signature during
+a live edit because the compiler rebuilds every reachable caller in the same candidate generation.
+The host must not retain any compiled entry address after the execution window that resolved it.
+
 ## 8. Enums
 
 Enums are named types that lower to integer values.
@@ -687,11 +699,15 @@ function draw_debug_ui(): void {
 
 ## 14. Incremental Compilation and Hot Swap
 
+The compiler/runtime ownership, generation state machine, platform matrix, and performance gates are
+defined in `docs/jit_generation_contract.md`.
+
 ### 14.1 Granularity
 
 - Invalidation unit: file
 - Correctness unit: file
-- Emission unit: function
+- Analysis/cache unit: function
+- Publication unit: complete reachable generation
 
 ### 14.2 Hashes
 
@@ -699,7 +715,8 @@ function draw_debug_ui(): void {
 - `fnBodyHash`: behavior
 
 Rules:
-- Unchanged `fnBodyHash` can reuse generated machine code.
+- Unchanged `fnBodyHash` can reuse target-independent analysis or lowering inputs.
+- Live machine code, relocations, and code pointers cannot be reused across generations.
 - Layout-affecting changes force conservative rebuild for changed file.
 
 ### 14.3 Two-Phase Swap
@@ -707,29 +724,37 @@ Rules:
 1. Background compile:
 - Re-lex, parse, index, and semantic-check changed file.
 - Compute per-function semantic hashes.
-- Compile changed functions.
+- Resolve the complete lifecycle/host-export root set and reachable call/type graph.
+- Finalize every reachable function into one direct-call `PendingGeneration` off the runtime thread.
 2. Commit between ticks:
-- Snapshot active bounded state when migration or `on_code_swap()` may mutate it.
-- Activate candidate storage and migrate compatible struct/global fields.
-- Run the candidate `on_code_swap()` if present.
-- Atomically publish candidate storage bindings and function pointers.
-- Retire the previous code generation.
+- Wait until the current generation's `tick()` and following `render()` have both returned.
+- Revalidate that the candidate is the newest requested revision and its host-export ABI is
+  compatible.
+- Create isolated candidate storage and migrate compatible struct/global fields.
+- Run the candidate `on_code_swap()` against candidate storage if present.
+- Complete every fallible preflight, then atomically replace one owning `ActiveGeneration`
+  reference containing all exports, bindings, metadata, and executable memory.
+- Release the previous generation when its last execution-window owner ends.
 
 Swap is rejected if:
 - Global layout changes and state-map migration is missing or incompatible.
-- Signature compatibility changes.
+- A required host-export signature changes.
 - `on_code_swap()` fails.
+- The candidate is cancelled or superseded.
+- The target cannot provide atomic owning-reference publication.
 
 Current policy (pre-1.0):
 - Layout-affecting semantic edits produce a versioned preview and require explicit apply.
-- The preview reports candidate dispatch-patch functions, state-layout compatibility, struct or whole-state scope, migration steps, capacity-shrink warnings, and estimated commit cost.
+- The preview reports the complete candidate generation, state-layout compatibility, struct or
+  whole-state scope, migration steps, capacity-shrink warnings, and estimated commit cost.
 - Apply regenerates the preview; any preview/commit mismatch rejects the swap.
 
 On rejection, old code and old data remain active.
 
 Current migration policy (pre-1.0):
 - JIT and AOT derive layout identity from the same canonical compiler-owned state-layout model; source text and function bodies are not layout identity inputs.
-- Development JIT compilation produces a staged runtime candidate and never activates dispatch, literals, collection headers, or state from the compiler thread.
+- Development JIT compilation produces a complete staged runtime generation and never activates
+  code, literals, collection headers, or state from the compiler thread.
 - Every JIT entry point uses the same migration planner and bounded transactional activation at the runtime safe point. There is no scalar-only runner migration path.
 - Layout-changing commits without a staged JIT candidate, including current AOT runtime swaps, reject with a restart-required diagnostic.
 - Migration compatibility is path-based: overlapping paths must keep compatible scalar or collection-element type shape.
@@ -737,19 +762,21 @@ Current migration policy (pre-1.0):
 - Fixed-collection growth is storage-ownership preflighted and bounded before allocation, preserves the old prefix, and initializes the expanded tail.
 - Shrink copies the retained prefix, warns about the discarded range, and clamps logical lengths; UTF-8 shrink retains the largest valid code-point prefix and recomputes byte and character counts.
 - Incompatible or missing state metadata fails deterministically with an actionable diagnostic.
-- Migration, `on_code_swap`, or pointer commit failure restores the old code and complete bounded runtime snapshot; partial migration is forbidden.
+- Migration or `on_code_swap` failure destroys isolated candidate state; the old active generation
+  was never mutated. Partial publication is forbidden.
 
 The migration transaction is a code-swap operation, not a gameplay transaction. Ordinary calls to
 `tick()` do not commit pools, normalize gameplay state, or invoke migration lifecycle functions.
 When a compiled candidate changes a struct or global layout, the host waits until the current
 `tick()` and `render()` have both returned. At that between-ticks safe point it snapshots the active
-state, activates candidate storage, copies compatible fields, initializes new fields, runs
-`on_code_swap()` if present, and atomically publishes the candidate code and migrated state. The
+state into isolated candidate storage, copies compatible fields, initializes new fields, runs
+`on_code_swap()` if present, and atomically publishes the one complete candidate generation. The
 next `tick()` is the first gameplay call allowed to observe the new generation.
 
 There is one visibility rule: a tick and its following render use one code/layout generation. A
-failed migration or swap hook restores the complete old generation before gameplay resumes; no
-candidate field, storage binding, function pointer, or partial value may be visible to the next
+failed migration or swap hook destroys the isolated candidate while the old active generation
+remains unchanged; no
+candidate field, storage binding, export, or partial value may be visible to the next
 tick. The executable fixtures under `samples/between_tick_layout_migration/` cover accepted and
 rejected struct growth across this boundary.
 
@@ -811,22 +838,33 @@ During development, file-change handling uses explicit role ownership and messag
 
 Role ownership:
 - Runtime/main thread owns tick loop, safe-point gating, and final commit.
-- Compiler service thread owns lex/parse/index/semantic/hash and patch assembly.
-- Codegen service owns backend emission (JIT for dev, AOT for prod artifacts).
-- Swap coordinator owns transactional all-or-nothing commit orchestration.
+- Compiler service thread owns an immutable source snapshot, lex/parse/index/semantic/hash,
+  reachability, and complete candidate assembly.
+- Codegen service owns shared direct-call backend emission and complete module finalization (JIT for
+  dev, AOT for prod artifacts).
+- Swap coordinator owns request ordering, supersession, and transactional all-or-nothing commit
+  orchestration.
 
 Required high-level message contracts:
 - `FileChangeEvent(path, revision, text_source, change_kind)`
-- `CompileRequest(request_id, changed_files[], target_mode)`
-- `CompileResult(request_id, status, diagnostics[], layout_hash, fn_patch_set, hook_symbol?, staged_candidate?)`
-- `SwapCommitRequest(request_id, layout_hash, fn_patch_set, hook_symbol)`
-- `SwapCommitResult(request_id, status, swapped_fn_ids[], new_generation, error)`
+- `BuildGeneration(request_id, revision, source_snapshot_id, target, host_set, active_contract)`
+- `BuildFinished(request_id, revision, status, diagnostics[], pending_generation?)`
+- `CommitGeneration(request_id, pending_generation)`
+- `CommitFinished(request_id, status, active_generation_number?, diagnostic?)`
+- `CancelBuild(request_id, superseded_by_request_id)`
 
 Rules:
 - Compiler/codegen services must not mutate runtime game state directly.
 - Runtime must not execute parser/semantic/codegen work on tick path.
 - Commit may occur only between ticks and must be all-or-nothing.
 - Any failure at compile or commit stage preserves old code and old data.
+- An execution window owns one immutable generation reference from before `tick()` until after its
+  following `render()` returns.
+- Candidates superseded before hook entry never run `on_code_swap()`. If supersession arrives while
+  a synchronous hook is already running, the hook may finish only to unwind; all isolated effects
+  are discarded and that candidate never publishes.
+- Guest fibers, suspended frames, threads, or retained host callback/code pointers are unsupported
+  and must fail deterministically.
 
 ## 15. Swap Hook
 
@@ -839,11 +877,14 @@ function on_code_swap(): void {
 ```
 
 Rules:
-- Runs once per successful swap attempt.
+- Runs at most once after a candidate enters hook execution; the attempt may later reject, trap, or
+  become superseded.
+- Runs exactly once for every successfully published candidate that defines the hook.
 - Runs between ticks.
 - Runs before new code executes.
-- May mutate global data.
-- May call `reject_code_swap()` to abort; the runtime restores the old code and complete bounded state snapshot.
+- May mutate only isolated candidate global data.
+- May call `reject_code_swap()` to abort; the runtime destroys the candidate, and the old active
+  code/state remain unchanged.
 - Must not invoke gameplay entrypoints.
 
 ## 16. Diagnostics

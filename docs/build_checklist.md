@@ -10,11 +10,14 @@ Status note:
 
 Locked decisions:
 - Entrypoint is `function main(): i32`.
-- Reachability-DCE roots are `main`, `tick`, and `on_code_swap` (when present), plus host-exported required entry symbols.
+- Reachability-DCE roots are lifecycle entries present in the program (`main`, `tick`, `render`,
+  `on_code_swap`) plus host-exported required entry symbols.
 - Initial host externs are `print_i32` and `print_string`.
 - Function-form calls remain supported indefinitely (receiver-form still preferred).
 - Runtime boundary is host-set-based and deny-by-default: Stasis can only access extern symbols exported by the selected host set.
-- Call dispatch policy: debug/hot-swap mode keeps indirect dispatch (`FnId -> code_ptr`); release/AOT mode can lower direct call edges where compatibility gates allow.
+- Call dispatch policy: JIT and AOT lower every reachable internal Stasis call directly inside one
+  complete generation. Only lifecycle/host-required exports cross the host boundary, and the host
+  publishes them through one owning `ActiveGeneration` reference.
 - Backend modes are:
 - Cranelift JIT for development/watch/hot-swap runtime
 - Cranelift AOT for production builds
@@ -56,6 +59,105 @@ Release AOT optimization:
 Historical bootstrap/self-host notes below are archival only and do not describe an active compiler track.
 
 ## Slice Plan
+
+### Direct-Call Generation Migration Track
+
+The canonical ABI, state machine, failure table, platform matrix, budgets, and ownership rules are
+in `docs/jit_generation_contract.md`. These slices replace the historical S7-S10 pointer-table and
+patch-set end state; they do not add a second compatibility mode.
+
+#### G0 - Lock Generation Architecture, ABI, and Lifecycle
+
+- Maddox task: #174.
+- Language: `docs`.
+- Scope: Replace product/spec/checklist requirements for internal `FnId -> code_ptr` dispatch with
+  complete reachable direct-call generations and one-reference publication.
+- Deliverable: Unambiguous ownership model, state machine, failure table, thread messages,
+  `on_code_swap` transaction, retirement rule, target matrix, performance budgets, and child gates.
+- Tests: Documentation consistency check, bounded repository validation, and touched-file cruft
+  review.
+- Done gate: No canonical current requirement permits mixed generations, independent pointer
+  publication, runtime-thread compiler work, or stale/superseded candidate visibility.
+- Status: `completed`
+
+#### G1 - Emit Complete Direct-Call Generation Modules
+
+- Maddox task: #175.
+- Language: `Rust + .stasis`.
+- Scope: Predeclare and define the complete reachable call graph in one JIT module through the
+  shared JIT/AOT direct-call lowering path.
+- Deliverable: One finalized pending generation with a compiler-derived immutable host-export map;
+  semantic caches stop before live machine-code ownership.
+- Tests: Direct-call/no-dispatch CLIF assertions for leaf, caller, shared utility, recursive/SCC,
+  lifecycle/export, added/deleted/renamed, and unreachable cases; representative executable JIT and
+  AOT sample.
+- Done gate: No internal arity wrapper, dispatch lookup, mutex, cross-generation relocation, or
+  per-function live machine-code patch remains.
+- Status: `pending`
+
+#### G2 - Publish and Retire One Generation Atomically
+
+- Maddox task: #176.
+- Language: `Rust + .stasis`.
+- Scope: Implement owned pending/active generations, versioned build messages, safe-point execution
+  windows, isolated migration/hook state, latest-request supersession, single-reference publication,
+  and owner-based retirement.
+- Deliverable: `tick` + `render` capture one generation; all fallible work precedes the atomic
+  exchange; old executable memory drops after the last window owner.
+- Tests: Delayed compile runs old code for multiple windows then purely new code; A -> B publishes
+  only B; compile/migration/hook rejection preserves exact active reference/state; 100 swaps reach
+  zero quiescent retired owners.
+- Done gate: Independent export stores, pointer-table commits, staged pointer previews, and fixed
+  tick-delay retirement are deleted.
+- Status: `pending`
+
+#### G3 - Verify the Function-Edit Transition Matrix
+
+- Maddox task: #177.
+- Language: `Rust + .stasis`.
+- Scope: Exercise every functional edit and rejection category against observable behavior and
+  generation/state identity.
+- Tests: Host roots, leaf/mid-level/shared/recursive calls, render, `on_code_swap`, multiple edits,
+  add/delete/rename, unreachable edits, host-ABI/layout incompatibility, syntax/lowering failure,
+  and recovery across JIT/AOT.
+- Done gate: Every failure preserves the previous complete generation and no test depends on an
+  implementation-only per-function pointer.
+- Status: `pending`
+
+#### G4 - Enforce Platform, Performance, and Memory Gates
+
+- Maddox task: #178.
+- Language: `Rust + CI + Android`.
+- Scope: Enforce the Windows x86_64, Linux x86_64, macOS x86_64/arm64, and Android arm64 JIT/AOT
+  matrix plus explicit exclusions.
+- Tests: Bounded target CI, Android Workshop JIT and published AOT acceptance on a named physical
+  arm64 device, optional x86_64 AVD smoke that does not satisfy the arm64 row, 100/1,000/5,000 and
+  Brickout-scale cold/edit benchmarks, publication latency, old-generation ticks, and retirement
+  memory stress.
+- Done gate: The budgets in `docs/jit_generation_contract.md` pass or are revised with recorded
+  evidence; unsupported combinations fail explicitly.
+- Status: `pending`
+
+#### Superseded checklist requirements
+
+The following completed slices remain history of the current implementation, but their listed end
+states are removal work for G1-G2 and are not compatibility requirements:
+
+- S7's "unchanged function bodies skip backend regeneration" may apply only to semantic/HIR or
+  target-independent lowering caches. It cannot reuse live machine code across generations.
+- S8's `FnId -> code_ptr` runtime dispatch, per-function publication, and safe-window retirement are
+  replaced by one owned complete generation and owner-based retirement.
+- S8b's per-function AOT patch manifests, symbol overrides, and per-function loader publication are
+  replaced wherever they participate in watch/live publication. Production AOT still emits one
+  complete direct-call program artifact.
+- S9's `CompileResult`/`SwapCommitRequest` patch sets and `swapped_fn_ids` publication truth are
+  replaced by the G0 versioned generation messages.
+- S10's hook `FnId`, staged pointer-table preview, and independent native hook address are replaced
+  by the validated `on_code_swap` export inside `PendingGeneration`.
+
+No new work may extend these obsolete paths. Each migration child deletes the paths it replaces and
+ends with a cruft review.
+
 ### Android Workshop Track
 
 #### AW0 - Product and Syntax Decisions
@@ -788,6 +890,8 @@ Archived priority override (2026-02-13, historical):
 - Status: `completed`
 
 ### S7 - Incremental Compiler V1
+- Contract status: historical implementation record. G0 supersedes machine-code reuse; only
+  semantic/HIR and target-independent lowering caches may survive into complete generations.
 - Language:
 - `Rust + .stasis`
 - Rust: in-memory file DB, cache storage, and invalidation substrate.
@@ -807,6 +911,8 @@ Archived priority override (2026-02-13, historical):
 - Status: `completed`
 
 ### S8 - Function Pointer Table ABI
+- Contract status: historical implementation record scheduled for deletion by G1-G2. The pointer
+  table is not a supported target ABI or compatibility path.
 - Language:
 - `Rust`
 - Scope:
@@ -823,6 +929,8 @@ Archived priority override (2026-02-13, historical):
 - Status: `completed`
 
 ### S8b - Cranelift AOT Production Path
+- Contract status: historical implementation record. Complete production AOT artifacts remain;
+  per-function patch/override publication does not and is superseded by G0-G2.
 - Language:
 - `Rust`
 - Scope:
@@ -946,6 +1054,8 @@ Archived priority override (2026-02-13, historical):
 - Slice R12 (optional): Perform long-session watch-mode stability/perf pass and memory-growth checks after R1-R11.
 
 ### S9 - Two-Phase Swap Commit
+- Contract status: historical implementation record. Transactional safe-point behavior remains,
+  but patch-set messages and independent pointer publication are superseded by G0-G2.
 - Language:
 - `Rust + .stasis`
 - Rust: commit transaction mechanism and thread-safe pointer swap.
@@ -967,6 +1077,8 @@ Archived priority override (2026-02-13, historical):
 - Status: `completed`
 
 ### S10 - `on_code_swap` Hook
+- Contract status: historical implementation record. Hook semantics remain, but hook `FnId`, staged
+  pointer preview, and independent entry publication are superseded by G0-G2.
 - Language:
 - `Rust + .stasis`
 - Rust: hook invocation boundary and rollback/error propagation.
