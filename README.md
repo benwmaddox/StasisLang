@@ -2,152 +2,51 @@
 
 ![Stasis Lang](opengraph.jpg)
 
-Stasis is an experimental programming language and toolchain focused on deterministic, game-style programs:
+Stasis is an experimental programming language for games and simulations that should remain understandable while they run and while they change.
 
-- Static global memory (no hidden allocations)
-- Predictable layouts (stable field offsets and array layouts)
-- A simple game loop model (`main` once, then `tick` + `render` each frame)
-- Fast edit-compile-run loops via in-process JIT + hot swap in development
+It is built around a simple bargain: give up hidden allocation and invisible runtime work in exchange for explicit state, predictable layouts, deterministic ticks, and fast live iteration.
 
-## Status
+## Why Stasis Exists
 
-Fast-moving. Expect breaking changes.
+Game code is easiest to reason about when the important facts are visible:
 
-## Philosophy and Influences
+- Where does the state live?
+- What changes it?
+- In what order do changes happen?
+- How much work can happen in one tick?
+- What happens to live state when the code changes?
 
-Stasis is built around a few pragmatic ideas that work well for games and simulations:
+Stasis makes those questions part of the language and runtime model instead of leaving them to convention.
 
-- Deterministic simulation: the same inputs produce the same outputs (tick-based, fixed-step thinking).
-- Make state explicit: prefer a single `global state` struct over scattered globals and hidden runtime state.
-- No hidden work: avoid implicit allocations and unpredictable background activity on the tick path.
-- Fast iteration: compile and hot-swap between ticks, with an explicit `on_code_swap()` hook for invariants.
+### State is a model, not plumbing
 
-Direct influences:
+Persistent program data lives in static global memory. A game will usually collect that data in one global state struct. There is no garbage collector and no hidden heap allocation on the simulation path.
 
-- **Age of Empires II**: deterministic, tick-style simulation mindset (good for replay/debug/lockstep-style thinking).
-- **Handmade Hero**: "simple and debuggable" game code, data-oriented structures, and skepticism of hidden complexity.
+That constraint is intentional. The state declaration becomes a readable model of the world, a stable inspection surface, and the boundary used to decide whether a live code swap is safe.
 
-## Start Here
+### Time advances in ticks
 
-Most users will:
+`main()` initializes the program. The host then calls `tick()` and `render()` in a deterministic loop. Gameplay progression should be tick-based: identical initial state and identical inputs should produce identical results.
 
-1. Install one release archive and put its `stasis` executable on `PATH`.
-2. Run `stasis new my_game`, then work from the project root or any subdirectory.
-3. Use `stasis fmt`, `stasis check`, `stasis test`, and `stasis run` during development.
-4. Use `stasis build --mode release`, `stasis package --target desktop`, or
-   `stasis package-mobile --target android-arm64|ios-arm64` to ship.
+This makes replays, tests, debugging, and lockstep-style simulation natural consequences of the model rather than features bolted on afterward.
 
-The integrated CLI, `stasis.json` workspace contract, JSON output, offline behavior, and
-installation layout are documented in `docs/toolchain_cli.md`.
+### Cost should be visible
 
-`stasis new` and `stasis init` also create a concise `AGENTS.md` that teaches coding agents to build
-and test the project's working theory and to use compiler-backed symbol, reference, semantic-edit,
-test, and fresh-runtime validation commands instead of scanning and rewriting whole files. A
-minimal `CLAUDE.md` points Claude-compatible agents to `AGENTS.md`. The same agent guide ships as
-`docs/agent_workflow.md` in release archives so it can be copied into an existing project.
+Stasis favors fixed-size arrays, explicit loops, static layouts, and bounded work. Source code uses convenient struct-array syntax while the compiler can lower fields into predictable structure-of-arrays storage.
 
-Lean Android/iOS app packaging is documented in `docs/mobile_packaging.md`;
-the lower-level AOT artifact contract is in `docs/mobile_aot_artifacts.md`.
+The goal is not merely speed. It is being able to explain where time and memory go.
 
-Nightly releases are published from `main`:
+### Live editing is a transaction
 
-- Releases: https://github.com/benwmaddox/StasisLang/releases
-- Workflow: `.github/workflows/nightly-release.yml`
+Development uses an in-process Cranelift JIT. Changed code is compiled in the background, checked for signature and layout compatibility, and committed between ticks. A swap either succeeds as a whole or the running program keeps its previous code and data.
 
-Windows release zip layout:
+`on_code_swap()` is the explicit place to restore invariants after a successful change. A failing hook aborts the swap; partial commits are never exposed to gameplay.
 
-- `stasis.exe` at the archive root
-- `stasis_graphics.dll` at the archive root
-- `lld-link.exe`, `clang-cl.exe`, `stasis_dynload.dll`, and `stasis_dynload.dll.lib` for offline AOT builds
-- `stasis_runner.exe` and `stasis_graphics.dll` for packaged desktop games
-- `src/`, `samples/`, `mobile/shells/`, `runtime/`, and `docs/agent_workflow.md` at the archive root
+The strongest influences are the deterministic simulation mindset of **Age of Empires II** and the simple, debuggable, data-oriented approach of **Handmade Hero**.
 
-That keeps the common Windows command simple:
+## The Shape of a Stasis Program
 
-```powershell
-.\stasis.exe play samples\bucket_catcher.stasis
-```
-
-## Project Data
-
-Put editable runtime data in the project-level `data/` directory. Every JSON or
-CSV file with a matching `<name>.struct-meta.json` mapping is bound
-automatically; normal development commands do not need `--data-bind`.
-
-JSON supports nested metadata paths. CSV headers are deliberately flat. The
-basic form maps one row to scalar/string fields or an exact number of rows to
-primitive arrays. The table form maps variable rows into a fixed-capacity struct
-array, writes `row_count` automatically, clears unused slots, and requires one
-or more non-blank unique key columns. For example:
-
-```json
-{
-  "version": 1,
-  "globalName": "level",
-  "csvTable": {
-    "rowsPath": "waves",
-    "rowCountPath": "wave_count",
-    "capacity": 64,
-    "keyColumns": ["id"]
-  },
-  "fields": [
-    { "jsonPath": "waves.id", "csvColumn": "id", "type": "i32", "arrayCount": 64 },
-    { "jsonPath": "waves.tick", "csvColumn": "tick", "type": "i32", "arrayCount": 64 },
-    { "jsonPath": "waves.enemy_kind", "csvColumn": "enemy", "type": "i32", "arrayCount": 64 }
-  ]
-}
-```
-
-This binds `id,tick,enemy` rows to the fields of `level.waves: Wave[64]`
-and maintains `level.wave_count`. Row fields are flat primitive values; CSV does
-not represent nested row properties. Quoted fields, escaped quotes, commas,
-CRLF, and embedded newlines are supported. A JSON and CSV file cannot share the
-same stem because their metadata mapping would be ambiguous.
-
-Binding is schema-strict in both directions. Every JSON property or CSV column
-must exist in the metadata, every metadata path must exist in the data file, and
-development binding fails if the resulting global path is absent from the
-compiled program. Misspellings never create fallback globals or disappear
-silently. Table CSV additionally rejects row counts above capacity, mismatched
-field capacities, blank keys, and duplicate (including composite) keys.
-
-While `stasis play` is running, changes to either file are validated and rebound
-between ticks. An invalid edit is rejected without partially applying the set.
-For AOT output, the same files are staged with the package and their values are
-compiled into the runtime bridge, so mobile and desktop builds start with the
-data even when no loose development data file is available.
-
-The older entry-specific `<entry-name>/data/` layout remains supported for
-existing projects. `--data-bind` is reserved for intentionally overriding the
-project convention with an external pair.
-
-On Windows, SmartScreen may warn on unsigned binaries.
-
-## Hello, World
-
-Create `hello.stasis`:
-
-```stasis
-import "../src/stdlib/stdlib.stasis";
-
-function main(): i32 {
-    print_string("hello from stasis\n");
-    return 0;
-}
-```
-
-Note: import paths are project-relative. In this repo, the samples typically use `../src/stdlib/...` or `../../src/stdlib/...`.
-
-## Minimal Game Skeleton
-
-Stasis gameplay code is usually:
-
-- One global `state` struct (your entire simulation state).
-- `main()` initializes state and requests the window.
-- `tick()` updates state using host snapshots (input/window info).
-- `render()` emits drawing commands (no direct rendering calls on hot path).
-
-Example:
+Here is a complete moving-line game:
 
 ```stasis
 import "../src/stdlib/stdlib.stasis";
@@ -156,22 +55,27 @@ import "../src/stdlib/sdl_scancodes.stasis";
 
 struct GameState {
     x: f32;
+    speed: f32;
 }
 
 global state: GameState;
 
 function main(): i32 {
-    // Host reads the request and creates/updates the window.
     init_window(800, 600, "Stasis Game");
     state.x = 120.0;
+    state.speed = 3.0;
     return 0;
 }
 
 function tick(): i32 {
     if (should_quit()) { return 1; }
 
-    if (is_key_down(Scancode.Left)) { state.x = state.x - 3.0; }
-    if (is_key_down(Scancode.Right)) { state.x = state.x + 3.0; }
+    if (is_key_down(Scancode.Left)) {
+        state.x -= state.speed;
+    }
+    if (is_key_down(Scancode.Right)) {
+        state.x += state.speed;
+    }
 
     return 0;
 }
@@ -179,104 +83,107 @@ function tick(): i32 {
 function render(): i32 {
     begin_frame();
     clear(0.05, 0.05, 0.10, 1.0);
-    draw_line(state.x, 60.0, state.x + 120.0, 60.0, 1.0, 1.0, 1.0, 1.0);
+    draw_line(state.x, 60.0, state.x + 120.0, 60.0,
+              1.0, 1.0, 1.0, 1.0);
     end_frame();
     return 0;
 }
 
-// Optional: runs after a successful hot swap.
-function on_code_swap(): void { return; }
-```
-
-## Game Dev Workflow (Watch + Hot Swap)
-
-Development runs in one process:
-
-- Stasis compiles to machine code via Cranelift JIT.
-- File changes are compiled in the background.
-- Swap commit happens between ticks.
-- On success the runner prints swap timing.
-
-Run Brickout Revenge v1 (Windows in-process dev runner):
-
-```powershell
-cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis
-```
-
-From a directory containing `stasis.json`, open its manifest `entry` with the persistent
-live-workspace TUI:
-
-```powershell
-stasis tui
-```
-
-Pass an entry path to override the manifest for that invocation, for example
-`stasis tui samples\state_inspection\src\main.stasis`.
-
-Edit and save any `.stasis` file in the current import/dependency graph. You should see output like:
-
-```text
-[watch] change detected: ...
-[swap] swapped ok total=29ms (compile=...ms package=...ms hook=...ms deps=...ms)
-```
-
-Notes:
-
-- `play` is currently Windows-focused (graphics runtime integration).
-- If `--watch-dir` is omitted, `play` watches the entry file's parent directory by default.
-- You can cap runtime for smoke testing with `--ticks N`.
-- Drive deterministic pointer snapshots with `--input-script path\to\input.json`.
-  Script frames are 1-based and are applied after the host snapshot and before the
-  guest tick. While a script is active, physical pointer input is ignored; pointer
-  positions and button state carry forward, while `wentDown`/`wentUp` clear on the
-  next unscripted frame.
-- Capture the rendered framebuffer with `--screenshot artifacts\frame.png`. PNG is
-  selected by the `.png` extension; other extensions preserve the existing BMP output.
-  `--screenshot-frame N` selects a 1-based frame (default `1`). The capture happens
-  after queued drawing and post-effects, immediately before present. PNG bytes are
-  deterministic for identical input pixels, but rasterization can differ between
-  graphics backends, drivers, and platforms.
-- The CLI creates missing parent directories and replaces an existing output file.
-  With `--exit-after-screenshot`, a write failure also stops the game and returns a
-  nonzero exit code instead of leaving screenshot automation running indefinitely.
-
-For example:
-
-```powershell
-cargo run -p stasis --release -- play samples\brickout_revenge\brickout_revenge_v1.stasis --screenshot artifacts\frame-12.png --screenshot-frame 12 --exit-after-screenshot
-```
-
-The equivalent runtime environment variables are `STASIS_SCREENSHOT_ONCE`,
-`STASIS_SCREENSHOT_FRAME`, and `STASIS_EXIT_AFTER_SCREENSHOT=1`.
-
-Input scripts use a bounded versioned JSON format. Frames must be strictly increasing,
-each frame contains the complete active pointer list, coordinates are viewport pixels,
-and at most eight pointers are allowed. Files larger than 16 MiB are rejected before
-parsing. Use an empty `pointers` list to release and remove every active pointer:
-
-```json
-{
-  "version": 1,
-  "frames": [
-    {
-      "frame": 1,
-      "pointers": [
-        { "id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 266, "y": 660 }
-      ]
-    },
-    {
-      "frame": 2,
-      "pointers": [
-        { "id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 266, "y": 660 }
-      ]
-    }
-  ]
+function on_code_swap(): void {
+    // Repair state here if a compatible live edit changes an invariant.
+    return;
 }
 ```
 
-## Tests (In Stasis, Run via JIT)
+The division of responsibility is deliberate:
 
-Create a test file like `math.test.stasis`:
+- `global state` describes the persistent simulation.
+- `main()` establishes its initial invariants and requests host resources.
+- `tick()` reads input snapshots and advances the model.
+- `render()` turns the current model into drawing commands.
+- `on_code_swap()` handles the exceptional transition between code versions.
+
+Rendering does not own gameplay state, and elapsed wall-clock time should not decide simulation results.
+
+## Using the Language
+
+Stasis has familiar C-shaped expressions and control flow, but keeps its surface deliberately small.
+
+### Values and state
+
+```stasis
+struct Enemy {
+    health: i32;
+    active: bool;
+}
+
+global enemies: Enemy[64];
+
+function activate_enemy(index: i32, health: i32): void {
+    enemies[index].health = health;
+    enemies[index].active = true;
+    return;
+}
+```
+
+Primitive types include signed and unsigned integers, floating-point values, booleans, strings, and fixed-capacity UTF-8 values. Composite storage is made from structs, enums, and fixed-size arrays such as `Enemy[64]`.
+
+Locals use `let`; types can be explicit or inferred when unambiguous:
+
+```stasis
+let lives: i32 = 3;
+let next_lives = lives - 1;
+```
+
+Arithmetic, comparison, and assignment are infix:
+
+```stasis
+score += 100;
+let alive = health > 0;
+```
+
+### Functions read naturally at the call site
+
+A function whose first parameter is a struct can be called in receiver form:
+
+```stasis
+function damage(self: Enemy, amount: i32): void {
+    self.health -= amount;
+    return;
+}
+
+enemies[0].damage(5);
+```
+
+The equivalent `damage(enemies[0], 5)` form is also supported. Receiver form is preferred when it makes ownership obvious.
+
+### Control flow stays explicit
+
+```stasis
+if (state.wave_complete) {
+    start_next_wave();
+} else {
+    spawn_due_enemies();
+}
+
+for (let i = 0; i < 64; i += 1) {
+    if (enemies[i].active) {
+        enemies[i].tick_enemy();
+    }
+}
+
+foreach (let enemy in enemies) {
+    if (enemy.active) {
+        enemy.damage(1);
+    }
+}
+```
+
+A `for` header always has all three clauses. Fixed extents and explicit traversal make loop cost easy to see.
+
+### Tests are part of the language
+
+Place tests in a `.test.stasis` file next to the code when practical:
 
 ```stasis
 import "../src/stdlib/stdlib.stasis";
@@ -286,58 +193,114 @@ test `adds`(): bool {
 }
 ```
 
-Run tests in a directory:
+Run them with:
 
 ```powershell
-cargo run -p stasis --release -- test --dir tests/stasis
+stasis test --dir tests/stasis
 ```
 
-Watch mode:
+Tests use the same compiler and JIT path as programs, so they exercise language behavior rather than a separate test interpreter.
+
+## The Everyday Workflow
+
+Create a project and enter it:
 
 ```powershell
-cargo run -p stasis --release -- test --dir tests/stasis --watch --watch-settle-ms 50
+stasis new my_game
+cd my_game
 ```
 
-## Current Constraints
+The normal loop is:
 
-Current intentional language/runtime constraints:
+```powershell
+stasis fmt
+stasis check
+stasis test
+stasis run
+```
 
-| Constraint | Notes |
-|------------|-------|
-| `for` header requires all 3 clauses (`init; condition; step`) | `for (; cond; step)` is intentionally rejected as a compile-time error. |
+For a graphical program, `stasis play path\to\main.stasis` keeps the process alive and watches the current import graph. Saving a `.stasis` file compiles a candidate in the background and attempts an all-or-nothing swap between ticks.
 
-## Build From Source
+From a project containing `stasis.json`, `stasis tui` opens the manifest entry in the persistent live-workspace interface. Pass an entry path to override the manifest for one invocation.
+
+Build distributable output with:
+
+```powershell
+stasis build --mode release
+stasis package --target desktop
+stasis package-mobile --target android-arm64
+```
+
+The integrated CLI, workspace manifest, JSON output, offline guarantees, and installation layout are specified in [docs/toolchain_cli.md](docs/toolchain_cli.md). Mobile packaging is documented in [docs/mobile_packaging.md](docs/mobile_packaging.md).
+
+## Data Belongs Beside the Model
+
+Editable runtime data can live in a project-level `data/` directory. JSON and CSV files with matching `<name>.struct-meta.json` metadata bind to declared globals automatically.
+
+Binding is schema-strict in both directions: unknown data properties, missing metadata paths, absent compiled globals, duplicate CSV keys, and capacity overflow are errors. A bad edit is rejected without partially changing the running state.
+
+While `stasis play` runs, valid data edits are rebound between ticks. AOT packages stage the same data and compile its values into the runtime bridge, keeping development and shipped behavior aligned. See [docs/toolchain_cli.md](docs/toolchain_cli.md) for the complete binding contract.
+
+## Deterministic Automation
+
+`play` can use a bounded, versioned input script instead of physical pointer input:
+
+```powershell
+stasis play game.stasis --input-script input.json --ticks 120
+```
+
+It can also capture a chosen rendered frame:
+
+```powershell
+stasis play game.stasis `
+  --input-script input.json `
+  --screenshot artifacts\frame-12.png `
+  --screenshot-frame 12 `
+  --exit-after-screenshot
+```
+
+This turns a graphical interaction into a repeatable test artifact. PNG bytes are deterministic for identical pixels, though rasterization may still differ across graphics backends, drivers, and platforms.
+
+## Installation and Setup
+
+Stasis is fast-moving and breaking changes are expected. Nightly release archives are published from `main` on the [GitHub Releases page](https://github.com/benwmaddox/StasisLang/releases).
+
+Download the archive for your platform, extract it, and put the `stasis` executable on `PATH`. On Windows, SmartScreen may warn because binaries are currently unsigned. The archive includes the compiler, native build tools, runtime libraries, standard library, samples, mobile shells, and agent workflow guide needed for offline use.
+
+To build the repository from source:
 
 ```bash
 cargo build
 cargo test
 ```
 
-On Windows, `play` also needs the native graphics runtime DLL:
+Windows graphical development also requires the native runtime:
 
 ```powershell
 runtime\build.bat
 cargo build -p stasis --release
 ```
 
-After the runtime exists under the repo (`runtime/build/...` or `runtime/build_ci/...`), the
-`stasis` build automatically stages `stasis_graphics.dll` next to `stasis.exe` so you can run
-`play` from the built output without manually copying the DLL.
+Once the runtime exists under `runtime/build` or `runtime/build_ci`, the build stages `stasis_graphics.dll` beside `stasis.exe` automatically.
 
-## Where Things Live
+Run the primary sample from this repository with:
 
-- `apps/stasis`: main app/CLI (includes `play`, `test`, `aot-cli`).
-- `crates/stasis_compiler`: Rust-native frontend + Cranelift lowering (JIT/AOT).
-- `crates/stasis_jit`: JIT/AOT support + function pointer table.
-- `crates/stasis_runner`: swap pipeline contracts + sequencing.
-- `runtime/`: graphics/audio host runtime (used by `play`).
-- `src/stdlib/`: standard library.
-- `samples/brickout_revenge/`: end-to-end game sample.
+```powershell
+cargo run -p stasis --release -- play `
+  samples\brickout_revenge\brickout_revenge_v1.stasis
+```
 
-## Specs / PRD
+## Repository Map and Deeper Reading
 
-- `docs/spec.md`: canonical language spec
-- `docs/live-compilation-prd.md`: hot swap + product/architecture requirements
-- `docs/build_checklist.md`: execution plan and slice ordering
-- `docs/mobile_packaging_abi.md`: v1 Android/iOS AOT packaging ABI
-- `docs/mobile_packaging.md`: one-command lean Android/iOS app packaging
+- `docs/spec.md` — canonical language semantics
+- `docs/live-compilation-prd.md` — hot-swap product and architecture requirements
+- `docs/toolchain_cli.md` — CLI and workspace contract
+- `docs/mobile_packaging.md` — Android and iOS packaging
+- `apps/stasis` — integrated app and CLI
+- `crates/stasis_compiler` — frontend, semantic checks, and Cranelift lowering
+- `crates/stasis_jit` — JIT/AOT support and function-pointer indirection
+- `crates/stasis_runner` — tick and swap sequencing
+- `src/stdlib` — standard library
+- `samples/brickout_revenge` — primary end-to-end sample
+
+Stasis is not trying to hide the machine or the simulation. It is trying to make the relationship between them small enough to hold in your head.
