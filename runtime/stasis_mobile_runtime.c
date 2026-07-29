@@ -6,8 +6,6 @@
 #include <stdio.h>
 #include <string.h>
 
-extern void SDL_Log(const char *fmt, ...);
-
 /* Implemented by the SDL-only stasis_graphics.c linked into the mobile core. */
 int stasis_init_window(int width, int height, const char *title);
 int stasis_should_quit(void);
@@ -62,7 +60,7 @@ static int bind_guest_globals(void) {
         hash_global_path("gfx_cmd_u8"), 0, STASIS_RENDER_U8_COUNT);
     if (host_i32 == NULL || host_f32 == NULL || gfx_cmd_i32 == NULL ||
         gfx_cmd_f32 == NULL || gfx_cmd_u8 == NULL) {
-        SDL_Log(
+        fprintf(stderr,
             "Stasis mobile runtime could not bind guest buffers: host_i32=%p host_f32=%p gfx_cmd_i32=%p gfx_cmd_f32=%p gfx_cmd_u8=%p\n",
             (void *)host_i32, (void *)host_f32, (void *)gfx_cmd_i32,
             (void *)gfx_cmd_f32, (void *)gfx_cmd_u8);
