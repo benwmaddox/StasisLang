@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "name": "windows_launch_smoke",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build"
+}

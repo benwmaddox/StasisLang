@@ -97,6 +97,9 @@ pub enum AssetFormat {
         channels: u16,
         duration_frames: u64,
     },
+    Font {
+        encoding: FontEncoding,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +118,13 @@ pub enum AudioEncoding {
     Ogg,
     Mp3,
     M4a,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FontEncoding {
+    Ttf,
+    Otf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -189,6 +199,7 @@ pub fn stable_asset_handle(entry: &AssetEntry) -> AssetHandle {
     let kind = match entry.format {
         AssetFormat::Sprite { .. } => "sprite",
         AssetFormat::Audio { .. } => "audio",
+        AssetFormat::Font { .. } => "font",
     };
     let mut hash = 2_166_136_261u32;
     for byte in kind.bytes().chain([b':']).chain(entry.id.bytes()) {
@@ -650,6 +661,9 @@ fn validate_entry(entry: &AssetEntry) -> Result<(), AssetManifestError> {
             }
             validate_extension(entry, audio_extension(encoding))?;
         }
+        AssetFormat::Font { encoding } => {
+            validate_extension(entry, font_extension(encoding))?;
+        }
     }
     if let Some(prepare) = &entry.prepare {
         if !matches!(entry.format, AssetFormat::Sprite { .. }) {
@@ -706,6 +720,13 @@ fn audio_extension(encoding: AudioEncoding) -> &'static str {
         AudioEncoding::Ogg => "ogg",
         AudioEncoding::Mp3 => "mp3",
         AudioEncoding::M4a => "m4a",
+    }
+}
+
+fn font_extension(encoding: FontEncoding) -> &'static str {
+    match encoding {
+        FontEncoding::Ttf => "ttf",
+        FontEncoding::Otf => "otf",
     }
 }
 
@@ -883,6 +904,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("stasis_assets_{name}_{stamp}"));
         fs::create_dir_all(root.join("assets/images")).unwrap();
         fs::create_dir_all(root.join("assets/audio")).unwrap();
+        fs::create_dir_all(root.join("assets/fonts")).unwrap();
         root
     }
 
@@ -914,6 +936,41 @@ mod tests {
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn resolves_and_prepares_declared_font_assets() {
+        let root = project("font");
+        let bytes = b"test font bytes";
+        fs::write(root.join("assets/fonts/ui.ttf"), bytes).unwrap();
+        write_manifest(
+            &root,
+            vec![AssetEntry {
+                id: "ui".to_string(),
+                path: "assets/fonts/ui.ttf".to_string(),
+                content_sha256: sha256_bytes(bytes),
+                prepared_from_sha256: None,
+                format: AssetFormat::Font {
+                    encoding: FontEncoding::Ttf,
+                },
+                prepare: None,
+                dependencies: vec![],
+            }],
+        );
+
+        let resolved = load_project_asset_manifest(&root, AssetLimits::default()).unwrap();
+        assert_eq!(resolved.assets[0].entry.id, "ui");
+        assert_eq!(
+            prepare_asset_bundle(&resolved, root.join("output"), root.join("cache"))
+                .unwrap()
+                .copied_assets,
+            1
+        );
+        assert_eq!(
+            fs::read(root.join("output/assets/fonts/ui.ttf")).unwrap(),
+            bytes
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

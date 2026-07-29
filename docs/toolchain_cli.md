@@ -140,3 +140,8 @@ stasis build --mode release --json
 
 Release workflows smoke-test a freshly assembled archive rather than borrowing compiler assets
 from the repository checkout.
+
+Windows graphical launch coverage is defined in
+[Windows game launch integration testing](windows_game_launch_testing.md). It exercises `play`,
+`run --watch`, `tui`, generated release executables, and packaged desktop executables with real
+PNG, SVG, font, tick, and framebuffer assertions.

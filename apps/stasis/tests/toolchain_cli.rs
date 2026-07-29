@@ -708,9 +708,16 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     assert_eq!(created.status.code(), Some(0));
     fs::write(
         project.join("src/main.stasis"),
-        "function main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+        "import \"gfx_cmd.stasis\";\nfunction main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
     )
     .expect("write mobile entry");
+    let gfx_cmd_fixture = include_str!("../../../src/stdlib/gfx_cmd.stasis")
+        .lines()
+        .skip(2)
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(project.join("src/gfx_cmd.stasis"), gfx_cmd_fixture)
+        .expect("write mobile stdlib fixture");
     fs::create_dir_all(project.join("assets")).expect("create assets");
     fs::write(
         project.join("assets/manifest.json"),
@@ -790,6 +797,21 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
             assert!(!Path::new(path).is_absolute(), "{field} must be relative");
             assert!(!path.contains(".staging"), "{field} must survive publish");
         }
+        let engine_manifest = fs::read_to_string(
+            aot_manifest_path
+                .parent()
+                .expect("mobile AOT manifest parent")
+                .join(
+                    aot_manifest["engine_manifest"]
+                        .as_str()
+                        .expect("engine manifest path"),
+                ),
+        )
+        .expect("read engine manifest");
+        assert!(
+            engine_manifest.contains("\"path\":\"gfx_cmd_f32\",\"max_length\":108676"),
+            "mobile render ABI must publish the full f32 command buffer"
+        );
         assert!(aot_manifest["objects"]
             .as_array()
             .expect("manifest objects")

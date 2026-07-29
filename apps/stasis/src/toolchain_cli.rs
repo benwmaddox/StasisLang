@@ -2155,6 +2155,12 @@ fn build_workspace(
                 None,
                 Some(Path::new(&workspace.manifest.entry)),
             )?;
+            stage_workspace_assets(
+                workspace,
+                output
+                    .parent()
+                    .ok_or_else(|| format!("release output has no parent: {}", output.display()))?,
+            )?;
             Ok(CommandResult::success(
                 format!("built release executable: {}", output.display()),
                 json!({
@@ -2235,20 +2241,6 @@ fn package_workspace(
             &workspace.root.join(MANIFEST_NAME),
             &staging_root.join(MANIFEST_NAME),
         )?;
-        let assets = workspace.root.join("assets");
-        validate_workspace_destination(workspace, "assets directory", &assets)?;
-        if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
-            let resolved = load_project_asset_manifest(&workspace.root, AssetLimits::default())
-                .map_err(|error| format!("failed to resolve desktop package assets: {error}"))?;
-            prepare_asset_bundle(
-                &resolved,
-                &staging_root,
-                workspace.root.join(".stasis_cache/assets"),
-            )
-            .map_err(|error| format!("failed to prepare desktop package assets: {error}"))?;
-        } else {
-            copy_dir_if_exists(&assets, &staging_root.join("assets"))?;
-        }
         if let Some(runtime) = installed_runtime_library() {
             copy_file(
                 &runtime,
@@ -2278,6 +2270,24 @@ fn package_workspace(
             "development_build": provenance["development_build"],
         }),
     ))
+}
+
+fn stage_workspace_assets(workspace: &Workspace, destination_root: &Path) -> Result<(), String> {
+    let assets = workspace.root.join("assets");
+    validate_workspace_destination(workspace, "assets directory", &assets)?;
+    if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        let resolved = load_project_asset_manifest(&workspace.root, AssetLimits::default())
+            .map_err(|error| format!("failed to resolve desktop build assets: {error}"))?;
+        prepare_asset_bundle(
+            &resolved,
+            destination_root,
+            workspace.root.join(".stasis_cache/assets"),
+        )
+        .map_err(|error| format!("failed to prepare desktop build assets: {error}"))?;
+    } else {
+        copy_dir_if_exists(&assets, &destination_root.join("assets"))?;
+    }
+    Ok(())
 }
 
 fn package_mobile_command(

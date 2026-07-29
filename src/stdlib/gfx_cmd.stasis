@@ -7,7 +7,7 @@ import "stdlib.stasis";
 // - Ordering: fixed by field order in this layout: clear -> lines -> sprites -> present.
 // - Coordinates: logical presentation units.
 
-const GFX_CMD_MAGIC: i32 = 0x47584631; // 'GXF1'
+const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
 const GFX_CMD_VERSION: i32 = 2;
 
 // i32 header indices
@@ -45,17 +45,18 @@ const GFX_F_CLEAR_G: i32 = 1;
 const GFX_F_CLEAR_B: i32 = 2;
 const GFX_F_CLEAR_A: i32 = 3;
 const GFX_F_LINE_BASE: i32 = 4;
-const GFX_F_SPRITE_BASE: i32 = GFX_F_LINE_BASE + GFX_MAX_LINES * GFX_LINE_STRIDE_F32;
-const GFX_F_TEXT_BASE: i32 = GFX_F_SPRITE_BASE + GFX_MAX_SPRITES * GFX_SPRITE_STRIDE_F32;
+const GFX_F_SPRITE_BASE: i32 = 80004;
+const GFX_F_TEXT_BASE: i32 = 96388;
 
-const GFX_I_TEXT_BASE: i32 = GFX_I_SPRITE_BASE + GFX_MAX_SPRITES * GFX_SPRITE_STRIDE_I32;
+const GFX_I_TEXT_BASE: i32 = 12320;
 
-const GFX_CMD_I32_COUNT: i32 = GFX_I_TEXT_BASE + GFX_MAX_TEXT * GFX_TEXT_STRIDE_I32;
-const GFX_CMD_F32_COUNT: i32 = GFX_F_TEXT_BASE + GFX_MAX_TEXT * GFX_TEXT_STRIDE_F32;
+const GFX_CMD_I32_COUNT: i32 = 18464;
+const GFX_CMD_F32_COUNT: i32 = 108676;
 
-global gfx_cmd_i32: i32[GFX_CMD_I32_COUNT];
-global gfx_cmd_f32: f32[GFX_CMD_F32_COUNT];
-global gfx_cmd_u8: u8[GFX_TEXT_MAX_BYTES];
+// Array capacities are ABI literals shared with stasis_render_contract.h.
+global gfx_cmd_i32: i32[18464];
+global gfx_cmd_f32: f32[108676];
+global gfx_cmd_u8: u8[65536];
 
 function gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_MAGIC] = GFX_CMD_MAGIC;

@@ -52,10 +52,14 @@ int SDL_main(int argc, char **argv) {
     };
     StasisMobileRuntimeConfig config = {1280, 720, "@STASIS_APP_NAME@"};
     int status = stasis_mobile_runtime_initialize(&config, &game);
+    if (status != STASIS_MOBILE_RUNTIME_OK) {
+        SDL_Log("Stasis mobile initialization stopped with status %d", status);
+    }
     while (status == STASIS_MOBILE_RUNTIME_OK) {
         status = stasis_mobile_runtime_step();
         SDL_Delay(1);
     }
+    SDL_Log("Stasis mobile loop stopped with status %d", status);
     int32_t game_result = stasis_mobile_runtime_last_entry_result();
     stasis_mobile_runtime_shutdown();
     if (game_result != 0) {

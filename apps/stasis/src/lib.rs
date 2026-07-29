@@ -3962,7 +3962,27 @@ mod tests {
                 .matches("stasis_present_gpu_loading();")
                 .count(),
             3,
-            "loading should be presented at startup and both real SDL reset events"
+            "loading should be invoked at startup and both real SDL reset events"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("SDL_PumpEvents();\n    stasis_present_gpu_loading();"),
+            "every desktop backend must pump initial window messages before presenting loading"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("stasis_graphics_runtime_abi_version(void)"),
+            "the graphics DLL must expose an explicit compatibility boundary"
+        );
+        assert!(
+            STASIS_RUNNER_SOURCE.contains("stasis_set_asset_root(exe_dir)")
+                && STASIS_RUNNER_SOURCE.contains("set_graphics_asset_root(launcher_asset_root)")
+                && STASIS_RUNNER_SOURCE.contains("stasis_set_packaged_graphics_path(exe_dir)")
+                && STASIS_RUNNER_SOURCE.contains("incompatible stasis_graphics.dll"),
+            "generated launchers must anchor packaged assets and reject mismatched graphics DLLs"
+        );
+        assert!(
+            STASIS_RUNNER_SOURCE.contains("strncmp(out, \"\\\\\\\\?\\\\UNC\\\\\", 8)")
+                && STASIS_RUNNER_SOURCE.contains("strncmp(out, \"\\\\\\\\?\\\\\", 4)"),
+            "Windows launchers must normalize extended drive and UNC paths before asset loading"
         );
     }
 

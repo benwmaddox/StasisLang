@@ -50,6 +50,10 @@ Each prepared axis is the ceiling of `maximum logical axis * display scale * max
 
 Only PNG resizing is implemented initially. Other sprite encodings and assets without `prepare` are copied unchanged. SVG remains resolution-independent. Opaque prepared PNGs are encoded as RGB; images with any transparency retain alpha.
 
+Fonts use `{"kind":"font","encoding":"ttf"}` or
+`{"kind":"font","encoding":"otf"}`. They are hash-validated and copied unchanged; sprite
+preparation metadata is not valid for fonts.
+
 ## Generated package contract
 
 Preparation writes only beneath the build output; project masters and the source manifest are never changed. The packaged manifest records the prepared dimensions and content hash. A resized entry also records `prepared_from_sha256`, which is the master hash. Preparation cache identity includes the master hash, algorithm version, and output dimensions, so unchanged assets can be reused deterministically.
@@ -62,7 +66,7 @@ The package contains only the selected display envelope's output, not multiple r
 - Runtime handles are the nonzero FNV-1a 32-bit hash of `<kind>:<id>`. Load fails if two entries collide; platforms must not repair or renumber collisions independently.
 - Paths use forward slashes, start with `assets/`, contain only normal path components, and must resolve to a regular file under the canonical project root.
 - SHA-256 is checked against the complete bounded file before the asset is accepted.
-- Declared encodings must match file extensions. Sprite dimensions, audio metadata, display dimensions, manifest size, entry count, and individual file size are bounded by the shared resolver.
+- Declared encodings must match file extensions. Sprite dimensions, audio metadata, font encoding, display dimensions, manifest size, entry count, and individual file size are bounded by the shared resolver.
 - Sprite preparation requires a version 2 manifest and top-level `display` metadata.
 - Dependencies must name manifest entries, cannot repeat or reference themselves, and must be acyclic.
 - Unknown fields, schemas, and future versions fail with stable diagnostic codes.
@@ -70,6 +74,9 @@ The package contains only the selected display envelope's output, not multiple r
 ## Mobile packaging
 
 - The AOT bundle command resolves and verifies the source manifest, then invokes the shared `stasis_assets` preparation path and packages the generated manifest and files under `assets/stasis_game/`.
-- As a narrow supplement for the path-based `load_font` API, mobile packaging scans compiled `.stasis` source string literals for `.ttf` and `.otf` paths. It copies only referenced regular font files beneath the canonical project `assets/` directory.
+- Declared fonts use the shared manifest path. As a compatibility supplement for projects that
+  have not declared their path-based `load_font` assets yet, mobile packaging also scans compiled
+  `.stasis` source string literals for `.ttf` and `.otf` paths and copies only referenced regular
+  font files beneath the canonical project `assets/` directory.
 - Android uses one GL texture per resolved sprite and batches only consecutive commands that share texture and clip state. Atlas layout remains backend-private, so atlas coordinates never enter the manifest or render-command ABI.
 - Missing, corrupt, oversized, hash-mismatched, or unsupported packaged sprites render the deterministic magenta checker fallback.

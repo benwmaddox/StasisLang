@@ -1,0 +1,27 @@
+{
+  "schema": "stasis-assets",
+  "version": 1,
+  "assets": [
+    {
+      "id": "smoke_png",
+      "path": "assets/smoke.png",
+      "content_sha256": "98d61197c8db539121336207a1cc722093a0d3e0acd5ef5196c1eda3e9b92d72",
+      "format": {"kind": "sprite", "encoding": "png", "width": 64, "height": 64},
+      "dependencies": []
+    },
+    {
+      "id": "smoke_svg",
+      "path": "assets/smoke.svg",
+      "content_sha256": "d19f86b655e7cecfd87718817d152ef40b5839f570eac662a36f0169f99ca797",
+      "format": {"kind": "sprite", "encoding": "svg", "width": 64, "height": 64},
+      "dependencies": []
+    },
+    {
+      "id": "smoke_font",
+      "path": "assets/smoke.ttf",
+      "content_sha256": "17ec668bd0cd62e934f97563287ed72a4a8599ae716d20c1a93c82f1876dde47",
+      "format": {"kind": "font", "encoding": "ttf"},
+      "dependencies": []
+    }
+  ]
+}

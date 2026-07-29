@@ -291,6 +291,32 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
 
+#[cfg(windows)]
+const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 1;
+
+#[cfg(windows)]
+fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String> {
+    let address = lib
+        .symbol_address("stasis_graphics_runtime_abi_version")
+        .map_err(|_| {
+            format!(
+                "incompatible stasis graphics runtime {}: missing ABI version",
+                path.display()
+            )
+        })?;
+    let version: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    let actual = version();
+    if actual != STASIS_GRAPHICS_RUNTIME_ABI_VERSION {
+        return Err(format!(
+            "incompatible stasis graphics runtime {}: expected ABI {}, found {}",
+            path.display(),
+            STASIS_GRAPHICS_RUNTIME_ABI_VERSION,
+            actual
+        ));
+    }
+    Ok(())
+}
+
 pub struct StasisGraphicsApi {
     _lib: Library,
     #[cfg(windows)]
@@ -313,15 +339,17 @@ impl StasisGraphicsApi {
     pub fn load_default() -> Result<Self, String> {
         #[cfg(windows)]
         {
+            let mut last_error = None;
             for candidate in runtime_library_candidate_paths() {
                 if !candidate.exists() {
                     continue;
                 }
-                if let Ok(api) = Self::load(&candidate) {
-                    return Ok(api);
+                match Self::load(&candidate) {
+                    Ok(api) => return Ok(api),
+                    Err(error) => last_error = Some(error),
                 }
             }
-            Err("failed to load stasis_graphics runtime library (set STASIS_RUNTIME_DLL_PATH or build runtime)".to_string())
+            Err(last_error.unwrap_or_else(|| "failed to load stasis_graphics runtime library (set STASIS_RUNTIME_DLL_PATH or build runtime)".to_string()))
         }
 
         #[cfg(not(windows))]
@@ -337,6 +365,7 @@ impl StasisGraphicsApi {
         #[cfg(windows)]
         {
             let lib = Library::load(path)?;
+            verify_graphics_runtime_abi(&lib, path)?;
             let stasis_init_window = lib.symbol_address("stasis_init_window")?;
             let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
             let stasis_host_bulk_init = lib.symbol_address("stasis_host_bulk_init")?;
@@ -543,19 +572,24 @@ struct StasisGraphicsAssetsApi {
 #[cfg(windows)]
 impl StasisGraphicsAssetsApi {
     fn load_default() -> Result<Self, String> {
+        let mut last_error = None;
         for candidate in runtime_library_candidate_paths() {
             if !candidate.exists() {
                 continue;
             }
-            if let Ok(api) = Self::load(&candidate) {
-                return Ok(api);
+            match Self::load(&candidate) {
+                Ok(api) => return Ok(api),
+                Err(error) => last_error = Some(error),
             }
         }
-        Err("failed to load stasis_graphics runtime library for asset calls".to_string())
+        Err(last_error.unwrap_or_else(|| {
+            "failed to load stasis_graphics runtime library for asset calls".to_string()
+        }))
     }
 
     fn load(path: &Path) -> Result<Self, String> {
         let lib = Library::load(path)?;
+        verify_graphics_runtime_abi(&lib, path)?;
         Ok(Self {
             stasis_gfx_load_sprite: lib.symbol_address("stasis_gfx_load_sprite")?,
             stasis_gfx_release_sprite: lib.symbol_address("stasis_gfx_release_sprite")?,

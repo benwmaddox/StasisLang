@@ -107,6 +107,10 @@ STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle);
 STASIS_EXPORT int stasis_storage_load_i32(const char* scope, const char* key, int fallback);
 STASIS_EXPORT int stasis_storage_save_i32(const char* scope, const char* key, int value);
 
+STASIS_EXPORT int stasis_graphics_runtime_abi_version(void) {
+    return STASIS_GRAPHICS_RUNTIME_ABI_VERSION;
+}
+
 /* Global state */
 static SDL_Window* g_window = NULL;
 static SDL_GLContext g_gl_context = NULL;
@@ -1296,6 +1300,15 @@ static GLint g_line_color_loc = -1;
 #endif
 static char g_asset_base[512] = {0};
 static char g_asset_env[512] = {0};
+
+STASIS_EXPORT int stasis_set_asset_root(const char* path) {
+    if (!path || !*path || strlen(path) >= sizeof(g_asset_base)) return 0;
+    strncpy(g_asset_base, path, sizeof(g_asset_base) - 1);
+    g_asset_base[sizeof(g_asset_base) - 1] = 0;
+    strncpy(g_asset_env, path, sizeof(g_asset_env) - 1);
+    g_asset_env[sizeof(g_asset_env) - 1] = 0;
+    return 1;
+}
 
 /* Sprite atlas + batching (baked from SVG sources) */
 #define SPRITE_ATLAS_DEFAULT_W 2048
@@ -3746,6 +3759,12 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     stasis_sync_display_metrics();
     stasis_renderer_lifecycle_initialize(&g_resource_lifecycle);
     g_resource_frame_ready = true;
+    /*
+     * Windows OpenGL drivers can block the first swap until the new window has
+     * processed its initial messages. Pump first, then present the same
+     * asset-free loading frame on SDL and OpenGL on every platform.
+     */
+    SDL_PumpEvents();
     stasis_present_gpu_loading();
     SDL_Log("Stasis display metrics: logical=%dx%d native=%dx%d drawable=%dx%d scale=%.2f",
         g_window_width, g_window_height,
@@ -4767,6 +4786,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     e->used = 1;
     e->ref_count = 1;
     if (!sprite_build_into_entry_sized(e, resolved, max_w, max_h)) {
+        SDL_Log("gfx_load_sprite: failed path=%s resolved=%s", path, resolved);
         free(e->path);
         memset(e, 0, sizeof(*e));
         e->generation = generation;

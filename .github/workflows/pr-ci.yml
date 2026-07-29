@@ -97,6 +97,7 @@ jobs:
           cargo run -p stasis -- play samples/render_parity/main.stasis --watch-dir samples/render_parity --ticks 2 --screenshot target/render-parity-ci/frame.png --screenshot-frame 2 --exit-after-screenshot 2>&1 | Tee-Object target/render-parity-ci/runtime.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/ci/verify_render_parity.py --capture target/render-parity-ci/frame.png --runtime-log target/render-parity-ci/runtime.log --evidence target/render-parity-ci/evidence.json --write-evidence --require-load-details --profile portable --stage second_frame
+          cargo test -p stasis --test windows_game_launch -- --test-threads=1 --nocapture
 
       - name: Bootstrap Compile Smoke (compiler .stasis)
         run: cargo test -p stasis_compiler -- --nocapture
