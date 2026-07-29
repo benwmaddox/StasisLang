@@ -37,6 +37,7 @@
 #endif
 
 #include "stasis_data.h"
+#include "stasis_render_contract.h"
 
 typedef int (*stasis_entry_fn)(void);
 typedef int (*stasis_tick_fn)(void);
@@ -65,6 +66,8 @@ typedef int (*stasis_host_bulk_step_fn)(
 typedef int (*stasis_init_window_fn)(int width, int height, const char *title);
 typedef int (*stasis_set_fullscreen_fn)(int enabled);
 typedef void (*stasis_set_window_size_fn)(int width, int height);
+typedef int (*stasis_graphics_runtime_abi_version_fn)(void);
+typedef int (*stasis_graphics_set_asset_root_fn)(const char *path);
 
 static int stasis_env_flag(const char *name, int default_value)
 {
@@ -322,6 +325,20 @@ static int stasis_extract_dir(const char *path, char *out, size_t out_cap)
     strncpy(out, path, out_cap - 1);
     out[out_cap - 1] = '\0';
 
+#ifdef _WIN32
+    if (strncmp(out, "\\\\?\\UNC\\", 8) == 0)
+    {
+        size_t remainder = strlen(out + 8);
+        memmove(out + 2, out + 8, remainder + 1);
+        out[0] = '\\';
+        out[1] = '\\';
+    }
+    else if (strncmp(out, "\\\\?\\", 4) == 0)
+    {
+        memmove(out, out + 4, strlen(out + 4) + 1);
+    }
+#endif
+
     char *slash = strrchr(out, '\\');
     char *fslash = strrchr(out, '/');
     char *sep = slash > fslash ? slash : fslash;
@@ -343,6 +360,36 @@ static int stasis_set_current_dir(const char *path)
     return SetCurrentDirectoryA(path) != 0;
 #else
     return chdir(path) == 0;
+#endif
+}
+
+static int stasis_set_asset_root(const char *path)
+{
+    if (!path || !path[0])
+    {
+        return 0;
+    }
+#ifdef _WIN32
+    return _putenv_s("STASIS_ASSET_ROOT", path) == 0;
+#else
+    return setenv("STASIS_ASSET_ROOT", path, 1) == 0;
+#endif
+}
+
+static int stasis_set_packaged_graphics_path(const char *exe_dir)
+{
+#ifdef _WIN32
+    char path[2080];
+    if (!exe_dir || !exe_dir[0] ||
+        snprintf(path, sizeof(path), "%s\\stasis_graphics.dll", exe_dir) >= (int)sizeof(path))
+    {
+        return 0;
+    }
+    return SetEnvironmentVariableA("STASIS_RUNTIME_DLL_PATH", path) != 0 &&
+           _putenv_s("STASIS_RUNTIME_DLL_PATH", path) == 0;
+#else
+    (void)exe_dir;
+    return 1;
 #endif
 }
 
@@ -489,8 +536,14 @@ static int stasis_try_load_launch_config(
         entry_out[entry_out_cap - 1] = '\0';
     }
 
-    /* Make relative asset/data paths stable for packaged game builds. */
-    stasis_set_current_dir(exe_dir);
+    /* Anchor assets to the generated executable, independent of caller CWD. */
+    if (!stasis_set_current_dir(exe_dir) ||
+        !stasis_set_asset_root(exe_dir) ||
+        !stasis_set_packaged_graphics_path(exe_dir))
+    {
+        fprintf(stderr, "error: failed to anchor generated launcher at %s\n", exe_dir);
+        return 0;
+    }
     return 1;
 }
 
@@ -1861,6 +1914,26 @@ int main(int argc, char **argv)
     stasis_set_window_size_fn set_window_size = NULL;
     if (gfx)
     {
+        stasis_graphics_runtime_abi_version_fn graphics_abi =
+            (stasis_graphics_runtime_abi_version_fn)GetProcAddress(gfx, "stasis_graphics_runtime_abi_version");
+        if (!graphics_abi || graphics_abi() != STASIS_GRAPHICS_RUNTIME_ABI_VERSION)
+        {
+            fprintf(stderr,
+                    "error: incompatible stasis_graphics.dll (expected ABI %d)\n",
+                    STASIS_GRAPHICS_RUNTIME_ABI_VERSION);
+            FreeLibrary(lib);
+            return 1;
+        }
+        stasis_graphics_set_asset_root_fn set_graphics_asset_root =
+            (stasis_graphics_set_asset_root_fn)GetProcAddress(gfx, "stasis_set_asset_root");
+        const char *launcher_asset_root = getenv("STASIS_ASSET_ROOT");
+        if (!set_graphics_asset_root || !launcher_asset_root ||
+            !set_graphics_asset_root(launcher_asset_root))
+        {
+            fprintf(stderr, "error: stasis_graphics.dll rejected the launcher asset root\n");
+            FreeLibrary(lib);
+            return 1;
+        }
         init_window = (stasis_init_window_fn)GetProcAddress(gfx, "stasis_init_window");
         set_fullscreen = (stasis_set_fullscreen_fn)GetProcAddress(gfx, "stasis_set_fullscreen");
         set_window_size = (stasis_set_window_size_fn)GetProcAddress(gfx, "stasis_set_window_size");

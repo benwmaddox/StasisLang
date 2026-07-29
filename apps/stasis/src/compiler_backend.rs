@@ -2261,6 +2261,12 @@ fn stage_stasis_dynload_runtime(_link_library: &Path, _output: &Path) -> Result<
 
 fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
     let runner_name = runtime_runner_file_name();
+    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_RUNNER_PATH") {
+        let configured = PathBuf::from(configured);
+        if configured.is_file() {
+            return Some(configured);
+        }
+    }
     let mut candidates = Vec::new();
     if let Some(installed) = std::env::current_exe()
         .ok()
@@ -2287,6 +2293,12 @@ fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
 }
 
 fn resolve_runtime_graphics_path(repo_root: &Path) -> Option<PathBuf> {
+    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
+        let configured = PathBuf::from(configured);
+        if configured.is_file() {
+            return Some(configured);
+        }
+    }
     let mut candidates = Vec::new();
     for name in runtime_graphics_file_names() {
         if let Some(installed) = std::env::current_exe()
@@ -4019,6 +4031,11 @@ fn package_engine_bundle_release(
     }
 
     let (runner_src, graphics_src) = ensure_runtime_release_artifacts()?;
+    eprintln!(
+        "Stasis release runtime artifacts: runner={} graphics={}",
+        runner_src.display(),
+        graphics_src.display()
+    );
     copy_file_creating_parent(&runner_src, output_exe)?;
     let graphics_dst = output_root.join(
         graphics_src

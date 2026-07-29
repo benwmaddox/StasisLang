@@ -75,7 +75,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
           if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
-          & (Join-Path $vcpkgRoot "vcpkg.exe") install sdl2:x64-windows sdl2-image:x64-windows --recurse
+          & (Join-Path $vcpkgRoot "vcpkg.exe") install sdl2:x64-windows-static sdl2-image:x64-windows-static --recurse
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $cmakeHelp = cmake --help | Out-String
           if ($cmakeHelp -match "Visual Studio 18 2026") {
@@ -85,18 +85,19 @@ jobs:
           } else {
             throw "Supported Visual Studio CMake generator not found."
           }
-          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF
+          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DCMAKE_TOOLCHAIN_FILE="$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DSTASIS_GRAPHICS_SDL_ONLY=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build target/render-parity-runtime --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force target/render-parity-ci | Out-Null
           $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          $env:PATH = "$(Join-Path $vcpkgRoot 'installed/x64-windows/bin');$env:PATH"
+          $env:STASIS_RUNTIME_RUNNER_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_runner.exe")
           $env:STASIS_GFX_LOG_SPRITES = "1"
           $env:STASIS_PARITY_CAPTURE_STAGE = "second_frame"
           cargo run -p stasis -- play samples/render_parity/main.stasis --watch-dir samples/render_parity --ticks 2 --screenshot target/render-parity-ci/frame.png --screenshot-frame 2 --exit-after-screenshot 2>&1 | Tee-Object target/render-parity-ci/runtime.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/ci/verify_render_parity.py --capture target/render-parity-ci/frame.png --runtime-log target/render-parity-ci/runtime.log --evidence target/render-parity-ci/evidence.json --write-evidence --require-load-details --profile portable --stage second_frame
+          cargo test -p stasis --test windows_game_launch -- --test-threads=1 --nocapture
 
       - name: Bootstrap Compile Smoke (compiler .stasis)
         run: cargo test -p stasis_compiler -- --nocapture

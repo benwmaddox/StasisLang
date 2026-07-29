@@ -183,6 +183,7 @@ jobs:
           Remove-Item Env:CC -ErrorAction SilentlyContinue
           Push-Location "dist/stasis-release-${{ runner.os }}"
           .\stasis.exe probe-graphics-runtime
+          & .\samples\windows_launch_smoke\verify.ps1 -Toolchain (Resolve-Path .\stasis.exe) -ArtifactRoot (Join-Path (Get-Location) 'windows-launch-evidence')
           .\stasis.exe new ci_smoke --dir cli-smoke
           .\stasis.exe --workspace cli-smoke check
           .\stasis.exe --workspace cli-smoke test

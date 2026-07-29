@@ -20,6 +20,7 @@ stasis_ai = { path = "../../crates/stasis_ai" }
 
 [dev-dependencies]
 object = "0.36"
+image.workspace = true
 
 [lib]
 path = "src/lib.rs"

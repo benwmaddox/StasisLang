@@ -3,6 +3,7 @@
 #include "stasis_render_contract.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Implemented by the SDL-only stasis_graphics.c linked into the mobile core. */
@@ -59,6 +60,10 @@ static int bind_guest_globals(void) {
         hash_global_path("gfx_cmd_u8"), 0, STASIS_RENDER_U8_COUNT);
     if (host_i32 == NULL || host_f32 == NULL || gfx_cmd_i32 == NULL ||
         gfx_cmd_f32 == NULL || gfx_cmd_u8 == NULL) {
+        fprintf(stderr,
+            "Stasis mobile runtime could not bind guest buffers: host_i32=%p host_f32=%p gfx_cmd_i32=%p gfx_cmd_f32=%p gfx_cmd_u8=%p\n",
+            (void *)host_i32, (void *)host_f32, (void *)gfx_cmd_i32,
+            (void *)gfx_cmd_f32, (void *)gfx_cmd_u8);
         return 0;
     }
     memset(host_i32, 0, 768 * sizeof(*host_i32));
@@ -115,6 +120,8 @@ int32_t stasis_mobile_runtime_initialize(
     runtime_state.last_entry_result = runtime_state.entries.main_entry();
     apply_guest_host_requests();
     if (runtime_state.last_entry_result != 0) {
+        fprintf(stderr, "Stasis mobile main entry requested stop with code %d\n",
+            runtime_state.last_entry_result);
         return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
     }
     return STASIS_MOBILE_RUNTIME_OK;
@@ -130,6 +137,7 @@ int32_t stasis_mobile_runtime_step(void) {
             : STASIS_MOBILE_RUNTIME_OK;
     }
     if (stasis_should_quit()) {
+        fprintf(stderr, "Stasis mobile runtime received a quit event before the frame\n");
         return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
     }
 
@@ -137,10 +145,14 @@ int32_t stasis_mobile_runtime_step(void) {
     apply_guest_host_requests();
     runtime_state.last_entry_result = runtime_state.entries.tick_entry();
     if (runtime_state.last_entry_result != 0) {
+        fprintf(stderr, "Stasis mobile tick entry requested stop with code %d\n",
+            runtime_state.last_entry_result);
         return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
     }
     runtime_state.last_entry_result = runtime_state.entries.render_entry();
     if (runtime_state.last_entry_result != 0) {
+        fprintf(stderr, "Stasis mobile render entry requested stop with code %d\n",
+            runtime_state.last_entry_result);
         return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
     }
     /* Submission owns begin/present according to the guest command-buffer flags. */
