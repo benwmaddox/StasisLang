@@ -1010,7 +1010,12 @@ fn compile_function_to_object_bytes(
         |mut module, function_id, mut context| {
             module
                 .define_function(function_id, &mut context)
-                .map_err(|error| format!("failed to define AOT function {symbol}: {error}"))?;
+                .map_err(|error| {
+                    format!(
+                        "failed to define AOT function {symbol} ({name}): {error:?}",
+                        name = meta.name
+                    )
+                })?;
             module.clear_context(&mut context);
             module
                 .finish()
@@ -1652,6 +1657,23 @@ mod tests {
                 "core AOT global storage emitted a runtime call in {name}:\n{clif}"
             );
         }
+    }
+
+    #[test]
+    fn aot_dynamic_global_array_fallback_uses_runtime_helper_signature() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "dynamic_global_array.stasis",
+            "global values: i32[2];\nfunction read(index: i32, a: i32, b: i32, c: i32): i32 { return values[index]; }\nfunction main(): i32 { values[1] = 9; return read(1, 0, 0, 0); }\n",
+        );
+
+        process
+            .compile()
+            .expect("compile dynamic global array AOT fixture");
+        assert!(
+            undefined_runtime_symbols(&process).contains("stasis_jit_global_i32_array_load"),
+            "dynamic bounds fallback should reference the array-load runtime helper"
+        );
     }
 
     fn undefined_runtime_symbols(process: &AotProcess) -> BTreeSet<String> {

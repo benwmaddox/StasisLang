@@ -113,6 +113,11 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     }
 
     @Override
+    public boolean isRestoreComplete() {
+        return !reportRestoreTiming;
+    }
+
+    @Override
     public void onFrameStart() {
         ensureCurrentProject();
         long now = System.nanoTime();

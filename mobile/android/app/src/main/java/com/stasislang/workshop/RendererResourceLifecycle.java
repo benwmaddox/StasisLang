@@ -54,6 +54,11 @@ final class RendererResourceLifecycle {
         }
     }
 
+    void deferRestore() {
+        if (state != State.RESTORING) return;
+        state = State.RESTORE_PENDING;
+    }
+
     void resourceFailed() {
         if (state == State.UNAVAILABLE || state == State.PAUSED) return;
         restoreFailures = nextCounter(restoreFailures);

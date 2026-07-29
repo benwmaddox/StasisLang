@@ -3945,6 +3945,28 @@ mod tests {
     }
 
     #[test]
+    fn graphics_runtime_presents_asset_free_loading_on_sdl_and_opengl() {
+        for required in [
+            "static void stasis_present_gpu_loading(void)",
+            "SDL_RenderPresent(g_renderer);",
+            "SDL_GL_SwapWindow(g_window);",
+            "g_use_sdl_renderer ? \"sdl\" : \"gl\"",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "shared graphics loading screen should contain {required}"
+            );
+        }
+        assert_eq!(
+            STASIS_GRAPHICS_SOURCE
+                .matches("stasis_present_gpu_loading();")
+                .count(),
+            3,
+            "loading should be presented at startup and both real SDL reset events"
+        );
+    }
+
+    #[test]
     fn mobile_runtime_uses_fixed_entries_and_sdl_only_static_target() {
         for required in [
             "typedef void (*StasisMobileBindEntry)(void)",
@@ -4007,6 +4029,22 @@ mod tests {
                 && STASIS_GRAPHICS_SOURCE
                     .contains("SDL_PauseAudioDevice(g_audio_device, paused ? 1 : 0)"),
             "mobile pause should continue polling events and pause the audio device"
+        );
+        for required in [
+            "static void stasis_present_gpu_loading(void)",
+            "Stasis renderer loading screen presented",
+            "stasis_renderer_lifecycle_resume(&g_resource_lifecycle);",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "mobile renderer lifecycle should contain {required}"
+            );
+        }
+        assert!(
+            !STASIS_GRAPHICS_SOURCE.contains(
+                "stasis_renderer_lifecycle_resume(&g_resource_lifecycle);\n                    stasis_invalidate_renderer_resources(0);"
+            ),
+            "ordinary foreground resume must not invalidate a surviving SDL renderer"
         );
     }
 

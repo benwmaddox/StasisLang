@@ -27,6 +27,7 @@ typedef struct {
     uint32_t restore_attempts;
     uint32_t restore_failures;
     StasisRendererResourceState state;
+    StasisRendererResourceState state_before_pause;
     StasisRendererResourceReason reason;
 } StasisRendererLifecycle;
 
@@ -42,6 +43,7 @@ static void stasis_renderer_lifecycle_initialize(StasisRendererLifecycle* lifecy
     lifecycle->restore_attempts = 0u;
     lifecycle->restore_failures = 0u;
     lifecycle->state = STASIS_RENDERER_READY;
+    lifecycle->state_before_pause = STASIS_RENDERER_READY;
     lifecycle->reason = STASIS_RENDERER_REASON_NONE;
 }
 
@@ -49,7 +51,6 @@ static void stasis_renderer_lifecycle_surface_changed(StasisRendererLifecycle* l
     if (!lifecycle || lifecycle->state == STASIS_RENDERER_UNAVAILABLE) return;
     lifecycle->surface_generation =
         stasis_renderer_next_generation(lifecycle->surface_generation);
-    lifecycle->state = STASIS_RENDERER_RESTORE_PENDING;
     lifecycle->reason = STASIS_RENDERER_REASON_SURFACE_CHANGED;
 }
 
@@ -68,17 +69,16 @@ static void stasis_renderer_lifecycle_renderer_reset(
 
 static void stasis_renderer_lifecycle_pause(StasisRendererLifecycle* lifecycle) {
     if (!lifecycle || lifecycle->state == STASIS_RENDERER_UNAVAILABLE) return;
+    lifecycle->state_before_pause = lifecycle->state;
     lifecycle->state = STASIS_RENDERER_PAUSED;
     lifecycle->reason = STASIS_RENDERER_REASON_BACKGROUND;
 }
 
 static void stasis_renderer_lifecycle_resume(StasisRendererLifecycle* lifecycle) {
     if (!lifecycle || lifecycle->state != STASIS_RENDERER_PAUSED) return;
-    lifecycle->surface_generation =
-        stasis_renderer_next_generation(lifecycle->surface_generation);
-    lifecycle->renderer_generation =
-        stasis_renderer_next_generation(lifecycle->renderer_generation);
-    lifecycle->state = STASIS_RENDERER_RESTORE_PENDING;
+    lifecycle->state = lifecycle->state_before_pause == STASIS_RENDERER_READY
+        ? STASIS_RENDERER_READY
+        : STASIS_RENDERER_RESTORE_PENDING;
     lifecycle->reason = STASIS_RENDERER_REASON_FOREGROUND;
 }
 

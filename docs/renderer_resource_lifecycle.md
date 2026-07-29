@@ -38,11 +38,13 @@ rebuilds all active sprites, the procedural fallback, every active font atlas, a
 cached text geometry. A failure keeps the lifecycle retryable and withholds that
 game frame. The Android GLES adapter first presents a context-local `STASIS LOADING`
 marker drawn only with clears and scissor rectangles, before shaders, fonts,
-textures, or game assets. It then restores resources referenced by the production command frame in bounded
-8 ms batches. Resources not reached in a batch use the procedural fallback (or
-temporarily omit text), so subsequent requested frames progressively replace them
-without blocking the UI for the entire asset set. A provider or GL failure marks
-the restore failed and retries it on the next requested frame.
+textures, or game assets. Surface setup redraws rather than erases the marker, and
+the marker remains visible for at least 250 ms before restoration starts. It then
+restores resources referenced by the production command frame in bounded 8 ms
+batches. Every incomplete batch keeps the loading marker presented; no partial game
+frame is published. The normal game frame replaces the marker only after every
+referenced sprite and text texture is ready and the GL checks succeed. A provider
+or GL failure marks the restore failed and retries it on the next requested frame.
 
 This path covers Android context loss and Activity recreation, plus SDL target and
 device resets. Resize, orientation, and Android background/resume retain resources
@@ -61,6 +63,12 @@ errors expose the same fields in the visible resource error and under the
 Android also emits `resource_restore_timing` with wall time, sprite resolution,
 decode, upload, text rasterization, restored counts, and the number of budget
 deferrals. This makes asset-heavy games such as Chess TD diagnosable from logcat.
+Generated SDL mobile packages present the same asset-free `STASIS LOADING` pixel
+marker immediately after renderer creation and again on SDL target/device reset.
+The marker remains in the presented framebuffer while the synchronous SDL resource
+transaction rebuilds every sprite, fallback, font atlas, and cached text run. A
+normal game frame is presented only after that transaction succeeds. Ordinary
+Android foreground resume preserves resources unless SDL reports an actual reset.
 
 ## Verification
 

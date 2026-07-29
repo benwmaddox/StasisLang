@@ -60,6 +60,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private static final int COLOR_VERTEX_BYTES = COLOR_VERTEX_FLOATS * 4;
     private static final int TEXTURE_VERTEX_BYTES = TEXTURE_VERTEX_FLOATS * 4;
     private static final int MAX_CAPTURE_PIXELS = 8_000_000;
+    private static final long MIN_RESTORE_LABEL_NANOS = 250_000_000L;
     private static final String[] RESTORE_LABEL = {
             "   01110 11111 01110 01110 11111 01110   ",
             "   10001 00100 10001 10001 00100 10001   ",
@@ -85,6 +86,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         default void beginRestoreAttempt() {}
 
         default String consumeFailure() { return null; }
+
+        default boolean isRestoreComplete() { return true; }
 
         default void onFrameStart() {}
 
@@ -210,6 +213,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int densityGeneration = -1;
     private CaptureCallback pendingCapture;
     private boolean restorePlaceholderPending;
+    private long restorePlaceholderUntilNanos;
 
     StasisPreviewRenderer(TextureProvider textures, TimingListener timing) {
         this.textures = textures;
@@ -261,6 +265,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             javax.microedition.khronos.egl.EGLConfig config) {
         resourceLifecycle.onRendererCreated();
         restorePlaceholderPending = true;
+        restorePlaceholderUntilNanos = System.nanoTime() + MIN_RESTORE_LABEL_NANOS;
         drawRestorePlaceholder();
         colorProgram = createProgram(VERTEX_SHADER, FRAGMENT_SHADER);
         colorPosition = GLES20.glGetAttribLocation(colorProgram, "aPosition");
@@ -288,8 +293,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         surfaceWidth = Math.max(1, width);
         surfaceHeight = Math.max(1, height);
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
-        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        if (restorePlaceholderPending) drawRestorePlaceholder();
         displayGeneration = -1;
         Log.i(LOG_TAG, "drawable=" + surfaceWidth + "x" + surfaceHeight);
     }
@@ -300,12 +304,13 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         CaptureCallback capture;
         LogicalFrameSnapshot capturedFrame;
         synchronized (this) {
-            if (restorePlaceholderPending) {
-                restorePlaceholderPending = false;
+            if (restorePlaceholderPending
+                    && System.nanoTime() < restorePlaceholderUntilNanos) {
                 drawRestorePlaceholder();
                 timing.onRendered(System.nanoTime() - started);
                 return;
             }
+            restorePlaceholderPending = false;
             boolean restoring = resourceLifecycle.beginRestore();
             textures.beginRestoreAttempt();
             while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
@@ -313,11 +318,20 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (hasFrame) prepareFrameResources();
             String resourceFailure = textures.consumeFailure();
             int glError = GLES20.glGetError();
-            boolean restored = resourceFailure == null && glError == GLES20.GL_NO_ERROR;
+            boolean restoreComplete = textures.isRestoreComplete();
+            boolean restored = resourceFailure == null && glError == GLES20.GL_NO_ERROR
+                    && restoreComplete;
             if (restoring) {
-                resourceLifecycle.finishRestore(restored);
+                if (resourceFailure == null && glError == GLES20.GL_NO_ERROR
+                        && !restoreComplete) {
+                    resourceLifecycle.deferRestore();
+                } else {
+                    resourceLifecycle.finishRestore(restored);
+                }
             } else if (!restored) {
-                resourceLifecycle.resourceFailed();
+                if (resourceFailure != null || glError != GLES20.GL_NO_ERROR) {
+                    resourceLifecycle.resourceFailed();
+                }
             }
             if (restoring) {
                 if (restored) {
@@ -325,7 +339,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                             + resourceLifecycle.surfaceGeneration() + " renderer_generation="
                             + resourceLifecycle.rendererGeneration() + " reason="
                             + resourceLifecycle.reason());
-                } else {
+                } else if (resourceFailure != null || glError != GLES20.GL_NO_ERROR) {
                     Log.e(LOG_TAG, "resource restore failed backend=gles surface_generation="
                             + resourceLifecycle.surfaceGeneration() + " renderer_generation="
                             + resourceLifecycle.rendererGeneration() + " reason="
@@ -333,6 +347,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                             + (resourceFailure == null ? "gl_error_" + glError : resourceFailure));
                 }
             }
+            if (!restoreComplete && resourceFailure == null
+                    && glError == GLES20.GL_NO_ERROR) drawRestorePlaceholder();
             if (hasFrame && restored && resourceLifecycle.canPresent()) drawFrame();
             capture = pendingCapture;
             pendingCapture = null;
