@@ -2,11 +2,11 @@
 
 ## Status
 
-Implemented initial graphics-standard-library slice, with the raw handle API retained for compatibility.
+Implemented typed-only graphics-standard-library surface. Legacy raw sprite and prepared-text functions are removed from Stasis source.
 
 ## Problem
 
-The current sprite API represents a loaded image as an untyped `i32` handle:
+The removed sprite API represented a loaded image as an untyped `i32` handle:
 
 ```stasis
 let aura: i32 = gfx_load_sprite("aura.svg", 64, 64);
@@ -108,11 +108,11 @@ physical raster width = logical painted width * active raster scale
 
 The host remains responsible for rounding, caps, atlas placement, density-generation changes, and backend-specific texture ownership.
 
-## Compatibility and migration
+## Host boundary and migration
 
-The initial slice adds the typed API alongside the existing raw functions. It migrates one representative end-to-end sample and adds deterministic coverage before considering removal or deprecation of raw handle APIs.
+`load_sprite_from` and `load_text_from` are direct host-bound receiver functions. A struct view crosses the ABI as `(base, index, len)`, allowing the host to publish the handle and logical measurements transactionally into either a global struct or an array element. No raw loader, cache, measurement, release, or legacy draw wrapper is declared in Stasis source.
 
-The typed API must work through the same command buffer and native implementation as existing drawing. It is a source-level ownership improvement, not a second rendering pipeline.
+The native renderer's lower-level ABI remains an implementation detail used by the receiver host functions. Bundled samples and standard-library helpers use `Sprite` and `TextRun`; command-buffer primitives remain available to renderer-building code but are not resource-loading APIs.
 
 ## Verification requirements
 
@@ -128,15 +128,17 @@ The first implementation slice must cover:
 - bounded repository validation with no lingering test/compiler processes.
 
 The implementation includes `samples/typed_sprite` as the executable contract fixture and
-`samples/typed_drawable_visual` as a raw-versus-typed framebuffer parity fixture. Run them with:
+`samples/typed_drawable_visual` as a typed-only deterministic framebuffer fixture. Run them with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/verify-typed-drawables.ps1
 powershell -ExecutionPolicy Bypass -File tools/verify-typed-drawable-visual.ps1
+powershell -ExecutionPolicy Bypass -File tools/verify-typed-drawable-migration.ps1
 ```
 
-The visual verifier renders both paths through the real Stasis framebuffer and requires the PNG
-bytes to be identical. The implementation also adds JIT and linked-AOT regression coverage for
+The visual verifier renders the typed path twice through the real Stasis framebuffer and requires
+the PNG bytes to be identical. The migration verifier rejects removed API names, compiles ten
+representative bundled entries, and proves a legacy `gfx_load_sprite` call is a compile error. The implementation also adds JIT and linked-AOT regression coverage for
 same-name receiver methods whose receiver types and natural arities differ.
 
 The final reviewed captures are physically 360x240 pixels while the renderer reports an 800x600
@@ -149,11 +151,12 @@ legibility.
 
 Final visual defect log:
 
-- `TDRAW-01` (blocker if present): raw/typed pixel mismatch; closed, none observed.
+- `TDRAW-01` (blocker if present): repeated typed framebuffer mismatch; closed, none observed.
 - `TDRAW-02` (minor): physical capture is 360x240 rather than logical 800x600; accepted and
   documented because both paths share the same output surface.
-- `TDRAW-03` (major for standalone copy, out of scope for parity): deterministic test glyphs are
-  not human-readable; accepted because both paths render the exact same cached text pixels.
+- `TDRAW-03` (major for standalone copy, out of scope for the deterministic fixture): deterministic
+  test glyphs are not human-readable; accepted because this fixture tests resource rendering rather
+  than UI copy.
 - `TDRAW-04` (minor if present): clipping or poor edge rasterization; closed, none observed.
 - `TDRAW-05` (major if present): typed-path displacement, bounds, color, or scale regression;
   closed, none observed.

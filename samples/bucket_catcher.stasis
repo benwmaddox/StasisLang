@@ -74,8 +74,6 @@ struct GameState {
     spawn_timer_ticks: i32;
 
     ui_font: i32;
-    bucket_sprite: i32;
-    ball_sprite: i32;
     ui_ascii: ascii[64];
     ui_text: utf8[64];
 
@@ -84,6 +82,8 @@ struct GameState {
 
 // Single global state block (instructional style).
 global state: GameState;
+global bucket_sprite: Sprite;
+global ball_sprite: Sprite;
 
 function seed_rng(seed: i32): void {
     // Park-Miller "minimal standard" RNG (31-bit, no overflow with i32 math).
@@ -165,12 +165,12 @@ function ensure_window(): bool {
 
     // Fonts depend on the graphics context, so load them after the window exists.
     state.ui_font = load_font(state.config.font_path, state.config.font_size_pixels);
-    state.bucket_sprite = gfx_load_sprite(
+    bucket_sprite.load_sprite_from(
         state.config.bucket_sprite_path,
         state.config.bucket_width,
         state.config.bucket_height
     );
-    state.ball_sprite = gfx_load_sprite(
+    ball_sprite.load_sprite_from(
         state.config.ball_sprite_path,
         state.config.ball_radius * 2,
         state.config.ball_radius * 2
@@ -182,13 +182,13 @@ function ensure_window(): bool {
         print_string("\n");
         return false;
     }
-    if (state.bucket_sprite == 0) {
+    if (bucket_sprite.handle == 0) {
         print_string("error: failed to load bucket sprite: ");
         print_string(state.config.bucket_sprite_path);
         print_string("\n");
         return false;
     }
-    if (state.ball_sprite == 0) {
+    if (ball_sprite.handle == 0) {
         print_string("error: failed to load ball sprite: ");
         print_string(state.config.ball_sprite_path);
         print_string("\n");
@@ -220,8 +220,8 @@ function update_input(): void {
 
     // Keyboard input: steer left/right with arrow keys.
     let move: i32 = 0;
-    if (input_key_down(Scancode.Left)) { move = move - 1; }
-    if (input_key_down(Scancode.Right)) { move = move + 1; }
+    if (input_key_down(80)) { move = move - 1; }
+    if (input_key_down(79)) { move = move + 1; }
     if (move != 0) {
         state.bucket_target_x = state.bucket_target_x + move * state.config.bucket_speed;
     }
@@ -278,28 +278,17 @@ function draw_bucket(): void {
     let x0: i32 = state.bucket_x - state.config.bucket_width / 2;
     let y0: i32 = state.config.screen_height - state.config.bucket_bottom_padding - state.config.bucket_height;
 
-    gfx_draw_sprite(
-        state.bucket_sprite,
-        i32_to_f32(x0),
-        i32_to_f32(y0),
-        i32_to_f32(state.config.bucket_width),
-        i32_to_f32(state.config.bucket_height),
-        0,
-        255
-    );
+    bucket_sprite.draw(i32_to_f32(x0), i32_to_f32(y0), 255, 0);
 }
 
 function draw_balls(): void {
     foreach (let ball in state.balls) {
         if (ball.active) {
-            gfx_draw_sprite(
-                state.ball_sprite,
+            ball_sprite.draw(
                 i32_to_f32(ball.x - state.config.ball_radius),
                 i32_to_f32(ball.y - state.config.ball_radius),
-                i32_to_f32(state.config.ball_radius * 2),
-                i32_to_f32(state.config.ball_radius * 2),
-                0,
-                255
+                255,
+                0
             );
         }
     }
@@ -314,11 +303,11 @@ function draw_ui(): void {
     ascii_push_i32(state.ui_ascii, state.misses);
     utf8_from_ascii(state.ui_text, state.ui_ascii, 64);
 
-    draw_text(state.ui_font, state.ui_text, 12.0, 10.0, state.config.ui_red, state.config.ui_green, state.config.ui_blue, 1.0);
+    gfx_cmd_text(state.ui_font, state.ui_text, 12.0, 10.0, state.config.ui_red, state.config.ui_green, state.config.ui_blue, 1.0);
 }
 
 function is_ready_to_run(): bool {
-    return state.config.json_loaded && state.ui_font != 0 && state.bucket_sprite != 0 && state.ball_sprite != 0;
+    return state.config.json_loaded && state.ui_font != 0 && bucket_sprite.handle != 0 && ball_sprite.handle != 0;
 }
 
 function tick(): i32 {

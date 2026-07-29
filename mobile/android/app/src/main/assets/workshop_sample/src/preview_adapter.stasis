@@ -4,8 +4,9 @@ global host_f32: f32[64];
 global gfx_cmd_i32: i32[18464];
 global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
-global PongHost { ball_sprite: i32; paddle_sprite: i32; center_sprite: i32; }
-extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+struct Sprite { handle: i32; width: i32; height: i32; }
+global PongHost { ball_sprite: Sprite; paddle_sprite: Sprite; center_sprite: Sprite; }
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
 
 function pong_host_sprite(index: i32, handle: i32, x: i32, y: i32, w: i32, h: i32): void {
     let i_base: i32 = 32 + index * 3;
@@ -21,10 +22,10 @@ function pong_host_render(): void {
     gfx_cmd_i32[3] = 0; gfx_cmd_i32[4] = 0; gfx_cmd_i32[7] = 0; gfx_cmd_i32[9] = 0;
     gfx_cmd_f32[0] = 0.0588; gfx_cmd_f32[1] = 0.0667;
     gfx_cmd_f32[2] = 0.1098; gfx_cmd_f32[3] = 1.0;
-    pong_host_sprite(0, PongHost.paddle_sprite, Render.command1_x, Render.command1_y, Render.command1_w, Render.command1_h);
-    pong_host_sprite(1, PongHost.paddle_sprite, Render.command2_x, Render.command2_y, Render.command2_w, Render.command2_h);
-    pong_host_sprite(2, PongHost.center_sprite, Render.command4_x, Render.command4_y, Render.command4_w, Render.command4_h);
-    pong_host_sprite(3, PongHost.ball_sprite, Render.command3_x, Render.command3_y, Render.command3_w, Render.command3_h);
+    pong_host_sprite(0, PongHost.paddle_sprite.handle, Render.command1_x, Render.command1_y, Render.command1_w, Render.command1_h);
+    pong_host_sprite(1, PongHost.paddle_sprite.handle, Render.command2_x, Render.command2_y, Render.command2_w, Render.command2_h);
+    pong_host_sprite(2, PongHost.center_sprite.handle, Render.command4_x, Render.command4_y, Render.command4_w, Render.command4_h);
+    pong_host_sprite(3, PongHost.ball_sprite.handle, Render.command3_x, Render.command3_y, Render.command3_w, Render.command3_h);
     let ball_base: i32 = 41;
     gfx_cmd_i32[ball_base + 1] = (GameState.tick_count * 3) % 360;
     gfx_cmd_i32[4] = 4;
@@ -33,9 +34,9 @@ function pong_host_render(): void {
 
 function main(): i32 {
     pong_game_main();
-    PongHost.ball_sprite = gfx_load_sprite("assets/ball.svg", 32, 32);
-    PongHost.paddle_sprite = gfx_load_sprite("assets/paddle.svg", 1, 1);
-    PongHost.center_sprite = gfx_load_sprite("assets/center_line.svg", 1, 1);
+    load_sprite_from(PongHost.ball_sprite, "assets/ball.svg", 32, 32);
+    load_sprite_from(PongHost.paddle_sprite, "assets/paddle.svg", 1, 1);
+    load_sprite_from(PongHost.center_sprite, "assets/center_line.svg", 1, 1);
     pong_host_render();
     return 0;
 }

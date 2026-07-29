@@ -30,7 +30,8 @@ global gfx_cmd_i32: i32[18464];
 global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
 
-extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+struct Sprite { handle: i32; width: i32; height: i32; }
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
 
 function exploration_host_request_window(): void {
     host_req_flags = HOST_REQ_FLAG_WINDOWED;

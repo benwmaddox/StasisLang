@@ -17,16 +17,16 @@ struct GlobalConfig {
 }
 
 struct Sprites {    
-    paddle: i32;
-    ball: i32;
-    brick_basic_base: i32;
-    brick_basic_turret: i32;
-    brick_basic_fx: i32;
-    brick_armored_base: i32;
-    brick_armored_turret: i32;
-    brick_armored_fx: i32;
-    brick_reflector_base: i32;
-    brick_reflector_fx: i32;
+    paddle: Sprite;
+    ball: Sprite;
+    brick_basic_base: Sprite;
+    brick_basic_turret: Sprite;
+    brick_basic_fx: Sprite;
+    brick_armored_base: Sprite;
+    brick_armored_turret: Sprite;
+    brick_armored_fx: Sprite;
+    brick_reflector_base: Sprite;
+    brick_reflector_fx: Sprite;
 
 }
 
@@ -111,16 +111,16 @@ export function main(): i32 {
         return 1;
     }    
 
-    state.sprites.paddle = gfx_load_sprite("assets/paddle.svg", 128, 24);
-    state.sprites.ball = gfx_load_sprite("assets/ball.svg", 32, 32);
-    state.sprites.brick_basic_base = gfx_load_sprite("assets/brick_basic.svg", 160, 64);
-    state.sprites.brick_basic_turret = gfx_load_sprite("assets/brick_basic_turret.svg", 160, 64);
-    state.sprites.brick_basic_fx = gfx_load_sprite("assets/brick_basic_fx.svg", 160, 64);
-    state.sprites.brick_armored_base = gfx_load_sprite("assets/brick_armored.svg", 160, 64);
-    state.sprites.brick_armored_turret = gfx_load_sprite("assets/brick_armored_turret.svg", 160, 64);
-    state.sprites.brick_armored_fx = gfx_load_sprite("assets/brick_armored_fx.svg", 160, 64);
-    state.sprites.brick_reflector_base = gfx_load_sprite("assets/brick_reflector.svg", 160, 64);
-    state.sprites.brick_reflector_fx = gfx_load_sprite("assets/brick_reflector_fx.svg", 160, 64);
+    load_sprite_from(state.sprites.paddle, "assets/paddle.svg", 128, 24);
+    load_sprite_from(state.sprites.ball, "assets/ball.svg", 32, 32);
+    load_sprite_from(state.sprites.brick_basic_base, "assets/brick_basic.svg", 160, 64);
+    load_sprite_from(state.sprites.brick_basic_turret, "assets/brick_basic_turret.svg", 160, 64);
+    load_sprite_from(state.sprites.brick_basic_fx, "assets/brick_basic_fx.svg", 160, 64);
+    load_sprite_from(state.sprites.brick_armored_base, "assets/brick_armored.svg", 160, 64);
+    load_sprite_from(state.sprites.brick_armored_turret, "assets/brick_armored_turret.svg", 160, 64);
+    load_sprite_from(state.sprites.brick_armored_fx, "assets/brick_armored_fx.svg", 160, 64);
+    load_sprite_from(state.sprites.brick_reflector_base, "assets/brick_reflector.svg", 160, 64);
+    load_sprite_from(state.sprites.brick_reflector_fx, "assets/brick_reflector_fx.svg", 160, 64);
 
     if (state.initialized == false) {
         state.game.rng_state = time();
@@ -162,8 +162,8 @@ function tick(): i32 {
     w_f.from_i32(w);
     let h_f: f32;
     h_f.from_i32(h);
-    render_push_sprite(state.sprites.paddle, (w / 2) - 64, h - 40, 128, 24, 0, 255);
-    render_push_sprite(state.sprites.ball, (w / 2) - 16, (h / 2) - 16, 32, 32, 0, 255);
+    render_push_sprite(state.sprites.paddle.handle, (w / 2) - 64, h - 40, 128, 24, 0, 255);
+    render_push_sprite(state.sprites.ball.handle, (w / 2) - 16, (h / 2) - 16, 32, 32, 0, 255);
 
     render_push_line(0.0, 0.0, w_f, 0.0, 0.2, 0.2, 0.5, 1.0);
     render_push_line(w_f, 0.0, w_f, h_f, 0.2, 0.2, 0.5, 1.0);

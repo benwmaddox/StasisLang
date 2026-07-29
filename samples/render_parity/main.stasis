@@ -1,9 +1,12 @@
 @link("stasis_graphics");
 import "frame.stasis";
 
-extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 extern function load_font(path: string, size: i32): i32;
-function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
+
+struct Sprite { handle: i32; width: i32; height: i32; }
+struct TextRun { font: i32; handle: i32; width: f32; height: f32; }
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
 
 global gfx_cmd_i32: i32[18464];
 global gfx_cmd_f32: f32[108676];
@@ -16,11 +19,11 @@ global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
 global host_req_seq: i32;
 
-global opaque_sprite: i32;
-global translucent_sprite: i32;
-global canvas_sprite: i32;
+global opaque_resource: Sprite;
+global translucent_resource: Sprite;
+global canvas_resource: Sprite;
 global parity_font: i32;
-global cached_label: i32;
+global cached_label_resource: TextRun;
 
 function main(): i32 {
     host_req_flags = 1;
@@ -28,16 +31,16 @@ function main(): i32 {
     host_req_window_h_px = PARITY_WINDOW_H;
     host_req_seq += 1;
 
-    opaque_sprite = gfx_load_sprite("assets/opaque.svg", 96, 72);
-    translucent_sprite = gfx_load_sprite("assets/translucent.svg", 96, 72);
-    canvas_sprite = gfx_load_sprite("assets/full_canvas.svg", PARITY_WINDOW_W, PARITY_WINDOW_H);
+    opaque_resource.load_sprite_from("assets/opaque.svg", 96, 72);
+    translucent_resource.load_sprite_from("assets/translucent.svg", 96, 72);
+    canvas_resource.load_sprite_from("assets/full_canvas.svg", PARITY_WINDOW_W, PARITY_WINDOW_H);
     parity_font = load_font("assets/parity.ttf", 24);
-    if (opaque_sprite == 0) { return 11; }
-    if (translucent_sprite == 0) { return 12; }
-    if (canvas_sprite == 0) { return 13; }
+    if (opaque_resource.handle == 0) { return 11; }
+    if (translucent_resource.handle == 0) { return 12; }
+    if (canvas_resource.handle == 0) { return 13; }
     if (parity_font == 0) { return 14; }
-    cached_label = gfx_cache_text(parity_font, "cached parity");
-    if (cached_label == 0) { return 15; }
+    cached_label_resource.load_text_from(parity_font, "cached parity");
+    if (cached_label_resource.handle == 0) { return 15; }
     return 0;
 }
 
@@ -48,8 +51,8 @@ function tick(): i32 {
 function render(): i32 {
     build_parity_frame(
         gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8,
-        canvas_sprite, opaque_sprite, translucent_sprite,
-        parity_font, cached_label
+        canvas_resource.handle, opaque_resource.handle, translucent_resource.handle,
+        parity_font, cached_label_resource.handle
     );
     return 0;
 }

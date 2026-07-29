@@ -2038,6 +2038,12 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         | "stasis_jit_gfx_measure_text_cached_height" => {
             function_address(stasis_dynload::stasis_jit_gfx_measure_text_cached_height as *const ())
         }
+        "stasis_jit_sprite_load_from" => {
+            function_address(stasis_dynload::stasis_jit_sprite_load_from as *const ())
+        }
+        "stasis_jit_text_run_load_from" => {
+            function_address(stasis_dynload::stasis_jit_text_run_load_from as *const ())
+        }
         "time" | "stasis_time" | "stasis_jit_time" | "stasis_get_time_ms" => {
             function_address(stasis_dynload::stasis_get_time_ms as *const ())
         }

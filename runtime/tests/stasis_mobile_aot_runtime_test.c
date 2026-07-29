@@ -16,6 +16,16 @@ static int32_t add_two(int32_t left, int32_t right) {
     return left + right;
 }
 
+static int32_t hash_text(const char *text) {
+    uint32_t hash = 2166136261u;
+    const unsigned char *cursor = (const unsigned char *)text;
+    while (*cursor != 0) {
+        hash ^= (uint32_t)*cursor++;
+        hash *= 16777619u;
+    }
+    return (int32_t)hash;
+}
+
 static char last_sprite_path[64];
 static char saved_scope[64];
 static char saved_key[64];
@@ -78,6 +88,13 @@ int main(void) {
     float overlapping_f32[5] = {1, 2, 3, 4, 5};
     uint8_t external_u8[4] = {1, 2, 3, 4};
     uint8_t dynamic_path[] = "sprite.bmp";
+    int32_t sprite_handle[1] = {0};
+    int32_t sprite_width[1] = {0};
+    int32_t sprite_height[1] = {0};
+    int32_t text_font[1] = {0};
+    int32_t text_handle[1] = {0};
+    float text_width[1] = {0};
+    float text_height[1] = {0};
     int32_t *owned;
     char escaped_json[64];
     const char json_controls[] = {'"', '\\', '\b', '\f', '\n', '\r', '\t', 1, 'A', 0};
@@ -122,6 +139,20 @@ int main(void) {
     CHECK(stasis_jit_gfx_load_sprite(23, 32, 32) == 1);
     CHECK(strcmp(last_sprite_path, "sprite.bmp") == 0);
     CHECK(stasis_jit_gfx_dump_png(23) == 1);
+
+    stasis_jit_register_global_i32_array(100, hash_text("handle"), sprite_handle, 1);
+    stasis_jit_register_global_i32_array(100, hash_text("width"), sprite_width, 1);
+    stasis_jit_register_global_i32_array(100, hash_text("height"), sprite_height, 1);
+    CHECK(stasis_jit_sprite_load_from(100, 0, 1, 23, 48, 24) == 1);
+    CHECK(sprite_handle[0] == 1 && sprite_width[0] == 48 && sprite_height[0] == 24);
+
+    stasis_jit_register_global_i32_array(101, hash_text("font"), text_font, 1);
+    stasis_jit_register_global_i32_array(101, hash_text("handle"), text_handle, 1);
+    stasis_jit_register_global_f32_array(101, hash_text("width"), text_width, 1);
+    stasis_jit_register_global_f32_array(101, hash_text("height"), text_height, 1);
+    CHECK(stasis_jit_text_run_load_from(101, 0, 1, 7, 23) == 1);
+    CHECK(text_font[0] == 7 && text_handle[0] == 8);
+    CHECK(text_width[0] == 8.0f && text_height[0] == 9.0f);
 
     stasis_jit_upsert_string_literal(40, "sample_game");
     stasis_jit_upsert_string_literal(41, "unlocked_tier");
