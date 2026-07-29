@@ -19,7 +19,8 @@ use stasis::{
     run_with_default_backend, run_with_real_backend, RunnerConfig, StasisTestRunSession,
 };
 use stasis_assets::{
-    load_project_asset_manifest, AssetFormat, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
+    load_project_asset_manifest, prepare_asset_bundle, AssetFormat, AssetLimits,
+    DEFAULT_ASSET_MANIFEST_PATH,
 };
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
@@ -1677,24 +1678,17 @@ fn write_mobile_asset_bundle(
         })?;
     }
     let game_root = asset_root.join("stasis_game");
-    let manifest_destination = game_root.join(DEFAULT_ASSET_MANIFEST_PATH);
-    fs::create_dir_all(manifest_destination.parent().expect("manifest parent"))
-        .map_err(|error| format!("failed to create mobile AOT manifest directory: {error}"))?;
-    fs::copy(&resolved.manifest_path, &manifest_destination)
-        .map_err(|error| format!("failed to package mobile AOT asset manifest: {error}"))?;
-    let mut packaged_paths = BTreeSet::new();
-    for asset in resolved.assets {
-        packaged_paths.insert(PathBuf::from(&asset.entry.path));
-        let destination = game_root.join(&asset.entry.path);
-        fs::create_dir_all(destination.parent().expect("asset parent"))
-            .map_err(|error| format!("failed to create mobile AOT asset directory: {error}"))?;
-        fs::copy(&asset.absolute_path, &destination).map_err(|error| {
-            format!(
-                "failed to package mobile AOT asset {}: {error}",
-                asset.entry.id
-            )
-        })?;
-    }
+    let mut packaged_paths = resolved
+        .assets
+        .iter()
+        .map(|asset| PathBuf::from(&asset.entry.path))
+        .collect::<BTreeSet<_>>();
+    prepare_asset_bundle(
+        &resolved,
+        &game_root,
+        output_dir.join("asset-preparation-cache"),
+    )
+    .map_err(|error| format!("failed to prepare mobile AOT assets: {error}"))?;
     for (relative_path, source_path) in collect_mobile_source_font_assets(project_dir, sources)? {
         if !packaged_paths.insert(relative_path.clone()) {
             continue;

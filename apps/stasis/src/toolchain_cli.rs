@@ -7,6 +7,9 @@ use stasis::{
     run_play_in_process_with_window_title, run_self_host_aot_cli_with_options, LiveRunConfig,
     StasisTestRunSession,
 };
+use stasis_assets::{
+    load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
+};
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
@@ -2234,7 +2237,18 @@ fn package_workspace(
         )?;
         let assets = workspace.root.join("assets");
         validate_workspace_destination(workspace, "assets directory", &assets)?;
-        copy_dir_if_exists(&assets, &staging_root.join("assets"))?;
+        if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+            let resolved = load_project_asset_manifest(&workspace.root, AssetLimits::default())
+                .map_err(|error| format!("failed to resolve desktop package assets: {error}"))?;
+            prepare_asset_bundle(
+                &resolved,
+                &staging_root,
+                workspace.root.join(".stasis_cache/assets"),
+            )
+            .map_err(|error| format!("failed to prepare desktop package assets: {error}"))?;
+        } else {
+            copy_dir_if_exists(&assets, &staging_root.join("assets"))?;
+        }
         if let Some(runtime) = installed_runtime_library() {
             copy_file(
                 &runtime,

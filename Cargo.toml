@@ -29,6 +29,7 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 atomic-write-file = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 cranelift-codegen = { version = "0.117", features = ["arm64"] }
 cranelift-frontend = "0.117"
