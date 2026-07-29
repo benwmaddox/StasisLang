@@ -4117,8 +4117,6 @@ mod tests {
     #[cfg(windows)]
     use object::{Object, ObjectSection};
     #[cfg(windows)]
-    use stasis_compiler::IncrementalCompilerHost;
-    #[cfg(windows)]
     use stasis_dynload::{invoke_noarg_u64, Library as DynamicLibrary};
     use stasis_runner::swap::contracts::{CompileRequest, CompileStatus, RequestId, TargetMode};
     use std::fs;
@@ -8200,23 +8198,6 @@ mod tests {
         )
         .expect("write source");
 
-        let mut host = IncrementalCompilerHost::new();
-        let parsed = host
-            .compile_changed_files(std::slice::from_ref(&source))
-            .expect("host parse");
-        let main_metric = parsed
-            .functions
-            .iter()
-            .find(|metric| metric.id_hash == hash_identifier("main"))
-            .expect("main metric");
-        let callee_metric = parsed
-            .functions
-            .iter()
-            .find(|metric| metric.id_hash == hash_identifier("callee"))
-            .expect("callee metric");
-        let expected_main_symbol = aot_symbol_name(main_metric);
-        let expected_callee_symbol = aot_symbol_name(callee_metric);
-
         let mut backend = IncrementalCompilerBackend::with_aot_compile_and_link_config(
             AotCompileConfig::default(),
             AotLinkConfig {
@@ -8240,6 +8221,25 @@ mod tests {
             fs::remove_dir_all(&temp_root).ok();
             return;
         };
+        let function_symbols = compiled
+            .aot_function_symbols
+            .as_ref()
+            .expect("successful AOT link should include function symbols");
+        let compiled_symbol_for = |name: &str| {
+            let key = format!("rust_native::{}::{name}", source.to_string_lossy());
+            let fn_id = backend
+                .fn_id_by_signature
+                .get(&key)
+                .unwrap_or_else(|| panic!("missing function id for {name}"));
+            function_symbols
+                .iter()
+                .find(|entry| entry.fn_id == *fn_id)
+                .unwrap_or_else(|| panic!("missing AOT symbol for {name}"))
+                .symbol
+                .clone()
+        };
+        let expected_main_symbol = compiled_symbol_for("main");
+        let expected_callee_symbol = compiled_symbol_for("callee");
 
         let library = DynamicLibrary::load(linked_path).expect("load linked image");
         let main_ptr = library
