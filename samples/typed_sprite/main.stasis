@@ -10,16 +10,16 @@ function main(): i32 {
     invalid_sample_sprite.width = 8;
     invalid_sample_sprite.height = 8;
     if (invalid_sample_sprite.load_sprite_from("unused.svg", 0, 92)) { return 1; }
-    if (invalid_sample_sprite.handle != 0) { return 2; }
-    if (invalid_sample_sprite.width != 0 || invalid_sample_sprite.height != 0) { return 3; }
+    if (invalid_sample_sprite.handle != 99) { return 2; }
+    if (invalid_sample_sprite.width != 8 || invalid_sample_sprite.height != 8) { return 3; }
 
     invalid_sample_text.font = 9;
     invalid_sample_text.handle = 12;
     invalid_sample_text.width = 40.0;
     invalid_sample_text.height = 18.0;
     if (invalid_sample_text.load_text_from(0, "unused")) { return 4; }
-    if (invalid_sample_text.font != 0 || invalid_sample_text.handle != 0) { return 5; }
-    if (invalid_sample_text.width != 0.0 || invalid_sample_text.height != 0.0) { return 6; }
+    if (invalid_sample_text.font != 9 || invalid_sample_text.handle != 12) { return 5; }
+    if (invalid_sample_text.width != 40.0 || invalid_sample_text.height != 18.0) { return 6; }
 
     sample_sprite.handle = 41;
     sample_sprite.width = 136;

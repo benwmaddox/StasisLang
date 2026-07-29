@@ -87,12 +87,12 @@ Receiver-scoped resolution distinguishes the two `draw` functions by parameter 0
 1. reject non-positive logical dimensions without calling the host;
 2. attempt the native load using the supplied logical dimensions;
 3. on success, assign the handle, width, and height together;
-4. on failure, clear the handle and dimensions together;
+4. on failure, leave the receiver unchanged (which keeps a fresh zero-valued receiver invalid);
 5. return `true` only when the resulting `Sprite` is valid.
 
-`load_text_from` follows the same atomic-result rule. Its width and height are the cached run's logical measured bounds. If the current host surface exposes only cached width, the implementation must add or derive a real logical height rather than inventing a placeholder contract.
+`load_text_from` follows the same transactional-result rule. Its width and height are the cached run's logical measured bounds. If the current host surface exposes only cached width, the implementation must add or derive a real logical height rather than inventing a placeholder contract.
 
-Replacing an already valid resource raises a lifecycle question. The first implementation must inspect existing renderer ownership before choosing whether to release the old handle. It must not release an old valid resource before a replacement has loaded successfully, and it must not silently create an unbounded leak path.
+Replacing an already valid sprite releases the old handle only after its replacement loads successfully. Failed replacement preserves the old valid resource. Prepared text remains owned by the host cache, which currently has no individual run-release operation; this API does not invent a second ownership policy.
 
 ## Drawing invariants
 

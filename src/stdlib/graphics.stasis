@@ -47,17 +47,11 @@ struct TextRun {
 
 function load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool {
     if (width <= 0 || height <= 0) {
-        self.handle = 0;
-        self.width = 0;
-        self.height = 0;
         return false;
     }
 
     let loaded_handle: i32 = gfx_load_sprite(path, width, height);
     if (loaded_handle <= 0) {
-        self.handle = 0;
-        self.width = 0;
-        self.height = 0;
         return false;
     }
 
@@ -82,19 +76,11 @@ function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
 
 function load_text_from(self: TextRun, font: i32, text: string): bool {
     if (font <= 0) {
-        self.font = 0;
-        self.handle = 0;
-        self.width = 0.0;
-        self.height = 0.0;
         return false;
     }
 
     let loaded_handle: i32 = gfx_cache_text(font, text);
     if (loaded_handle <= 0) {
-        self.font = 0;
-        self.handle = 0;
-        self.width = 0.0;
-        self.height = 0.0;
         return false;
     }
 

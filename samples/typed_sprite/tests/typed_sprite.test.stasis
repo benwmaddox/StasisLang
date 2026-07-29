@@ -3,12 +3,12 @@ import "../../../src/stdlib/graphics.stasis";
 global tested_sprite: Sprite;
 global tested_text: TextRun;
 
-test `invalid sprite dimensions clear receiver atomically`(): bool {
+test `invalid sprite replacement preserves receiver atomically`(): bool {
     tested_sprite.handle = 23;
     tested_sprite.width = 16;
     tested_sprite.height = 16;
     if (tested_sprite.load_sprite_from("unused.svg", 0, 48)) { return false; }
-    return tested_sprite.handle == 0 && tested_sprite.width == 0 && tested_sprite.height == 0;
+    return tested_sprite.handle == 23 && tested_sprite.width == 16 && tested_sprite.height == 16;
 }
 
 test `draw uses sprite logical dimensions`(): bool {
@@ -59,12 +59,12 @@ test `cached text draw uses its font and run handles`(): bool {
     return true;
 }
 
-test `invalid cached text font clears receiver atomically`(): bool {
+test `invalid cached text replacement preserves receiver atomically`(): bool {
     tested_text.font = 4;
     tested_text.handle = 12;
     tested_text.width = 72.5;
     tested_text.height = 18.0;
     if (tested_text.load_text_from(0, "unused")) { return false; }
-    if (tested_text.font != 0 || tested_text.handle != 0) { return false; }
-    return tested_text.width == 0.0 && tested_text.height == 0.0;
+    if (tested_text.font != 4 || tested_text.handle != 12) { return false; }
+    return tested_text.width == 72.5 && tested_text.height == 18.0;
 }
