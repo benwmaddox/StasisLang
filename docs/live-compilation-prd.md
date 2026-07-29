@@ -435,18 +435,19 @@ When a source file changes during development, ownership is:
 
 Interfaces are message-based and versioned. No cross-thread shared mutable compiler/runtime objects.
 
-- `FileChangeEvent`: producer file watcher/input bridge; consumer compiler service; fields `path`, `revision`, `text_source`, `change_kind`.
-- `BuildGeneration`: producer swap coordinator; consumer compiler service; fields `request_id`,
-  `revision`, immutable `source_snapshot_id`, `target`, `host_set`, and immutable active ABI/layout
-  contract.
-- `BuildFinished`: producer compiler service; consumer swap coordinator; fields `request_id`,
-  `revision`, `status`, `diagnostics[]`, and optional owning `pending_generation`.
-- `CommitGeneration`: producer swap coordinator; consumer runtime/main thread safe-point gate; fields
-  `request_id` and owning `pending_generation`.
-- `CommitFinished`: producer runtime/main thread; consumer swap coordinator + UI/status bridge;
-  fields `request_id`, `status`, optional `active_generation_number`, and optional diagnostic.
-- `CancelBuild`: producer swap coordinator; consumer compiler service; fields `request_id` and
-  `superseded_by_request_id`.
+- `FileChangeEvent(path, revision, text_source, change_kind)`: producer file watcher/input bridge;
+  consumer swap coordinator.
+- `BuildGeneration(request_id, revision, source_snapshot_id, target, host_set, active_contract)`:
+  producer swap coordinator; consumer compiler service; the snapshot and active contract are
+  immutable.
+- `BuildFinished(request_id, revision, status, diagnostics[], pending_generation?)`: producer
+  compiler service; consumer swap coordinator; the optional generation transfers ownership.
+- `CommitGeneration(request_id, pending_generation)`: producer swap coordinator; consumer
+  runtime/main thread safe-point gate; the generation transfers ownership.
+- `CommitFinished(request_id, status, active_generation_number?, diagnostic?)`: producer
+  runtime/main thread; consumer swap coordinator + UI/status bridge.
+- `CancelBuild(request_id, superseded_by_request_id)`: producer swap coordinator; consumer compiler
+  service.
 
 ### 12.3 Development Change Sequence (Single File Save)
 

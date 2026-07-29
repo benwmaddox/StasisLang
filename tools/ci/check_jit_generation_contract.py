@@ -68,6 +68,17 @@ def validate_documents(documents: Mapping[str, str]) -> None:
     ):
         require(contract, invariant, contract_path)
 
+    message_shapes = (
+        "FileChangeEvent(path, revision, text_source, change_kind)",
+        "BuildGeneration(request_id, revision, source_snapshot_id, target, host_set, active_contract)",
+        "BuildFinished(request_id, revision, status, diagnostics[], pending_generation?)",
+        "CommitGeneration(request_id, pending_generation)",
+        "CommitFinished(request_id, status, active_generation_number?, diagnostic?)",
+        "CancelBuild(request_id, superseded_by_request_id)",
+    )
+    for message_shape in message_shapes:
+        require(contract, message_shape, contract_path)
+
     for state_rule in (
         "`Preparing(N,R)` | newer revision queued or supersession observed",
         "`Hook(N,R)` | newer revision queued while the hook is running",
@@ -115,6 +126,8 @@ def validate_documents(documents: Mapping[str, str]) -> None:
     require(prd, "Ordinary internal functions are not compatibility boundaries", prd_path)
     require(prd, "global state layout is unchanged or the compiler-owned bounded migration plan is compatible", prd_path)
     require(prd, "May mutate only isolated candidate global data", prd_path)
+    for message_shape in message_shapes:
+        require(prd, message_shape, prd_path)
     require(
         prd,
         "- `main` - `tick` (when present) - `render` (when present) "
@@ -126,6 +139,8 @@ def validate_documents(documents: Mapping[str, str]) -> None:
     spec = documents[spec_path]
     require(spec, "(`main`, `tick`, `render`, `on_code_swap`)", spec_path)
     require(spec, "May mutate only isolated candidate global data", spec_path)
+    for message_shape in message_shapes:
+        require(spec, message_shape, spec_path)
     require(
         spec,
         "If supersession arrives while a synchronous hook is already running, the hook may finish "

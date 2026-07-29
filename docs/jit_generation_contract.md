@@ -122,19 +122,22 @@ compiler and runtime threads.
 The versioned message boundary is:
 
 ```text
-SourceChange(revision, changed_files, source_snapshot_id)
-BuildGeneration(request_id, revision, target, host_set, active_contract)
-BuildFinished(request_id, revision, diagnostics, pending_generation?)
+FileChangeEvent(path, revision, text_source, change_kind)
+BuildGeneration(request_id, revision, source_snapshot_id, target, host_set, active_contract)
+BuildFinished(request_id, revision, status, diagnostics[], pending_generation?)
 CommitGeneration(request_id, pending_generation)
 CommitFinished(request_id, status, active_generation_number?, diagnostic?)
 CancelBuild(request_id, superseded_by_request_id)
 ```
 
-`active_contract` contains immutable host-export ABI and state-layout metadata, not runtime values
-or pointers. `BuildFinished` transfers ownership of a finalized `PendingGeneration`; it never
-installs code or storage. Cancellation is a message/control flag only and does not expose mutable
-compiler state. The coordinator records the newest requested revision. Results for older revisions
-are discarded even if cancellation arrived too late to stop code generation.
+The watcher sends `FileChangeEvent` to the coordinator. The coordinator coalesces events, creates an
+immutable source snapshot, and sends its ID in `BuildGeneration`; the compiler never reconstructs a
+snapshot from mutable watcher state. `active_contract` contains immutable host-export ABI and
+state-layout metadata, not runtime values or pointers. `BuildFinished` transfers ownership of a
+finalized `PendingGeneration`; it never installs code or storage. Cancellation is a message/control
+flag only and does not expose mutable compiler state. The coordinator records the newest requested
+revision. Results for older revisions are discarded even if cancellation arrived too late to stop
+code generation.
 
 The runtime thread may validate metadata, prepare bounded candidate state, run the swap hook, and
 replace the active reference. It must not parse, check, lower, generate, link, or finalize code.

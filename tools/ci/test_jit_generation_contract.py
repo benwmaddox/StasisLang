@@ -26,6 +26,27 @@ class JitGenerationContractCheckTests(unittest.TestCase):
             "`Preparing(N,R)` | source event",
         )
 
+    def test_build_finished_status_is_required(self) -> None:
+        self.assert_mutation_fails(
+            "docs/jit_generation_contract.md",
+            "BuildFinished(request_id, revision, status, diagnostics[], pending_generation?)",
+            "BuildFinished(request_id, revision, diagnostics[], pending_generation?)",
+        )
+
+    def test_build_generation_snapshot_is_required(self) -> None:
+        self.assert_mutation_fails(
+            "docs/jit_generation_contract.md",
+            "BuildGeneration(request_id, revision, source_snapshot_id, target, host_set, active_contract)",
+            "BuildGeneration(request_id, revision, target, host_set, active_contract)",
+        )
+
+    def test_file_change_event_shape_is_required(self) -> None:
+        self.assert_mutation_fails(
+            "docs/jit_generation_contract.md",
+            "FileChangeEvent(path, revision, text_source, change_kind)",
+            "SourceChange(revision, changed_files, source_snapshot_id)",
+        )
+
     def test_missing_hook_supersession_transition_fails(self) -> None:
         self.assert_mutation_fails(
             "docs/jit_generation_contract.md",
