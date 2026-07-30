@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject contradictory direct-call generation documentation."""
+"""Reject contradictory selective direct-call JIT patch documentation."""
 
 from pathlib import Path
 from typing import Mapping
@@ -17,7 +17,7 @@ DOCUMENTS = (
 
 
 class ContractError(ValueError):
-    """A canonical document is missing or contradicts the generation contract."""
+    """A canonical document is missing or contradicts the selective patch contract."""
 
 
 def normalized(text: str) -> str:
@@ -27,14 +27,14 @@ def normalized(text: str) -> str:
 def require(text: str, needle: str, relative: str) -> None:
     if normalized(needle) not in normalized(text):
         raise ContractError(
-            f"{relative}: missing required generation contract text: {needle!r}"
+            f"{relative}: missing required selective JIT contract text: {needle!r}"
         )
 
 
 def forbid(text: str, needle: str, relative: str) -> None:
     if normalized(needle) in normalized(text):
         raise ContractError(
-            f"{relative}: obsolete generation contract text remains: {needle!r}"
+            f"{relative}: superseded whole-generation text remains: {needle!r}"
         )
 
 
@@ -50,71 +50,85 @@ def validate_documents(documents: Mapping[str, str]) -> None:
     contract = documents[contract_path]
     for heading in (
         "## Non-negotiable invariants",
-        "## One generation state machine",
+        "## Host-entry boundary and reachability",
+        "## Patch contents and exact invalidation",
+        "### Worked call-graph examples",
+        "## Direct-call patch ABI",
+        "## Selective patch state machine",
         "## Failure table",
         "## Target and platform matrix",
         "## Performance and memory budgets",
         "## Implementation sequence and bounded verification gates",
-        "## Obsolete paths to remove",
+        "## Superseded architecture to remove",
     ):
         require(contract, heading, contract_path)
 
     for invariant in (
-        "one `ActiveGeneration` reference",
+        "Full semantic analysis runs for every changed file",
         "Calls between Stasis functions are direct Cranelift calls",
-        "No Stasis frame or raw compiled pointer may outlive its execution window",
-        "A failed or superseded build never becomes visible",
-        "never run on the runtime thread",
+        "Stable trampolines exist only for host-to-Stasis entries",
+        "A warm edit emits only the exact affected reverse-caller closure",
+        "Recursive and mutually recursive functions invalidate and emit as strongly connected components",
+        "Unaffected reachable bodies keep their addresses",
+        "Automatic retirement and compaction are not priority-1 correctness requirements",
+        "AOT emits the complete reachable program",
     ):
         require(contract, invariant, contract_path)
 
+    require(
+        contract,
+        "Reachability starts from lifecycle entries present in the program (`main`, `tick`, "
+        "`render`, and `on_code_swap`)",
+        contract_path,
+    )
+
+    for example in (
+        "Editing `C` emits `{C,B,A,H}`",
+        "Editing shared `S` emits `{S,A,B,H}`",
+        "Editing `S` emits `{S,tick,render}`",
+        "Editing either `A` or `B` emits `{A,B,H}`",
+        "Editing `A` emits `{A,H}` and reuses `S`",
+        "New `A` binds a direct native call to the retained accepted address of `U`",
+    ):
+        require(contract, example, contract_path)
+
     message_shapes = (
         "FileChangeEvent(path, revision, text_source, change_kind)",
-        "BuildGeneration(request_id, revision, source_snapshot_id, target, host_set, active_contract)",
-        "BuildFinished(request_id, revision, status, diagnostics[], pending_generation?)",
-        "CommitGeneration(request_id, pending_generation)",
-        "CommitFinished(request_id, status, active_generation_number?, diagnostic?)",
+        "BuildPatch(request_id, revision, source_snapshot_id, target, host_set, active_contract)",
+        "BuildFinished(request_id, revision, status, diagnostics[], pending_patch?)",
+        "CommitPatch(request_id, pending_patch)",
+        "CommitFinished(request_id, status, active_patch_number?, diagnostic?)",
         "CancelBuild(request_id, superseded_by_request_id)",
     )
     for message_shape in message_shapes:
         require(contract, message_shape, contract_path)
 
     for state_rule in (
-        "`Preparing(N,R)` | newer revision queued or supersession observed",
-        "`Hook(N,R)` | newer revision queued while the hook is running",
-        "`Publishing(N,R)` | current-request compare-and-exchange fails",
-        "`Publishing(N,R)` | current-request compare-and-exchange succeeds",
-        "a revision ordered after it is a new request based on `N+1`",
+        "Exchange one immutable `ActiveEntryTable`",
+        "Continue the complete old window",
+        "Let synchronous work unwind, discard candidate effects, never publish",
+        "freshness compare-and-exchange fails",
+        "a new request based on `N+1`",
     ):
         require(contract, state_rule, contract_path)
 
     for failure_rule in (
-        "Request is superseded during migration or hook execution",
-        "Current-request compare-and-exchange fails",
-        "Internal unresolved call or cross-generation import",
-        "Attempted retained pointer, callback, fiber, or guest thread",
+        "Invalid or non-minimal affected closure",
+        "Missing retained callee address or retained ABI mismatch",
+        "Unsupported internal pointer escape",
+        "Executable-memory growth during a long dev session",
+        "restart the process to reclaim code",
     ):
         require(contract, failure_rule, contract_path)
 
-    for target_rule in (
-        "Windows x86_64 PR CI plus the pinned performance runner",
-        "Linux x86_64 PR CI",
-        "Native x86_64 macOS CI runner",
-        "Native arm64 macOS CI runner",
-        "Named physical arm64 device for Workshop JIT",
-        "standard `Stasis_API_35` AVD is x86_64",
-        "JIT_TARGET_MUST_MATCH_HOST",
-    ):
-        require(contract, target_rule, contract_path)
-
     for performance_rule in (
-        "tests/perf/generation_reference_profile.json",
         "five unmeasured warmups",
-        "30 measured samples for 100/1,000 functions",
-        "10 measured samples for 5,000 functions and Brickout-scale",
+        "30 measured samples for 100/1,000-function and real-game narrow edits",
+        "10 measured samples for 5,000 functions and broad shared-helper cases",
         "nearest-rank p95",
-        "Run the parent commit and candidate commit on the same profile",
-        "100-swap stress test",
+        "Chess TD narrow body edits",
+        "Commonly fewer than ten functions",
+        "Executable-memory retirement has no priority-1 budget",
     ):
         require(contract, performance_rule, contract_path)
 
@@ -123,62 +137,66 @@ def validate_documents(documents: Mapping[str, str]) -> None:
 
     prd_path = "docs/live-compilation-prd.md"
     prd = documents[prd_path]
-    require(prd, "Ordinary internal functions are not compatibility boundaries", prd_path)
-    require(prd, "global state layout is unchanged or the compiler-owned bounded migration plan is compatible", prd_path)
-    require(prd, "May mutate only isolated candidate global data", prd_path)
-    for message_shape in message_shapes:
-        require(prd, message_shape, prd_path)
-    require(
-        prd,
-        "- `main` - `tick` (when present) - `render` (when present) "
-        "- `on_code_swap` (when present) - host-required exported entry symbols",
-        prd_path,
-    )
+    for phrase in (
+        "Exact changed/SCC/reverse-caller patch planning",
+        "Publication unit: one validated selective patch through the host-entry table",
+        "Unaffected machine-code bodies keep their accepted addresses",
+        "Warm JIT patches may call unchanged retained bodies",
+        "Retain old JIT arenas until a development process restart",
+        "Phase P0 (#184)",
+        "Phase P4 (#188)",
+    ):
+        require(prd, phrase, prd_path)
 
     spec_path = "docs/spec.md"
     spec = documents[spec_path]
-    require(spec, "(`main`, `tick`, `render`, `on_code_swap`)", spec_path)
-    require(spec, "May mutate only isolated candidate global data", spec_path)
-    for message_shape in message_shapes:
-        require(spec, message_shape, spec_path)
-    require(
-        spec,
-        "If supersession arrives while a synchronous hook is already running, the hook may finish "
-        "only to unwind; all isolated effects are discarded and that candidate never publishes",
-        spec_path,
-    )
+    for phrase in (
+        "Publication unit: one validated selective patch through stable host-entry trampolines",
+        "Unchanged reachable JIT functions may retain their accepted machine code and addresses",
+        "Finalize the changed function/SCC plus exact reverse direct callers",
+        "Retain superseded JIT code until process restart",
+    ):
+        require(spec, phrase, spec_path)
 
     checklist_path = "docs/build_checklist.md"
     checklist = documents[checklist_path]
-    require(
-        checklist,
-        "Reachability-DCE roots are lifecycle entries present in the program "
-        "(`main`, `tick`, `render`, `on_code_swap`) plus host-exported required entry symbols",
-        checklist_path,
-    )
-    for child in ("#174", "#175", "#176", "#177", "#178"):
+    for child in ("#184", "#185", "#186", "#187", "#188"):
         require(checklist, f"Maddox task: {child}.", checklist_path)
-    require(checklist, "#### Superseded checklist requirements", checklist_path)
+    for phrase in (
+        "### Selective Direct-Call JIT Patch Track",
+        "#### Superseded checklist requirements",
+        "typical narrow Chess TD edits commonly re-JIT fewer than ten functions",
+    ):
+        require(checklist, phrase, checklist_path)
+
+    shared_path = "docs/shared_cranelift_backend_contract.md"
+    require(
+        documents[shared_path],
+        "JIT may bind an unchanged accepted callee address from an older retained arena",
+        shared_path,
+    )
+    guardrails_path = "docs/cranelift_backend_guardrails.md"
+    require(
+        documents[guardrails_path],
+        "JIT must reuse unchanged accepted bodies",
+        guardrails_path,
+    )
 
     forbidden_by_file = {
         prd_path: (
-            "FnId -> code_ptr",
-            "fn_patch_set",
-            "swapped_fn_ids",
-            "global struct layouts are unchanged",
-            "function signatures are unchanged",
-            "rejection restores the old code and state",
-            "Runs once per successful swap attempt",
+            "Publication unit: complete reachable generation",
+            "Every accepted development build still finalizes one complete reachable machine-code generation",
+            "Semantic hashes never reuse live machine code, relocations, or pointers from another generation",
+            "Release the old generation when its last execution-window reference ends",
         ),
         spec_path: (
-            "FnId -> code_ptr",
-            "fn_patch_set",
-            "swapped_fn_ids",
-            "Unchanged `fnBodyHash` can reuse generated machine code",
-            "failed migration or swap hook restores the complete old generation",
-            "runtime restores the old code and complete bounded state snapshot",
-            "Superseded candidates never run `on_code_swap()`",
-            "Runs once per successful swap attempt",
+            "Publication unit: complete reachable generation",
+            "Live machine code, relocations, and code pointers cannot be reused across generations",
+            "Finalize every reachable function into one direct-call `PendingGeneration`",
+            "Release the previous generation when its last execution-window owner ends",
+        ),
+        guardrails_path: (
+            "reuse live machine code from a different generation",
         ),
     }
     for relative, obsolete_phrases in forbidden_by_file.items():
@@ -191,7 +209,7 @@ def main() -> None:
         validate_documents(load_documents())
     except ContractError as error:
         raise SystemExit(str(error)) from error
-    print("JIT generation documentation contract is consistent")
+    print("Selective JIT patch documentation contract is consistent")
 
 
 if __name__ == "__main__":

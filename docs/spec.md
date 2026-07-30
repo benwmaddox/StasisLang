@@ -718,7 +718,7 @@ defined in `docs/jit_generation_contract.md`.
 - Invalidation unit: file
 - Correctness unit: file
 - Analysis/cache unit: function
-- Publication unit: complete reachable generation
+- Publication unit: one validated selective patch through stable host-entry trampolines
 
 ### 14.2 Hashes
 
@@ -727,36 +727,37 @@ defined in `docs/jit_generation_contract.md`.
 
 Rules:
 - Unchanged `fnBodyHash` can reuse target-independent analysis or lowering inputs.
-- Live machine code, relocations, and code pointers cannot be reused across generations.
-- Layout-affecting changes force conservative rebuild for changed file.
+- Unchanged reachable JIT functions may retain their accepted machine code and addresses.
+- Layout-affecting changes invalidate functions whose lowered storage facts changed and their
+  reverse direct callers.
 
 ### 14.3 Two-Phase Swap
 
 1. Background compile:
 - Re-lex, parse, index, and semantic-check changed file.
 - Compute per-function semantic hashes.
-- Resolve the complete lifecycle/host-export root set and reachable call/type graph.
-- Finalize every reachable function into one direct-call `PendingGeneration` off the runtime thread.
+- Resolve the complete lifecycle/host-export root set and canonical call/type graph.
+- Finalize the changed function/SCC plus exact reverse direct callers into a `PendingPatch` off the
+  runtime thread.
 2. Commit between ticks:
 - Wait until the current generation's `tick()` and following `render()` have both returned.
 - Revalidate that the candidate is the newest requested revision and its host-export ABI is
   compatible.
 - Create isolated candidate storage and migrate compatible struct/global fields.
 - Run the candidate `on_code_swap()` against candidate storage if present.
-- Complete every fallible preflight, then atomically replace one owning `ActiveGeneration`
-  reference containing all exports, bindings, metadata, and executable memory.
-- Release the previous generation when its last execution-window owner ends.
+- Complete every fallible preflight, then atomically replace one immutable host-entry table.
+- Retain superseded JIT code until process restart; automatic retirement is not required.
 
 Swap is rejected if:
 - Global layout changes and state-map migration is missing or incompatible.
 - A required host-export signature changes.
 - `on_code_swap()` fails.
 - The candidate is cancelled or superseded.
-- The target cannot provide atomic owning-reference publication.
+- The target cannot provide atomic host-entry-table publication.
 
 Current policy (pre-1.0):
 - Layout-affecting semantic edits produce a versioned preview and require explicit apply.
-- The preview reports the complete candidate generation, state-layout compatibility, struct or
+- The preview reports the complete candidate patch, state-layout compatibility, struct or
   whole-state scope, migration steps, capacity-shrink warnings, and estimated commit cost.
 - Apply regenerates the preview; any preview/commit mismatch rejects the swap.
 
@@ -764,7 +765,7 @@ On rejection, old code and old data remain active.
 
 Current migration policy (pre-1.0):
 - JIT and AOT derive layout identity from the same canonical compiler-owned state-layout model; source text and function bodies are not layout identity inputs.
-- Development JIT compilation produces a complete staged runtime generation and never activates
+- Development JIT compilation produces a selective staged runtime patch and never activates
   code, literals, collection headers, or state from the compiler thread.
 - Every JIT entry point uses the same migration planner and bounded transactional activation at the runtime safe point. There is no scalar-only runner migration path.
 - Layout-changing commits without a staged JIT candidate, including current AOT runtime swaps, reject with a restart-required diagnostic.
@@ -773,7 +774,7 @@ Current migration policy (pre-1.0):
 - Fixed-collection growth is storage-ownership preflighted and bounded before allocation, preserves the old prefix, and initializes the expanded tail.
 - Shrink copies the retained prefix, warns about the discarded range, and clamps logical lengths; UTF-8 shrink retains the largest valid code-point prefix and recomputes byte and character counts.
 - Incompatible or missing state metadata fails deterministically with an actionable diagnostic.
-- Migration or `on_code_swap` failure destroys isolated candidate state; the old active generation
+- Migration or `on_code_swap` failure destroys isolated candidate state; the old active entries
   was never mutated. Partial publication is forbidden.
 
 The migration transaction is a code-swap operation, not a gameplay transaction. Ordinary calls to
