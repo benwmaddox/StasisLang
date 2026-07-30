@@ -2160,7 +2160,7 @@ fn should_link_stasis_dynload(target: &stasis_jit::AotTarget) -> bool {
 }
 
 fn default_runtime_bridge_compiler(target: &stasis_jit::AotTarget) -> PathBuf {
-    if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
+    if target.is_android() {
         PathBuf::from("clang")
     } else if cfg!(windows) {
         std::env::current_exe()
@@ -3685,7 +3685,7 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
         }
     }
     // Keep the Android ABI surface fixed while the host shell/input event mapping lands separately.
-    if matches!(target, stasis_jit::AotTarget::AndroidArm64 { .. }) {
+    if target.is_android() {
         source.push_str(
             "STASIS_EXPORT void stasis_init(int width, int height) {\n\
     host_i32[12] = width;\n\
@@ -3798,12 +3798,7 @@ fn emit_engine_bundle_runtime_bridge_object(
             .arg("c")
             .arg("-o")
             .arg(&object_path);
-        if !cfg!(windows)
-            || matches!(
-                backend.aot_compile_config.target,
-                stasis_jit::AotTarget::AndroidArm64 { .. }
-            )
-        {
+        if !cfg!(windows) || backend.aot_compile_config.target.is_android() {
             command.arg("-fPIC");
         }
         if let Some(target) = backend.aot_compile_config.target.clang_target() {

@@ -1,5 +1,10 @@
 param(
     [switch]$Install,
+    [switch]$RenderAcceptance,
+    [switch]$SkipCodexNative,
+    [switch]$SkipRustBridgeBuild,
+    [switch]$NoGradleDaemon,
+    [string]$GradlePath = "",
     [string]$CompileSdk = "",
     [string]$TargetSdk = ""
 )
@@ -10,7 +15,10 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location $scriptRoot
 try {
     $gradle = Join-Path $scriptRoot "gradlew.bat"
-    if (Test-Path $gradle) {
+    if ($GradlePath) {
+        if (-not (Test-Path $GradlePath)) { throw "Gradle was not found: $GradlePath" }
+        $gradleCmd = $GradlePath
+    } elseif (Test-Path $gradle) {
         $gradleCmd = $gradle
     } elseif (Get-Command gradle -ErrorAction SilentlyContinue) {
         $gradleCmd = "gradle"
@@ -18,11 +26,19 @@ try {
         throw "Gradle was not found. Install Gradle or open mobile/android in Android Studio."
     }
 
-    & (Join-Path $scriptRoot "build_rust_bridge.ps1") -Release
-    & (Join-Path $scriptRoot "build_codex_native.ps1") -Release
+    if ($SkipRustBridgeBuild) {
+        & (Join-Path $scriptRoot "rust_bridge_provenance.ps1") -Mode Verify -Profile release
+    } else {
+        & (Join-Path $scriptRoot "build_rust_bridge.ps1") -Release
+    }
+    if (-not $SkipCodexNative) {
+        & (Join-Path $scriptRoot "build_codex_native.ps1") -Release
+    }
 
     $task = if ($Install) { ":app:installWorkshopDebug" } else { ":app:assembleWorkshopDebug" }
     $args = @($task)
+    if ($NoGradleDaemon) { $args += "--no-daemon" }
+    if ($RenderAcceptance) { $args += "-Pstasis.renderAcceptance=true" }
     if ($CompileSdk) { $args += "-Pstasis.compileSdk=$CompileSdk" }
     if ($TargetSdk) { $args += "-Pstasis.targetSdk=$TargetSdk" }
 

@@ -3,10 +3,21 @@ plugins {
 }
 
 def repoRootDir = rootProject.projectDir.parentFile.parentFile
-def publishedAotDir = layout.buildDirectory.dir('generated/stasisAot/publishedArm64')
+def publishedAotTarget = (project.findProperty('stasis.androidAotTarget') ?: 'android-arm64').toString()
+def publishedAotAbis = [
+        'android-arm64': 'arm64-v8a',
+        'android-x86_64': 'x86_64'
+]
+if (!publishedAotAbis.containsKey(publishedAotTarget)) {
+    throw new GradleException("Unsupported Android AOT target: ${publishedAotTarget}")
+}
+def publishedAotAbi = publishedAotAbis[publishedAotTarget]
+def publishedAotDir = layout.buildDirectory.dir("generated/stasisAot/${publishedAotTarget}")
 def workshopAssetsDir = layout.buildDirectory.dir('generated/stasisAssets/workshop')
 def workshopRustBridgeManifestFile = file('src/workshop/jniLibs/stasis-rust-bridge.json')
 def allowDebugWorkshopRustBridge = (project.findProperty('stasis.allowDebugRustBridge') ?: 'false')
+        .toString().toBoolean()
+def renderAcceptance = (project.findProperty('stasis.renderAcceptance') ?: 'false')
         .toString().toBoolean()
 def publishedGameName = (project.findProperty('stasis.publishedGame') ?: 'pong').toString()
 def publishedGameDescriptorFile = rootProject.file("games/${publishedGameName}.gradle")
@@ -37,6 +48,7 @@ android {
         targetSdk = (project.findProperty('stasis.targetSdk') ?: '35').toString().toInteger()
         versionCode 1
         versionName '0.1.0'
+        buildConfigField 'boolean', 'STASIS_RENDER_ACCEPTANCE', renderAcceptance.toString()
 
         externalNativeBuild {
             cmake {
@@ -71,7 +83,7 @@ android {
             dimension 'mode'
             applicationId publishedGame.applicationId
             ndk {
-                abiFilters 'arm64-v8a'
+                abiFilters publishedAotAbi
             }
             manifestPlaceholders = [appLabel: publishedGame.label]
             buildConfigField 'boolean', 'STASIS_PUBLISHED_BUILD', 'true'
@@ -79,7 +91,8 @@ android {
             buildConfigField 'String', 'STASIS_RUNTIME_ID', "\"${publishedGame.runtimeId}\""
             externalNativeBuild {
                 cmake {
-                    arguments '-DSTASIS_ANDROID_PUBLISHED_AOT=ON', "-DSTASIS_PUBLISHED_AOT_DIR=${projectDir}/build/generated/stasisAot/publishedArm64"
+                    arguments '-DSTASIS_ANDROID_PUBLISHED_AOT=ON',
+                            "-DSTASIS_PUBLISHED_AOT_DIR=${publishedAotDir.get().asFile.absolutePath}"
                 }
             }
         }
@@ -112,6 +125,16 @@ tasks.register('prepareWorkshopAssets', Sync) {
         exclude 'workshop_sample/build/**'
         exclude 'exploration_sample/build/**'
     }
+    if (renderAcceptance) {
+        from(new File(repoRootDir, 'samples/render_parity')) {
+            exclude '*.stasis'
+            into 'render_parity_sample'
+        }
+        from(new File(repoRootDir, 'samples/render_parity')) {
+            include '*.stasis'
+            into 'render_parity_sample/src'
+        }
+    }
     into(workshopAssetsDir)
 }
 
@@ -131,7 +154,8 @@ tasks.register('generatePublishedAotBundle', Exec) {
     inputs.dir(publishedGame.projectDirectory)
     outputs.dir(outputDir)
     workingDir repoRootDir
-    commandLine 'cargo', 'run', '-p', 'stasis', '--', 'android-aot-bundle',
+    commandLine 'cargo', 'run', '-p', 'stasis', '--', 'mobile-aot-bundle',
+            '--target', publishedAotTarget,
             '--project-dir', publishedGame.projectDirectory.absolutePath,
             '--entry-file', publishedGame.entrySource,
             '--out-dir', outputDir.absolutePath

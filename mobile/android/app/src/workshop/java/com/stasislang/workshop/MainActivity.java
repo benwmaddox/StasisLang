@@ -388,7 +388,9 @@ public final class MainActivity extends Activity {
 
         try {
             activeProject = WorkshopProjectRegistry.initialize(this,
-                    WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID);
+                    BuildConfig.STASIS_RENDER_ACCEPTANCE
+                            ? WorkshopTemplateCatalog.RENDER_ACCEPTANCE_TEMPLATE_ID
+                            : WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID);
             projectRootFile = activeProject.root;
         } catch (Exception error) {
             projectRegistryError = error.getMessage();
@@ -431,7 +433,7 @@ public final class MainActivity extends Activity {
                     ? "Restart loop detected; preview and queued AI are paused until the local crash record is cleared in Privacy & Data"
                     : "Previous crash detected; export a redacted support bundle or clear the local crash record in Privacy & Data");
         }
-        if (savedInstanceState == null) {
+        if (savedInstanceState == null && !BuildConfig.STASIS_RENDER_ACCEPTANCE) {
             gameLoopHandler.post(new Runnable() {
                 @Override public void run() {
                     WorkshopOnboardingPolicy.Progress progress = onboardingProgress();
@@ -10709,8 +10711,23 @@ public final class MainActivity extends Activity {
         if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
             throw new IOException("failed to create " + parent.getAbsolutePath());
         }
-
-        writeTextFile(diskFile, readAsset(assets, assetPath));
+        File temporary = new File(parent, diskFile.getName() + ".asset.tmp");
+        try (InputStream input = assets.open(assetPath);
+                FileOutputStream output = new FileOutputStream(temporary, false)) {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            output.getFD().sync();
+        }
+        try {
+            try {
+                Files.move(temporary.toPath(), diskFile.toPath(), StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException unsupported) {
+                Files.move(temporary.toPath(), diskFile.toPath());
+            }
+        } finally {
+            if (temporary.exists()) temporary.delete();
+        }
     }
 
     private void deleteProjectDirectory(File file) {

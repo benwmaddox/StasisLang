@@ -491,6 +491,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--capture", type=Path)
+    parser.add_argument(
+        "--capture-only",
+        action="store_true",
+        help="verify capture regions without desktop runtime-log evidence",
+    )
     parser.add_argument("--profile", default="portable")
     parser.add_argument("--stage", choices=sorted(ALLOWED_STAGES))
     parser.add_argument(
@@ -506,6 +511,15 @@ def main() -> int:
     try:
         manifest = validate_fixture(args.manifest.resolve())
         if args.capture:
+            viewport = [int(value) for value in args.viewport.split(",")] if args.viewport else None
+            if viewport is not None and len(viewport) != 4:
+                raise ValueError("--viewport requires x,y,width,height")
+            if args.capture_only:
+                digest = verify_capture(
+                    manifest, args.capture.resolve(), args.profile, viewport
+                )
+                print(f"render parity capture passed: sha256_rgba={digest}")
+                return 0
             if not args.stage:
                 raise ValueError("--capture requires --stage")
             if not args.runtime_log:
@@ -527,9 +541,6 @@ def main() -> int:
                 args.stage,
                 args.require_load_details,
             )
-            viewport = [int(value) for value in args.viewport.split(",")] if args.viewport else None
-            if viewport is not None and len(viewport) != 4:
-                raise ValueError("--viewport requires x,y,width,height")
             digest = verify_capture(
                 manifest, args.capture.resolve(), args.profile, viewport
             )

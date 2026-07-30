@@ -19,6 +19,10 @@ $emulator = Join-Path $androidHome "emulator\emulator.exe"
 $adb = Join-Path $androidHome "platform-tools\adb.exe"
 if (-not (Test-Path $emulator)) { throw "Android Emulator was not found: $emulator" }
 if (-not (Test-Path $adb)) { throw "adb.exe was not found: $adb" }
+if (-not $env:ANDROID_AVD_HOME -and $env:USERPROFILE) {
+    $defaultAvdHome = Join-Path $env:USERPROFILE ".android\avd"
+    if (Test-Path $defaultAvdHome) { $env:ANDROID_AVD_HOME = $defaultAvdHome }
+}
 
 $serial = "emulator-$Port"
 $deviceLines = @(& $adb devices)

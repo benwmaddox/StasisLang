@@ -66,6 +66,7 @@ public final class MainActivity extends Activity {
         installSystemInsetGuard(root);
 
         gameSurface = new GameSurfaceView(this);
+        gameSurface.setContentDescription("Published Stasis game surface");
         root.addView(gameSurface, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -76,7 +77,8 @@ public final class MainActivity extends Activity {
         hud.setSingleLine(false);
         hud.setPadding(dp(10), dp(6), dp(10), dp(6));
         hud.setBackgroundColor(Color.argb(135, 20, 28, 38));
-        hud.setVisibility(BuildConfig.DEBUG ? View.VISIBLE : View.GONE);
+        hud.setVisibility(BuildConfig.DEBUG && !BuildConfig.STASIS_RENDER_ACCEPTANCE
+                ? View.VISIBLE : View.GONE);
         FrameLayout.LayoutParams hudParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
