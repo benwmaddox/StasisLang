@@ -1991,8 +1991,7 @@ fn run_play_in_process_inner(
         return Ok(());
     }
 
-    let mut host_entry_revision = 1_u64;
-    stasis_dynload::begin_jit_host_entry_session(package.host_entry_targets(host_entry_revision)?)?;
+    stasis_dynload::begin_jit_host_entry_session(package.host_entry_targets(1)?)?;
     let mut tick_code_ptr = stasis_dynload::jit_host_tick_trampoline_ptr() as u64;
     let mut render_code_ptr = stasis_dynload::jit_host_render_trampoline_ptr() as u64;
     let mut requested_watch_revision = 0_u64;
@@ -2049,13 +2048,11 @@ fn run_play_in_process_inner(
                             .map_or(0, |metadata| metadata.reused_function_ids.len());
                         let candidate_tick_budget = prepared.candidate.tick_budget_us();
                         let commit_started = Instant::now();
-                        let next_host_entry_revision = host_entry_revision.saturating_add(1);
                         let commit_result = commit_play_candidate_between_ticks(
                             &mut jit,
                             prepared.candidate,
                             prepared.package.symbol_code_ptrs.keys().cloned().collect(),
                             &prepared.package,
-                            next_host_entry_revision,
                         );
                         let commit_ms = commit_started.elapsed().as_millis();
                         match commit_result {
@@ -2067,7 +2064,6 @@ fn run_play_in_process_inner(
                                 commit_ms
                             ),
                             Ok(entrypoints) => {
-                                host_entry_revision = next_host_entry_revision;
                                 tick_code_ptr = entrypoints.tick_code_ptr;
                                 render_code_ptr = entrypoints.render_code_ptr;
                                 if let Ok(Some(candidate_tick_budget)) = candidate_tick_budget {
@@ -2265,8 +2261,9 @@ fn commit_play_candidate_between_ticks(
     candidate: JitProcess,
     changed_functions: Vec<String>,
     package: &JitEnginePackage,
-    revision: u64,
 ) -> Result<PlayEntrypoints, String> {
+    let revision = stasis_dynload::jit_host_entry_targets()
+        .map_or(1, |targets| targets.revision.saturating_add(1));
     let targets = package.host_entry_targets(revision)?;
     stasis_dynload::validate_jit_host_entry_targets(&targets)?;
     let mut preview = plan_state_migration(
@@ -5186,7 +5183,6 @@ mod tests {
             candidate,
             package.symbol_code_ptrs.keys().cloned().collect(),
             &package,
-            2,
         )
         .expect("commit and publish v2 at the production between-tick boundary");
         assert_eq!(published.tick_code_ptr, active_entrypoints.tick_code_ptr);
@@ -5281,13 +5277,18 @@ mod tests {
         );
         assert_eq!(stasis_dynload::invoke_noarg_i32(tick_trampoline), Ok(1));
         assert_eq!(stasis_dynload::invoke_noarg_i32(render_trampoline), Ok(11));
+        stasis_dynload::publish_jit_host_entry_targets(
+            active_package
+                .host_entry_targets(2)
+                .expect("intervening live-edit targets"),
+        )
+        .expect("simulate live edit publishing while watch compile is pending");
 
         commit_play_candidate_between_ticks(
             &mut active,
             prepared.candidate,
             prepared.package.symbol_code_ptrs.keys().cloned().collect(),
             &prepared.package,
-            2,
         )
         .expect("publish v2");
         assert_eq!(
@@ -5300,6 +5301,13 @@ mod tests {
         );
         assert_eq!(stasis_dynload::invoke_noarg_i32(tick_trampoline), Ok(2));
         assert_eq!(stasis_dynload::invoke_noarg_i32(render_trampoline), Ok(12));
+        assert_eq!(
+            stasis_dynload::jit_host_entry_targets()
+                .expect("watch targets")
+                .revision,
+            3,
+            "watch publication must advance from the intervening live revision"
+        );
         fs::remove_dir_all(root).expect("remove watch patch fixture");
     }
 
@@ -5348,7 +5356,6 @@ mod tests {
             candidate,
             package.symbol_code_ptrs.keys().cloned().collect(),
             &package,
-            2,
         )
         .expect_err("swap hook must reject at the production boundary");
         assert!(error.contains("rejection"));

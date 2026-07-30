@@ -387,7 +387,14 @@ impl LiveWorkspace {
     }
 
     pub(crate) fn refresh_after_external_edit(&mut self, jit: &JitProcess) {
+        self.sync_host_entry_revision();
         let _ = self.refresh_completion(jit);
+    }
+
+    fn sync_host_entry_revision(&mut self) {
+        if let Some(targets) = stasis_dynload::jit_host_entry_targets() {
+            self.host_entry_revision = self.host_entry_revision.max(targets.revision);
+        }
     }
 
     pub(crate) fn consumes_self_write(&mut self, path: &Path) -> bool {
@@ -1143,6 +1150,7 @@ impl LiveWorkspace {
         render_code_ptr: &mut u64,
     ) -> Result<(&'static str, Value), String> {
         verify_prepared_input_hashes(&self.config, &prepared.input_hashes)?;
+        self.sync_host_entry_revision();
         let next_host_entry_revision = self.host_entry_revision.saturating_add(1);
         let host_entry_targets = prepared
             .package
@@ -2693,6 +2701,48 @@ mod tests {
             receiver,
             worker: None,
         });
+    }
+
+    #[test]
+    fn live_commit_advances_from_external_watch_host_revision() {
+        let (root, config) = project();
+        let (mut jit, package) = compile(&config);
+        let initial_revision = stasis_dynload::jit_host_entry_targets()
+            .map_or(1, |targets| targets.revision.saturating_add(1));
+        stasis_dynload::begin_jit_host_entry_session(
+            package
+                .host_entry_targets(initial_revision)
+                .expect("initial host targets"),
+        )
+        .expect("begin host-entry session");
+        let (client, server) = stasis_runner::live::live_session(4);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+
+        let external_revision = initial_revision.saturating_add(1);
+        stasis_dynload::publish_jit_host_entry_targets(
+            package
+                .host_entry_targets(external_revision)
+                .expect("external watch targets"),
+        )
+        .expect("publish external watch revision");
+        workspace.refresh_after_external_edit(&jit);
+        assert_eq!(workspace.host_entry_revision, external_revision);
+
+        let prepared = prepared_tick_edit(&config, 701);
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        workspace
+            .commit_prepared(prepared, &mut jit, &mut tick_ptr, &mut render_ptr)
+            .expect("live commit after external watch publish");
+        assert_eq!(
+            stasis_dynload::jit_host_entry_targets()
+                .expect("live targets")
+                .revision,
+            external_revision.saturating_add(1)
+        );
+
+        drop(client);
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

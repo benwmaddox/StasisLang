@@ -3378,6 +3378,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn jit_process_rejects_removed_reachable_callee_and_keeps_active_code() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function leaf(): i32 { return 1; } function main(): i32 { return leaf(); }",
+        );
+        process.compile().expect("compile active source");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(1));
+
+        process.upsert_file("sample.stasis", "function main(): i32 { return leaf(); }");
+        let error = process
+            .compile()
+            .expect_err("removed reachable callee must reject the candidate");
+        assert!(
+            matches!(
+                error,
+                crate::compiler::CompileError::Backend(ref message)
+                    if message.contains("unknown call target 'leaf'")
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("main"),
+            Ok(1),
+            "failed candidate must retain the active complete generation"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn jit_process_executes_two_arg_i32_function_in_memory() {

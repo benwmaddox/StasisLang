@@ -122,6 +122,16 @@ pub fn plan_patch(
     let cold_start = accepted.is_none();
     let mut reasons: BTreeMap<FunctionKey, PatchReasonChain> = BTreeMap::new();
     let mut queue = VecDeque::new();
+    let removed: Vec<FunctionKey> = accepted
+        .map(|accepted| {
+            accepted
+                .functions
+                .keys()
+                .filter(|key| !graph.by_key.contains_key(*key))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
 
     if let Some(accepted) = accepted {
         for key in &graph.reachable {
@@ -145,6 +155,42 @@ pub fn plan_patch(
             if let Some(reason) = seed_reason {
                 insert_seed(&mut reasons, &mut queue, key.clone(), reason);
             }
+        }
+        let removed_reachable: BTreeSet<FunctionKey> = removed
+            .iter()
+            .filter(|key| accepted.reachable.contains(*key))
+            .cloned()
+            .collect();
+        for caller in &graph.reachable {
+            let Some(removed_callee) = accepted
+                .functions
+                .get(caller)
+                .and_then(|function| {
+                    function
+                        .dependencies
+                        .iter()
+                        .find(|dependency| removed_reachable.contains(dependency))
+                })
+                .cloned()
+            else {
+                continue;
+            };
+            if reasons.contains_key(caller) {
+                continue;
+            }
+            insert_seed(
+                &mut reasons,
+                &mut queue,
+                caller.clone(),
+                PatchReason::DirectCaller {
+                    callee: removed_callee.clone(),
+                },
+            );
+            reasons
+                .get_mut(caller)
+                .expect("removed-callee seed was inserted")
+                .path_from_change
+                .insert(0, removed_callee);
         }
     } else {
         for key in &graph.reachable {
@@ -187,17 +233,6 @@ pub fn plan_patch(
         .iter()
         .filter_map(|key| graph.by_key.get(key).map(|function| function.id))
         .collect();
-    let removed = accepted
-        .map(|accepted| {
-            accepted
-                .functions
-                .keys()
-                .filter(|key| !graph.by_key.contains_key(*key))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-
     Ok(PatchPlan {
         cold_start,
         changed,
@@ -852,6 +887,34 @@ mod tests {
         assert_eq!(key_by_name(&plan.re_jit), vec!["leaf", "main", "mid"]);
         assert_eq!(plan.removed.len(), 1);
         assert_eq!(plan.removed[0].name, "leaf");
+    }
+
+    #[test]
+    fn removed_reachable_callee_rebuilds_unchanged_callers() {
+        let before = "function leaf(): i32 { return 1; } function main(): i32 { return leaf(); }";
+        let previous = accepted(before);
+        let plan = plan(&previous, "function main(): i32 { return leaf(); }");
+
+        assert_eq!(key_by_name(&plan.re_jit), vec!["main"]);
+        assert_eq!(key_by_name(&plan.removed), vec!["leaf"]);
+        let main = plan
+            .re_jit
+            .iter()
+            .find(|key| key.name == "main")
+            .expect("main invalidated");
+        let reason = plan.reason_for(main).expect("main reason");
+        assert!(matches!(
+            &reason.reason,
+            PatchReason::DirectCaller { callee } if callee.name == "leaf"
+        ));
+        assert_eq!(
+            reason
+                .path_from_change
+                .iter()
+                .map(|key| key.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["leaf", "main"]
+        );
     }
 
     #[test]
