@@ -693,7 +693,12 @@ impl AotProcess {
                     object_path.display()
                 )
             })?;
-            object_paths_by_function.insert(function.name.clone(), object_path);
+            let object_key = if object_paths_by_function.contains_key(&function.name) {
+                format!("{}#{}", function.name, artifact.function_id)
+            } else {
+                function.name.clone()
+            };
+            object_paths_by_function.insert(object_key, object_path);
             manifest_rows.push((
                 function.name.clone(),
                 artifact.symbol_name.clone(),
@@ -2141,6 +2146,36 @@ mod tests {
         assert!(
             manifest.contains("\"tick\": \"tick\"") && manifest.contains("\"render\": \"render\""),
             "manifest should include required entrypoints"
+        );
+
+        let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[test]
+    fn aot_engine_bundle_preserves_objects_for_overloaded_function_names() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function draw(value: i32): i32 { return value; }\nfunction draw(value: f32): i32 { return 2; }\nfunction tick(): void { let first: i32 = draw(1); let second: i32 = draw(1.0); return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+        );
+        process.compile().expect("compile overload bundle");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_overloads_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+            .expect("write overload bundle");
+        assert_eq!(
+            bundle
+                .object_paths_by_function
+                .keys()
+                .filter(|key| key.starts_with("draw"))
+                .count(),
+            2,
+            "both draw overload objects must remain in the bundle"
         );
 
         let _ = fs::remove_dir_all(&bundle_dir);
