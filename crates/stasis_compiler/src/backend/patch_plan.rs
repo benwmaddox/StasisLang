@@ -133,9 +133,7 @@ pub fn plan_patch(
             };
             let seed_reason = match accepted.functions.get(key) {
                 None => Some(PatchReason::AddedOrSignatureChanged),
-                Some(previous) if !accepted.reachable.contains(key) => {
-                    Some(PatchReason::BecameReachable)
-                }
+                Some(_) if !accepted.reachable.contains(key) => Some(PatchReason::BecameReachable),
                 Some(previous) if previous.body_hash != current.body_hash => {
                     Some(PatchReason::BodyChanged)
                 }
