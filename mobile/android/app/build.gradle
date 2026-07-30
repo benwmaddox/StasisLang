@@ -5,6 +5,9 @@ plugins {
 def repoRootDir = rootProject.projectDir.parentFile.parentFile
 def publishedAotDir = layout.buildDirectory.dir('generated/stasisAot/publishedArm64')
 def workshopAssetsDir = layout.buildDirectory.dir('generated/stasisAssets/workshop')
+def workshopRustBridgeManifestFile = file('src/workshop/jniLibs/stasis-rust-bridge.json')
+def allowDebugWorkshopRustBridge = (project.findProperty('stasis.allowDebugRustBridge') ?: 'false')
+        .toString().toBoolean()
 def publishedGameName = (project.findProperty('stasis.publishedGame') ?: 'pong').toString()
 def publishedGameDescriptorFile = rootProject.file("games/${publishedGameName}.gradle")
 if (!publishedGameDescriptorFile.isFile()) {
@@ -112,6 +115,16 @@ tasks.register('prepareWorkshopAssets', Sync) {
     into(workshopAssetsDir)
 }
 
+tasks.register('verifyWorkshopRustBridge', Exec) {
+    inputs.file(workshopRustBridgeManifestFile)
+    inputs.files('src/workshop/jniLibs/arm64-v8a/libstasis_android_bridge.so',
+            'src/workshop/jniLibs/x86_64/libstasis_android_bridge.so')
+    def expectedProfile = allowDebugWorkshopRustBridge ? 'debug' : 'release'
+    commandLine 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            rootProject.file('rust_bridge_provenance.ps1').absolutePath,
+            '-Mode', 'Verify', '-Profile', expectedProfile
+}
+
 tasks.register('generatePublishedAotBundle', Exec) {
     def outputDir = publishedAotDir.get().asFile
     inputs.file(publishedGameDescriptorFile)
@@ -127,6 +140,7 @@ tasks.register('generatePublishedAotBundle', Exec) {
 tasks.configureEach { task ->
     if (task.name.startsWith('preWorkshop')) {
         task.dependsOn(tasks.named('prepareWorkshopAssets'))
+        task.dependsOn(tasks.named('verifyWorkshopRustBridge'))
     }
     if (task.name.startsWith('prePublished') || (task.name.startsWith('configureCMake') && task.name.contains('Published'))) {
         task.dependsOn(tasks.named('generatePublishedAotBundle'))
