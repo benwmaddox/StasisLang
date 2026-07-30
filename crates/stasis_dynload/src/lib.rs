@@ -74,19 +74,19 @@ pub fn jit_host_entry_targets() -> Option<JitHostEntryTargets> {
 }
 
 pub fn jit_host_main_trampoline_ptr() -> usize {
-    stasis_jit_host_main_trampoline as usize
+    stasis_jit_host_main_trampoline as *const () as usize
 }
 
 pub fn jit_host_tick_trampoline_ptr() -> usize {
-    stasis_jit_host_tick_trampoline as usize
+    stasis_jit_host_tick_trampoline as *const () as usize
 }
 
 pub fn jit_host_render_trampoline_ptr() -> usize {
-    stasis_jit_host_render_trampoline as usize
+    stasis_jit_host_render_trampoline as *const () as usize
 }
 
 pub fn jit_host_on_code_swap_trampoline_ptr() -> usize {
-    stasis_jit_host_on_code_swap_trampoline as usize
+    stasis_jit_host_on_code_swap_trampoline as *const () as usize
 }
 
 fn active_jit_host_target(select: impl FnOnce(JitHostEntryTargets) -> Option<usize>) -> usize {
