@@ -2604,6 +2604,55 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn selective_jit_revision_sequence_matches_full_aot_builds() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let revisions = [
+            "function helper(): i32 { return 1; } function main(): i32 { return helper() + 1; }",
+            "function helper(): i32 { return 2; } function main(): i32 { return helper() + 1; }",
+        ];
+        let mut jit = JitProcess::new();
+        for (index, source) in revisions.iter().enumerate() {
+            if index == 0 {
+                jit.upsert_file("revision.stasis", *source);
+                jit.compile().expect("initial JIT revision");
+            } else {
+                let mut candidate = jit.staged_candidate();
+                candidate.upsert_file("revision.stasis", *source);
+                candidate.compile_staged().expect("selective JIT revision");
+                assert_eq!(
+                    candidate
+                        .generation_metadata()
+                        .expect("selective metadata")
+                        .emitted_function_ids
+                        .len(),
+                    2
+                );
+                jit = candidate;
+            }
+            let jit_result = jit
+                .execute_i32_noarg_by_name("main")
+                .expect("execute JIT revision");
+
+            let mut aot = AotProcess::new();
+            aot.upsert_file("revision.stasis", *source);
+            aot.compile().expect("full AOT revision");
+            let Some(aot_result) = run_linked_i32_noarg_fixture(
+                &aot,
+                "main",
+                &format!("selective_revision_{index}"),
+                &link_config,
+            ) else {
+                return;
+            };
+            assert_eq!(jit_result, (index as i32) + 2);
+            assert_eq!(aot_result, jit_result);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn aot_and_jit_execute_deterministic_numeric_sample() {
         let Some(link_config) = resolve_link_config_for_smoke() else {
             return;

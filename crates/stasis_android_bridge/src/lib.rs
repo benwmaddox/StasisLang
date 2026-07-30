@@ -2337,6 +2337,7 @@ pub extern "C" fn stasis_android_bridge_free_string(value: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn android_display_metrics_preserve_logical_canvas_and_round_trip_letterbox() {
@@ -2886,6 +2887,70 @@ mod tests {
 
         stasis_dynload::clear_registered_global_memory();
         stasis_dynload::clear_jit_i32_array_global_table();
+    }
+
+    #[test]
+    fn workshop_warm_reload_emits_only_changed_helper_and_direct_caller() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("selective_warm_reload");
+        let entry = Path::new("src/main.stasis");
+        let source = root.join(entry);
+        let before = "global GameState { tick_count: i32; }\nfunction helper(): i32 { return 1; }\nfunction untouched(): i32 { return 40; }\nfunction main(): void { GameState.tick_count = untouched(); }\nfunction tick(): void { GameState.tick_count += helper(); }\n";
+        fs::write(&source, before).expect("write active source");
+        compile_android_workshop_project(&root, entry).expect("compile active source");
+        let baseline = run_android_workshop_tick(&root, entry, default_tick_input())
+            .expect("initialize active source");
+        assert_eq!(baseline.observed_game_tick_count, 41);
+
+        fs::write(&source, before.replace("return 1", "return 2")).expect("write helper edit");
+        compile_android_workshop_project(&root, entry).expect("stage selective patch");
+
+        RUNTIME_SESSION.with(|session_cell| {
+            let session_slot = session_cell.borrow();
+            let candidate = session_slot
+                .as_ref()
+                .and_then(|session| session.pending_candidate.as_ref())
+                .expect("pending selective candidate");
+            let metadata = candidate
+                .generation_metadata()
+                .expect("selective candidate metadata");
+            let name_for_id = |id| {
+                candidate
+                    .artifacts()
+                    .iter()
+                    .find(|artifact| artifact.function_id == id)
+                    .map(|artifact| artifact.function_key.name.as_str())
+                    .expect("metadata function id should have an artifact")
+            };
+            let emitted: BTreeSet<&str> = metadata
+                .emitted_function_ids
+                .iter()
+                .map(|id| name_for_id(*id))
+                .collect();
+            let reused: BTreeSet<&str> = metadata
+                .reused_function_ids
+                .iter()
+                .map(|id| name_for_id(*id))
+                .collect();
+            assert_eq!(emitted, BTreeSet::from(["helper", "tick"]));
+            assert_eq!(reused, BTreeSet::from(["main", "untouched"]));
+            assert_eq!(
+                metadata
+                    .affected_host_entries
+                    .iter()
+                    .map(|key| key.name.as_str())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(["tick"])
+            );
+        });
+        let activated = run_android_workshop_tick(&root, entry, default_tick_input())
+            .expect("activate and execute selective patch");
+        assert!(activated.recompiled);
+        assert_eq!(activated.observed_game_tick_count, 43);
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
     }
 
     #[test]

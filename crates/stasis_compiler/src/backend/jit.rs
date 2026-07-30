@@ -197,6 +197,7 @@ pub struct JitGenerationMetadata {
     pub code_owner_revision: u64,
     pub data_owner_layout_hash: u64,
     pub codegen_micros: u64,
+    pub plan_micros: u64,
     pub finalize_micros: u64,
     pub module_count: usize,
     pub retained_arena_count: usize,
@@ -508,6 +509,7 @@ impl JitProcess {
             false,
         )
         .map_err(crate::compiler::CompileError::Backend)?;
+        let plan_started = Instant::now();
         let patch_plan = plan_patch(
             self.compiler.functions(),
             self.compiler.files(),
@@ -516,6 +518,7 @@ impl JitProcess {
             &lowered_contract_changes,
         )
         .map_err(crate::compiler::CompileError::Backend)?;
+        let plan_micros = elapsed_micros(plan_started);
         let emit_function_ids = patch_plan.re_jit_ids.clone();
         let function_keys_by_id: BTreeMap<FunctionId, FunctionKey> = self
             .compiler
@@ -776,6 +779,7 @@ impl JitProcess {
             code_owner_revision: files_fingerprint,
             data_owner_layout_hash: layout_hash,
             codegen_micros,
+            plan_micros,
             finalize_micros,
             module_count: self.modules.len() + usize::from(staged_module.is_some()),
             retained_arena_count: self.modules.len(),

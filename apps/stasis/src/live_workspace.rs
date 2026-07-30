@@ -1246,6 +1246,7 @@ impl LiveWorkspace {
                     "re_jit_count": metadata.emitted_function_ids.len(),
                     "reused_count": metadata.reused_function_ids.len(),
                     "codegen_micros": metadata.codegen_micros,
+                    "plan_micros": metadata.plan_micros,
                     "finalize_micros": metadata.finalize_micros,
                     "retained_arena_count": metadata.retained_arena_count,
                     "retained_jit_bytes": metadata.retained_jit_bytes,

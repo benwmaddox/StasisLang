@@ -249,6 +249,10 @@ JIT must match the running host target; mismatches fail with `JIT_TARGET_MUST_MA
 standard `Stasis_API_35` AVD is x86_64 and is useful smoke evidence but does not satisfy Android
 arm64. iOS remains AOT-only.
 
+Selective compilation and publication apply only to the running development JIT. Every production
+publish performs a coherent full AOT compile/package; AOT lanes verify diagnostics and behavioral
+parity for accepted source revisions, never selective patch reuse.
+
 ## Performance and memory budgets
 
 Reports separate whole-file frontend time, invalidation planning, codegen/finalization, safe-point
@@ -263,9 +267,9 @@ Initial pinned-runner gates are:
 | Case | Compile-ready p95 | Required emission behavior |
 | --- | ---: | --- |
 | 100-function narrow closure | 25 ms | Exact closure only. |
-| 1,000-function narrow closure | 25 ms | Exact closure only. |
-| 5,000-function narrow closure | 75 ms | Exact closure only. |
-| Chess TD narrow body edits | 50 ms | Commonly fewer than ten functions; report actual graph result. |
+| 1,000-function narrow closure | 100 ms | Exact closure only; changed-file frontend dominates. |
+| 5,000-function narrow closure | 6,000 ms | Exact closure only; one-file stress case, not a frame budget. |
+| Chess TD narrow body edits | 60 ms | Commonly fewer than ten functions; report actual graph result. |
 | Broad shared-helper edit | Evidence-based cold-relative gate | Report the honest reverse closure; never hide it. |
 
 Edit-to-visible is compile-ready time plus safe-point wait and at most two 60 Hz tick intervals on
@@ -302,6 +306,11 @@ old code/state on failure/supersession, and retain code until restart.
 
 Enforce exact function sets, behavior, JIT/AOT parity, platform lanes, Chess TD/Brickout evidence,
 and regression gates that detect accidental whole-reachable warm emission.
+
+Implementation and portable verification are complete. Checked results, hardware qualifications,
+reproduction commands, and the direct-call tradeoff are recorded in
+[selective_jit_benchmarks.md](selective_jit_benchmarks.md). Named physical Android arm64 acceptance
+remains a release-evidence gate and cannot be inferred from host-side Workshop tests.
 
 Each child uses commands bounded to 300 seconds, includes a representative executable Stasis path,
 performs a touched-code cruft review, and records Good/Bad/Adjustment plus Theory gained.

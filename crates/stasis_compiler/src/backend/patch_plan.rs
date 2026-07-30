@@ -238,29 +238,34 @@ fn expand_affected_closure(
     reasons: &mut BTreeMap<FunctionKey, PatchReasonChain>,
     queue: &mut VecDeque<FunctionKey>,
 ) {
+    let mut expanded_components = BTreeSet::new();
     while let Some(callee) = queue.pop_front() {
-        if let Some(component) = graph.scc_by_key.get(&callee) {
-            let base_path = reasons
-                .get(&callee)
-                .map(|reason| reason.path_from_change.clone())
-                .unwrap_or_else(|| vec![callee.clone()]);
-            for peer in component {
-                if reasons.contains_key(peer) {
-                    continue;
+        if let Some(component_index) = graph.scc_index_by_key.get(&callee).copied() {
+            if expanded_components.insert(component_index) {
+                if let Some(component) = graph.sccs.get(component_index) {
+                    let base_path = reasons
+                        .get(&callee)
+                        .map(|reason| reason.path_from_change.clone())
+                        .unwrap_or_else(|| vec![callee.clone()]);
+                    for peer in component {
+                        if reasons.contains_key(peer) {
+                            continue;
+                        }
+                        let mut path = base_path.clone();
+                        path.push(peer.clone());
+                        reasons.insert(
+                            peer.clone(),
+                            PatchReasonChain {
+                                function: peer.clone(),
+                                reason: PatchReason::SccPeer {
+                                    changed: callee.clone(),
+                                },
+                                path_from_change: path,
+                            },
+                        );
+                        queue.push_back(peer.clone());
+                    }
                 }
-                let mut path = base_path.clone();
-                path.push(peer.clone());
-                reasons.insert(
-                    peer.clone(),
-                    PatchReasonChain {
-                        function: peer.clone(),
-                        reason: PatchReason::SccPeer {
-                            changed: callee.clone(),
-                        },
-                        path_from_change: path,
-                    },
-                );
-                queue.push_back(peer.clone());
             }
         }
         let Some(callers) = graph.reverse.get(&callee) else {
@@ -303,7 +308,8 @@ struct CurrentGraph {
     reachable: BTreeSet<FunctionKey>,
     reverse: BTreeMap<FunctionKey, BTreeSet<FunctionKey>>,
     host_entries: BTreeSet<FunctionKey>,
-    scc_by_key: BTreeMap<FunctionKey, BTreeSet<FunctionKey>>,
+    scc_index_by_key: BTreeMap<FunctionKey, usize>,
+    sccs: Vec<BTreeSet<FunctionKey>>,
 }
 
 impl CurrentGraph {
@@ -367,13 +373,14 @@ impl CurrentGraph {
                 },
             );
         }
-        let scc_by_key = strongly_connected_components(&by_key, &reachable);
+        let (scc_index_by_key, sccs) = strongly_connected_components(&by_key, &reachable);
         Ok(Self {
             by_key,
             reachable,
             reverse,
             host_entries,
-            scc_by_key,
+            scc_index_by_key,
+            sccs,
         })
     }
 }
@@ -381,90 +388,81 @@ impl CurrentGraph {
 fn strongly_connected_components(
     functions: &BTreeMap<FunctionKey, CurrentFunction>,
     reachable: &BTreeSet<FunctionKey>,
-) -> BTreeMap<FunctionKey, BTreeSet<FunctionKey>> {
-    struct TarjanState {
-        next_index: usize,
-        indices: BTreeMap<FunctionKey, usize>,
-        lowlinks: BTreeMap<FunctionKey, usize>,
-        stack: Vec<FunctionKey>,
-        on_stack: BTreeSet<FunctionKey>,
-        components: Vec<BTreeSet<FunctionKey>>,
-    }
-
-    fn visit(
-        key: &FunctionKey,
-        functions: &BTreeMap<FunctionKey, CurrentFunction>,
-        reachable: &BTreeSet<FunctionKey>,
-        state: &mut TarjanState,
-    ) {
-        let index = state.next_index;
-        state.next_index += 1;
-        state.indices.insert(key.clone(), index);
-        state.lowlinks.insert(key.clone(), index);
-        state.stack.push(key.clone());
-        state.on_stack.insert(key.clone());
-
-        if let Some(function) = functions.get(key) {
-            for dependency in &function.dependencies {
-                if !reachable.contains(dependency) {
-                    continue;
-                }
-                if !state.indices.contains_key(dependency) {
-                    visit(dependency, functions, reachable, state);
-                    let dependency_low = state.lowlinks[dependency];
-                    let key_low = state.lowlinks[key];
-                    state
-                        .lowlinks
-                        .insert(key.clone(), key_low.min(dependency_low));
-                } else if state.on_stack.contains(dependency) {
-                    let dependency_index = state.indices[dependency];
-                    let key_low = state.lowlinks[key];
-                    state
-                        .lowlinks
-                        .insert(key.clone(), key_low.min(dependency_index));
+) -> (BTreeMap<FunctionKey, usize>, Vec<BTreeSet<FunctionKey>>) {
+    let mut visited = BTreeSet::new();
+    let mut finish_order = Vec::with_capacity(reachable.len());
+    for start in reachable {
+        if visited.contains(start) {
+            continue;
+        }
+        let mut stack = vec![(start.clone(), false)];
+        while let Some((key, expanded)) = stack.pop() {
+            if expanded {
+                finish_order.push(key);
+                continue;
+            }
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            stack.push((key.clone(), true));
+            if let Some(function) = functions.get(&key) {
+                for dependency in function.dependencies.iter().rev() {
+                    if reachable.contains(dependency) && !visited.contains(dependency) {
+                        stack.push((dependency.clone(), false));
+                    }
                 }
             }
         }
+    }
 
-        if state.lowlinks[key] == state.indices[key] {
-            let mut component = BTreeSet::new();
-            while let Some(member) = state.stack.pop() {
-                state.on_stack.remove(&member);
-                component.insert(member.clone());
-                if member == *key {
-                    break;
+    let mut reverse: BTreeMap<FunctionKey, BTreeSet<FunctionKey>> = BTreeMap::new();
+    for (caller, function) in functions {
+        if !reachable.contains(caller) {
+            continue;
+        }
+        for callee in &function.dependencies {
+            if reachable.contains(callee) {
+                reverse
+                    .entry(callee.clone())
+                    .or_default()
+                    .insert(caller.clone());
+            }
+        }
+    }
+    let mut assigned = BTreeSet::new();
+    let mut components = Vec::new();
+    for start in finish_order.into_iter().rev() {
+        if !assigned.insert(start.clone()) {
+            continue;
+        }
+        let mut component = BTreeSet::from([start.clone()]);
+        let mut stack = vec![start];
+        while let Some(key) = stack.pop() {
+            if let Some(callers) = reverse.get(&key) {
+                for caller in callers.iter().rev() {
+                    if assigned.insert(caller.clone()) {
+                        component.insert(caller.clone());
+                        stack.push(caller.clone());
+                    }
                 }
             }
-            state.components.push(component);
+        }
+        components.push(component);
+    }
+    let mut index_by_key = BTreeMap::new();
+    for (index, component) in components.iter().enumerate() {
+        for key in component {
+            index_by_key.insert(key.clone(), index);
         }
     }
-
-    let mut state = TarjanState {
-        next_index: 0,
-        indices: BTreeMap::new(),
-        lowlinks: BTreeMap::new(),
-        stack: Vec::new(),
-        on_stack: BTreeSet::new(),
-        components: Vec::new(),
-    };
-    for key in reachable {
-        if !state.indices.contains_key(key) {
-            visit(key, functions, reachable, &mut state);
-        }
-    }
-    let mut by_key = BTreeMap::new();
-    for component in state.components {
-        for key in &component {
-            by_key.insert(key.clone(), component.clone());
-        }
-    }
-    by_key
+    (index_by_key, components)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compiler::Compiler;
+    use std::time::Instant;
 
     fn indexed(files: &[(&str, &str)]) -> Compiler {
         let mut compiler = Compiler::new();
@@ -592,6 +590,246 @@ mod tests {
             key_by_name(&plan.re_jit),
             vec!["first", "leaf", "main", "second"]
         );
+    }
+
+    #[test]
+    fn iterative_scc_planning_handles_five_thousand_functions() {
+        let keys: Vec<FunctionKey> = (0..5000)
+            .map(|index| FunctionKey::new("scale.stasis", format!("fn_{index}"), index as u64))
+            .collect();
+        let functions: BTreeMap<FunctionKey, CurrentFunction> = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                (
+                    key.clone(),
+                    CurrentFunction {
+                        id: index as FunctionId,
+                        body_hash: index as u64,
+                        dependencies: BTreeSet::from([keys[(index + 1) % keys.len()].clone()]),
+                    },
+                )
+            })
+            .collect();
+        let reachable = keys.iter().cloned().collect();
+        let (index_by_key, components) = strongly_connected_components(&functions, &reachable);
+        assert_eq!(index_by_key.len(), 5000);
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].len(), 5000);
+    }
+
+    fn synthetic_graph(
+        dependencies: Vec<Vec<usize>>,
+        main_dependencies: Vec<usize>,
+    ) -> (CurrentGraph, Vec<FunctionKey>) {
+        let function_count = dependencies.len();
+        let mut keys: Vec<FunctionKey> = (0..function_count)
+            .map(|index| FunctionKey::new("scale.stasis", format!("fn_{index}"), index as u64))
+            .collect();
+        keys.push(FunctionKey::new("scale.stasis", "main", u64::MAX));
+        let main_index = function_count;
+        let mut all_dependencies = dependencies;
+        all_dependencies.push(main_dependencies);
+        let by_key: BTreeMap<FunctionKey, CurrentFunction> = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                (
+                    key.clone(),
+                    CurrentFunction {
+                        id: index as FunctionId,
+                        body_hash: index as u64,
+                        dependencies: all_dependencies[index]
+                            .iter()
+                            .map(|dependency| keys[*dependency].clone())
+                            .collect(),
+                    },
+                )
+            })
+            .collect();
+        let mut reachable = BTreeSet::new();
+        let mut pending = vec![keys[main_index].clone()];
+        while let Some(key) = pending.pop() {
+            if !reachable.insert(key.clone()) {
+                continue;
+            }
+            if let Some(function) = by_key.get(&key) {
+                pending.extend(function.dependencies.iter().cloned());
+            }
+        }
+        assert_eq!(
+            reachable.len(),
+            keys.len(),
+            "synthetic graph must be root-reachable"
+        );
+        let mut reverse: BTreeMap<FunctionKey, BTreeSet<FunctionKey>> = BTreeMap::new();
+        for (caller, function) in &by_key {
+            for callee in &function.dependencies {
+                reverse
+                    .entry(callee.clone())
+                    .or_default()
+                    .insert(caller.clone());
+            }
+        }
+        let (scc_index_by_key, sccs) = strongly_connected_components(&by_key, &reachable);
+        (
+            CurrentGraph {
+                by_key,
+                reachable,
+                reverse,
+                host_entries: BTreeSet::from([keys[main_index].clone()]),
+                scc_index_by_key,
+                sccs,
+            },
+            keys,
+        )
+    }
+
+    fn affected_keys(graph: &CurrentGraph, changed: &FunctionKey) -> BTreeSet<String> {
+        let mut reasons = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        insert_seed(
+            &mut reasons,
+            &mut queue,
+            changed.clone(),
+            PatchReason::BodyChanged,
+        );
+        expand_affected_closure(graph, &mut reasons, &mut queue);
+        reasons.into_keys().map(|key| key.name).collect()
+    }
+
+    fn topology_plan_percentiles(
+        graph: &CurrentGraph,
+        changed: &FunctionKey,
+        measured_samples: usize,
+    ) -> (f64, f64) {
+        let mut samples = Vec::with_capacity(measured_samples);
+        for sample in 0..(5 + measured_samples) {
+            let started = Instant::now();
+            let _ = affected_keys(graph, changed);
+            if sample >= 5 {
+                samples.push(started.elapsed());
+            }
+        }
+        samples.sort();
+        let percentile = |value: usize| {
+            let rank = (value * samples.len()).div_ceil(100).saturating_sub(1);
+            samples[rank.min(samples.len() - 1)].as_secs_f64() * 1000.0
+        };
+        (percentile(50), percentile(95))
+    }
+
+    fn names(indices: impl IntoIterator<Item = usize>) -> BTreeSet<String> {
+        indices
+            .into_iter()
+            .map(|index| format!("fn_{index}"))
+            .chain(std::iter::once("main".to_string()))
+            .collect()
+    }
+
+    fn report_topology_plan(
+        topology: &str,
+        function_count: usize,
+        graph: &CurrentGraph,
+        changed: &FunctionKey,
+    ) {
+        let samples = if function_count == 5000 { 10 } else { 30 };
+        let (p50, p95) = topology_plan_percentiles(graph, changed, samples);
+        eprintln!(
+            "topology_closure topology={topology} functions={function_count} samples={samples} closure_ms_p50={p50:.3} closure_ms_p95={p95:.3}"
+        );
+    }
+
+    #[test]
+    fn scaled_topology_matrix_has_exact_selective_closures() {
+        for function_count in [100, 1000, 5000] {
+            let mut chain = vec![Vec::new(); function_count];
+            for (index, dependencies) in chain.iter_mut().enumerate().take(function_count - 1) {
+                dependencies.push(index + 1);
+            }
+            let (graph, keys) = synthetic_graph(chain, vec![0]);
+            assert_eq!(
+                affected_keys(&graph, &keys[0]),
+                names([0]),
+                "chain {function_count}"
+            );
+            report_topology_plan("chain", function_count, &graph, &keys[0]);
+
+            let mut branching = vec![Vec::new(); function_count];
+            for (index, dependencies) in branching.iter_mut().enumerate() {
+                for child in [index * 2 + 1, index * 2 + 2] {
+                    if child < function_count {
+                        dependencies.push(child);
+                    }
+                }
+            }
+            let mut branch_indices = Vec::new();
+            let mut ancestor = function_count - 1;
+            loop {
+                branch_indices.push(ancestor);
+                if ancestor == 0 {
+                    break;
+                }
+                ancestor = (ancestor - 1) / 2;
+            }
+            let (graph, keys) = synthetic_graph(branching, vec![0]);
+            assert_eq!(
+                affected_keys(&graph, &keys[function_count - 1]),
+                names(branch_indices),
+                "branching {function_count}"
+            );
+            report_topology_plan(
+                "branching",
+                function_count,
+                &graph,
+                &keys[function_count - 1],
+            );
+
+            let mut diamond = vec![Vec::new(); function_count];
+            diamond[0] = vec![1, 2, 4];
+            diamond[1] = vec![3];
+            diamond[2] = vec![3];
+            for (index, dependencies) in diamond
+                .iter_mut()
+                .enumerate()
+                .take(function_count - 1)
+                .skip(4)
+            {
+                dependencies.push(index + 1);
+            }
+            let (graph, keys) = synthetic_graph(diamond, vec![0]);
+            assert_eq!(
+                affected_keys(&graph, &keys[3]),
+                names([0, 1, 2, 3]),
+                "diamond {function_count}"
+            );
+            report_topology_plan("diamond", function_count, &graph, &keys[3]);
+
+            let mut shared = vec![Vec::new(); function_count];
+            for dependencies in shared.iter_mut().take(function_count - 1) {
+                dependencies.push(function_count - 1);
+            }
+            let shared_callers: Vec<usize> = (0..function_count - 1).collect();
+            let (graph, keys) = synthetic_graph(shared, shared_callers);
+            assert_eq!(
+                affected_keys(&graph, &keys[function_count - 1]),
+                names(0..function_count),
+                "shared {function_count}"
+            );
+            report_topology_plan("shared", function_count, &graph, &keys[function_count - 1]);
+
+            let mut scc = vec![Vec::new(); function_count];
+            for (index, dependencies) in scc.iter_mut().enumerate() {
+                dependencies.push((index + 1) % function_count);
+            }
+            let (graph, keys) = synthetic_graph(scc, vec![0]);
+            assert_eq!(
+                affected_keys(&graph, &keys[function_count / 2]),
+                names(0..function_count),
+                "scc {function_count}"
+            );
+            report_topology_plan("scc", function_count, &graph, &keys[function_count / 2]);
+        }
     }
 
     #[test]
