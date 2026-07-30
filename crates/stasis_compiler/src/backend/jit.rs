@@ -26,7 +26,7 @@ use std::path::Path;
 use std::rc::Rc;
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 pub use crate::backend::state_layout::{
     StateCapacityChangeReport as JitStateCapacityChangeReport,
@@ -42,6 +42,10 @@ pub use crate::backend::state_layout::{
 
 const MAX_STATE_QUERY_SCAN: usize = 4096;
 const MAX_STATE_QUERY_MATCHES: usize = 64;
+
+fn elapsed_micros(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -74,14 +78,13 @@ pub struct JitArtifact {
     pub function_id: FunctionId,
     pub slot: u32,
     pub body_hash: u64,
-    pub code_ptr: u64,
+    pub(crate) code_ptr: u64,
     pub clif: String,
 }
 
 pub struct JitProcess {
     compiler: Compiler,
-    next_slot: u32,
-    next_symbol_seq: u64,
+    active_compiler: Option<Compiler>,
     artifacts: Vec<JitArtifact>,
     artifact_index: HashMap<FunctionId, usize>,
     modules: Vec<JITModule>,
@@ -90,7 +93,11 @@ pub struct JitProcess {
     source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
     import_parse_cache: BTreeMap<String, ImportParseCacheEntry>,
     compile_analysis_cache: Option<CompileAnalysisCache>,
+    active_compile_analysis_cache: Option<CompileAnalysisCache>,
+    generation_metadata: Option<JitGenerationMetadata>,
     staged_string_literals: HashMap<i32, String>,
+    active_string_literals: HashMap<i32, String>,
+    last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
     required_emit_roots: Vec<String>,
     local_runtime_helper_trampolines: bool,
     #[cfg(test)]
@@ -103,6 +110,23 @@ pub struct JitEnginePackage {
     pub render_code_ptr: u64,
     pub on_code_swap_code_ptr: Option<u64>,
     pub symbol_code_ptrs: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JitGenerationMetadata {
+    pub source_revision: u64,
+    pub layout_hash: u64,
+    pub emitted_function_ids: Vec<FunctionId>,
+    pub host_export_signatures: BTreeMap<String, String>,
+    pub host_export_code_ptrs: BTreeMap<String, u64>,
+    pub diagnostics: Vec<String>,
+    pub code_owner_revision: u64,
+    pub data_owner_layout_hash: u64,
+    pub codegen_micros: u64,
+    pub finalize_micros: u64,
+    pub module_count: usize,
+    pub emitted_clif_bytes: usize,
+    pub executable_bytes: usize,
 }
 
 impl JitProcess {
@@ -132,8 +156,7 @@ impl JitProcess {
     fn new_inner(#[cfg(test)] _test_guard: Option<MutexGuard<'static, ()>>) -> Self {
         Self {
             compiler: Compiler::new(),
-            next_slot: 0,
-            next_symbol_seq: 0,
+            active_compiler: None,
             artifacts: Vec::new(),
             artifact_index: HashMap::new(),
             modules: Vec::new(),
@@ -142,7 +165,11 @@ impl JitProcess {
             source_disk_probe_cache: BTreeMap::new(),
             import_parse_cache: BTreeMap::new(),
             compile_analysis_cache: None,
+            active_compile_analysis_cache: None,
+            generation_metadata: None,
             staged_string_literals: HashMap::new(),
+            active_string_literals: HashMap::new(),
+            last_failed_source_diagnostic: None,
             required_emit_roots: Vec::new(),
             local_runtime_helper_trampolines: false,
             #[cfg(test)]
@@ -239,20 +266,61 @@ impl JitProcess {
     }
 
     pub fn compile_staged(&mut self) -> CompileResult<CompileReport> {
+        let result = self.compile_candidate_staged();
+        match result {
+            Ok(report) => {
+                self.last_failed_source_diagnostic = None;
+                self.active_compiler = Some(self.compiler.clone());
+                self.active_compile_analysis_cache = self.compile_analysis_cache.clone();
+                self.active_string_literals = self.staged_string_literals.clone();
+                Ok(report)
+            }
+            Err(error) => {
+                self.last_failed_source_diagnostic =
+                    self.compiler.last_source_diagnostic().cloned().or_else(|| {
+                        self.compiler
+                            .files()
+                            .first()
+                            .map(|file| crate::SourceDiagnostic {
+                                path: file.path.clone(),
+                                start: 0,
+                                end: file.content.len(),
+                                symbol: String::new(),
+                                message: match &error {
+                                    crate::compiler::CompileError::Frontend(message)
+                                    | crate::compiler::CompileError::Backend(message)
+                                    | crate::compiler::CompileError::Invariant(message) => {
+                                        message.clone()
+                                    }
+                                },
+                            })
+                    });
+                self.restore_active_compiler_with_pending_sources();
+                Err(error)
+            }
+        }
+    }
+
+    fn compile_candidate_staged(&mut self) -> CompileResult<CompileReport> {
         stasis_dynload::begin_jit_string_literal_staging()
             .map_err(crate::compiler::CompileError::Backend)?;
         let result = self.compile_internal();
-        let literals = stasis_dynload::finish_jit_string_literal_staging()
-            .map_err(crate::compiler::CompileError::Backend);
-        match result {
-            Err(error) => Err(error),
-            Ok(report) => {
-                literals?;
-                self.staged_string_literals = collect_current_string_literals(&self.compiler)
-                    .map_err(crate::compiler::CompileError::Backend)?;
-                Ok(report)
-            }
+        if result.is_err() {
+            let _ = stasis_dynload::finish_jit_string_literal_staging();
         }
+        result
+    }
+
+    fn restore_active_compiler_with_pending_sources(&mut self) {
+        let pending_files = self.compiler.files().to_vec();
+        self.compiler = self.active_compiler.clone().unwrap_or_default();
+        self.compiler
+            .set_analysis_required_roots(&self.required_emit_roots);
+        for file in pending_files {
+            self.compiler.upsert_file(file.path, file.content);
+        }
+        self.compile_analysis_cache = self.active_compile_analysis_cache.clone();
+        self.staged_string_literals = self.active_string_literals.clone();
     }
 
     fn compile_internal(&mut self) -> CompileResult<CompileReport> {
@@ -273,7 +341,6 @@ impl JitProcess {
             .compile_analysis_cache
             .as_ref()
             .is_none_or(|cache| cache.files_fingerprint != files_fingerprint);
-        let mut force_reemit_reachable = false;
         if cache_miss {
             let extern_signatures = collect_supported_extern_call_signatures(
                 self.compiler.files(),
@@ -292,10 +359,6 @@ impl JitProcess {
                 extern_symbol_addresses,
             )
             .map_err(crate::compiler::CompileError::Backend)?;
-            if let Some(previous_cache) = self.compile_analysis_cache.as_ref() {
-                force_reemit_reachable =
-                    compile_analysis_requires_reemit(previous_cache, &next_cache);
-            }
             self.compile_analysis_cache = Some(next_cache);
         }
         *self.compiler.types_mut() = analysis_type_table.clone();
@@ -311,27 +374,31 @@ impl JitProcess {
             false,
         )
         .map_err(crate::compiler::CompileError::Backend)?;
-        let emit_function_ids = select_emit_function_ids(
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
             self.compiler.functions(),
-            self.artifacts(),
             &self.required_emit_roots,
-            force_reemit_reachable,
         );
-        let mut next_slot = self.next_slot;
-        let mut next_symbol_seq = self.next_symbol_seq;
-        let mut staged_artifacts = self.artifacts.clone();
-        let mut staged_modules: Vec<JITModule> = Vec::new();
+        let emit_function_ids: Vec<FunctionId> = reachable.iter().copied().collect();
         let local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
+        let mut staged_module = Some(
+            new_generation_jit_module(&analysis.extern_symbol_addresses)
+                .map_err(crate::compiler::CompileError::Backend)?,
+        );
+        let mut staged_functions = Vec::with_capacity(emit_function_ids.len());
+        let codegen_started = Instant::now();
         let emit = self.compiler.emit_pass_for_ids_with(
             &emit_function_ids,
             &mut |meta, hir, lowered_types| {
-                let symbol = format!("jit_fn_{}_{}", meta.id, next_symbol_seq);
-                next_symbol_seq = next_symbol_seq.saturating_add(1);
+                let symbol = format!("jit_fn_{}", meta.id);
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
+                let module = staged_module.take().ok_or_else(|| {
+                    "JIT generation module missing during function emission".to_string()
+                })?;
                 let compiled = catch_unwind(AssertUnwindSafe(|| {
-                    compile_function_to_jit_module(
+                    compile_function_into_jit_module(
+                        module,
                         meta,
                         hir,
                         &symbol,
@@ -346,7 +413,7 @@ impl JitProcess {
                         local_runtime_helper_trampolines,
                     )
                 }));
-                let (module, code_ptr, clif) = match compiled {
+                let (module, function_id, clif, executable_bytes) = match compiled {
                     Ok(result) => result?,
                     Err(payload) => {
                         let message = payload
@@ -360,30 +427,112 @@ impl JitProcess {
                         ));
                     }
                 };
-                let slot = next_slot;
-                next_slot = next_slot.saturating_add(1);
-                staged_modules.push(module);
-                staged_artifacts.retain(|artifact| artifact.function_id != meta.id);
-                staged_artifacts.push(JitArtifact {
-                    function_id: meta.id,
-                    slot,
-                    body_hash: meta.body_hash,
-                    code_ptr,
+                staged_module = Some(module);
+                staged_functions.push((
+                    meta.id,
+                    meta.body_hash,
+                    function_id,
                     clif,
-                });
+                    executable_bytes,
+                ));
                 Ok(())
             },
         )?;
-        self.next_slot = next_slot;
-        self.next_symbol_seq = next_symbol_seq;
-        self.artifacts = staged_artifacts;
-        self.modules.extend(staged_modules);
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
-            self.compiler.functions(),
-            &self.required_emit_roots,
+        let codegen_micros = elapsed_micros(codegen_started);
+        let mut module = staged_module.ok_or_else(|| {
+            crate::compiler::CompileError::Invariant(
+                "JIT generation module missing after function emission".to_string(),
+            )
+        })?;
+        let finalize_started = Instant::now();
+        module.finalize_definitions().map_err(|error| {
+            crate::compiler::CompileError::Backend(format!(
+                "failed to finalize complete JIT generation: {error}"
+            ))
+        })?;
+        let finalize_micros = elapsed_micros(finalize_started);
+        let executable_bytes = staged_functions
+            .iter()
+            .map(|(_, _, _, _, bytes)| *bytes)
+            .sum();
+        let staged_artifacts: Vec<JitArtifact> = staged_functions
+            .into_iter()
+            .enumerate()
+            .map(
+                |(slot, (function_id, body_hash, clif_function_id, clif, _))| JitArtifact {
+                    function_id,
+                    slot: u32::try_from(slot).unwrap_or(u32::MAX),
+                    body_hash,
+                    code_ptr: module.get_finalized_function(clif_function_id) as usize as u64,
+                    clif,
+                },
+            )
+            .collect();
+        let state_layout = build_state_layout(
+            &analysis.global_path_types,
+            &analysis.collection_infos,
+            self.compiler.types(),
         );
-        self.artifacts
-            .retain(|artifact| reachable.contains(&artifact.function_id));
+        let layout_hash = hash_text(&serde_json::to_string(&state_layout).map_err(|error| {
+            crate::compiler::CompileError::Invariant(format!(
+                "failed to serialize JIT generation layout: {error}"
+            ))
+        })?);
+        let host_export_signatures = self
+            .compiler
+            .functions()
+            .iter()
+            .filter(|function| self.is_host_export_name(&function.name))
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    format!("{:?}->{:?}", function.params, function.return_type),
+                )
+            })
+            .collect();
+        let host_export_code_ptrs = self
+            .compiler
+            .functions()
+            .iter()
+            .filter(|function| self.is_host_export_name(&function.name))
+            .filter_map(|function| {
+                staged_artifacts
+                    .iter()
+                    .find(|artifact| artifact.function_id == function.id)
+                    .map(|artifact| (function.name.clone(), artifact.code_ptr))
+            })
+            .collect();
+        let emitted_clif_bytes = staged_artifacts
+            .iter()
+            .map(|artifact| artifact.clif.len())
+            .sum();
+        let staged_metadata = JitGenerationMetadata {
+            source_revision: files_fingerprint,
+            layout_hash,
+            emitted_function_ids: staged_artifacts
+                .iter()
+                .map(|artifact| artifact.function_id)
+                .collect(),
+            host_export_signatures,
+            host_export_code_ptrs,
+            diagnostics: Vec::new(),
+            code_owner_revision: files_fingerprint,
+            data_owner_layout_hash: layout_hash,
+            codegen_micros,
+            finalize_micros,
+            module_count: 1,
+            emitted_clif_bytes,
+            executable_bytes,
+        };
+        stasis_dynload::finish_jit_string_literal_staging()
+            .map_err(crate::compiler::CompileError::Backend)?;
+        let staged_string_literals = collect_current_string_literals(&self.compiler)
+            .map_err(crate::compiler::CompileError::Backend)?;
+        self.artifacts = staged_artifacts;
+        self.modules.clear();
+        self.modules.push(module);
+        self.generation_metadata = Some(staged_metadata);
+        self.staged_string_literals = staged_string_literals;
         let report = CompileReport { index, emit };
         self.rebuild_artifact_index();
         Ok(report)
@@ -391,6 +540,15 @@ impl JitProcess {
 
     pub fn artifacts(&self) -> &[JitArtifact] {
         &self.artifacts
+    }
+
+    pub fn generation_metadata(&self) -> Option<&JitGenerationMetadata> {
+        self.generation_metadata.as_ref()
+    }
+
+    fn is_host_export_name(&self, name: &str) -> bool {
+        matches!(name, "main" | "tick" | "render" | "on_code_swap")
+            || self.required_emit_roots.iter().any(|root| root == name)
     }
 
     pub fn clif_for_function_name(&self, name: &str) -> Option<&str> {
@@ -404,12 +562,13 @@ impl JitProcess {
     }
 
     pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
-        self.compiler.last_source_diagnostic()
+        self.last_failed_source_diagnostic
+            .as_ref()
+            .or_else(|| self.compiler.last_source_diagnostic())
     }
 
-    pub fn activate_runtime_dispatch_table(&self) {
+    pub fn activate_runtime_state(&self) {
         stasis_dynload::replace_jit_string_literal_table(&self.staged_string_literals);
-        self.refresh_runtime_dispatch_table();
     }
 
     pub fn activate_staged_runtime(&self) -> Result<(), String> {
@@ -428,7 +587,6 @@ impl JitProcess {
             self.compiler.types(),
         )?;
         stasis_dynload::replace_jit_string_literal_table(&self.staged_string_literals);
-        self.refresh_runtime_dispatch_table();
         Ok(())
     }
 
@@ -1205,20 +1363,10 @@ impl JitProcess {
     }
 
     pub fn symbol_code_ptrs(&self) -> BTreeMap<String, u64> {
-        let mut symbol_code_ptrs = BTreeMap::new();
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
-            self.compiler.functions(),
-            &self.required_emit_roots,
-        );
-        for function in self.compiler.functions() {
-            if !reachable.contains(&function.id) {
-                continue;
-            }
-            if let Some(artifact) = self.artifact_for_function_id(function.id) {
-                symbol_code_ptrs.insert(function.name.clone(), artifact.code_ptr);
-            }
-        }
-        symbol_code_ptrs
+        self.generation_metadata
+            .as_ref()
+            .map(|metadata| metadata.host_export_code_ptrs.clone())
+            .unwrap_or_default()
     }
 
     pub fn validate_on_code_swap_signature(&self) -> Result<(), String> {
@@ -1313,66 +1461,6 @@ impl JitProcess {
         self.artifact_for_function_id(function.id)
             .map(|artifact| artifact.code_ptr)
             .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))
-    }
-
-    fn refresh_runtime_dispatch_table(&self) {
-        let mut i32_entries = Vec::new();
-        let mut f32_entries = Vec::new();
-        let mut code_ptr_entries = Vec::new();
-        let type_table = self.compiler.types();
-        let empty_struct_fields = NamedStructFieldTypeMap::new();
-        let named_struct_field_types = self
-            .compile_analysis_cache
-            .as_ref()
-            .map(|cache| &cache.named_struct_field_types)
-            .unwrap_or(&empty_struct_fields);
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
-            self.compiler.functions(),
-            &self.required_emit_roots,
-        );
-        for function in self.compiler.functions() {
-            if !reachable.contains(&function.id) {
-                continue;
-            }
-            let Some(artifact) = self.artifact_for_function_id(function.id) else {
-                continue;
-            };
-            code_ptr_entries.push((function.id, artifact.code_ptr as usize));
-            let abi_arity = abi_word_count_for_params(&function.params, named_struct_field_types);
-            let Ok(arity) = u8::try_from(abi_arity) else {
-                continue;
-            };
-            if arity > 8 {
-                continue;
-            }
-            if is_i32_abi_compatible_type(function.return_type, type_table)
-                && (function
-                    .params
-                    .iter()
-                    .all(|type_id| is_i32_abi_compatible_type(*type_id, type_table))
-                    || function
-                        .params
-                        .iter()
-                        .all(|type_id| *type_id == TYPE_ID_F32))
-            {
-                i32_entries.push((function.id, arity, artifact.code_ptr as usize));
-            } else if function.return_type == TYPE_ID_VOID && function.params.is_empty() {
-                i32_entries.push((function.id, arity, artifact.code_ptr as usize));
-            } else if function.return_type == TYPE_ID_F32
-                && (function
-                    .params
-                    .iter()
-                    .all(|type_id| *type_id == TYPE_ID_F32)
-                    || (function.params.len() == 1
-                        && is_i32_abi_compatible_type(function.params[0], type_table)
-                        && abi_arity == 1))
-            {
-                f32_entries.push((function.id, arity, artifact.code_ptr as usize));
-            }
-        }
-        stasis_dynload::replace_jit_i32_dispatch_table(&i32_entries);
-        stasis_dynload::replace_jit_f32_dispatch_table(&f32_entries);
-        stasis_dynload::replace_jit_code_ptr_table(&code_ptr_entries);
     }
 
     fn rebuild_artifact_index(&mut self) {
@@ -1974,24 +2062,6 @@ fn probe_disk_source(path: &Path) -> Option<SourceDiskProbe> {
     })
 }
 
-fn select_emit_function_ids(
-    functions: &[FunctionMeta],
-    artifacts: &[JitArtifact],
-    required_emit_roots: &[String],
-    force_reemit_reachable: bool,
-) -> Vec<FunctionId> {
-    let compiled_body_hashes: HashMap<FunctionId, u64> = artifacts
-        .iter()
-        .map(|artifact| (artifact.function_id, artifact.body_hash))
-        .collect();
-    crate::backend::emit::select_emit_function_ids(
-        functions,
-        required_emit_roots,
-        &compiled_body_hashes,
-        force_reemit_reachable,
-    )
-}
-
 fn function_address(function: *const ()) -> usize {
     function as usize
 }
@@ -2221,36 +2291,8 @@ fn runtime_helper_addresses() -> BTreeMap<String, usize> {
         };
     }
     insert_helpers!(
-        stasis_jit_call_i32_0,
-        stasis_jit_call_i32_1,
-        stasis_jit_call_i32_2,
-        stasis_jit_call_i32_3,
-        stasis_jit_call_i32_4,
-        stasis_jit_call_i32_5,
-        stasis_jit_call_i32_6,
-        stasis_jit_call_i32_7,
-        stasis_jit_call_i32_8,
-        stasis_jit_call_i32_f32_1,
-        stasis_jit_call_i32_f32_2,
-        stasis_jit_call_i32_f32_3,
-        stasis_jit_call_i32_f32_4,
-        stasis_jit_call_i32_f32_5,
-        stasis_jit_call_i32_f32_6,
-        stasis_jit_call_i32_f32_7,
-        stasis_jit_call_i32_f32_8,
-        stasis_jit_call_f32_0,
-        stasis_jit_call_f32_1,
-        stasis_jit_call_f32_2,
-        stasis_jit_call_f32_3,
-        stasis_jit_call_f32_4,
-        stasis_jit_call_f32_5,
-        stasis_jit_call_f32_6,
-        stasis_jit_call_f32_7,
-        stasis_jit_call_f32_8,
-        stasis_jit_call_f32_i32_1,
         stasis_jit_print_i32,
         stasis_jit_print_string,
-        stasis_jit_lookup_code_ptr,
         stasis_jit_sin_fast,
         stasis_jit_cos_fast,
         stasis_jit_global_i32_load,
@@ -2274,7 +2316,25 @@ fn runtime_helper_addresses() -> BTreeMap<String, usize> {
     );
     out
 }
-fn compile_function_to_jit_module(
+
+fn new_generation_jit_module(
+    extern_symbol_addresses: &ExternSymbolAddressMap,
+) -> Result<JITModule, String> {
+    let mut builder = new_stasis_jit_builder()?;
+    for (symbol, address) in runtime_helper_addresses() {
+        builder.symbol(&symbol, address as *const u8);
+    }
+    for (symbol, address) in extern_symbol_addresses {
+        if *address != 0 {
+            builder.symbol(symbol, *address as *const u8);
+        }
+    }
+    Ok(JITModule::new(builder))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_function_into_jit_module(
+    module: JITModule,
     meta: &FunctionMeta,
     hir: &FunctionHIR,
     symbol: &str,
@@ -2287,210 +2347,7 @@ fn compile_function_to_jit_module(
     extern_symbol_addresses: &ExternSymbolAddressMap,
     direct_storage: &DirectStorageBindings,
     local_runtime_helper_trampolines: bool,
-) -> Result<(JITModule, u64, String), String> {
-    let mut jit_builder = new_stasis_jit_builder()?;
-    jit_builder.symbol(
-        "stasis_jit_call_i32_0",
-        stasis_dynload::stasis_jit_call_i32_0 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_1",
-        stasis_dynload::stasis_jit_call_i32_1 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_2",
-        stasis_dynload::stasis_jit_call_i32_2 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_3",
-        stasis_dynload::stasis_jit_call_i32_3 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_4",
-        stasis_dynload::stasis_jit_call_i32_4 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_5",
-        stasis_dynload::stasis_jit_call_i32_5 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_6",
-        stasis_dynload::stasis_jit_call_i32_6 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_7",
-        stasis_dynload::stasis_jit_call_i32_7 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_8",
-        stasis_dynload::stasis_jit_call_i32_8 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_f32_1",
-        stasis_dynload::stasis_jit_call_i32_f32_1 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_f32_2",
-        stasis_dynload::stasis_jit_call_i32_f32_2 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_f32_3",
-        stasis_dynload::stasis_jit_call_i32_f32_3 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_f32_4",
-        stasis_dynload::stasis_jit_call_i32_f32_4 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_f32_5",
-        stasis_dynload::stasis_jit_call_i32_f32_5 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_f32_6",
-        stasis_dynload::stasis_jit_call_i32_f32_6 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_f32_7",
-        stasis_dynload::stasis_jit_call_i32_f32_7 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_i32_f32_8",
-        stasis_dynload::stasis_jit_call_i32_f32_8 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_f32_0",
-        stasis_dynload::stasis_jit_call_f32_0 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_f32_1",
-        stasis_dynload::stasis_jit_call_f32_1 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_f32_2",
-        stasis_dynload::stasis_jit_call_f32_2 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_f32_3",
-        stasis_dynload::stasis_jit_call_f32_3 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_f32_4",
-        stasis_dynload::stasis_jit_call_f32_4 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_f32_5",
-        stasis_dynload::stasis_jit_call_f32_5 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_f32_6",
-        stasis_dynload::stasis_jit_call_f32_6 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_f32_7",
-        stasis_dynload::stasis_jit_call_f32_7 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_f32_8",
-        stasis_dynload::stasis_jit_call_f32_8 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_call_f32_i32_1",
-        stasis_dynload::stasis_jit_call_f32_i32_1 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_print_i32",
-        stasis_dynload::stasis_jit_print_i32 as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_print_string",
-        stasis_dynload::stasis_jit_print_string as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_lookup_code_ptr",
-        stasis_dynload::stasis_jit_lookup_code_ptr as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_sin_fast",
-        stasis_dynload::stasis_jit_sin_fast as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_cos_fast",
-        stasis_dynload::stasis_jit_cos_fast as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_i32_load",
-        stasis_dynload::stasis_jit_global_i32_load as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_i32_store",
-        stasis_dynload::stasis_jit_global_i32_store as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_f32_load",
-        stasis_dynload::stasis_jit_global_f32_load as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_f32_store",
-        stasis_dynload::stasis_jit_global_f32_store as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_f64_load",
-        stasis_dynload::stasis_jit_global_f64_load as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_f64_store",
-        stasis_dynload::stasis_jit_global_f64_store as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_collection_i32_load",
-        stasis_dynload::stasis_jit_collection_i32_load as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_collection_i32_store",
-        stasis_dynload::stasis_jit_collection_i32_store as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_i32_array_load",
-        stasis_dynload::stasis_jit_global_i32_array_load as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_i32_array_store",
-        stasis_dynload::stasis_jit_global_i32_array_store as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_i32_array_ptr",
-        stasis_dynload::stasis_jit_global_i32_array_ptr as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_f32_array_load",
-        stasis_dynload::stasis_jit_global_f32_array_load as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_f32_array_store",
-        stasis_dynload::stasis_jit_global_f32_array_store as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_f32_array_ptr",
-        stasis_dynload::stasis_jit_global_f32_array_ptr as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_f64_array_load",
-        stasis_dynload::stasis_jit_global_f64_array_load as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_f64_array_store",
-        stasis_dynload::stasis_jit_global_f64_array_store as *const u8,
-    );
-    jit_builder.symbol(
-        "stasis_jit_global_f64_array_ptr",
-        stasis_dynload::stasis_jit_global_f64_array_ptr as *const u8,
-    );
-    for (extern_symbol, address) in extern_symbol_addresses {
-        if *address == 0 {
-            continue;
-        }
-        jit_builder.symbol(extern_symbol, *address as *const u8);
-    }
+) -> Result<(JITModule, cranelift_module::FuncId, String, usize), String> {
     let runtime_helper_addresses = local_runtime_helper_trampolines.then(|| {
         let mut addresses = runtime_helper_addresses();
         addresses.extend(
@@ -2507,13 +2364,13 @@ fn compile_function_to_jit_module(
         });
     let clif = Rc::new(RefCell::new(String::new()));
     let clif_capture = Rc::clone(&clif);
-    let (module, code_ptr) = compile_function_with_module(
-        JITModule::new(jit_builder),
+    let (module, function_id, executable_bytes) = compile_function_with_module(
+        module,
         meta,
         hir,
         symbol,
         runtime_helper_linkage,
-        SharedCompileBackendMode::Jit,
+        SharedCompileBackendMode::JitDirect,
         call_signatures,
         type_table,
         global_path_types,
@@ -2528,23 +2385,82 @@ fn compile_function_to_jit_module(
         |mut module, function_id, mut context| {
             module
                 .define_function(function_id, &mut context)
-                .map_err(|error| format!("failed to define JIT function {symbol}: {error}"))?;
+                .map_err(|error| format!("failed to define JIT function {symbol}: {error:?}"))?;
+            let executable_bytes = context
+                .compiled_code()
+                .map(|code| code.code_buffer().len())
+                .unwrap_or(0);
             module.clear_context(&mut context);
-            module
-                .finalize_definitions()
-                .map_err(|error| format!("failed to finalize JIT definitions: {error}"))?;
-            let code_ptr = module.get_finalized_function(function_id) as usize as u64;
-            Ok((module, code_ptr))
+            Ok((module, function_id, executable_bytes))
         },
     )?;
     let clif = clif.borrow().clone();
-    Ok((module, code_ptr, clif))
+    Ok((module, function_id, clif, executable_bytes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::EngineEntrypoints;
+
+    #[test]
+    fn complete_generation_uses_direct_calls_and_hides_internal_pointers() {
+        let mut process = JitProcess::new();
+        let fixture_root = Path::new("direct_call_generation_fixture");
+        process.upsert_file(
+            fixture_root.join("main.stasis").to_string_lossy(),
+            include_str!("../../../../samples/direct_call_generation/main.stasis"),
+        );
+        process.upsert_file(
+            fixture_root.join("math.stasis").to_string_lossy(),
+            include_str!("../../../../samples/direct_call_generation/math.stasis"),
+        );
+
+        let report = process.compile().expect("complete generation compile");
+        assert_eq!(report.emit.emitted_functions, 9);
+        assert_eq!(process.artifacts().len(), 9);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute direct-call sample"),
+            17
+        );
+
+        let metadata = process
+            .generation_metadata()
+            .expect("complete generation metadata");
+        assert_eq!(metadata.module_count, 1);
+        assert_eq!(metadata.emitted_function_ids.len(), 9);
+        assert!(metadata.executable_bytes > 0);
+        for name in ["main", "tick", "render", "on_code_swap"] {
+            assert!(metadata.host_export_signatures.contains_key(name));
+        }
+
+        let host_exports = process.symbol_code_ptrs();
+        for name in ["main", "tick", "render", "on_code_swap"] {
+            assert!(host_exports.contains_key(name));
+        }
+        for internal in ["leaf", "shared", "mid", "even", "odd"] {
+            assert!(!host_exports.contains_key(internal));
+            let clif = process
+                .clif_for_function_name(internal)
+                .unwrap_or_else(|| panic!("missing CLIF for {internal}"));
+            assert!(
+                !clif.contains("stasis_jit_call_") && !clif.contains("stasis_jit_lookup_code_ptr"),
+                "internal dispatch leaked into {internal}:\n{clif}"
+            );
+        }
+        for caller in ["main", "tick", "mid", "shared", "even", "odd"] {
+            let clif = process
+                .clif_for_function_name(caller)
+                .unwrap_or_else(|| panic!("missing CLIF for {caller}"));
+            assert!(
+                clif.contains("call fn"),
+                "expected direct call in {caller}:\n{clif}"
+            );
+        }
+        assert!(process.clif_for_function_name("unreachable").is_none());
+    }
 
     #[test]
     fn jit_process_runs_full_compile_and_records_slots() {
@@ -4489,24 +4405,210 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
-    fn jit_process_incremental_compile_emits_only_changed_function() {
-        let mut process = JitProcess::new();
-        process.upsert_file(
-            "sample.stasis",
-            "function helper(): i32 { return 1; }\nfunction main(): i32 { return 2; }\n",
-        );
-        let first = process.compile().expect("first compile");
-        assert_eq!(first.emit.emitted_functions, 1);
-        assert_eq!(process.artifacts().len(), 1);
+    fn jit_process_rebuilds_complete_generation_for_reachable_edit_shapes() {
+        fn source(
+            leaf: &str,
+            shared: &str,
+            mid: &str,
+            tick: &str,
+            render: &str,
+            swap_delta: i32,
+            extra: &str,
+        ) -> String {
+            format!(
+                "global swap_count: i32;\nfunction leaf(): i32 {{ {leaf} }}\nfunction shared(): i32 {{ {shared} }}\nfunction mid(): i32 {{ {mid} }}\nfunction tick(): i32 {{ {tick} }}\nfunction render(): i32 {{ {render} }}\nfunction on_code_swap(): void {{ swap_count += {swap_delta}; return; }}\nfunction main(): i32 {{ return tick() + render(); }}\n{extra}\n"
+            )
+        }
 
-        process.upsert_file(
-            "sample.stasis",
-            "function helper(): i32 { return 3; }\nfunction main(): i32 { return 2; }\n",
-        );
-        let second = process.compile().expect("second compile");
-        assert_eq!(second.emit.emitted_functions, 0);
-        assert_eq!(process.artifacts().len(), 1);
+        let mut process = JitProcess::new();
+        let cases = [
+            (
+                "baseline",
+                source(
+                    "return 1;",
+                    "return leaf() + 1;",
+                    "return shared() + 1;",
+                    "return mid() + 10;",
+                    "return shared() + 20;",
+                    1,
+                    "",
+                ),
+                35,
+                7,
+            ),
+            (
+                "tick body",
+                source(
+                    "return 1;",
+                    "return leaf() + 1;",
+                    "return shared() + 1;",
+                    "return mid() + 11;",
+                    "return shared() + 20;",
+                    1,
+                    "",
+                ),
+                36,
+                7,
+            ),
+            (
+                "render body",
+                source(
+                    "return 1;",
+                    "return leaf() + 1;",
+                    "return shared() + 1;",
+                    "return mid() + 11;",
+                    "return shared() + 21;",
+                    1,
+                    "",
+                ),
+                37,
+                7,
+            ),
+            (
+                "on_code_swap body",
+                source(
+                    "return 1;",
+                    "return leaf() + 1;",
+                    "return shared() + 1;",
+                    "return mid() + 11;",
+                    "return shared() + 21;",
+                    3,
+                    "",
+                ),
+                37,
+                7,
+            ),
+            (
+                "leaf body",
+                source(
+                    "return 2;",
+                    "return leaf() + 1;",
+                    "return shared() + 1;",
+                    "return mid() + 11;",
+                    "return shared() + 21;",
+                    3,
+                    "",
+                ),
+                39,
+                7,
+            ),
+            (
+                "mid body",
+                source(
+                    "return 2;",
+                    "return leaf() + 1;",
+                    "return shared() + 2;",
+                    "return mid() + 11;",
+                    "return shared() + 21;",
+                    3,
+                    "",
+                ),
+                40,
+                7,
+            ),
+            (
+                "shared body",
+                source(
+                    "return 2;",
+                    "return leaf() + 2;",
+                    "return shared() + 2;",
+                    "return mid() + 11;",
+                    "return shared() + 21;",
+                    3,
+                    "",
+                ),
+                42,
+                7,
+            ),
+            (
+                "multiple bodies",
+                source(
+                    "return 2;",
+                    "return leaf() + 2;",
+                    "return shared() + 2;",
+                    "return mid() + 12;",
+                    "return shared() + 22;",
+                    3,
+                    "",
+                ),
+                44,
+                7,
+            ),
+            (
+                "added reachable function",
+                source(
+                    "return 2;",
+                    "return leaf() + 2;",
+                    "return shared() + added();",
+                    "return mid() + 12;",
+                    "return shared() + 22;",
+                    3,
+                    "function added(): i32 { return 4; }",
+                ),
+                46,
+                8,
+            ),
+            (
+                "deleted and renamed function",
+                source(
+                    "return 2;",
+                    "return leaf() + 2;",
+                    "return shared() + renamed();",
+                    "return mid() + 12;",
+                    "return shared() + 22;",
+                    3,
+                    "function renamed(): i32 { return 5; }",
+                ),
+                47,
+                8,
+            ),
+            (
+                "unreachable function",
+                source(
+                    "return 2;",
+                    "return leaf() + 2;",
+                    "return shared() + renamed();",
+                    "return mid() + 12;",
+                    "return shared() + 22;",
+                    3,
+                    "function renamed(): i32 { return 5; }\nfunction unreachable(): i32 { return missing(); }",
+                ),
+                47,
+                8,
+            ),
+        ];
+
+        let mut previous_revision = None;
+        for (label, source, expected, emitted) in cases {
+            process.upsert_file("sample.stasis", source);
+            let report = process
+                .compile()
+                .unwrap_or_else(|error| panic!("compile {label}: {error:?}"));
+            assert_eq!(report.emit.emitted_functions, emitted, "{label}");
+            assert_eq!(process.artifacts().len(), emitted, "{label}");
+            assert_eq!(
+                process
+                    .execute_i32_noarg_by_name("main")
+                    .unwrap_or_else(|error| panic!("execute {label}: {error}")),
+                expected,
+                "{label}"
+            );
+            let metadata = process
+                .generation_metadata()
+                .unwrap_or_else(|| panic!("metadata {label}"));
+            assert_eq!(metadata.module_count, 1, "{label}");
+            if let Some(previous) = previous_revision {
+                assert_ne!(metadata.source_revision, previous, "{label}");
+            }
+            previous_revision = Some(metadata.source_revision);
+        }
+
+        process
+            .execute_void_noarg_by_name("on_code_swap")
+            .expect("execute edited on_code_swap");
+        assert_eq!(process.read_i32_global_path("swap_count"), 3);
     }
 
     #[cfg(windows)]
@@ -5408,7 +5510,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_recompiles_shifted_function_ids_when_artifact_body_hash_mismatch() {
+    fn jit_process_rebuilds_complete_generation_when_function_ids_shift() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -5430,7 +5532,7 @@ mod tests {
         let second = process.compile().expect("second compile");
         assert_eq!(
             second.emit.emitted_functions, 2,
-            "f1 and main should be re-emitted after function-id shift"
+            "the full reachable generation should be emitted after a function-id shift"
         );
         assert_eq!(
             process
@@ -5444,8 +5546,15 @@ mod tests {
     #[test]
     fn jit_process_keeps_previous_artifacts_on_partial_emit_failure() {
         let mut process = JitProcess::new();
-        process.upsert_file("sample.stasis", "function main(): i32 { return 1; }\n");
+        process.upsert_file(
+            "sample.stasis",
+            "function stable_helper(): i32 { return 1; }\nfunction main(): i32 { return stable_helper(); }\n",
+        );
         process.compile().expect("initial compile");
+        let first_metadata = process
+            .generation_metadata()
+            .expect("initial generation metadata")
+            .clone();
         let first_main_ptr = process
             .symbol_code_ptrs()
             .get("main")
@@ -5460,7 +5569,7 @@ mod tests {
 
         process.upsert_file(
             "sample.stasis",
-            "function main(): i32 { return helper(); }\nfunction helper(): i32 { return missing(); }\n",
+            "function inserted(): i32 { return 9; }\nfunction stable_helper(): i32 { return 1; }\nfunction main(): i32 { return missing(); }\n",
         );
         let error = process.compile().expect_err("expected compile failure");
         match error {
@@ -5480,6 +5589,11 @@ mod tests {
             .expect("main ptr after failed compile");
         assert_eq!(second_main_ptr, first_main_ptr);
         assert_eq!(
+            process.generation_metadata(),
+            Some(&first_metadata),
+            "a failed staged generation must not publish metadata"
+        );
+        assert_eq!(
             process
                 .execute_i32_noarg_by_name("main")
                 .expect("execute preserved main"),
@@ -5488,14 +5602,46 @@ mod tests {
 
         process.upsert_file(
             "sample.stasis",
-            "function main(): i32 { return helper(); }\nfunction helper(): i32 { return 5; }\n",
+            "function inserted(): i32 { return 9; }\nfunction stable_helper(): i32 { return 5; }\nfunction main(): i32 { return stable_helper(); }\n",
         );
         process.compile().expect("recovery compile");
+        assert_ne!(
+            process.generation_metadata(),
+            Some(&first_metadata),
+            "the repaired source should publish a new complete generation"
+        );
         assert_eq!(
             process
                 .execute_i32_noarg_by_name("main")
                 .expect("execute recovered main"),
             5
+        );
+
+        let recovered_metadata = process
+            .generation_metadata()
+            .expect("recovered generation metadata")
+            .clone();
+        process.upsert_file(
+            "sample.stasis",
+            "function another_inserted(): i32 { return 10; }\nfunction stable_helper(): i32 { return 5; }\nfunction main(): i32 { let i: i32 = 0; while (i < 2) { i += 1; } return stable_helper(); }\n",
+        );
+        process.compile().expect_err("expected frontend failure");
+        let diagnostic = process
+            .last_source_diagnostic()
+            .expect("failed source diagnostic should survive active snapshot restore");
+        assert_eq!(diagnostic.path, "sample.stasis");
+        assert!(!diagnostic.message.is_empty());
+        assert!(diagnostic.end > diagnostic.start);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute generation preserved after frontend failure"),
+            5
+        );
+        assert_eq!(
+            process.generation_metadata(),
+            Some(&recovered_metadata),
+            "frontend failure must not publish a generation"
         );
     }
 

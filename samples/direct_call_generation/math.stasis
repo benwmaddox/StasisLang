@@ -1,0 +1,25 @@
+function leaf(value: i32): i32 {
+    return value + 1;
+}
+
+function shared(value: i32): i32 {
+    return leaf(value) * 2;
+}
+
+function mid(value: i32): i32 {
+    return shared(value) + leaf(value);
+}
+
+function even(value: i32): i32 {
+    if (value == 0) {
+        return 1;
+    }
+    return odd(value - 1);
+}
+
+function odd(value: i32): i32 {
+    if (value == 0) {
+        return 0;
+    }
+    return even(value - 1);
+}

@@ -2061,19 +2061,6 @@ fn write_mobile_aot_bindings_source(
     for line in direct_storage_register_lines {
         out.push_str(&format!("    {line}\n"));
     }
-    for function in functions {
-        let symbol = function
-            .get("symbol")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "mobile AOT function missing symbol".to_string())?;
-        let fn_id = symbol
-            .strip_prefix("aot_fn_")
-            .and_then(|value| value.parse::<i32>().ok())
-            .ok_or_else(|| format!("mobile AOT function has invalid symbol '{symbol}'"))?;
-        out.push_str(&format!(
-            "    stasis_jit_register_code_ptr({fn_id}, (int64_t)(uintptr_t)&{symbol});\n"
-        ));
-    }
     out.push_str("    stasis_jit_clear_string_literal_table();\n");
     for literal in literals {
         let id = literal
@@ -2807,7 +2794,7 @@ mod tests {
         assert!(bindings.contains("extern void aot_fn_0(void);"));
         assert!(bindings.contains("int32_t stasis_mobile_main_entry(void)"));
         assert!(bindings.contains("void stasis_aot_bind_runtime_globals(void)"));
-        assert!(bindings.contains("stasis_jit_register_code_ptr(0"));
+        assert!(!bindings.contains("stasis_jit_register_code_ptr"));
         assert!(bindings.contains("stasis_published_sprite_handle_for_path"));
         assert!(bindings.contains("{\"assets/ball.svg\","));
         assert!(header.contains("#define STASIS_AOT_BIND_RUNTIME_GLOBALS"));

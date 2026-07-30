@@ -228,12 +228,11 @@ fn timed_compile_jit(
             process.artifacts().len()
         ));
     }
-    if process
-        .artifacts()
-        .iter()
-        .any(|artifact| artifact.code_ptr == 0)
-    {
-        return Err("jit compile produced zero code pointer artifact".to_string());
+    let metadata = process
+        .generation_metadata()
+        .ok_or_else(|| "jit compile produced no generation metadata".to_string())?;
+    if metadata.module_count != 1 || metadata.executable_bytes == 0 {
+        return Err("jit compile produced an empty generation module".to_string());
     }
     Ok(elapsed)
 }
