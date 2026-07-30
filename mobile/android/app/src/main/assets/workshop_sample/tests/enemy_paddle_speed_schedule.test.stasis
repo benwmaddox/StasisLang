@@ -23,3 +23,27 @@ test `enemy paddle speed schedule is linear`(): bool {
     if (GameState.enemy_paddle_speed_x100 != 1500) { return false; }
     return GameState.ball_age_ticks == 0;
 }
+
+test `enemy paddle clamps at target`(): bool {
+    init();
+    GameState.ball_age_ticks = 0;
+    GameState.ai_y = 40;
+    GameState.ball_y = 45;
+    update_enemy_paddle();
+    if (GameState.ai_y != 45) { return false; }
+
+    GameState.ai_y = 50;
+    GameState.ball_y = 45;
+    update_enemy_paddle();
+    if (GameState.ai_y != 45) { return false; }
+
+    GameState.ai_y = 40;
+    GameState.ball_y = 70;
+    update_enemy_paddle();
+    if (GameState.ai_y != 55) { return false; }
+
+    GameState.ai_y = 70;
+    GameState.ball_y = 55;
+    update_enemy_paddle();
+    return GameState.ai_y == 55;
+}
