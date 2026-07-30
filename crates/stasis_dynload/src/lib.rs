@@ -3235,14 +3235,14 @@ pub extern "C" fn stasis_jit_sprite_load_from(
         return 0;
     }
     let loaded_handle = stasis_jit_gfx_load_sprite(path_id, width, height);
-    if loaded_handle <= 0 {
+    if loaded_handle == 0 {
         return 0;
     }
     let old_handle = struct_view_i32_load(base, index, "handle");
     struct_view_i32_store(base, index, len, "handle", loaded_handle);
     struct_view_i32_store(base, index, len, "width", width);
     struct_view_i32_store(base, index, len, "height", height);
-    if old_handle > 0 && old_handle != loaded_handle {
+    if old_handle != 0 && old_handle != loaded_handle {
         stasis_jit_gfx_release_sprite(old_handle);
     }
     1

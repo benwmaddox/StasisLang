@@ -12,4 +12,11 @@ public final class WorkshopTextureProviderTest {
         assertFalse(WorkshopTextureProvider.projectChanged("projects/one", "projects/one"));
         assertTrue(WorkshopTextureProvider.projectChanged("projects/one", "projects/two"));
     }
+
+    @Test
+    public void zeroSpriteHandleUsesFallbackWithoutRejectingStableSignedHandles() {
+        assertTrue(WorkshopTextureProvider.usesFallbackSprite(0));
+        assertFalse(WorkshopTextureProvider.usesFallbackSprite(17));
+        assertFalse(WorkshopTextureProvider.usesFallbackSprite(-17));
+    }
 }

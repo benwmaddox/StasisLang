@@ -856,6 +856,7 @@ impl JitProcess {
             )
         };
         let mut staged_functions = Vec::with_capacity(emit_function_ids.len());
+        let mut defined_runtime_helper_trampolines = BTreeSet::new();
         let codegen_started = Instant::now();
         let emit = self.compiler.emit_pass_for_ids_with(
             &emit_function_ids,
@@ -882,6 +883,7 @@ impl JitProcess {
                         &analysis.extern_symbol_addresses,
                         &direct_storage,
                         local_runtime_helper_trampolines,
+                        &mut defined_runtime_helper_trampolines,
                     )
                 }));
                 let (module, function_id, clif, executable_bytes) = match compiled {
@@ -2917,6 +2919,7 @@ fn compile_function_into_jit_module(
     extern_symbol_addresses: &ExternSymbolAddressMap,
     direct_storage: &DirectStorageBindings,
     local_runtime_helper_trampolines: bool,
+    defined_runtime_helper_trampolines: &mut BTreeSet<String>,
 ) -> Result<(JITModule, cranelift_module::FuncId, String, usize), String> {
     let runtime_helper_addresses = local_runtime_helper_trampolines.then(|| {
         let mut addresses = runtime_helper_addresses();
@@ -2948,6 +2951,7 @@ fn compile_function_into_jit_module(
         collection_infos,
         named_struct_field_types,
         Some(direct_storage),
+        Some(defined_runtime_helper_trampolines),
         |_| Ok(()),
         move |_, function| {
             *clif_capture.borrow_mut() = function.display().to_string();
@@ -3332,6 +3336,26 @@ mod tests {
             .expect("compile production preview externs");
         assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 1);
         assert!(crate::backend::emit::runtime_helper_trampoline_count_for_test() >= 5);
+    }
+
+    #[test]
+    fn local_runtime_defines_shared_helper_trampoline_once_per_module() {
+        crate::backend::emit::reset_runtime_helper_trampoline_count_for_test();
+        let mut process = JitProcess::new();
+        process.set_local_runtime_helper_trampolines(true);
+        process.upsert_file(
+            "sample.stasis",
+            "extern function time(): i32;\nfunction helper(): i32 { return time(); }\nfunction main(): i32 { return time() + helper(); }\n",
+        );
+
+        let report = process.compile().expect("compile shared runtime helper");
+
+        assert_eq!(report.emit.emitted_functions, 2);
+        process.execute_i32_noarg_by_name("main").unwrap();
+        assert_eq!(
+            crate::backend::emit::runtime_helper_trampoline_count_for_test(),
+            1
+        );
     }
 
     #[test]

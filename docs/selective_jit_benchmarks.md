@@ -111,15 +111,29 @@ preserving the exact set.
 
 Windows runs the real project numbers above. Linux runs the strongest portable 1,000-function
 selective-emission gate in Perf CI. macOS JIT remains supported only where hardened-process policy
-permits executable memory, as specified by the contract. The host-side Android Workshop bridge
-regression stages and activates a real `JitProcess` candidate, asserts emitted `{helper, tick}` and
-reused `{main, untouched}`, verifies the single affected `tick` host entry, and executes the new
-tick behavior. This verifies the shared Workshop code path but is not Android arm64 device evidence.
-No Android device was attached on 2026-07-30 (`adb devices -l` returned an empty list), so the named
-physical arm64 Workshop JIT and published full-AOT acceptance cell remains unverified. Production
-AOT tests compile coherent full builds; Windows CI with a linker executes both revisions and compares
-their results to selective JIT. AOT is intentionally not selective. The local Windows host lacked a
-linker, so that executable parity test compiled but reported its explicit linker skip locally.
+permits executable memory, as specified by the contract. Android Workshop deliberately uses a
+different development policy: each accepted edit compiles a complete reachable JIT generation and
+switches the generation atomically. This avoids stale embedded addresses while keeping ordinary
+calls direct. The desktop development runner remains selectively incremental, and publish remains
+a coherent full AOT build.
+
+Physical arm64 acceptance ran on a Samsung SM-G991U1 (Android 15/API 35). A warm changed-function
+Workshop edit compiled all 17 reachable Pong functions in 270.362 ms; the first frame from the new
+generation appeared 75 ms after compilation completed (357 ms from source delivery to drawable
+frame). The same optimized sprite-only frame measured 0.09 ms average tick plus 0.62 ms average
+render in Workshop JIT, versus 0.09 ms plus 0.64 ms in the published AOT package. The 0.71 ms JIT
+total is within measurement noise of, and 2.7% below, the 0.73 ms AOT total. Separate visual
+acceptance rendered dynamic font text together with three decoded sprite resources, while the fair
+runtime comparison used the identical sprite-only Pong source in both packages.
+
+Workshop and published lifecycle acceptance both passed cold launch, portrait/landscape surface
+recreation, and process restart with four resource-restoration markers. The published path executes
+against its generated AOT host and command buffers directly; a regression that instead registered
+parallel shell-owned buffers had produced `native preview frame failed` and was fixed before these
+measurements. Production AOT tests compile coherent full builds; Windows CI with a linker executes
+both revisions and compares their results to selective JIT. AOT is intentionally not selective. The
+local Windows host lacked a linker, so that executable parity test compiled but reported its explicit
+linker skip locally.
 
 The engine hot-update benchmark measures first new tick/render and total edit-to-visible latency
 because real games cannot safely execute arbitrary benchmark edits without their normal host

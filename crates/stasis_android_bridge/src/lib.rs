@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use stasis_assets::{AssetFormat, AssetHandle, AssetLimits, ResolvedAssetManifest};
 use stasis_compiler::backend::jit::JitProcess;
@@ -145,6 +146,7 @@ struct AndroidRuntimeSession {
     jit: JitProcess,
     initialized: bool,
     pending_candidate: Option<JitProcess>,
+    pending_source_fingerprint: Option<u64>,
     pending_resource_catalog: Option<EmbeddedResourceCatalog>,
     tick_count: i32,
     previous_input: Option<AndroidBridgeTickInput>,
@@ -167,6 +169,7 @@ pub struct AndroidBridgeCompileResult {
     pub manifest_path: PathBuf,
     pub runtime_state_path: PathBuf,
     pub function_artifact_count: usize,
+    pub compile_micros: u64,
 }
 
 pub fn load_android_workshop_asset_manifest(
@@ -493,10 +496,12 @@ pub fn compile_android_workshop_project(
     project_root: impl AsRef<Path>,
     entry_file: impl AsRef<Path>,
 ) -> Result<AndroidBridgeCompileResult, String> {
+    let started = Instant::now();
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
-    discard_pending_runtime_candidate(project_root);
     let files = load_workshop_project(project_root, entry_file)?;
+    let source_fingerprint = fingerprint_workshop_sources(&files);
+    discard_pending_runtime_candidate_if_different(project_root, source_fingerprint);
     let changed_files = files
         .iter()
         .map(|file| project_root.join(&file.path))
@@ -519,7 +524,7 @@ pub fn compile_android_workshop_project(
     // report detector errors for programs the real JIT has compiled successfully. The
     // executable pipeline above is authoritative for Workshop; retain the artifact
     // manifest for tooling, but derive its success/reload state from the source set.
-    let executable_project_hash = fingerprint_workshop_sources(&files) as i32;
+    let executable_project_hash = source_fingerprint as i32;
     let previous_hashes = previous
         .as_ref()
         .map(|previous| (previous.project_hash, previous.layout_hash));
@@ -598,7 +603,7 @@ pub fn compile_android_workshop_project(
         })?;
     }
 
-    warm_or_reload_runtime_session(project_root, &files, fingerprint_workshop_sources(&files))?;
+    warm_or_reload_runtime_session(project_root, &files, source_fingerprint)?;
 
     Ok(AndroidBridgeCompileResult {
         status: plan.status,
@@ -606,6 +611,7 @@ pub fn compile_android_workshop_project(
         manifest_path,
         runtime_state_path,
         function_artifact_count: artifacts.function_artifacts.len(),
+        compile_micros: started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
     })
 }
 
@@ -1276,6 +1282,7 @@ fn build_runtime_session(
         jit,
         initialized: false,
         pending_candidate: None,
+        pending_source_fingerprint: None,
         pending_resource_catalog: None,
         tick_count: 0,
         previous_input: None,
@@ -1295,9 +1302,19 @@ fn warm_or_reload_runtime_session(
     RUNTIME_SESSION.with(|session_cell| {
         let mut session_slot = session_cell.borrow_mut();
         match session_slot.as_mut() {
-            Some(session) if session.project_root == project_root => {
+            Some(session)
+                if session.project_root == project_root
+                    && session.pending_source_fingerprint == Some(source_fingerprint) =>
+            {
+                // A duplicate watcher notification must retain the already staged generation.
+            }
+            Some(session)
+                if session.project_root == project_root
+                    && session.source_fingerprint != source_fingerprint =>
+            {
                 recompile_runtime_session(session, project_root, files, source_fingerprint)?;
             }
+            Some(session) if session.project_root == project_root => {}
             _ => {
                 *session_slot = Some(build_runtime_session(
                     project_root,
@@ -1317,8 +1334,12 @@ fn recompile_runtime_session(
     source_fingerprint: u64,
 ) -> Result<(), String> {
     session.pending_candidate = None;
+    session.pending_source_fingerprint = None;
     session.pending_resource_catalog = None;
-    let mut candidate = session.jit.staged_candidate();
+    // Android arm64 loads a complete development generation so state can migrate and
+    // host entries can switch atomically without cross-generation code dependencies.
+    let mut candidate = JitProcess::new();
+    candidate.set_local_runtime_helper_trampolines(true);
     configure_runtime_jit(&mut candidate, project_root, files);
     if let Err(error) = candidate.compile_staged() {
         return Err(candidate
@@ -1329,8 +1350,8 @@ fn recompile_runtime_session(
     candidate.validate_on_code_swap_signature()?;
     let resource_catalog = prepare_embedded_resource_catalog(project_root, true)?;
     session.pending_candidate = Some(candidate);
+    session.pending_source_fingerprint = Some(source_fingerprint);
     session.pending_resource_catalog = Some(resource_catalog);
-    session.source_fingerprint = source_fingerprint;
     Ok(())
 }
 
@@ -1338,6 +1359,10 @@ fn activate_pending_runtime_candidate(session: &mut AndroidRuntimeSession) -> Re
     let Some(candidate) = session.pending_candidate.take() else {
         return Ok(false);
     };
+    let pending_source_fingerprint = session
+        .pending_source_fingerprint
+        .take()
+        .ok_or_else(|| "pending Android generation has no source fingerprint".to_string())?;
     let pending_catalog = session.pending_resource_catalog.take();
     let mut preview = plan_state_migration(
         &session.jit.state_layout(),
@@ -1383,17 +1408,19 @@ fn activate_pending_runtime_candidate(session: &mut AndroidRuntimeSession) -> Re
         return Err(error);
     }
     session.jit = candidate;
+    session.source_fingerprint = pending_source_fingerprint;
     Ok(true)
 }
 
-fn discard_pending_runtime_candidate(project_root: &Path) {
+fn discard_pending_runtime_candidate_if_different(project_root: &Path, source_fingerprint: u64) {
     RUNTIME_SESSION.with(|session_cell| {
         let mut session_slot = session_cell.borrow_mut();
-        if let Some(session) = session_slot
-            .as_mut()
-            .filter(|session| session.project_root == project_root)
-        {
+        if let Some(session) = session_slot.as_mut().filter(|session| {
+            session.project_root == project_root
+                && session.pending_source_fingerprint != Some(source_fingerprint)
+        }) {
             session.pending_candidate = None;
+            session.pending_source_fingerprint = None;
             session.pending_resource_catalog = None;
         }
     });
@@ -1643,10 +1670,11 @@ pub extern "C" fn stasis_android_bridge_compile_project(
     }));
     let message = match result {
         Ok(Ok(result)) => format!(
-            "CompilePlanned: reload={:?} status={} functions={} manifest={}",
+            "CompilePlanned: reload={:?} status={} functions={} compile_us={} manifest={}",
             result.reload,
             result.status,
             result.function_artifact_count,
+            result.compile_micros,
             result.manifest_path.display()
         ),
         Ok(Err(error)) => format!("CompileError: {error}"),
@@ -2510,6 +2538,47 @@ mod tests {
         assert_eq!(resolved["height"], 32);
     }
 
+    #[test]
+    fn android_jit_preserves_negative_stable_sprite_handles() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("negative_sprite_handle");
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        let sprite = include_bytes!(
+            "../../../mobile/android/app/src/main/assets/workshop_sample/assets/ball.svg"
+        );
+        fs::write(root.join("assets/ball.svg"), sprite).expect("write sprite");
+        let hash = stasis_assets::sha256_bytes(sprite);
+        fs::write(
+            root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
+            format!(r#"{{"schema":"stasis-assets","version":1,"assets":[{{"id":"ball","path":"assets/ball.svg","content_sha256":"{hash}","format":{{"kind":"sprite","encoding":"svg","width":32,"height":32}},"dependencies":[]}}]}}"#),
+        )
+        .expect("write manifest");
+        let manifest = load_android_workshop_asset_manifest(&root).expect("load manifest");
+        let handle = manifest.by_id("ball").expect("ball entry").handle.as_i32();
+        assert!(handle < 0, "fixture must exercise a negative stable handle");
+        fs::write(
+            root.join("src/main.stasis"),
+            "@link(\"stasis_graphics\");\nstruct Sprite { handle: i32; width: i32; height: i32; }\nglobal TestHost { sprite: Sprite; }\nfunction @extern(\"stasis_jit_sprite_load_from\") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;\nfunction main(): void { load_sprite_from(TestHost.sprite, \"assets/ball.svg\", 32, 32); }\nfunction tick(): void {}\n",
+        )
+        .expect("write source");
+
+        run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+            .expect("load negative-handle sprite");
+
+        assert_eq!(
+            get_android_workshop_i32_global(
+                &root,
+                Path::new("src/main.stasis"),
+                "TestHost.sprite.handle",
+            )
+            .expect("read sprite handle"),
+            handle
+        );
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
     fn temp_project(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2648,6 +2717,91 @@ mod tests {
             .expect("read preserved runtime state");
         assert!(state.contains("tick_count=41"));
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn android_reload_stages_a_complete_fresh_generation() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("full_generation_reload");
+        let source = root.join("src/main.stasis");
+        fs::write(
+            &source,
+            "global GameState { score: i32; }\nfunction helper(): i32 { return 1; }\nfunction main(): void { GameState.score = helper(); }\nfunction tick(): void { GameState.score += helper(); }\n",
+        )
+        .expect("write active source");
+        run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+            .expect("initialize active generation");
+
+        fs::write(
+            &source,
+            "global GameState { score: i32; }\nfunction helper(): i32 { return 2; }\nfunction main(): void { GameState.score = helper(); }\nfunction tick(): void { GameState.score += helper(); }\n",
+        )
+        .expect("write changed source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("stage complete generation");
+
+        RUNTIME_SESSION.with(|session| {
+            let session = session.borrow();
+            let candidate = session
+                .as_ref()
+                .and_then(|session| session.pending_candidate.as_ref())
+                .expect("pending generation");
+            let metadata = candidate
+                .generation_metadata()
+                .expect("generation metadata");
+            assert_eq!(metadata.emitted_function_ids.len(), 3);
+            assert!(metadata.reused_function_ids.is_empty());
+            assert_eq!(metadata.module_count, 1);
+        });
+
+        let activated =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect("activate complete generation");
+        assert!(activated.recompiled);
+        assert_eq!(
+            get_android_workshop_i32_global(&root, Path::new("src/main.stasis"), "GameState.score")
+                .expect("read migrated state"),
+            4
+        );
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn android_no_change_compile_keeps_active_generation_without_staging() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("no_change_generation");
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): i32 { return 1; }\nfunction tick(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("initial compile");
+        let active_pointers = RUNTIME_SESSION.with(|session| {
+            session
+                .borrow()
+                .as_ref()
+                .expect("active session")
+                .jit
+                .symbol_code_ptrs()
+        });
+
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("no-change compile");
+
+        RUNTIME_SESSION.with(|session| {
+            let session = session.borrow();
+            let session = session.as_ref().expect("active session");
+            assert!(session.pending_candidate.is_none());
+            assert_eq!(session.jit.symbol_code_ptrs(), active_pointers);
+        });
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
     }
 
     #[test]
@@ -2810,7 +2964,7 @@ mod tests {
         let source = root.join("src/main.stasis");
         fs::write(
             &source,
-            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 1; }\n",
+            "global GameState { tick_count: i32; }\nfunction main(): void { print_string(\"live\"); GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 1; }\n",
         )
         .expect("write first source");
 
@@ -2821,16 +2975,41 @@ mod tests {
 
         fs::write(
             &source,
-            "extern function reject_code_swap(): void;\nglobal GameState { tick_count: i32; added: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 2; }\nfunction on_code_swap(): void { GameState.tick_count = 99; reject_code_swap(); return; }\n",
+            "extern function reject_code_swap(): void;\nglobal GameState { tick_count: i32; added: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 2; }\nfunction on_code_swap(): void { print_string(\"candidate\"); GameState.tick_count = 99; reject_code_swap(); return; }\n",
         )
         .expect("write rejecting hot reload source");
         compile_android_workshop_project(&root, Path::new("src/main.stasis"))
             .expect("stage rejecting hot reload source");
+        let live_literal = hash_global_path("live");
+        let candidate_literal = hash_global_path("candidate");
+        assert_eq!(
+            stasis_dynload::jit_string_literal_value(live_literal).as_deref(),
+            Some("live")
+        );
+        assert_eq!(
+            stasis_dynload::jit_string_literal_value(candidate_literal),
+            None
+        );
 
         let error =
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
                 .expect_err("hook rejection should abort hot reload");
         assert!(error.contains("hook requested rejection"));
+        assert_eq!(
+            stasis_dynload::jit_string_literal_value(live_literal).as_deref(),
+            Some("live")
+        );
+        assert_eq!(
+            stasis_dynload::jit_string_literal_value(candidate_literal),
+            None
+        );
+
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("retry identical rejected source");
+        let retry_error =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .expect_err("retried hook rejection should run again");
+        assert!(retry_error.contains("hook requested rejection"));
 
         let resumed =
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
@@ -2872,6 +3051,7 @@ mod tests {
             jit: active,
             initialized: true,
             pending_candidate: Some(candidate),
+            pending_source_fingerprint: Some(2),
             pending_resource_catalog: None,
             tick_count: 0,
             previous_input: None,
@@ -2890,7 +3070,7 @@ mod tests {
     }
 
     #[test]
-    fn workshop_warm_reload_emits_only_changed_helper_and_direct_caller() {
+    fn workshop_reload_emits_complete_reachable_android_generation() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("selective_warm_reload");
@@ -2904,17 +3084,19 @@ mod tests {
         assert_eq!(baseline.observed_game_tick_count, 41);
 
         fs::write(&source, before.replace("return 1", "return 2")).expect("write helper edit");
-        compile_android_workshop_project(&root, entry).expect("stage selective patch");
+        compile_android_workshop_project(&root, entry).expect("stage complete generation");
+        compile_android_workshop_project(&root, entry)
+            .expect("duplicate notification keeps complete generation staged");
 
         RUNTIME_SESSION.with(|session_cell| {
             let session_slot = session_cell.borrow();
             let candidate = session_slot
                 .as_ref()
                 .and_then(|session| session.pending_candidate.as_ref())
-                .expect("pending selective candidate");
+                .expect("pending complete candidate");
             let metadata = candidate
                 .generation_metadata()
-                .expect("selective candidate metadata");
+                .expect("complete candidate metadata");
             let name_for_id = |id| {
                 candidate
                     .artifacts()
@@ -2933,19 +3115,14 @@ mod tests {
                 .iter()
                 .map(|id| name_for_id(*id))
                 .collect();
-            assert_eq!(emitted, BTreeSet::from(["helper", "tick"]));
-            assert_eq!(reused, BTreeSet::from(["main", "untouched"]));
             assert_eq!(
-                metadata
-                    .affected_host_entries
-                    .iter()
-                    .map(|key| key.name.as_str())
-                    .collect::<BTreeSet<_>>(),
-                BTreeSet::from(["tick"])
+                emitted,
+                BTreeSet::from(["helper", "main", "tick", "untouched"])
             );
+            assert!(reused.is_empty());
         });
         let activated = run_android_workshop_tick(&root, entry, default_tick_input())
-            .expect("activate and execute selective patch");
+            .expect("activate and execute complete generation");
         assert!(activated.recompiled);
         assert_eq!(activated.observed_game_tick_count, 43);
 

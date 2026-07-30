@@ -91,6 +91,7 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
 
     @Override
     public int textureFor(int handle) {
+        if (usesFallbackSprite(handle)) return fallbackTexture();
         SpriteTexture cached = textures.get(handle);
         if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)) {
             return cached.texture;
@@ -122,6 +123,10 @@ final class PublishedSpriteCatalog implements StasisPreviewRenderer.TextureProvi
                     sprite == null ? 0 : sprite.height, error);
             return fallbackTexture();
         }
+    }
+
+    static boolean usesFallbackSprite(int handle) {
+        return handle == 0;
     }
 
     @Override

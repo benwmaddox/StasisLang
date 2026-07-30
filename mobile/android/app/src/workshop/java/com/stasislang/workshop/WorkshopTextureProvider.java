@@ -139,6 +139,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
 
     @Override
     public int textureFor(int handle) {
+        if (usesFallbackSprite(handle)) return fallbackTexture();
         SpriteTexture cached = textures.get(handle);
         if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)
                 && cached.checkedManifestStamp == manifestStamp) {
@@ -200,6 +201,10 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             }
             return fallbackTexture();
         }
+    }
+
+    static boolean usesFallbackSprite(int handle) {
+        return handle == 0;
     }
 
     @Override
