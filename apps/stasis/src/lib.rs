@@ -26,6 +26,9 @@ use live_workspace::LiveWorkspace;
 use runtime_exec::RuntimeLauncher;
 use serde::Deserialize;
 use serde_json::Value;
+use stasis_assets::{
+    load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
+};
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::state_migration::{
     activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
@@ -1370,6 +1373,47 @@ fn resolve_play_watch_dir(watch_file: &Path, watch_dir: Option<&Path>) -> PathBu
     PathBuf::from(".")
 }
 
+fn prepare_play_asset_working_dir(watch_dir: &Path) -> Result<PathBuf, String> {
+    let Some(project_root) = watch_dir
+        .ancestors()
+        .find(|ancestor| ancestor.join(DEFAULT_ASSET_MANIFEST_PATH).is_file())
+    else {
+        return Ok(watch_dir.to_path_buf());
+    };
+    let relative_watch_dir = watch_dir.strip_prefix(project_root).map_err(|error| {
+        format!(
+            "failed to map play directory {} into asset project {}: {error}",
+            watch_dir.display(),
+            project_root.display()
+        )
+    })?;
+    let prepared_root = project_root.join(".stasis_cache/play-assets");
+    if prepared_root.exists() {
+        fs::remove_dir_all(&prepared_root).map_err(|error| {
+            format!(
+                "failed to clear prepared play assets {}: {error}",
+                prepared_root.display()
+            )
+        })?;
+    }
+    let resolved = load_project_asset_manifest(project_root, AssetLimits::default())
+        .map_err(|error| format!("failed to resolve play assets: {error}"))?;
+    prepare_asset_bundle(
+        &resolved,
+        &prepared_root,
+        project_root.join(".stasis_cache/assets"),
+    )
+    .map_err(|error| format!("failed to prepare play assets: {error}"))?;
+    let prepared_watch_dir = prepared_root.join(relative_watch_dir);
+    fs::create_dir_all(&prepared_watch_dir).map_err(|error| {
+        format!(
+            "failed to create prepared play directory {}: {error}",
+            prepared_watch_dir.display()
+        )
+    })?;
+    Ok(prepared_watch_dir)
+}
+
 const PLAY_INPUT_MAX_FRAMES: usize = 10_000;
 const PLAY_INPUT_MAX_POINTERS: usize = 8;
 const PLAY_INPUT_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -1829,10 +1873,11 @@ fn run_play_in_process_inner(
         .unwrap_or_else(|_| watch_file.to_path_buf());
     let root_path_str = root_path.to_string_lossy().to_string();
 
-    std::env::set_current_dir(&watch_dir_abs).map_err(|error| {
+    let asset_working_dir = prepare_play_asset_working_dir(&watch_dir_abs)?;
+    std::env::set_current_dir(&asset_working_dir).map_err(|error| {
         format!(
             "failed to set current directory to {}: {error}",
-            watch_dir_abs.display()
+            asset_working_dir.display()
         )
     })?;
 
@@ -5580,6 +5625,47 @@ mod tests {
             Some(Path::new("override")),
         );
         assert_eq!(resolved, PathBuf::from("override"));
+    }
+
+    #[test]
+    fn play_prepares_manifest_assets_in_a_source_relative_cache_mirror() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_play_assets_{stamp}"));
+        let source_dir = root.join("src");
+        let asset_dir = root.join("assets/fonts");
+        fs::create_dir_all(&source_dir).expect("create source directory");
+        fs::create_dir_all(&asset_dir).expect("create asset directory");
+        let font = b"font fixture";
+        fs::write(asset_dir.join("ui.ttf"), font).expect("write font");
+        let manifest = serde_json::json!({
+            "schema": "stasis-assets",
+            "version": 2,
+            "assets": [{
+                "id": "ui",
+                "path": "assets/fonts/ui.ttf",
+                "content_sha256": stasis_assets::sha256_bytes(font),
+                "format": { "kind": "font", "encoding": "ttf" },
+                "dependencies": []
+            }]
+        });
+        fs::write(
+            root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            serde_json::to_vec_pretty(&manifest).expect("encode manifest"),
+        )
+        .expect("write manifest");
+
+        let working_dir = prepare_play_asset_working_dir(&source_dir).expect("prepare play assets");
+
+        assert_eq!(working_dir, root.join(".stasis_cache/play-assets/src"));
+        assert_eq!(
+            fs::read(working_dir.join("../assets/fonts/ui.ttf")).expect("read prepared font"),
+            font
+        );
+        assert!(root.join(".stasis_cache/assets").is_dir());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

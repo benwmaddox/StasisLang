@@ -58,6 +58,10 @@ preparation metadata is not valid for fonts.
 
 Preparation writes only beneath the build output; project masters and the source manifest are never changed. The packaged manifest records the prepared dimensions and content hash. A resized entry also records `prepared_from_sha256`, which is the master hash. Preparation cache identity includes the master hash, algorithm version, and output dimensions, so unchanged assets can be reused deterministically.
 
+`stasis play` prepares the same bundle beneath `.stasis_cache/play-assets` before guest startup and mirrors the source directory's position relative to the project root. Existing source-relative paths such as `../assets/images/hero.png` therefore resolve to prepared output without source rewriting. Resized cache hits do not decode the master again. Both development and release `stasis build` commands stage the same prepared bundle beside their build output.
+
+Once a project has an asset manifest, every runtime-loaded asset must be declared. Source-only provenance files may remain elsewhere in the project, but undeclared files are not copied into prepared play or build output.
+
 The package contains only the selected display envelope's output, not multiple resolution variants. A future target-profile extension can select different display envelopes without changing the per-sprite sizing contract.
 
 ## Identity and validation
