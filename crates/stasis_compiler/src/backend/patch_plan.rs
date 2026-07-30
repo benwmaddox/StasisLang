@@ -13,6 +13,21 @@ pub struct FunctionKey {
 }
 
 impl FunctionKey {
+    pub fn new(source_path: &str, name: impl Into<String>, signature_hash: u64) -> Self {
+        let mut source_path = source_path.replace('\\', "/");
+        if let Some(stripped) = source_path.strip_prefix("//?/") {
+            source_path = stripped.to_string();
+        }
+        if cfg!(windows) {
+            source_path.make_ascii_lowercase();
+        }
+        Self {
+            source_path,
+            name: name.into(),
+            signature_hash,
+        }
+    }
+
     pub fn display_name(&self) -> String {
         format!(
             "{}::{}#{:016x}",
@@ -307,11 +322,7 @@ impl CurrentGraph {
             })?;
             key_by_id.insert(
                 function.id,
-                FunctionKey {
-                    source_path: file.path.clone(),
-                    name: function.name.clone(),
-                    signature_hash: function.signature_hash,
-                },
+                FunctionKey::new(&file.path, function.name.clone(), function.signature_hash),
             );
         }
         let reachable_ids = compute_reachable_function_ids(functions, required_roots);

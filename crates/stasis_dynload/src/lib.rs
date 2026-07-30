@@ -19,6 +19,120 @@ pub struct Library {
     handle: *mut c_void,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitHostEntryTargets {
+    pub revision: u64,
+    pub main: usize,
+    pub tick: usize,
+    pub render: usize,
+    pub on_code_swap: Option<usize>,
+}
+
+static JIT_HOST_ENTRY_TARGETS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn publish_jit_host_entry_targets(targets: JitHostEntryTargets) -> Result<(), String> {
+    validate_jit_host_entry_targets(&targets)?;
+    if let Some(active) = jit_host_entry_targets() {
+        if targets.revision <= active.revision {
+            return Err(format!(
+                "stale JIT host-entry revision {} cannot replace active revision {}",
+                targets.revision, active.revision
+            ));
+        }
+    }
+    install_jit_host_entry_targets(targets);
+    Ok(())
+}
+
+pub fn begin_jit_host_entry_session(targets: JitHostEntryTargets) -> Result<(), String> {
+    validate_jit_host_entry_targets(&targets)?;
+    install_jit_host_entry_targets(targets);
+    Ok(())
+}
+
+fn install_jit_host_entry_targets(targets: JitHostEntryTargets) {
+    let published = Box::into_raw(Box::new(targets)) as usize;
+    JIT_HOST_ENTRY_TARGETS.store(published, Ordering::Release);
+}
+
+pub fn validate_jit_host_entry_targets(targets: &JitHostEntryTargets) -> Result<(), String> {
+    if targets.main == 0 || targets.tick == 0 || targets.render == 0 {
+        return Err(
+            "JIT host-entry publication requires non-zero main, tick, and render targets"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+pub fn jit_host_entry_targets() -> Option<JitHostEntryTargets> {
+    let published = JIT_HOST_ENTRY_TARGETS.load(Ordering::Acquire);
+    if published == 0 {
+        return None;
+    }
+    Some(unsafe { *(published as *const JitHostEntryTargets) })
+}
+
+pub fn jit_host_main_trampoline_ptr() -> usize {
+    stasis_jit_host_main_trampoline as usize
+}
+
+pub fn jit_host_tick_trampoline_ptr() -> usize {
+    stasis_jit_host_tick_trampoline as usize
+}
+
+pub fn jit_host_render_trampoline_ptr() -> usize {
+    stasis_jit_host_render_trampoline as usize
+}
+
+pub fn jit_host_on_code_swap_trampoline_ptr() -> usize {
+    stasis_jit_host_on_code_swap_trampoline as usize
+}
+
+fn active_jit_host_target(select: impl FnOnce(JitHostEntryTargets) -> Option<usize>) -> usize {
+    jit_host_entry_targets().and_then(select).unwrap_or(0)
+}
+
+extern "C" fn stasis_jit_host_main_trampoline() -> i32 {
+    call_jit_host_i32_target(active_jit_host_target(|targets| Some(targets.main)))
+}
+
+extern "C" fn stasis_jit_host_tick_trampoline() -> i32 {
+    call_jit_host_i32_target(active_jit_host_target(|targets| Some(targets.tick)))
+}
+
+extern "C" fn stasis_jit_host_render_trampoline() -> i32 {
+    call_jit_host_i32_target(active_jit_host_target(|targets| Some(targets.render)))
+}
+
+extern "C" fn stasis_jit_host_on_code_swap_trampoline() {
+    if let Some(target) = jit_host_entry_targets().and_then(|targets| targets.on_code_swap) {
+        call_jit_host_void_target(target);
+    }
+}
+
+fn call_jit_host_i32_target(address: usize) -> i32 {
+    if address == 0 {
+        return -1;
+    }
+    #[cfg(windows)]
+    let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    callback()
+}
+
+fn call_jit_host_void_target(address: usize) {
+    if address == 0 {
+        return;
+    }
+    #[cfg(windows)]
+    let callback: extern "system" fn() = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn() = unsafe { std::mem::transmute(address) };
+    callback();
+}
+
 // Library handles are process-wide OS resources and can be moved between threads.
 unsafe impl Send for Library {}
 // Loading a module and calling exports is thread-safe on Windows; the handle is immutable after load.
@@ -4206,5 +4320,54 @@ mod tests {
         stasis_jit_global_i32_array_store(shared_id, 0, 5, i32::from(b'r'));
 
         assert_eq!(jit_text_arg_bytes(shared_id), Some(b"buffer".to_vec()));
+    }
+
+    extern "C" fn host_entry_one() -> i32 {
+        1
+    }
+
+    extern "C" fn host_entry_two() -> i32 {
+        2
+    }
+
+    #[test]
+    fn host_entry_trampolines_publish_one_immutable_target_table() {
+        let _lock = test_lock();
+        let tick_trampoline = jit_host_tick_trampoline_ptr();
+        let render_trampoline = jit_host_render_trampoline_ptr();
+        begin_jit_host_entry_session(JitHostEntryTargets {
+            revision: 41,
+            main: host_entry_one as usize,
+            tick: host_entry_one as usize,
+            render: host_entry_one as usize,
+            on_code_swap: None,
+        })
+        .expect("publish first host-entry table");
+        assert_eq!(invoke_noarg_i32(tick_trampoline), Ok(1));
+        assert_eq!(invoke_noarg_i32(render_trampoline), Ok(1));
+
+        publish_jit_host_entry_targets(JitHostEntryTargets {
+            revision: 42,
+            main: host_entry_two as usize,
+            tick: host_entry_two as usize,
+            render: host_entry_two as usize,
+            on_code_swap: None,
+        })
+        .expect("publish second host-entry table");
+        assert_eq!(jit_host_tick_trampoline_ptr(), tick_trampoline);
+        assert_eq!(jit_host_render_trampoline_ptr(), render_trampoline);
+        assert_eq!(invoke_noarg_i32(tick_trampoline), Ok(2));
+        assert_eq!(invoke_noarg_i32(render_trampoline), Ok(2));
+        assert_eq!(jit_host_entry_targets().unwrap().revision, 42);
+        assert!(publish_jit_host_entry_targets(JitHostEntryTargets {
+            revision: 41,
+            main: host_entry_one as usize,
+            tick: host_entry_one as usize,
+            render: host_entry_one as usize,
+            on_code_swap: None,
+        })
+        .expect_err("stale publication")
+        .contains("stale JIT host-entry revision"));
+        assert_eq!(invoke_noarg_i32(tick_trampoline), Ok(2));
     }
 }

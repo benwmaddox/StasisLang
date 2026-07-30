@@ -174,6 +174,7 @@ pub(crate) struct LiveWorkspace {
     completion_preparation: Option<CompletionPreparation>,
     dropped_watch_events: u64,
     validation_snapshot: Option<stasis_dynload::JitRuntimeStateSnapshot>,
+    host_entry_revision: u64,
 }
 
 impl Drop for LiveWorkspace {
@@ -221,6 +222,8 @@ impl LiveWorkspace {
             completion_preparation: None,
             dropped_watch_events: 0,
             validation_snapshot: None,
+            host_entry_revision: stasis_dynload::jit_host_entry_targets()
+                .map_or(0, |targets| targets.revision),
         };
         workspace.refresh_completion(jit)?;
         Ok(workspace)
@@ -963,14 +966,21 @@ impl LiveWorkspace {
         validate_edit_input_size(&input)?;
         let config = self.config.clone();
         let active_layout = active.state_layout();
+        let candidate = active.staged_candidate();
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_canceled = Arc::clone(&canceled);
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
             .name(format!("stasis-live-edit-{request_id}"))
             .spawn(move || {
-                let result =
-                    prepare_edit(request_id, &config, input, &active_layout, &worker_canceled);
+                let result = prepare_edit(
+                    request_id,
+                    &config,
+                    input,
+                    &active_layout,
+                    candidate,
+                    &worker_canceled,
+                );
                 let _ = sender.send(result);
             })
             .map_err(|error| format!("failed starting live edit preparation: {error}"))?;
@@ -1133,6 +1143,11 @@ impl LiveWorkspace {
         render_code_ptr: &mut u64,
     ) -> Result<(&'static str, Value), String> {
         verify_prepared_input_hashes(&self.config, &prepared.input_hashes)?;
+        let next_host_entry_revision = self.host_entry_revision.saturating_add(1);
+        let host_entry_targets = prepared
+            .package
+            .host_entry_targets(next_host_entry_revision)?;
+        stasis_dynload::validate_jit_host_entry_targets(&host_entry_targets)?;
         let active_layout = jit.state_layout();
         let active_version = state_layout_version(&active_layout)?;
         if active_version != prepared.swap_preview.from_layout_version {
@@ -1207,8 +1222,10 @@ impl LiveWorkspace {
                 "on_code_swap failed; disk/code/state remained on the prior version: {error}"
             ));
         }
-        *tick_code_ptr = prepared.package.tick_code_ptr;
-        *render_code_ptr = prepared.package.render_code_ptr;
+        stasis_dynload::publish_jit_host_entry_targets(host_entry_targets)?;
+        self.host_entry_revision = next_host_entry_revision;
+        *tick_code_ptr = stasis_dynload::jit_host_tick_trampoline_ptr() as u64;
+        *render_code_ptr = stasis_dynload::jit_host_render_trampoline_ptr() as u64;
         let plan = prepared.plan.clone();
         let swap_preview = prepared.swap_preview.clone();
         let action = prepared.action.clone();
@@ -1220,6 +1237,22 @@ impl LiveWorkspace {
         } else {
             "skipped"
         };
+        let patch_status = prepared.candidate.generation_metadata().map_or_else(
+            || json!({"revision": next_host_entry_revision}),
+            |metadata| {
+                json!({
+                    "revision": next_host_entry_revision,
+                    "source_revision": metadata.source_revision,
+                    "re_jit_count": metadata.emitted_function_ids.len(),
+                    "reused_count": metadata.reused_function_ids.len(),
+                    "codegen_micros": metadata.codegen_micros,
+                    "finalize_micros": metadata.finalize_micros,
+                    "retained_arena_count": metadata.retained_arena_count,
+                    "retained_jit_bytes": metadata.retained_jit_bytes,
+                    "total_jit_bytes": metadata.total_jit_bytes,
+                })
+            },
+        );
         *jit = prepared.candidate;
         self.source_items = source_items;
         self.completion_items = completion_items;
@@ -1236,7 +1269,7 @@ impl LiveWorkspace {
                 self.history_cursor = self.history.len();
                 (
                     "edit_applied",
-                    json!({"plan": plan, "swap": swap_preview, "receipt": receipt, "tests": tests}),
+                    json!({"plan": plan, "swap": swap_preview, "receipt": receipt, "tests": tests, "jit_patch": patch_status}),
                 )
             }
             PreparedAction::ApplyPending => {
@@ -1250,21 +1283,21 @@ impl LiveWorkspace {
                 self.pending_plan = None;
                 (
                     "edit_applied",
-                    json!({"plan": plan, "swap": swap_preview, "receipt": receipt, "tests": tests}),
+                    json!({"plan": plan, "swap": swap_preview, "receipt": receipt, "tests": tests, "jit_patch": patch_status}),
                 )
             }
             PreparedAction::Undo { index } => {
                 self.history_cursor = index;
                 (
                     "edit_undone",
-                    json!({"index": index, "swap": swap_preview, "receipt": receipt, "tests": tests}),
+                    json!({"index": index, "swap": swap_preview, "receipt": receipt, "tests": tests, "jit_patch": patch_status}),
                 )
             }
             PreparedAction::Redo { index } => {
                 self.history_cursor = index + 1;
                 (
                     "edit_redone",
-                    json!({"index": index, "swap": swap_preview, "receipt": receipt, "tests": tests}),
+                    json!({"index": index, "swap": swap_preview, "receipt": receipt, "tests": tests, "jit_patch": patch_status}),
                 )
             }
             PreparedAction::Preview => unreachable!("preview never commits"),
@@ -1534,6 +1567,7 @@ fn prepare_edit(
     config: &LiveRunConfig,
     input: EditPreparationInput,
     active_layout: &JitStateLayout,
+    candidate: JitProcess,
     canceled: &AtomicBool,
 ) -> Result<PreparedEdit, String> {
     check_preparation_canceled(canceled)?;
@@ -1631,7 +1665,7 @@ fn prepare_edit(
     };
     require_semantic_changes(&plan)?;
     check_preparation_canceled(canceled)?;
-    let (candidate, package) = compile_candidate(config, &candidate_files)?;
+    let (candidate, package) = compile_candidate(config, &candidate_files, candidate)?;
     let changed_functions = candidate.symbol_code_ptrs().into_keys().collect();
     let abi_rejection = (plan.reload.expected_reload == ExpectedReload::ResetRequired
         && plan
@@ -1782,20 +1816,24 @@ fn plan_live_edit_batch(
 fn compile_candidate(
     config: &LiveRunConfig,
     files: &[WorkshopSourceFile],
+    mut candidate: JitProcess,
 ) -> Result<(JitProcess, JitEnginePackage), String> {
     let runtime_files = workshop_reachable_files(files, &config.entry)?;
-    let mut candidate = JitProcess::new();
     candidate.set_required_emit_roots(&[
         "main".to_string(),
         "tick".to_string(),
         "render".to_string(),
         "on_code_swap".to_string(),
     ]);
+    let mut retained_paths = BTreeSet::new();
     for file in runtime_files {
         let path = config.project_root.join(&file.path);
         let path = path.canonicalize().unwrap_or(path);
-        candidate.upsert_file(path.to_string_lossy().to_string(), file.source);
+        let path = path.to_string_lossy().to_string();
+        retained_paths.insert(path.clone());
+        candidate.upsert_file(path, file.source);
     }
+    candidate.retain_files(&retained_paths);
     candidate
         .compile_staged()
         .map_err(|error| candidate_diagnostic(&candidate, error))?;
@@ -2583,7 +2621,8 @@ mod tests {
         .expect("adapter");
         let files = load_workshop_edit_workspace(&root, &config.entry).expect("files");
 
-        compile_candidate(&config, &files).expect("candidate with imported helper");
+        compile_candidate(&config, &files, JitProcess::new())
+            .expect("candidate with imported helper");
 
         fs::remove_dir_all(root).ok();
     }
@@ -2617,7 +2656,7 @@ mod tests {
     fn prepared_tick_edit(config: &LiveRunConfig, request_id: u64) -> PreparedEdit {
         let (active, _) = compile(config);
         let active_layout = active.state_layout();
-        drop(active);
+        let candidate = active.staged_candidate();
         prepare_edit(
             request_id,
             config,
@@ -2636,6 +2675,7 @@ mod tests {
                 run_tests: false,
             },
             &active_layout,
+            candidate,
             &AtomicBool::new(false),
         )
         .expect("prepare edit")
@@ -2737,7 +2777,8 @@ mod tests {
         .expect("test-only helper");
 
         let files = load_workshop_edit_workspace(&root, &config.entry).expect("workspace files");
-        let (jit, package) = compile_candidate(&config, &files).expect("runtime candidate");
+        let (jit, package) =
+            compile_candidate(&config, &files, JitProcess::new()).expect("runtime candidate");
         jit.activate_staged_runtime().expect("activate candidate");
         jit.execute_i32_noarg_by_name("main").expect("main");
         stasis_dynload::invoke_noarg_i32(package.tick_code_ptr as usize).expect("tick");
@@ -3205,6 +3246,12 @@ mod tests {
             LiveRequest::new(2, LiveCommand::Apply { run_tests: false }),
         );
         assert!(response.ok, "{:?}", response.error);
+        let patch = &response.data.as_ref().expect("apply data")["jit_patch"];
+        assert_eq!(patch["re_jit_count"], 1);
+        assert_eq!(patch["reused_count"], 3);
+        assert!(patch["revision"]
+            .as_u64()
+            .is_some_and(|revision| revision > 0));
         stasis_dynload::invoke_noarg_i32(tick_ptr as usize).expect("new tick");
         assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(5)));
         assert!(fs::read_to_string(root.join("src/main.stasis"))

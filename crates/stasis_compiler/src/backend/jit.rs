@@ -80,11 +80,11 @@ fn function_keys_referencing_names(
                     .is_some_and(|identifier| names.contains(identifier))
         });
         if references_changed_name {
-            keys.insert(FunctionKey {
-                source_path: file.path.clone(),
-                name: function.name.clone(),
-                signature_hash: function.signature_hash,
-            });
+            keys.insert(FunctionKey::new(
+                &file.path,
+                function.name.clone(),
+                function.signature_hash,
+            ));
         }
     }
     Ok(keys)
@@ -123,6 +123,7 @@ pub struct JitArtifact {
     pub slot: u32,
     pub body_hash: u64,
     pub(crate) code_ptr: u64,
+    pub executable_bytes: usize,
     pub clif: String,
 }
 
@@ -131,7 +132,7 @@ pub struct JitProcess {
     active_compiler: Option<Compiler>,
     artifacts: Vec<JitArtifact>,
     artifact_index: HashMap<FunctionId, usize>,
-    modules: Vec<Arc<Mutex<JITModule>>>,
+    modules: Vec<Arc<JitArena>>,
     runtime_libraries: Vec<stasis_dynload::Library>,
     runtime_symbol_cache: BTreeMap<String, usize>,
     source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
@@ -149,12 +150,36 @@ pub struct JitProcess {
     _test_guard: Option<MutexGuard<'static, ()>>,
 }
 
+struct JitArena {
+    _module: Mutex<JITModule>,
+    executable_bytes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitEnginePackage {
     pub tick_code_ptr: u64,
     pub render_code_ptr: u64,
     pub on_code_swap_code_ptr: Option<u64>,
     pub symbol_code_ptrs: BTreeMap<String, u64>,
+}
+
+impl JitEnginePackage {
+    pub fn host_entry_targets(
+        &self,
+        revision: u64,
+    ) -> Result<stasis_dynload::JitHostEntryTargets, String> {
+        let main =
+            self.symbol_code_ptrs.get("main").copied().ok_or_else(|| {
+                "JIT host-entry package is missing required main target".to_string()
+            })?;
+        Ok(stasis_dynload::JitHostEntryTargets {
+            revision,
+            main: main as usize,
+            tick: self.tick_code_ptr as usize,
+            render: self.render_code_ptr as usize,
+            on_code_swap: self.on_code_swap_code_ptr.map(|address| address as usize),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +202,8 @@ pub struct JitGenerationMetadata {
     pub retained_arena_count: usize,
     pub emitted_clif_bytes: usize,
     pub executable_bytes: usize,
+    pub retained_jit_bytes: usize,
+    pub total_jit_bytes: usize,
 }
 
 impl JitProcess {
@@ -262,6 +289,10 @@ impl JitProcess {
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
         self.compiler.upsert_file(path, content);
+    }
+
+    pub fn retain_files(&mut self, paths: &BTreeSet<String>) {
+        self.compiler.retain_files(paths);
     }
 
     pub fn function_data_flow_summaries(&self) -> &[crate::data_flow::FunctionDataFlowSummary] {
@@ -497,11 +528,11 @@ impl JitProcess {
                     .map(|file| {
                         (
                             function.id,
-                            FunctionKey {
-                                source_path: file.path.clone(),
-                                name: function.name.clone(),
-                                signature_hash: function.signature_hash,
-                            },
+                            FunctionKey::new(
+                                &file.path,
+                                function.name.clone(),
+                                function.signature_hash,
+                            ),
                         )
                     })
             })
@@ -616,7 +647,17 @@ impl JitProcess {
             .into_iter()
             .enumerate()
             .map(
-                |(slot, (function_id, function_key, body_hash, clif_function_id, clif, _))| {
+                |(
+                    slot,
+                    (
+                        function_id,
+                        function_key,
+                        body_hash,
+                        clif_function_id,
+                        clif,
+                        executable_bytes,
+                    ),
+                )| {
                     let module = staged_module.as_ref().ok_or_else(|| {
                         crate::compiler::CompileError::Invariant(
                             "emitted JIT patch has no finalized module".to_string(),
@@ -628,6 +669,7 @@ impl JitProcess {
                         slot: u32::try_from(slot).unwrap_or(u32::MAX),
                         body_hash,
                         code_ptr: module.get_finalized_function(clif_function_id) as usize as u64,
+                        executable_bytes,
                         clif,
                     })
                 },
@@ -711,6 +753,12 @@ impl JitProcess {
             .filter(|artifact| patch_plan.reused.contains(&artifact.function_key))
             .map(|artifact| artifact.function_id)
             .collect();
+        let retained_jit_bytes = self
+            .modules
+            .iter()
+            .map(|arena| arena.executable_bytes)
+            .sum();
+        let total_jit_bytes = retained_jit_bytes + executable_bytes;
         let staged_metadata = JitGenerationMetadata {
             source_revision: files_fingerprint,
             layout_hash,
@@ -733,6 +781,8 @@ impl JitProcess {
             retained_arena_count: self.modules.len(),
             emitted_clif_bytes,
             executable_bytes,
+            retained_jit_bytes,
+            total_jit_bytes,
         };
         stasis_dynload::finish_jit_string_literal_staging()
             .map_err(crate::compiler::CompileError::Backend)?;
@@ -746,7 +796,10 @@ impl JitProcess {
         .map_err(crate::compiler::CompileError::Backend)?;
         self.artifacts = staged_artifacts;
         if let Some(module) = staged_module {
-            self.modules.push(Arc::new(Mutex::new(module)));
+            self.modules.push(Arc::new(JitArena {
+                _module: Mutex::new(module),
+                executable_bytes,
+            }));
         }
         self.generation_metadata = Some(staged_metadata);
         self.accepted_program = Some(accepted_program);

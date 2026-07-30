@@ -88,7 +88,7 @@ functions.
 - Tests: Exact-set fixtures for leaf, chain, diamond/shared, multi-root, SCC, overload/multi-file,
   add/delete/rename, reachability, signature/layout failure, and recovery.
 - Done gate: A narrow compatible edit never schedules unrelated reachable bodies.
-- Status: `pending`
+- Status: `completed`
 
 #### P2 - Emit Selective Direct-Call Patch Modules
 
@@ -99,7 +99,7 @@ functions.
 - Tests: CLIF/executable assertions for patched-to-patched and patched-to-retained calls, SCCs,
   failure preservation, and exact emitted counts.
 - Done gate: Warm emission count equals the PatchPlan and no internal dispatch import exists.
-- Status: `pending`
+- Status: `completed`
 
 #### P3 - Publish Through Host-Entry Trampolines
 
@@ -110,7 +110,7 @@ functions.
 - Tests: Delayed compile, multi-root atomicity, A -> B supersession, hook/layout/signature failure,
   callback escape, recovery, and repeated retained-code patches.
 - Done gate: No partial affected closure becomes visible and runtime-thread compiler work is zero.
-- Status: `pending`
+- Status: `completed`
 
 #### P4 - Verify Edit Shapes and Performance
 
