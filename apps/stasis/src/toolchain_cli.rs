@@ -2135,6 +2135,15 @@ fn build_workspace(
             contents.push('\n');
             fs::write(&receipt, contents)
                 .map_err(|error| format!("failed to write {}: {error}", receipt.display()))?;
+            stage_workspace_assets(
+                workspace,
+                receipt.parent().ok_or_else(|| {
+                    format!(
+                        "development build receipt has no parent: {}",
+                        receipt.display()
+                    )
+                })?,
+            )?;
             Ok(CommandResult::success(
                 format!("built JIT development image: {}", receipt.display()),
                 json!({"backend": "jit", "receipt": display_path(&receipt)}),

@@ -399,30 +399,19 @@ pub fn prepare_asset_bundle(
             prepared_axis(prepare.max_logical_width, scale, prepare.max_render_scale);
         let target_height =
             prepared_axis(prepare.max_logical_height, scale, prepare.max_render_scale);
-        let image = image::ImageReader::open(&source.absolute_path)
-            .map_err(|error| format!("failed to open PNG asset {}: {error}", entry.id))?
-            .with_guessed_format()
-            .map_err(|error| format!("failed to inspect PNG asset {}: {error}", entry.id))?
-            .decode()
-            .map_err(|error| format!("failed to decode PNG asset {}: {error}", entry.id))?;
-        if let AssetFormat::Sprite { width, height, .. } = entry.format {
-            if image.width() != width || image.height() != height {
-                return Err(format!(
-                    "PNG asset {} dimensions are {}x{}, manifest declares {width}x{height}",
-                    entry.id,
-                    image.width(),
-                    image.height()
-                ));
-            }
-        }
+        let (declared_width, declared_height) = match entry.format {
+            AssetFormat::Sprite { width, height, .. } => (width, height),
+            _ => unreachable!("PNG preparation requires a sprite entry"),
+        };
         let ratio = f64::min(
-            target_width as f64 / image.width() as f64,
-            target_height as f64 / image.height() as f64,
+            target_width as f64 / declared_width as f64,
+            target_height as f64 / declared_height as f64,
         )
         .min(1.0);
-        let output_width = ((image.width() as f64 * ratio).round() as u32).max(1);
-        let output_height = ((image.height() as f64 * ratio).round() as u32).max(1);
-        if output_width == image.width() && output_height == image.height() {
+        let output_width = ((declared_width as f64 * ratio).round() as u32).max(1);
+        let output_height = ((declared_height as f64 * ratio).round() as u32).max(1);
+        if output_width == declared_width && output_height == declared_height {
+            validate_png_dimensions(source, declared_width, declared_height)?;
             fs::copy(&source.absolute_path, &destination)
                 .map_err(|error| format!("failed to copy asset {}: {error}", entry.id))?;
             summary.copied_assets += 1;
@@ -442,6 +431,15 @@ pub fn prepare_asset_bundle(
                 .map_err(|error| format!("failed to copy cached asset {}: {error}", entry.id))?;
             summary.cache_hits += 1;
         } else {
+            let image = decode_png(source)?;
+            if image.width() != declared_width || image.height() != declared_height {
+                return Err(format!(
+                    "PNG asset {} dimensions are {}x{}, manifest declares {declared_width}x{declared_height}",
+                    entry.id,
+                    image.width(),
+                    image.height()
+                ));
+            }
             let resized = image.resize_exact(
                 output_width,
                 output_height,
@@ -497,6 +495,33 @@ pub fn prepare_asset_bundle(
     )
     .map_err(|error| format!("failed to write prepared asset manifest: {error}"))?;
     Ok(summary)
+}
+
+fn decode_png(source: &ResolvedAsset) -> Result<image::DynamicImage, String> {
+    image::ImageReader::open(&source.absolute_path)
+        .map_err(|error| format!("failed to open PNG asset {}: {error}", source.entry.id))?
+        .with_guessed_format()
+        .map_err(|error| format!("failed to inspect PNG asset {}: {error}", source.entry.id))?
+        .decode()
+        .map_err(|error| format!("failed to decode PNG asset {}: {error}", source.entry.id))
+}
+
+fn validate_png_dimensions(
+    source: &ResolvedAsset,
+    declared_width: u32,
+    declared_height: u32,
+) -> Result<(), String> {
+    let image = decode_png(source)?;
+    if image.width() == declared_width && image.height() == declared_height {
+        Ok(())
+    } else {
+        Err(format!(
+            "PNG asset {} dimensions are {}x{}, manifest declares {declared_width}x{declared_height}",
+            source.entry.id,
+            image.width(),
+            image.height()
+        ))
+    }
 }
 
 fn display_scale(display: &AssetDisplay) -> f64 {
