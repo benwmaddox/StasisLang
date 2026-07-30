@@ -1429,36 +1429,8 @@ pub(crate) fn resolve_fixed_array_extent(
 }
 
 pub(crate) struct RuntimeCallImportIds {
-    pub(crate) call_i32_0: FuncId,
-    pub(crate) call_i32_1: FuncId,
-    pub(crate) call_i32_2: FuncId,
-    pub(crate) call_i32_3: FuncId,
-    pub(crate) call_i32_4: FuncId,
-    pub(crate) call_i32_5: FuncId,
-    pub(crate) call_i32_6: FuncId,
-    pub(crate) call_i32_7: FuncId,
-    pub(crate) call_i32_8: FuncId,
-    pub(crate) call_i32_f32_1: FuncId,
-    pub(crate) call_i32_f32_2: FuncId,
-    pub(crate) call_i32_f32_3: FuncId,
-    pub(crate) call_i32_f32_4: FuncId,
-    pub(crate) call_i32_f32_5: FuncId,
-    pub(crate) call_i32_f32_6: FuncId,
-    pub(crate) call_i32_f32_7: FuncId,
-    pub(crate) call_i32_f32_8: FuncId,
-    pub(crate) call_f32_0: FuncId,
-    pub(crate) call_f32_1: FuncId,
-    pub(crate) call_f32_2: FuncId,
-    pub(crate) call_f32_3: FuncId,
-    pub(crate) call_f32_4: FuncId,
-    pub(crate) call_f32_5: FuncId,
-    pub(crate) call_f32_6: FuncId,
-    pub(crate) call_f32_7: FuncId,
-    pub(crate) call_f32_8: FuncId,
-    pub(crate) call_f32_i32_1: FuncId,
     pub(crate) print_i32: FuncId,
     pub(crate) print_string: FuncId,
-    pub(crate) lookup_code_ptr: FuncId,
     pub(crate) sin_fast: FuncId,
     pub(crate) cos_fast: FuncId,
     pub(crate) global_i32_load: FuncId,
@@ -1482,36 +1454,8 @@ pub(crate) struct RuntimeCallImportIds {
 }
 
 pub(crate) struct RuntimeCallRefs {
-    pub(crate) call_i32_0: FuncRef,
-    pub(crate) call_i32_1: FuncRef,
-    pub(crate) call_i32_2: FuncRef,
-    pub(crate) call_i32_3: FuncRef,
-    pub(crate) call_i32_4: FuncRef,
-    pub(crate) call_i32_5: FuncRef,
-    pub(crate) call_i32_6: FuncRef,
-    pub(crate) call_i32_7: FuncRef,
-    pub(crate) call_i32_8: FuncRef,
-    pub(crate) call_i32_f32_1: FuncRef,
-    pub(crate) call_i32_f32_2: FuncRef,
-    pub(crate) call_i32_f32_3: FuncRef,
-    pub(crate) call_i32_f32_4: FuncRef,
-    pub(crate) call_i32_f32_5: FuncRef,
-    pub(crate) call_i32_f32_6: FuncRef,
-    pub(crate) call_i32_f32_7: FuncRef,
-    pub(crate) call_i32_f32_8: FuncRef,
-    pub(crate) call_f32_0: FuncRef,
-    pub(crate) call_f32_1: FuncRef,
-    pub(crate) call_f32_2: FuncRef,
-    pub(crate) call_f32_3: FuncRef,
-    pub(crate) call_f32_4: FuncRef,
-    pub(crate) call_f32_5: FuncRef,
-    pub(crate) call_f32_6: FuncRef,
-    pub(crate) call_f32_7: FuncRef,
-    pub(crate) call_f32_8: FuncRef,
-    pub(crate) call_f32_i32_1: FuncRef,
     pub(crate) print_i32: FuncRef,
     pub(crate) print_string: FuncRef,
-    pub(crate) lookup_code_ptr: FuncRef,
     pub(crate) sin_fast: FuncRef,
     pub(crate) cos_fast: FuncRef,
     pub(crate) global_i32_load: FuncRef,
@@ -1573,21 +1517,21 @@ pub(crate) struct DirectArrayStorageRef {
     pub(crate) static_len: Option<usize>,
 }
 
-pub(crate) struct AotDirectCallMode<'a> {
+pub(crate) struct DirectCallMode<'a> {
     pub(crate) module: &'a mut dyn Module,
     pub(crate) self_function_id: FunctionId,
     pub(crate) self_clif_func_id: FuncId,
     pub(crate) imported_function_ids: HashMap<FunctionId, FuncId>,
+    pub(crate) symbol_prefix: &'static str,
 }
 
 pub(crate) enum InternalCallMode<'a> {
-    Jit,
-    AotDirect(AotDirectCallMode<'a>),
+    Direct(DirectCallMode<'a>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SharedCompileBackendMode {
-    Jit,
+    JitDirect,
     AotDirect,
 }
 
@@ -1597,13 +1541,9 @@ pub(crate) enum RuntimeHelperLinkage<'a> {
     LocalTrampolines(&'a BTreeMap<String, usize>),
 }
 
-fn aot_symbol_name(function_id: FunctionId) -> String {
-    format!("aot_fn_{function_id}")
-}
-
-fn emit_aot_direct_call_for_signature(
+fn emit_direct_call_for_signature(
     builder: &mut FunctionBuilder<'_>,
-    mode: &mut AotDirectCallMode<'_>,
+    mode: &mut DirectCallMode<'_>,
     signature: &CallSignature,
     arg_values: &[Value],
     type_table: &TypeTable,
@@ -1621,7 +1561,7 @@ fn emit_aot_direct_call_for_signature(
     } else if let Some(existing) = mode.imported_function_ids.get(&function_id).copied() {
         existing
     } else {
-        let symbol = aot_symbol_name(function_id);
+        let symbol = format!("{}{function_id}", mode.symbol_prefix);
         let mut import_signature = mode.module.make_signature();
         for param_type in &signature.params {
             append_abi_params_for_type_id(
@@ -1743,26 +1683,24 @@ where
         .declare_function(symbol, Linkage::Export, &context.func.signature)
         .map_err(|error| format!("failed to declare function {symbol}: {error}"))?;
     let referenced_call_targets = collect_call_targets_from_hir(hir);
-    let uses_runtime_storage = !global_path_types.is_empty();
-    let uses_collection_runtime = !collection_infos.is_empty();
+    let uses_runtime_storage =
+        backend_mode == SharedCompileBackendMode::JitDirect || !global_path_types.is_empty();
+    let uses_collection_runtime =
+        backend_mode == SharedCompileBackendMode::JitDirect || !collection_infos.is_empty();
     let runtime_call_imports = match backend_mode {
-        SharedCompileBackendMode::Jit => build_runtime_call_import_ids(
-            &mut module,
-            runtime_helper_linkage,
-            call_signatures,
-            type_table,
-            named_struct_field_types,
-        )?,
-        SharedCompileBackendMode::AotDirect => build_aot_runtime_call_import_ids(
-            &mut module,
-            function_id,
-            uses_runtime_storage,
-            uses_collection_runtime,
-            &referenced_call_targets,
-            call_signatures,
-            type_table,
-            named_struct_field_types,
-        )?,
+        SharedCompileBackendMode::JitDirect | SharedCompileBackendMode::AotDirect => {
+            build_direct_runtime_call_import_ids(
+                &mut module,
+                function_id,
+                runtime_helper_linkage,
+                uses_runtime_storage,
+                uses_collection_runtime,
+                &referenced_call_targets,
+                call_signatures,
+                type_table,
+                named_struct_field_types,
+            )?
+        }
     };
 
     let mut function_builder_context = FunctionBuilderContext::new();
@@ -1901,15 +1839,17 @@ where
         }
 
         let empty_foreach_bindings = ForeachBindingMap::new();
-        let mut internal_calls = match backend_mode {
-            SharedCompileBackendMode::Jit => InternalCallMode::Jit,
-            SharedCompileBackendMode::AotDirect => InternalCallMode::AotDirect(AotDirectCallMode {
-                module: &mut module,
-                self_function_id: meta.id,
-                self_clif_func_id: function_id,
-                imported_function_ids: HashMap::new(),
-            }),
+        let symbol_prefix = match backend_mode {
+            SharedCompileBackendMode::JitDirect => "jit_fn_",
+            SharedCompileBackendMode::AotDirect => "aot_fn_",
         };
+        let mut internal_calls = InternalCallMode::Direct(DirectCallMode {
+            module: &mut module,
+            self_function_id: meta.id,
+            self_clif_func_id: function_id,
+            imported_function_ids: HashMap::new(),
+            symbol_prefix,
+        });
         let mut terminated = false;
         for statement in &hir.statements {
             if terminated {
@@ -2115,32 +2055,6 @@ pub(crate) fn declare_i32_call_import(
     declare_runtime_helper(module, symbol, signature, linkage)
 }
 
-pub(crate) fn declare_i32_f32_call_import(
-    module: &mut impl Module,
-    symbol: &str,
-    linkage: RuntimeHelperLinkage<'_>,
-    f32_arg_count: usize,
-) -> Result<FuncId, String> {
-    let mut signature = module.make_signature();
-    signature.params.push(AbiParam::new(types::I32));
-    for _ in 0..f32_arg_count {
-        signature.params.push(AbiParam::new(types::F32));
-    }
-    signature.returns.push(AbiParam::new(types::I32));
-    declare_runtime_helper(module, symbol, signature, linkage)
-}
-
-pub(crate) fn declare_lookup_code_ptr_import(
-    module: &mut impl Module,
-    symbol: &str,
-    linkage: RuntimeHelperLinkage<'_>,
-) -> Result<FuncId, String> {
-    let mut signature = module.make_signature();
-    signature.params.push(AbiParam::new(types::I32));
-    signature.returns.push(AbiParam::new(types::I64));
-    declare_runtime_helper(module, symbol, signature, linkage)
-}
-
 pub(crate) fn declare_direct_f32_unary_import(
     module: &mut impl Module,
     symbol: &str,
@@ -2148,39 +2062,6 @@ pub(crate) fn declare_direct_f32_unary_import(
 ) -> Result<FuncId, String> {
     let mut signature = module.make_signature();
     signature.params.push(AbiParam::new(types::F32));
-    signature.returns.push(AbiParam::new(types::F32));
-    declare_runtime_helper(module, symbol, signature, linkage)
-}
-
-pub(crate) fn declare_f32_call_import(
-    module: &mut impl Module,
-    symbol: &str,
-    linkage: RuntimeHelperLinkage<'_>,
-    param_count: usize,
-) -> Result<FuncId, String> {
-    let mut signature = module.make_signature();
-    signature.params.push(AbiParam::new(types::I32));
-    for _ in 0..param_count.saturating_sub(1) {
-        signature.params.push(AbiParam::new(types::F32));
-    }
-    signature.returns.push(AbiParam::new(types::F32));
-    declare_runtime_helper(module, symbol, signature, linkage)
-}
-
-pub(crate) fn declare_f32_i32_call_import(
-    module: &mut impl Module,
-    symbol: &str,
-    linkage: RuntimeHelperLinkage<'_>,
-    param_count: usize,
-) -> Result<FuncId, String> {
-    let mut signature = module.make_signature();
-    if param_count == 0 {
-        return Err("f32(i32)-call import requires at least fn-id parameter".to_string());
-    }
-    signature.params.push(AbiParam::new(types::I32));
-    for _ in 0..param_count.saturating_sub(1) {
-        signature.params.push(AbiParam::new(types::I32));
-    }
     signature.returns.push(AbiParam::new(types::F32));
     declare_runtime_helper(module, symbol, signature, linkage)
 }
@@ -2438,28 +2319,6 @@ pub(crate) fn is_struct_view_type(
     named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> bool {
     named_struct_field_types.contains_key(&type_id)
-}
-
-pub(crate) fn abi_word_count_for_param_type(
-    type_id: TypeId,
-    named_struct_field_types: &NamedStructFieldTypeMap,
-) -> usize {
-    if is_struct_view_type(type_id, named_struct_field_types) {
-        STRUCT_VIEW_ABI_WORDS
-    } else {
-        1
-    }
-}
-
-pub(crate) fn abi_word_count_for_params(
-    params: &[TypeId],
-    named_struct_field_types: &NamedStructFieldTypeMap,
-) -> usize {
-    params
-        .iter()
-        .copied()
-        .map(|type_id| abi_word_count_for_param_type(type_id, named_struct_field_types))
-        .sum()
 }
 
 pub(crate) fn append_abi_params_for_type_id(
@@ -3954,62 +3813,6 @@ pub(crate) fn emit_host_print_call_statement(
     Ok(true)
 }
 
-pub(crate) fn emit_indirect_call_for_signature(
-    builder: &mut FunctionBuilder<'_>,
-    runtime_call_refs: &RuntimeCallRefs,
-    signature: &CallSignature,
-    arg_values: &[Value],
-    type_table: &TypeTable,
-    named_struct_field_types: &NamedStructFieldTypeMap,
-) -> Result<Option<Value>, String> {
-    let function_id = signature
-        .function_id
-        .ok_or_else(|| "internal dispatch requested for extern call signature".to_string())?;
-    let function_id_i32 = i32::try_from(function_id).map_err(|_| {
-        format!(
-            "function id {} out of i32 range for indirect call",
-            function_id
-        )
-    })?;
-    let fn_id_value = builder.ins().iconst(types::I32, i64::from(function_id_i32));
-    let lookup = builder
-        .ins()
-        .call(runtime_call_refs.lookup_code_ptr, &[fn_id_value]);
-    let code_ptr = builder.inst_results(lookup)[0];
-
-    let mut indirect_signature =
-        cranelift_codegen::ir::Signature::new(builder.func.signature.call_conv);
-    for param_type in &signature.params {
-        append_abi_params_for_type_id(
-            &mut indirect_signature.params,
-            *param_type,
-            type_table,
-            named_struct_field_types,
-        )?;
-    }
-    if signature.return_type != TYPE_ID_VOID {
-        indirect_signature
-            .returns
-            .push(AbiParam::new(clif_type_for_type_id(
-                signature.return_type,
-                type_table,
-            )?));
-    }
-    let signature_ref = builder.func.import_signature(indirect_signature);
-    let call = builder
-        .ins()
-        .call_indirect(signature_ref, code_ptr, arg_values);
-    if signature.return_type == TYPE_ID_VOID {
-        Ok(None)
-    } else {
-        let result =
-            builder.inst_results(call).first().copied().ok_or_else(|| {
-                "indirect call expected value result but produced none".to_string()
-            })?;
-        Ok(Some(result))
-    }
-}
-
 pub(crate) fn emit_extern_call_for_signature(
     builder: &mut FunctionBuilder<'_>,
     runtime_call_refs: &RuntimeCallRefs,
@@ -4046,367 +3849,28 @@ pub(crate) fn emit_extern_call_for_signature(
 
 pub(crate) fn emit_internal_call_for_signature(
     builder: &mut FunctionBuilder<'_>,
-    runtime_call_refs: &RuntimeCallRefs,
+    _runtime_call_refs: &RuntimeCallRefs,
     internal_calls: &mut InternalCallMode<'_>,
     signature: &CallSignature,
     arg_values: &[Value],
-    arg_types: &[TypeId],
+    _arg_types: &[TypeId],
     type_table: &TypeTable,
     named_struct_field_types: &NamedStructFieldTypeMap,
-    target: &str,
+    _target: &str,
 ) -> Result<Option<Value>, String> {
     if signature.extern_symbol.is_some() {
-        return Err("internal call dispatch requested for extern signature".to_string());
+        return Err("internal direct call requested for extern signature".to_string());
     }
-
-    if let InternalCallMode::AotDirect(mode) = internal_calls {
-        return emit_aot_direct_call_for_signature(
-            builder,
-            mode,
-            signature,
-            arg_values,
-            type_table,
-            named_struct_field_types,
-        );
-    }
-
-    let function_id = signature.function_id.ok_or_else(|| {
-        format!(
-            "internal call target '{}' is missing function id metadata",
-            target
-        )
-    })?;
-    let function_id_i32 = i32::try_from(function_id).map_err(|_| {
-        format!(
-            "function id {} out of i32 range for call target '{}'",
-            function_id, target
-        )
-    })?;
-    let fn_id_value = builder.ins().iconst(types::I32, i64::from(function_id_i32));
-
-    if signature.return_type == TYPE_ID_VOID {
-        return emit_indirect_call_for_signature(
-            builder,
-            runtime_call_refs,
-            signature,
-            arg_values,
-            type_table,
-            named_struct_field_types,
-        );
-    }
-
-    if is_i32_abi_compatible_type(signature.return_type, type_table) {
-        let all_i32_abi_args = arg_types
-            .iter()
-            .all(|type_id| is_i32_abi_compatible_type(*type_id, type_table))
-            && signature
-                .params
-                .iter()
-                .all(|type_id| is_i32_abi_compatible_type(*type_id, type_table));
-        let all_f32_args = arg_types.iter().all(|type_id| *type_id == TYPE_ID_F32)
-            && signature
-                .params
-                .iter()
-                .all(|type_id| *type_id == TYPE_ID_F32);
-        let call = if all_i32_abi_args {
-            match arg_values.len() {
-                0 => Some(
-                    builder
-                        .ins()
-                        .call(runtime_call_refs.call_i32_0, &[fn_id_value]),
-                ),
-                1 => Some(
-                    builder
-                        .ins()
-                        .call(runtime_call_refs.call_i32_1, &[fn_id_value, arg_values[0]]),
-                ),
-                2 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_2,
-                    &[fn_id_value, arg_values[0], arg_values[1]],
-                )),
-                3 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_3,
-                    &[fn_id_value, arg_values[0], arg_values[1], arg_values[2]],
-                )),
-                4 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_4,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                    ],
-                )),
-                5 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_5,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                    ],
-                )),
-                6 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_6,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                        arg_values[5],
-                    ],
-                )),
-                7 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_7,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                        arg_values[5],
-                        arg_values[6],
-                    ],
-                )),
-                8 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_8,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                        arg_values[5],
-                        arg_values[6],
-                        arg_values[7],
-                    ],
-                )),
-                _ => None,
-            }
-        } else if all_f32_args {
-            match arg_values.len() {
-                0 => Some(
-                    builder
-                        .ins()
-                        .call(runtime_call_refs.call_i32_0, &[fn_id_value]),
-                ),
-                1 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_f32_1,
-                    &[fn_id_value, arg_values[0]],
-                )),
-                2 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_f32_2,
-                    &[fn_id_value, arg_values[0], arg_values[1]],
-                )),
-                3 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_f32_3,
-                    &[fn_id_value, arg_values[0], arg_values[1], arg_values[2]],
-                )),
-                4 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_f32_4,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                    ],
-                )),
-                5 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_f32_5,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                    ],
-                )),
-                6 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_f32_6,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                        arg_values[5],
-                    ],
-                )),
-                7 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_f32_7,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                        arg_values[5],
-                        arg_values[6],
-                    ],
-                )),
-                8 => Some(builder.ins().call(
-                    runtime_call_refs.call_i32_f32_8,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                        arg_values[5],
-                        arg_values[6],
-                        arg_values[7],
-                    ],
-                )),
-                _ => None,
-            }
-        } else {
-            None
-        };
-
-        if let Some(call) = call {
-            if signature.return_type == TYPE_ID_VOID {
-                return Ok(None);
-            }
-            let value = builder
-                .inst_results(call)
-                .first()
-                .copied()
-                .ok_or_else(|| format!("call target '{}' did not produce value", target))?;
-            return Ok(Some(value));
-        }
-    } else if signature.return_type == TYPE_ID_F32 {
-        let call = if arg_values.is_empty() {
-            Some(
-                builder
-                    .ins()
-                    .call(runtime_call_refs.call_f32_0, &[fn_id_value]),
-            )
-        } else if arg_values.len() == 1
-            && is_i32_abi_compatible_type(signature.params[0], type_table)
-            && is_i32_abi_compatible_type(arg_types[0], type_table)
-        {
-            Some(builder.ins().call(
-                runtime_call_refs.call_f32_i32_1,
-                &[fn_id_value, arg_values[0]],
-            ))
-        } else if arg_types.iter().all(|type_id| *type_id == TYPE_ID_F32) {
-            match arg_values.len() {
-                1 => Some(
-                    builder
-                        .ins()
-                        .call(runtime_call_refs.call_f32_1, &[fn_id_value, arg_values[0]]),
-                ),
-                2 => Some(builder.ins().call(
-                    runtime_call_refs.call_f32_2,
-                    &[fn_id_value, arg_values[0], arg_values[1]],
-                )),
-                3 => Some(builder.ins().call(
-                    runtime_call_refs.call_f32_3,
-                    &[fn_id_value, arg_values[0], arg_values[1], arg_values[2]],
-                )),
-                4 => Some(builder.ins().call(
-                    runtime_call_refs.call_f32_4,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                    ],
-                )),
-                5 => Some(builder.ins().call(
-                    runtime_call_refs.call_f32_5,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                    ],
-                )),
-                6 => Some(builder.ins().call(
-                    runtime_call_refs.call_f32_6,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                        arg_values[5],
-                    ],
-                )),
-                7 => Some(builder.ins().call(
-                    runtime_call_refs.call_f32_7,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                        arg_values[5],
-                        arg_values[6],
-                    ],
-                )),
-                8 => Some(builder.ins().call(
-                    runtime_call_refs.call_f32_8,
-                    &[
-                        fn_id_value,
-                        arg_values[0],
-                        arg_values[1],
-                        arg_values[2],
-                        arg_values[3],
-                        arg_values[4],
-                        arg_values[5],
-                        arg_values[6],
-                        arg_values[7],
-                    ],
-                )),
-                _ => None,
-            }
-        } else {
-            None
-        };
-
-        if let Some(call) = call {
-            let value = builder
-                .inst_results(call)
-                .first()
-                .copied()
-                .ok_or_else(|| format!("call target '{}' did not produce value", target))?;
-            return Ok(Some(value));
-        }
-    } else if signature.return_type != TYPE_ID_F64 {
-        return Err(format!(
-            "unsupported return type {} for call target '{}'",
-            signature.return_type, target
-        ));
-    }
-
-    emit_indirect_call_for_signature(
+    let InternalCallMode::Direct(mode) = internal_calls;
+    emit_direct_call_for_signature(
         builder,
-        runtime_call_refs,
+        mode,
         signature,
         arg_values,
         type_table,
         named_struct_field_types,
     )
 }
-
 pub(crate) fn ensure_no_variable_shadowing(
     name: &str,
     values_by_name: &BTreeMap<String, LocalBinding>,
@@ -10523,9 +9987,10 @@ pub(crate) fn emit_bool_constant(builder: &mut FunctionBuilder<'_>, value: bool)
     builder.ins().icmp_imm(IntCC::NotEqual, i32_value, 0)
 }
 
-fn build_aot_runtime_call_import_ids(
+fn build_direct_runtime_call_import_ids(
     module: &mut impl Module,
     fallback: FuncId,
+    linkage: RuntimeHelperLinkage<'_>,
     uses_runtime_storage: bool,
     uses_collection_runtime: bool,
     referenced_call_targets: &BTreeSet<String>,
@@ -10533,7 +9998,6 @@ fn build_aot_runtime_call_import_ids(
     type_table: &TypeTable,
     named_struct_field_types: &NamedStructFieldTypeMap,
 ) -> Result<RuntimeCallImportIds, String> {
-    let linkage = RuntimeHelperLinkage::Imported;
     let print_i32 = if referenced_call_targets
         .iter()
         .any(|target| matches!(target.as_str(), "print_i32" | "print_int" | "print_char"))
@@ -10572,36 +10036,8 @@ fn build_aot_runtime_call_import_ids(
         };
     }
     Ok(RuntimeCallImportIds {
-        call_i32_0: fallback,
-        call_i32_1: fallback,
-        call_i32_2: fallback,
-        call_i32_3: fallback,
-        call_i32_4: fallback,
-        call_i32_5: fallback,
-        call_i32_6: fallback,
-        call_i32_7: fallback,
-        call_i32_8: fallback,
-        call_i32_f32_1: fallback,
-        call_i32_f32_2: fallback,
-        call_i32_f32_3: fallback,
-        call_i32_f32_4: fallback,
-        call_i32_f32_5: fallback,
-        call_i32_f32_6: fallback,
-        call_i32_f32_7: fallback,
-        call_i32_f32_8: fallback,
-        call_f32_0: fallback,
-        call_f32_1: fallback,
-        call_f32_2: fallback,
-        call_f32_3: fallback,
-        call_f32_4: fallback,
-        call_f32_5: fallback,
-        call_f32_6: fallback,
-        call_f32_7: fallback,
-        call_f32_8: fallback,
-        call_f32_i32_1: fallback,
         print_i32,
         print_string,
-        lookup_code_ptr: fallback,
         sin_fast,
         cos_fast,
         // Direct storage handles known standalone globals, but dynamic paths and
@@ -10685,189 +10121,6 @@ fn build_aot_runtime_call_import_ids(
     })
 }
 
-pub(crate) fn build_runtime_call_import_ids(
-    module: &mut impl Module,
-    linkage: RuntimeHelperLinkage<'_>,
-    call_signatures: &CallSignatureMap,
-    type_table: &TypeTable,
-    named_struct_field_types: &NamedStructFieldTypeMap,
-) -> Result<RuntimeCallImportIds, String> {
-    Ok(RuntimeCallImportIds {
-        call_i32_0: declare_i32_call_import(module, "stasis_jit_call_i32_0", linkage, 1)?,
-        call_i32_1: declare_i32_call_import(module, "stasis_jit_call_i32_1", linkage, 2)?,
-        call_i32_2: declare_i32_call_import(module, "stasis_jit_call_i32_2", linkage, 3)?,
-        call_i32_3: declare_i32_call_import(module, "stasis_jit_call_i32_3", linkage, 4)?,
-        call_i32_4: declare_i32_call_import(module, "stasis_jit_call_i32_4", linkage, 5)?,
-        call_i32_5: declare_i32_call_import(module, "stasis_jit_call_i32_5", linkage, 6)?,
-        call_i32_6: declare_i32_call_import(module, "stasis_jit_call_i32_6", linkage, 7)?,
-        call_i32_7: declare_i32_call_import(module, "stasis_jit_call_i32_7", linkage, 8)?,
-        call_i32_8: declare_i32_call_import(module, "stasis_jit_call_i32_8", linkage, 9)?,
-        call_i32_f32_1: declare_i32_f32_call_import(
-            module,
-            "stasis_jit_call_i32_f32_1",
-            linkage,
-            1,
-        )?,
-        call_i32_f32_2: declare_i32_f32_call_import(
-            module,
-            "stasis_jit_call_i32_f32_2",
-            linkage,
-            2,
-        )?,
-        call_i32_f32_3: declare_i32_f32_call_import(
-            module,
-            "stasis_jit_call_i32_f32_3",
-            linkage,
-            3,
-        )?,
-        call_i32_f32_4: declare_i32_f32_call_import(
-            module,
-            "stasis_jit_call_i32_f32_4",
-            linkage,
-            4,
-        )?,
-        call_i32_f32_5: declare_i32_f32_call_import(
-            module,
-            "stasis_jit_call_i32_f32_5",
-            linkage,
-            5,
-        )?,
-        call_i32_f32_6: declare_i32_f32_call_import(
-            module,
-            "stasis_jit_call_i32_f32_6",
-            linkage,
-            6,
-        )?,
-        call_i32_f32_7: declare_i32_f32_call_import(
-            module,
-            "stasis_jit_call_i32_f32_7",
-            linkage,
-            7,
-        )?,
-        call_i32_f32_8: declare_i32_f32_call_import(
-            module,
-            "stasis_jit_call_i32_f32_8",
-            linkage,
-            8,
-        )?,
-        call_f32_0: declare_f32_call_import(module, "stasis_jit_call_f32_0", linkage, 1)?,
-        call_f32_1: declare_f32_call_import(module, "stasis_jit_call_f32_1", linkage, 2)?,
-        call_f32_2: declare_f32_call_import(module, "stasis_jit_call_f32_2", linkage, 3)?,
-        call_f32_3: declare_f32_call_import(module, "stasis_jit_call_f32_3", linkage, 4)?,
-        call_f32_4: declare_f32_call_import(module, "stasis_jit_call_f32_4", linkage, 5)?,
-        call_f32_5: declare_f32_call_import(module, "stasis_jit_call_f32_5", linkage, 6)?,
-        call_f32_6: declare_f32_call_import(module, "stasis_jit_call_f32_6", linkage, 7)?,
-        call_f32_7: declare_f32_call_import(module, "stasis_jit_call_f32_7", linkage, 8)?,
-        call_f32_8: declare_f32_call_import(module, "stasis_jit_call_f32_8", linkage, 9)?,
-        call_f32_i32_1: declare_f32_i32_call_import(
-            module,
-            "stasis_jit_call_f32_i32_1",
-            linkage,
-            2,
-        )?,
-        print_i32: declare_void_call_import(module, "stasis_jit_print_i32", linkage, 1)?,
-        print_string: declare_void_call_import(module, "stasis_jit_print_string", linkage, 1)?,
-        lookup_code_ptr: declare_lookup_code_ptr_import(
-            module,
-            "stasis_jit_lookup_code_ptr",
-            linkage,
-        )?,
-        sin_fast: declare_direct_f32_unary_import(module, "stasis_jit_sin_fast", linkage)?,
-        cos_fast: declare_direct_f32_unary_import(module, "stasis_jit_cos_fast", linkage)?,
-        global_i32_load: declare_i32_call_import(module, "stasis_jit_global_i32_load", linkage, 1)?,
-        global_i32_store: declare_void_call_import(
-            module,
-            "stasis_jit_global_i32_store",
-            linkage,
-            2,
-        )?,
-        global_f32_load: declare_f32_global_load_import(
-            module,
-            "stasis_jit_global_f32_load",
-            linkage,
-        )?,
-        global_f32_store: declare_f32_global_store_import(
-            module,
-            "stasis_jit_global_f32_store",
-            linkage,
-        )?,
-        global_f64_load: declare_f64_global_load_import(
-            module,
-            "stasis_jit_global_f64_load",
-            linkage,
-        )?,
-        global_f64_store: declare_f64_global_store_import(
-            module,
-            "stasis_jit_global_f64_store",
-            linkage,
-        )?,
-        global_i32_array_load: declare_i32_array_load_import(
-            module,
-            "stasis_jit_global_i32_array_load",
-            linkage,
-        )?,
-        global_i32_array_store: declare_i32_array_store_import(
-            module,
-            "stasis_jit_global_i32_array_store",
-            linkage,
-        )?,
-        global_i32_array_ptr: declare_i32_array_ptr_import(
-            module,
-            "stasis_jit_global_i32_array_ptr",
-            linkage,
-        )?,
-        global_f32_array_load: declare_f32_array_load_import(
-            module,
-            "stasis_jit_global_f32_array_load",
-            linkage,
-        )?,
-        global_f32_array_store: declare_f32_array_store_import(
-            module,
-            "stasis_jit_global_f32_array_store",
-            linkage,
-        )?,
-        global_f32_array_ptr: declare_f32_array_ptr_import(
-            module,
-            "stasis_jit_global_f32_array_ptr",
-            linkage,
-        )?,
-        global_f64_array_load: declare_f64_array_load_import(
-            module,
-            "stasis_jit_global_f64_array_load",
-            linkage,
-        )?,
-        global_f64_array_store: declare_f64_array_store_import(
-            module,
-            "stasis_jit_global_f64_array_store",
-            linkage,
-        )?,
-        global_f64_array_ptr: declare_f64_array_ptr_import(
-            module,
-            "stasis_jit_global_f64_array_ptr",
-            linkage,
-        )?,
-        collection_i32_load: declare_i32_call_import(
-            module,
-            "stasis_jit_collection_i32_load",
-            linkage,
-            2,
-        )?,
-        collection_i32_store: declare_void_call_import(
-            module,
-            "stasis_jit_collection_i32_store",
-            linkage,
-            3,
-        )?,
-        extern_calls: declare_extern_call_imports(
-            module,
-            call_signatures,
-            type_table,
-            named_struct_field_types,
-            linkage,
-        )?,
-    })
-}
-
 pub(crate) fn build_runtime_call_refs(
     module: &mut impl Module,
     imports: &RuntimeCallImportIds,
@@ -10878,36 +10131,8 @@ pub(crate) fn build_runtime_call_refs(
         .map(|bindings| resolve_direct_storage_refs(module, func, bindings))
         .transpose()?;
     Ok(RuntimeCallRefs {
-        call_i32_0: module.declare_func_in_func(imports.call_i32_0, func),
-        call_i32_1: module.declare_func_in_func(imports.call_i32_1, func),
-        call_i32_2: module.declare_func_in_func(imports.call_i32_2, func),
-        call_i32_3: module.declare_func_in_func(imports.call_i32_3, func),
-        call_i32_4: module.declare_func_in_func(imports.call_i32_4, func),
-        call_i32_5: module.declare_func_in_func(imports.call_i32_5, func),
-        call_i32_6: module.declare_func_in_func(imports.call_i32_6, func),
-        call_i32_7: module.declare_func_in_func(imports.call_i32_7, func),
-        call_i32_8: module.declare_func_in_func(imports.call_i32_8, func),
-        call_i32_f32_1: module.declare_func_in_func(imports.call_i32_f32_1, func),
-        call_i32_f32_2: module.declare_func_in_func(imports.call_i32_f32_2, func),
-        call_i32_f32_3: module.declare_func_in_func(imports.call_i32_f32_3, func),
-        call_i32_f32_4: module.declare_func_in_func(imports.call_i32_f32_4, func),
-        call_i32_f32_5: module.declare_func_in_func(imports.call_i32_f32_5, func),
-        call_i32_f32_6: module.declare_func_in_func(imports.call_i32_f32_6, func),
-        call_i32_f32_7: module.declare_func_in_func(imports.call_i32_f32_7, func),
-        call_i32_f32_8: module.declare_func_in_func(imports.call_i32_f32_8, func),
-        call_f32_0: module.declare_func_in_func(imports.call_f32_0, func),
-        call_f32_1: module.declare_func_in_func(imports.call_f32_1, func),
-        call_f32_2: module.declare_func_in_func(imports.call_f32_2, func),
-        call_f32_3: module.declare_func_in_func(imports.call_f32_3, func),
-        call_f32_4: module.declare_func_in_func(imports.call_f32_4, func),
-        call_f32_5: module.declare_func_in_func(imports.call_f32_5, func),
-        call_f32_6: module.declare_func_in_func(imports.call_f32_6, func),
-        call_f32_7: module.declare_func_in_func(imports.call_f32_7, func),
-        call_f32_8: module.declare_func_in_func(imports.call_f32_8, func),
-        call_f32_i32_1: module.declare_func_in_func(imports.call_f32_i32_1, func),
         print_i32: module.declare_func_in_func(imports.print_i32, func),
         print_string: module.declare_func_in_func(imports.print_string, func),
-        lookup_code_ptr: module.declare_func_in_func(imports.lookup_code_ptr, func),
         sin_fast: module.declare_func_in_func(imports.sin_fast, func),
         cos_fast: module.declare_func_in_func(imports.cos_fast, func),
         global_i32_load: module.declare_func_in_func(imports.global_i32_load, func),

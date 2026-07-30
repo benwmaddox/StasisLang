@@ -155,7 +155,7 @@ pub fn run_jit_tests_in_directory_with_session(
             session.last_active_path = Some(file_path.clone());
         }
 
-        entry.process.activate_runtime_dispatch_table();
+        entry.process.activate_runtime_state();
         let execute_started = Instant::now();
         run_discovered_tests(&entry.process, &tests, &file_path, &mut summary);
         session.last_active_path = Some(file_path.clone());

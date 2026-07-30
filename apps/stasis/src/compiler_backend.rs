@@ -1162,6 +1162,13 @@ impl IncrementalCompilerBackend {
     }
 
     #[cfg(test)]
+    fn jit_generation_source_revision(&self) -> Option<u64> {
+        self.jit_process
+            .generation_metadata()
+            .map(|metadata| metadata.source_revision)
+    }
+
+    #[cfg(test)]
     fn last_aot_engine_bundle(&self) -> Option<&AotEngineBundle> {
         self.last_aot_engine_bundle.as_ref()
     }
@@ -1999,10 +2006,6 @@ fn aot_symbol_name(metric: &stasis_compiler::FunctionMetric) -> String {
         metric.sig_hash.unsigned_abs(),
         metric.ordinal
     )
-}
-
-fn parse_aot_fn_symbol_id(symbol: &str) -> Option<i32> {
-    symbol.strip_prefix("aot_fn_")?.parse::<i32>().ok()
 }
 
 fn compute_file_sha256_hex(path: &Path) -> Result<String, String> {
@@ -3597,7 +3600,6 @@ void stasis_jit_register_global_f32_array(int32_t collection_hash, int32_t field
 void stasis_jit_register_global_f64_array(int32_t collection_hash, int32_t field_hash, double* ptr, int32_t len);\n\
 void stasis_jit_register_global_u8_array(int32_t collection_hash, int32_t field_hash, uint8_t* ptr, int32_t len);\n\
 void stasis_jit_register_global_u16_array(int32_t collection_hash, int32_t field_hash, uint16_t* ptr, int32_t len);\n\
-void stasis_jit_register_code_ptr(int32_t fn_id_raw, int64_t code_ptr);\n\
 void stasis_jit_clear_string_literal_table(void);\n\
 void stasis_jit_upsert_string_literal(int32_t id, const char* value);\n",
     );
@@ -3657,14 +3659,6 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
 
     for field in runtime_fields {
         append_runtime_bridge_field_source(&mut source, &mut register_lines, field)?;
-    }
-    for symbol in function_symbols {
-        let Some(fn_id) = parse_aot_fn_symbol_id(symbol) else {
-            continue;
-        };
-        register_lines.push(format!(
-            "stasis_jit_register_code_ptr({fn_id}, (int64_t)(uintptr_t)&{symbol});"
-        ));
     }
     register_lines.push("stasis_jit_clear_string_literal_table();".to_string());
     for literal in string_literals {
@@ -7593,7 +7587,7 @@ mod tests {
     }
 
     #[test]
-    fn jit_dev_engine_mode_reuses_unchanged_function_artifacts_between_compiles() {
+    fn jit_dev_engine_mode_rebuilds_one_complete_generation_between_compiles() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -7615,6 +7609,9 @@ mod tests {
             TargetMode::JitDev,
         ));
         assert_eq!(first.status, CompileStatus::Success);
+        let revision_before = backend
+            .jit_generation_source_revision()
+            .expect("generation metadata after first compile");
         let tick_slot_before = backend
             .jit_artifact_slot_for_function_name("tick")
             .expect("tick slot after first compile");
@@ -7633,6 +7630,9 @@ mod tests {
             TargetMode::JitDev,
         ));
         assert_eq!(second.status, CompileStatus::Success);
+        let revision_after = backend
+            .jit_generation_source_revision()
+            .expect("generation metadata after second compile");
         let tick_slot_after = backend
             .jit_artifact_slot_for_function_name("tick")
             .expect("tick slot after second compile");
@@ -7640,13 +7640,17 @@ mod tests {
             .jit_artifact_slot_for_function_name("render")
             .expect("render slot after second compile");
 
-        assert!(
-            tick_slot_after > tick_slot_before,
-            "changed function should get a new slot"
+        assert_eq!(
+            tick_slot_after, tick_slot_before,
+            "stable generation-local function order should preserve the tick slot"
         );
         assert_eq!(
             render_slot_after, render_slot_before,
-            "unchanged function should keep prior artifact slot"
+            "stable generation-local function order should preserve the render slot"
+        );
+        assert_ne!(
+            revision_after, revision_before,
+            "the body edit should publish a distinct complete generation"
         );
 
         fs::remove_dir_all(&temp_root).ok();
@@ -7695,7 +7699,7 @@ mod tests {
     }
 
     #[test]
-    fn jit_dev_non_engine_source_emits_jit_code_ptr_overrides() {
+    fn jit_dev_non_engine_source_exposes_only_host_jit_code_ptr_overrides() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -7726,8 +7730,8 @@ mod tests {
             .expect("patch set should be present");
         assert_eq!(
             patch_set.functions.len(),
-            2,
-            "expected damage + main patches from non-engine source"
+            1,
+            "only the host-callable main export should be patched"
         );
         let overrides = result
             .jit_code_ptr_overrides
@@ -7735,8 +7739,8 @@ mod tests {
             .expect("jit code pointer overrides should be present for non-engine jit path");
         assert_eq!(
             overrides.len(),
-            2,
-            "expected damage + main code pointers in non-engine jit path"
+            1,
+            "internal damage should stay private to the complete JIT generation"
         );
         assert!(
             overrides.iter().all(|entry| entry.code_ptr != 0),

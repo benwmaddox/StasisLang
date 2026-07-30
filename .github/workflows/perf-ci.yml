@@ -74,22 +74,22 @@ jobs:
               return float(value)
 
           cold_p95_ms = f64("cold_ms_p95")
-          incremental_p95_ms = f64("incremental_one_fn_ms_p95")
+          generation_update_p95_ms = f64("complete_generation_update_ms_p95")
 
           # Stop conditions: generous by design (CI hardware variance). These are not the PRD targets.
           max_cold_p95_ms = 1800.0
-          max_incremental_p95_ms = 100.0
+          max_generation_update_p95_ms = 1800.0
 
           print(f"cold_ms_p95={cold_p95_ms:.3f}ms (max {max_cold_p95_ms:.3f}ms)")
           print(
-              f"incremental_one_fn_ms_p95={incremental_p95_ms:.3f}ms (max {max_incremental_p95_ms:.3f}ms)"
+              f"complete_generation_update_ms_p95={generation_update_p95_ms:.3f}ms (max {max_generation_update_p95_ms:.3f}ms)"
           )
 
           if cold_p95_ms > max_cold_p95_ms:
               print("cold compile regression: p95 exceeded stop condition", file=sys.stderr)
               sys.exit(1)
-          if incremental_p95_ms > max_incremental_p95_ms:
-              print("incremental compile regression: p95 exceeded stop condition", file=sys.stderr)
+          if generation_update_p95_ms > max_generation_update_p95_ms:
+              print("complete-generation update regression: p95 exceeded stop condition", file=sys.stderr)
               sys.exit(1)
           PY
 

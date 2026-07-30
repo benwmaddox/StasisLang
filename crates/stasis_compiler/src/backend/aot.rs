@@ -1537,7 +1537,7 @@ mod tests {
                 expected_collection_max_lengths: &[("enemies", 3)],
                 expected_clif_markers: &[
                     ("main", &["call"]),
-                    ("mutate", &["call fn39", "call fn38", "iadd"]),
+                    ("mutate", &["call", "iadd"]),
                 ],
             },
         ]
@@ -2554,6 +2554,52 @@ mod tests {
                 "AOT/JIT mismatch for internal call fixture '{label}'"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn direct_call_generation_sample_matches_jit_and_linked_aot() {
+        let main_source = include_str!("../../../../samples/direct_call_generation/main.stasis");
+        let math_source = include_str!("../../../../samples/direct_call_generation/math.stasis");
+        let fixture_root = Path::new("direct_call_generation_fixture");
+
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            fixture_root.join("main.stasis").to_string_lossy(),
+            main_source,
+        );
+        jit.upsert_file(
+            fixture_root.join("math.stasis").to_string_lossy(),
+            math_source,
+        );
+        jit.compile().expect("JIT sample compile");
+        let jit_result = jit
+            .execute_i32_noarg_by_name("main")
+            .expect("JIT sample run");
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file(
+            fixture_root.join("main.stasis").to_string_lossy(),
+            main_source,
+        );
+        aot.upsert_file(
+            fixture_root.join("math.stasis").to_string_lossy(),
+            math_source,
+        );
+        aot.compile().expect("AOT sample compile");
+        assert_eq!(aot.artifacts().len(), 9);
+        assert_eq!(jit_result, 17);
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            eprintln!("skipping linked AOT execution: no Windows linker found");
+            return;
+        };
+        let Some(aot_result) =
+            run_linked_i32_noarg_fixture(&aot, "main", "direct_call_generation", &link_config)
+        else {
+            return;
+        };
+
+        assert_eq!(aot_result, jit_result);
     }
 
     #[cfg(windows)]
