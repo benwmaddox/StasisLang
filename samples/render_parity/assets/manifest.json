@@ -17,6 +17,13 @@
       "dependencies": []
     },
     {
+      "id": "parity_font",
+      "path": "assets/parity.ttf",
+      "content_sha256": "17ec668bd0cd62e934f97563287ed72a4a8599ae716d20c1a93c82f1876dde47",
+      "format": {"kind": "font", "encoding": "ttf"},
+      "dependencies": []
+    },
+    {
       "id": "translucent",
       "path": "assets/translucent.svg",
       "content_sha256": "8319b2879d03d06a2a4bb947ad0c5c9a37ef08be8888666b06086252770c526c",
