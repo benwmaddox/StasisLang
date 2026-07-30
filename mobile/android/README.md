@@ -65,7 +65,7 @@ From this directory:
 .\build_debug.ps1
 ```
 
-This builds the Stasis Rust bridge plus the optimized phone-native Codex login
+This builds the Stasis Rust bridge with the Cargo release profile plus the optimized phone-native Codex login
 library from its pinned official revision, packages the Android Rustls verifier,
 and assembles the Workshop APK. The first Codex build downloads upstream Rust
 dependencies and takes longer; subsequent builds reuse Cargo output.
@@ -76,6 +76,13 @@ Gradle directly:
 ```powershell
 gradle :app:assembleWorkshopDebug
 ```
+
+Direct Gradle assembly verifies the generated Rust bridge provenance manifest,
+including the release profile, current Rust/Cargo input fingerprint, and exact
+SHA-256 for both required Workshop ABIs. Rebuild with
+`build_rust_bridge.ps1 -Release` if verification fails. For an intentional
+native-debug session only, build with `build_rust_bridge.ps1 -Debug` and pass
+`-Pstasis.allowDebugRustBridge=true` to Gradle.
 
 Build the descriptor-selected Pong package directly with:
 

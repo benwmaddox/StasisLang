@@ -18,7 +18,7 @@ try {
         throw "Gradle was not found. Install Gradle or open mobile/android in Android Studio."
     }
 
-    & (Join-Path $scriptRoot "build_rust_bridge.ps1")
+    & (Join-Path $scriptRoot "build_rust_bridge.ps1") -Release
     & (Join-Path $scriptRoot "build_codex_native.ps1") -Release
 
     $task = if ($Install) { ":app:installWorkshopDebug" } else { ":app:assembleWorkshopDebug" }

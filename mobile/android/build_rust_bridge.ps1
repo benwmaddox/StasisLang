@@ -3,7 +3,8 @@ param(
     [string]$NdkVersion = "",
     [int]$MinSdk = 26,
     [string[]]$Abis = @("arm64-v8a", "x86_64"),
-    [switch]$Release
+    [switch]$Release,
+    [switch]$Debug
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,9 +37,16 @@ $prebuilt = Join-Path $ndkRoot "toolchains\llvm\prebuilt\windows-x86_64"
 $installedTargets = & rustup target list --installed
 if ($LASTEXITCODE -ne 0) { throw "rustup target discovery failed with exit code $LASTEXITCODE" }
 $env:CARGO_INCREMENTAL = "0"
+$useRelease = -not $Debug
+if ($Release -and $Debug) {
+    throw "Choose either -Release or -Debug, not both."
+}
+if ($Release) {
+    $useRelease = $true
+}
 $profileArgs = @()
 $profileDir = "debug"
-if ($Release) {
+if ($useRelease) {
     $profileArgs += "--release"
     $profileDir = "release"
 }
@@ -46,6 +54,12 @@ if ($Release) {
 $targets = @{
     "arm64-v8a" = @{ Rust = "aarch64-linux-android"; Clang = "aarch64-linux-android" }
     "x86_64" = @{ Rust = "x86_64-linux-android"; Clang = "x86_64-linux-android" }
+}
+$requiredAbis = @("arm64-v8a", "x86_64")
+$requestedAbis = @($Abis | Sort-Object -Unique)
+if ($requestedAbis.Count -ne $requiredAbis.Count -or
+        (Compare-Object ($requiredAbis | Sort-Object) $requestedAbis)) {
+    throw "Workshop Rust bridge packaging requires both ABIs: $($requiredAbis -join ', ')."
 }
 
 foreach ($abi in $Abis) {
@@ -80,3 +94,6 @@ foreach ($abi in $Abis) {
     Copy-Item -Force $source $dest
     Write-Host "Packaged Rust Android bridge: $dest"
 }
+
+& (Join-Path $scriptRoot "rust_bridge_provenance.ps1") -Mode Write -Profile $profileDir
+if ($LASTEXITCODE -ne 0) { throw "Rust bridge provenance write failed with exit code $LASTEXITCODE" }
