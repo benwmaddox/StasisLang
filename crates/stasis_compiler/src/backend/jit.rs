@@ -259,10 +259,41 @@ impl JitProcess {
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
+        let previous_compiler = self.compiler.clone();
+        let previous_analysis = self.compile_analysis_cache.clone();
+        let previous_artifacts = self.artifacts.clone();
+        let previous_metadata = self.generation_metadata.clone();
+        let previous_literals = self.staged_string_literals.clone();
+        let previous_active_compiler = self.active_compiler.clone();
+        let previous_active_analysis = self.active_compile_analysis_cache.clone();
+        let previous_active_literals = self.active_string_literals.clone();
+        let previous_module_count = self.modules.len();
         let report = self.compile_staged()?;
-        self.activate_staged_runtime()
-            .map_err(crate::compiler::CompileError::Backend)?;
-        Ok(report)
+        match self.activate_staged_runtime() {
+            Ok(()) => {
+                let active_module = self.modules.pop().ok_or_else(|| {
+                    crate::compiler::CompileError::Invariant(
+                        "activated JIT generation has no code module".to_string(),
+                    )
+                })?;
+                self.modules.clear();
+                self.modules.push(active_module);
+                Ok(report)
+            }
+            Err(error) => {
+                self.modules.truncate(previous_module_count);
+                self.compiler = previous_compiler;
+                self.compile_analysis_cache = previous_analysis;
+                self.artifacts = previous_artifacts;
+                self.generation_metadata = previous_metadata;
+                self.staged_string_literals = previous_literals;
+                self.active_compiler = previous_active_compiler;
+                self.active_compile_analysis_cache = previous_active_analysis;
+                self.active_string_literals = previous_active_literals;
+                self.rebuild_artifact_index();
+                Err(crate::compiler::CompileError::Backend(error))
+            }
+        }
     }
 
     pub fn compile_staged(&mut self) -> CompileResult<CompileReport> {
@@ -529,7 +560,6 @@ impl JitProcess {
         let staged_string_literals = collect_current_string_literals(&self.compiler)
             .map_err(crate::compiler::CompileError::Backend)?;
         self.artifacts = staged_artifacts;
-        self.modules.clear();
         self.modules.push(module);
         self.generation_metadata = Some(staged_metadata);
         self.staged_string_literals = staged_string_literals;
@@ -5642,6 +5672,56 @@ mod tests {
             process.generation_metadata(),
             Some(&recovered_metadata),
             "frontend failure must not publish a generation"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_keeps_previous_module_when_runtime_activation_fails() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "global task175_activation_values: i32[1];\nfunction main(): i32 { return 1; }\n",
+        );
+        process.compile().expect("initial compile");
+        let first_metadata = process
+            .generation_metadata()
+            .expect("initial metadata")
+            .clone();
+        let first_main_ptr = process
+            .symbol_code_ptrs()
+            .get("main")
+            .copied()
+            .expect("initial main pointer");
+
+        let host_values = Box::leak(Box::new([0_i32]));
+        stasis_dynload::register_global_i32_array(
+            hash_global_path("task175_activation_values"),
+            0,
+            host_values.as_mut_ptr(),
+            host_values.len(),
+        );
+        process.upsert_file(
+            "sample.stasis",
+            "global task175_activation_values: i32[2];\nfunction main(): i32 { return 2; }\n",
+        );
+        let error = process
+            .compile()
+            .expect_err("activation should reject growth");
+        assert!(
+            format!("{error:?}").contains("cannot grow host-owned collection storage"),
+            "unexpected activation error: {error:?}"
+        );
+        assert_eq!(
+            process.symbol_code_ptrs().get("main").copied(),
+            Some(first_main_ptr)
+        );
+        assert_eq!(process.generation_metadata(), Some(&first_metadata));
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("old main remains executable"),
+            1
         );
     }
 

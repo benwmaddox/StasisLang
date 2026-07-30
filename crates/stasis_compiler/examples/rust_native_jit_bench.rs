@@ -146,10 +146,11 @@ fn run_scenario(
         let start = Instant::now();
         let report = process.compile().map_err(|error| format!("{error:?}"))?;
         let elapsed = start.elapsed();
-        if report.emit.emitted_functions != 1 {
+        let expected_generation_functions = function_count.saturating_add(1);
+        if report.emit.emitted_functions != expected_generation_functions {
             return Err(format!(
-                "expected one emitted function for incremental update, got {}",
-                report.emit.emitted_functions
+                "expected {expected_generation_functions} emitted functions for complete-generation update, got {}",
+                report.emit.emitted_functions,
             ));
         }
         incremental_times.push(elapsed);
@@ -266,7 +267,7 @@ fn main() -> Result<(), String> {
             config.incremental_samples,
         )?;
         println!(
-            "result functions={} seed={} cold_ms_p50={:.3} cold_ms_p95={:.3} incremental_one_fn_ms_p50={:.3} incremental_one_fn_ms_p95={:.3}",
+            "result functions={} seed={} cold_ms_p50={:.3} cold_ms_p95={:.3} complete_generation_update_ms_p50={:.3} complete_generation_update_ms_p95={:.3}",
             result.function_count,
             result.seed,
             result.cold_ms_p50,
