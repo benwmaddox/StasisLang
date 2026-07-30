@@ -29,7 +29,7 @@ use serde_json::Value;
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
 };
-use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
 use stasis_compiler::backend::state_migration::{
     activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
     MAX_STATE_SNAPSHOT_BYTES,
@@ -1991,8 +1991,12 @@ fn run_play_in_process_inner(
         return Ok(());
     }
 
-    let mut tick_code_ptr = package.tick_code_ptr;
-    let mut render_code_ptr = package.render_code_ptr;
+    stasis_dynload::begin_jit_host_entry_session(package.host_entry_targets(1)?)?;
+    let mut tick_code_ptr = stasis_dynload::jit_host_tick_trampoline_ptr() as u64;
+    let mut render_code_ptr = stasis_dynload::jit_host_render_trampoline_ptr() as u64;
+    let mut requested_watch_revision = 0_u64;
+    let mut finished_watch_revision = 0_u64;
+    let mut watch_patch_job: Option<WatchPatchJob> = None;
     let mut live = live
         .map(|(server, config)| LiveWorkspace::new(server, config, &jit))
         .transpose()?;
@@ -2008,6 +2012,103 @@ fn run_play_in_process_inner(
             );
             if live.should_quit() {
                 break;
+            }
+        }
+        let completed_watch =
+            watch_patch_job
+                .as_ref()
+                .and_then(|job| match job.receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(format!(
+                        "watch compile worker {} disconnected",
+                        job.revision
+                    ))),
+                });
+        if let Some(result) = completed_watch {
+            let job = watch_patch_job.take().expect("completed watch job exists");
+            let _ = job.worker.join();
+            finished_watch_revision = job.revision;
+            if job.revision < requested_watch_revision {
+                println!(
+                    "[watch] discarded superseded revision {} (latest {})",
+                    job.revision, requested_watch_revision
+                );
+            } else {
+                match result {
+                    Err(error) => println!("[swap] revision {} rejected: {error}", job.revision),
+                    Ok(prepared) => {
+                        let emitted = prepared
+                            .candidate
+                            .generation_metadata()
+                            .map_or(0, |metadata| metadata.emitted_function_ids.len());
+                        let reused = prepared
+                            .candidate
+                            .generation_metadata()
+                            .map_or(0, |metadata| metadata.reused_function_ids.len());
+                        let candidate_tick_budget = prepared.candidate.tick_budget_us();
+                        let commit_started = Instant::now();
+                        let commit_result = commit_play_candidate_between_ticks(
+                            &mut jit,
+                            prepared.candidate,
+                            prepared.package.symbol_code_ptrs.keys().cloned().collect(),
+                            &prepared.package,
+                        );
+                        let commit_ms = commit_started.elapsed().as_millis();
+                        match commit_result {
+                            Err(error) => println!(
+                                "[swap] revision {} aborted (compile={}ms package={}ms commit={}ms): {error}",
+                                prepared.revision,
+                                prepared.compile_ms,
+                                prepared.package_ms,
+                                commit_ms
+                            ),
+                            Ok(entrypoints) => {
+                                tick_code_ptr = entrypoints.tick_code_ptr;
+                                render_code_ptr = entrypoints.render_code_ptr;
+                                if let Ok(Some(candidate_tick_budget)) = candidate_tick_budget {
+                                    if let Some(report) = update_tick_budget_after_swap(
+                                        &mut tick_budget,
+                                        &mut tick_budget_generation,
+                                        Some(candidate_tick_budget),
+                                        true,
+                                    ) {
+                                        println!("{report}");
+                                    }
+                                }
+                                if let Ok(paths) = prepared.dependency_paths {
+                                    watch_dependency_paths = Some(paths);
+                                }
+                                if let Some(live) = live.as_mut() {
+                                    live.refresh_after_external_edit(&jit);
+                                }
+                                println!(
+                                    "[swap] revision {} published re_jit={} reused={} compile={}ms package={}ms commit={}ms",
+                                    prepared.revision,
+                                    emitted,
+                                    reused,
+                                    prepared.compile_ms,
+                                    prepared.package_ms,
+                                    commit_ms
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if watch_patch_job.is_none() && requested_watch_revision > finished_watch_revision {
+            match start_watch_patch_job(
+                requested_watch_revision,
+                jit.staged_candidate(),
+                root_path.clone(),
+                root_path_str.clone(),
+            ) {
+                Ok(job) => watch_patch_job = Some(job),
+                Err(error) => {
+                    finished_watch_revision = requested_watch_revision;
+                    println!("[watch] failed starting background compile: {error}");
+                }
             }
         }
         // Drain file events and recompile at tick boundaries (all-or-nothing).
@@ -2058,101 +2159,21 @@ fn run_play_in_process_inner(
             println!("[watch] ignored {ignored_changes} change(s) (not in dependency graph)");
         }
         if needs_recompile {
-            let changed = triggered_paths
+            let latest_watch_path = triggered_paths
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "<unknown>".to_string());
-            println!("[watch] change detected: {changed}");
-
-            let t_total = Instant::now();
-            let mut candidate = jit.staged_candidate();
-            // Ensure the root file is refreshed (imports are pulled by the candidate process).
-            if let Ok(next_root_source) = fs::read_to_string(&root_path) {
-                candidate.upsert_file(root_path_str.clone(), next_root_source);
-            }
-            let _ = candidate.refresh_imported_sources_from_disk(&root_path_str);
-
-            let t_compile = Instant::now();
-            match candidate.compile_staged() {
-                Ok(_) => {
-                    let compile_ms = t_compile.elapsed().as_millis();
-                    let candidate_tick_budget = match candidate.tick_budget_us() {
-                        Ok(value) => value,
-                        Err(error) => {
-                            println!("[swap] compile rejected: {error}");
-                            continue;
-                        }
-                    };
-
-                    let t_pkg = Instant::now();
-                    match candidate.build_engine_package(&EngineEntrypoints::runtime_default()) {
-                        Ok(next_package) => {
-                            let package_ms = t_pkg.elapsed().as_millis();
-
-                            let candidate_entrypoints = PlayEntrypoints {
-                                tick_code_ptr: next_package.tick_code_ptr,
-                                render_code_ptr: next_package.render_code_ptr,
-                            };
-
-                            let t_commit = Instant::now();
-                            let commit_result = commit_play_candidate_between_ticks(
-                                &mut jit,
-                                candidate,
-                                next_package.symbol_code_ptrs.keys().cloned().collect(),
-                                next_package.on_code_swap_code_ptr,
-                                candidate_entrypoints,
-                            );
-                            let commit_ms = t_commit.elapsed().as_millis();
-
-                            let t_deps = Instant::now();
-                            if let Ok(next_graph) = collect_watch_dependency_paths(&root_path) {
-                                watch_dependency_paths = Some(next_graph);
-                            }
-                            let deps_ms = t_deps.elapsed().as_millis();
-
-                            let total_ms = t_total.elapsed().as_millis();
-
-                            match commit_result {
-                                Err(error) => println!(
-                                    "[swap] aborted total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms commit={commit_ms}ms deps={deps_ms}ms): {error}"
-                                ),
-                                Ok(entrypoints) => {
-                                    tick_code_ptr = entrypoints.tick_code_ptr;
-                                    render_code_ptr = entrypoints.render_code_ptr;
-                                    if let Some(report) = update_tick_budget_after_swap(
-                                        &mut tick_budget,
-                                        &mut tick_budget_generation,
-                                        candidate_tick_budget,
-                                        true,
-                                    ) {
-                                        println!("{report}");
-                                    }
-                                    if let Some(live) = live.as_mut() {
-                                        live.refresh_after_external_edit(&jit);
-                                    }
-                                    println!(
-                                        "[swap] swapped ok total={total_ms}ms (compile={compile_ms}ms package={package_ms}ms commit={commit_ms}ms deps={deps_ms}ms)"
-                                    );
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            println!(
-                                "[swap] build_engine_package failed after {}ms: {error}",
-                                t_pkg.elapsed().as_millis()
-                            );
-                        }
-                    }
+            requested_watch_revision = requested_watch_revision.saturating_add(1);
+            println!(
+                "[watch] queued revision {} for {}{}",
+                requested_watch_revision,
+                latest_watch_path,
+                if watch_patch_job.is_some() {
+                    " (superseding in-flight compile)"
+                } else {
+                    ""
                 }
-                Err(error) => {
-                    // Keep running the last known-good code/data if compilation fails.
-                    println!(
-                        "[swap] compile failed after {}ms: {:?}",
-                        t_compile.elapsed().as_millis(),
-                        error
-                    );
-                }
-            }
+            );
         }
 
         gfx.host_get_frame(&mut host_i32, &mut host_f32)?;
@@ -2219,6 +2240,9 @@ fn run_play_in_process_inner(
         }
     }
 
+    if let Some(job) = watch_patch_job.take() {
+        let _ = job.worker.join();
+    }
     if let Some(budget) = tick_budget {
         println!("{}", budget.report());
     }
@@ -2236,9 +2260,12 @@ fn commit_play_candidate_between_ticks(
     active: &mut JitProcess,
     candidate: JitProcess,
     changed_functions: Vec<String>,
-    on_code_swap_code_ptr: Option<u64>,
-    entrypoints: PlayEntrypoints,
+    package: &JitEnginePackage,
 ) -> Result<PlayEntrypoints, String> {
+    let revision = stasis_dynload::jit_host_entry_targets()
+        .map_or(1, |targets| targets.revision.saturating_add(1));
+    let targets = package.host_entry_targets(revision)?;
+    stasis_dynload::validate_jit_host_entry_targets(&targets)?;
     let mut preview = plan_state_migration(
         &active.state_layout(),
         &candidate.state_layout(),
@@ -2251,16 +2278,80 @@ fn commit_play_candidate_between_ticks(
         Some(&*active),
         &candidate,
         &preview,
-        on_code_swap_code_ptr.is_some(),
+        package.on_code_swap_code_ptr.is_some(),
         || {
-            on_code_swap_code_ptr.map_or(Ok(()), |code_ptr| {
+            package.on_code_swap_code_ptr.map_or(Ok(()), |code_ptr| {
                 stasis_dynload::invoke_code_swap_hook(code_ptr as usize)
             })
         },
         Result::is_ok,
     )??;
+    stasis_dynload::publish_jit_host_entry_targets(targets)?;
     active.accept_staged_candidate(candidate);
-    Ok(entrypoints)
+    Ok(PlayEntrypoints {
+        tick_code_ptr: stasis_dynload::jit_host_tick_trampoline_ptr() as u64,
+        render_code_ptr: stasis_dynload::jit_host_render_trampoline_ptr() as u64,
+    })
+}
+
+struct PreparedWatchPatch {
+    revision: u64,
+    candidate: JitProcess,
+    package: JitEnginePackage,
+    compile_ms: u128,
+    package_ms: u128,
+    dependency_paths: Result<BTreeSet<String>, String>,
+}
+
+struct WatchPatchJob {
+    revision: u64,
+    receiver: std::sync::mpsc::Receiver<Result<PreparedWatchPatch, String>>,
+    worker: std::thread::JoinHandle<()>,
+}
+
+fn start_watch_patch_job(
+    revision: u64,
+    mut candidate: JitProcess,
+    root_path: PathBuf,
+    root_path_str: String,
+) -> Result<WatchPatchJob, String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::Builder::new()
+        .name(format!("stasis-watch-compile-{revision}"))
+        .spawn(move || {
+            let result = (|| {
+                if let Ok(next_root_source) = fs::read_to_string(&root_path) {
+                    candidate.upsert_file(root_path_str.clone(), next_root_source);
+                }
+                let _ = candidate.refresh_imported_sources_from_disk(&root_path_str);
+                let compile_started = Instant::now();
+                candidate
+                    .compile_staged()
+                    .map_err(|error| format!("compile failed: {error:?}"))?;
+                let compile_ms = compile_started.elapsed().as_millis();
+                let package_started = Instant::now();
+                let package = candidate
+                    .build_engine_package(&EngineEntrypoints::runtime_default())
+                    .map_err(|error| format!("build_engine_package failed: {error}"))?;
+                let package_ms = package_started.elapsed().as_millis();
+                let dependency_paths = collect_watch_dependency_paths(&root_path);
+                Ok(PreparedWatchPatch {
+                    revision,
+                    candidate,
+                    package,
+                    compile_ms,
+                    package_ms,
+                    dependency_paths,
+                })
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("failed starting watch compile worker: {error}"))?;
+    Ok(WatchPatchJob {
+        revision,
+        receiver,
+        worker,
+    })
 }
 
 fn format_live_main_error(error: String) -> String {
@@ -5057,9 +5148,15 @@ mod tests {
         let active_package = active
             .build_engine_package(&EngineEntrypoints::runtime_default())
             .expect("build v1 package");
+        stasis_dynload::begin_jit_host_entry_session(
+            active_package
+                .host_entry_targets(1)
+                .expect("v1 host targets"),
+        )
+        .expect("publish v1 host targets");
         let active_entrypoints = PlayEntrypoints {
-            tick_code_ptr: active_package.tick_code_ptr,
-            render_code_ptr: active_package.render_code_ptr,
+            tick_code_ptr: stasis_dynload::jit_host_tick_trampoline_ptr() as u64,
+            render_code_ptr: stasis_dynload::jit_host_render_trampoline_ptr() as u64,
         };
         assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(0));
         assert_eq!(
@@ -5085,13 +5182,20 @@ mod tests {
             &mut active,
             candidate,
             package.symbol_code_ptrs.keys().cloned().collect(),
-            package.on_code_swap_code_ptr,
-            PlayEntrypoints {
-                tick_code_ptr: package.tick_code_ptr,
-                render_code_ptr: package.render_code_ptr,
-            },
+            &package,
         )
         .expect("commit and publish v2 at the production between-tick boundary");
+        assert_eq!(published.tick_code_ptr, active_entrypoints.tick_code_ptr);
+        assert_eq!(
+            published.render_code_ptr,
+            active_entrypoints.render_code_ptr
+        );
+        assert_eq!(
+            stasis_dynload::jit_host_entry_targets()
+                .expect("published v2 targets")
+                .revision,
+            2
+        );
 
         assert_eq!(
             active.read_global_scalar("state.score"),
@@ -5117,6 +5221,94 @@ mod tests {
         );
 
         stasis_dynload::clear_jit_i32_global_table();
+    }
+
+    #[test]
+    fn background_watch_patch_keeps_old_multi_root_windows_until_atomic_publish() {
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        let root = std::env::temp_dir().join(format!("stasis-watch-patch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create watch patch fixture");
+        let source_path = root.join("main.stasis");
+        let source_v1 = "function shared(): i32 { return 1; } function main(): i32 { return 0; } function tick(): i32 { return shared(); } function render(): i32 { return shared() + 10; } function on_code_swap(): void { return; }";
+        let source_v2 = source_v1.replace("return 1", "return 2");
+        fs::write(&source_path, source_v1).expect("write v1");
+
+        let source_path_text = source_path.to_string_lossy().to_string();
+        let mut active = JitProcess::new();
+        active.upsert_file(source_path_text.clone(), source_v1);
+        active.compile().expect("compile v1");
+        let active_package = active
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect("build v1 package");
+        stasis_dynload::begin_jit_host_entry_session(
+            active_package.host_entry_targets(1).expect("v1 targets"),
+        )
+        .expect("publish v1 targets");
+        let tick_trampoline = stasis_dynload::jit_host_tick_trampoline_ptr();
+        let render_trampoline = stasis_dynload::jit_host_render_trampoline_ptr();
+
+        fs::write(&source_path, source_v2).expect("write v2");
+        let job = start_watch_patch_job(
+            2,
+            active.staged_candidate(),
+            source_path.clone(),
+            source_path_text,
+        )
+        .expect("start background patch");
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_trampoline), Ok(1));
+        assert_eq!(stasis_dynload::invoke_noarg_i32(render_trampoline), Ok(11));
+        let prepared = job
+            .receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("background result")
+            .expect("background compile");
+        job.worker.join().expect("join background compile");
+        assert_eq!(
+            prepared
+                .candidate
+                .generation_metadata()
+                .expect("patch metadata")
+                .emitted_function_ids
+                .len(),
+            3
+        );
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_trampoline), Ok(1));
+        assert_eq!(stasis_dynload::invoke_noarg_i32(render_trampoline), Ok(11));
+        stasis_dynload::publish_jit_host_entry_targets(
+            active_package
+                .host_entry_targets(2)
+                .expect("intervening live-edit targets"),
+        )
+        .expect("simulate live edit publishing while watch compile is pending");
+
+        commit_play_candidate_between_ticks(
+            &mut active,
+            prepared.candidate,
+            prepared.package.symbol_code_ptrs.keys().cloned().collect(),
+            &prepared.package,
+        )
+        .expect("publish v2");
+        assert_eq!(
+            stasis_dynload::jit_host_tick_trampoline_ptr(),
+            tick_trampoline
+        );
+        assert_eq!(
+            stasis_dynload::jit_host_render_trampoline_ptr(),
+            render_trampoline
+        );
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_trampoline), Ok(2));
+        assert_eq!(stasis_dynload::invoke_noarg_i32(render_trampoline), Ok(12));
+        assert_eq!(
+            stasis_dynload::jit_host_entry_targets()
+                .expect("watch targets")
+                .revision,
+            3,
+            "watch publication must advance from the intervening live revision"
+        );
+        fs::remove_dir_all(root).expect("remove watch patch fixture");
     }
 
     #[test]
@@ -5163,11 +5355,7 @@ mod tests {
             &mut active,
             candidate,
             package.symbol_code_ptrs.keys().cloned().collect(),
-            package.on_code_swap_code_ptr,
-            PlayEntrypoints {
-                tick_code_ptr: package.tick_code_ptr,
-                render_code_ptr: package.render_code_ptr,
-            },
+            &package,
         )
         .expect_err("swap hook must reject at the production boundary");
         assert!(error.contains("rejection"));

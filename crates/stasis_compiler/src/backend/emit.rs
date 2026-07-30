@@ -1523,6 +1523,7 @@ pub(crate) struct DirectCallMode<'a> {
     pub(crate) self_clif_func_id: FuncId,
     pub(crate) imported_function_ids: HashMap<FunctionId, FuncId>,
     pub(crate) symbol_prefix: &'static str,
+    pub(crate) force_far_nonself_calls: bool,
 }
 
 pub(crate) enum InternalCallMode<'a> {
@@ -1590,6 +1591,9 @@ fn emit_direct_call_for_signature(
     let func_ref = mode
         .module
         .declare_func_in_func(callee_func_id, builder.func);
+    if mode.force_far_nonself_calls && function_id != mode.self_function_id {
+        builder.func.dfg.ext_funcs[func_ref].colocated = false;
+    }
     let call = builder.ins().call(func_ref, arg_values);
     if signature.return_type == TYPE_ID_VOID {
         Ok(None)
@@ -1644,6 +1648,7 @@ pub(crate) fn compile_function_with_module<M, T, BeforeStatement, OnFunctionBuil
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
     direct_storage: Option<&DirectStorageBindings>,
+    defined_runtime_helper_trampolines: Option<&mut BTreeSet<String>>,
     mut before_statement: BeforeStatement,
     on_function_built: OnFunctionBuilt,
     finalize: Finalize,
@@ -1843,12 +1848,20 @@ where
             SharedCompileBackendMode::JitDirect => "jit_fn_",
             SharedCompileBackendMode::AotDirect => "aot_fn_",
         };
+        // Cranelift's JIT allocator maps functions independently. AArch64's BL range
+        // therefore cannot be assumed between functions, even in one JITModule.
+        let force_far_nonself_calls = backend_mode == SharedCompileBackendMode::JitDirect
+            && matches!(
+                module.isa().triple().architecture,
+                target_lexicon::Architecture::Aarch64(_)
+            );
         let mut internal_calls = InternalCallMode::Direct(DirectCallMode {
             module: &mut module,
             self_function_id: meta.id,
             self_clif_func_id: function_id,
             imported_function_ids: HashMap::new(),
             symbol_prefix,
+            force_far_nonself_calls,
         });
         let mut terminated = false;
         for statement in &hir.statements {
@@ -1891,6 +1904,7 @@ where
         &mut module,
         runtime_helper_linkage,
         &context.func,
+        defined_runtime_helper_trampolines,
     )?;
 
     on_function_built(meta, &context.func);
@@ -1947,6 +1961,7 @@ fn define_referenced_runtime_helper_trampolines(
     module: &mut impl Module,
     linkage: RuntimeHelperLinkage<'_>,
     function: &cranelift_codegen::ir::Function,
+    mut defined: Option<&mut BTreeSet<String>>,
 ) -> Result<(), String> {
     let RuntimeHelperLinkage::LocalTrampolines(addresses) = linkage else {
         return Ok(());
@@ -1993,6 +2008,12 @@ fn define_referenced_runtime_helper_trampolines(
         ));
     }
     for (func_id, symbol, signature, address) in trampolines {
+        if defined
+            .as_deref_mut()
+            .is_some_and(|defined| !defined.insert(symbol.clone()))
+        {
+            continue;
+        }
         define_runtime_helper_trampoline(module, func_id, &symbol, signature, address)?;
     }
     Ok(())

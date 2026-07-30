@@ -217,6 +217,10 @@ impl Compiler {
         });
     }
 
+    pub fn retain_files(&mut self, paths: &BTreeSet<String>) {
+        self.files.retain(|file| paths.contains(&file.path));
+    }
+
     pub fn compile_with<F>(&mut self, mut emit_function: F) -> CompileResult<CompileReport>
     where
         F: FnMut(&FunctionMeta, &FunctionHIR, &TypeTable) -> Result<(), String>,

@@ -1,4 +1,10 @@
-use crate::backend::emit::{DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage};
+use crate::backend::emit::{
+    AssignTarget, CompileAnalysisCache, DirectStorageBinding, DirectStorageBindings,
+    RuntimeHelperLinkage, SimpleCondition, SimpleExpr, SimpleStmt,
+};
+use crate::backend::patch_plan::{
+    capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReasonChain,
+};
 use crate::backend::state_layout::{
     build_state_layout, build_state_memory_report, is_named_scalar_state_path,
 };
@@ -24,8 +30,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 #[cfg(test)]
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{MutexGuard, OnceLock};
 use std::time::{Instant, SystemTime};
 
 pub use crate::backend::state_layout::{
@@ -45,6 +52,294 @@ const MAX_STATE_QUERY_MATCHES: usize = 64;
 
 fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+#[derive(Clone, Default)]
+struct FunctionLoweringReferences {
+    paths: BTreeSet<String>,
+    calls: BTreeSet<String>,
+    type_ids: BTreeSet<crate::frontend::types::TypeId>,
+}
+
+fn path_is_local(path: &str, scopes: &[BTreeSet<String>]) -> bool {
+    let root = path.split('.').next().unwrap_or(path);
+    scopes.iter().rev().any(|scope| scope.contains(root))
+}
+
+fn collect_condition_references(
+    condition: &SimpleCondition,
+    references: &mut FunctionLoweringReferences,
+    scopes: &[BTreeSet<String>],
+) {
+    match condition {
+        SimpleCondition::Comparison { lhs, rhs, .. } => {
+            collect_expression_references(lhs, references, scopes);
+            collect_expression_references(rhs, references, scopes);
+        }
+        SimpleCondition::Expr(expression) => {
+            collect_expression_references(expression, references, scopes)
+        }
+        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+            collect_condition_references(lhs, references, scopes);
+            collect_condition_references(rhs, references, scopes);
+        }
+        SimpleCondition::Not(inner) => collect_condition_references(inner, references, scopes),
+    }
+}
+
+fn collect_expression_references(
+    expression: &SimpleExpr,
+    references: &mut FunctionLoweringReferences,
+    scopes: &[BTreeSet<String>],
+) {
+    match expression {
+        SimpleExpr::Identifier(path) => {
+            if !path_is_local(path, scopes) {
+                references.paths.insert(path.clone());
+            }
+        }
+        SimpleExpr::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            if !path_is_local(collection_path, scopes) {
+                references.paths.insert(collection_path.clone());
+                if !suffix.is_empty() {
+                    references
+                        .paths
+                        .insert(format!("{collection_path}.{suffix}"));
+                }
+            }
+            collect_expression_references(index, references, scopes);
+        }
+        SimpleExpr::Call { target, args } => {
+            references.calls.insert(target.clone());
+            for argument in args {
+                collect_expression_references(argument, references, scopes);
+            }
+        }
+        SimpleExpr::Binary { lhs, rhs, .. } => {
+            collect_expression_references(lhs, references, scopes);
+            collect_expression_references(rhs, references, scopes);
+        }
+        SimpleExpr::Condition(condition) => {
+            collect_condition_references(condition, references, scopes)
+        }
+        SimpleExpr::Int(_)
+        | SimpleExpr::Float(_)
+        | SimpleExpr::Bool(_)
+        | SimpleExpr::StringLiteral(_) => {}
+    }
+}
+
+fn collect_target_references(
+    target: &AssignTarget,
+    references: &mut FunctionLoweringReferences,
+    scopes: &[BTreeSet<String>],
+) {
+    match target {
+        AssignTarget::Local(path) => {
+            if !path_is_local(path, scopes) {
+                references.paths.insert(path.clone());
+            }
+        }
+        AssignTarget::GlobalPath(path) => {
+            if !path_is_local(path, scopes) {
+                references.paths.insert(path.clone());
+            }
+        }
+        AssignTarget::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            if !path_is_local(collection_path, scopes) {
+                references.paths.insert(collection_path.clone());
+                if !suffix.is_empty() {
+                    references
+                        .paths
+                        .insert(format!("{collection_path}.{suffix}"));
+                }
+            }
+            collect_expression_references(index, references, scopes);
+        }
+    }
+}
+
+fn collect_statement_references(
+    statements: &[SimpleStmt],
+    references: &mut FunctionLoweringReferences,
+    scopes: &mut Vec<BTreeSet<String>>,
+) {
+    for statement in statements {
+        match statement {
+            SimpleStmt::Let {
+                name,
+                type_id,
+                expression,
+            } => {
+                collect_expression_references(expression, references, scopes);
+                references.type_ids.extend(*type_id);
+                scopes
+                    .last_mut()
+                    .expect("function dependency scope")
+                    .insert(name.clone());
+            }
+            SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
+                collect_expression_references(expression, references, scopes)
+            }
+            SimpleStmt::Assign {
+                target, expression, ..
+            } => {
+                collect_target_references(target, references, scopes);
+                collect_expression_references(expression, references, scopes);
+            }
+            SimpleStmt::Convert { target, source, .. } => {
+                collect_target_references(target, references, scopes);
+                collect_expression_references(source, references, scopes);
+            }
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => {
+                collect_condition_references(condition, references, scopes);
+                scopes.push(BTreeSet::new());
+                collect_statement_references(then_statements, references, scopes);
+                scopes.pop();
+                if let Some(statements) = else_statements {
+                    scopes.push(BTreeSet::new());
+                    collect_statement_references(statements, references, scopes);
+                    scopes.pop();
+                }
+            }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                scopes.push(BTreeSet::new());
+                collect_statement_references(std::slice::from_ref(init), references, scopes);
+                collect_condition_references(condition, references, scopes);
+                scopes.push(BTreeSet::new());
+                collect_statement_references(body_statements, references, scopes);
+                scopes.pop();
+                collect_statement_references(std::slice::from_ref(step), references, scopes);
+                scopes.pop();
+            }
+            SimpleStmt::Foreach {
+                item_name,
+                index_name,
+                collection_path,
+                body_statements,
+            } => {
+                if !path_is_local(collection_path, scopes) {
+                    references.paths.insert(collection_path.clone());
+                }
+                scopes.push(BTreeSet::from_iter(
+                    std::iter::once(item_name.clone()).chain(index_name.clone()),
+                ));
+                collect_statement_references(body_statements, references, scopes);
+                scopes.pop();
+            }
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+        }
+    }
+}
+
+fn paths_overlap(reference: &str, contract_path: &str) -> bool {
+    reference == contract_path
+        || contract_path
+            .strip_prefix(reference)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+        || reference
+            .strip_prefix(contract_path)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+}
+
+fn function_lowering_contract_hash(
+    function: &FunctionMeta,
+    references: &FunctionLoweringReferences,
+    analysis: &CompileAnalysisCache,
+    type_table: &TypeTable,
+) -> u64 {
+    let mut type_ids: BTreeSet<_> = function
+        .params
+        .iter()
+        .copied()
+        .chain(std::iter::once(function.return_type))
+        .chain(references.type_ids.iter().copied())
+        .collect();
+
+    let mut facts = Vec::new();
+    for path in &references.paths {
+        if let Some(value) = analysis.constant_values.get(path) {
+            facts.push(format!("constant:{path}:{value:?}"));
+        }
+    }
+    for (path, type_id) in &analysis.global_path_types {
+        if references
+            .paths
+            .iter()
+            .any(|reference| paths_overlap(reference, path))
+        {
+            facts.push(format!("global:{path}:{type_id:?}"));
+            type_ids.insert(*type_id);
+        }
+    }
+    for (path, info) in &analysis.collection_infos {
+        if references
+            .paths
+            .iter()
+            .any(|reference| paths_overlap(reference, path))
+        {
+            facts.push(format!("collection:{path}:{info:?}"));
+            type_ids.extend(info.element_type);
+            type_ids.extend(info.field_types.values().copied());
+        }
+    }
+    for signature in &analysis.resolved_extern_signatures {
+        if references.calls.contains(&signature.name) {
+            facts.push(format!("extern:{signature:?}"));
+            type_ids.extend(signature.params.iter().copied());
+            type_ids.insert(signature.return_type);
+            if let Some(address) = analysis.extern_symbol_addresses.get(&signature.symbol) {
+                facts.push(format!("extern_address:{}:{address}", signature.symbol));
+            }
+        }
+    }
+
+    let mut pending_types: Vec<_> = type_ids.iter().copied().collect();
+    let mut seen_types = BTreeSet::new();
+    while let Some(type_id) = pending_types.pop() {
+        if !seen_types.insert(type_id) {
+            continue;
+        }
+        if let Some(info) = type_table.type_info(type_id) {
+            facts.push(format!("type:{type_id:?}:{info:?}"));
+        }
+        if let Some(element_type) = type_table.indexed_element_type_id(type_id) {
+            pending_types.push(element_type);
+        }
+        if let Some(fields) = analysis.named_struct_field_types.get(&type_id) {
+            facts.push(format!("struct:{type_id:?}:{fields:?}"));
+            pending_types.extend(fields.values().copied());
+        }
+    }
+    facts.sort();
+    hash_text(&facts.join("\n"))
+}
+
+fn collect_function_lowering_references(
+    function: &FunctionMeta,
+    hir: &FunctionHIR,
+) -> FunctionLoweringReferences {
+    let mut references = FunctionLoweringReferences::default();
+    let mut scopes = vec![function.param_names.iter().cloned().collect()];
+    collect_statement_references(&hir.statements, &mut references, &mut scopes);
+    references
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -76,9 +371,11 @@ impl JitScalarValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitArtifact {
     pub function_id: FunctionId,
+    pub function_key: FunctionKey,
     pub slot: u32,
     pub body_hash: u64,
     pub(crate) code_ptr: u64,
+    pub executable_bytes: usize,
     pub clif: String,
 }
 
@@ -87,7 +384,7 @@ pub struct JitProcess {
     active_compiler: Option<Compiler>,
     artifacts: Vec<JitArtifact>,
     artifact_index: HashMap<FunctionId, usize>,
-    modules: Vec<JITModule>,
+    modules: Vec<Arc<JitArena>>,
     runtime_libraries: Vec<stasis_dynload::Library>,
     runtime_symbol_cache: BTreeMap<String, usize>,
     source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
@@ -95,6 +392,9 @@ pub struct JitProcess {
     compile_analysis_cache: Option<CompileAnalysisCache>,
     active_compile_analysis_cache: Option<CompileAnalysisCache>,
     generation_metadata: Option<JitGenerationMetadata>,
+    accepted_program: Option<AcceptedProgram>,
+    accepted_lowering_references: BTreeMap<FunctionKey, FunctionLoweringReferences>,
+    accepted_lowering_contracts: BTreeMap<FunctionKey, u64>,
     staged_string_literals: HashMap<i32, String>,
     active_string_literals: HashMap<i32, String>,
     last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
@@ -102,6 +402,11 @@ pub struct JitProcess {
     local_runtime_helper_trampolines: bool,
     #[cfg(test)]
     _test_guard: Option<MutexGuard<'static, ()>>,
+}
+
+struct JitArena {
+    _module: Mutex<JITModule>,
+    executable_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,21 +417,48 @@ pub struct JitEnginePackage {
     pub symbol_code_ptrs: BTreeMap<String, u64>,
 }
 
+impl JitEnginePackage {
+    pub fn host_entry_targets(
+        &self,
+        revision: u64,
+    ) -> Result<stasis_dynload::JitHostEntryTargets, String> {
+        let main =
+            self.symbol_code_ptrs.get("main").copied().ok_or_else(|| {
+                "JIT host-entry package is missing required main target".to_string()
+            })?;
+        Ok(stasis_dynload::JitHostEntryTargets {
+            revision,
+            main: main as usize,
+            tick: self.tick_code_ptr as usize,
+            render: self.render_code_ptr as usize,
+            on_code_swap: self.on_code_swap_code_ptr.map(|address| address as usize),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitGenerationMetadata {
     pub source_revision: u64,
     pub layout_hash: u64,
     pub emitted_function_ids: Vec<FunctionId>,
+    pub reused_function_ids: Vec<FunctionId>,
+    pub patch_reasons: Vec<PatchReasonChain>,
+    pub affected_host_entries: Vec<FunctionKey>,
+    pub retained_dependencies: Vec<FunctionKey>,
     pub host_export_signatures: BTreeMap<String, String>,
     pub host_export_code_ptrs: BTreeMap<String, u64>,
     pub diagnostics: Vec<String>,
     pub code_owner_revision: u64,
     pub data_owner_layout_hash: u64,
     pub codegen_micros: u64,
+    pub plan_micros: u64,
     pub finalize_micros: u64,
     pub module_count: usize,
+    pub retained_arena_count: usize,
     pub emitted_clif_bytes: usize,
     pub executable_bytes: usize,
+    pub retained_jit_bytes: usize,
+    pub total_jit_bytes: usize,
 }
 
 impl JitProcess {
@@ -167,6 +499,9 @@ impl JitProcess {
             compile_analysis_cache: None,
             active_compile_analysis_cache: None,
             generation_metadata: None,
+            accepted_program: None,
+            accepted_lowering_references: BTreeMap::new(),
+            accepted_lowering_contracts: BTreeMap::new(),
             staged_string_literals: HashMap::new(),
             active_string_literals: HashMap::new(),
             last_failed_source_diagnostic: None,
@@ -185,6 +520,17 @@ impl JitProcess {
         for file in self.compiler.files() {
             candidate.upsert_file(file.path.clone(), file.content.clone());
         }
+        candidate.active_compiler = self.active_compiler.clone();
+        candidate.artifacts = self.artifacts.clone();
+        candidate.modules = self.modules.clone();
+        candidate.compile_analysis_cache = self.compile_analysis_cache.clone();
+        candidate.active_compile_analysis_cache = self.active_compile_analysis_cache.clone();
+        candidate.generation_metadata = self.generation_metadata.clone();
+        candidate.accepted_program = self.accepted_program.clone();
+        candidate.accepted_lowering_references = self.accepted_lowering_references.clone();
+        candidate.accepted_lowering_contracts = self.accepted_lowering_contracts.clone();
+        candidate.staged_string_literals = self.staged_string_literals.clone();
+        candidate.active_string_literals = self.active_string_literals.clone();
         candidate.required_emit_roots = self.required_emit_roots.clone();
         candidate.local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
         candidate
@@ -202,6 +548,10 @@ impl JitProcess {
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
         self.compiler.upsert_file(path, content);
+    }
+
+    pub fn retain_files(&mut self, paths: &BTreeSet<String>) {
+        self.compiler.retain_files(paths);
     }
 
     pub fn function_data_flow_summaries(&self) -> &[crate::data_flow::FunctionDataFlowSummary] {
@@ -263,6 +613,9 @@ impl JitProcess {
         let previous_analysis = self.compile_analysis_cache.clone();
         let previous_artifacts = self.artifacts.clone();
         let previous_metadata = self.generation_metadata.clone();
+        let previous_accepted_program = self.accepted_program.clone();
+        let previous_lowering_references = self.accepted_lowering_references.clone();
+        let previous_lowering_contracts = self.accepted_lowering_contracts.clone();
         let previous_literals = self.staged_string_literals.clone();
         let previous_active_compiler = self.active_compiler.clone();
         let previous_active_analysis = self.active_compile_analysis_cache.clone();
@@ -270,22 +623,16 @@ impl JitProcess {
         let previous_module_count = self.modules.len();
         let report = self.compile_staged()?;
         match self.activate_staged_runtime() {
-            Ok(()) => {
-                let active_module = self.modules.pop().ok_or_else(|| {
-                    crate::compiler::CompileError::Invariant(
-                        "activated JIT generation has no code module".to_string(),
-                    )
-                })?;
-                self.modules.clear();
-                self.modules.push(active_module);
-                Ok(report)
-            }
+            Ok(()) => Ok(report),
             Err(error) => {
                 self.modules.truncate(previous_module_count);
                 self.compiler = previous_compiler;
                 self.compile_analysis_cache = previous_analysis;
                 self.artifacts = previous_artifacts;
                 self.generation_metadata = previous_metadata;
+                self.accepted_program = previous_accepted_program;
+                self.accepted_lowering_references = previous_lowering_references;
+                self.accepted_lowering_contracts = previous_lowering_contracts;
                 self.staged_string_literals = previous_literals;
                 self.active_compiler = previous_active_compiler;
                 self.active_compile_analysis_cache = previous_active_analysis;
@@ -393,11 +740,70 @@ impl JitProcess {
             self.compile_analysis_cache = Some(next_cache);
         }
         *self.compiler.types_mut() = analysis_type_table.clone();
-        let analysis = self.compile_analysis_cache.as_ref().ok_or_else(|| {
+        let analysis = self.compile_analysis_cache.clone().ok_or_else(|| {
             crate::compiler::CompileError::Invariant(
                 "jit compile analysis cache missing after refresh".to_string(),
             )
         })?;
+        let reachable_ids: Vec<_> = crate::backend::reachability::compute_reachable_function_ids(
+            self.compiler.functions(),
+            &self.required_emit_roots,
+        )
+        .into_iter()
+        .collect();
+        let function_keys_by_id: BTreeMap<FunctionId, FunctionKey> = self
+            .compiler
+            .functions()
+            .iter()
+            .filter_map(|function| {
+                self.compiler
+                    .files()
+                    .get(function.file_id as usize)
+                    .map(|file| {
+                        (
+                            function.id,
+                            FunctionKey::new(
+                                &file.path,
+                                function.name.clone(),
+                                function.signature_hash,
+                            ),
+                        )
+                    })
+            })
+            .collect();
+        let mut lowering_references = BTreeMap::new();
+        let mut lowering_contracts = BTreeMap::new();
+        let mut lowered_contract_changes = BTreeSet::new();
+        for function_id in &reachable_ids {
+            let function = self
+                .compiler
+                .functions()
+                .get(*function_id as usize)
+                .ok_or_else(|| {
+                    crate::compiler::CompileError::Invariant(format!(
+                        "reachable function id {function_id} is missing"
+                    ))
+                })?;
+            let key = function_keys_by_id.get(function_id).ok_or_else(|| {
+                crate::compiler::CompileError::Invariant(format!(
+                    "function '{}' has no stable key",
+                    function.name
+                ))
+            })?;
+            if let Some(references) = self.accepted_lowering_references.get(key) {
+                let hash = function_lowering_contract_hash(
+                    function,
+                    references,
+                    &analysis,
+                    self.compiler.types(),
+                );
+                if self.accepted_lowering_contracts.get(key) != Some(&hash) {
+                    lowered_contract_changes.insert(key.clone());
+                }
+                lowering_references.insert(key.clone(), references.clone());
+                lowering_contracts.insert(key.clone(), hash);
+            }
+        }
         let direct_storage = build_direct_storage_bindings(
             &analysis.global_path_types,
             &analysis.collection_infos,
@@ -405,17 +811,52 @@ impl JitProcess {
             false,
         )
         .map_err(crate::compiler::CompileError::Backend)?;
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+        let plan_started = Instant::now();
+        let patch_plan = plan_patch(
             self.compiler.functions(),
+            self.compiler.files(),
             &self.required_emit_roots,
-        );
-        let emit_function_ids: Vec<FunctionId> = reachable.iter().copied().collect();
+            self.accepted_program.as_ref(),
+            &lowered_contract_changes,
+        )
+        .map_err(crate::compiler::CompileError::Backend)?;
+        let plan_micros = elapsed_micros(plan_started);
+        let emit_function_ids = patch_plan.re_jit_ids.clone();
+        let previous_artifacts_by_key: BTreeMap<FunctionKey, JitArtifact> = self
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.function_key.clone(), artifact.clone()))
+            .collect();
+        let mut retained_symbols = BTreeMap::new();
+        for key in &patch_plan.reused {
+            let current_id = function_keys_by_id
+                .iter()
+                .find_map(|(id, candidate)| (candidate == key).then_some(*id))
+                .ok_or_else(|| {
+                    crate::compiler::CompileError::Invariant(format!(
+                        "reused function '{}' has no current id",
+                        key.display_name()
+                    ))
+                })?;
+            let artifact = previous_artifacts_by_key.get(key).ok_or_else(|| {
+                crate::compiler::CompileError::Backend(format!(
+                    "retained JIT address missing for '{}'",
+                    key.display_name()
+                ))
+            })?;
+            retained_symbols.insert(format!("jit_fn_{current_id}"), artifact.code_ptr as usize);
+        }
         let local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
-        let mut staged_module = Some(
-            new_generation_jit_module(&analysis.extern_symbol_addresses)
-                .map_err(crate::compiler::CompileError::Backend)?,
-        );
+        let mut staged_module = if emit_function_ids.is_empty() {
+            None
+        } else {
+            Some(
+                new_generation_jit_module(&analysis.extern_symbol_addresses, &retained_symbols)
+                    .map_err(crate::compiler::CompileError::Backend)?,
+            )
+        };
         let mut staged_functions = Vec::with_capacity(emit_function_ids.len());
+        let mut defined_runtime_helper_trampolines = BTreeSet::new();
         let codegen_started = Instant::now();
         let emit = self.compiler.emit_pass_for_ids_with(
             &emit_function_ids,
@@ -442,6 +883,7 @@ impl JitProcess {
                         &analysis.extern_symbol_addresses,
                         &direct_storage,
                         local_runtime_helper_trampolines,
+                        &mut defined_runtime_helper_trampolines,
                     )
                 }));
                 let (module, function_id, clif, executable_bytes) = match compiled {
@@ -459,8 +901,18 @@ impl JitProcess {
                     }
                 };
                 staged_module = Some(module);
+                let function_key = function_keys_by_id
+                    .get(&meta.id)
+                    .cloned()
+                    .ok_or_else(|| format!("emitted function '{}' has no stable key", meta.name))?;
+                let references = collect_function_lowering_references(meta, hir);
+                let contract_hash =
+                    function_lowering_contract_hash(meta, &references, &analysis, lowered_types);
+                lowering_references.insert(function_key.clone(), references);
+                lowering_contracts.insert(function_key.clone(), contract_hash);
                 staged_functions.push((
                     meta.id,
+                    function_key,
                     meta.body_hash,
                     function_id,
                     clif,
@@ -470,35 +922,86 @@ impl JitProcess {
             },
         )?;
         let codegen_micros = elapsed_micros(codegen_started);
-        let mut module = staged_module.ok_or_else(|| {
-            crate::compiler::CompileError::Invariant(
-                "JIT generation module missing after function emission".to_string(),
-            )
-        })?;
         let finalize_started = Instant::now();
-        module.finalize_definitions().map_err(|error| {
-            crate::compiler::CompileError::Backend(format!(
-                "failed to finalize complete JIT generation: {error}"
-            ))
-        })?;
+        if let Some(module) = staged_module.as_mut() {
+            module.finalize_definitions().map_err(|error| {
+                crate::compiler::CompileError::Backend(format!(
+                    "failed to finalize selective JIT patch: {error}"
+                ))
+            })?;
+        }
         let finalize_micros = elapsed_micros(finalize_started);
         let executable_bytes = staged_functions
             .iter()
-            .map(|(_, _, _, _, bytes)| *bytes)
+            .map(|(_, _, _, _, _, bytes)| *bytes)
             .sum();
-        let staged_artifacts: Vec<JitArtifact> = staged_functions
+        let patch_artifacts: Vec<JitArtifact> = staged_functions
             .into_iter()
             .enumerate()
             .map(
-                |(slot, (function_id, body_hash, clif_function_id, clif, _))| JitArtifact {
-                    function_id,
-                    slot: u32::try_from(slot).unwrap_or(u32::MAX),
-                    body_hash,
-                    code_ptr: module.get_finalized_function(clif_function_id) as usize as u64,
-                    clif,
+                |(
+                    slot,
+                    (
+                        function_id,
+                        function_key,
+                        body_hash,
+                        clif_function_id,
+                        clif,
+                        executable_bytes,
+                    ),
+                )| {
+                    let module = staged_module.as_ref().ok_or_else(|| {
+                        crate::compiler::CompileError::Invariant(
+                            "emitted JIT patch has no finalized module".to_string(),
+                        )
+                    })?;
+                    Ok(JitArtifact {
+                        function_id,
+                        function_key,
+                        slot: u32::try_from(slot).unwrap_or(u32::MAX),
+                        body_hash,
+                        code_ptr: module.get_finalized_function(clif_function_id) as usize as u64,
+                        executable_bytes,
+                        clif,
+                    })
                 },
             )
+            .collect::<CompileResult<Vec<_>>>()?;
+        let patch_artifacts_by_key: BTreeMap<FunctionKey, JitArtifact> = patch_artifacts
+            .iter()
+            .map(|artifact| (artifact.function_key.clone(), artifact.clone()))
             .collect();
+        let mut current_keys = patch_plan.re_jit.clone();
+        current_keys.extend(patch_plan.reused.iter().cloned());
+        current_keys.sort();
+        let staged_artifacts: Vec<JitArtifact> = current_keys
+            .into_iter()
+            .enumerate()
+            .map(|(slot, key)| {
+                let current_id = function_keys_by_id
+                    .iter()
+                    .find_map(|(id, candidate)| (candidate == &key).then_some(*id))
+                    .ok_or_else(|| {
+                        crate::compiler::CompileError::Invariant(format!(
+                            "planned function '{}' has no current id",
+                            key.display_name()
+                        ))
+                    })?;
+                let mut artifact = patch_artifacts_by_key
+                    .get(&key)
+                    .or_else(|| previous_artifacts_by_key.get(&key))
+                    .cloned()
+                    .ok_or_else(|| {
+                        crate::compiler::CompileError::Backend(format!(
+                            "planned JIT artifact missing for '{}'",
+                            key.display_name()
+                        ))
+                    })?;
+                artifact.function_id = current_id;
+                artifact.slot = u32::try_from(slot).unwrap_or(u32::MAX);
+                Ok(artifact)
+            })
+            .collect::<CompileResult<Vec<_>>>()?;
         let state_layout = build_state_layout(
             &analysis.global_path_types,
             &analysis.collection_infos,
@@ -533,35 +1036,68 @@ impl JitProcess {
                     .map(|artifact| (function.name.clone(), artifact.code_ptr))
             })
             .collect();
-        let emitted_clif_bytes = staged_artifacts
+        let emitted_clif_bytes = patch_artifacts
             .iter()
             .map(|artifact| artifact.clif.len())
             .sum();
+        let reused_function_ids = staged_artifacts
+            .iter()
+            .filter(|artifact| patch_plan.reused.contains(&artifact.function_key))
+            .map(|artifact| artifact.function_id)
+            .collect();
+        let retained_jit_bytes = self
+            .modules
+            .iter()
+            .map(|arena| arena.executable_bytes)
+            .sum();
+        let total_jit_bytes = retained_jit_bytes + executable_bytes;
         let staged_metadata = JitGenerationMetadata {
             source_revision: files_fingerprint,
             layout_hash,
-            emitted_function_ids: staged_artifacts
+            emitted_function_ids: patch_artifacts
                 .iter()
                 .map(|artifact| artifact.function_id)
                 .collect(),
+            reused_function_ids,
+            patch_reasons: patch_plan.reasons.clone(),
+            affected_host_entries: patch_plan.affected_host_entries.clone(),
+            retained_dependencies: patch_plan.retained_dependencies.clone(),
             host_export_signatures,
             host_export_code_ptrs,
             diagnostics: Vec::new(),
             code_owner_revision: files_fingerprint,
             data_owner_layout_hash: layout_hash,
             codegen_micros,
+            plan_micros,
             finalize_micros,
-            module_count: 1,
+            module_count: self.modules.len() + usize::from(staged_module.is_some()),
+            retained_arena_count: self.modules.len(),
             emitted_clif_bytes,
             executable_bytes,
+            retained_jit_bytes,
+            total_jit_bytes,
         };
         stasis_dynload::finish_jit_string_literal_staging()
             .map_err(crate::compiler::CompileError::Backend)?;
         let staged_string_literals = collect_current_string_literals(&self.compiler)
             .map_err(crate::compiler::CompileError::Backend)?;
+        let accepted_program = capture_accepted_program(
+            self.compiler.functions(),
+            self.compiler.files(),
+            &self.required_emit_roots,
+        )
+        .map_err(crate::compiler::CompileError::Backend)?;
         self.artifacts = staged_artifacts;
-        self.modules.push(module);
+        if let Some(module) = staged_module {
+            self.modules.push(Arc::new(JitArena {
+                _module: Mutex::new(module),
+                executable_bytes,
+            }));
+        }
         self.generation_metadata = Some(staged_metadata);
+        self.accepted_program = Some(accepted_program);
+        self.accepted_lowering_references = lowering_references;
+        self.accepted_lowering_contracts = lowering_contracts;
         self.staged_string_literals = staged_string_literals;
         let report = CompileReport { index, emit };
         self.rebuild_artifact_index();
@@ -2349,12 +2885,18 @@ fn runtime_helper_addresses() -> BTreeMap<String, usize> {
 
 fn new_generation_jit_module(
     extern_symbol_addresses: &ExternSymbolAddressMap,
+    retained_function_addresses: &BTreeMap<String, usize>,
 ) -> Result<JITModule, String> {
     let mut builder = new_stasis_jit_builder()?;
     for (symbol, address) in runtime_helper_addresses() {
         builder.symbol(&symbol, address as *const u8);
     }
     for (symbol, address) in extern_symbol_addresses {
+        if *address != 0 {
+            builder.symbol(symbol, *address as *const u8);
+        }
+    }
+    for (symbol, address) in retained_function_addresses {
         if *address != 0 {
             builder.symbol(symbol, *address as *const u8);
         }
@@ -2377,6 +2919,7 @@ fn compile_function_into_jit_module(
     extern_symbol_addresses: &ExternSymbolAddressMap,
     direct_storage: &DirectStorageBindings,
     local_runtime_helper_trampolines: bool,
+    defined_runtime_helper_trampolines: &mut BTreeSet<String>,
 ) -> Result<(JITModule, cranelift_module::FuncId, String, usize), String> {
     let runtime_helper_addresses = local_runtime_helper_trampolines.then(|| {
         let mut addresses = runtime_helper_addresses();
@@ -2408,6 +2951,7 @@ fn compile_function_into_jit_module(
         collection_infos,
         named_struct_field_types,
         Some(direct_storage),
+        Some(defined_runtime_helper_trampolines),
         |_| Ok(()),
         move |_, function| {
             *clif_capture.borrow_mut() = function.display().to_string();
@@ -2434,7 +2978,141 @@ mod tests {
     use crate::backend::EngineEntrypoints;
 
     #[test]
-    fn complete_generation_uses_direct_calls_and_hides_internal_pointers() {
+    fn collection_contract_edit_rejits_only_consumers_and_callers() {
+        fn source(capacity: usize) -> String {
+            format!(
+                "global values: i32[{capacity}];\nfunction read_value(): i32 {{ return values[0]; }}\nfunction untouched(): i32 {{ return 7; }}\nfunction tick(): i32 {{ return read_value(); }}\nfunction render(): i32 {{ return untouched(); }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("layout.stasis", source(2));
+        process.compile().expect("compile initial layout");
+        let old_pointers: BTreeMap<_, _> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| (artifact.function_key.name.clone(), artifact.code_ptr))
+            .collect();
+        process.upsert_file("layout.stasis", source(3));
+        let report = process.compile().expect("compile changed layout");
+
+        let metadata = process.generation_metadata().expect("generation metadata");
+        let emitted_names: BTreeSet<_> = metadata
+            .emitted_function_ids
+            .iter()
+            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .collect();
+        assert_eq!(
+            emitted_names,
+            BTreeSet::from(["main", "read_value", "tick"])
+        );
+        let reused_names: BTreeSet<_> = metadata
+            .reused_function_ids
+            .iter()
+            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .collect();
+        assert_eq!(reused_names, BTreeSet::from(["render", "untouched"]));
+        for artifact in process.artifacts() {
+            if reused_names.contains(artifact.function_key.name.as_str()) {
+                assert_eq!(
+                    old_pointers.get(&artifact.function_key.name),
+                    Some(&artifact.code_ptr),
+                    "{} pointer",
+                    artifact.function_key.name
+                );
+            }
+        }
+        assert_eq!(report.emit.emitted_functions, 3);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute changed layout"),
+            7
+        );
+    }
+
+    #[test]
+    fn lowering_contract_cache_respects_scopes_and_failed_retries() {
+        fn source(value: i32, valid: bool) -> String {
+            let main = if valid {
+                "function main(): i32 { return read_value(); }"
+            } else {
+                "function main(): i32 { return missing(); }"
+            };
+            format!(
+                "const value: i32 = {value};\nfunction read_value(): i32 {{ let before: i32 = value; if (true) {{ let value: i32 = 9; }} return before; }}\n{main}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("scope.stasis", source(1, true));
+        process.compile().expect("compile accepted contract");
+        process.upsert_file("scope.stasis", source(2, false));
+        assert!(process.compile().is_err(), "reject invalid candidate");
+        process.upsert_file("scope.stasis", source(2, true));
+        process.compile().expect("retry changed contract");
+
+        let emitted_names: BTreeSet<_> = process
+            .generation_metadata()
+            .expect("generation metadata")
+            .emitted_function_ids
+            .iter()
+            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .collect();
+        assert_eq!(emitted_names, BTreeSet::from(["main", "read_value"]));
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute retried contract"),
+            2
+        );
+    }
+
+    #[test]
+    fn dotted_local_assignment_does_not_depend_on_same_named_global() {
+        fn source(extra_field: bool) -> String {
+            let global_fields = if extra_field {
+                "flag: i32; extra: i32;"
+            } else {
+                "flag: i32;"
+            };
+            format!(
+                "struct Local {{ value: i32; }}\nstruct Global {{ {global_fields} }}\nglobal item: Global;\nglobal local_item: Local;\nfunction local_user(item: Local): i32 {{ item.value = 3; return item.value; }}\nfunction tick(): i32 {{ return local_user(local_item); }}\nfunction render(): i32 {{ return item.flag; }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("local_global.stasis", source(false));
+        process.compile().expect("compile initial global layout");
+        let old_pointers: BTreeMap<_, _> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| (artifact.function_key.name.clone(), artifact.code_ptr))
+            .collect();
+        process.upsert_file("local_global.stasis", source(true));
+        process.compile().expect("compile changed global layout");
+
+        let metadata = process.generation_metadata().expect("generation metadata");
+        let emitted_names: BTreeSet<_> = metadata
+            .emitted_function_ids
+            .iter()
+            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .collect();
+        assert_eq!(emitted_names, BTreeSet::from(["main", "render"]));
+        for artifact in process.artifacts() {
+            if matches!(artifact.function_key.name.as_str(), "local_user" | "tick") {
+                assert_eq!(
+                    old_pointers.get(&artifact.function_key.name),
+                    Some(&artifact.code_ptr),
+                    "{} pointer",
+                    artifact.function_key.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selective_patch_uses_direct_calls_and_retains_unaffected_pointers() {
         let mut process = JitProcess::new();
         let fixture_root = Path::new("direct_call_generation_fixture");
         process.upsert_file(
@@ -2490,6 +3168,45 @@ mod tests {
             );
         }
         assert!(process.clif_for_function_name("unreachable").is_none());
+
+        let cold_ptrs: BTreeMap<String, u64> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| (artifact.function_key.name.clone(), artifact.code_ptr))
+            .collect();
+        let edited_math = include_str!("../../../../samples/direct_call_generation/math.stasis")
+            .replace(
+                "return shared(value) + leaf(value);",
+                "return shared(value) + leaf(value) + 1;",
+            );
+        process.upsert_file(
+            fixture_root.join("math.stasis").to_string_lossy(),
+            edited_math,
+        );
+        let patch = process.compile().expect("selective direct-call patch");
+        assert_eq!(patch.emit.emitted_functions, 3);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute patched direct-call sample"),
+            18
+        );
+        let patched_ptrs: BTreeMap<String, u64> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| (artifact.function_key.name.clone(), artifact.code_ptr))
+            .collect();
+        for retained in ["leaf", "shared", "even", "odd", "render", "on_code_swap"] {
+            assert_eq!(cold_ptrs[retained], patched_ptrs[retained], "{retained}");
+        }
+        for rebuilt in ["mid", "tick", "main"] {
+            assert_ne!(cold_ptrs[rebuilt], patched_ptrs[rebuilt], "{rebuilt}");
+        }
+        let mid_clif = process
+            .clif_for_function_name("mid")
+            .expect("patched mid CLIF");
+        assert!(mid_clif.matches("call fn").count() >= 2, "{mid_clif}");
+        assert!(!mid_clif.contains("stasis_jit_call_") && !mid_clif.contains("lookup_code_ptr"));
     }
 
     #[test]
@@ -2622,6 +3339,26 @@ mod tests {
     }
 
     #[test]
+    fn local_runtime_defines_shared_helper_trampoline_once_per_module() {
+        crate::backend::emit::reset_runtime_helper_trampoline_count_for_test();
+        let mut process = JitProcess::new();
+        process.set_local_runtime_helper_trampolines(true);
+        process.upsert_file(
+            "sample.stasis",
+            "extern function time(): i32;\nfunction helper(): i32 { return time(); }\nfunction main(): i32 { return time() + helper(); }\n",
+        );
+
+        let report = process.compile().expect("compile shared runtime helper");
+
+        assert_eq!(report.emit.emitted_functions, 2);
+        process.execute_i32_noarg_by_name("main").unwrap();
+        assert_eq!(
+            crate::backend::emit::runtime_helper_trampoline_count_for_test(),
+            1
+        );
+    }
+
+    #[test]
     fn jit_process_rejects_non_literal_i32_return() {
         let mut process = JitProcess::new();
         process.upsert_file(
@@ -2639,6 +3376,35 @@ mod tests {
             }
             other => panic!("expected backend error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn jit_process_rejects_removed_reachable_callee_and_keeps_active_code() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function leaf(): i32 { return 1; } function main(): i32 { return leaf(); }",
+        );
+        process.compile().expect("compile active source");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(1));
+
+        process.upsert_file("sample.stasis", "function main(): i32 { return leaf(); }");
+        let error = process
+            .compile()
+            .expect_err("removed reachable callee must reject the candidate");
+        assert!(
+            matches!(
+                error,
+                crate::compiler::CompileError::Backend(ref message)
+                    if message.contains("unknown call target 'leaf'")
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("main"),
+            Ok(1),
+            "failed candidate must retain the active complete generation"
+        );
     }
 
     #[cfg(windows)]
@@ -4437,7 +5203,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_rebuilds_complete_generation_for_reachable_edit_shapes() {
+    fn jit_process_emits_selective_patches_for_reachable_edit_shapes() {
         fn source(
             leaf: &str,
             shared: &str,
@@ -4480,7 +5246,7 @@ mod tests {
                     "",
                 ),
                 36,
-                7,
+                2,
             ),
             (
                 "render body",
@@ -4494,7 +5260,7 @@ mod tests {
                     "",
                 ),
                 37,
-                7,
+                2,
             ),
             (
                 "on_code_swap body",
@@ -4508,7 +5274,7 @@ mod tests {
                     "",
                 ),
                 37,
-                7,
+                1,
             ),
             (
                 "leaf body",
@@ -4522,7 +5288,7 @@ mod tests {
                     "",
                 ),
                 39,
-                7,
+                6,
             ),
             (
                 "mid body",
@@ -4536,7 +5302,7 @@ mod tests {
                     "",
                 ),
                 40,
-                7,
+                3,
             ),
             (
                 "shared body",
@@ -4550,7 +5316,7 @@ mod tests {
                     "",
                 ),
                 42,
-                7,
+                5,
             ),
             (
                 "multiple bodies",
@@ -4564,7 +5330,7 @@ mod tests {
                     "",
                 ),
                 44,
-                7,
+                3,
             ),
             (
                 "added reachable function",
@@ -4578,7 +5344,7 @@ mod tests {
                     "function added(): i32 { return 4; }",
                 ),
                 46,
-                8,
+                4,
             ),
             (
                 "deleted and renamed function",
@@ -4592,7 +5358,7 @@ mod tests {
                     "function renamed(): i32 { return 5; }",
                 ),
                 47,
-                8,
+                4,
             ),
             (
                 "unreachable function",
@@ -4606,18 +5372,29 @@ mod tests {
                     "function renamed(): i32 { return 5; }\nfunction unreachable(): i32 { return missing(); }",
                 ),
                 47,
-                8,
+                0,
             ),
         ];
 
         let mut previous_revision = None;
+        let mut expected_module_count = 0;
         for (label, source, expected, emitted) in cases {
             process.upsert_file("sample.stasis", source);
             let report = process
                 .compile()
                 .unwrap_or_else(|error| panic!("compile {label}: {error:?}"));
             assert_eq!(report.emit.emitted_functions, emitted, "{label}");
-            assert_eq!(process.artifacts().len(), emitted, "{label}");
+            let reachable_count = if matches!(
+                label,
+                "added reachable function"
+                    | "deleted and renamed function"
+                    | "unreachable function"
+            ) {
+                8
+            } else {
+                7
+            };
+            assert_eq!(process.artifacts().len(), reachable_count, "{label}");
             assert_eq!(
                 process
                     .execute_i32_noarg_by_name("main")
@@ -4628,7 +5405,16 @@ mod tests {
             let metadata = process
                 .generation_metadata()
                 .unwrap_or_else(|| panic!("metadata {label}"));
-            assert_eq!(metadata.module_count, 1, "{label}");
+            if emitted > 0 {
+                expected_module_count += 1;
+            }
+            assert_eq!(metadata.emitted_function_ids.len(), emitted, "{label}");
+            assert_eq!(
+                metadata.reused_function_ids.len(),
+                reachable_count - emitted,
+                "{label}"
+            );
+            assert_eq!(metadata.module_count, expected_module_count, "{label}");
             if let Some(previous) = previous_revision {
                 assert_ne!(metadata.source_revision, previous, "{label}");
             }
@@ -5540,7 +6326,46 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_rebuilds_complete_generation_when_function_ids_shift() {
+    fn staged_candidate_reuses_active_arenas_and_keeps_active_code_running() {
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "sample.stasis",
+            "function leaf(): i32 { return 1; } function render(): i32 { return 9; } function main(): i32 { return leaf(); }",
+        );
+        active.compile().expect("cold compile");
+        let render_ptr = active
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "render")
+            .expect("render artifact")
+            .code_ptr;
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "sample.stasis",
+            "function leaf(): i32 { return 2; } function render(): i32 { return 9; } function main(): i32 { return leaf(); }",
+        );
+        let report = candidate.compile().expect("selective candidate compile");
+        assert_eq!(report.emit.emitted_functions, 2);
+        assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 1);
+        assert_eq!(candidate.execute_i32_noarg_by_name("main").unwrap(), 2);
+        assert_eq!(
+            candidate
+                .artifacts()
+                .iter()
+                .find(|artifact| artifact.function_key.name == "render")
+                .expect("retained render artifact")
+                .code_ptr,
+            render_ptr
+        );
+
+        active.accept_staged_candidate(candidate);
+        assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_reuses_stable_functions_when_ordinal_ids_shift() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -5554,16 +6379,15 @@ mod tests {
                 .expect("execute first"),
             102
         );
+        let first_ptrs = process.symbol_code_ptrs();
 
         process.upsert_file(
             "sample.stasis",
             "function inserted(): i32 { return 9; }\nfunction f0(): i32 { return 1; }\nfunction f1(): i32 { return 2; }\nfunction main(): i32 { return f1() + 100; }\n",
         );
         let second = process.compile().expect("second compile");
-        assert_eq!(
-            second.emit.emitted_functions, 2,
-            "the full reachable generation should be emitted after a function-id shift"
-        );
+        assert_eq!(second.emit.emitted_functions, 0);
+        assert_eq!(process.symbol_code_ptrs(), first_ptrs);
         assert_eq!(
             process
                 .execute_i32_noarg_by_name("main")

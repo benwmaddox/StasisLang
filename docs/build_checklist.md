@@ -15,9 +15,9 @@ Locked decisions:
 - Initial host externs are `print_i32` and `print_string`.
 - Function-form calls remain supported indefinitely (receiver-form still preferred).
 - Runtime boundary is host-set-based and deny-by-default: Stasis can only access extern symbols exported by the selected host set.
-- Call dispatch policy: JIT and AOT lower every reachable internal Stasis call directly inside one
-  complete generation. Only lifecycle/host-required exports cross the host boundary, and the host
-  publishes them through one owning `ActiveGeneration` reference.
+- Call dispatch policy: JIT and AOT lower internal Stasis calls directly. Warm JIT edits emit the
+  changed function/SCC plus exact reverse callers and reuse unaffected bodies. Only
+  lifecycle/host-required entries use stable trampolines and publish through one entry table.
 - Backend modes are:
 - Cranelift JIT for development/watch/hot-swap runtime
 - Cranelift AOT for production builds
@@ -60,103 +60,79 @@ Historical bootstrap/self-host notes below are archival only and do not describe
 
 ## Slice Plan
 
-### Direct-Call Generation Migration Track
+### Selective Direct-Call JIT Patch Track
 
-The canonical ABI, state machine, failure table, platform matrix, budgets, and ownership rules are
-in `docs/jit_generation_contract.md`. These slices replace the historical S7-S10 pointer-table and
-patch-set end state; they do not add a second compatibility mode.
+The canonical ABI, state machine, failure table, platform matrix, and budgets are in
+`docs/jit_generation_contract.md`. This track supersedes the merged #173-#178 whole-generation
+design. It does not restore internal hash/mutex dispatch or stable trampolines for ordinary
+functions.
 
-#### G0 - Lock Generation Architecture, ABI, and Lifecycle
+#### P0 - Lock Selective Invalidation and Trampoline Contract
 
-- Maddox task: #174.
+- Maddox task: #184.
 - Language: `docs`.
-- Scope: Replace product/spec/checklist requirements for internal `FnId -> code_ptr` dispatch with
-  complete reachable direct-call generations and one-reference publication.
-- Deliverable: Unambiguous ownership model, state machine, failure table, thread messages,
-  `on_code_swap` transaction, retirement rule, target matrix, performance budgets, and child gates.
-- Tests: Documentation consistency check, bounded repository validation, and touched-file cruft
-  review.
-- Done gate: No canonical current requirement permits mixed generations, independent pointer
-  publication, runtime-thread compiler work, or stale/superseded candidate visibility.
+- Scope: Define exact changed/SCC/reverse-caller invalidation, host-entry-only trampolines,
+  cross-patch direct calls to retained bodies, restart reclamation, state machine, and failure table.
+- Tests: Contract consistency checker plus negative mutations for whole-reachable warm emission,
+  internal trampolines, missing render root, and automatic-retirement requirements.
+- Done gate: Every canonical current document points to the selective patch contract and explicitly
+  marks #173-#178 as superseded.
 - Status: `completed`
 
-#### G1 - Emit Complete Direct-Call Generation Modules
+#### P1 - Plan Exact Affected Function Closures
 
-- Maddox task: #175.
+- Maddox task: #185.
 - Language: `Rust + .stasis`.
-- Scope: Predeclare and define the complete reachable call graph in one JIT module through the
-  shared JIT/AOT direct-call lowering path.
-- Deliverable: One finalized pending generation with a compiler-derived immutable host-export map;
-  semantic caches stop before live machine-code ownership.
-- Tests: Direct-call/no-dispatch CLIF assertions for leaf, caller, shared utility, recursive/SCC,
-  lifecycle/export, added/deleted/renamed, and unreachable cases; representative executable JIT and
-  AOT sample.
-- Done gate: No internal arity wrapper, dispatch lookup, mutex, cross-generation relocation, or
-  per-function live machine-code patch remains.
-- Status: `pending`
+- Scope: Maintain canonical forward/reverse graphs and produce deterministic PatchPlans with
+  changed, affected SCC, re-JITed, reused, affected-entry, and reason-chain metadata.
+- Tests: Exact-set fixtures for leaf, chain, diamond/shared, multi-root, SCC, overload/multi-file,
+  add/delete/rename, reachability, signature/layout failure, and recovery.
+- Done gate: A narrow compatible edit never schedules unrelated reachable bodies.
+- Status: `completed`
 
-#### G2 - Publish and Retire One Generation Atomically
+#### P2 - Emit Selective Direct-Call Patch Modules
 
-- Maddox task: #176.
+- Maddox task: #186.
 - Language: `Rust + .stasis`.
-- Scope: Implement owned pending/active generations, versioned build messages, safe-point execution
-  windows, isolated migration/hook state, latest-request supersession, single-reference publication,
-  and owner-based retirement.
-- Deliverable: `tick` + `render` capture one generation; all fallible work precedes the atomic
-  exchange; old executable memory drops after the last window owner.
-- Tests: Delayed compile runs old code for multiple windows then purely new code; A -> B publishes
-  only B; compile/migration/hook rejection preserves exact active reference/state; 100 swaps reach
-  zero quiescent retired owners.
-- Done gate: Independent export stores, pointer-table commits, staged pointer previews, and fixed
-  tick-delay retirement are deleted.
-- Status: `pending`
+- Scope: Emit only PatchPlan bodies, direct-bind patched and retained callees, preserve unchanged
+  pointers, and keep complete emission only for cold JIT/AOT.
+- Tests: CLIF/executable assertions for patched-to-patched and patched-to-retained calls, SCCs,
+  failure preservation, and exact emitted counts.
+- Done gate: Warm emission count equals the PatchPlan and no internal dispatch import exists.
+- Status: `completed`
 
-#### G3 - Verify the Function-Edit Transition Matrix
+#### P3 - Publish Through Host-Entry Trampolines
 
-- Maddox task: #177.
+- Maddox task: #187.
 - Language: `Rust + .stasis`.
-- Scope: Exercise every functional edit and rejection category against observable behavior and
-  generation/state identity.
-- Tests: Host roots, leaf/mid-level/shared/recursive calls, render, `on_code_swap`, multiple edits,
-  add/delete/rename, unreachable edits, host-ABI/layout incompatibility, syntax/lowering failure,
-  and recovery across JIT/AOT.
-- Done gate: Every failure preserves the previous complete generation and no test depends on an
-  implementation-only per-function pointer.
-- Status: `pending`
+- Scope: Build patches off-thread, validate/migrate/hook in isolation, and atomically exchange one
+  host-entry table between complete windows. Retain old JIT arenas until restart.
+- Tests: Delayed compile, multi-root atomicity, A -> B supersession, hook/layout/signature failure,
+  callback escape, recovery, and repeated retained-code patches.
+- Done gate: No partial affected closure becomes visible and runtime-thread compiler work is zero.
+- Status: `completed`
 
-#### G4 - Enforce Platform, Performance, and Memory Gates
+#### P4 - Verify Edit Shapes and Performance
 
-- Maddox task: #178.
-- Language: `Rust + CI + Android`.
-- Scope: Enforce the Windows x86_64, Linux x86_64, macOS x86_64/arm64, and Android arm64 JIT/AOT
-  matrix plus explicit exclusions.
-- Tests: Bounded target CI, Android Workshop JIT and published AOT acceptance on a named physical
-  arm64 device, optional x86_64 AVD smoke that does not satisfy the arm64 row, 100/1,000/5,000 and
-  Brickout-scale cold/edit benchmarks, publication latency, old-generation ticks, and retirement
-  memory stress.
-- Done gate: The budgets in `docs/jit_generation_contract.md` pass or are revised with recorded
-  evidence; unsupported combinations fail explicitly.
+- Maddox task: #188.
+- Language: `Rust + CI + Android + .stasis`.
+- Scope: Enforce exact sets, behavior, JIT/AOT parity, target matrix, and p50/p95 evidence for
+  synthetic topologies, Chess TD, and Brickout.
+- Tests: 100/1,000/5,000 chain/branch/shared/SCC graphs, real-game narrow and broad edits, desktop
+  JIT, Android Workshop JIT, and production AOT parity.
+- Done gate: Reports expose accidental whole-reachable warm emission immediately; typical narrow
+  Chess TD edits commonly re-JIT fewer than ten functions while broad closures remain truthful.
 - Status: `pending`
 
 #### Superseded checklist requirements
 
-The following completed slices remain history of the current implementation, but their listed end
-states are removal work for G1-G2 and are not compatibility requirements:
-
-- S7's "unchanged function bodies skip backend regeneration" may apply only to semantic/HIR or
-  target-independent lowering caches. It cannot reuse live machine code across generations.
-- S8's `FnId -> code_ptr` runtime dispatch, per-function publication, and safe-window retirement are
-  replaced by one owned complete generation and owner-based retirement.
-- S8b's per-function AOT patch manifests, symbol overrides, and per-function loader publication are
-  replaced wherever they participate in watch/live publication. Production AOT still emits one
-  complete direct-call program artifact.
-- S9's `CompileResult`/`SwapCommitRequest` patch sets and `swapped_fn_ids` publication truth are
-  replaced by the G0 versioned generation messages.
-- S10's hook `FnId`, staged pointer-table preview, and independent native hook address are replaced
-  by the validated `on_code_swap` export inside `PendingGeneration`.
-
-No new work may extend these obsolete paths. Each migration child deletes the paths it replaces and
-ends with a cruft review.
+- Maddox #173-#178 and PRs #356/#365 encoded complete reachable warm generations,
+  no cross-patch calls, one code owner, and automatic owner retirement. Those are superseded.
+- Historical S7 per-function semantic hashes remain useful and now gate selective backend work.
+- Historical S8 hash/mutex/arity dispatch is not restored. Stable indirection exists only at
+  host-entry trampolines.
+- Production AOT continues to emit one complete direct-call artifact.
+- No priority-1 task must reclaim superseded JIT arenas; process restart is sufficient.
 
 ### Android Workshop Track
 
@@ -890,8 +866,8 @@ Archived priority override (2026-02-13, historical):
 - Status: `completed`
 
 ### S7 - Incremental Compiler V1
-- Contract status: historical implementation record. G0 supersedes machine-code reuse; only
-  semantic/HIR and target-independent lowering caches may survive into complete generations.
+- Contract status: historical implementation substrate reused by P1-P2. Whole-file correctness and
+  per-function hashes now gate selective JIT machine-code emission.
 - Language:
 - `Rust + .stasis`
 - Rust: in-memory file DB, cache storage, and invalidation substrate.
@@ -911,8 +887,8 @@ Archived priority override (2026-02-13, historical):
 - Status: `completed`
 
 ### S8 - Function Pointer Table ABI
-- Contract status: historical implementation record scheduled for deletion by G1-G2. The pointer
-  table is not a supported target ABI or compatibility path.
+- Contract status: historical implementation record. Its internal hash/mutex dispatch is not a
+  supported ABI; P3 retains stable indirection only for host-entry trampolines.
 - Language:
 - `Rust`
 - Scope:

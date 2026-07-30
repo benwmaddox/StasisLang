@@ -471,6 +471,13 @@ float stasis_gfx_measure_text_cached(int handle) {
             ? published_text_runs[handle - 1].width : 0.0f;
 }
 
+float stasis_gfx_measure_text_cached_height(int handle) {
+    if (handle <= 0 || handle > published_text_run_count) return 0.0f;
+    int32_t font = published_text_runs[handle - 1].font;
+    return font > 0 && font <= published_font_count
+            ? (float)published_fonts[font - 1].size : 0.0f;
+}
+
 int stasis_audio_init(int sample_rate, int channels, int target_latency_frames) {
     (void)sample_rate; (void)channels; (void)target_latency_frames; return 0;
 }
@@ -503,8 +510,13 @@ static int published_v2_initialized;
 static int32_t *published_v2_i32;
 static float *published_v2_f32;
 static uint8_t *published_v2_u8;
-static int32_t published_host_i32[768];
-static float published_host_f32[64];
+extern int32_t host_i32[768];
+extern float host_f32[64];
+extern int32_t gfx_cmd_i32[STASIS_RENDER_I32_COUNT];
+extern float gfx_cmd_f32[STASIS_RENDER_F32_COUNT];
+extern uint8_t gfx_cmd_u8[STASIS_RENDER_U8_COUNT];
+#define published_host_i32 host_i32
+#define published_host_f32 host_f32
 static int32_t published_previous_touch_x;
 static int32_t published_previous_touch_y;
 static int32_t published_previous_touch_active;
@@ -608,6 +620,35 @@ static void stasis_published_write_host_frame(
     published_has_previous_input = 1;
 }
 
+static void stasis_published_copy_active_frame(
+        int32_t *out_i32, float *out_f32, uint8_t *out_u8) {
+    int32_t line_count = stasis_render_clamp_count(
+            gfx_cmd_i32[STASIS_RENDER_I_LINE_COUNT], STASIS_RENDER_MAX_LINES);
+    int32_t sprite_count = stasis_render_clamp_count(
+            gfx_cmd_i32[STASIS_RENDER_I_SPRITE_COUNT], STASIS_RENDER_MAX_SPRITES);
+    int32_t text_count = stasis_render_clamp_count(
+            gfx_cmd_i32[STASIS_RENDER_I_TEXT_COUNT], STASIS_RENDER_MAX_TEXT);
+    int32_t text_bytes = stasis_render_clamp_count(
+            gfx_cmd_i32[STASIS_RENDER_I_TEXT_BYTES_USED], STASIS_RENDER_U8_COUNT);
+    memcpy(out_i32, gfx_cmd_i32, STASIS_RENDER_I_SPRITE_BASE * sizeof(int32_t));
+    memcpy(out_i32 + STASIS_RENDER_I_SPRITE_BASE,
+            gfx_cmd_i32 + STASIS_RENDER_I_SPRITE_BASE,
+            (size_t)sprite_count * STASIS_RENDER_SPRITE_I32_STRIDE * sizeof(int32_t));
+    memcpy(out_i32 + STASIS_RENDER_I_TEXT_BASE,
+            gfx_cmd_i32 + STASIS_RENDER_I_TEXT_BASE,
+            (size_t)text_count * STASIS_RENDER_TEXT_I32_STRIDE * sizeof(int32_t));
+    memcpy(out_f32, gfx_cmd_f32,
+            (size_t)(STASIS_RENDER_F_LINE_BASE +
+                    line_count * STASIS_RENDER_LINE_F32_STRIDE) * sizeof(float));
+    memcpy(out_f32 + STASIS_RENDER_F_SPRITE_BASE,
+            gfx_cmd_f32 + STASIS_RENDER_F_SPRITE_BASE,
+            (size_t)sprite_count * STASIS_RENDER_SPRITE_F32_STRIDE * sizeof(float));
+    memcpy(out_f32 + STASIS_RENDER_F_TEXT_BASE,
+            gfx_cmd_f32 + STASIS_RENDER_F_TEXT_BASE,
+            (size_t)text_count * STASIS_RENDER_TEXT_F32_STRIDE * sizeof(float));
+    memcpy(out_u8, gfx_cmd_u8, (size_t)text_bytes);
+}
+
 static int stasis_published_run_tick_frame_v2(
         int touch_x, int touch_y, int touch_active, int screen_w, int screen_h,
         int32_t *out_i32, float *out_f32, uint8_t *out_u8) {
@@ -622,21 +663,14 @@ static int stasis_published_run_tick_frame_v2(
         published_has_previous_input = 0;
         memset(published_host_i32, 0, sizeof(published_host_i32));
         memset(published_host_f32, 0, sizeof(published_host_f32));
+        memset(gfx_cmd_i32, 0, sizeof(gfx_cmd_i32));
+        memset(gfx_cmd_f32, 0, sizeof(gfx_cmd_f32));
+        memset(gfx_cmd_u8, 0, sizeof(gfx_cmd_u8));
     }
     if (!published_v2_initialized) {
         published_resource_error[0] = '\0';
         stasis_mobile_aot_reset();
         STASIS_AOT_BIND_RUNTIME_GLOBALS();
-        stasis_jit_register_global_i32_array(
-                stasis_published_hash_path("host_i32"), 0, published_host_i32, 768);
-        stasis_jit_register_global_f32_array(
-                stasis_published_hash_path("host_f32"), 0, published_host_f32, 64);
-        stasis_jit_register_global_i32_array(
-                stasis_published_hash_path("gfx_cmd_i32"), 0, out_i32, STASIS_RENDER_I32_COUNT);
-        stasis_jit_register_global_f32_array(
-                stasis_published_hash_path("gfx_cmd_f32"), 0, out_f32, STASIS_RENDER_F32_COUNT);
-        stasis_jit_register_global_u8_array(
-                stasis_published_hash_path("gfx_cmd_u8"), 0, out_u8, STASIS_RENDER_U8_COUNT);
         published_v2_i32 = out_i32;
         published_v2_f32 = out_f32;
         published_v2_u8 = out_u8;
@@ -649,7 +683,8 @@ static int stasis_published_run_tick_frame_v2(
     if (STASIS_AOT_TICK() != 0 || STASIS_AOT_RENDER() != 0) return -1;
     if (published_resource_error[0] != '\0') return -1;
     published_host_i32[10] += 1;
-    if (!stasis_render_v2_is_valid(out_i32)) return -1;
+    if (!stasis_render_v2_is_valid(gfx_cmd_i32)) return -1;
+    stasis_published_copy_active_frame(out_i32, out_f32, out_u8);
     out_i32[STASIS_RENDER_I_LOGICAL_W] = published_display_metrics.logical_w;
     out_i32[STASIS_RENDER_I_LOGICAL_H] = published_display_metrics.logical_h;
     out_i32[STASIS_RENDER_I_NATIVE_W] = published_display_metrics.native_w;

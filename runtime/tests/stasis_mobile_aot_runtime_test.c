@@ -27,6 +27,8 @@ static int32_t hash_text(const char *text) {
 }
 
 static char last_sprite_path[64];
+static int sprite_handle_to_load = 1;
+static int released_sprite_handle;
 static char saved_scope[64];
 static char saved_key[64];
 static int saved_value;
@@ -49,9 +51,9 @@ int stasis_gfx_load_sprite(const char *path, int max_w, int max_h) {
         strncpy(last_sprite_path, path, sizeof(last_sprite_path) - 1);
         last_sprite_path[sizeof(last_sprite_path) - 1] = '\0';
     }
-    return path != NULL && max_w > 0 && max_h > 0 ? 1 : 0;
+    return path != NULL && max_w > 0 && max_h > 0 ? sprite_handle_to_load : 0;
 }
-void stasis_gfx_release_sprite(int handle) { (void)handle; }
+void stasis_gfx_release_sprite(int handle) { released_sprite_handle = handle; }
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }
 int stasis_gfx_dump_png(const char *path) { return path != NULL; }
 int stasis_gfx_cache_text(int font, const char *text) { return font + (text != NULL); }
@@ -145,6 +147,10 @@ int main(void) {
     stasis_jit_register_global_i32_array(100, hash_text("height"), sprite_height, 1);
     CHECK(stasis_jit_sprite_load_from(100, 0, 1, 23, 48, 24) == 1);
     CHECK(sprite_handle[0] == 1 && sprite_width[0] == 48 && sprite_height[0] == 24);
+    sprite_handle_to_load = -1520461853;
+    CHECK(stasis_jit_sprite_load_from(100, 0, 1, 23, 64, 32) == 1);
+    CHECK(sprite_handle[0] == -1520461853 && sprite_width[0] == 64 && sprite_height[0] == 32);
+    CHECK(released_sprite_handle == 1);
 
     stasis_jit_register_global_i32_array(101, hash_text("font"), text_font, 1);
     stasis_jit_register_global_i32_array(101, hash_text("handle"), text_handle, 1);

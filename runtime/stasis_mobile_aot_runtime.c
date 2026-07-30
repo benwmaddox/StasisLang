@@ -484,12 +484,12 @@ int stasis_jit_sprite_load_from(int32_t base, int32_t index, int32_t len, int32_
     int32_t old_handle;
     if (width <= 0 || height <= 0 || (index >= 0 && index >= len)) return 0;
     loaded_handle = stasis_jit_gfx_load_sprite(path, width, height);
-    if (loaded_handle <= 0) return 0;
+    if (loaded_handle == 0) return 0;
     old_handle = stasis_struct_i32_load(base, index, "handle");
     stasis_struct_i32_store(base, index, len, "handle", loaded_handle);
     stasis_struct_i32_store(base, index, len, "width", width);
     stasis_struct_i32_store(base, index, len, "height", height);
-    if (old_handle > 0 && old_handle != loaded_handle) stasis_jit_gfx_release_sprite(old_handle);
+    if (old_handle != 0 && old_handle != loaded_handle) stasis_jit_gfx_release_sprite(old_handle);
     return 1;
 }
 
