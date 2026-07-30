@@ -1,4 +1,7 @@
-use crate::backend::emit::{DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage};
+use crate::backend::emit::{
+    AssignTarget, CompileAnalysisCache, DirectStorageBinding, DirectStorageBindings,
+    RuntimeHelperLinkage, SimpleCondition, SimpleExpr, SimpleStmt,
+};
 use crate::backend::patch_plan::{
     capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReasonChain,
 };
@@ -9,9 +12,7 @@ use crate::backend::state_query::{
     parse_state_query, BinaryOperator, ScalarExpression, StateQuery, StateValueReference,
 };
 use crate::backend::EngineEntrypoints;
-use crate::compiler::{
-    CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta, SourceFile,
-};
+use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::indexer::hash_text;
 use crate::frontend::lexer::{lex, TokenKind};
 use crate::frontend::parser::parse_string_literal_text;
@@ -53,41 +54,292 @@ fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-fn function_keys_referencing_names(
-    functions: &[FunctionMeta],
-    files: &[SourceFile],
-    names: &BTreeSet<String>,
-) -> Result<BTreeSet<FunctionKey>, String> {
-    if names.is_empty() {
-        return Ok(BTreeSet::new());
+#[derive(Clone, Default)]
+struct FunctionLoweringReferences {
+    paths: BTreeSet<String>,
+    calls: BTreeSet<String>,
+    type_ids: BTreeSet<crate::frontend::types::TypeId>,
+}
+
+fn path_is_local(path: &str, scopes: &[BTreeSet<String>]) -> bool {
+    let root = path.split('.').next().unwrap_or(path);
+    scopes.iter().rev().any(|scope| scope.contains(root))
+}
+
+fn collect_condition_references(
+    condition: &SimpleCondition,
+    references: &mut FunctionLoweringReferences,
+    scopes: &[BTreeSet<String>],
+) {
+    match condition {
+        SimpleCondition::Comparison { lhs, rhs, .. } => {
+            collect_expression_references(lhs, references, scopes);
+            collect_expression_references(rhs, references, scopes);
+        }
+        SimpleCondition::Expr(expression) => {
+            collect_expression_references(expression, references, scopes)
+        }
+        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+            collect_condition_references(lhs, references, scopes);
+            collect_condition_references(rhs, references, scopes);
+        }
+        SimpleCondition::Not(inner) => collect_condition_references(inner, references, scopes),
     }
-    let mut keys = BTreeSet::new();
-    for function in functions {
-        let file = files.get(function.file_id as usize).ok_or_else(|| {
-            format!(
-                "function '{}' references missing source file",
-                function.name
-            )
-        })?;
-        let source = file
-            .content
-            .get(function.source_range.start as usize..function.source_range.end as usize)
-            .ok_or_else(|| format!("function '{}' has an invalid source range", function.name))?;
-        let references_changed_name = lex(source)?.iter().any(|token| {
-            token.kind == TokenKind::Identifier
-                && source
-                    .get(token.start..token.end)
-                    .is_some_and(|identifier| names.contains(identifier))
-        });
-        if references_changed_name {
-            keys.insert(FunctionKey::new(
-                &file.path,
-                function.name.clone(),
-                function.signature_hash,
-            ));
+}
+
+fn collect_expression_references(
+    expression: &SimpleExpr,
+    references: &mut FunctionLoweringReferences,
+    scopes: &[BTreeSet<String>],
+) {
+    match expression {
+        SimpleExpr::Identifier(path) => {
+            if !path_is_local(path, scopes) {
+                references.paths.insert(path.clone());
+            }
+        }
+        SimpleExpr::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            if !path_is_local(collection_path, scopes) {
+                references.paths.insert(collection_path.clone());
+                if !suffix.is_empty() {
+                    references
+                        .paths
+                        .insert(format!("{collection_path}.{suffix}"));
+                }
+            }
+            collect_expression_references(index, references, scopes);
+        }
+        SimpleExpr::Call { target, args } => {
+            references.calls.insert(target.clone());
+            for argument in args {
+                collect_expression_references(argument, references, scopes);
+            }
+        }
+        SimpleExpr::Binary { lhs, rhs, .. } => {
+            collect_expression_references(lhs, references, scopes);
+            collect_expression_references(rhs, references, scopes);
+        }
+        SimpleExpr::Condition(condition) => {
+            collect_condition_references(condition, references, scopes)
+        }
+        SimpleExpr::Int(_)
+        | SimpleExpr::Float(_)
+        | SimpleExpr::Bool(_)
+        | SimpleExpr::StringLiteral(_) => {}
+    }
+}
+
+fn collect_target_references(
+    target: &AssignTarget,
+    references: &mut FunctionLoweringReferences,
+    scopes: &[BTreeSet<String>],
+) {
+    match target {
+        AssignTarget::Local(path) => {
+            if !path_is_local(path, scopes) {
+                references.paths.insert(path.clone());
+            }
+        }
+        AssignTarget::GlobalPath(path) => {
+            if !path_is_local(path, scopes) {
+                references.paths.insert(path.clone());
+            }
+        }
+        AssignTarget::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            if !path_is_local(collection_path, scopes) {
+                references.paths.insert(collection_path.clone());
+                if !suffix.is_empty() {
+                    references
+                        .paths
+                        .insert(format!("{collection_path}.{suffix}"));
+                }
+            }
+            collect_expression_references(index, references, scopes);
         }
     }
-    Ok(keys)
+}
+
+fn collect_statement_references(
+    statements: &[SimpleStmt],
+    references: &mut FunctionLoweringReferences,
+    scopes: &mut Vec<BTreeSet<String>>,
+) {
+    for statement in statements {
+        match statement {
+            SimpleStmt::Let {
+                name,
+                type_id,
+                expression,
+            } => {
+                collect_expression_references(expression, references, scopes);
+                references.type_ids.extend(*type_id);
+                scopes
+                    .last_mut()
+                    .expect("function dependency scope")
+                    .insert(name.clone());
+            }
+            SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
+                collect_expression_references(expression, references, scopes)
+            }
+            SimpleStmt::Assign {
+                target, expression, ..
+            } => {
+                collect_target_references(target, references, scopes);
+                collect_expression_references(expression, references, scopes);
+            }
+            SimpleStmt::Convert { target, source, .. } => {
+                collect_target_references(target, references, scopes);
+                collect_expression_references(source, references, scopes);
+            }
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => {
+                collect_condition_references(condition, references, scopes);
+                scopes.push(BTreeSet::new());
+                collect_statement_references(then_statements, references, scopes);
+                scopes.pop();
+                if let Some(statements) = else_statements {
+                    scopes.push(BTreeSet::new());
+                    collect_statement_references(statements, references, scopes);
+                    scopes.pop();
+                }
+            }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                scopes.push(BTreeSet::new());
+                collect_statement_references(std::slice::from_ref(init), references, scopes);
+                collect_condition_references(condition, references, scopes);
+                scopes.push(BTreeSet::new());
+                collect_statement_references(body_statements, references, scopes);
+                scopes.pop();
+                collect_statement_references(std::slice::from_ref(step), references, scopes);
+                scopes.pop();
+            }
+            SimpleStmt::Foreach {
+                item_name,
+                index_name,
+                collection_path,
+                body_statements,
+            } => {
+                if !path_is_local(collection_path, scopes) {
+                    references.paths.insert(collection_path.clone());
+                }
+                scopes.push(BTreeSet::from_iter(
+                    std::iter::once(item_name.clone()).chain(index_name.clone()),
+                ));
+                collect_statement_references(body_statements, references, scopes);
+                scopes.pop();
+            }
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+        }
+    }
+}
+
+fn paths_overlap(reference: &str, contract_path: &str) -> bool {
+    reference == contract_path
+        || contract_path
+            .strip_prefix(reference)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+        || reference
+            .strip_prefix(contract_path)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+}
+
+fn function_lowering_contract_hash(
+    function: &FunctionMeta,
+    references: &FunctionLoweringReferences,
+    analysis: &CompileAnalysisCache,
+    type_table: &TypeTable,
+) -> u64 {
+    let mut type_ids: BTreeSet<_> = function
+        .params
+        .iter()
+        .copied()
+        .chain(std::iter::once(function.return_type))
+        .chain(references.type_ids.iter().copied())
+        .collect();
+
+    let mut facts = Vec::new();
+    for path in &references.paths {
+        if let Some(value) = analysis.constant_values.get(path) {
+            facts.push(format!("constant:{path}:{value:?}"));
+        }
+    }
+    for (path, type_id) in &analysis.global_path_types {
+        if references
+            .paths
+            .iter()
+            .any(|reference| paths_overlap(reference, path))
+        {
+            facts.push(format!("global:{path}:{type_id:?}"));
+            type_ids.insert(*type_id);
+        }
+    }
+    for (path, info) in &analysis.collection_infos {
+        if references
+            .paths
+            .iter()
+            .any(|reference| paths_overlap(reference, path))
+        {
+            facts.push(format!("collection:{path}:{info:?}"));
+            type_ids.extend(info.element_type);
+            type_ids.extend(info.field_types.values().copied());
+        }
+    }
+    for signature in &analysis.resolved_extern_signatures {
+        if references.calls.contains(&signature.name) {
+            facts.push(format!("extern:{signature:?}"));
+            type_ids.extend(signature.params.iter().copied());
+            type_ids.insert(signature.return_type);
+            if let Some(address) = analysis.extern_symbol_addresses.get(&signature.symbol) {
+                facts.push(format!("extern_address:{}:{address}", signature.symbol));
+            }
+        }
+    }
+
+    let mut pending_types: Vec<_> = type_ids.iter().copied().collect();
+    let mut seen_types = BTreeSet::new();
+    while let Some(type_id) = pending_types.pop() {
+        if !seen_types.insert(type_id) {
+            continue;
+        }
+        if let Some(info) = type_table.type_info(type_id) {
+            facts.push(format!("type:{type_id:?}:{info:?}"));
+        }
+        if let Some(element_type) = type_table.indexed_element_type_id(type_id) {
+            pending_types.push(element_type);
+        }
+        if let Some(fields) = analysis.named_struct_field_types.get(&type_id) {
+            facts.push(format!("struct:{type_id:?}:{fields:?}"));
+            pending_types.extend(fields.values().copied());
+        }
+    }
+    facts.sort();
+    hash_text(&facts.join("\n"))
+}
+
+fn collect_function_lowering_references(
+    function: &FunctionMeta,
+    hir: &FunctionHIR,
+) -> FunctionLoweringReferences {
+    let mut references = FunctionLoweringReferences::default();
+    let mut scopes = vec![function.param_names.iter().cloned().collect()];
+    collect_statement_references(&hir.statements, &mut references, &mut scopes);
+    references
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -141,6 +393,8 @@ pub struct JitProcess {
     active_compile_analysis_cache: Option<CompileAnalysisCache>,
     generation_metadata: Option<JitGenerationMetadata>,
     accepted_program: Option<AcceptedProgram>,
+    accepted_lowering_references: BTreeMap<FunctionKey, FunctionLoweringReferences>,
+    accepted_lowering_contracts: BTreeMap<FunctionKey, u64>,
     staged_string_literals: HashMap<i32, String>,
     active_string_literals: HashMap<i32, String>,
     last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
@@ -246,6 +500,8 @@ impl JitProcess {
             active_compile_analysis_cache: None,
             generation_metadata: None,
             accepted_program: None,
+            accepted_lowering_references: BTreeMap::new(),
+            accepted_lowering_contracts: BTreeMap::new(),
             staged_string_literals: HashMap::new(),
             active_string_literals: HashMap::new(),
             last_failed_source_diagnostic: None,
@@ -271,6 +527,8 @@ impl JitProcess {
         candidate.active_compile_analysis_cache = self.active_compile_analysis_cache.clone();
         candidate.generation_metadata = self.generation_metadata.clone();
         candidate.accepted_program = self.accepted_program.clone();
+        candidate.accepted_lowering_references = self.accepted_lowering_references.clone();
+        candidate.accepted_lowering_contracts = self.accepted_lowering_contracts.clone();
         candidate.staged_string_literals = self.staged_string_literals.clone();
         candidate.active_string_literals = self.active_string_literals.clone();
         candidate.required_emit_roots = self.required_emit_roots.clone();
@@ -356,6 +614,8 @@ impl JitProcess {
         let previous_artifacts = self.artifacts.clone();
         let previous_metadata = self.generation_metadata.clone();
         let previous_accepted_program = self.accepted_program.clone();
+        let previous_lowering_references = self.accepted_lowering_references.clone();
+        let previous_lowering_contracts = self.accepted_lowering_contracts.clone();
         let previous_literals = self.staged_string_literals.clone();
         let previous_active_compiler = self.active_compiler.clone();
         let previous_active_analysis = self.active_compile_analysis_cache.clone();
@@ -371,6 +631,8 @@ impl JitProcess {
                 self.artifacts = previous_artifacts;
                 self.generation_metadata = previous_metadata;
                 self.accepted_program = previous_accepted_program;
+                self.accepted_lowering_references = previous_lowering_references;
+                self.accepted_lowering_contracts = previous_lowering_contracts;
                 self.staged_string_literals = previous_literals;
                 self.active_compiler = previous_active_compiler;
                 self.active_compile_analysis_cache = previous_active_analysis;
@@ -453,11 +715,6 @@ impl JitProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
         let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
-        let previous_constant_values = self
-            .compile_analysis_cache
-            .as_ref()
-            .map(|cache| cache.constant_values.clone())
-            .unwrap_or_default();
         let cache_miss = self
             .compile_analysis_cache
             .as_ref()
@@ -483,43 +740,17 @@ impl JitProcess {
             self.compile_analysis_cache = Some(next_cache);
         }
         *self.compiler.types_mut() = analysis_type_table.clone();
-        let analysis = self.compile_analysis_cache.as_ref().ok_or_else(|| {
+        let analysis = self.compile_analysis_cache.clone().ok_or_else(|| {
             crate::compiler::CompileError::Invariant(
                 "jit compile analysis cache missing after refresh".to_string(),
             )
         })?;
-        let changed_constants: BTreeSet<String> = previous_constant_values
-            .keys()
-            .chain(analysis.constant_values.keys())
-            .filter(|name| {
-                previous_constant_values.get(*name) != analysis.constant_values.get(*name)
-            })
-            .cloned()
-            .collect();
-        let lowered_contract_changes = function_keys_referencing_names(
+        let reachable_ids: Vec<_> = crate::backend::reachability::compute_reachable_function_ids(
             self.compiler.functions(),
-            self.compiler.files(),
-            &changed_constants,
-        )
-        .map_err(crate::compiler::CompileError::Backend)?;
-        let direct_storage = build_direct_storage_bindings(
-            &analysis.global_path_types,
-            &analysis.collection_infos,
-            self.compiler.types(),
-            false,
-        )
-        .map_err(crate::compiler::CompileError::Backend)?;
-        let plan_started = Instant::now();
-        let patch_plan = plan_patch(
-            self.compiler.functions(),
-            self.compiler.files(),
             &self.required_emit_roots,
-            self.accepted_program.as_ref(),
-            &lowered_contract_changes,
         )
-        .map_err(crate::compiler::CompileError::Backend)?;
-        let plan_micros = elapsed_micros(plan_started);
-        let emit_function_ids = patch_plan.re_jit_ids.clone();
+        .into_iter()
+        .collect();
         let function_keys_by_id: BTreeMap<FunctionId, FunctionKey> = self
             .compiler
             .functions()
@@ -540,6 +771,57 @@ impl JitProcess {
                     })
             })
             .collect();
+        let mut lowering_references = BTreeMap::new();
+        let mut lowering_contracts = BTreeMap::new();
+        let mut lowered_contract_changes = BTreeSet::new();
+        for function_id in &reachable_ids {
+            let function = self
+                .compiler
+                .functions()
+                .get(*function_id as usize)
+                .ok_or_else(|| {
+                    crate::compiler::CompileError::Invariant(format!(
+                        "reachable function id {function_id} is missing"
+                    ))
+                })?;
+            let key = function_keys_by_id.get(function_id).ok_or_else(|| {
+                crate::compiler::CompileError::Invariant(format!(
+                    "function '{}' has no stable key",
+                    function.name
+                ))
+            })?;
+            if let Some(references) = self.accepted_lowering_references.get(key) {
+                let hash = function_lowering_contract_hash(
+                    function,
+                    references,
+                    &analysis,
+                    self.compiler.types(),
+                );
+                if self.accepted_lowering_contracts.get(key) != Some(&hash) {
+                    lowered_contract_changes.insert(key.clone());
+                }
+                lowering_references.insert(key.clone(), references.clone());
+                lowering_contracts.insert(key.clone(), hash);
+            }
+        }
+        let direct_storage = build_direct_storage_bindings(
+            &analysis.global_path_types,
+            &analysis.collection_infos,
+            self.compiler.types(),
+            false,
+        )
+        .map_err(crate::compiler::CompileError::Backend)?;
+        let plan_started = Instant::now();
+        let patch_plan = plan_patch(
+            self.compiler.functions(),
+            self.compiler.files(),
+            &self.required_emit_roots,
+            self.accepted_program.as_ref(),
+            &lowered_contract_changes,
+        )
+        .map_err(crate::compiler::CompileError::Backend)?;
+        let plan_micros = elapsed_micros(plan_started);
+        let emit_function_ids = patch_plan.re_jit_ids.clone();
         let previous_artifacts_by_key: BTreeMap<FunctionKey, JitArtifact> = self
             .artifacts
             .iter()
@@ -621,6 +903,11 @@ impl JitProcess {
                     .get(&meta.id)
                     .cloned()
                     .ok_or_else(|| format!("emitted function '{}' has no stable key", meta.name))?;
+                let references = collect_function_lowering_references(meta, hir);
+                let contract_hash =
+                    function_lowering_contract_hash(meta, &references, &analysis, lowered_types);
+                lowering_references.insert(function_key.clone(), references);
+                lowering_contracts.insert(function_key.clone(), contract_hash);
                 staged_functions.push((
                     meta.id,
                     function_key,
@@ -807,6 +1094,8 @@ impl JitProcess {
         }
         self.generation_metadata = Some(staged_metadata);
         self.accepted_program = Some(accepted_program);
+        self.accepted_lowering_references = lowering_references;
+        self.accepted_lowering_contracts = lowering_contracts;
         self.staged_string_literals = staged_string_literals;
         let report = CompileReport { index, emit };
         self.rebuild_artifact_index();
@@ -2683,6 +2972,140 @@ fn compile_function_into_jit_module(
 mod tests {
     use super::*;
     use crate::backend::EngineEntrypoints;
+
+    #[test]
+    fn collection_contract_edit_rejits_only_consumers_and_callers() {
+        fn source(capacity: usize) -> String {
+            format!(
+                "global values: i32[{capacity}];\nfunction read_value(): i32 {{ return values[0]; }}\nfunction untouched(): i32 {{ return 7; }}\nfunction tick(): i32 {{ return read_value(); }}\nfunction render(): i32 {{ return untouched(); }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("layout.stasis", source(2));
+        process.compile().expect("compile initial layout");
+        let old_pointers: BTreeMap<_, _> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| (artifact.function_key.name.clone(), artifact.code_ptr))
+            .collect();
+        process.upsert_file("layout.stasis", source(3));
+        let report = process.compile().expect("compile changed layout");
+
+        let metadata = process.generation_metadata().expect("generation metadata");
+        let emitted_names: BTreeSet<_> = metadata
+            .emitted_function_ids
+            .iter()
+            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .collect();
+        assert_eq!(
+            emitted_names,
+            BTreeSet::from(["main", "read_value", "tick"])
+        );
+        let reused_names: BTreeSet<_> = metadata
+            .reused_function_ids
+            .iter()
+            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .collect();
+        assert_eq!(reused_names, BTreeSet::from(["render", "untouched"]));
+        for artifact in process.artifacts() {
+            if reused_names.contains(artifact.function_key.name.as_str()) {
+                assert_eq!(
+                    old_pointers.get(&artifact.function_key.name),
+                    Some(&artifact.code_ptr),
+                    "{} pointer",
+                    artifact.function_key.name
+                );
+            }
+        }
+        assert_eq!(report.emit.emitted_functions, 3);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute changed layout"),
+            7
+        );
+    }
+
+    #[test]
+    fn lowering_contract_cache_respects_scopes_and_failed_retries() {
+        fn source(value: i32, valid: bool) -> String {
+            let main = if valid {
+                "function main(): i32 { return read_value(); }"
+            } else {
+                "function main(): i32 { return missing(); }"
+            };
+            format!(
+                "const value: i32 = {value};\nfunction read_value(): i32 {{ let before: i32 = value; if (true) {{ let value: i32 = 9; }} return before; }}\n{main}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("scope.stasis", source(1, true));
+        process.compile().expect("compile accepted contract");
+        process.upsert_file("scope.stasis", source(2, false));
+        assert!(process.compile().is_err(), "reject invalid candidate");
+        process.upsert_file("scope.stasis", source(2, true));
+        process.compile().expect("retry changed contract");
+
+        let emitted_names: BTreeSet<_> = process
+            .generation_metadata()
+            .expect("generation metadata")
+            .emitted_function_ids
+            .iter()
+            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .collect();
+        assert_eq!(emitted_names, BTreeSet::from(["main", "read_value"]));
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute retried contract"),
+            2
+        );
+    }
+
+    #[test]
+    fn dotted_local_assignment_does_not_depend_on_same_named_global() {
+        fn source(extra_field: bool) -> String {
+            let global_fields = if extra_field {
+                "flag: i32; extra: i32;"
+            } else {
+                "flag: i32;"
+            };
+            format!(
+                "struct Local {{ value: i32; }}\nstruct Global {{ {global_fields} }}\nglobal item: Global;\nglobal local_item: Local;\nfunction local_user(item: Local): i32 {{ item.value = 3; return item.value; }}\nfunction tick(): i32 {{ return local_user(local_item); }}\nfunction render(): i32 {{ return item.flag; }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("local_global.stasis", source(false));
+        process.compile().expect("compile initial global layout");
+        let old_pointers: BTreeMap<_, _> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| (artifact.function_key.name.clone(), artifact.code_ptr))
+            .collect();
+        process.upsert_file("local_global.stasis", source(true));
+        process.compile().expect("compile changed global layout");
+
+        let metadata = process.generation_metadata().expect("generation metadata");
+        let emitted_names: BTreeSet<_> = metadata
+            .emitted_function_ids
+            .iter()
+            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .collect();
+        assert_eq!(emitted_names, BTreeSet::from(["main", "render"]));
+        for artifact in process.artifacts() {
+            if matches!(artifact.function_key.name.as_str(), "local_user" | "tick") {
+                assert_eq!(
+                    old_pointers.get(&artifact.function_key.name),
+                    Some(&artifact.code_ptr),
+                    "{} pointer",
+                    artifact.function_key.name
+                );
+            }
+        }
+    }
 
     #[test]
     fn selective_patch_uses_direct_calls_and_retains_unaffected_pointers() {

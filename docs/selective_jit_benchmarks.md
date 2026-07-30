@@ -25,6 +25,13 @@ changed-file parse/check/index preparation makes compile-ready latency several s
 does not indicate whole-reachable JIT emission; it identifies changed-file frontend scale as the
 next optimization boundary.
 
+Each emitted function records its parsed lowering dependencies as a side effect of the normal
+lowering pass. Warm planning re-hashes those cached dependencies against current constants,
+global/collection paths, extern contracts, type descriptors, and recursively used struct layouts;
+it does not lower unchanged bodies again. A changed fingerprint seeds that function before
+reverse-caller expansion. This keeps layout/handle edits correct without turning an unrelated use
+of the same root object into a false patch seed. The final Chess TD timings below include this pass.
+
 ## Hardware and method
 
 - Date: 2026-07-30
@@ -47,8 +54,8 @@ All times are milliseconds.
 | Synthetic chain-root, 100 functions | 101 | 1 | 2 | 99 | 1 | 7.578 / 8.545 | 2.597 / 2.904 | 0.423 / 0.510 | 0.187 / 0.247 | 0.004 / 0.006 | n/a |
 | Synthetic chain-root, 1,000 functions | 1,001 | 1 | 2 | 999 | 1 | 194.723 / 196.005 | 79.511 / 92.458 | 5.401 / 6.056 | 0.256 / 0.314 | 0.006 / 0.007 | n/a |
 | Synthetic chain-root, 5,000 functions | 5,001 | 1 | 2 | 4,999 | 1 | 4,374.564 / 4,715.801 | 4,326.213 / 5,810.282 | 36.484 / 52.183 | 0.394 / 0.569 | 0.009 / 0.011 | n/a |
-| Chess TD `command_guard_ticks` | 181 | 1 | 4 | 177 | 1 | 108.439 / 113.618 | 39.141 / 42.595 | 1.328 / 1.435 | 2.557 / 2.698 | 0.012 / 0.013 | 0.000 / 0.000 |
-| Chess TD shared `abs_i32` | 181 | 1 | 51 | 130 | 3 | 112.712 / 112.712 | 64.240 / 65.973 | 1.556 / 1.661 | 26.546 / 27.034 | 0.041 / 0.046 | 0.000 / 0.000 |
+| Chess TD `command_guard_ticks` | 181 | 1 | 4 | 177 | 1 | 121.172 / 125.043 | 50.219 / 52.347 | 1.249 / 1.309 | 2.983 / 3.054 | 0.010 / 0.013 | 0.000 / 0.000 |
+| Chess TD shared `abs_i32` | 181 | 1 | 51 | 130 | 3 | 123.600 / 123.600 | 78.785 / 80.189 | 1.508 / 1.531 | 30.788 / 31.245 | 0.036 / 0.043 | 0.000 / 0.000 |
 | Brickout `brickout_shop_anim_step` | 182 | 1 | 2 | 180 | 1 | 68.667 / 72.776 | 23.494 / 24.113 | 1.135 / 1.198 | 0.888 / 0.992 | 0.010 / 0.012 | 0.000 / 0.000 |
 
 The initial provisional targets (25 ms at 1,000, 75 ms at 5,000, and 50 ms for Chess TD) did not
@@ -79,6 +86,11 @@ also proves planning uses an iterative traversal rather than the process stack. 
 matrix asserts exact chain, binary-branching, diamond, shared-helper, and SCC closure sizes at 100,
 1,000, and 5,000 functions; broad 5,000-function topologies stay planner-only to avoid deliberately
 retaining tens of thousands of native bodies in one validation command.
+
+A collection-layout regression changes only a fixed capacity and asserts the exact emitted set is
+the storage consumer plus its reverse callers; an unrelated function and host entry retain their
+old bodies. The live-workspace text-capacity regression additionally migrates and executes the
+changed layout, covering the failure that exposed stale lowering contracts on Linux CI.
 
 Prebuilt-graph closure-expansion timings (milliseconds) are shown below. They isolate the reverse
 closure/SCC algorithm after graph construction; they are not complete edit-to-plan latency. The
