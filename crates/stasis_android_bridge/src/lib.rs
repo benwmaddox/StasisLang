@@ -3393,7 +3393,7 @@ mod tests {
             .canonicalize()
             .expect("bundled sample root");
         let result = run_android_workshop_stasis_tests(&root).expect("run bundled Stasis tests");
-        assert_eq!(result["passed"], 1, "{result}");
+        assert_eq!(result["passed"], 2, "{result}");
         assert_eq!(result["failed"], 0);
         assert_eq!(result["all_passed"], true);
         assert_eq!(
