@@ -1,4 +1,7 @@
 use crate::backend::emit::{DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage};
+use crate::backend::patch_plan::{
+    capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReasonChain,
+};
 use crate::backend::state_layout::{
     build_state_layout, build_state_memory_report, is_named_scalar_state_path,
 };
@@ -6,7 +9,9 @@ use crate::backend::state_query::{
     parse_state_query, BinaryOperator, ScalarExpression, StateQuery, StateValueReference,
 };
 use crate::backend::EngineEntrypoints;
-use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
+use crate::compiler::{
+    CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta, SourceFile,
+};
 use crate::frontend::indexer::hash_text;
 use crate::frontend::lexer::{lex, TokenKind};
 use crate::frontend::parser::parse_string_literal_text;
@@ -24,8 +29,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 #[cfg(test)]
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{MutexGuard, OnceLock};
 use std::time::{Instant, SystemTime};
 
 pub use crate::backend::state_layout::{
@@ -45,6 +51,43 @@ const MAX_STATE_QUERY_MATCHES: usize = 64;
 
 fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+fn function_keys_referencing_names(
+    functions: &[FunctionMeta],
+    files: &[SourceFile],
+    names: &BTreeSet<String>,
+) -> Result<BTreeSet<FunctionKey>, String> {
+    if names.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let mut keys = BTreeSet::new();
+    for function in functions {
+        let file = files.get(function.file_id as usize).ok_or_else(|| {
+            format!(
+                "function '{}' references missing source file",
+                function.name
+            )
+        })?;
+        let source = file
+            .content
+            .get(function.source_range.start as usize..function.source_range.end as usize)
+            .ok_or_else(|| format!("function '{}' has an invalid source range", function.name))?;
+        let references_changed_name = lex(source)?.iter().any(|token| {
+            token.kind == TokenKind::Identifier
+                && source
+                    .get(token.start..token.end)
+                    .is_some_and(|identifier| names.contains(identifier))
+        });
+        if references_changed_name {
+            keys.insert(FunctionKey {
+                source_path: file.path.clone(),
+                name: function.name.clone(),
+                signature_hash: function.signature_hash,
+            });
+        }
+    }
+    Ok(keys)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -76,6 +119,7 @@ impl JitScalarValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitArtifact {
     pub function_id: FunctionId,
+    pub function_key: FunctionKey,
     pub slot: u32,
     pub body_hash: u64,
     pub(crate) code_ptr: u64,
@@ -87,7 +131,7 @@ pub struct JitProcess {
     active_compiler: Option<Compiler>,
     artifacts: Vec<JitArtifact>,
     artifact_index: HashMap<FunctionId, usize>,
-    modules: Vec<JITModule>,
+    modules: Vec<Arc<Mutex<JITModule>>>,
     runtime_libraries: Vec<stasis_dynload::Library>,
     runtime_symbol_cache: BTreeMap<String, usize>,
     source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
@@ -95,6 +139,7 @@ pub struct JitProcess {
     compile_analysis_cache: Option<CompileAnalysisCache>,
     active_compile_analysis_cache: Option<CompileAnalysisCache>,
     generation_metadata: Option<JitGenerationMetadata>,
+    accepted_program: Option<AcceptedProgram>,
     staged_string_literals: HashMap<i32, String>,
     active_string_literals: HashMap<i32, String>,
     last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
@@ -117,6 +162,10 @@ pub struct JitGenerationMetadata {
     pub source_revision: u64,
     pub layout_hash: u64,
     pub emitted_function_ids: Vec<FunctionId>,
+    pub reused_function_ids: Vec<FunctionId>,
+    pub patch_reasons: Vec<PatchReasonChain>,
+    pub affected_host_entries: Vec<FunctionKey>,
+    pub retained_dependencies: Vec<FunctionKey>,
     pub host_export_signatures: BTreeMap<String, String>,
     pub host_export_code_ptrs: BTreeMap<String, u64>,
     pub diagnostics: Vec<String>,
@@ -125,6 +174,7 @@ pub struct JitGenerationMetadata {
     pub codegen_micros: u64,
     pub finalize_micros: u64,
     pub module_count: usize,
+    pub retained_arena_count: usize,
     pub emitted_clif_bytes: usize,
     pub executable_bytes: usize,
 }
@@ -167,6 +217,7 @@ impl JitProcess {
             compile_analysis_cache: None,
             active_compile_analysis_cache: None,
             generation_metadata: None,
+            accepted_program: None,
             staged_string_literals: HashMap::new(),
             active_string_literals: HashMap::new(),
             last_failed_source_diagnostic: None,
@@ -185,6 +236,15 @@ impl JitProcess {
         for file in self.compiler.files() {
             candidate.upsert_file(file.path.clone(), file.content.clone());
         }
+        candidate.active_compiler = self.active_compiler.clone();
+        candidate.artifacts = self.artifacts.clone();
+        candidate.modules = self.modules.clone();
+        candidate.compile_analysis_cache = self.compile_analysis_cache.clone();
+        candidate.active_compile_analysis_cache = self.active_compile_analysis_cache.clone();
+        candidate.generation_metadata = self.generation_metadata.clone();
+        candidate.accepted_program = self.accepted_program.clone();
+        candidate.staged_string_literals = self.staged_string_literals.clone();
+        candidate.active_string_literals = self.active_string_literals.clone();
         candidate.required_emit_roots = self.required_emit_roots.clone();
         candidate.local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
         candidate
@@ -263,6 +323,7 @@ impl JitProcess {
         let previous_analysis = self.compile_analysis_cache.clone();
         let previous_artifacts = self.artifacts.clone();
         let previous_metadata = self.generation_metadata.clone();
+        let previous_accepted_program = self.accepted_program.clone();
         let previous_literals = self.staged_string_literals.clone();
         let previous_active_compiler = self.active_compiler.clone();
         let previous_active_analysis = self.active_compile_analysis_cache.clone();
@@ -270,22 +331,14 @@ impl JitProcess {
         let previous_module_count = self.modules.len();
         let report = self.compile_staged()?;
         match self.activate_staged_runtime() {
-            Ok(()) => {
-                let active_module = self.modules.pop().ok_or_else(|| {
-                    crate::compiler::CompileError::Invariant(
-                        "activated JIT generation has no code module".to_string(),
-                    )
-                })?;
-                self.modules.clear();
-                self.modules.push(active_module);
-                Ok(report)
-            }
+            Ok(()) => Ok(report),
             Err(error) => {
                 self.modules.truncate(previous_module_count);
                 self.compiler = previous_compiler;
                 self.compile_analysis_cache = previous_analysis;
                 self.artifacts = previous_artifacts;
                 self.generation_metadata = previous_metadata;
+                self.accepted_program = previous_accepted_program;
                 self.staged_string_literals = previous_literals;
                 self.active_compiler = previous_active_compiler;
                 self.active_compile_analysis_cache = previous_active_analysis;
@@ -368,6 +421,11 @@ impl JitProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
         let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
+        let previous_constant_values = self
+            .compile_analysis_cache
+            .as_ref()
+            .map(|cache| cache.constant_values.clone())
+            .unwrap_or_default();
         let cache_miss = self
             .compile_analysis_cache
             .as_ref()
@@ -398,6 +456,20 @@ impl JitProcess {
                 "jit compile analysis cache missing after refresh".to_string(),
             )
         })?;
+        let changed_constants: BTreeSet<String> = previous_constant_values
+            .keys()
+            .chain(analysis.constant_values.keys())
+            .filter(|name| {
+                previous_constant_values.get(*name) != analysis.constant_values.get(*name)
+            })
+            .cloned()
+            .collect();
+        let lowered_contract_changes = function_keys_referencing_names(
+            self.compiler.functions(),
+            self.compiler.files(),
+            &changed_constants,
+        )
+        .map_err(crate::compiler::CompileError::Backend)?;
         let direct_storage = build_direct_storage_bindings(
             &analysis.global_path_types,
             &analysis.collection_infos,
@@ -405,16 +477,68 @@ impl JitProcess {
             false,
         )
         .map_err(crate::compiler::CompileError::Backend)?;
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+        let patch_plan = plan_patch(
             self.compiler.functions(),
+            self.compiler.files(),
             &self.required_emit_roots,
-        );
-        let emit_function_ids: Vec<FunctionId> = reachable.iter().copied().collect();
+            self.accepted_program.as_ref(),
+            &lowered_contract_changes,
+        )
+        .map_err(crate::compiler::CompileError::Backend)?;
+        let emit_function_ids = patch_plan.re_jit_ids.clone();
+        let function_keys_by_id: BTreeMap<FunctionId, FunctionKey> = self
+            .compiler
+            .functions()
+            .iter()
+            .filter_map(|function| {
+                self.compiler
+                    .files()
+                    .get(function.file_id as usize)
+                    .map(|file| {
+                        (
+                            function.id,
+                            FunctionKey {
+                                source_path: file.path.clone(),
+                                name: function.name.clone(),
+                                signature_hash: function.signature_hash,
+                            },
+                        )
+                    })
+            })
+            .collect();
+        let previous_artifacts_by_key: BTreeMap<FunctionKey, JitArtifact> = self
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.function_key.clone(), artifact.clone()))
+            .collect();
+        let mut retained_symbols = BTreeMap::new();
+        for key in &patch_plan.reused {
+            let current_id = function_keys_by_id
+                .iter()
+                .find_map(|(id, candidate)| (candidate == key).then_some(*id))
+                .ok_or_else(|| {
+                    crate::compiler::CompileError::Invariant(format!(
+                        "reused function '{}' has no current id",
+                        key.display_name()
+                    ))
+                })?;
+            let artifact = previous_artifacts_by_key.get(key).ok_or_else(|| {
+                crate::compiler::CompileError::Backend(format!(
+                    "retained JIT address missing for '{}'",
+                    key.display_name()
+                ))
+            })?;
+            retained_symbols.insert(format!("jit_fn_{current_id}"), artifact.code_ptr as usize);
+        }
         let local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
-        let mut staged_module = Some(
-            new_generation_jit_module(&analysis.extern_symbol_addresses)
-                .map_err(crate::compiler::CompileError::Backend)?,
-        );
+        let mut staged_module = if emit_function_ids.is_empty() {
+            None
+        } else {
+            Some(
+                new_generation_jit_module(&analysis.extern_symbol_addresses, &retained_symbols)
+                    .map_err(crate::compiler::CompileError::Backend)?,
+            )
+        };
         let mut staged_functions = Vec::with_capacity(emit_function_ids.len());
         let codegen_started = Instant::now();
         let emit = self.compiler.emit_pass_for_ids_with(
@@ -459,8 +583,13 @@ impl JitProcess {
                     }
                 };
                 staged_module = Some(module);
+                let function_key = function_keys_by_id
+                    .get(&meta.id)
+                    .cloned()
+                    .ok_or_else(|| format!("emitted function '{}' has no stable key", meta.name))?;
                 staged_functions.push((
                     meta.id,
+                    function_key,
                     meta.body_hash,
                     function_id,
                     clif,
@@ -470,35 +599,75 @@ impl JitProcess {
             },
         )?;
         let codegen_micros = elapsed_micros(codegen_started);
-        let mut module = staged_module.ok_or_else(|| {
-            crate::compiler::CompileError::Invariant(
-                "JIT generation module missing after function emission".to_string(),
-            )
-        })?;
         let finalize_started = Instant::now();
-        module.finalize_definitions().map_err(|error| {
-            crate::compiler::CompileError::Backend(format!(
-                "failed to finalize complete JIT generation: {error}"
-            ))
-        })?;
+        if let Some(module) = staged_module.as_mut() {
+            module.finalize_definitions().map_err(|error| {
+                crate::compiler::CompileError::Backend(format!(
+                    "failed to finalize selective JIT patch: {error}"
+                ))
+            })?;
+        }
         let finalize_micros = elapsed_micros(finalize_started);
         let executable_bytes = staged_functions
             .iter()
-            .map(|(_, _, _, _, bytes)| *bytes)
+            .map(|(_, _, _, _, _, bytes)| *bytes)
             .sum();
-        let staged_artifacts: Vec<JitArtifact> = staged_functions
+        let patch_artifacts: Vec<JitArtifact> = staged_functions
             .into_iter()
             .enumerate()
             .map(
-                |(slot, (function_id, body_hash, clif_function_id, clif, _))| JitArtifact {
-                    function_id,
-                    slot: u32::try_from(slot).unwrap_or(u32::MAX),
-                    body_hash,
-                    code_ptr: module.get_finalized_function(clif_function_id) as usize as u64,
-                    clif,
+                |(slot, (function_id, function_key, body_hash, clif_function_id, clif, _))| {
+                    let module = staged_module.as_ref().ok_or_else(|| {
+                        crate::compiler::CompileError::Invariant(
+                            "emitted JIT patch has no finalized module".to_string(),
+                        )
+                    })?;
+                    Ok(JitArtifact {
+                        function_id,
+                        function_key,
+                        slot: u32::try_from(slot).unwrap_or(u32::MAX),
+                        body_hash,
+                        code_ptr: module.get_finalized_function(clif_function_id) as usize as u64,
+                        clif,
+                    })
                 },
             )
+            .collect::<CompileResult<Vec<_>>>()?;
+        let patch_artifacts_by_key: BTreeMap<FunctionKey, JitArtifact> = patch_artifacts
+            .iter()
+            .map(|artifact| (artifact.function_key.clone(), artifact.clone()))
             .collect();
+        let mut current_keys = patch_plan.re_jit.clone();
+        current_keys.extend(patch_plan.reused.iter().cloned());
+        current_keys.sort();
+        let staged_artifacts: Vec<JitArtifact> = current_keys
+            .into_iter()
+            .enumerate()
+            .map(|(slot, key)| {
+                let current_id = function_keys_by_id
+                    .iter()
+                    .find_map(|(id, candidate)| (candidate == &key).then_some(*id))
+                    .ok_or_else(|| {
+                        crate::compiler::CompileError::Invariant(format!(
+                            "planned function '{}' has no current id",
+                            key.display_name()
+                        ))
+                    })?;
+                let mut artifact = patch_artifacts_by_key
+                    .get(&key)
+                    .or_else(|| previous_artifacts_by_key.get(&key))
+                    .cloned()
+                    .ok_or_else(|| {
+                        crate::compiler::CompileError::Backend(format!(
+                            "planned JIT artifact missing for '{}'",
+                            key.display_name()
+                        ))
+                    })?;
+                artifact.function_id = current_id;
+                artifact.slot = u32::try_from(slot).unwrap_or(u32::MAX);
+                Ok(artifact)
+            })
+            .collect::<CompileResult<Vec<_>>>()?;
         let state_layout = build_state_layout(
             &analysis.global_path_types,
             &analysis.collection_infos,
@@ -533,17 +702,26 @@ impl JitProcess {
                     .map(|artifact| (function.name.clone(), artifact.code_ptr))
             })
             .collect();
-        let emitted_clif_bytes = staged_artifacts
+        let emitted_clif_bytes = patch_artifacts
             .iter()
             .map(|artifact| artifact.clif.len())
             .sum();
+        let reused_function_ids = staged_artifacts
+            .iter()
+            .filter(|artifact| patch_plan.reused.contains(&artifact.function_key))
+            .map(|artifact| artifact.function_id)
+            .collect();
         let staged_metadata = JitGenerationMetadata {
             source_revision: files_fingerprint,
             layout_hash,
-            emitted_function_ids: staged_artifacts
+            emitted_function_ids: patch_artifacts
                 .iter()
                 .map(|artifact| artifact.function_id)
                 .collect(),
+            reused_function_ids,
+            patch_reasons: patch_plan.reasons.clone(),
+            affected_host_entries: patch_plan.affected_host_entries.clone(),
+            retained_dependencies: patch_plan.retained_dependencies.clone(),
             host_export_signatures,
             host_export_code_ptrs,
             diagnostics: Vec::new(),
@@ -551,7 +729,8 @@ impl JitProcess {
             data_owner_layout_hash: layout_hash,
             codegen_micros,
             finalize_micros,
-            module_count: 1,
+            module_count: self.modules.len() + usize::from(staged_module.is_some()),
+            retained_arena_count: self.modules.len(),
             emitted_clif_bytes,
             executable_bytes,
         };
@@ -559,9 +738,18 @@ impl JitProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
         let staged_string_literals = collect_current_string_literals(&self.compiler)
             .map_err(crate::compiler::CompileError::Backend)?;
+        let accepted_program = capture_accepted_program(
+            self.compiler.functions(),
+            self.compiler.files(),
+            &self.required_emit_roots,
+        )
+        .map_err(crate::compiler::CompileError::Backend)?;
         self.artifacts = staged_artifacts;
-        self.modules.push(module);
+        if let Some(module) = staged_module {
+            self.modules.push(Arc::new(Mutex::new(module)));
+        }
         self.generation_metadata = Some(staged_metadata);
+        self.accepted_program = Some(accepted_program);
         self.staged_string_literals = staged_string_literals;
         let report = CompileReport { index, emit };
         self.rebuild_artifact_index();
@@ -2349,12 +2537,18 @@ fn runtime_helper_addresses() -> BTreeMap<String, usize> {
 
 fn new_generation_jit_module(
     extern_symbol_addresses: &ExternSymbolAddressMap,
+    retained_function_addresses: &BTreeMap<String, usize>,
 ) -> Result<JITModule, String> {
     let mut builder = new_stasis_jit_builder()?;
     for (symbol, address) in runtime_helper_addresses() {
         builder.symbol(&symbol, address as *const u8);
     }
     for (symbol, address) in extern_symbol_addresses {
+        if *address != 0 {
+            builder.symbol(symbol, *address as *const u8);
+        }
+    }
+    for (symbol, address) in retained_function_addresses {
         if *address != 0 {
             builder.symbol(symbol, *address as *const u8);
         }
@@ -2434,7 +2628,7 @@ mod tests {
     use crate::backend::EngineEntrypoints;
 
     #[test]
-    fn complete_generation_uses_direct_calls_and_hides_internal_pointers() {
+    fn selective_patch_uses_direct_calls_and_retains_unaffected_pointers() {
         let mut process = JitProcess::new();
         let fixture_root = Path::new("direct_call_generation_fixture");
         process.upsert_file(
@@ -2490,6 +2684,45 @@ mod tests {
             );
         }
         assert!(process.clif_for_function_name("unreachable").is_none());
+
+        let cold_ptrs: BTreeMap<String, u64> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| (artifact.function_key.name.clone(), artifact.code_ptr))
+            .collect();
+        let edited_math = include_str!("../../../../samples/direct_call_generation/math.stasis")
+            .replace(
+                "return shared(value) + leaf(value);",
+                "return shared(value) + leaf(value) + 1;",
+            );
+        process.upsert_file(
+            fixture_root.join("math.stasis").to_string_lossy(),
+            edited_math,
+        );
+        let patch = process.compile().expect("selective direct-call patch");
+        assert_eq!(patch.emit.emitted_functions, 3);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute patched direct-call sample"),
+            18
+        );
+        let patched_ptrs: BTreeMap<String, u64> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| (artifact.function_key.name.clone(), artifact.code_ptr))
+            .collect();
+        for retained in ["leaf", "shared", "even", "odd", "render", "on_code_swap"] {
+            assert_eq!(cold_ptrs[retained], patched_ptrs[retained], "{retained}");
+        }
+        for rebuilt in ["mid", "tick", "main"] {
+            assert_ne!(cold_ptrs[rebuilt], patched_ptrs[rebuilt], "{rebuilt}");
+        }
+        let mid_clif = process
+            .clif_for_function_name("mid")
+            .expect("patched mid CLIF");
+        assert!(mid_clif.matches("call fn").count() >= 2, "{mid_clif}");
+        assert!(!mid_clif.contains("stasis_jit_call_") && !mid_clif.contains("lookup_code_ptr"));
     }
 
     #[test]
@@ -4437,7 +4670,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_rebuilds_complete_generation_for_reachable_edit_shapes() {
+    fn jit_process_emits_selective_patches_for_reachable_edit_shapes() {
         fn source(
             leaf: &str,
             shared: &str,
@@ -4480,7 +4713,7 @@ mod tests {
                     "",
                 ),
                 36,
-                7,
+                2,
             ),
             (
                 "render body",
@@ -4494,7 +4727,7 @@ mod tests {
                     "",
                 ),
                 37,
-                7,
+                2,
             ),
             (
                 "on_code_swap body",
@@ -4508,7 +4741,7 @@ mod tests {
                     "",
                 ),
                 37,
-                7,
+                1,
             ),
             (
                 "leaf body",
@@ -4522,7 +4755,7 @@ mod tests {
                     "",
                 ),
                 39,
-                7,
+                6,
             ),
             (
                 "mid body",
@@ -4536,7 +4769,7 @@ mod tests {
                     "",
                 ),
                 40,
-                7,
+                3,
             ),
             (
                 "shared body",
@@ -4550,7 +4783,7 @@ mod tests {
                     "",
                 ),
                 42,
-                7,
+                5,
             ),
             (
                 "multiple bodies",
@@ -4564,7 +4797,7 @@ mod tests {
                     "",
                 ),
                 44,
-                7,
+                3,
             ),
             (
                 "added reachable function",
@@ -4578,7 +4811,7 @@ mod tests {
                     "function added(): i32 { return 4; }",
                 ),
                 46,
-                8,
+                4,
             ),
             (
                 "deleted and renamed function",
@@ -4592,7 +4825,7 @@ mod tests {
                     "function renamed(): i32 { return 5; }",
                 ),
                 47,
-                8,
+                4,
             ),
             (
                 "unreachable function",
@@ -4606,18 +4839,29 @@ mod tests {
                     "function renamed(): i32 { return 5; }\nfunction unreachable(): i32 { return missing(); }",
                 ),
                 47,
-                8,
+                0,
             ),
         ];
 
         let mut previous_revision = None;
+        let mut expected_module_count = 0;
         for (label, source, expected, emitted) in cases {
             process.upsert_file("sample.stasis", source);
             let report = process
                 .compile()
                 .unwrap_or_else(|error| panic!("compile {label}: {error:?}"));
             assert_eq!(report.emit.emitted_functions, emitted, "{label}");
-            assert_eq!(process.artifacts().len(), emitted, "{label}");
+            let reachable_count = if matches!(
+                label,
+                "added reachable function"
+                    | "deleted and renamed function"
+                    | "unreachable function"
+            ) {
+                8
+            } else {
+                7
+            };
+            assert_eq!(process.artifacts().len(), reachable_count, "{label}");
             assert_eq!(
                 process
                     .execute_i32_noarg_by_name("main")
@@ -4628,7 +4872,16 @@ mod tests {
             let metadata = process
                 .generation_metadata()
                 .unwrap_or_else(|| panic!("metadata {label}"));
-            assert_eq!(metadata.module_count, 1, "{label}");
+            if emitted > 0 {
+                expected_module_count += 1;
+            }
+            assert_eq!(metadata.emitted_function_ids.len(), emitted, "{label}");
+            assert_eq!(
+                metadata.reused_function_ids.len(),
+                reachable_count - emitted,
+                "{label}"
+            );
+            assert_eq!(metadata.module_count, expected_module_count, "{label}");
             if let Some(previous) = previous_revision {
                 assert_ne!(metadata.source_revision, previous, "{label}");
             }
@@ -5540,7 +5793,46 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_rebuilds_complete_generation_when_function_ids_shift() {
+    fn staged_candidate_reuses_active_arenas_and_keeps_active_code_running() {
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "sample.stasis",
+            "function leaf(): i32 { return 1; } function render(): i32 { return 9; } function main(): i32 { return leaf(); }",
+        );
+        active.compile().expect("cold compile");
+        let render_ptr = active
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "render")
+            .expect("render artifact")
+            .code_ptr;
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "sample.stasis",
+            "function leaf(): i32 { return 2; } function render(): i32 { return 9; } function main(): i32 { return leaf(); }",
+        );
+        let report = candidate.compile().expect("selective candidate compile");
+        assert_eq!(report.emit.emitted_functions, 2);
+        assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 1);
+        assert_eq!(candidate.execute_i32_noarg_by_name("main").unwrap(), 2);
+        assert_eq!(
+            candidate
+                .artifacts()
+                .iter()
+                .find(|artifact| artifact.function_key.name == "render")
+                .expect("retained render artifact")
+                .code_ptr,
+            render_ptr
+        );
+
+        active.accept_staged_candidate(candidate);
+        assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_reuses_stable_functions_when_ordinal_ids_shift() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -5554,16 +5846,15 @@ mod tests {
                 .expect("execute first"),
             102
         );
+        let first_ptrs = process.symbol_code_ptrs();
 
         process.upsert_file(
             "sample.stasis",
             "function inserted(): i32 { return 9; }\nfunction f0(): i32 { return 1; }\nfunction f1(): i32 { return 2; }\nfunction main(): i32 { return f1() + 100; }\n",
         );
         let second = process.compile().expect("second compile");
-        assert_eq!(
-            second.emit.emitted_functions, 2,
-            "the full reachable generation should be emitted after a function-id shift"
-        );
+        assert_eq!(second.emit.emitted_functions, 0);
+        assert_eq!(process.symbol_code_ptrs(), first_ptrs);
         assert_eq!(
             process
                 .execute_i32_noarg_by_name("main")

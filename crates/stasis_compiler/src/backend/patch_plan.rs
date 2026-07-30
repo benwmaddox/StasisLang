@@ -248,9 +248,6 @@ fn expand_affected_closure(
                 queue.push_back(peer.clone());
             }
         }
-        if graph.host_entries.contains(&callee) {
-            continue;
-        }
         let Some(callers) = graph.reverse.get(&callee) else {
             continue;
         };
@@ -550,6 +547,14 @@ mod tests {
             key_by_name(&plan.affected_host_entries),
             vec!["render", "tick"]
         );
+    }
+
+    #[test]
+    fn host_entry_called_by_stasis_still_propagates_to_its_caller() {
+        let before = "function tick(): i32 { return 1; } function main(): i32 { return tick(); }";
+        let previous = accepted(before);
+        let plan = plan(&previous, &before.replace("return 1", "return 2"));
+        assert_eq!(key_by_name(&plan.re_jit), vec!["main", "tick"]);
     }
 
     #[test]

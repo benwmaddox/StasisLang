@@ -73,8 +73,9 @@ addresses. After whole-file checking it builds an immutable `PatchPlan`.
 The seed set contains reachable functions whose body, signature, or lowered contract changed;
 affected SCC peers; newly reachable functions; and functions whose embedded layout/global access
 facts changed. The planner then adds reverse direct callers whenever the callee address, ABI, or
-lowered call contract requires a new caller body. Propagation stops after including each affected
-host-entry body because its stable trampoline hides the new body address from the host.
+lowered call contract requires a new caller body. A host-entry trampoline ends propagation only for
+the external host caller, which is not a Stasis call-graph node. If another Stasis function directly
+calls a host-entry function, that real reverse edge continues through the normal closure.
 
 The planner does not add unchanged callees merely because patched code calls them. It records their
 accepted addresses as retained dependencies. An unreachable body edit produces no JIT code until a
