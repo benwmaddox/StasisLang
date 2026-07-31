@@ -145,7 +145,7 @@ public final class MainActivity extends Activity {
             public void run() {
                 if (!compileAttempted) {
                     String result = nativeCompileProject(PUBLISHED_RUNTIME_ID);
-                    compileReady = result != null && result.startsWith("CompilePlanned")
+                    compileReady = result != null && result.startsWith("CompileReady")
                             && result.contains("status=0");
                     compileAttempted = true;
                 }

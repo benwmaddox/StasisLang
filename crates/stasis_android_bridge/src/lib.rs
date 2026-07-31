@@ -17,10 +17,9 @@ use stasis_compiler::backend::state_migration::{
 };
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_compiler::frontend::workshop::{
-    build_workshop_compile_plan, find_workshop_references, load_workshop_edit_workspace,
-    load_workshop_project, plan_workshop_semantic_edits, render_workshop_artifacts,
-    workshop_reachable_files, workshop_source_items, write_workshop_semantic_plan,
-    write_workshop_semantic_receipt, WorkshopCompilePlan, WorkshopReload,
+    find_workshop_references, load_workshop_edit_workspace, load_workshop_project,
+    plan_workshop_semantic_edits, workshop_reachable_files, workshop_source_items,
+    write_workshop_semantic_plan, write_workshop_semantic_receipt, WorkshopReload,
     WorkshopSemanticEditBatch, WorkshopSemanticEditPlan, WorkshopSourceFile,
 };
 #[cfg(test)]
@@ -28,7 +27,6 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSemanticEdit, WorkshopSemanticEditOperation, WorkshopSourceItemKind,
     WorkshopSymbolSelector,
 };
-use stasis_compiler::IncrementalCompilerHost;
 
 pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
 pub const ANDROID_RENDER_FRAME_HEADER_SIZE: usize = 6;
@@ -160,6 +158,8 @@ struct AndroidRuntimeSession {
 thread_local! {
     static RUNTIME_SESSION: RefCell<Option<AndroidRuntimeSession>> = const { RefCell::new(None) };
     static LAST_FRAME_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    #[cfg(test)]
+    static FORCE_NEXT_MANIFEST_COMMIT_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,8 +168,35 @@ pub struct AndroidBridgeCompileResult {
     pub reload: WorkshopReload,
     pub manifest_path: PathBuf,
     pub runtime_state_path: PathBuf,
-    pub function_artifact_count: usize,
+    pub compiled_function_count: usize,
     pub compile_micros: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AndroidJitArtifactSummary {
+    source_path: String,
+    name: String,
+    signature_hash: u64,
+    slot: u32,
+    body_hash: u64,
+    executable_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AndroidJitCompileSummary {
+    source_revision: u64,
+    layout_hash: u64,
+    emitted_function_count: usize,
+    reused_function_count: usize,
+    executable_bytes: usize,
+    artifacts: Vec<AndroidJitArtifactSummary>,
+    entrypoints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviousAndroidCompile {
+    project_hash: u64,
+    layout_hash: u64,
 }
 
 pub fn load_android_workshop_asset_manifest(
@@ -502,116 +529,139 @@ pub fn compile_android_workshop_project(
     let files = load_workshop_project(project_root, entry_file)?;
     let source_fingerprint = fingerprint_workshop_sources(&files);
     discard_pending_runtime_candidate_if_different(project_root, source_fingerprint);
-    let changed_files = files
-        .iter()
-        .map(|file| project_root.join(&file.path))
-        .collect::<Vec<_>>();
-
-    let mut host = IncrementalCompilerHost::new();
-    host.set_required_reachability_roots(&["tick", "render", "on_code_swap"]);
-    let compile = match host.compile_changed_files(&changed_files) {
-        Ok(compile) => compile,
+    let previous = read_previous_android_plan(project_root)?;
+    let had_runtime_session = has_runtime_session_for_project(project_root);
+    warm_or_reload_runtime_session(project_root, &files, source_fingerprint)?;
+    let finalized = (|| {
+        let summary = current_android_jit_compile_summary(project_root, source_fingerprint)?;
+        let reload = match (had_runtime_session, previous) {
+            (false, _) => WorkshopReload::InitialCompile,
+            (true, None) => WorkshopReload::InitialCompile,
+            (true, Some(previous)) if previous.project_hash == source_fingerprint => {
+                WorkshopReload::NoChange
+            }
+            (true, Some(previous)) if previous.layout_hash == summary.layout_hash => {
+                WorkshopReload::FastReload
+            }
+            (true, Some(_)) => WorkshopReload::ResetRequired,
+        };
+        let manifest_path = project_root.join("build/native_compile_manifest.txt");
+        let runtime_state_path = project_root.join("build/runtime_state.txt");
+        let manifest =
+            render_android_jit_manifest(project_root, source_fingerprint, reload, &summary);
+        if let Some(parent) = manifest_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed creating Android manifest directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        remove_legacy_stub_artifacts(project_root)?;
+        let previous_runtime_state = fs::read(&runtime_state_path).ok();
+        if matches!(
+            reload,
+            WorkshopReload::InitialCompile | WorkshopReload::ResetRequired
+        ) {
+            if let Some(parent) = runtime_state_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    format!(
+                        "failed creating Android runtime state directory {}: {error}",
+                        parent.display()
+                    )
+                })?;
+            }
+            let runtime_state = format!(
+                "status=RuntimeStateReady\nproject_hash={source_fingerprint:016x}\nreload={reload:?}\ntick_count=0\n"
+            );
+            if let Err(error) = fs::write(&runtime_state_path, runtime_state.as_bytes()) {
+                let primary = format!(
+                    "failed writing Android runtime state {}: {error}",
+                    runtime_state_path.display()
+                );
+                return Err(restore_after_error(
+                    primary,
+                    &runtime_state_path,
+                    previous_runtime_state.as_deref(),
+                ));
+            }
+        }
+        if let Err(primary) = write_android_manifest_atomically(&manifest_path, &manifest) {
+            return Err(restore_after_error(
+                primary,
+                &runtime_state_path,
+                previous_runtime_state.as_deref(),
+            ));
+        }
+        Ok::<_, String>((summary, reload, manifest_path, runtime_state_path))
+    })();
+    let (summary, reload, manifest_path, runtime_state_path) = match finalized {
+        Ok(finalized) => finalized,
         Err(error) => {
-            return Err(host
-                .last_source_diagnostic()
-                .map(|diagnostic| format_compiler_source_diagnostic(project_root, diagnostic))
-                .unwrap_or(error));
+            reject_staged_runtime_compile(project_root, source_fingerprint, had_runtime_session);
+            return Err(error);
         }
     };
-    let previous = read_previous_android_plan(project_root)?;
-    let mut plan = build_workshop_compile_plan(&files, &compile, previous.as_ref())?;
-    // The legacy artifact analyzer does not understand every production extern and can
-    // report detector errors for programs the real JIT has compiled successfully. The
-    // executable pipeline above is authoritative for Workshop; retain the artifact
-    // manifest for tooling, but derive its success/reload state from the source set.
-    let executable_project_hash = source_fingerprint as i32;
-    let previous_hashes = previous
-        .as_ref()
-        .map(|previous| (previous.project_hash, previous.layout_hash));
-    plan.status = 0;
-    plan.errors.clear();
-    plan.project_hash = executable_project_hash;
-    (plan.reload, plan.reason) = match previous_hashes {
-        None => (
-            WorkshopReload::InitialCompile,
-            "Production JIT initialized the Workshop runtime.".to_string(),
-        ),
-        Some((project_hash, _)) if project_hash == executable_project_hash => (
-            WorkshopReload::NoChange,
-            "Production JIT source fingerprint is unchanged.".to_string(),
-        ),
-        Some((_, layout_hash)) if layout_hash == plan.layout_hash => (
-            WorkshopReload::FastReload,
-            "Production JIT accepted a layout-compatible source update.".to_string(),
-        ),
-        Some(_) => (
-            WorkshopReload::ResetRequired,
-            "Production JIT accepted a layout-changing source update.".to_string(),
-        ),
-    };
-    let artifacts = render_workshop_artifacts(&plan);
 
-    let manifest_path = project_root.join(&artifacts.manifest_path);
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed creating Android manifest directory {}: {error}",
-                parent.display()
-            )
-        })?;
+    Ok(AndroidBridgeCompileResult {
+        status: 0,
+        reload,
+        manifest_path,
+        runtime_state_path,
+        compiled_function_count: summary.artifacts.len(),
+        compile_micros: started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+    })
+}
+
+fn restore_after_error(primary: String, path: &Path, contents: Option<&[u8]>) -> String {
+    match restore_optional_file(path, contents) {
+        Ok(()) => primary,
+        Err(rollback) => format!("{primary}; rollback failed: {rollback}"),
     }
-    fs::write(&manifest_path, artifacts.manifest.as_bytes()).map_err(|error| {
+}
+
+fn restore_optional_file(path: &Path, contents: Option<&[u8]>) -> Result<(), String> {
+    if let Some(contents) = contents {
+        fs::write(path, contents)
+            .map_err(|error| format!("failed restoring {}: {error}", path.display()))
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("failed removing {}: {error}", path.display())),
+        }
+    }
+}
+
+fn write_android_manifest_atomically(path: &Path, manifest: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut file = atomic_write_file::AtomicWriteFile::open(path).map_err(|error| {
         format!(
-            "failed writing Android manifest {}: {error}",
-            manifest_path.display()
+            "failed staging Android manifest {}: {error}",
+            path.display()
         )
     })?;
-
-    let runtime_state_path = project_root.join(&artifacts.runtime_state_path);
-    if let Some(runtime_state) = artifacts.runtime_state.as_deref() {
-        if let Some(parent) = runtime_state_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!(
-                    "failed creating Android runtime state directory {}: {error}",
-                    parent.display()
-                )
-            })?;
-        }
-        fs::write(&runtime_state_path, runtime_state.as_bytes()).map_err(|error| {
+    file.write_all(manifest.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
             format!(
-                "failed writing Android runtime state {}: {error}",
-                runtime_state_path.display()
-            )
-        })?;
-    }
-
-    for artifact in &artifacts.function_artifacts {
-        let path = project_root.join(&artifact.path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!(
-                    "failed creating Android function artifact directory {}: {error}",
-                    parent.display()
-                )
-            })?;
-        }
-        fs::write(&path, artifact.source.as_bytes()).map_err(|error| {
-            format!(
-                "failed writing Android function artifact {}: {error}",
+                "failed staging Android manifest {}: {error}",
                 path.display()
             )
         })?;
+    #[cfg(test)]
+    if FORCE_NEXT_MANIFEST_COMMIT_FAILURE.with(|forced| forced.replace(false)) {
+        return Err(format!(
+            "failed writing Android manifest {}: forced atomic commit failure",
+            path.display()
+        ));
     }
-
-    warm_or_reload_runtime_session(project_root, &files, source_fingerprint)?;
-
-    Ok(AndroidBridgeCompileResult {
-        status: plan.status,
-        reload: plan.reload,
-        manifest_path,
-        runtime_state_path,
-        function_artifact_count: artifacts.function_artifacts.len(),
-        compile_micros: started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+    file.commit().map_err(|error| {
+        format!(
+            "failed writing Android manifest {}: {error}",
+            path.display()
+        )
     })
 }
 
@@ -1426,6 +1476,29 @@ fn discard_pending_runtime_candidate_if_different(project_root: &Path, source_fi
     });
 }
 
+fn reject_staged_runtime_compile(
+    project_root: &Path,
+    source_fingerprint: u64,
+    had_runtime_session: bool,
+) {
+    RUNTIME_SESSION.with(|session_cell| {
+        let mut session_slot = session_cell.borrow_mut();
+        let Some(session) = session_slot
+            .as_mut()
+            .filter(|session| session.project_root == project_root)
+        else {
+            return;
+        };
+        if session.pending_source_fingerprint == Some(source_fingerprint) {
+            session.pending_candidate = None;
+            session.pending_source_fingerprint = None;
+            session.pending_resource_catalog = None;
+        } else if !had_runtime_session && session.source_fingerprint == source_fingerprint {
+            *session_slot = None;
+        }
+    });
+}
+
 fn configure_runtime_jit(jit: &mut JitProcess, project_root: &Path, files: &[WorkshopSourceFile]) {
     jit.set_required_emit_roots(&[
         "main".to_string(),
@@ -1588,6 +1661,117 @@ fn fingerprint_workshop_sources(files: &[WorkshopSourceFile]) -> u64 {
     hasher.finish()
 }
 
+fn has_runtime_session_for_project(project_root: &Path) -> bool {
+    RUNTIME_SESSION.with(|session| {
+        session
+            .borrow()
+            .as_ref()
+            .is_some_and(|session| session.project_root == project_root)
+    })
+}
+
+fn current_android_jit_compile_summary(
+    project_root: &Path,
+    source_fingerprint: u64,
+) -> Result<AndroidJitCompileSummary, String> {
+    RUNTIME_SESSION.with(|session| {
+        let session = session.borrow();
+        let session = session
+            .as_ref()
+            .filter(|session| session.project_root == project_root)
+            .ok_or_else(|| "Android JIT compile produced no runtime session".to_string())?;
+        let jit = if session.pending_source_fingerprint == Some(source_fingerprint) {
+            session
+                .pending_candidate
+                .as_ref()
+                .ok_or_else(|| "Android JIT compile produced no pending candidate".to_string())?
+        } else if session.source_fingerprint == source_fingerprint {
+            &session.jit
+        } else {
+            return Err(
+                "Android JIT compile session does not match source fingerprint".to_string(),
+            );
+        };
+        let metadata = jit
+            .generation_metadata()
+            .ok_or_else(|| "Android JIT compile produced no generation metadata".to_string())?;
+        let artifacts = jit
+            .artifacts()
+            .iter()
+            .map(|artifact| AndroidJitArtifactSummary {
+                source_path: artifact.function_key.source_path.clone(),
+                name: artifact.function_key.name.clone(),
+                signature_hash: artifact.function_key.signature_hash,
+                slot: artifact.slot,
+                body_hash: artifact.body_hash,
+                executable_bytes: artifact.executable_bytes,
+            })
+            .collect();
+        Ok(AndroidJitCompileSummary {
+            source_revision: metadata.source_revision,
+            layout_hash: metadata.layout_hash,
+            emitted_function_count: metadata.emitted_function_ids.len(),
+            reused_function_count: metadata.reused_function_ids.len(),
+            executable_bytes: metadata.executable_bytes,
+            artifacts,
+            entrypoints: metadata.host_export_signatures.keys().cloned().collect(),
+        })
+    })
+}
+
+fn render_android_jit_manifest(
+    project_root: &Path,
+    project_hash: u64,
+    reload: WorkshopReload,
+    summary: &AndroidJitCompileSummary,
+) -> String {
+    let mut manifest = format!(
+        "status=CompileReady\nbackend=cranelift-jit\nartifact_kind=executable-memory\nreload={reload:?}\nproject_hash={project_hash:016x}\nlayout_hash={:016x}\nsource_revision={}\nfunctions={}\nemitted_functions={}\nreused_functions={}\nexecutable_bytes={}\nerrors=0\nruntime_state=build/runtime_state.txt\n",
+        summary.layout_hash,
+        summary.source_revision,
+        summary.artifacts.len(),
+        summary.emitted_function_count,
+        summary.reused_function_count,
+        summary.executable_bytes,
+    );
+    for entrypoint in &summary.entrypoints {
+        manifest.push_str(&format!("entrypoint={entrypoint}\n"));
+    }
+    for artifact in &summary.artifacts {
+        let source_path = Path::new(&artifact.source_path)
+            .strip_prefix(project_root)
+            .unwrap_or_else(|_| Path::new(&artifact.source_path))
+            .to_string_lossy()
+            .replace('\\', "/");
+        manifest.push_str(&format!(
+            "function={}|file={source_path}|signature_hash={:016x}|body_hash={:016x}|slot={}|executable_bytes={}\n",
+            artifact.name,
+            artifact.signature_hash,
+            artifact.body_hash,
+            artifact.slot,
+            artifact.executable_bytes,
+        ));
+    }
+    manifest
+}
+
+fn remove_legacy_stub_artifacts(project_root: &Path) -> Result<(), String> {
+    let path = project_root.join("build/functions");
+    if path.is_dir() {
+        fs::remove_dir_all(&path)
+    } else if path.is_file() {
+        fs::remove_file(&path)
+    } else {
+        return Ok(());
+    }
+    .map_err(|error| {
+        format!(
+            "failed removing legacy stub artifacts {}: {error}",
+            path.display()
+        )
+    })
+}
+
 fn should_write_jit_runtime_state(initialized: bool, recompiled: bool) -> bool {
     initialized || recompiled
 }
@@ -1622,7 +1806,9 @@ fn write_jit_runtime_state(
         )
     })
 }
-fn read_previous_android_plan(project_root: &Path) -> Result<Option<WorkshopCompilePlan>, String> {
+fn read_previous_android_plan(
+    project_root: &Path,
+) -> Result<Option<PreviousAndroidCompile>, String> {
     let manifest_path = project_root.join("build/native_compile_manifest.txt");
     let manifest = match fs::read_to_string(&manifest_path) {
         Ok(value) => value,
@@ -1634,30 +1820,22 @@ fn read_previous_android_plan(project_root: &Path) -> Result<Option<WorkshopComp
             ));
         }
     };
-    let Some(project_hash) = parse_manifest_hex_i32(&manifest, "project_hash=") else {
+    let Some(project_hash) = parse_manifest_hex_u64(&manifest, "project_hash=") else {
         return Ok(None);
     };
-    let Some(layout_hash) = parse_manifest_hex_i32(&manifest, "layout_hash=") else {
+    let Some(layout_hash) = parse_manifest_hex_u64(&manifest, "layout_hash=") else {
         return Ok(None);
     };
-    Ok(Some(WorkshopCompilePlan {
-        status: 0,
-        reload: WorkshopReload::NoChange,
-        reason: "Loaded from previous Android manifest.".to_string(),
+    Ok(Some(PreviousAndroidCompile {
         project_hash,
         layout_hash,
-        entrypoints: Vec::new(),
-        functions: Vec::new(),
-        errors: Vec::new(),
     }))
 }
 
-fn parse_manifest_hex_i32(manifest: &str, key: &str) -> Option<i32> {
+fn parse_manifest_hex_u64(manifest: &str, key: &str) -> Option<u64> {
     let line = manifest.lines().find(|line| line.starts_with(key))?;
     let value = line[key.len()..].trim();
-    u32::from_str_radix(value, 16)
-        .ok()
-        .map(|value| value as i32)
+    u64::from_str_radix(value, 16).ok()
 }
 
 #[no_mangle]
@@ -1670,10 +1848,10 @@ pub extern "C" fn stasis_android_bridge_compile_project(
     }));
     let message = match result {
         Ok(Ok(result)) => format!(
-            "CompilePlanned: reload={:?} status={} functions={} compile_us={} manifest={}",
+            "CompileReady: backend=cranelift-jit reload={:?} status={} functions={} compile_us={} manifest={}",
             result.reload,
             result.status,
-            result.function_artifact_count,
+            result.compiled_function_count,
             result.compile_micros,
             result.manifest_path.display()
         ),
@@ -1840,8 +2018,25 @@ fn format_compiler_source_diagnostic(
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
     let source = fs::read_to_string(path).unwrap_or_default();
-    let (line, column) = source_line_column(&source, diagnostic.start);
-    let (end_line, end_column) = source_line_column(&source, diagnostic.end);
+    let inferred =
+        diagnostic.symbol.is_empty() && diagnostic.start == 0 && diagnostic.end == source.len();
+    let start = if inferred {
+        diagnostic_offset(&source, &diagnostic.message)
+    } else {
+        diagnostic.start
+    };
+    let end = if inferred {
+        start.saturating_add(1).min(source.len())
+    } else {
+        diagnostic.end
+    };
+    let symbol = if inferred {
+        diagnostic_symbol(&source, start, &diagnostic.message)
+    } else {
+        diagnostic.symbol.clone()
+    };
+    let (line, column) = source_line_column(&source, start);
+    let (end_line, end_column) = source_line_column(&source, end);
     let file = path
         .strip_prefix(project_root)
         .or_else(|_| path.strip_prefix(&canonical_root))
@@ -1857,12 +2052,27 @@ fn format_compiler_source_diagnostic(
         column,
         end_line,
         end_column,
-        percent_encode(&diagnostic.symbol),
+        percent_encode(&symbol),
         percent_encode(&diagnostic.message),
     )
 }
 
 fn diagnostic_offset(source: &str, error: &str) -> usize {
+    if let Some(token_name) = error.split(" but found ").nth(1) {
+        let token = match token_name.split_whitespace().next().unwrap_or("") {
+            "Colon" => Some(':'),
+            "LParen" => Some('('),
+            "RParen" => Some(')'),
+            "LBrace" => Some('{'),
+            "RBrace" => Some('}'),
+            "Comma" => Some(','),
+            "Semicolon" => Some(';'),
+            _ => None,
+        };
+        if let Some(offset) = token.and_then(|token| source.find(token)) {
+            return offset;
+        }
+    }
     if error.contains("unterminated string literal") {
         return source.rfind('"').unwrap_or(0);
     }
@@ -1899,6 +2109,14 @@ fn diagnostic_symbol(source: &str, offset: usize, error: &str) -> String {
         .and_then(|value| value.split('\'').next())
     {
         return name.to_string();
+    }
+    if let Some(function_start) = source[..offset.min(source.len())].rfind("function ") {
+        let name_start = function_start + "function ".len();
+        let name_end = source[name_start..]
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .map(|length| name_start + length)
+            .unwrap_or(source.len());
+        return source[name_start..name_end].to_string();
     }
     if let Some(name) = error
         .strip_prefix("test '")
@@ -2590,7 +2808,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_compiles_project_and_writes_compiler_rendered_artifacts() {
+    fn bridge_compiles_project_and_reports_real_jit_artifacts() {
         let root = temp_project("compile");
         fs::write(
             root.join("src/main.stasis"),
@@ -2602,14 +2820,30 @@ mod tests {
             .expect("compile bridge");
         assert_eq!(result.status, 0);
         assert_eq!(result.reload, WorkshopReload::InitialCompile);
-        assert!(result.function_artifact_count >= 2);
+        assert!(result.compiled_function_count >= 2);
 
         let manifest = fs::read_to_string(root.join("build/native_compile_manifest.txt"))
             .expect("read manifest");
-        assert!(manifest.contains("status=CompilePlanned"));
+        assert!(manifest.contains("status=CompileReady"));
+        assert!(manifest.contains("backend=cranelift-jit"));
+        assert!(manifest.contains("artifact_kind=executable-memory"));
         assert!(manifest.contains("entrypoint=main"));
         assert!(manifest.contains("entrypoint=tick"));
-        assert!(manifest.contains("signature=tick(): i32"));
+        assert!(manifest.contains("function=tick|"));
+        assert!(manifest.contains("executable_bytes="));
+        assert!(!root.join("build/functions").exists());
+        RUNTIME_SESSION.with(|session| {
+            assert_eq!(
+                session
+                    .borrow()
+                    .as_ref()
+                    .expect("compiled runtime")
+                    .jit
+                    .execute_i32_noarg_by_name("tick")
+                    .expect("execute compiled tick"),
+                7
+            );
+        });
 
         let state =
             fs::read_to_string(root.join("build/runtime_state.txt")).expect("read runtime state");
@@ -2619,7 +2853,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_uses_successful_jit_result_when_legacy_scan_misreads_from_field() {
+    fn bridge_accepts_valid_fields_through_the_production_jit() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("production_jit_authoritative");
@@ -2641,7 +2875,28 @@ mod tests {
     }
 
     #[test]
-    fn artifact_write_failure_does_not_stage_runtime_candidate() {
+    fn bridge_rejects_unsupported_program_without_stub_success() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("no_stub_fallback");
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): i32 { return tick(); }\nfunction tick(): i32 { return missing(); }\n",
+        )
+        .expect("write unsupported source");
+
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("missing reachable function must fail");
+        assert!(error.contains("missing"), "{error}");
+        assert!(!root.join("build/native_compile_manifest.txt").exists());
+        assert!(!root.join("build/functions").exists());
+
+        fs::remove_dir_all(root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn manifest_write_failure_does_not_stage_runtime_candidate() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("artifact_write_rejection");
@@ -2657,19 +2912,21 @@ mod tests {
             run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
                 .expect("initial tick");
         assert_eq!(initial.observed_game_tick_count, 11);
+        let previous_runtime_state =
+            fs::read(root.join("build/runtime_state.txt")).expect("read previous runtime state");
+        let manifest_path = root.join("build/native_compile_manifest.txt");
+        let previous_manifest = fs::read(&manifest_path).expect("read previous manifest");
 
         fs::write(
             &source,
             "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 100; }\n",
         )
         .expect("write changed source");
-        fs::remove_dir_all(root.join("build/functions")).expect("remove artifact directory");
-        fs::write(root.join("build/functions"), b"blocks artifact directory")
-            .expect("block artifact directory");
+        FORCE_NEXT_MANIFEST_COMMIT_FAILURE.with(|forced| forced.set(true));
 
         let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
-            .expect_err("artifact write must fail");
-        assert!(error.contains("function artifact directory"), "{error}");
+            .expect_err("manifest write must fail");
+        assert!(error.contains("failed writing Android manifest"), "{error}");
         RUNTIME_SESSION.with(|session| {
             let session = session.borrow();
             let session = session.as_ref().expect("active runtime preserved");
@@ -2682,8 +2939,68 @@ mod tests {
                 .expect("old runtime tick");
         assert!(!after_failure.recompiled);
         assert_eq!(after_failure.observed_game_tick_count, 12);
+        assert_eq!(
+            fs::read(root.join("build/runtime_state.txt")).expect("read restored runtime state"),
+            previous_runtime_state
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("read preserved manifest"),
+            previous_manifest
+        );
 
-        fs::remove_file(root.join("build/functions")).ok();
+        fs::remove_dir_all(root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn runtime_state_write_failure_preserves_published_compile() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("runtime_state_write_rejection");
+        let source = root.join("src/main.stasis");
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 1; }\n",
+        )
+        .expect("write initial source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("initial compile");
+        let manifest_path = root.join("build/native_compile_manifest.txt");
+        let state_path = root.join("build/runtime_state.txt");
+        let previous_manifest = fs::read(&manifest_path).expect("read previous manifest");
+        let previous_state = fs::read(&state_path).expect("read previous runtime state");
+
+        fs::write(
+            &source,
+            "global GameState { tick_count: i32; score: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 100; }\n",
+        )
+        .expect("write layout change");
+        let mut permissions = fs::metadata(&state_path)
+            .expect("runtime state metadata")
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&state_path, permissions).expect("make runtime state read-only");
+
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("runtime state write must fail");
+        assert!(
+            error.contains("failed writing Android runtime state"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("read preserved manifest"),
+            previous_manifest
+        );
+        assert_eq!(
+            fs::read(&state_path).expect("read preserved runtime state"),
+            previous_state
+        );
+
+        let mut permissions = fs::metadata(&state_path)
+            .expect("read-only runtime state metadata")
+            .permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&state_path, permissions).expect("restore runtime state permissions");
         fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();
     }
@@ -2717,6 +3034,36 @@ mod tests {
             .expect("read preserved runtime state");
         assert!(state.contains("tick_count=41"));
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bridge_restart_rebuilds_initial_runtime_state() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("restart_state");
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): i32 { return tick(); }\nfunction tick(): i32 { return 1; }\n",
+        )
+        .expect("write source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("initial compile");
+        fs::write(
+            root.join("build/runtime_state.txt"),
+            "status=RuntimeStateReady\ntick_count=41\n",
+        )
+        .expect("seed stale runtime state");
+        clear_runtime_session_for_test();
+
+        let result = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("restart compile");
+        assert_eq!(result.reload, WorkshopReload::InitialCompile);
+        let state = fs::read_to_string(root.join("build/runtime_state.txt"))
+            .expect("read restarted runtime state");
+        assert!(state.contains("tick_count=0"));
+
+        fs::remove_dir_all(root).ok();
+        clear_runtime_session_for_test();
     }
 
     #[test]
@@ -3215,7 +3562,7 @@ mod tests {
     }
 
     #[test]
-    fn android_bundled_touch_pong_sample_compile_plan_is_runnable() {
+    fn android_bundled_touch_pong_sample_real_jit_is_runnable() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../mobile/android/app/src/main/assets/workshop_sample")
             .canonicalize()
@@ -3227,7 +3574,7 @@ mod tests {
             .expect("read bundled sample manifest");
 
         assert_eq!(result.status, 0, "{manifest}");
-        assert!(result.function_artifact_count >= 5, "{manifest}");
+        assert!(result.compiled_function_count >= 5, "{manifest}");
     }
 
     #[test]
@@ -3497,7 +3844,10 @@ mod tests {
 
         let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
             .expect_err("compile should fail");
-        assert!(error.contains("|diagnostic_file=src/systems/broken.stasis"));
+        assert!(
+            error.contains("|diagnostic_file=src/systems/broken.stasis"),
+            "{error}"
+        );
         assert!(error.contains("|diagnostic_line=3"));
         assert!(error.contains("|diagnostic_column=17"));
         assert!(error.contains("|diagnostic_symbol=broken"));
@@ -3795,7 +4145,7 @@ function render(): void {}
             .expect("message utf8")
             .to_string();
         stasis_android_bridge_free_string(ptr);
-        assert!(message.contains("CompilePlanned"));
+        assert!(message.contains("CompileReady"));
         assert!(message.contains("functions="));
         fs::remove_dir_all(&root).ok();
     }

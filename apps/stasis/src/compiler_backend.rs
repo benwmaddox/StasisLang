@@ -5369,6 +5369,7 @@ mod tests {
 
     #[test]
     fn resolve_simple_i32_return_call_target_symbol_returns_unique_match() {
+        let target_id_hash = hash_identifier("callee");
         let caller = stasis_compiler::FunctionMetric {
             file_index: 0,
             ordinal: 0,
@@ -5376,25 +5377,8 @@ mod tests {
             sig_hash: 11,
             body_hash: 12,
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
-            uses_stub_fallback: false,
             param_count: 0,
             first_param_type_code: 0,
-            simple_i32_return_expr: None,
-            simple_i32_return_call_target_id_hash: Some(hash_identifier("callee")),
-            simple_i32_return_call_add_delta: None,
-            simple_i32_return_call_one_arg_target_id_hash: None,
-            simple_i32_return_call_one_arg_i32_literal: None,
-            simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
-            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
-            simple_i32_return_two_call_left_target_id_hash: None,
-            simple_i32_return_two_call_right_target_id_hash: None,
-            simple_i32_return_two_call_op_code: None,
-            simple_void_print_i32_literal: None,
-            simple_void_print_i32_call_target_id_hash: None,
-            simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
-            simple_void_print_i32_call_add_delta: None,
-            simple_void_print_call_target_shape_code:
-                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let callee = stasis_compiler::FunctionMetric {
@@ -5404,38 +5388,20 @@ mod tests {
             sig_hash: 21,
             body_hash: 22,
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
-            uses_stub_fallback: false,
             param_count: 0,
             first_param_type_code: 0,
-            simple_i32_return_expr: None,
-            simple_i32_return_call_target_id_hash: None,
-            simple_i32_return_call_add_delta: None,
-            simple_i32_return_call_one_arg_target_id_hash: None,
-            simple_i32_return_call_one_arg_i32_literal: None,
-            simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
-            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
-            simple_i32_return_two_call_left_target_id_hash: None,
-            simple_i32_return_two_call_right_target_id_hash: None,
-            simple_i32_return_two_call_op_code: None,
-            simple_void_print_i32_literal: None,
-            simple_void_print_i32_call_target_id_hash: None,
-            simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
-            simple_void_print_i32_call_add_delta: None,
-            simple_void_print_call_target_shape_code:
-                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee.clone()];
-        let resolved = resolve_unique_i32_call_target_symbol_by_hash(
-            caller.simple_i32_return_call_target_id_hash,
-            &metrics,
-        )
-        .expect("resolved");
+        let resolved =
+            resolve_unique_i32_call_target_symbol_by_hash(Some(target_id_hash), &metrics)
+                .expect("resolved");
         assert_eq!(resolved, aot_symbol_name(&callee));
     }
 
     #[test]
     fn resolve_simple_i32_return_call_target_symbol_rejects_one_arg_candidate_for_noarg_call() {
+        let target_id_hash = hash_identifier("callee");
         let caller = stasis_compiler::FunctionMetric {
             file_index: 0,
             ordinal: 0,
@@ -5443,25 +5409,8 @@ mod tests {
             sig_hash: 11,
             body_hash: 12,
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
-            uses_stub_fallback: false,
             param_count: 0,
             first_param_type_code: 0,
-            simple_i32_return_expr: None,
-            simple_i32_return_call_target_id_hash: Some(hash_identifier("callee")),
-            simple_i32_return_call_add_delta: None,
-            simple_i32_return_call_one_arg_target_id_hash: None,
-            simple_i32_return_call_one_arg_i32_literal: None,
-            simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
-            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
-            simple_i32_return_two_call_left_target_id_hash: None,
-            simple_i32_return_two_call_right_target_id_hash: None,
-            simple_i32_return_two_call_op_code: None,
-            simple_void_print_i32_literal: None,
-            simple_void_print_i32_call_target_id_hash: None,
-            simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
-            simple_void_print_i32_call_add_delta: None,
-            simple_void_print_call_target_shape_code:
-                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let callee = stasis_compiler::FunctionMetric {
@@ -5471,32 +5420,13 @@ mod tests {
             sig_hash: 21,
             body_hash: 22,
             return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
-            uses_stub_fallback: false,
             param_count: 1,
             first_param_type_code: 1,
-            simple_i32_return_expr: None,
-            simple_i32_return_call_target_id_hash: None,
-            simple_i32_return_call_add_delta: None,
-            simple_i32_return_call_one_arg_target_id_hash: None,
-            simple_i32_return_call_one_arg_i32_literal: None,
-            simple_i32_return_call_one_arg_arg_call_target_id_hash: None,
-            simple_i32_one_arg_call_shape_code: stasis_compiler::SIMPLE_I32_ONE_ARG_CALL_SHAPE_NONE,
-            simple_i32_return_two_call_left_target_id_hash: None,
-            simple_i32_return_two_call_right_target_id_hash: None,
-            simple_i32_return_two_call_op_code: None,
-            simple_void_print_i32_literal: None,
-            simple_void_print_i32_call_target_id_hash: None,
-            simple_void_print_i32_call_one_arg_arg_call_target_id_hash: None,
-            simple_void_print_i32_call_add_delta: None,
-            simple_void_print_call_target_shape_code:
-                stasis_compiler::SIMPLE_VOID_PRINT_CALL_TARGET_SHAPE_NONE,
             clif_text: String::new(),
         };
         let metrics = vec![caller.clone(), callee];
-        let resolved = resolve_unique_i32_call_target_symbol_by_hash(
-            caller.simple_i32_return_call_target_id_hash,
-            &metrics,
-        );
+        let resolved =
+            resolve_unique_i32_call_target_symbol_by_hash(Some(target_id_hash), &metrics);
         assert!(
             resolved.is_none(),
             "no-arg call resolution should reject one-arg candidate signature"

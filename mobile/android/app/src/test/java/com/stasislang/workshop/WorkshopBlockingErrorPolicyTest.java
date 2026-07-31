@@ -11,7 +11,7 @@ public final class WorkshopBlockingErrorPolicyTest {
         assertTrue(WorkshopBlockingErrorPolicy.shouldShow(false, "CompileError: bad source"));
         assertTrue(WorkshopBlockingErrorPolicy.shouldShow(false, "RunError: invalid frame"));
         assertFalse(WorkshopBlockingErrorPolicy.shouldShow(true, "CompileError: stale edit"));
-        assertFalse(WorkshopBlockingErrorPolicy.shouldShow(false, "CompilePlanned: status=0"));
+        assertFalse(WorkshopBlockingErrorPolicy.shouldShow(false, "CompileReady: status=0"));
     }
 
     @Test

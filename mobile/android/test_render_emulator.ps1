@@ -229,7 +229,7 @@ function Assert-RenderedVariant(
     if (-not $frameCounts -or ($frameCounts | Measure-Object -Maximum).Maximum -lt 30) {
         throw "$Name did not prove 30 actively rendered acceptance frames; see $logFile"
     }
-    if ($RequireJit -and -not ($log -match 'CompilePlanned: reload=InitialCompile status=0 functions=[1-9][0-9]*')) {
+    if ($RequireJit -and -not ($log -match 'CompileReady: backend=cranelift-jit reload=InitialCompile status=0 functions=[1-9][0-9]*')) {
         throw "$Name did not log a successful non-empty Workshop JIT compile; see $logFile"
     }
     if (-not $renderPassed) {

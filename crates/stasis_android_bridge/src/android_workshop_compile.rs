@@ -17,7 +17,7 @@ fn main() {
             serde_json::json!({
                 "ok": true,
                 "status": result.status,
-                "function_artifact_count": result.function_artifact_count,
+                "compiled_function_count": result.compiled_function_count,
                 "manifest_path": result.manifest_path,
                 "runtime_state_path": result.runtime_state_path,
             })

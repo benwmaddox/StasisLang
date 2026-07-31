@@ -1353,7 +1353,7 @@ public final class MainActivity extends Activity {
     }
 
     private static boolean isRunnableCompile(String compileResult) {
-        return compileResult.startsWith("CompilePlanned") && compileResult.contains("status=0");
+        return compileResult.startsWith("CompileReady") && compileResult.contains("status=0");
     }
 
     private void setStatusText(String status) {
@@ -1374,7 +1374,7 @@ public final class MainActivity extends Activity {
 
     private static String compactStatusText(String status) {
         if (status == null) return "";
-        if (status.startsWith("CompilePlanned") && status.contains("status=0")) {
+        if (status.startsWith("CompileReady") && status.contains("status=0")) {
             String reload = reloadKind(status);
             if ("FastReload".equals(reload)) return "Game updated - hot swapped";
             if ("ResetRequired".equals(reload)) return "Game updated - restarted";
@@ -7120,7 +7120,7 @@ public final class MainActivity extends Activity {
         if ("error".equals(result.optString("status"))) {
             throw new IOException(result.optString("error", "Rust semantic edit failed"));
         }
-        lastCompileResult = validate ? "CompilePlanned: semantic_edit=RustValidated" : lastCompileResult;
+        lastCompileResult = validate ? "CompileReady: semantic_edit=RustValidated" : lastCompileResult;
         compileReady = validate || compileReady;
         compileAttempted = validate || compileAttempted;
         return result;
