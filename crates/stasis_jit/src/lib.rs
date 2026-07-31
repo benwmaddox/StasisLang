@@ -51,12 +51,17 @@ impl Default for AotCompileConfig {
 pub enum AotTarget {
     Native,
     AndroidArm64 { min_sdk: u32 },
+    AndroidX86_64 { min_sdk: u32 },
     IosArm64,
 }
 
 impl AotTarget {
     pub fn android_arm64_default() -> Self {
         Self::AndroidArm64 { min_sdk: 26 }
+    }
+
+    pub fn android_x86_64_default() -> Self {
+        Self::AndroidX86_64 { min_sdk: 26 }
     }
 
     pub fn ios_arm64_default() -> Self {
@@ -67,6 +72,7 @@ impl AotTarget {
         match self {
             Self::Native => None,
             Self::AndroidArm64 { .. } => Some("aarch64-linux-android"),
+            Self::AndroidX86_64 { .. } => Some("x86_64-linux-android"),
             Self::IosArm64 => Some("aarch64-apple-ios"),
         }
     }
@@ -75,8 +81,13 @@ impl AotTarget {
         match self {
             Self::Native => None,
             Self::AndroidArm64 { min_sdk } => Some(format!("aarch64-linux-android{min_sdk}")),
+            Self::AndroidX86_64 { min_sdk } => Some(format!("x86_64-linux-android{min_sdk}")),
             Self::IosArm64 => Some("aarch64-apple-ios".to_string()),
         }
+    }
+
+    pub fn is_android(&self) -> bool {
+        matches!(self, Self::AndroidArm64 { .. } | Self::AndroidX86_64 { .. })
     }
 
     pub fn requires_position_independent_code(&self) -> bool {
@@ -453,7 +464,7 @@ fn resolve_linker_path(config: &AotLinkConfig) -> PathBuf {
     if let Some(path) = config.linker_path.as_ref() {
         return path.clone();
     }
-    if matches!(config.target, AotTarget::AndroidArm64 { .. }) {
+    if config.target.is_android() {
         PathBuf::from("clang")
     } else if cfg!(windows) {
         PathBuf::from("lld-link.exe")
@@ -788,7 +799,19 @@ echo "fake-shared" > "$OUT"
     fn aot_target_reports_position_independent_code_requirement() {
         assert!(!AotTarget::Native.requires_position_independent_code());
         assert!(AotTarget::android_arm64_default().requires_position_independent_code());
+        assert!(AotTarget::android_x86_64_default().requires_position_independent_code());
         assert!(AotTarget::ios_arm64_default().requires_position_independent_code());
+    }
+
+    #[test]
+    fn android_x86_64_target_reports_emulator_triples() {
+        let target = AotTarget::android_x86_64_default();
+        assert_eq!(target.object_triple(), Some("x86_64-linux-android"));
+        assert_eq!(
+            target.clang_target().as_deref(),
+            Some("x86_64-linux-android26")
+        );
+        assert!(target.is_android());
     }
 
     #[test]

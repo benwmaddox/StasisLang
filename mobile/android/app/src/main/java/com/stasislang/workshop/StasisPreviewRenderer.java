@@ -178,7 +178,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             "vColor=aColor;gl_Position=vec4(p.x,-p.y,0.0,1.0);}";
     private static final String TEXTURE_FRAGMENT_SHADER =
             "precision mediump float;uniform sampler2D uTexture;varying vec2 vTexCoord;" +
-            "varying vec4 vColor;void main(){gl_FragColor=texture2D(uTexture,vTexCoord)*vColor;}";
+            "varying vec4 vColor;void main(){vec4 texel=texture2D(uTexture,vTexCoord);" +
+            "gl_FragColor=texel*vec4(vColor.rgb*vColor.a,vColor.a);}";
 
     private final TextureProvider textures;
     private final TimingListener timing;
@@ -214,6 +215,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private CaptureCallback pendingCapture;
     private boolean restorePlaceholderPending;
     private long restorePlaceholderUntilNanos;
+    private int renderAcceptanceFrameCount;
 
     StasisPreviewRenderer(TextureProvider textures, TimingListener timing) {
         this.textures = textures;
@@ -349,7 +351,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             }
             if (!restoreComplete && resourceFailure == null
                     && glError == GLES20.GL_NO_ERROR) drawRestorePlaceholder();
-            if (hasFrame && restored && resourceLifecycle.canPresent()) drawFrame();
+            if (hasFrame && restored && resourceLifecycle.canPresent()) {
+                drawFrame();
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+                    renderAcceptanceFrameCount += 1;
+                    if (renderAcceptanceFrameCount == 1 || renderAcceptanceFrameCount % 30 == 0) {
+                        Log.i(LOG_TAG, "RenderAcceptanceFrame: count=" + renderAcceptanceFrameCount);
+                    }
+                }
+            }
             capture = pendingCapture;
             pendingCapture = null;
             capturedFrame = capture == null ? null : captureLogicalFrame();
@@ -718,6 +728,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     private void drawColorBatch(FloatBuffer vertices, int vertexCount, int mode) {
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
         GLES20.glUseProgram(colorProgram);
         GLES20.glUniform2f(colorResolution, logicalWidth, logicalHeight);
         GLES20.glEnableVertexAttribArray(colorPosition);
@@ -733,6 +744,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     private void beginTextureBatches(FloatBuffer vertices) {
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
         GLES20.glUseProgram(textureProgram);
         GLES20.glUniform2f(textureResolution, logicalWidth, logicalHeight);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);

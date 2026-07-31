@@ -36,6 +36,7 @@ class RenderParityGateTest(unittest.TestCase):
         manifest = validate_fixture(DEFAULT_MANIFEST)
         self.assertEqual(manifest["logical_size"], [640, 360])
         self.assertEqual(len(manifest["stages"]), 4)
+        self.assertIn("android_emulator", manifest["capture_profiles"])
 
     def test_bmp_reader_and_exact_capture_hash(self):
         with tempfile.TemporaryDirectory() as directory:

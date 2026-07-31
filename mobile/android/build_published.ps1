@@ -1,6 +1,12 @@
 param(
     [switch]$Install,
     [switch]$ValidateAot,
+    [string]$Game = "pong",
+    [ValidateSet("android-arm64", "android-x86_64")]
+    [string]$AotTarget = "android-arm64",
+    [switch]$RenderAcceptance,
+    [switch]$NoGradleDaemon,
+    [string]$GradlePath = "",
     [string]$CompileSdk = "",
     [string]$TargetSdk = ""
 )
@@ -11,7 +17,10 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location $scriptRoot
 try {
     $gradle = Join-Path $scriptRoot "gradlew.bat"
-    if (Test-Path $gradle) {
+    if ($GradlePath) {
+        if (-not (Test-Path $GradlePath)) { throw "Gradle was not found: $GradlePath" }
+        $gradleCmd = $GradlePath
+    } elseif (Test-Path $gradle) {
         $gradleCmd = $gradle
     } elseif (Get-Command gradle -ErrorAction SilentlyContinue) {
         $gradleCmd = "gradle"
@@ -32,6 +41,10 @@ try {
 
     $task = if ($Install) { ":app:installPublishedDebug" } else { ":app:assemblePublishedRelease" }
     $args = @($task)
+    if ($NoGradleDaemon) { $args += "--no-daemon" }
+    $args += "-Pstasis.publishedGame=$Game"
+    $args += "-Pstasis.androidAotTarget=$AotTarget"
+    if ($RenderAcceptance) { $args += "-Pstasis.renderAcceptance=true" }
     if ($CompileSdk) { $args += "-Pstasis.compileSdk=$CompileSdk" }
     if ($TargetSdk) { $args += "-Pstasis.targetSdk=$TargetSdk" }
 
@@ -43,7 +56,10 @@ try {
     } else {
         Join-Path $scriptRoot "app\build\outputs\apk\published\release\app-published-release-unsigned.apk"
     }
-    & python (Join-Path $scriptRoot "..\..\tools\ci\check_android_published_apk.py") $apk
+    $expectedAbi = if ($AotTarget -eq "android-x86_64") { "x86_64" } else { "arm64-v8a" }
+    $requiredAsset = if ($Game -eq "render_parity") { "assets/opaque.svg" } else { "assets/ball.svg" }
+    & python (Join-Path $scriptRoot "..\..\tools\ci\check_android_published_apk.py") `
+        $apk --abi $expectedAbi --required-asset $requiredAsset
     if ($LASTEXITCODE -ne 0) { throw "Published APK validation failed with exit code $LASTEXITCODE" }
 }
 finally {

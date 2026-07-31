@@ -11,6 +11,8 @@ function @extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, 
 global gfx_cmd_i32: i32[18464];
 global gfx_cmd_f32: f32[108676];
 global gfx_cmd_u8: u8[65536];
+global host_i32: i32[768];
+global host_f32: f32[64];
 
 // The host consumes this request between ticks; mobile shells already own the
 // surface and simply ignore the desktop window size request.

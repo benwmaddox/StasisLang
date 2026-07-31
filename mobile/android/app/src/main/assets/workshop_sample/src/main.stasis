@@ -166,11 +166,21 @@ function update_enemy_paddle(): void {
     let enemy_speed = GameState.enemy_paddle_speed_x100 / 100;
 
     if (GameState.ai_y < GameState.ball_y) {
-        GameState.ai_y += enemy_speed;
+        let remaining_distance = GameState.ball_y - GameState.ai_y;
+        if (enemy_speed >= remaining_distance) {
+            GameState.ai_y = GameState.ball_y;
+        } else {
+            GameState.ai_y += enemy_speed;
+        }
     }
 
     if (GameState.ai_y > GameState.ball_y) {
-        GameState.ai_y -= enemy_speed;
+        let remaining_distance = GameState.ai_y - GameState.ball_y;
+        if (enemy_speed >= remaining_distance) {
+            GameState.ai_y = GameState.ball_y;
+        } else {
+            GameState.ai_y -= enemy_speed;
+        }
     }
 
     if (GameState.ai_y < 36) {

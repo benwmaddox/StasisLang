@@ -5,7 +5,7 @@ This is the first checked-in Android app shell for the `android` branch.
 Current scope:
 
 - Builds one Android app module with `workshop` and `published` product flavors.
-- Targets `arm64-v8a` devices and `x86_64` Android emulators for Workshop debug builds. Published builds remain arm64-only.
+- Targets `arm64-v8a` devices and `x86_64` Android emulators for Workshop debug builds. Production published builds remain arm64-only; the render acceptance suite can emit a real x86_64 Android AOT package for the local emulator.
 - Loads a tiny native C library through JNI.
 - Bundles the default Exploration Garden tutorial plus Pong as independently identified Workshop templates.
 - Opens the native Android symbol browser and source editor from a top-right hamburger overlay grouped by Main, Structs, Systems, and Root.
@@ -65,7 +65,7 @@ From this directory:
 .\build_debug.ps1
 ```
 
-This builds the Stasis Rust bridge plus the optimized phone-native Codex login
+This builds the Stasis Rust bridge with the Cargo release profile plus the optimized phone-native Codex login
 library from its pinned official revision, packages the Android Rustls verifier,
 and assembles the Workshop APK. The first Codex build downloads upstream Rust
 dependencies and takes longer; subsequent builds reuse Cargo output.
@@ -76,6 +76,13 @@ Gradle directly:
 ```powershell
 gradle :app:assembleWorkshopDebug
 ```
+
+Direct Gradle assembly verifies the generated Rust bridge provenance manifest,
+including the release profile, current Rust/Cargo input fingerprint, and exact
+SHA-256 for both required Workshop ABIs. Rebuild with
+`build_rust_bridge.ps1 -Release` if verification fails. For an intentional
+native-debug session only, build with `build_rust_bridge.ps1 -Debug` and pass
+`-Pstasis.allowDebugRustBridge=true` to Gradle.
 
 Build the descriptor-selected Pong package directly with:
 
@@ -120,6 +127,22 @@ Then build, install, launch, and record the normal Workshop acceptance check wit
 ```
 
 Pass `-Headless` for unattended runs or `-SkipBuild` to relaunch and validate an APK that is already installed. The emulator gate rotates, backgrounds/resumes, and force-recreates Workshop, requires successful `StasisRenderer` resource restoration markers, and force-stops the app when finished. Pass `-Lifecycle` to `validate_device.ps1` for the same lifecycle matrix on an attached device. `start_emulator.ps1` can also be used independently. Workshop validation prefers an attached emulator when both an emulator and phone are connected; pass `-Serial` to `validate_device.ps1` to select explicitly.
+
+Run the blocking render end-to-end gate directly with:
+
+```powershell
+.\test_render_emulator.ps1 -Headless
+```
+
+This builds the canonical `samples/render_parity` fixture twice: Workshop uses the real x86_64 development JIT and Published uses real `android-x86_64` AOT objects linked into a runtime-only APK. It installs both packages into `Stasis_API_35`, captures their OpenGL surfaces, normalizes the letterboxed 640x360 viewport, and checks Android parity regions for the background, procedural fallback, opaque/translucent/rotated SVG sprites, crossing lines, direct text, and cached text. Each flavor must pass three spaced captures and log at least 30 rendered frames; Workshop must also log a successful non-empty JIT compile. Fatal renderer logs, blank/incorrect regions, process exits, build failures, stale release Rust bridge provenance, or a missing emulator block the command. Build subprocesses are limited to five minutes each and the full gate to fifteen minutes. The render-only build verifies and reuses the release Rust bridge and phone-native Codex artifacts instead of rebuilding unrelated native support. Captures, UI bounds, build output, process-scoped logs, and a success/failure JSON summary are retained under ignored `artifacts/android_render_e2e/` directories.
+
+Install the repository-owned blocking pre-commit hook once per clone:
+
+```powershell
+.\tools\install_git_hooks.ps1
+```
+
+The hook runs the same headless gate for every local commit and returns nonzero on any failure. `android-x86_64` exists only to execute Published AOT on the standard x86_64 AVD; normal `build_published.ps1` and production publishing continue to default to `android-arm64`.
 
 ## Host AI Run Review
 

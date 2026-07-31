@@ -6,6 +6,7 @@ REQUIRED_FILES = [
     "mobile/android/settings.gradle",
     "mobile/android/build.gradle",
     "mobile/android/build_rust_bridge.ps1",
+    "mobile/android/rust_bridge_provenance.ps1",
     "mobile/android/build_published.ps1",
     "mobile/android/validate_device.ps1",
     "mobile/android/app/build.gradle",
@@ -142,6 +143,7 @@ def main() -> int:
     assert "render_workshop_artifacts" in bridge
 
     rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
+    rust_bridge_provenance = read("mobile/android/rust_bridge_provenance.ps1")
     debug_script = read("mobile/android/build_debug.ps1")
     emulator_script = read("mobile/android/start_emulator.ps1")
     emulator_test_script = read("mobile/android/test_emulator.ps1")
@@ -152,11 +154,20 @@ def main() -> int:
     device_script = read("mobile/android/validate_device.ps1")
     android_gitignore = read("mobile/android/.gitignore")
     assert 'linkerVariable = "CARGO_TARGET_' in rust_bridge_script
+    assert "$useRelease = -not $Debug" in rust_bridge_script
+    assert "rust_bridge_provenance.ps1" in rust_bridge_script
+    assert "requires both ABIs" in rust_bridge_script
+    assert "Get-BridgeInputFingerprint" in rust_bridge_provenance
+    assert "stasis-rust-bridge.json" in rust_bridge_provenance
+    assert "inputFingerprint = Get-BridgeInputFingerprint" in rust_bridge_provenance
+    assert "Get-FileHash -LiteralPath $bridge -Algorithm SHA256" in rust_bridge_provenance
+    assert "must contain exactly one entry for each required ABI" in rust_bridge_provenance
+    assert "stale for the current Rust/Cargo inputs" in rust_bridge_provenance
     assert "aarch64-linux-android" in rust_bridge_script
     assert "x86_64-linux-android" in rust_bridge_script
     assert "libstasis_android_bridge.so" in rust_bridge_script
     assert '"app\\src\\workshop\\jniLibs\\$abi"' in rust_bridge_script
-    assert "build_rust_bridge.ps1" in debug_script
+    assert 'build_rust_bridge.ps1") -Release' in debug_script
     assert ":app:assembleWorkshopDebug" in debug_script
     assert ":app:assemblePublishedRelease" in published_script
     assert ":app:installPublishedDebug" in published_script
@@ -182,6 +193,9 @@ def main() -> int:
     app_gradle = read("mobile/android/app/build.gradle")
     pong_descriptor = read("mobile/android/games/pong.gradle")
     assert "flavorDimensions 'mode'" in app_gradle
+    assert "verifyWorkshopRustBridge" in app_gradle
+    assert "stasis.allowDebugRustBridge" in app_gradle
+    assert "rust_bridge_provenance.ps1" in app_gradle
     assert "workshop {" in app_gradle
     assert "published {" in app_gradle
     assert "applicationId 'com.stasislang.workshop'" in app_gradle
