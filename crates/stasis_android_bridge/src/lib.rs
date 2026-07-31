@@ -158,6 +158,8 @@ struct AndroidRuntimeSession {
 thread_local! {
     static RUNTIME_SESSION: RefCell<Option<AndroidRuntimeSession>> = const { RefCell::new(None) };
     static LAST_FRAME_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    #[cfg(test)]
+    static FORCE_NEXT_MANIFEST_COMMIT_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,6 +650,13 @@ fn write_android_manifest_atomically(path: &Path, manifest: &str) -> Result<(), 
                 path.display()
             )
         })?;
+    #[cfg(test)]
+    if FORCE_NEXT_MANIFEST_COMMIT_FAILURE.with(|forced| forced.replace(false)) {
+        return Err(format!(
+            "failed writing Android manifest {}: forced atomic commit failure",
+            path.display()
+        ));
+    }
     file.commit().map_err(|error| {
         format!(
             "failed writing Android manifest {}: {error}",
@@ -2905,18 +2914,15 @@ mod tests {
         assert_eq!(initial.observed_game_tick_count, 11);
         let previous_runtime_state =
             fs::read(root.join("build/runtime_state.txt")).expect("read previous runtime state");
+        let manifest_path = root.join("build/native_compile_manifest.txt");
+        let previous_manifest = fs::read(&manifest_path).expect("read previous manifest");
 
         fs::write(
             &source,
             "global GameState { tick_count: i32; }\nfunction main(): void { GameState.tick_count = 10; }\nfunction tick(): void { GameState.tick_count += 100; }\n",
         )
         .expect("write changed source");
-        let manifest_path = root.join("build/native_compile_manifest.txt");
-        let mut permissions = fs::metadata(&manifest_path)
-            .expect("manifest metadata")
-            .permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&manifest_path, permissions).expect("make manifest read-only");
+        FORCE_NEXT_MANIFEST_COMMIT_FAILURE.with(|forced| forced.set(true));
 
         let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
             .expect_err("manifest write must fail");
@@ -2937,12 +2943,11 @@ mod tests {
             fs::read(root.join("build/runtime_state.txt")).expect("read restored runtime state"),
             previous_runtime_state
         );
+        assert_eq!(
+            fs::read(&manifest_path).expect("read preserved manifest"),
+            previous_manifest
+        );
 
-        let mut permissions = fs::metadata(&manifest_path)
-            .expect("read-only manifest metadata")
-            .permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(&manifest_path, permissions).expect("restore manifest permissions");
         fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();
     }
