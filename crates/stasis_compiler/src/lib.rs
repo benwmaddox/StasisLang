@@ -50,23 +50,39 @@ pub struct FunctionMetric {
     pub sig_hash: i32,
     pub body_hash: i32,
     pub return_type_code: i32,
+    #[cfg(test)]
     pub uses_stub_fallback: bool,
     pub param_count: i32,
     pub first_param_type_code: i32,
+    #[cfg(test)]
     pub simple_i32_return_expr: Option<SimpleI32ReturnExpr>,
+    #[cfg(test)]
     pub simple_i32_return_call_target_id_hash: Option<i32>,
+    #[cfg(test)]
     pub simple_i32_return_call_add_delta: Option<i32>,
+    #[cfg(test)]
     pub simple_i32_return_call_one_arg_target_id_hash: Option<i32>,
+    #[cfg(test)]
     pub simple_i32_return_call_one_arg_i32_literal: Option<i32>,
+    #[cfg(test)]
     pub simple_i32_return_call_one_arg_arg_call_target_id_hash: Option<i32>,
+    #[cfg(test)]
     pub simple_i32_one_arg_call_shape_code: i32,
+    #[cfg(test)]
     pub simple_i32_return_two_call_left_target_id_hash: Option<i32>,
+    #[cfg(test)]
     pub simple_i32_return_two_call_right_target_id_hash: Option<i32>,
+    #[cfg(test)]
     pub simple_i32_return_two_call_op_code: Option<i32>,
+    #[cfg(test)]
     pub simple_void_print_i32_literal: Option<i32>,
+    #[cfg(test)]
     pub simple_void_print_i32_call_target_id_hash: Option<i32>,
+    #[cfg(test)]
     pub simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
+    #[cfg(test)]
     pub simple_void_print_i32_call_add_delta: Option<i32>,
+    #[cfg(test)]
     pub simple_void_print_call_target_shape_code: i32,
     pub clif_text: String,
 }
@@ -133,23 +149,39 @@ struct ParsedFunction {
     sig_hash: i32,
     body_hash: i32,
     return_type_code: i32,
+    #[cfg(test)]
     uses_stub_fallback: bool,
     param_count: i32,
     first_param_type_code: i32,
+    #[cfg(test)]
     simple_i32_return_expr: Option<SimpleI32ReturnExpr>,
+    #[cfg(test)]
     simple_i32_return_call_target_id_hash: Option<i32>,
+    #[cfg(test)]
     simple_i32_return_call_add_delta: Option<i32>,
+    #[cfg(test)]
     simple_i32_return_call_one_arg_target_id_hash: Option<i32>,
+    #[cfg(test)]
     simple_i32_return_call_one_arg_i32_literal: Option<i32>,
+    #[cfg(test)]
     simple_i32_return_call_one_arg_arg_call_target_id_hash: Option<i32>,
+    #[cfg(test)]
     simple_i32_one_arg_call_shape_code: i32,
+    #[cfg(test)]
     simple_i32_return_two_call_left_target_id_hash: Option<i32>,
+    #[cfg(test)]
     simple_i32_return_two_call_right_target_id_hash: Option<i32>,
+    #[cfg(test)]
     simple_i32_return_two_call_op_code: Option<i32>,
+    #[cfg(test)]
     simple_void_print_i32_literal: Option<i32>,
+    #[cfg(test)]
     simple_void_print_i32_call_target_id_hash: Option<i32>,
+    #[cfg(test)]
     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: Option<i32>,
+    #[cfg(test)]
     simple_void_print_i32_call_add_delta: Option<i32>,
+    #[cfg(test)]
     simple_void_print_call_target_shape_code: i32,
     call_target_id_hashes: Vec<i32>,
     clif_text: String,
@@ -404,32 +436,48 @@ impl IncrementalCompilerHost {
                     sig_hash: parsed.sig_hash,
                     body_hash: parsed.body_hash,
                     return_type_code: parsed.return_type_code,
+                    #[cfg(test)]
                     uses_stub_fallback: parsed.uses_stub_fallback,
                     param_count: parsed.param_count,
                     first_param_type_code: parsed.first_param_type_code,
+                    #[cfg(test)]
                     simple_i32_return_expr: parsed.simple_i32_return_expr.clone(),
+                    #[cfg(test)]
                     simple_i32_return_call_target_id_hash: parsed
                         .simple_i32_return_call_target_id_hash,
+                    #[cfg(test)]
                     simple_i32_return_call_add_delta: parsed.simple_i32_return_call_add_delta,
+                    #[cfg(test)]
                     simple_i32_return_call_one_arg_target_id_hash: parsed
                         .simple_i32_return_call_one_arg_target_id_hash,
+                    #[cfg(test)]
                     simple_i32_return_call_one_arg_i32_literal: parsed
                         .simple_i32_return_call_one_arg_i32_literal,
+                    #[cfg(test)]
                     simple_i32_return_call_one_arg_arg_call_target_id_hash: parsed
                         .simple_i32_return_call_one_arg_arg_call_target_id_hash,
+                    #[cfg(test)]
                     simple_i32_one_arg_call_shape_code: parsed.simple_i32_one_arg_call_shape_code,
+                    #[cfg(test)]
                     simple_i32_return_two_call_left_target_id_hash: parsed
                         .simple_i32_return_two_call_left_target_id_hash,
+                    #[cfg(test)]
                     simple_i32_return_two_call_right_target_id_hash: parsed
                         .simple_i32_return_two_call_right_target_id_hash,
+                    #[cfg(test)]
                     simple_i32_return_two_call_op_code: parsed.simple_i32_return_two_call_op_code,
+                    #[cfg(test)]
                     simple_void_print_i32_literal: parsed.simple_void_print_i32_literal,
+                    #[cfg(test)]
                     simple_void_print_i32_call_target_id_hash: parsed
                         .simple_void_print_i32_call_target_id_hash,
+                    #[cfg(test)]
                     simple_void_print_i32_call_one_arg_arg_call_target_id_hash: parsed
                         .simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+                    #[cfg(test)]
                     simple_void_print_i32_call_add_delta: parsed
                         .simple_void_print_i32_call_add_delta,
+                    #[cfg(test)]
                     simple_void_print_call_target_shape_code: parsed
                         .simple_void_print_call_target_shape_code,
                     clif_text: parsed.clif_text.clone(),
@@ -553,7 +601,9 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, SourceDiagn
         } else {
             None
         };
+        #[cfg(test)]
         let simple_i32_return_expr = expression.as_ref().and_then(convert_eval_expr_to_simple);
+        #[cfg(test)]
         let (
             simple_i32_return_call_target_id_hash,
             simple_i32_return_call_add_delta,
@@ -568,9 +618,12 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, SourceDiagn
         } else {
             (None, None, None, None, None, None, None, None)
         };
+        #[cfg(test)]
         let simple_i32_one_arg_has_literal = simple_i32_return_call_one_arg_i32_literal.is_some();
+        #[cfg(test)]
         let simple_i32_one_arg_has_arg_call =
             simple_i32_return_call_one_arg_arg_call_target_id_hash.is_some();
+        #[cfg(test)]
         let simple_i32_one_arg_call_shape_code = simple_i32_one_arg_call_shape_code(
             function.params.len(),
             simple_i32_return_call_one_arg_target_id_hash.is_some(),
@@ -578,6 +631,7 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, SourceDiagn
             simple_i32_one_arg_has_arg_call,
         );
 
+        #[cfg(test)]
         let (
             simple_void_print_i32_literal,
             simple_void_print_i32_call_target_id_hash,
@@ -588,13 +642,16 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, SourceDiagn
         } else {
             (None, None, None, None)
         };
+        #[cfg(test)]
         let simple_void_print_is_one_arg = simple_void_print_i32_call_target_id_hash.is_some()
             && simple_void_print_i32_literal.is_some();
+        #[cfg(test)]
         let simple_void_print_call_target_shape_code = simple_void_print_call_target_shape_code(
             simple_void_print_i32_call_target_id_hash.is_some(),
             simple_void_print_is_one_arg,
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash.is_some(),
         );
+        #[cfg(test)]
         let uses_stub_fallback = return_type_code == RETURN_TYPE_CODE_I32
             && simple_i32_return_expr.is_none()
             && simple_i32_return_call_target_id_hash.is_none()
@@ -611,23 +668,39 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, SourceDiagn
             sig_hash,
             body_hash,
             return_type_code,
+            #[cfg(test)]
             uses_stub_fallback,
             param_count: i32::try_from(function.params.len()).unwrap_or_default(),
             first_param_type_code,
+            #[cfg(test)]
             simple_i32_return_expr,
+            #[cfg(test)]
             simple_i32_return_call_target_id_hash,
+            #[cfg(test)]
             simple_i32_return_call_add_delta,
+            #[cfg(test)]
             simple_i32_return_call_one_arg_target_id_hash,
+            #[cfg(test)]
             simple_i32_return_call_one_arg_i32_literal,
+            #[cfg(test)]
             simple_i32_return_call_one_arg_arg_call_target_id_hash,
+            #[cfg(test)]
             simple_i32_one_arg_call_shape_code,
+            #[cfg(test)]
             simple_i32_return_two_call_left_target_id_hash,
+            #[cfg(test)]
             simple_i32_return_two_call_right_target_id_hash,
+            #[cfg(test)]
             simple_i32_return_two_call_op_code,
+            #[cfg(test)]
             simple_void_print_i32_literal,
+            #[cfg(test)]
             simple_void_print_i32_call_target_id_hash,
+            #[cfg(test)]
             simple_void_print_i32_call_one_arg_arg_call_target_id_hash,
+            #[cfg(test)]
             simple_void_print_i32_call_add_delta,
+            #[cfg(test)]
             simple_void_print_call_target_shape_code,
             call_target_id_hashes: collect_call_target_id_hashes(body_text),
             clif_text: String::new(),
@@ -1050,6 +1123,7 @@ fn return_type_code_from_name(type_name: &str) -> i32 {
     }
 }
 
+#[cfg(test)]
 fn simple_i32_one_arg_call_shape_code(
     param_count: usize,
     has_one_arg_target: bool,
@@ -1074,6 +1148,7 @@ fn simple_i32_one_arg_call_shape_code(
     SIMPLE_I32_ONE_ARG_CALL_SHAPE_DIRECT
 }
 
+#[cfg(test)]
 fn simple_void_print_call_target_shape_code(
     has_call_target: bool,
     one_arg_literal: bool,
@@ -1146,6 +1221,7 @@ fn parse_return_expression(body_text: &str) -> Option<EvalExpr> {
     parse_eval_expression(expression)
 }
 
+#[cfg(test)]
 fn simple_call0_name(expression: &EvalExpr) -> Option<&str> {
     match expression {
         EvalExpr::Call(name, args) if args.is_empty() => Some(name.as_str()),
@@ -1153,6 +1229,7 @@ fn simple_call0_name(expression: &EvalExpr) -> Option<&str> {
     }
 }
 
+#[cfg(test)]
 fn simple_i32_literal(expression: &EvalExpr) -> Option<i32> {
     match expression {
         EvalExpr::Literal(value) => Some(*value),
@@ -1160,6 +1237,7 @@ fn simple_i32_literal(expression: &EvalExpr) -> Option<i32> {
     }
 }
 
+#[cfg(test)]
 fn analyze_simple_i32_return_call_metadata(
     expression: &EvalExpr,
 ) -> (
@@ -1276,6 +1354,7 @@ fn analyze_simple_i32_return_call_metadata(
     (None, None, None, None, None, None, None, None)
 }
 
+#[cfg(test)]
 fn analyze_simple_void_print_i32_metadata(
     body_text: &str,
 ) -> (
@@ -1532,6 +1611,7 @@ impl<'a> EvalExpressionParser<'a> {
     }
 }
 
+#[cfg(test)]
 fn convert_eval_expr_to_simple(expression: &EvalExpr) -> Option<SimpleI32ReturnExpr> {
     match expression {
         EvalExpr::Literal(value) => Some(SimpleI32ReturnExpr::Literal(*value)),

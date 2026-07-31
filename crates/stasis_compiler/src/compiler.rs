@@ -232,7 +232,59 @@ impl Compiler {
 
     pub fn index_pass(&mut self) -> CompileResult<IndexPassResult> {
         self.last_source_diagnostic = None;
-        crate::performance::tick_budget_us(&self.files).map_err(CompileError::Frontend)?;
+        if let Err(message) = crate::performance::tick_budget_us(&self.files) {
+            let file = self
+                .files
+                .iter()
+                .find(|file| {
+                    crate::performance::tick_budget_us(std::slice::from_ref(file)).is_err()
+                })
+                .or_else(|| {
+                    self.files
+                        .iter()
+                        .filter(|file| file.content.contains("@tick_budget_us"))
+                        .nth(1)
+                })
+                .or_else(|| self.files.first());
+            if let Some(file) = file {
+                let is_tick_budget_error = message.contains("tick_budget_us");
+                let start = is_tick_budget_error
+                    .then(|| file.content.find("@tick_budget_us"))
+                    .flatten()
+                    .unwrap_or(0);
+                let end = if is_tick_budget_error {
+                    start
+                        .saturating_add("@tick_budget_us".len())
+                        .min(file.content.len())
+                } else {
+                    file.content.len()
+                };
+                let symbol = is_tick_budget_error
+                    .then(|| {
+                        crate::frontend::parser::parse_top_level_functions(&file.content)
+                            .ok()
+                            .and_then(|functions| {
+                                functions.into_iter().find(|function| {
+                                    function
+                                        .annotations
+                                        .iter()
+                                        .any(|annotation| annotation.name == "tick_budget_us")
+                                })
+                            })
+                            .map(|function| function.name)
+                    })
+                    .flatten()
+                    .unwrap_or_default();
+                self.last_source_diagnostic = Some(crate::SourceDiagnostic {
+                    path: file.path.clone(),
+                    start,
+                    end,
+                    symbol,
+                    message: message.clone(),
+                });
+            }
+            return Err(CompileError::Frontend(message));
+        }
         let previous_hashes = self.capture_previous_hashes();
         self.functions.clear();
         self.parsed_statements.clear();
@@ -619,6 +671,33 @@ mod tests {
         assert_eq!(index.parsed_functions, 2);
         assert_eq!(index.dirty_functions, 2);
         assert_eq!(index.signature_changed_functions, 2);
+    }
+
+    #[test]
+    fn tick_budget_diagnostic_identifies_the_second_annotated_file() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "first.stasis",
+            "function @tick_budget_us(100) tick(): i32 { return 1; }\n",
+        );
+        compiler.upsert_file(
+            "second.stasis",
+            "function @tick_budget_us(200) tick(): i32 { return 2; }\n",
+        );
+
+        compiler
+            .index_pass()
+            .expect_err("duplicate budget must fail");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("tick budget diagnostic");
+        assert_eq!(diagnostic.path, "second.stasis");
+        assert_eq!(diagnostic.symbol, "tick");
+        assert_eq!(diagnostic.start, "function ".len());
+        assert_eq!(
+            &compiler.files()[1].content[diagnostic.start..diagnostic.end],
+            "@tick_budget_us"
+        );
     }
 
     #[test]

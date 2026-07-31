@@ -139,8 +139,8 @@ def main() -> int:
     assert "stasis_android_bridge_compile_project" in bridge
     assert "load_android_workshop_asset_manifest" in bridge
     assert "stasis_assets::load_project_asset_manifest" in bridge
-    assert "build_workshop_compile_plan" in bridge
-    assert "render_workshop_artifacts" in bridge
+    assert "render_android_jit_manifest" in bridge
+    assert "artifact_kind=executable-memory" in bridge
 
     rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
     rust_bridge_provenance = read("mobile/android/rust_bridge_provenance.ps1")
@@ -1394,15 +1394,10 @@ def main() -> int:
     assert '"com.stasislang.pong"' in device_script
     assert "ensureBundledProject" not in published_activity
     workshop = read("crates/stasis_compiler/src/frontend/workshop.rs")
-    assert "build_workshop_compile_plan" in workshop
-    assert "WorkshopCompilePlan" in workshop
-    assert "IncrementalCompileOutput" in workshop
     assert "WorkshopReload" in workshop
-    assert "workshop_compile_plan_tests" in workshop
-    assert "render_workshop_artifacts" in workshop
-    assert "WorkshopArtifactSet" in workshop
-    assert "status=RuntimeStateReady" in workshop
-    assert "status=CompiledStub" in workshop
+    assert "WorkshopCompilePlan" not in workshop
+    assert "render_workshop_artifacts" not in workshop
+    assert "CompiledStub" not in workshop
 
     native = read("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
     codex_native = read("mobile/android/codex_native/src/lib.rs")
@@ -1414,7 +1409,8 @@ def main() -> int:
     assert "Codex model is unavailable" in codex_native
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
-    assert "try_rust_bridge_compile" in native
+    assert "call_rust_bridge_compile" in native
+    assert "required Rust Android compiler bridge is unavailable" in native
     assert "dlopen(\"libstasis_android_bridge.so\"" in native
     assert "stasis_android_bridge_compile_project" in native
     assert "stasis_android_bridge_set_i32_global" in native
@@ -1430,48 +1426,36 @@ def main() -> int:
     assert '"Render.command" #index "_rotation_degrees"' in native
     assert '"Render.command" #index "_alpha"' in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv" not in native
-    assert "scan_stasis_files" in native
-    assert "analyze_stasis_file" in native
-    assert "validate_braces" in native
-    assert "CompilePlanned: reload=%s files=" in native
-    assert "STASIS_COMPILE_MANIFEST_RELATIVE_PATH" in native
-    assert "write_compile_manifest" in native
-    assert "write_function_manifest_entries" in native
-    assert "append_function_entries_for_project" in native
-    assert "body_hash=%016llx" in native
-    assert "STASIS_FUNCTION_ARTIFACT_DIR" in native
+    assert "scan_stasis_files" not in native
+    assert "analyze_stasis_file" not in native
+    assert "validate_braces" not in native
+    assert "write_compile_manifest" not in native
+    assert "write_function_manifest_entries" not in native
+    assert "STASIS_FUNCTION_ARTIFACT_DIR" not in native
     assert "STASIS_RUNTIME_STATE_RELATIVE_PATH" in native
-    assert "CompiledStub" in native
-    assert "write_function_artifact" in native
-    assert "artifact=%s/%016llx.stub" in native
-    assert "signature_hash=%016llx" in native
-    assert "project_hash=%016llx" in native
-    assert "status=CompilePlanned" in native
+    assert "CompiledStub" not in native
+    assert "write_function_artifact" not in native
+    assert "CompileReady: backend=cranelift-aot" in native
     assert "RuntimeStateReady" in native
     assert "read_runtime_tick_count" in native
     assert "write_runtime_tick_count" in native
     assert "RunTick: tick_count=%d" in native
     assert "RunError: compile project before running tick" in native
-    assert "write_runtime_state" in native
-    assert "runtime_state=%s" in native
-    assert "entrypoint=main" in native
-    assert "entrypoint=tick" in native
     assert "state=%s" in native
     assert "touch_y" in bridge
     assert "render_command_count" in bridge
     assert "Render.command0_kind" in bridge
     assert "Render.command{index}_asset" in bridge
-    assert "PreviousManifest" in native
-    assert "read_previous_compile_manifest" in native
-    assert "classify_reload" in native
+    assert "PreviousManifest" not in native
+    assert "read_previous_compile_manifest" not in native
+    assert "classify_reload" not in native
     assert '"GameState.ball_age_ticks", &published_game_ball_age_ticks' in native
     assert '"GameState.enemy_paddle_speed_x100", &published_game_enemy_paddle_speed_x100' in native
-    assert "reload=%s" in native
-    assert "InitialCompile" in native
-    assert "NoChange" in native
-    assert "FastReload" in native
-    assert "ResetRequired" in native
-    assert "CompileError: missing lifecycle root" in native
+    assert "WorkshopReload::InitialCompile" in bridge
+    assert "WorkshopReload::NoChange" in bridge
+    assert "WorkshopReload::FastReload" in bridge
+    assert "WorkshopReload::ResetRequired" in bridge
+    assert "CompileReady: backend=cranelift-jit" in bridge
     assert "Stasis Android native smoke loaded" in native
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
