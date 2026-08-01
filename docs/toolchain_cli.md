@@ -66,6 +66,8 @@ contain `..`. Generated projects include a
 runnable `main()`, a real `.test.stasis` test, an `AGENTS.md` theory-building and semantic-edit
 guide, a minimal `CLAUDE.md` that points to `AGENTS.md`, and a version-matched
 `PROJECT_ARCHITECTURE.md` with practical input, tick, state, and rendering guidance.
+Both `new` and `init` also add language-scoped VS Code settings that recommend the Stasis extension
+and enable its canonical formatter on save without changing the formatter for other languages.
 `stasis new` also initializes a local Git repository, writes `.gitattributes` to keep `.stasis`
 files on CRLF in every checkout, selects the checked-in `.githooks` directory, and installs a
 pre-commit hook. The hook checks formatting, formats noncanonical source when needed, and blocks
@@ -82,6 +84,9 @@ cloning a generated repository, reactivate the checked-in hook with
   `format` is an alias for `fmt`; both emit `fmt` as the canonical JSON command name. The operation
   is idempotent and never follows symlinks. With explicit file or directory paths, formatting works
   without a `stasis.json`; this lets mixed-language repositories enforce Stasis formatting too.
+  `format --stdin` reads one unsaved source buffer and writes only canonical source to stdout for
+  editor integrations; it does not require a manifest and cannot be combined with `--check`,
+  explicit paths, `--workspace`, or `--json`.
 - `check`: run the shared frontend and Cranelift JIT compilation path without executing `main`.
 - `test [PATH]`: run Stasis tests in one isolated JIT session.
 - `run [--headless]`: JIT-compile and execute no-argument `main(): i32` or `main(): void`; an
@@ -97,7 +102,9 @@ cloning a generated repository, reactivate the checked-in hook with
   palette with live fuzzy compiler-backed symbol/member completion, keyboard navigation and
   insertion, Tab completion, paging, multiline cancellation, and concise command-specific output. Use
   `--live-json` for complete schema-v1 response envelopes or `--live-script PATH` for a
-  deterministic command script. See
+  deterministic command script. Editor integrations use `--live-stdio`, which accepts versioned
+  requests as JSON lines on stdin and emits only response envelopes on stdout while the graphical
+  game and hot-swap watcher remain active. See
   [Interactive live workspace](live_cli_workspace.md).
 - `build --mode dev`: compile through JIT and write `build/dev-build.json` as a deterministic
   receipt.

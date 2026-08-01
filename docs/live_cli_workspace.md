@@ -15,6 +15,18 @@ symbol, edit, scratch, status, and diagnostic lines; large semantic plans are su
 symbols/files and reload class. Routine human responses omit protocol request and tick metadata. Add
 `--live-json` only for clients that need complete schema-v1 response envelopes.
 
+`--live-stdio` is the persistent editor transport. It leaves the graphical runner and hot-swap
+watcher active, accepts one versioned `LiveRequest` JSON object per stdin line, and writes only
+`LiveResponse` JSON objects to stdout. Renderer and runtime diagnostics remain on stderr. Requests
+carry caller-selected IDs, while asynchronous watch events use request ID `0`, so an editor can
+route responses without serializing unrelated watch updates. EOF closes the session cleanly. This
+is a local child-process protocol, not a network service.
+
+For editor completion, a `complete` request with `context.file` and no `context.owner` treats the
+buffer as that file's unsaved document. The runtime infers the containing function from compiler
+source spans, overlays its dirty definition on the accepted project, and returns replacement byte
+offsets plus the same ranked local, parameter, member, and project items used by the TUI.
+
 The project must provide the graphical lifecycle entry points `main`, `tick`, and `render`.
 `on_code_swap` is optional. This mode is local-only and does not open a network listener.
 

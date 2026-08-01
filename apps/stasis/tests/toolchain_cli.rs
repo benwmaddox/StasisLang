@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
@@ -25,6 +26,24 @@ fn stasis(args: &[&str], cwd: &Path) -> Output {
         .current_dir(cwd)
         .output()
         .expect("run stasis CLI")
+}
+
+fn stasis_with_stdin(args: &[&str], cwd: &Path, input: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stasis"))
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start stasis CLI");
+    child
+        .stdin
+        .take()
+        .expect("stasis stdin")
+        .write_all(input.as_bytes())
+        .expect("write stasis stdin");
+    child.wait_with_output().expect("wait for stasis CLI")
 }
 
 fn git(args: &[&str], cwd: &Path) -> Output {
@@ -116,6 +135,16 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert_eq!(
         fs::read_to_string(project.join(".gitattributes")).expect("read generated Git attributes"),
         "*.stasis text eol=crlf\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join(".vscode/settings.json"))
+            .expect("read generated VS Code settings"),
+        "{\n  \"[stasis]\": {\n    \"editor.defaultFormatter\": \"stasislang.stasis\",\n    \"editor.formatOnSave\": true\n  }\n}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join(".vscode/extensions.json"))
+            .expect("read generated VS Code recommendations"),
+        "{\n  \"recommendations\": [\n    \"stasislang.stasis\"\n  ]\n}\n"
     );
 
     let formatted = stasis(&["--json", "fmt", "--check"], &project);
@@ -318,6 +347,36 @@ fn format_accepts_explicit_sources_without_a_project_manifest() {
     );
 
     fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn format_stdin_returns_only_canonical_source_without_a_manifest() {
+    let root = temp_dir("format_stdin");
+    fs::create_dir_all(&root).expect("create stdin format directory");
+    let output = stasis_with_stdin(
+        &["format", "--stdin"],
+        &root,
+        "enum Mode{Menu Playing}function main():i32{return 0;}\n",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("formatted UTF-8"),
+        crlf(
+            "enum Mode {\n    Menu,\n    Playing,\n}\n\nfunction main(): i32 {\n    return 0;\n}\n"
+        )
+    );
+
+    let rejected = stasis_with_stdin(&["--json", "format", "--stdin"], &root, "");
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("stdout is the formatted source"));
+    fs::remove_dir_all(root).ok();
 }
 
 #[test]
@@ -1754,6 +1813,75 @@ fn tui_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     );
     assert!(String::from_utf8_lossy(&unfinished.stderr)
         .contains("live script ended with unfinished multiline input"));
+    fs::remove_dir_all(parent).ok();
+}
+
+#[cfg(windows)]
+#[test]
+fn tui_live_stdio_keeps_a_jsonl_editor_session_open() {
+    let parent = temp_dir("live_stdio");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    fs::write(
+        project.join("src/main.stasis"),
+        "global score: i32;\nfunction main(): i32 { score = 1; return 0; }\nfunction tick(): i32 { score += 1; return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+    )
+    .expect("write stdio live project");
+
+    let output = stasis_with_stdin(
+        &["tui", "src/main.stasis", "--live-stdio"],
+        &project,
+        concat!(
+            "{\"schema_version\":1,\"request_id\":101,\"type\":\"pause\"}\n",
+            "{\"schema_version\":1,\"request_id\":102,\"type\":\"inspect\",\"path\":\"score\"}\n",
+            "{\"schema_version\":1,\"request_id\":103,\"type\":\"watch\",\"path\":\"score\"}\n",
+            "{\"schema_version\":1,\"request_id\":104,\"type\":\"step\",\"ticks\":1}\n",
+            "{\"schema_version\":1,\"request_id\":105,\"type\":\"inspect\",\"path\":\"score\"}\n",
+            "{\"schema_version\":1,\"request_id\":106,\"type\":\"quit\"}\n",
+        ),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("stdio response JSON"))
+        .collect::<Vec<_>>();
+    assert!(responses
+        .iter()
+        .all(|response| response["schema_version"] == 1));
+    assert!(responses
+        .iter()
+        .any(|response| response["kind"] == "watch_added"));
+    assert!(responses
+        .iter()
+        .any(|response| response["kind"] == "quitting"));
+    assert!(responses
+        .iter()
+        .any(|response| response["request_id"] == 101));
+    assert!(responses
+        .iter()
+        .any(|response| response["request_id"] == 106));
+    let inspected = responses
+        .iter()
+        .filter(|response| response["kind"] == "inspection")
+        .map(|response| {
+            response["data"]["value"]["value"]
+                .as_i64()
+                .expect("i32 value")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inspected, vec![1, 2]);
     fs::remove_dir_all(parent).ok();
 }
 

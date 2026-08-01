@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,6 +69,19 @@ const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
 const PROJECT_GIT_ATTRIBUTES: &str = "*.stasis text eol=crlf\n";
+const PROJECT_VSCODE_SETTINGS: &str = r#"{
+  "[stasis]": {
+    "editor.defaultFormatter": "stasislang.stasis",
+    "editor.formatOnSave": true
+  }
+}
+"#;
+const PROJECT_VSCODE_EXTENSIONS: &str = r#"{
+  "recommendations": [
+    "stasislang.stasis"
+  ]
+}
+"#;
 const PROJECT_PRE_COMMIT_HOOK: &str = r#"#!/bin/sh
 set -eu
 
@@ -164,6 +177,9 @@ enum ToolchainCommand {
     Fmt {
         #[arg(long)]
         check: bool,
+        /// Read source from stdin and write the formatted source to stdout.
+        #[arg(long, conflicts_with_all = ["check", "paths"])]
+        stdin: bool,
         #[arg(value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
@@ -232,6 +248,9 @@ enum ToolchainCommand {
         /// Emit versioned live response envelopes as JSON lines.
         #[arg(long)]
         live_json: bool,
+        /// Read live commands from stdin and emit response envelopes as JSON lines.
+        #[arg(long, conflicts_with = "live_script")]
+        live_stdio: bool,
         #[arg(long, default_value_t = 16_000)]
         tick_sleep_us: u64,
         #[arg(long)]
@@ -577,6 +596,7 @@ pub(super) fn try_run() -> Option<i32> {
         }
     };
     let command_name = command_name(&parsed.command);
+    let raw_output = matches!(&parsed.command, ToolchainCommand::Fmt { stdin: true, .. });
     match execute(parsed.command, parsed.workspace, parsed.json) {
         Ok(result) => {
             if parsed.json {
@@ -588,6 +608,9 @@ pub(super) fn try_run() -> Option<i32> {
                         "result": result.data,
                     })
                 );
+            } else if raw_output {
+                print!("{}", result.human);
+                let _ = io::stdout().flush();
             } else if !result.human.is_empty() {
                 println!("{}", result.human);
             }
@@ -675,7 +698,31 @@ fn execute(
             "verify is unavailable in toolchain 0.1; no replay verification contract is implemented"
                 .to_string(),
         ),
-        ToolchainCommand::Fmt { check, paths } if !paths.is_empty() => {
+        ToolchainCommand::Fmt {
+            stdin: true,
+            check,
+            paths,
+        } => {
+            debug_assert!(!check);
+            debug_assert!(paths.is_empty());
+            if workspace_arg.is_some() {
+                Err("--workspace cannot be combined with format --stdin".to_string())
+            } else if json_output {
+                Err("--json cannot be combined with format --stdin; stdout is the formatted source".to_string())
+            } else {
+                let mut source = String::new();
+                io::stdin()
+                    .read_to_string(&mut source)
+                    .map_err(|error| format!("failed reading source from stdin: {error}"))?;
+                let formatted = format_source(&source)?;
+                Ok(CommandResult::success(formatted, json!({"source": "stdin"})))
+            }
+        }
+        ToolchainCommand::Fmt {
+            check,
+            paths,
+            stdin: false,
+        } if !paths.is_empty() => {
             if workspace_arg.is_some() {
                 Err("--workspace cannot be combined with explicit format paths".to_string())
             } else {
@@ -738,6 +785,7 @@ fn execute(
                     data_bind,
                     live_script,
                     live_json,
+                    live_stdio,
                     tick_sleep_us,
                     ticks,
                 } => {
@@ -754,6 +802,7 @@ fn execute(
                             &data_bind,
                             live_script.as_deref(),
                             live_json,
+                            live_stdio,
                             tick_sleep_us,
                             ticks,
                         )
@@ -834,10 +883,24 @@ fn create_project_with_options(
         root.join("src/main.stasis"),
         root.join("tests/main.test.stasis"),
         root.join("stdlib"),
+        root.join(".vscode/settings.json"),
+        root.join(".vscode/extensions.json"),
     ];
     if initialize_git {
         reserved_paths.push(root.join(".gitattributes"));
         reserved_paths.push(root.join(".githooks/pre-commit"));
+    }
+    let vscode_directory = root.join(".vscode");
+    if vscode_directory.exists() {
+        let metadata = fs::symlink_metadata(&vscode_directory).map_err(|error| {
+            format!("failed to inspect {}: {error}", vscode_directory.display())
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "refusing to write editor settings through {}",
+                vscode_directory.display()
+            ));
+        }
     }
     for reserved in &reserved_paths {
         if reserved.exists() {
@@ -864,6 +927,13 @@ fn create_project_with_options(
     write_new_file(
         &root.join("tests/main.test.stasis"),
         "test `new project is ready`(): bool {\r\n    return 1 == 1;\r\n}\r\n",
+    )?;
+    fs::create_dir_all(root.join(".vscode"))
+        .map_err(|error| format!("failed to create VS Code settings directory: {error}"))?;
+    write_new_file(&root.join(".vscode/settings.json"), PROJECT_VSCODE_SETTINGS)?;
+    write_new_file(
+        &root.join(".vscode/extensions.json"),
+        PROJECT_VSCODE_EXTENSIONS,
     )?;
     if initialize_git {
         write_new_file(&root.join(".gitattributes"), PROJECT_GIT_ATTRIBUTES)?;
@@ -1458,6 +1528,7 @@ fn run_workspace_tui(
     data_bind: &[PathBuf],
     script: Option<&Path>,
     json_lines: bool,
+    stdio: bool,
     tick_sleep_micros: u64,
     max_ticks: Option<u64>,
 ) -> Result<CommandResult, String> {
@@ -1475,10 +1546,17 @@ fn run_workspace_tui(
     let data_meta = data_bind.get(1).map(|path| workspace.root.join(path));
     let watch_dir = watch_dir.map(|path| workspace.root.join(path));
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
+    let transport = if stdio {
+        "stdio"
+    } else if script.is_some() {
+        "script"
+    } else {
+        "terminal"
+    };
     let script = script.map(|path| workspace.root.join(path));
     let terminal_root = workspace.root.clone();
     let terminal = thread::spawn(move || {
-        run_live_terminal(client, script.as_deref(), json_lines, &terminal_root)
+        run_live_terminal(client, script.as_deref(), json_lines, stdio, &terminal_root)
     });
     let config = LiveRunConfig::new(
         workspace.root.clone(),
@@ -1508,8 +1586,17 @@ fn run_workspace_tui(
     run_result?;
     terminal_result?;
     Ok(CommandResult::success(
-        "interactive live session ended",
-        json!({"backend": "jit", "headless": false, "interactive": true}),
+        if stdio {
+            String::new()
+        } else {
+            "interactive live session ended".to_string()
+        },
+        json!({
+            "backend": "jit",
+            "headless": false,
+            "interactive": true,
+            "transport": transport,
+        }),
     ))
 }
 
@@ -1550,9 +1637,10 @@ fn run_live_terminal(
     client: stasis_runner::live::LiveSessionClient,
     script: Option<&Path>,
     json_lines: bool,
+    stdio: bool,
     project_root: &Path,
 ) -> Result<(), String> {
-    let result = run_live_terminal_inner(&client, script, json_lines, project_root);
+    let result = run_live_terminal_inner(&client, script, json_lines, stdio, project_root);
     if result.is_err() {
         let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
     }
@@ -1563,12 +1651,34 @@ fn run_live_terminal_inner(
     client: &stasis_runner::live::LiveSessionClient,
     script: Option<&Path>,
     json_lines: bool,
+    stdio: bool,
     project_root: &Path,
 ) -> Result<(), String> {
     let mut terminal = TerminalBuffer::new();
     let mut saw_quit = false;
     let mut script_failure = None;
-    if let Some(script) = script {
+    if stdio {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let line =
+                line.map_err(|error| format!("failed reading live command from stdin: {error}"))?;
+            if let TerminalInput::Request(request) = terminal.feed_line(&line)? {
+                saw_quit |= matches!(&request.command, LiveCommand::Quit);
+                submit_and_print_live_response(client, request, true, true)?;
+                io::stdout()
+                    .flush()
+                    .map_err(|error| format!("failed flushing live response: {error}"))?;
+                if saw_quit {
+                    break;
+                }
+            }
+        }
+        if terminal.cancel_pending() {
+            return Err(
+                "live stdin ended with unfinished multiline input; send :end or :abort".to_string(),
+            );
+        }
+    } else if let Some(script) = script {
         let file = fs::File::open(script)
             .map_err(|error| format!("failed to open live script {}: {error}", script.display()))?;
         for line in io::BufReader::new(file).lines() {
@@ -4412,6 +4522,44 @@ mod tests {
     }
 
     #[test]
+    fn editor_transports_are_explicit_and_mutually_exclusive() {
+        let formatted = ToolchainCli::try_parse_from(["stasis", "format", "--stdin"])
+            .expect("parse stdin formatter");
+        assert!(matches!(
+            formatted.command,
+            ToolchainCommand::Fmt {
+                stdin: true,
+                check: false,
+                ref paths,
+            } if paths.is_empty()
+        ));
+        assert!(
+            ToolchainCli::try_parse_from(["stasis", "format", "--stdin", "src/main.stasis",])
+                .is_err()
+        );
+        assert!(ToolchainCli::try_parse_from(["stasis", "format", "--stdin", "--check"]).is_err());
+
+        let live = ToolchainCli::try_parse_from(["stasis", "tui", "--live-stdio"])
+            .expect("parse live stdio");
+        assert!(matches!(
+            live.command,
+            ToolchainCommand::Tui {
+                live_stdio: true,
+                live_script: None,
+                ..
+            }
+        ));
+        assert!(ToolchainCli::try_parse_from([
+            "stasis",
+            "tui",
+            "--live-stdio",
+            "--live-script",
+            "commands.txt",
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn ai_command_accepts_one_prompt() {
         let parsed = ToolchainCli::try_parse_from([
             "stasis",
@@ -4703,6 +4851,27 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).expect("read user source"),
             "user source\n"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn init_preserves_existing_vscode_settings_without_partial_writes() {
+        let root = temp_dir("vscode_preflight");
+        fs::create_dir_all(root.join(".vscode")).expect("create VS Code directory");
+        fs::write(
+            root.join(".vscode/settings.json"),
+            "{\"editor.tabSize\": 2}\n",
+        )
+        .expect("write user editor settings");
+
+        let error = create_project(root.clone(), "demo".to_string()).expect_err("reject conflict");
+        assert!(error.contains(".vscode"));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        assert_eq!(
+            fs::read_to_string(root.join(".vscode/settings.json"))
+                .expect("read user editor settings"),
+            "{\"editor.tabSize\": 2}\n"
         );
         remove_temp(&root);
     }
