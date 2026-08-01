@@ -10,12 +10,36 @@ pub struct IndexedFunction {
     pub name: String,
     pub name_hash: u64,
     pub source_range: Range<u32>,
+    pub signature_range: Range<u32>,
     pub signature_hash: u64,
     pub body_hash: u64,
     pub param_names: Vec<String>,
     pub params: Vec<TypeId>,
     pub return_type: TypeId,
     pub dependency_name_hashes: Vec<u64>,
+}
+
+/// Lightweight parser-owned declaration record for editor and CLI lookup.
+/// This deliberately avoids type interning and semantic indexing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedSourceFunctionItem {
+    pub name: String,
+    pub source_range: Range<u32>,
+    pub signature_range: Range<u32>,
+}
+
+pub fn source_function_items(source: &str) -> Result<Vec<IndexedSourceFunctionItem>, String> {
+    parse_top_level_functions(source).map(|functions| {
+        functions
+            .into_iter()
+            .map(|function| IndexedSourceFunctionItem {
+                name: function.name,
+                source_range: function.body_range.start as u32..function.body_range.end as u32,
+                signature_range: function.signature_range.start as u32
+                    ..function.signature_range.end as u32,
+            })
+            .collect()
+    })
 }
 
 pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunction>, String> {
@@ -41,6 +65,8 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
             name: function.name,
             name_hash,
             source_range: function.body_range.start as u32..function.body_range.end as u32,
+            signature_range: function.signature_range.start as u32
+                ..function.signature_range.end as u32,
             signature_hash,
             body_hash,
             param_names,

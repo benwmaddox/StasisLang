@@ -563,3 +563,13 @@ This system is intentionally:
 It provides a robust, file-correct hot reload pipeline with reusable semantic work, complete
 direct-call generations, an explicit transactional swap hook, and deterministic tick-based UI
 confirmation.
+
+## Program Snapshot Ownership
+
+Each accepted compiler candidate publishes one immutable `ProgramSnapshot`. It is the canonical
+owner of source/function metadata, reachability, typed state and collection metadata, literals,
+data-flow summaries, and the canonical `StateLayout` digest. Candidate diagnostics remain separate
+from an accepted snapshot so a failed compile cannot overwrite accepted program metadata. JIT and AOT attach only
+target artifact mappings (object paths or code pointers), which must not change semantic or layout
+identity. A failed parse, semantic check, lowering, finalize, or activation leaves the previously
+accepted snapshot and its artifacts active; the candidate diagnostic is reported separately.

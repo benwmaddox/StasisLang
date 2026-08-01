@@ -24,6 +24,7 @@ pub struct FunctionMeta {
     pub name_hash: u64,
     pub file_id: u32,
     pub source_range: Range<u32>,
+    pub signature_range: Range<u32>,
     pub signature_hash: u64,
     pub body_hash: u64,
     pub param_names: Vec<String>,
@@ -32,6 +33,78 @@ pub struct FunctionMeta {
     pub dependencies: Vec<FunctionId>,
     pub dependents: Vec<FunctionId>,
     pub dirty: bool,
+}
+
+/// Parser-owned source item used by hosts that need function ranges/names before
+/// choosing a target contract. Hosts must not independently reparse Stasis files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFunctionItem {
+    pub path: String,
+    pub name: String,
+    pub source_range: Range<u32>,
+    pub signature_range: Range<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceStructItem {
+    pub path: String,
+    pub name: String,
+    pub definition_range: Range<u32>,
+}
+
+/// Parser-owned declaration bundle for editor tooling.  It is intentionally a
+/// frontend record, not a semantic compilation result: callers use it for an
+/// already-open workspace without inventing a second parser pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceWorkshopItems {
+    pub layout: crate::frontend::parser::ParsedTypeLayout,
+    pub functions: Vec<crate::frontend::parser::ParsedFunctionSignature>,
+    pub typed_local_bindings: Vec<crate::frontend::parser::ParsedLocalBinding>,
+    pub structs: Vec<crate::frontend::parser::ParsedStructDefinitionRange>,
+}
+
+pub fn source_workshop_items(source: &str) -> Result<SourceWorkshopItems, String> {
+    Ok(SourceWorkshopItems {
+        layout: crate::frontend::parser::parse_top_level_type_layout(source)?,
+        functions: crate::frontend::parser::parse_top_level_functions(source)?,
+        typed_local_bindings: crate::frontend::parser::parse_typed_local_bindings(source)?,
+        structs: crate::frontend::parser::parse_top_level_struct_definitions(source)?,
+    })
+}
+
+pub fn source_function_items(
+    files: impl IntoIterator<Item = (String, String)>,
+) -> Result<Vec<SourceFunctionItem>, String> {
+    let mut items = Vec::new();
+    for (path, content) in files {
+        for item in crate::frontend::indexer::source_function_items(&content)? {
+            items.push(SourceFunctionItem {
+                path: path.clone(),
+                name: item.name,
+                source_range: item.source_range,
+                signature_range: item.signature_range,
+            });
+        }
+    }
+    Ok(items)
+}
+
+pub fn source_struct_items(
+    source: &str,
+    path: impl Into<String>,
+) -> Result<Vec<SourceStructItem>, String> {
+    let path = path.into();
+    crate::frontend::parser::parse_top_level_struct_definitions(source).map(|items| {
+        items
+            .into_iter()
+            .map(|item| SourceStructItem {
+                path: path.clone(),
+                name: item.name,
+                definition_range: item.definition_range.start as u32
+                    ..item.definition_range.end as u32,
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -344,6 +417,7 @@ impl Compiler {
                     name_hash: indexed_function.name_hash,
                     file_id: file_id as u32,
                     source_range: indexed_function.source_range,
+                    signature_range: indexed_function.signature_range,
                     signature_hash: indexed_function.signature_hash,
                     body_hash: indexed_function.body_hash,
                     param_names: indexed_function.param_names,
@@ -1364,5 +1438,34 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
             assert!(tick.aggregate.calls.contains(&expected.to_string()));
             assert!(!tick.aggregate.calls.contains(&rejected.to_string()));
         }
+    }
+
+    #[test]
+    fn source_items_preserve_annotation_and_same_line_definition_ranges() {
+        let source = "@tick_budget_us(100) function tick(): i32 { return 0; } function helper(): i32 { return 1; } struct State { score: i32; }";
+        let functions = source_function_items([("sample.stasis".to_string(), source.to_string())])
+            .expect("source functions");
+        assert_eq!(
+            functions
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["tick", "helper"]
+        );
+        let tick = functions
+            .iter()
+            .find(|item| item.name == "tick")
+            .expect("tick");
+        assert_eq!(
+            &source[tick.signature_range.start as usize..tick.signature_range.end as usize],
+            "function tick(): i32 "
+        );
+        let structs = source_struct_items(source, "sample.stasis").expect("source structs");
+        assert_eq!(structs.len(), 1);
+        assert_eq!(
+            &source[structs[0].definition_range.start as usize
+                ..structs[0].definition_range.end as usize],
+            "struct State { score: i32; }"
+        );
     }
 }

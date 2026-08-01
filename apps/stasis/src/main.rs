@@ -24,10 +24,8 @@ use stasis_assets::{
 };
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
+use stasis_compiler::compiler::{source_function_items, source_struct_items};
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
-use stasis_compiler::frontend::parser::{
-    parse_top_level_functions, parse_top_level_struct_definitions,
-};
 use stasis_jit::AotTarget;
 use stasis_runner::swap::contracts::TargetMode;
 
@@ -429,16 +427,18 @@ fn collect_lookup_matches_in_source(
     let display_path = lookup_display_path(path, root);
     let mut matches = Vec::new();
 
-    if let Ok(functions) = parse_top_level_functions(source) {
+    if let Ok(functions) = source_function_items([(display_path.clone(), source.to_string())]) {
         for function in functions {
             if !lookup_name_matches(&function.name, &query_lower) {
                 continue;
             }
             let text = match parsed.mode {
-                LookupMode::Signature => source.get(function.signature_range.clone()),
-                LookupMode::Definition => {
-                    source.get(function.signature_range.start..function.body_range.end)
-                }
+                LookupMode::Signature => source.get(
+                    function.signature_range.start as usize..function.signature_range.end as usize,
+                ),
+                LookupMode::Definition => source.get(
+                    function.signature_range.start as usize..function.source_range.end as usize,
+                ),
             };
             if let Some(text) = text {
                 matches.push(LookupMatch {
@@ -450,12 +450,15 @@ fn collect_lookup_matches_in_source(
     }
 
     if parsed.mode == LookupMode::Definition {
-        if let Ok(structs) = parse_top_level_struct_definitions(source) {
+        if let Ok(structs) = source_struct_items(source, display_path.clone()) {
             for definition in structs {
                 if !lookup_name_matches(&definition.name, &query_lower) {
                     continue;
                 }
-                if let Some(text) = source.get(definition.definition_range.clone()) {
+                if let Some(text) = source.get(
+                    definition.definition_range.start as usize
+                        ..definition.definition_range.end as usize,
+                ) {
                     matches.push(LookupMatch {
                         path: display_path.clone(),
                         text: text.trim().to_string(),

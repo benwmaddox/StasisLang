@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
-use stasis_compiler::backend::state_layout::{state_layout_digest, StateLayout};
+use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
+use stasis_compiler::backend::state_layout::StateLayout;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
-use stasis_compiler::frontend::parser::parse_top_level_functions;
 #[cfg(test)]
 use stasis_compiler::{SimpleI32Condition, SimpleI32ReturnExpr};
 use stasis_jit::{
@@ -39,7 +39,9 @@ pub struct IncrementalCompilerBackend {
     last_aot_engine_bundle: Option<AotEngineBundle>,
     prepared_jit_swap_tx: Option<SyncSender<PreparedJitSwap>>,
     pending_jit_candidate: Option<JitProcess>,
-    last_state_layout: Option<StateLayout>,
+    last_program_snapshot: Option<ProgramSnapshot>,
+    last_jit_source_diagnostic: Option<stasis_compiler::SourceDiagnostic>,
+    last_aot_source_diagnostic: Option<stasis_compiler::SourceDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +195,28 @@ impl SelfHostedAotCliOptions {
 }
 
 impl IncrementalCompilerBackend {
+    fn compile_jit_candidate_from_cache(
+        &mut self,
+        source_delta: &SourceCacheDelta,
+    ) -> Result<JitProcess, String> {
+        self.sync_jit_process_sources(source_delta);
+        let mut candidate = if self.prepared_jit_swap_tx.is_some() {
+            self.jit_process.staged_candidate()
+        } else {
+            std::mem::take(&mut self.jit_process)
+        };
+        if let Err(error) = candidate.compile_staged() {
+            self.last_jit_source_diagnostic = candidate.last_source_diagnostic().cloned();
+            if self.prepared_jit_swap_tx.is_none() {
+                self.jit_process = candidate;
+            }
+            return Err(format!("rust-native JIT compile failed: {error:?}"));
+        }
+        candidate.validate_on_code_swap_signature()?;
+        self.last_jit_source_diagnostic = None;
+        Ok(candidate)
+    }
+
     pub fn new() -> Self {
         let cache_root = std::env::var_os("STASIS_CACHE_DIR")
             .filter(|value| !value.is_empty())
@@ -218,7 +242,9 @@ impl IncrementalCompilerBackend {
             last_aot_engine_bundle: None,
             prepared_jit_swap_tx: None,
             pending_jit_candidate: None,
-            last_state_layout: None,
+            last_program_snapshot: None,
+            last_jit_source_diagnostic: None,
+            last_aot_source_diagnostic: None,
         }
     }
 
@@ -260,7 +286,9 @@ impl IncrementalCompilerBackend {
             last_aot_engine_bundle: None,
             prepared_jit_swap_tx: None,
             pending_jit_candidate: None,
-            last_state_layout: None,
+            last_program_snapshot: None,
+            last_jit_source_diagnostic: None,
+            last_aot_source_diagnostic: None,
         }
     }
 
@@ -285,7 +313,9 @@ impl IncrementalCompilerBackend {
             last_aot_engine_bundle: None,
             prepared_jit_swap_tx: None,
             pending_jit_candidate: None,
-            last_state_layout: None,
+            last_program_snapshot: None,
+            last_jit_source_diagnostic: None,
+            last_aot_source_diagnostic: None,
         }
     }
 
@@ -303,6 +333,22 @@ impl IncrementalCompilerBackend {
     }
 }
 
+fn snapshot_function_entries(snapshot: &ProgramSnapshot) -> Vec<EngineFunctionEntry> {
+    snapshot
+        .functions()
+        .iter()
+        .filter_map(|function| {
+            snapshot
+                .files()
+                .get(function.file_id as usize)
+                .map(|file| EngineFunctionEntry {
+                    path: file.path.clone(),
+                    name: function.name.clone(),
+                })
+        })
+        .collect()
+}
+
 impl Default for IncrementalCompilerBackend {
     fn default() -> Self {
         Self::new()
@@ -312,6 +358,14 @@ impl Default for IncrementalCompilerBackend {
 impl CompilerBackend for IncrementalCompilerBackend {
     fn compile(&mut self, request: CompileRequest) -> CompileResult {
         let request_id = request.request_id;
+        let accepted_jit = self.jit_process.staged_candidate();
+        let accepted_snapshot = self.last_program_snapshot.clone();
+        let accepted_jit_package = self.last_jit_engine_package.clone();
+        let accepted_aot_bundle = self.last_aot_engine_bundle.clone();
+        let accepted_pending = self
+            .pending_jit_candidate
+            .as_ref()
+            .map(JitProcess::staged_candidate);
         let mut result = self.compile_request(request);
         if result.status == stasis_runner::swap::contracts::CompileStatus::Success {
             if let Err(message) = self.publish_prepared_jit_candidate(request_id) {
@@ -326,8 +380,13 @@ impl CompilerBackend for IncrementalCompilerBackend {
                     }],
                 );
             }
-        } else {
-            self.pending_jit_candidate = None;
+        }
+        if result.status != stasis_runner::swap::contracts::CompileStatus::Success {
+            self.jit_process = accepted_jit;
+            self.last_program_snapshot = accepted_snapshot;
+            self.last_jit_engine_package = accepted_jit_package;
+            self.last_aot_engine_bundle = accepted_aot_bundle;
+            self.pending_jit_candidate = accepted_pending;
         }
         result
     }
@@ -335,10 +394,6 @@ impl CompilerBackend for IncrementalCompilerBackend {
 
 impl IncrementalCompilerBackend {
     fn compile_request(&mut self, request: CompileRequest) -> CompileResult {
-        self.last_jit_engine_package = None;
-        self.last_aot_engine_bundle = None;
-        self.pending_jit_candidate = None;
-        self.last_state_layout = None;
         let source_delta = match self.refresh_cached_sources(&request.changed_files) {
             Ok(delta) => delta,
             Err(message) => {
@@ -355,19 +410,43 @@ impl IncrementalCompilerBackend {
             }
         };
 
-        let has_tick_entrypoint = self.source_cache_has_function("tick");
-        let has_render_entrypoint = self.source_cache_has_function("render");
-        let has_on_code_swap_entrypoint = self.source_cache_has_function("on_code_swap");
-        let use_engine_mode_contracts = has_tick_entrypoint && has_render_entrypoint;
-        if use_engine_mode_contracts {
-            return self.compile_engine_mode_contract_request(
-                &request,
-                has_on_code_swap_entrypoint,
-                &source_delta,
-            );
-        }
         if request.target_mode == TargetMode::JitDev {
-            return match self.compile_jit_non_engine_contract_request(&request, &source_delta) {
+            let candidate = match self.compile_jit_candidate_from_cache(&source_delta) {
+                Ok(candidate) => candidate,
+                Err(message) => {
+                    return CompileResult::failed(
+                        request.request_id,
+                        vec![self.runner_diagnostic_from_source(
+                            self.last_jit_source_diagnostic.as_ref(),
+                            message,
+                            request.changed_files.first().cloned(),
+                        )],
+                    )
+                }
+            };
+            let entries = snapshot_function_entries(
+                candidate
+                    .program_snapshot()
+                    .expect("compiled JIT candidate snapshot"),
+            );
+            let engine = entries.iter().any(|entry| entry.name == "tick")
+                && entries.iter().any(|entry| entry.name == "render");
+            if engine {
+                return self.compile_engine_mode_contract_request(
+                    &request,
+                    entries.iter().any(|entry| entry.name == "on_code_swap"),
+                    &source_delta,
+                    &entries,
+                    Some(candidate),
+                    None,
+                );
+            }
+            return match self.compile_jit_non_engine_contract_request(
+                &request,
+                &source_delta,
+                &entries,
+                Some(candidate),
+            ) {
                 Ok(result) => result,
                 Err(message) => CompileResult::failed(
                     request.request_id,
@@ -381,7 +460,41 @@ impl IncrementalCompilerBackend {
                 ),
             };
         }
-        match self.compile_aot_non_engine_contract_request(&request) {
+        let candidate = match self.compile_aot_process_from_source_cache() {
+            Ok(candidate) => candidate,
+            Err(message) => {
+                return CompileResult::failed(
+                    request.request_id,
+                    vec![self.runner_diagnostic_from_source(
+                        self.last_aot_source_diagnostic.as_ref(),
+                        message,
+                        request.changed_files.first().cloned(),
+                    )],
+                )
+            }
+        };
+        let function_entries = snapshot_function_entries(
+            candidate
+                .program_snapshot()
+                .expect("compiled AOT candidate snapshot"),
+        );
+        let has_tick_entrypoint = function_entries.iter().any(|entry| entry.name == "tick");
+        let has_render_entrypoint = function_entries.iter().any(|entry| entry.name == "render");
+        let has_on_code_swap_entrypoint = function_entries
+            .iter()
+            .any(|entry| entry.name == "on_code_swap");
+        let use_engine_mode_contracts = has_tick_entrypoint && has_render_entrypoint;
+        if use_engine_mode_contracts {
+            return self.compile_engine_mode_contract_request(
+                &request,
+                has_on_code_swap_entrypoint,
+                &source_delta,
+                &function_entries,
+                None,
+                Some(candidate),
+            );
+        }
+        match self.compile_aot_non_engine_contract_request(&request, &function_entries, candidate) {
             Ok(result) => result,
             Err(message) => CompileResult::failed(
                 request.request_id,
@@ -398,28 +511,48 @@ impl IncrementalCompilerBackend {
 }
 
 impl IncrementalCompilerBackend {
+    fn runner_diagnostic_from_source(
+        &self,
+        source: Option<&stasis_compiler::SourceDiagnostic>,
+        fallback: String,
+        fallback_path: Option<PathBuf>,
+    ) -> Diagnostic {
+        let Some(source) = source else {
+            return Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: fallback,
+                path: fallback_path,
+                line: None,
+                column: None,
+            };
+        };
+        let text = self
+            .source_by_path
+            .get(&source.path)
+            .map(String::as_str)
+            .unwrap_or("");
+        let start = source.start.min(text.len());
+        let line = text[..start].bytes().filter(|byte| *byte == b'\n').count() as u32 + 1;
+        let column =
+            start.saturating_sub(text[..start].rfind('\n').map_or(0, |index| index + 1)) as u32 + 1;
+        Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: source.message.clone(),
+            path: Some(PathBuf::from(&source.path)),
+            line: Some(line),
+            column: Some(column),
+        }
+    }
+
     fn compile_engine_mode_contract_request(
         &mut self,
         request: &CompileRequest,
         include_on_code_swap: bool,
         source_delta: &SourceCacheDelta,
+        function_entries: &[EngineFunctionEntry],
+        jit_candidate: Option<JitProcess>,
+        aot_candidate: Option<AotProcess>,
     ) -> CompileResult {
-        let function_entries = match self.collect_cached_function_entries() {
-            Ok(entries) => entries,
-            Err(message) => {
-                return CompileResult::failed(
-                    request.request_id,
-                    vec![Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        message,
-                        path: request.changed_files.first().cloned(),
-                        line: None,
-                        column: None,
-                    }],
-                );
-            }
-        };
-
         let mut aot_linked_image_path: Option<PathBuf> = None;
         let mut aot_linked_image_size_bytes: Option<u64> = None;
         let mut aot_linked_image_sha256: Option<String> = None;
@@ -428,29 +561,67 @@ impl IncrementalCompilerBackend {
 
         match request.target_mode {
             TargetMode::JitDev => {
-                if let Err(message) =
-                    self.compile_jit_engine_package_from_cache(include_on_code_swap, source_delta)
+                let candidate = match jit_candidate {
+                    Some(candidate) => candidate,
+                    None => match self.compile_jit_candidate_from_cache(source_delta) {
+                        Ok(candidate) => candidate,
+                        Err(message) => {
+                            return CompileResult::failed(
+                                request.request_id,
+                                vec![Diagnostic {
+                                    severity: DiagnosticSeverity::Error,
+                                    message,
+                                    path: request.changed_files.first().cloned(),
+                                    line: None,
+                                    column: None,
+                                }],
+                            );
+                        }
+                    },
+                };
+                let package = match candidate
+                    .build_engine_package(&Self::engine_entrypoints(include_on_code_swap))
                 {
-                    return CompileResult::failed(
-                        request.request_id,
-                        vec![Diagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            message,
-                            path: request.changed_files.first().cloned(),
-                            line: None,
-                            column: None,
-                        }],
-                    );
-                }
+                    Ok(package) => package,
+                    Err(message) => {
+                        return CompileResult::failed(
+                            request.request_id,
+                            vec![Diagnostic {
+                                severity: DiagnosticSeverity::Error,
+                                message,
+                                path: request.changed_files.first().cloned(),
+                                line: None,
+                                column: None,
+                            }],
+                        );
+                    }
+                };
+                self.last_program_snapshot = candidate.program_snapshot().cloned();
+                self.last_jit_engine_package = Some(package);
+                self.pending_jit_candidate = Some(candidate);
                 if let Some(package) = self.last_jit_engine_package.as_ref() {
                     jit_emitted_function_names =
                         Some(package.symbol_code_ptrs.keys().cloned().collect());
                 }
             }
             TargetMode::AotProd => {
-                let bundle = match self.compile_aot_engine_bundle_from_cache(
-                    request.request_id.0,
-                    include_on_code_swap,
+                let mut process = aot_candidate.expect("AOT request has compiled candidate");
+                let bundle_output_dir = self
+                    .aot_artifact_root
+                    .join("engine_bundle")
+                    .join(format!("request_{}", request.request_id.0));
+                if bundle_output_dir.exists() {
+                    if let Err(error) = std::fs::remove_dir_all(&bundle_output_dir) {
+                        return CompileResult::failed(request.request_id, vec![Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!("failed to clear existing AOT engine bundle directory {}: {error}", bundle_output_dir.display()),
+                            path: request.changed_files.first().cloned(), line: None, column: None,
+                        }]);
+                    }
+                }
+                let bundle = match process.write_engine_bundle(
+                    &Self::engine_entrypoints(include_on_code_swap),
+                    &bundle_output_dir,
                 ) {
                     Ok(bundle) => bundle,
                     Err(message) => {
@@ -466,6 +637,8 @@ impl IncrementalCompilerBackend {
                         );
                     }
                 };
+                self.last_program_snapshot = process.program_snapshot().cloned();
+                self.last_aot_engine_bundle = Some(bundle.clone());
                 aot_linked_image_path = Some(bundle.manifest_path.clone());
                 let metadata = std::fs::metadata(&bundle.manifest_path).map_err(|error| {
                     CompileResult::failed(
@@ -552,7 +725,7 @@ impl IncrementalCompilerBackend {
         let mut functions = Vec::new();
         let mut hook_fn_id: Option<FnId> = None;
         let mut fn_id_by_name: BTreeMap<String, FnId> = BTreeMap::new();
-        for entry in &function_entries {
+        for entry in function_entries {
             if let Some(emitted_names) = jit_emitted_function_names.as_ref() {
                 if !emitted_names.contains(&entry.name) {
                     continue;
@@ -686,7 +859,7 @@ impl IncrementalCompilerBackend {
 
         let mut result = CompileResult::success_with_host_set_metadata(
             request.request_id,
-            self.layout_hash_from_state_layout(),
+            self.layout_hash_from_snapshot(),
             FunctionPatchSet { functions },
             request.host_set_id.clone(),
             request.host_set_hash,
@@ -705,9 +878,16 @@ impl IncrementalCompilerBackend {
         &mut self,
         request: &CompileRequest,
         source_delta: &SourceCacheDelta,
+        function_entries: &[EngineFunctionEntry],
+        jit_candidate: Option<JitProcess>,
     ) -> Result<CompileResult, String> {
-        let function_entries = self.collect_cached_function_entries()?;
-        let symbol_code_ptrs = self.compile_jit_symbol_code_ptrs_from_cache(source_delta)?;
+        let candidate = match jit_candidate {
+            Some(candidate) => candidate,
+            None => self.compile_jit_candidate_from_cache(source_delta)?,
+        };
+        let symbol_code_ptrs = candidate.symbol_code_ptrs();
+        self.last_program_snapshot = candidate.program_snapshot().cloned();
+        self.pending_jit_candidate = Some(candidate);
         if function_entries.is_empty() || symbol_code_ptrs.is_empty() {
             return Err(
                 "non-engine JIT compile requires at least one parsed function and emitted code pointer"
@@ -718,7 +898,7 @@ impl IncrementalCompilerBackend {
         let mut functions = Vec::new();
         let mut hook_fn_id: Option<FnId> = None;
         let mut fn_id_by_name: BTreeMap<String, FnId> = BTreeMap::new();
-        for entry in &function_entries {
+        for entry in function_entries {
             if !symbol_code_ptrs.contains_key(&entry.name) {
                 continue;
             }
@@ -757,7 +937,7 @@ impl IncrementalCompilerBackend {
 
         let mut result = CompileResult::success_with_host_set_metadata(
             request.request_id,
-            self.layout_hash_from_state_layout(),
+            self.layout_hash_from_snapshot(),
             FunctionPatchSet { functions },
             request.host_set_id.clone(),
             request.host_set_hash,
@@ -775,16 +955,17 @@ impl IncrementalCompilerBackend {
     fn compile_aot_non_engine_contract_request(
         &mut self,
         request: &CompileRequest,
+        function_entries: &[EngineFunctionEntry],
+        process: AotProcess,
     ) -> Result<CompileResult, String> {
-        let function_entries = self.collect_cached_function_entries()?;
-        let request_id = request.request_id.0;
-        let compile = self.compile_aot_non_engine_artifacts_from_cache(request_id)?;
+        let compile =
+            self.compile_aot_non_engine_artifacts_from_process(process, request.request_id.0)?;
 
         let mut functions = Vec::new();
         let mut aot_function_symbols = Vec::new();
         let mut hook_fn_id: Option<FnId> = None;
         let mut fn_id_by_name: BTreeMap<String, FnId> = BTreeMap::new();
-        for entry in &function_entries {
+        for entry in function_entries {
             let Some((symbol, _)) = compile.object_paths_by_function.get(&entry.name) else {
                 continue;
             };
@@ -815,7 +996,7 @@ impl IncrementalCompilerBackend {
 
         let result = CompileResult::success_with_host_set_metadata(
             request.request_id,
-            self.layout_hash_from_state_layout(),
+            self.layout_hash_from_snapshot(),
             FunctionPatchSet { functions },
             request.host_set_id.clone(),
             request.host_set_hash,
@@ -883,6 +1064,7 @@ impl IncrementalCompilerBackend {
             self.jit_process = candidate;
             return Ok(());
         };
+        let accepted = self.jit_process.staged_candidate();
         self.jit_process = candidate.staged_candidate();
         sender
             .send(PreparedJitSwap {
@@ -890,41 +1072,12 @@ impl IncrementalCompilerBackend {
                 candidate,
             })
             .map_err(|_| {
+                self.jit_process = accepted;
                 format!(
                     "failed publishing staged JIT candidate for request {}",
                     request_id.0
                 )
             })
-    }
-
-    fn source_cache_has_function(&self, function_name: &str) -> bool {
-        self.source_by_path
-            .values()
-            .filter_map(|source| parse_top_level_functions(source).ok())
-            .flatten()
-            .any(|function| function.name == function_name)
-    }
-
-    fn collect_cached_function_entries(&self) -> Result<Vec<EngineFunctionEntry>, String> {
-        let mut entries = Vec::new();
-        for (path, source) in &self.source_by_path {
-            let parsed = parse_top_level_functions(source).map_err(|error| {
-                format!("failed to parse top-level functions in {path} for engine mode: {error}")
-            })?;
-            for function in parsed {
-                entries.push(EngineFunctionEntry {
-                    path: path.clone(),
-                    name: function.name,
-                });
-            }
-        }
-        if entries.is_empty() {
-            return Err(
-                "engine contract mode requires at least one function in cached source set"
-                    .to_string(),
-            );
-        }
-        Ok(entries)
     }
 
     fn read_engine_bundle_manifest(&self, path: &Path) -> Result<EngineBundleManifest, String> {
@@ -942,75 +1095,21 @@ impl IncrementalCompilerBackend {
         })
     }
 
-    fn layout_hash_from_state_layout(&self) -> LayoutHash {
+    fn layout_hash_from_snapshot(&self) -> LayoutHash {
         LayoutHash(
-            state_layout_digest(
-                self.last_state_layout
-                    .as_ref()
-                    .expect("successful compiler result must have canonical state layout"),
-            )
-            .expect("canonical state layout serialization is infallible"),
+            self.last_program_snapshot
+                .as_ref()
+                .expect("successful compiler result must have a program snapshot")
+                .layout_digest(),
         )
     }
 
-    fn compile_jit_engine_package_from_cache(
+    fn compile_aot_engine_bundle_from_process(
         &mut self,
-        include_on_code_swap: bool,
-        source_delta: &SourceCacheDelta,
-    ) -> Result<(), String> {
-        self.sync_jit_process_sources(source_delta);
-        let mut candidate = if self.prepared_jit_swap_tx.is_some() {
-            self.jit_process.staged_candidate()
-        } else {
-            std::mem::take(&mut self.jit_process)
-        };
-        if let Err(error) = candidate.compile_staged() {
-            if self.prepared_jit_swap_tx.is_none() {
-                self.jit_process = candidate;
-            }
-            return Err(format!("rust-native JIT engine compile failed: {error:?}"));
-        }
-        candidate.validate_on_code_swap_signature()?;
-        let package = candidate
-            .build_engine_package(&Self::engine_entrypoints(include_on_code_swap))
-            .map_err(|error| format!("failed to build JIT engine package: {error}"))?;
-        self.last_state_layout = Some(candidate.state_layout());
-        self.last_jit_engine_package = Some(package);
-        self.pending_jit_candidate = Some(candidate);
-        Ok(())
-    }
-
-    fn compile_jit_symbol_code_ptrs_from_cache(
-        &mut self,
-        source_delta: &SourceCacheDelta,
-    ) -> Result<BTreeMap<String, u64>, String> {
-        self.sync_jit_process_sources(source_delta);
-        let mut candidate = if self.prepared_jit_swap_tx.is_some() {
-            self.jit_process.staged_candidate()
-        } else {
-            std::mem::take(&mut self.jit_process)
-        };
-        if let Err(error) = candidate.compile_staged() {
-            if self.prepared_jit_swap_tx.is_none() {
-                self.jit_process = candidate;
-            }
-            return Err(format!("rust-native JIT compile failed: {error:?}"));
-        }
-        candidate.validate_on_code_swap_signature()?;
-        let symbol_code_ptrs = candidate.symbol_code_ptrs();
-        self.last_state_layout = Some(candidate.state_layout());
-        self.pending_jit_candidate = Some(candidate);
-        Ok(symbol_code_ptrs)
-    }
-
-    fn compile_aot_engine_bundle_from_cache(
-        &mut self,
+        mut process: AotProcess,
         request_id: u64,
         include_on_code_swap: bool,
     ) -> Result<AotEngineBundle, String> {
-        let process = self.compile_aot_process_from_source_cache()?;
-        self.last_state_layout = Some(process.state_layout());
-
         let bundle_output_dir = self
             .aot_artifact_root
             .join("engine_bundle")
@@ -1028,11 +1127,12 @@ impl IncrementalCompilerBackend {
             &Self::engine_entrypoints(include_on_code_swap),
             &bundle_output_dir,
         )?;
+        self.last_program_snapshot = process.program_snapshot().cloned();
         self.last_aot_engine_bundle = Some(bundle.clone());
         Ok(bundle)
     }
 
-    fn compile_aot_process_from_source_cache(&self) -> Result<AotProcess, String> {
+    fn compile_aot_process_from_source_cache(&mut self) -> Result<AotProcess, String> {
         let mut process = AotProcess::with_optimization_profile(
             Self::aot_optimization_profile_from_compile_config(&self.aot_compile_config),
         );
@@ -1040,18 +1140,19 @@ impl IncrementalCompilerBackend {
         for (path, source) in &self.source_by_path {
             process.upsert_file(path.clone(), source.clone());
         }
-        process
-            .compile()
-            .map_err(|error| format!("rust-native AOT compile failed: {error:?}"))?;
+        if let Err(error) = process.compile() {
+            self.last_aot_source_diagnostic = process.last_source_diagnostic().cloned();
+            return Err(format!("rust-native AOT compile failed: {error:?}"));
+        }
+        self.last_aot_source_diagnostic = None;
         Ok(process)
     }
 
-    fn compile_aot_non_engine_artifacts_from_cache(
+    fn compile_aot_non_engine_artifacts_from_process(
         &mut self,
+        mut process: AotProcess,
         request_id: u64,
     ) -> Result<DirectAotArtifactBundle, String> {
-        let process = self.compile_aot_process_from_source_cache()?;
-        self.last_state_layout = Some(process.state_layout());
         let output_dir = self
             .aot_artifact_root
             .join("non_engine")
@@ -1067,6 +1168,7 @@ impl IncrementalCompilerBackend {
 
         let object_dir = output_dir.join("objects");
         let object_paths_by_function = process.write_object_files(&object_dir)?;
+        self.last_program_snapshot = process.program_snapshot().cloned();
         let artifact_paths: Vec<String> = object_paths_by_function
             .values()
             .map(|(_, path)| path.display().to_string())
@@ -3884,9 +3986,10 @@ fn package_engine_bundle_release(
     let entry_file = resolve_self_host_aot_entry_file(project_dir, entry_file_override)?;
     let support = stage_entry_support_files(project_dir, entry_file.as_deref(), output_root)?;
     let state_layout = backend
-        .last_state_layout
+        .last_program_snapshot
         .as_ref()
-        .ok_or_else(|| "AOT state layout missing during packaging".to_string())?;
+        .map(ProgramSnapshot::state_layout)
+        .ok_or_else(|| "AOT program snapshot missing during packaging".to_string())?;
     let runtime_fields = merge_runtime_fields(state_layout, &support.runtime_fields)?;
     let mut function_aliases = vec![PackagedFunctionAlias {
         alias: "main",
@@ -4120,6 +4223,353 @@ fn aot_call_conv() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot_semantic_fingerprint(snapshot: &ProgramSnapshot) -> String {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            snapshot.source_revision(),
+            snapshot.functions(),
+            snapshot.state_layout(),
+            snapshot.literal_table(),
+            snapshot.types(),
+            snapshot.data_flow_summaries(),
+            snapshot.artifact_mappings(),
+        )
+    }
+
+    #[test]
+    fn runner_diagnostic_uses_second_file_source_span() {
+        let mut backend = IncrementalCompilerBackend::new();
+        backend.source_by_path.insert(
+            "main.stasis".to_string(),
+            "function main(): i32 { return helper(); }".to_string(),
+        );
+        backend.source_by_path.insert(
+            "dep.stasis".to_string(),
+            "\nfunction helper(): i32 { return missing(); }".to_string(),
+        );
+        let diagnostic = backend.runner_diagnostic_from_source(
+            Some(&stasis_compiler::SourceDiagnostic {
+                path: "dep.stasis".to_string(),
+                start: 1,
+                end: 9,
+                symbol: "helper".to_string(),
+                message: "unknown call target".to_string(),
+            }),
+            "fallback".to_string(),
+            Some(PathBuf::from("main.stasis")),
+        );
+        assert_eq!(diagnostic.path, Some(PathBuf::from("dep.stasis")));
+        assert_eq!(diagnostic.line, Some(2));
+        assert_eq!(diagnostic.column, Some(1));
+    }
+
+    fn assert_second_file_diagnostic(target_mode: TargetMode) {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_snapshot_diagnostic_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let main = temp_root.join("main.stasis");
+        let dependency = temp_root.join("dependency.stasis");
+        fs::write(&main, "function main(): i32 { return helper(); }\n").expect("write main");
+        fs::write(
+            &dependency,
+            "\nfunction helper(): i32 { return missing(); }\n",
+        )
+        .expect("write dependency");
+
+        let mut backend = IncrementalCompilerBackend::new();
+        let result = backend.compile(CompileRequest::new(
+            RequestId(98_001),
+            vec![main, dependency.clone()],
+            target_mode,
+        ));
+        assert_eq!(result.status, CompileStatus::Failed, "{result:?}");
+        let diagnostic = result.diagnostics.first().expect("source diagnostic");
+        assert_eq!(diagnostic.path, Some(dependency));
+        assert_eq!(diagnostic.line, Some(2));
+        assert_eq!(diagnostic.column, Some(24));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn jit_rejection_reports_imported_file_source_span() {
+        assert_second_file_diagnostic(TargetMode::JitDev);
+    }
+
+    #[test]
+    fn aot_rejection_reports_imported_file_source_span() {
+        assert_second_file_diagnostic(TargetMode::AotProd);
+    }
+
+    #[test]
+    fn rejected_jit_parse_preserves_accepted_snapshot() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_snapshot_jit_rollback_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("main.stasis");
+        fs::write(&source, "function main(): i32 { return 1; }\n").expect("write valid source");
+        let mut backend = IncrementalCompilerBackend::new();
+        assert_eq!(
+            backend
+                .compile(CompileRequest::new(
+                    RequestId(98_010),
+                    vec![source.clone()],
+                    TargetMode::JitDev
+                ))
+                .status,
+            CompileStatus::Success
+        );
+        let accepted = snapshot_semantic_fingerprint(
+            backend
+                .last_program_snapshot
+                .as_ref()
+                .expect("accepted snapshot"),
+        );
+        fs::write(&source, "function main(: i32 { return 2; }\n").expect("write invalid source");
+        assert_eq!(
+            backend
+                .compile(CompileRequest::new(
+                    RequestId(98_011),
+                    vec![source],
+                    TargetMode::JitDev
+                ))
+                .status,
+            CompileStatus::Failed
+        );
+        assert_eq!(
+            snapshot_semantic_fingerprint(
+                backend
+                    .last_program_snapshot
+                    .as_ref()
+                    .expect("preserved snapshot"),
+            ),
+            accepted
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn failed_prepared_jit_send_preserves_accepted_snapshot() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_snapshot_send_rollback_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("main.stasis");
+        fs::write(&source, "function main(): i32 { return 1; }\n").expect("write source");
+        let (live_sender, live_receiver) = std::sync::mpsc::sync_channel(1);
+        let mut backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(live_sender);
+        assert_eq!(
+            backend
+                .compile(CompileRequest::new(
+                    RequestId(98_020),
+                    vec![source.clone()],
+                    TargetMode::JitDev
+                ))
+                .status,
+            CompileStatus::Success
+        );
+        let accepted_candidate = live_receiver.recv().expect("prepared accepted baseline");
+        let accepted = snapshot_semantic_fingerprint(
+            backend
+                .last_program_snapshot
+                .as_ref()
+                .expect("accepted snapshot"),
+        );
+        let (sender, receiver) = std::sync::mpsc::sync_channel(0);
+        drop(receiver);
+        backend.prepared_jit_swap_tx = Some(sender);
+        fs::write(&source, "function main(): i32 { return 2; }\n").expect("update source");
+        let result = backend.compile(CompileRequest::new(
+            RequestId(98_021),
+            vec![source],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Failed);
+        assert_eq!(
+            snapshot_semantic_fingerprint(
+                backend
+                    .last_program_snapshot
+                    .as_ref()
+                    .expect("preserved snapshot"),
+            ),
+            accepted
+        );
+        assert_eq!(
+            accepted_candidate
+                .candidate
+                .execute_i32_noarg_by_name("main"),
+            Ok(1)
+        );
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn prepared_jit_rejection_reports_second_file_candidate_diagnostic() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_prepared_diagnostic_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let main = temp_root.join("main.stasis");
+        let dependency = temp_root.join("dependency.stasis");
+        fs::write(&main, "function main(): i32 { return helper(); }\n").expect("write main");
+        fs::write(&dependency, "\nfunction helper(): i32 { return 1; }\n")
+            .expect("write dependency");
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let mut backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(sender);
+        assert_eq!(
+            backend
+                .compile(CompileRequest::new(
+                    RequestId(98_025),
+                    vec![main.clone(), dependency.clone()],
+                    TargetMode::JitDev
+                ))
+                .status,
+            CompileStatus::Success
+        );
+        receiver.recv().expect("prepared baseline");
+        fs::write(
+            &dependency,
+            "\nfunction helper(): i32 { return missing(); }\n",
+        )
+        .expect("write invalid dependency");
+        let result = backend.compile(CompileRequest::new(
+            RequestId(98_026),
+            vec![dependency.clone()],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(result.status, CompileStatus::Failed);
+        let diagnostic = result.diagnostics.first().expect("candidate diagnostic");
+        assert_eq!(diagnostic.path, Some(dependency));
+        assert_eq!(diagnostic.line, Some(2));
+        assert_eq!(diagnostic.column, Some(24));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn aot_write_fault_preserves_accepted_snapshot_and_bundle() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_snapshot_aot_rollback_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("engine.stasis");
+        fs::write(
+            &source,
+            "function tick(): i32 { return 1; }\nfunction render(): i32 { return 2; }\n",
+        )
+        .expect("write source");
+        let mut backend = IncrementalCompilerBackend::with_aot_config(
+            AotCompileConfig::default(),
+            temp_root.join("artifacts"),
+        );
+        assert_eq!(
+            backend
+                .compile(CompileRequest::new(
+                    RequestId(98_030),
+                    vec![source.clone()],
+                    TargetMode::AotProd
+                ))
+                .status,
+            CompileStatus::Success
+        );
+        let accepted = snapshot_semantic_fingerprint(
+            backend
+                .last_program_snapshot
+                .as_ref()
+                .expect("accepted snapshot"),
+        );
+        let accepted_bundle = backend
+            .last_aot_engine_bundle
+            .as_ref()
+            .expect("accepted bundle")
+            .clone();
+        let accepted_manifest_text =
+            fs::read_to_string(&accepted_bundle.manifest_path).expect("read accepted manifest");
+        let blocked_root = temp_root.join("blocked-root");
+        fs::write(&blocked_root, "not a directory").expect("write blocking file");
+        backend.aot_artifact_root = blocked_root;
+        let result = backend.compile(CompileRequest::new(
+            RequestId(98_031),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(result.status, CompileStatus::Failed);
+        assert_eq!(
+            snapshot_semantic_fingerprint(
+                backend
+                    .last_program_snapshot
+                    .as_ref()
+                    .expect("preserved snapshot"),
+            ),
+            accepted
+        );
+        let preserved_bundle = backend
+            .last_aot_engine_bundle
+            .as_ref()
+            .expect("preserved bundle");
+        assert_eq!(preserved_bundle, &accepted_bundle);
+        assert_eq!(
+            fs::read_to_string(&preserved_bundle.manifest_path).expect("read preserved manifest"),
+            accepted_manifest_text
+        );
+        assert!(preserved_bundle
+            .object_paths_by_function
+            .values()
+            .all(|path| path.exists()));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn successful_aot_snapshot_mappings_reference_existing_objects() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_snapshot_aot_mappings_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("main.stasis");
+        fs::write(&source, "function main(): i32 { return 1; }\n").expect("write source");
+        let mut backend = IncrementalCompilerBackend::with_aot_config(
+            AotCompileConfig::default(),
+            temp_root.join("artifacts"),
+        );
+        assert_eq!(
+            backend
+                .compile(CompileRequest::new(
+                    RequestId(98_040),
+                    vec![source],
+                    TargetMode::AotProd
+                ))
+                .status,
+            CompileStatus::Success
+        );
+        let snapshot = backend
+            .last_program_snapshot
+            .as_ref()
+            .expect("AOT snapshot");
+        assert!(!snapshot.artifact_mappings().is_empty());
+        for mapping in snapshot.artifact_mappings().values() {
+            assert!(Path::new(
+                mapping
+                    .target_path
+                    .as_deref()
+                    .expect("materialized object path")
+            )
+            .exists());
+        }
+        fs::remove_dir_all(&temp_root).ok();
+    }
     #[cfg(windows)]
     use object::{Object, ObjectSection};
     #[cfg(windows)]
@@ -8243,7 +8693,11 @@ mod tests {
             .read_engine_bundle_manifest(&bundle.manifest_path)
             .expect("read manifest");
         let runtime_fields = merge_runtime_fields(
-            backend.last_state_layout.as_ref().expect("state layout"),
+            backend
+                .last_program_snapshot
+                .as_ref()
+                .expect("program snapshot")
+                .state_layout(),
             &[],
         )
         .expect("derive AOT storage fields");
@@ -8345,7 +8799,11 @@ mod tests {
             .read_engine_bundle_manifest(&bundle.manifest_path)
             .expect("read manifest");
         let runtime_fields = merge_runtime_fields(
-            backend.last_state_layout.as_ref().expect("state layout"),
+            backend
+                .last_program_snapshot
+                .as_ref()
+                .expect("program snapshot")
+                .state_layout(),
             &[],
         )
         .expect("derive AOT storage fields");
@@ -8927,12 +9385,21 @@ fn run_self_host_aot_cli_with_backend_and_options(
     backend.last_jit_engine_package = None;
     backend.last_aot_engine_bundle = None;
     backend.refresh_cached_sources(&changed_files)?;
-    let include_on_code_swap = backend.source_cache_has_function("on_code_swap");
-    let use_engine_mode_contracts =
-        backend.source_cache_has_function("tick") && backend.source_cache_has_function("render");
+    let candidate = backend.compile_aot_process_from_source_cache()?;
+    let function_entries = snapshot_function_entries(
+        candidate
+            .program_snapshot()
+            .expect("compiled self-host AOT candidate snapshot"),
+    );
+    let include_on_code_swap = function_entries
+        .iter()
+        .any(|entry| entry.name == "on_code_swap");
+    let use_engine_mode_contracts = function_entries.iter().any(|entry| entry.name == "tick")
+        && function_entries.iter().any(|entry| entry.name == "render");
 
     let mut summary = if use_engine_mode_contracts {
-        let bundle = backend.compile_aot_engine_bundle_from_cache(1, include_on_code_swap)?;
+        let bundle =
+            backend.compile_aot_engine_bundle_from_process(candidate, 1, include_on_code_swap)?;
         package_engine_bundle_release(
             backend,
             &bundle,
@@ -8941,8 +9408,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
             options.entry_file.as_deref(),
         )?
     } else {
-        let function_entries = backend.collect_cached_function_entries()?;
-        let compile = backend.compile_aot_non_engine_artifacts_from_cache(1)?;
+        let compile = backend.compile_aot_non_engine_artifacts_from_process(candidate, 1)?;
         let mut seen_paths_by_name: BTreeMap<String, String> = BTreeMap::new();
         for entry in &function_entries {
             if !compile.object_paths_by_function.contains_key(&entry.name) {

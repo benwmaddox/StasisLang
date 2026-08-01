@@ -1,5 +1,6 @@
 use crate::backend::emit::*;
-use crate::backend::state_layout::{build_state_layout, is_named_scalar_state_path, StateLayout};
+use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramSnapshot};
+use crate::backend::state_layout::{is_named_scalar_state_path, StateLayout};
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{
@@ -29,7 +30,7 @@ pub struct AotArtifact {
     pub object_bytes_len: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AotProcess {
     compiler: Compiler,
     import_base_dir: Option<PathBuf>,
@@ -40,7 +41,8 @@ pub struct AotProcess {
     object_bytes: Vec<Vec<u8>>,
     string_literals: BTreeMap<i32, String>,
     collection_max_lengths: BTreeMap<String, i32>,
-    compile_analysis_cache: Option<CompileAnalysisCache>,
+    program_snapshot: Option<ProgramSnapshot>,
+    last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
     required_emit_roots: Vec<String>,
 }
 
@@ -68,7 +70,8 @@ impl AotProcess {
             object_bytes: Vec::new(),
             string_literals: BTreeMap::new(),
             collection_max_lengths: BTreeMap::new(),
-            compile_analysis_cache: None,
+            program_snapshot: None,
+            last_failed_source_diagnostic: None,
             required_emit_roots: Vec::new(),
         }
     }
@@ -93,6 +96,36 @@ impl AotProcess {
     }
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
+        // Keep accepted object buffers in place.  A full `self.clone()` duplicates every
+        // object blob before we know whether a candidate will be rejected.
+        let accepted_compiler = self.compiler.clone();
+        let accepted_next_object_index = self.next_object_index;
+        let accepted_artifacts = self.artifacts.clone();
+        let accepted_object_bytes_len = self.object_bytes.len();
+        let accepted_string_literals = self.string_literals.clone();
+        let accepted_collection_max_lengths = self.collection_max_lengths.clone();
+        let accepted_program_snapshot = self.program_snapshot.clone();
+        match self.compile_internal() {
+            Ok(report) => {
+                self.last_failed_source_diagnostic = None;
+                Ok(report)
+            }
+            Err(error) => {
+                let diagnostic = self.compiler.last_source_diagnostic().cloned();
+                self.compiler = accepted_compiler;
+                self.next_object_index = accepted_next_object_index;
+                self.artifacts = accepted_artifacts;
+                self.object_bytes.truncate(accepted_object_bytes_len);
+                self.string_literals = accepted_string_literals;
+                self.collection_max_lengths = accepted_collection_max_lengths;
+                self.program_snapshot = accepted_program_snapshot;
+                self.last_failed_source_diagnostic = diagnostic;
+                Err(error)
+            }
+        }
+    }
+
+    fn compile_internal(&mut self) -> CompileResult<CompileReport> {
         self.load_import_graph_sources()
             .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
@@ -106,12 +139,12 @@ impl AotProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
         let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
-        let cache_miss = self
-            .compile_analysis_cache
+        let snapshot_miss = self
+            .program_snapshot
             .as_ref()
-            .is_none_or(|cache| cache.files_fingerprint != files_fingerprint);
+            .is_none_or(|snapshot| snapshot.source_revision() != files_fingerprint);
         let mut force_reemit_reachable = false;
-        if cache_miss {
+        if snapshot_miss {
             let next_cache = build_compile_analysis_cache(
                 self.compiler.files(),
                 self.compiler.functions(),
@@ -120,25 +153,31 @@ impl AotProcess {
                 resolve_preferred_extern_call_signatures,
             )
             .map_err(crate::compiler::CompileError::Backend)?;
-            if let Some(previous_cache) = self.compile_analysis_cache.as_ref() {
+            if let Some(previous_snapshot) = self.program_snapshot.as_ref() {
                 force_reemit_reachable =
-                    compile_analysis_requires_reemit(previous_cache, &next_cache);
+                    compile_analysis_requires_reemit(&previous_snapshot.analysis, &next_cache);
             }
-            self.compile_analysis_cache = Some(next_cache);
+            self.program_snapshot = Some(
+                ProgramSnapshot::build(
+                    files_fingerprint,
+                    self.compiler.files(),
+                    self.compiler.functions(),
+                    &analysis_type_table,
+                    self.compiler.function_data_flow_summaries(),
+                    &self.required_emit_roots,
+                    next_cache,
+                )
+                .map_err(crate::compiler::CompileError::Backend)?,
+            );
         }
         *self.compiler.types_mut() = analysis_type_table.clone();
-        let analysis = self.compile_analysis_cache.as_ref().ok_or_else(|| {
+        let snapshot = self.program_snapshot.as_ref().ok_or_else(|| {
             crate::compiler::CompileError::Invariant(
-                "aot compile analysis cache missing after refresh".to_string(),
+                "aot program snapshot missing after refresh".to_string(),
             )
         })?;
-        self.string_literals.clear();
-        for constant in analysis.constant_values.values() {
-            if let ConstantValue::String { value, .. } = constant {
-                record_string_literal(&mut self.string_literals, value)
-                    .map_err(crate::compiler::CompileError::Backend)?;
-            }
-        }
+        let analysis = &snapshot.analysis;
+        self.string_literals = snapshot.literal_table().clone();
         self.collection_max_lengths =
             collect_fixed_collection_max_lengths(&analysis.global_path_types, &analysis_type_table)
                 .map_err(crate::compiler::CompileError::Backend)?;
@@ -217,26 +256,39 @@ impl AotProcess {
             },
         )?;
 
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
-            self.compiler.functions(),
-            &self.required_emit_roots,
-        );
+        let reachable = snapshot.reachable_function_ids().clone();
         artifacts.retain(|artifact| reachable.contains(&artifact.function_id));
         compact_active_artifact_storage(artifacts, object_bytes);
         self.next_object_index = u32::try_from(self.object_bytes.len()).unwrap_or(u32::MAX);
+        if let Some(snapshot) = self.program_snapshot.as_mut() {
+            snapshot.set_artifact_mappings(self.artifacts.iter().map(|artifact| {
+                ProgramArtifactMapping {
+                    function_id: artifact.function_id,
+                    symbol: artifact.symbol_name.clone(),
+                    target_path: None,
+                    code_pointer: None,
+                }
+            }));
+        }
         Ok(CompileReport { index, emit })
     }
 
     pub fn state_layout(&self) -> StateLayout {
-        self.compile_analysis_cache
+        self.program_snapshot
             .as_ref()
-            .map_or_else(StateLayout::default, |analysis| {
-                build_state_layout(
-                    &analysis.global_path_types,
-                    &analysis.collection_infos,
-                    self.compiler.types(),
-                )
+            .map_or_else(StateLayout::default, |snapshot| {
+                snapshot.state_layout().clone()
             })
+    }
+
+    pub fn program_snapshot(&self) -> Option<&ProgramSnapshot> {
+        self.program_snapshot.as_ref()
+    }
+
+    pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
+        self.last_failed_source_diagnostic
+            .as_ref()
+            .or_else(|| self.compiler.last_source_diagnostic())
     }
 
     fn load_import_graph_sources(&mut self) -> Result<(), String> {
@@ -646,7 +698,7 @@ impl AotProcess {
     }
 
     pub fn write_engine_bundle(
-        &self,
+        &mut self,
         entrypoints: &EngineEntrypoints,
         output_dir: &Path,
     ) -> Result<AotEngineBundle, String> {
@@ -729,6 +781,22 @@ impl AotProcess {
             )
         })?;
 
+        if let Some(snapshot) = self.program_snapshot.as_mut() {
+            let paths = self
+                .artifacts
+                .iter()
+                .filter_map(|artifact| {
+                    let function = self
+                        .compiler
+                        .functions()
+                        .iter()
+                        .find(|function| function.id == artifact.function_id)?;
+                    let path = object_paths_by_function.get(&function.name)?;
+                    Some((artifact.function_id, path.display().to_string()))
+                })
+                .collect();
+            snapshot.set_artifact_paths(&paths);
+        }
         Ok(AotEngineBundle {
             output_dir: output_dir.to_path_buf(),
             manifest_path,
@@ -738,7 +806,7 @@ impl AotProcess {
     }
 
     pub fn write_object_files(
-        &self,
+        &mut self,
         output_dir: &Path,
     ) -> Result<BTreeMap<String, (String, PathBuf)>, String> {
         fs::create_dir_all(output_dir).map_err(|error| {
@@ -788,6 +856,22 @@ impl AotProcess {
                 function.name.clone(),
                 (artifact.symbol_name.clone(), object_path),
             );
+        }
+        if let Some(snapshot) = self.program_snapshot.as_mut() {
+            let paths = self
+                .artifacts
+                .iter()
+                .filter_map(|artifact| {
+                    let function = self
+                        .compiler
+                        .functions()
+                        .iter()
+                        .find(|function| function.id == artifact.function_id)?;
+                    let (_, path) = out.get(&function.name)?;
+                    Some((artifact.function_id, path.display().to_string()))
+                })
+                .collect();
+            snapshot.set_artifact_paths(&paths);
         }
         Ok(out)
     }
@@ -1355,6 +1439,59 @@ mod tests {
 
     static CLIF_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn aot_failed_candidate_preserves_accepted_snapshot_and_artifacts() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "global score: i32; function main(): i32 { return score; }",
+        );
+        process.compile().expect("initial compile");
+        let snapshot = process
+            .program_snapshot()
+            .expect("accepted snapshot")
+            .clone();
+        let artifacts = process.artifacts.clone();
+        let object_bytes = process.object_bytes.clone();
+
+        process.upsert_file(
+            "main.stasis",
+            "global score: i32; function main(): i32 { return missing(); }",
+        );
+        process.compile().expect_err("candidate must fail");
+
+        let accepted = process.program_snapshot().expect("preserved snapshot");
+        assert_eq!(accepted.source_revision(), snapshot.source_revision());
+        assert_eq!(accepted.functions(), snapshot.functions());
+        assert_eq!(accepted.layout_digest(), snapshot.layout_digest());
+        assert_eq!(accepted.artifact_mappings(), snapshot.artifact_mappings());
+        assert_eq!(process.artifacts, artifacts);
+        assert_eq!(process.object_bytes, object_bytes);
+    }
+
+    #[test]
+    fn aot_transaction_restores_accepted_object_buffers_without_cloning() {
+        let mut process = AotProcess::new();
+        process.upsert_file("main.stasis", "function main(): i32 { return 1; }");
+        process.compile().expect("initial compile");
+        let addresses = process
+            .object_bytes
+            .iter()
+            .map(|bytes| bytes.as_ptr())
+            .collect::<Vec<_>>();
+        process.upsert_file("main.stasis", "function main(): i32 { return missing(); }");
+        process.compile().expect_err("reject candidate");
+        assert_eq!(
+            process
+                .object_bytes
+                .iter()
+                .map(|bytes| bytes.as_ptr())
+                .collect::<Vec<_>>(),
+            addresses,
+            "rejected AOT candidates must restore the original object buffers by move, not clone"
+        );
+    }
+
     struct ParityCorpusCase {
         label: &'static str,
         source: &'static str,
@@ -1562,10 +1699,11 @@ mod tests {
         aot.upsert_file("sample.stasis", case.source);
         let captured_clif = capture_aot_clif_by_function(&mut aot);
 
-        let analysis = aot
-            .compile_analysis_cache
+        let analysis = &aot
+            .program_snapshot
             .as_ref()
-            .expect("compile analysis cache");
+            .expect("program snapshot")
+            .analysis;
         let resolved_externs: BTreeMap<_, _> = analysis
             .resolved_extern_signatures
             .iter()
@@ -1877,10 +2015,11 @@ mod tests {
         );
 
         process.compile().expect("compile");
-        let analysis = process
-            .compile_analysis_cache
+        let analysis = &process
+            .program_snapshot
             .as_ref()
-            .expect("compile analysis cache");
+            .expect("program snapshot")
+            .analysis;
         assert_eq!(analysis.resolved_extern_signatures.len(), 1);
         assert_eq!(
             analysis.resolved_extern_signatures[0].symbol,
@@ -1897,10 +2036,11 @@ mod tests {
         );
 
         process.compile().expect("compile");
-        let analysis = process
-            .compile_analysis_cache
+        let analysis = &process
+            .program_snapshot
             .as_ref()
-            .expect("compile analysis cache");
+            .expect("program snapshot")
+            .analysis;
         assert_eq!(analysis.resolved_extern_signatures.len(), 1);
         assert_eq!(
             analysis.resolved_extern_signatures[0].symbol,
@@ -1917,10 +2057,11 @@ mod tests {
         );
 
         process.compile().expect("compile");
-        let analysis = process
-            .compile_analysis_cache
+        let analysis = &process
+            .program_snapshot
             .as_ref()
-            .expect("compile analysis cache");
+            .expect("program snapshot")
+            .analysis;
         assert_eq!(analysis.resolved_extern_signatures.len(), 2);
         assert_eq!(
             analysis.resolved_extern_signatures[0].symbol,
@@ -2227,10 +2368,11 @@ mod tests {
         );
         process.compile().expect("compile");
 
-        let analysis = process
-            .compile_analysis_cache
+        let analysis = &process
+            .program_snapshot
             .as_ref()
-            .expect("compile analysis cache");
+            .expect("program snapshot")
+            .analysis;
         let resolved: BTreeMap<_, _> = analysis
             .resolved_extern_signatures
             .iter()
@@ -2318,6 +2460,43 @@ mod tests {
             "unexpected message: {error}"
         );
         let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn program_snapshot_multifile_jit_and_aot_executable_parity() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let main = include_str!("../../../../tests/program_snapshot_parity_main.stasis");
+        let helper = include_str!("../../../../tests/program_snapshot_parity_helper.stasis");
+        let mut jit = crate::backend::jit::JitProcess::new();
+        jit.upsert_file("main.stasis", main);
+        jit.upsert_file("helper.stasis", helper);
+        jit.compile().expect("compile JIT fixture");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(7));
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", main);
+        aot.upsert_file("helper.stasis", helper);
+        aot.compile().expect("compile AOT fixture");
+        assert_eq!(
+            jit.program_snapshot().expect("JIT snapshot").functions(),
+            aot.program_snapshot().expect("AOT snapshot").functions()
+        );
+        assert_eq!(
+            jit.program_snapshot()
+                .expect("JIT snapshot")
+                .layout_digest(),
+            aot.program_snapshot()
+                .expect("AOT snapshot")
+                .layout_digest()
+        );
+        if let Some(exit_code) =
+            run_linked_i32_noarg_fixture(&aot, "main", "snapshot_parity", &link_config)
+        {
+            assert_eq!(exit_code, 7);
+        }
     }
 
     #[cfg(windows)]

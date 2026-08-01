@@ -5,17 +5,14 @@ use crate::backend::emit::{
 use crate::backend::patch_plan::{
     capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReasonChain,
 };
-use crate::backend::state_layout::{
-    build_state_layout, build_state_memory_report, is_named_scalar_state_path,
-};
+use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramSnapshot};
+use crate::backend::state_layout::{build_state_memory_report, is_named_scalar_state_path};
 use crate::backend::state_query::{
     parse_state_query, BinaryOperator, ScalarExpression, StateQuery, StateValueReference,
 };
 use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::indexer::hash_text;
-use crate::frontend::lexer::{lex, TokenKind};
-use crate::frontend::parser::parse_string_literal_text;
 use crate::frontend::types::{
     TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
     TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
@@ -389,8 +386,8 @@ pub struct JitProcess {
     runtime_symbol_cache: BTreeMap<String, usize>,
     source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
     import_parse_cache: BTreeMap<String, ImportParseCacheEntry>,
-    compile_analysis_cache: Option<CompileAnalysisCache>,
-    active_compile_analysis_cache: Option<CompileAnalysisCache>,
+    program_snapshot: Option<ProgramSnapshot>,
+    active_program_snapshot: Option<ProgramSnapshot>,
     generation_metadata: Option<JitGenerationMetadata>,
     accepted_program: Option<AcceptedProgram>,
     accepted_lowering_references: BTreeMap<FunctionKey, FunctionLoweringReferences>,
@@ -496,8 +493,8 @@ impl JitProcess {
             runtime_symbol_cache: BTreeMap::new(),
             source_disk_probe_cache: BTreeMap::new(),
             import_parse_cache: BTreeMap::new(),
-            compile_analysis_cache: None,
-            active_compile_analysis_cache: None,
+            program_snapshot: None,
+            active_program_snapshot: None,
             generation_metadata: None,
             accepted_program: None,
             accepted_lowering_references: BTreeMap::new(),
@@ -523,8 +520,8 @@ impl JitProcess {
         candidate.active_compiler = self.active_compiler.clone();
         candidate.artifacts = self.artifacts.clone();
         candidate.modules = self.modules.clone();
-        candidate.compile_analysis_cache = self.compile_analysis_cache.clone();
-        candidate.active_compile_analysis_cache = self.active_compile_analysis_cache.clone();
+        candidate.program_snapshot = self.program_snapshot.clone();
+        candidate.active_program_snapshot = self.active_program_snapshot.clone();
         candidate.generation_metadata = self.generation_metadata.clone();
         candidate.accepted_program = self.accepted_program.clone();
         candidate.accepted_lowering_references = self.accepted_lowering_references.clone();
@@ -610,7 +607,7 @@ impl JitProcess {
 
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
         let previous_compiler = self.compiler.clone();
-        let previous_analysis = self.compile_analysis_cache.clone();
+        let previous_snapshot = self.program_snapshot.clone();
         let previous_artifacts = self.artifacts.clone();
         let previous_metadata = self.generation_metadata.clone();
         let previous_accepted_program = self.accepted_program.clone();
@@ -618,7 +615,7 @@ impl JitProcess {
         let previous_lowering_contracts = self.accepted_lowering_contracts.clone();
         let previous_literals = self.staged_string_literals.clone();
         let previous_active_compiler = self.active_compiler.clone();
-        let previous_active_analysis = self.active_compile_analysis_cache.clone();
+        let previous_active_snapshot = self.active_program_snapshot.clone();
         let previous_active_literals = self.active_string_literals.clone();
         let previous_module_count = self.modules.len();
         let report = self.compile_staged()?;
@@ -627,7 +624,7 @@ impl JitProcess {
             Err(error) => {
                 self.modules.truncate(previous_module_count);
                 self.compiler = previous_compiler;
-                self.compile_analysis_cache = previous_analysis;
+                self.program_snapshot = previous_snapshot;
                 self.artifacts = previous_artifacts;
                 self.generation_metadata = previous_metadata;
                 self.accepted_program = previous_accepted_program;
@@ -635,7 +632,7 @@ impl JitProcess {
                 self.accepted_lowering_contracts = previous_lowering_contracts;
                 self.staged_string_literals = previous_literals;
                 self.active_compiler = previous_active_compiler;
-                self.active_compile_analysis_cache = previous_active_analysis;
+                self.active_program_snapshot = previous_active_snapshot;
                 self.active_string_literals = previous_active_literals;
                 self.rebuild_artifact_index();
                 Err(crate::compiler::CompileError::Backend(error))
@@ -649,7 +646,7 @@ impl JitProcess {
             Ok(report) => {
                 self.last_failed_source_diagnostic = None;
                 self.active_compiler = Some(self.compiler.clone());
-                self.active_compile_analysis_cache = self.compile_analysis_cache.clone();
+                self.active_program_snapshot = self.program_snapshot.clone();
                 self.active_string_literals = self.staged_string_literals.clone();
                 Ok(report)
             }
@@ -697,7 +694,7 @@ impl JitProcess {
         for file in pending_files {
             self.compiler.upsert_file(file.path, file.content);
         }
-        self.compile_analysis_cache = self.active_compile_analysis_cache.clone();
+        self.program_snapshot = self.active_program_snapshot.clone();
         self.staged_string_literals = self.active_string_literals.clone();
     }
 
@@ -715,11 +712,11 @@ impl JitProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
         let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
-        let cache_miss = self
-            .compile_analysis_cache
+        let snapshot_miss = self
+            .program_snapshot
             .as_ref()
-            .is_none_or(|cache| cache.files_fingerprint != files_fingerprint);
-        if cache_miss {
+            .is_none_or(|snapshot| snapshot.source_revision() != files_fingerprint);
+        if snapshot_miss {
             let extern_signatures = collect_supported_extern_call_signatures(
                 self.compiler.files(),
                 &mut analysis_type_table,
@@ -737,20 +734,27 @@ impl JitProcess {
                 extern_symbol_addresses,
             )
             .map_err(crate::compiler::CompileError::Backend)?;
-            self.compile_analysis_cache = Some(next_cache);
+            self.program_snapshot = Some(
+                ProgramSnapshot::build(
+                    files_fingerprint,
+                    self.compiler.files(),
+                    self.compiler.functions(),
+                    &analysis_type_table,
+                    self.compiler.function_data_flow_summaries(),
+                    &self.required_emit_roots,
+                    next_cache,
+                )
+                .map_err(crate::compiler::CompileError::Backend)?,
+            );
         }
         *self.compiler.types_mut() = analysis_type_table.clone();
-        let analysis = self.compile_analysis_cache.clone().ok_or_else(|| {
+        let snapshot = self.program_snapshot.clone().ok_or_else(|| {
             crate::compiler::CompileError::Invariant(
-                "jit compile analysis cache missing after refresh".to_string(),
+                "jit program snapshot missing after refresh".to_string(),
             )
         })?;
-        let reachable_ids: Vec<_> = crate::backend::reachability::compute_reachable_function_ids(
-            self.compiler.functions(),
-            &self.required_emit_roots,
-        )
-        .into_iter()
-        .collect();
+        let analysis = snapshot.analysis.clone();
+        let reachable_ids: Vec<_> = snapshot.reachable_function_ids().iter().copied().collect();
         let function_keys_by_id: BTreeMap<FunctionId, FunctionKey> = self
             .compiler
             .functions()
@@ -1002,16 +1006,11 @@ impl JitProcess {
                 Ok(artifact)
             })
             .collect::<CompileResult<Vec<_>>>()?;
-        let state_layout = build_state_layout(
-            &analysis.global_path_types,
-            &analysis.collection_infos,
-            self.compiler.types(),
+        let layout_hash = u64::from_le_bytes(
+            snapshot.layout_digest()[..8]
+                .try_into()
+                .expect("layout digest prefix has eight bytes"),
         );
-        let layout_hash = hash_text(&serde_json::to_string(&state_layout).map_err(|error| {
-            crate::compiler::CompileError::Invariant(format!(
-                "failed to serialize JIT generation layout: {error}"
-            ))
-        })?);
         let host_export_signatures = self
             .compiler
             .functions()
@@ -1079,8 +1078,11 @@ impl JitProcess {
         };
         stasis_dynload::finish_jit_string_literal_staging()
             .map_err(crate::compiler::CompileError::Backend)?;
-        let staged_string_literals = collect_current_string_literals(&self.compiler)
-            .map_err(crate::compiler::CompileError::Backend)?;
+        let staged_string_literals = snapshot
+            .literal_table()
+            .iter()
+            .map(|(id, value)| (*id, value.clone()))
+            .collect();
         let accepted_program = capture_accepted_program(
             self.compiler.functions(),
             self.compiler.files(),
@@ -1088,6 +1090,16 @@ impl JitProcess {
         )
         .map_err(crate::compiler::CompileError::Backend)?;
         self.artifacts = staged_artifacts;
+        if let Some(snapshot) = self.program_snapshot.as_mut() {
+            snapshot.set_artifact_mappings(self.artifacts.iter().map(|artifact| {
+                ProgramArtifactMapping {
+                    function_id: artifact.function_id,
+                    symbol: artifact.function_key.display_name(),
+                    target_path: None,
+                    code_pointer: Some(artifact.code_ptr),
+                }
+            }));
+        }
         if let Some(module) = staged_module {
             self.modules.push(Arc::new(JitArena {
                 _module: Mutex::new(module),
@@ -1106,6 +1118,10 @@ impl JitProcess {
 
     pub fn artifacts(&self) -> &[JitArtifact] {
         &self.artifacts
+    }
+
+    pub fn program_snapshot(&self) -> Option<&ProgramSnapshot> {
+        self.program_snapshot.as_ref()
     }
 
     pub fn generation_metadata(&self) -> Option<&JitGenerationMetadata> {
@@ -1138,10 +1154,12 @@ impl JitProcess {
     }
 
     pub fn activate_staged_runtime(&self) -> Result<(), String> {
-        let analysis = self
-            .compile_analysis_cache
+        let analysis = &self
+            .program_snapshot
             .as_ref()
-            .ok_or_else(|| "cannot activate an uncompiled JIT process".to_string())?;
+            .ok_or_else(|| "cannot activate an uncompiled JIT process".to_string())?
+            .analysis
+            .clone();
         build_direct_storage_bindings(
             &analysis.global_path_types,
             &analysis.collection_infos,
@@ -1222,15 +1240,16 @@ impl JitProcess {
     }
 
     pub fn has_global_path(&self, path: &str) -> bool {
-        self.compile_analysis_cache
+        self.program_snapshot
             .as_ref()
-            .is_some_and(|analysis| analysis.global_path_types.contains_key(path))
+            .is_some_and(|snapshot| snapshot.analysis.global_path_types.contains_key(path))
     }
 
     pub fn global_scalar_type(&self, path: &str) -> Option<&'static str> {
         let type_id = self
-            .compile_analysis_cache
+            .program_snapshot
             .as_ref()?
+            .analysis
             .global_path_types
             .get(path)?;
         scalar_type_name(*type_id)
@@ -1238,14 +1257,15 @@ impl JitProcess {
 
     pub fn global_binding_type(&self, path: &str) -> Option<&'static str> {
         let type_id = *self
-            .compile_analysis_cache
+            .program_snapshot
             .as_ref()?
+            .analysis
             .global_path_types
             .get(path)?;
         if let Some(type_name) = scalar_type_name(type_id) {
             return Some(type_name);
         }
-        let type_table = self.compiler.types();
+        let type_table = self.program_snapshot.as_ref()?.types();
         match type_table.type_info(type_id)?.category {
             TypeCategory::AsciiFixed
             | TypeCategory::AsciiView
@@ -1260,16 +1280,21 @@ impl JitProcess {
 
     pub fn global_binding_capacity(&self, path: &str) -> Option<i32> {
         let type_id = *self
-            .compile_analysis_cache
+            .program_snapshot
             .as_ref()?
+            .analysis
             .global_path_types
             .get(path)?;
-        self.compiler.types().fixed_collection_len(type_id)
+        self.program_snapshot
+            .as_ref()?
+            .types()
+            .fixed_collection_len(type_id)
     }
 
     pub fn global_collection_capacity(&self, path: &str) -> Option<i32> {
-        self.compile_analysis_cache
+        self.program_snapshot
             .as_ref()?
+            .analysis
             .collection_infos
             .get(path)
             .map(|info| info.len)
@@ -1277,8 +1302,9 @@ impl JitProcess {
 
     pub fn global_collection_field_type(&self, path: &str, field: &str) -> Option<&'static str> {
         let type_id = self
-            .compile_analysis_cache
+            .program_snapshot
             .as_ref()?
+            .analysis
             .collection_infos
             .get(path)?
             .field_types
@@ -1287,9 +1313,10 @@ impl JitProcess {
     }
 
     pub fn global_scalar_paths(&self) -> Vec<(String, &'static str)> {
-        let Some(analysis) = self.compile_analysis_cache.as_ref() else {
+        let Some(snapshot) = self.program_snapshot.as_ref() else {
             return Vec::new();
         };
+        let analysis = &snapshot.analysis;
         analysis
             .global_path_types
             .iter()
@@ -1300,14 +1327,10 @@ impl JitProcess {
     }
 
     pub fn state_layout(&self) -> JitStateLayout {
-        self.compile_analysis_cache
+        self.program_snapshot
             .as_ref()
-            .map_or_else(JitStateLayout::default, |analysis| {
-                build_state_layout(
-                    &analysis.global_path_types,
-                    &analysis.collection_infos,
-                    self.compiler.types(),
-                )
+            .map_or_else(JitStateLayout::default, |snapshot| {
+                snapshot.state_layout().clone()
             })
     }
 
@@ -1722,30 +1745,29 @@ impl JitProcess {
     }
 
     fn global_path_type(&self, path: &str) -> Result<u16, String> {
-        self.compile_analysis_cache
+        self.program_snapshot
             .as_ref()
-            .and_then(|analysis| analysis.global_path_types.get(path).copied())
+            .and_then(|snapshot| snapshot.analysis.global_path_types.get(path).copied())
             .ok_or_else(|| format!("global path '{path}' was not found in compiler metadata"))
     }
 
     fn is_named_i32_state_scalar(&self, path: &str, type_id: u16) -> bool {
-        self.compile_analysis_cache
-            .as_ref()
-            .is_some_and(|analysis| {
-                is_named_scalar_state_path(
-                    path,
-                    type_id,
-                    &analysis.global_path_types,
-                    self.compiler.types(),
-                )
-            })
+        self.program_snapshot.as_ref().is_some_and(|snapshot| {
+            is_named_scalar_state_path(
+                path,
+                type_id,
+                &snapshot.analysis.global_path_types,
+                snapshot.types(),
+            )
+        })
     }
 
     fn global_collection_value_type(&self, path: &str, field: &str) -> Result<(u16, i32), String> {
-        let analysis = self
-            .compile_analysis_cache
+        let analysis = &self
+            .program_snapshot
             .as_ref()
-            .ok_or_else(|| "JIT collection metadata is unavailable".to_string())?;
+            .ok_or_else(|| "JIT collection metadata is unavailable".to_string())?
+            .analysis;
         if let Some(info) = analysis.collection_infos.get(path) {
             let type_id = if field.is_empty() {
                 info.element_type
@@ -1762,7 +1784,12 @@ impl JitProcess {
                 let type_id = analysis
                     .global_path_types
                     .get(path)
-                    .and_then(|type_id| self.compiler.types().indexed_element_type_id(*type_id))
+                    .and_then(|type_id| {
+                        self.program_snapshot
+                            .as_ref()?
+                            .types()
+                            .indexed_element_type_id(*type_id)
+                    })
                     .ok_or_else(|| format!("global text path '{path}' has no payload type"))?;
                 return Ok((type_id, capacity));
             }
@@ -1772,23 +1799,41 @@ impl JitProcess {
 
     fn global_fixed_text_capacity(&self, path: &str) -> Option<i32> {
         let type_id = self
-            .compile_analysis_cache
+            .program_snapshot
             .as_ref()?
+            .analysis
             .global_path_types
             .get(path)?;
-        let category = self.compiler.types().type_info(*type_id)?.category;
+        let category = self
+            .program_snapshot
+            .as_ref()?
+            .types()
+            .type_info(*type_id)?
+            .category;
         matches!(category, TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed)
-            .then(|| self.compiler.types().fixed_collection_len(*type_id))
+            .then(|| {
+                self.program_snapshot
+                    .as_ref()?
+                    .types()
+                    .fixed_collection_len(*type_id)
+            })
             .flatten()
     }
 
     pub fn global_fixed_text_encoding(&self, path: &str) -> Option<&'static str> {
         let type_id = self
-            .compile_analysis_cache
+            .program_snapshot
             .as_ref()?
+            .analysis
             .global_path_types
             .get(path)?;
-        match self.compiler.types().type_info(*type_id)?.category {
+        match self
+            .program_snapshot
+            .as_ref()?
+            .types()
+            .type_info(*type_id)?
+            .category
+        {
             TypeCategory::AsciiFixed => Some("ascii"),
             TypeCategory::Utf8Fixed => Some("utf8"),
             _ => None,
@@ -2566,29 +2611,6 @@ fn storage_kind_bytes(kind: stasis_dynload::JitStorageKind) -> u8 {
         stasis_dynload::JitStorageKind::I32 | stasis_dynload::JitStorageKind::F32 => 4,
         stasis_dynload::JitStorageKind::F64 => 8,
     }
-}
-
-fn collect_current_string_literals(compiler: &Compiler) -> Result<HashMap<i32, String>, String> {
-    let mut literals = HashMap::new();
-    for file in compiler.files() {
-        for token in lex(&file.content)? {
-            if token.kind != TokenKind::StringLiteral {
-                continue;
-            }
-            let value = parse_string_literal_text(&file.content[token.start..token.end])?;
-            let id = crate::backend::emit::hash_string_literal(&value);
-            if let Some(previous) = literals.get(&id) {
-                if previous != &value {
-                    return Err(format!(
-                        "JIT string literal hash collision for id {id}: '{previous}' vs '{value}'"
-                    ));
-                }
-            } else {
-                literals.insert(id, value);
-            }
-        }
-    }
-    Ok(literals)
 }
 
 impl Default for JitProcess {
@@ -6409,6 +6431,10 @@ mod tests {
             .generation_metadata()
             .expect("initial generation metadata")
             .clone();
+        let first_snapshot = process
+            .program_snapshot()
+            .expect("initial program snapshot")
+            .clone();
         let first_main_ptr = process
             .symbol_code_ptrs()
             .get("main")
@@ -6446,6 +6472,14 @@ mod tests {
             process.generation_metadata(),
             Some(&first_metadata),
             "a failed staged generation must not publish metadata"
+        );
+        assert_eq!(
+            process
+                .program_snapshot()
+                .expect("preserved program snapshot")
+                .layout_digest(),
+            first_snapshot.layout_digest(),
+            "a failed candidate must not publish state metadata"
         );
         assert_eq!(
             process
@@ -6550,7 +6584,7 @@ mod tests {
     }
 
     #[test]
-    fn jit_process_keeps_compile_analysis_cache_for_unchanged_sources() {
+    fn jit_process_keeps_program_snapshot_for_unchanged_sources() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
@@ -6559,26 +6593,26 @@ mod tests {
 
         process.compile().expect("first compile");
         let first_fingerprint = process
-            .compile_analysis_cache
+            .program_snapshot
             .as_ref()
-            .expect("analysis cache after first compile")
-            .files_fingerprint;
+            .expect("snapshot after first compile")
+            .source_revision();
 
         process.compile().expect("second compile");
         let second_fingerprint = process
-            .compile_analysis_cache
+            .program_snapshot
             .as_ref()
-            .expect("analysis cache after second compile")
-            .files_fingerprint;
+            .expect("snapshot after second compile")
+            .source_revision();
 
         assert_eq!(
             first_fingerprint, second_fingerprint,
-            "unchanged sources should keep the same compile-analysis cache key"
+            "unchanged sources should keep the same snapshot revision"
         );
     }
 
     #[test]
-    fn jit_process_rebuilds_compile_analysis_cache_when_dependency_changes() {
+    fn jit_process_rebuilds_program_snapshot_when_dependency_changes() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "main.stasis",
@@ -6594,10 +6628,10 @@ mod tests {
             11
         );
         let first_fingerprint = process
-            .compile_analysis_cache
+            .program_snapshot
             .as_ref()
-            .expect("analysis cache after first compile")
-            .files_fingerprint;
+            .expect("snapshot after first compile")
+            .source_revision();
 
         process.upsert_file("stdlib.stasis", "function helper(): i32 { return 27; }\n");
         process.compile().expect("second compile");
@@ -6608,10 +6642,10 @@ mod tests {
             27
         );
         let second_fingerprint = process
-            .compile_analysis_cache
+            .program_snapshot
             .as_ref()
-            .expect("analysis cache after second compile")
-            .files_fingerprint;
+            .expect("snapshot after second compile")
+            .source_revision();
 
         assert_ne!(
             first_fingerprint, second_fingerprint,

@@ -118,3 +118,12 @@
 - Good: pure layout/contrast policies made adaptive and accessibility decisions fast to test without an emulator.
 - Bad: the first broad Cargo validation exhausted the host drive and hit a Windows PDB linker limit even though this slice changes only Android Java/resources.
 - Adjustment: keep Android UI slices on the bounded Android/JVM/APK gates first, then attempt the full Cargo gate only with verified workspace capacity.
+
+## 2026-08-01
+
+- Maddox #180: introduced immutable compiler-owned `ProgramSnapshot` shared by JIT, AOT, runner-facing metadata, and app packaging. The snapshot is the canonical state-layout digest owner; target code pointers/object paths are non-semantic artifact mappings.
+- Verification: ProgramSnapshot 12/12, state layout 5/5, JIT 178/178, AOT 46/47 runnable plus 1 ignored with the Application Control-blocked parity case passing on isolated retry, Workshop 32/32, app compiler backend 84/84 plus 6 ignored benchmarks, Android bridge 48/48 plus 1 ignored, repository Python checks 29/29, workspace check, Windows launch acceptance, formatting, and diff checks.
+- Theory gained: one accepted semantic snapshot can safely outlive failed candidates because target artifacts are attached metadata, not an alternate source of program truth. The matching multi-file JIT/AOT execution and rollback tests support this; an adjacent prediction is that new tooling views can consume snapshot/source-item records without adding another source scanner.
+- Good: moving the existing analysis cache behind the snapshot retained one-pass lowering data while the same compiler-owned records replaced app and Workshop reparsing.
+- Bad: transaction boundaries were initially incomplete around prepared JIT delivery and AOT object buffers, so rejected candidates could lose precise diagnostics or invite expensive rollback cloning.
+- Adjustment: every future snapshot consumer must test successful publication, post-mutation rejection, retained diagnostics, and preservation of the complete previously accepted semantic and artifact state.

@@ -5,11 +5,9 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::compiler::source_workshop_items;
 use crate::frontend::lexer::{lex, Token, TokenKind};
-use crate::frontend::parser::{
-    parse_top_level_functions, parse_top_level_struct_definitions, parse_top_level_type_layout,
-    parse_typed_local_bindings,
-};
+use crate::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -339,7 +337,7 @@ fn struct_owned_function_placement(owner: &str, reason: &str) -> WorkshopSymbolP
 fn collect_workshop_struct_names(files: &[WorkshopSourceFile]) -> Result<BTreeSet<String>, String> {
     let mut out = BTreeSet::new();
     for file in files {
-        let layout = parse_top_level_type_layout(&file.source)?;
+        let layout = source_workshop_items(&file.source)?.layout;
         for parsed in layout.structs {
             out.insert(parsed.name);
         }
@@ -367,7 +365,7 @@ pub fn build_workshop_symbol_tree(
     let mut struct_names = BTreeSet::new();
     let mut structs_by_file: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for file in files {
-        let layout = parse_top_level_type_layout(&file.source)?;
+        let layout = source_workshop_items(&file.source)?.layout;
         for parsed in layout.structs {
             struct_names.insert(parsed.name.clone());
             structs_by_file
@@ -433,8 +431,9 @@ fn index_file_symbols(
     file_structs: &[String],
 ) -> Result<Vec<PendingSymbol>, String> {
     let mut out = Vec::new();
-    for parsed_struct in parse_struct_spans(&file.source)? {
-        let source = source_for_range(&file.source, parsed_struct.range.clone())?;
+    let records = source_workshop_items(&file.source)?;
+    for parsed_struct in &records.structs {
+        let source = source_for_range(&file.source, parsed_struct.definition_range.clone())?;
         out.push(PendingSymbol {
             group_kind: WorkshopSymbolGroupKind::Struct,
             group_name: parsed_struct.name.clone(),
@@ -444,13 +443,13 @@ fn index_file_symbols(
                 owner: Some(parsed_struct.name.clone()),
                 file: file.path.clone(),
                 signature: format!("struct {}", parsed_struct.name),
-                source_span: span_from_range(parsed_struct.range.clone())?,
+                source_span: span_from_range(parsed_struct.definition_range.clone())?,
                 source,
             },
         });
     }
 
-    for function in parse_top_level_functions(&file.source)? {
+    for function in records.functions {
         let full_range = function.signature_range.start..function.body_range.end;
         let source = source_for_range(&file.source, full_range.clone())?;
         let signature =
@@ -760,50 +759,6 @@ fn function_group(
         );
     }
     (WorkshopSymbolGroupKind::Root, "Root".to_string())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedStructSpan {
-    name: String,
-    range: Range<usize>,
-}
-
-fn parse_struct_spans(source: &str) -> Result<Vec<ParsedStructSpan>, String> {
-    let tokens = lex(source)?;
-    let mut out = Vec::new();
-    let mut cursor = 0usize;
-    let mut depth = 0usize;
-    while cursor < tokens.len() {
-        let token = tokens[cursor];
-        match token.kind {
-            TokenKind::LBrace => {
-                depth = depth.saturating_add(1);
-                cursor += 1;
-                continue;
-            }
-            TokenKind::RBrace => {
-                depth = depth.saturating_sub(1);
-                cursor += 1;
-                continue;
-            }
-            TokenKind::Identifier if depth == 0 && token_text(source, token) == "struct" => {
-                let name_token = expect_token(&tokens, cursor + 1, TokenKind::Identifier)?;
-                let open_index = cursor + 2;
-                expect_token(&tokens, open_index, TokenKind::LBrace)?;
-                let close_index = find_matching_rbrace(&tokens, open_index + 1, 1)?;
-                let end = tokens[close_index].end;
-                out.push(ParsedStructSpan {
-                    name: token_text(source, name_token).to_string(),
-                    range: token.start..end,
-                });
-                cursor = close_index + 1;
-                continue;
-            }
-            _ => {}
-        }
-        cursor += 1;
-    }
-    Ok(out)
 }
 
 fn format_function_signature(
@@ -1315,13 +1270,15 @@ pub fn workshop_completion_items(
     let parsed_files = files
         .iter()
         .map(|file| {
-            Ok((
-                file,
-                parse_top_level_type_layout(&file.source)?,
-                parse_top_level_functions(&file.source)?,
-                parse_typed_local_bindings(&file.source)?,
-                parse_top_level_struct_definitions(&file.source)?,
-            ))
+            source_workshop_items(&file.source).map(|records| {
+                (
+                    file,
+                    records.layout,
+                    records.functions,
+                    records.typed_local_bindings,
+                    records.structs,
+                )
+            })
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut struct_scopes = BTreeMap::<(String, String), WorkshopCompletionScope>::new();
@@ -2962,7 +2919,7 @@ pub fn classify_workshop_reload(
 fn layout_fingerprint(files: &[WorkshopSourceFile]) -> Result<String, String> {
     let mut parts = Vec::new();
     for file in files {
-        let layout = parse_top_level_type_layout(&file.source)?;
+        let layout = source_workshop_items(&file.source)?.layout;
         for parsed in layout.structs {
             let fields = parsed
                 .fields
@@ -3039,7 +2996,7 @@ fn struct_layouts_by_name(
 ) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
     for file in files {
-        let layout = parse_top_level_type_layout(&file.source)?;
+        let layout = source_workshop_items(&file.source)?.layout;
         for parsed in layout.structs {
             let fields = parsed
                 .fields
@@ -3937,6 +3894,54 @@ mod workshop_contract_tests {
         }
         fs::write(&path, source).expect("write project file");
         path
+    }
+
+    #[test]
+    fn workshop_symbol_and_completion_records_match_multifile_program_snapshot() {
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source:
+                    "function main(): i32 { return helper(); } function extra(): i32 { return 9; }"
+                        .to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/helper.stasis".to_string(),
+                source: "struct Helper { value: i32; }\nfunction helper(): i32 { return 7; }"
+                    .to_string(),
+            },
+        ];
+        let mut process = crate::backend::jit::JitProcess::new();
+        for file in &files {
+            process.upsert_file(file.path.clone(), file.source.clone());
+        }
+        process.compile().expect("compile snapshot");
+        let snapshot_functions = process
+            .program_snapshot()
+            .expect("snapshot")
+            .functions()
+            .iter()
+            .map(|function| function.name.clone())
+            .collect::<BTreeSet<_>>();
+
+        let tree = build_workshop_symbol_tree(&files).expect("symbol tree");
+        let tree_functions = tree
+            .groups
+            .iter()
+            .flat_map(|group| group.symbols.iter())
+            .filter(|symbol| symbol.kind == WorkshopSymbolKind::Function)
+            .map(|symbol| symbol.name.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(tree_functions, snapshot_functions);
+
+        let completions = workshop_completion_items(&files).expect("completion records");
+        for function in &snapshot_functions {
+            assert!(completions.iter().any(|item| item.text == *function));
+        }
+        assert!(
+            tree_functions.contains("extra"),
+            "same-line declaration retained"
+        );
     }
 
     fn semantic_selector(
