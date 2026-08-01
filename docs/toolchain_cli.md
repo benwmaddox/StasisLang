@@ -127,8 +127,8 @@ exit code. Guest program output may precede the final JSON object for `run`.
 keeps token and comment text, explicit parentheses, declaration order, and import order unchanged.
 Before writing, it verifies that both its lossless token stream and the compiler token stream are
 unchanged. It plans every source and test-file rewrite first; a formatting or verification error
-therefore leaves the workspace untouched. If a later file write fails, it attempts to restore all
-files already written.
+therefore leaves the workspace untouched. Files whose formatted bytes already match are never
+opened for writing. If a later file write fails, it attempts to restore all files already written.
 
 The canonical rules are:
 

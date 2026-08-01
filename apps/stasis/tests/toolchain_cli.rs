@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -150,6 +151,32 @@ fn format_alias_applies_canonical_layout_and_fmt_check_enforces_it() {
         fs::read_to_string(&entry).expect("read formatted fixture"),
         "struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu\n    Playing\n}\n\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n"
     );
+
+    let fixed_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&entry)
+        .expect("open formatted fixture without truncating")
+        .set_times(fs::FileTimes::new().set_modified(fixed_modified))
+        .expect("set fixture modification time");
+    let baseline_modified = fs::metadata(&entry)
+        .expect("read fixture metadata")
+        .modified()
+        .expect("read fixture modification time");
+
+    for command in ["fmt", "format"] {
+        let unchanged = stasis(&["--json", command], &project);
+        assert_eq!(unchanged.status.code(), Some(0));
+        assert_eq!(json_stdout(&unchanged)["result"]["changed"], json!([]));
+        assert_eq!(
+            fs::metadata(&entry)
+                .expect("read unchanged fixture metadata")
+                .modified()
+                .expect("read unchanged fixture modification time"),
+            baseline_modified,
+            "{command} rewrote an unchanged source file"
+        );
+    }
 
     assert_eq!(stasis(&["fmt", "--check"], &project).status.code(), Some(0));
     let checked = stasis(&["check"], &project);
