@@ -134,7 +134,6 @@ pub struct SourceDiagnostic {
 
 #[derive(Debug, Clone)]
 struct FileState {
-    layout_hash: i32,
     main_decl_count: i32,
     main_valid_count: i32,
     main_invalid_count: i32,
@@ -197,6 +196,7 @@ struct FunctionKey {
 #[derive(Debug, Clone)]
 struct AnalysisResult {
     functions: Vec<ParsedFunction>,
+    #[cfg(test)]
     layout_hash: i32,
     main_decl_count: i32,
     main_valid_count: i32,
@@ -206,6 +206,7 @@ struct AnalysisResult {
 
 pub struct IncrementalCompilerHost {
     source_hash_by_path: BTreeMap<String, u64>,
+    accepted_source_by_path: BTreeMap<String, String>,
     state_by_path: BTreeMap<String, FileState>,
     last_layout_hash_i32: i32,
     required_reachability_root_hashes: Vec<i32>,
@@ -217,6 +218,7 @@ impl IncrementalCompilerHost {
     pub fn new() -> Self {
         Self {
             source_hash_by_path: BTreeMap::new(),
+            accepted_source_by_path: BTreeMap::new(),
             state_by_path: BTreeMap::new(),
             last_layout_hash_i32: 0,
             required_reachability_root_hashes: Vec::new(),
@@ -347,7 +349,6 @@ impl IncrementalCompilerHost {
             self.state_by_path.insert(
                 path_key.clone(),
                 FileState {
-                    layout_hash: analyzed.layout_hash,
                     main_decl_count: analyzed.main_decl_count,
                     main_valid_count: analyzed.main_valid_count,
                     main_invalid_count: analyzed.main_invalid_count,
@@ -485,10 +486,21 @@ impl IncrementalCompilerHost {
             }
         }
 
-        let mut layout_acc = 216613626_i32;
-        for state in self.state_by_path.values() {
-            layout_acc = hash_mix(layout_acc, state.layout_hash);
+        let mut accepted_sources = self.accepted_source_by_path.clone();
+        for (path, source) in &changed_sources {
+            accepted_sources.insert(path.clone(), source.clone());
         }
+        for path in &deleted_paths {
+            accepted_sources.remove(path);
+        }
+        let digest = crate::backend::program_snapshot::canonical_state_layout_digest_for_files(
+            accepted_sources
+                .iter()
+                .map(|(path, source)| (path.clone(), source.clone())),
+        )
+        .map_err(|message| format!("canonical legacy layout snapshot failed: {message}"))?;
+        let layout_acc = i32::from_le_bytes(digest[..4].try_into().expect("digest prefix"));
+        self.accepted_source_by_path = accepted_sources;
         self.last_layout_hash_i32 = layout_acc;
         self.last_reachable_function_keys = current_reachable_keys;
 
@@ -730,7 +742,16 @@ fn analyze_source_in_process(source: &str) -> Result<AnalysisResult, SourceDiagn
 
     Ok(AnalysisResult {
         functions: parsed_functions,
-        layout_hash: hash_i32(source),
+        #[cfg(test)]
+        layout_hash: legacy_layout_hash_from_canonical_digest(source).map_err(|message| {
+            SourceDiagnostic {
+                path: "legacy.stasis".to_string(),
+                start: 0,
+                end: source.len(),
+                symbol: String::new(),
+                message,
+            }
+        })?,
         main_decl_count,
         main_valid_count,
         main_invalid_count,
@@ -2184,6 +2205,17 @@ fn hash_i32(value: &str) -> i32 {
     hash
 }
 
+#[cfg(test)]
+fn legacy_layout_hash_from_canonical_digest(source: &str) -> Result<i32, String> {
+    let digest = crate::backend::program_snapshot::canonical_state_layout_digest_for_files([(
+        "legacy.stasis".to_string(),
+        source.to_string(),
+    )])?;
+    Ok(i32::from_le_bytes(
+        digest[..4].try_into().expect("digest prefix"),
+    ))
+}
+
 fn hash_identifier(name: &str) -> i32 {
     hash_i32(name)
 }
@@ -2308,7 +2340,6 @@ mod tests {
 
     fn test_file_state(functions: Vec<ParsedFunction>) -> FileState {
         FileState {
-            layout_hash: 0,
             main_decl_count: 0,
             main_valid_count: 0,
             main_invalid_count: 0,
@@ -2361,6 +2392,82 @@ mod tests {
         let mut host = IncrementalCompilerHost::new();
         let err = host.compile_changed_files(&[]).expect_err("expected error");
         assert!(err.contains("no changed files"));
+    }
+
+    #[test]
+    fn legacy_host_layout_hash_uses_canonical_state_layout_not_source_formatting() {
+        let plain = "global score: i32; function main(): i32 { return score; }";
+        let formatted = "// comment\n global score: i32;\nfunction main(): i32 { return score; }\n";
+        let changed =
+            "global score: i32; global lives: i32; function main(): i32 { return score; }";
+        let plain_hash = analyze_source_in_process(plain).expect("plain").layout_hash;
+        assert_eq!(
+            plain_hash,
+            analyze_source_in_process(formatted)
+                .expect("formatted")
+                .layout_hash
+        );
+        assert_ne!(
+            plain_hash,
+            analyze_source_in_process(changed)
+                .expect("layout changed")
+                .layout_hash
+        );
+    }
+
+    #[test]
+    fn legacy_multifile_layout_hash_is_one_canonical_snapshot_digest_prefix() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_legacy_snapshot_digest_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let main = temp_root.join("main.stasis");
+        let data = temp_root.join("data.stasis");
+        let main_source = "function main(): i32 { return helper(); }\n";
+        let data_source = "global score: i32;\nfunction helper(): i32 { return score; }\n";
+        fs::write(&main, main_source).expect("write main");
+        fs::write(&data, data_source).expect("write data");
+
+        let mut host = IncrementalCompilerHost::new();
+        let output = host
+            .compile_changed_files(&[main.clone(), data.clone()])
+            .expect("legacy compile");
+        assert_eq!(output.status, 0);
+        let files = vec![
+            (normalize_path_key(&data), data_source.to_string()),
+            (normalize_path_key(&main), main_source.to_string()),
+        ];
+        let digest =
+            crate::backend::program_snapshot::canonical_layout_digest_for_files(files.clone())
+                .expect("canonical digest");
+        assert_eq!(
+            output.layout_hash,
+            i32::from_le_bytes(digest[..4].try_into().expect("prefix"))
+        );
+
+        let mut jit = crate::backend::jit::JitProcess::new();
+        let mut aot = crate::backend::aot::AotProcess::new();
+        for (path, source) in files {
+            jit.upsert_file(path.clone(), source.clone());
+            aot.upsert_file(path, source);
+        }
+        jit.compile().expect("JIT compile");
+        aot.compile().expect("AOT compile");
+        assert_eq!(
+            jit.program_snapshot()
+                .expect("JIT snapshot")
+                .layout_digest(),
+            digest
+        );
+        assert_eq!(
+            aot.program_snapshot()
+                .expect("AOT snapshot")
+                .layout_digest(),
+            digest
+        );
+        fs::remove_dir_all(&temp_root).ok();
     }
 
     #[test]

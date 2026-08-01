@@ -2,6 +2,7 @@ pub mod aot;
 pub(crate) mod emit;
 pub mod jit;
 pub mod patch_plan;
+pub mod program_snapshot;
 pub(crate) mod reachability;
 mod runtime_exports;
 pub mod state_layout;

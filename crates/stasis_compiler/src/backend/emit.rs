@@ -75,6 +75,7 @@ pub(crate) type ExternSymbolAddressMap = BTreeMap<String, usize>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompileAnalysisCache {
+    #[allow(dead_code)]
     pub(crate) files_fingerprint: u64,
     pub(crate) call_signatures: CallSignatureMap,
     pub(crate) resolved_extern_signatures: Vec<ResolvedExternCallSignature>,

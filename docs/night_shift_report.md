@@ -118,3 +118,12 @@
 - Good: pure layout/contrast policies made adaptive and accessibility decisions fast to test without an emulator.
 - Bad: the first broad Cargo validation exhausted the host drive and hit a Windows PDB linker limit even though this slice changes only Android Java/resources.
 - Adjustment: keep Android UI slices on the bounded Android/JVM/APK gates first, then attempt the full Cargo gate only with verified workspace capacity.
+
+## 2026-08-01
+
+- Maddox #180: introduced immutable compiler-owned `ProgramSnapshot` shared by JIT, AOT, runner-facing metadata, and app packaging. The snapshot is the canonical state-layout digest owner; target code pointers/object paths are non-semantic artifact mappings.
+- Verification: ProgramSnapshot 14/14, state layout 5/5, JIT 178/178, compiler library 399/400 runnable plus 1 ignored with the Application Control-blocked case passing on isolated retry, Workshop 32/32, app compiler backend 84/84 plus 6 ignored benchmarks, Android bridge 48/48 plus 1 ignored, repository Python checks 29/29, workspace and release checks, Windows launch acceptance, Android JIT/AOT render acceptance, formatting, and diff checks. The 1,000-function selective-update benchmark improved from 202 ms to 27.560 ms p95 while emitting 2/1001 functions.
+- Theory gained: one accepted semantic snapshot can safely outlive failed candidates because target artifacts are attached metadata, not an alternate source of program truth. Compiler-produced data-flow summaries are already immutable at index completion, so sharing their owner into snapshots preserves completeness while avoiding semantic-vector copies; an adjacent prediction is that other large immutable semantic tables can use the same ownership boundary.
+- Good: moving the existing analysis cache behind the snapshot retained one-pass lowering data while the same compiler-owned records replaced app and Workshop reparsing; CI profiling then exposed and removed an unnecessary full data-flow copy.
+- Bad: initial transaction boundaries missed prepared JIT delivery and AOT buffer rollback, and initial snapshot copies regressed selective compilation above its stop condition; staged candidates also failed to propagate custom analysis roots.
+- Adjustment: every future snapshot consumer must test publication, post-mutation rejection, retained diagnostics, custom-root staged compilation, complete accepted semantic/artifact preservation, and the existing performance stop conditions.
