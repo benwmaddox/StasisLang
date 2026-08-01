@@ -149,7 +149,7 @@ fn format_alias_applies_canonical_layout_and_fmt_check_enforces_it() {
     assert_eq!(json_stdout(&formatted)["command"], "fmt");
     assert_eq!(
         fs::read_to_string(&entry).expect("read formatted fixture"),
-        "struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu\n    Playing\n}\n\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n"
+        "struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu,\n    Playing,\n}\n\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n"
     );
 
     let fixed_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);

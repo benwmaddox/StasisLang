@@ -9,13 +9,13 @@ const BRICKOUT_LEVEL_COUNT: i32 = 3;
 
 enum BrickoutScreen {
     Menu,
-    Game
+    Game,
 }
 
 enum BrickoutBallPreset {
     Normal,
     Heavy,
-    Splitter
+    Splitter,
 }
 
 const BRICKOUT_LEVEL_EVENT_CAP: i32 = 192; // BRICKOUT_LEVEL_COUNT * BRICKOUT_LEVEL_MAX_EVENTS

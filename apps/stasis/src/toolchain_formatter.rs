@@ -140,7 +140,7 @@ impl Writer {
 }
 
 pub(crate) fn format_source(source: &str) -> Result<String, String> {
-    let tokens = scan(source)?;
+    let tokens = canonicalize_enum_commas(&scan(source)?)?;
     let formatted = render(&tokens)?;
     let formatted_tokens = scan(&formatted)?;
     let original_significant = significant_tokens(&tokens);
@@ -148,21 +148,49 @@ pub(crate) fn format_source(source: &str) -> Result<String, String> {
     if original_significant != formatted_significant {
         return Err("formatter changed the Stasis token stream".to_string());
     }
-    if compiler_tokens(source)? != compiler_tokens(&formatted)? {
+    if compiler_tokens_without_enum_commas(source)?
+        != compiler_tokens_without_enum_commas(&formatted)?
+    {
         return Err("formatter changed the compiler token stream".to_string());
     }
     Ok(formatted)
 }
 
-fn compiler_tokens(
+fn compiler_tokens_without_enum_commas(
     source: &str,
 ) -> Result<Vec<(stasis_compiler::frontend::lexer::TokenKind, &str)>, String> {
-    stasis_compiler::frontend::lexer::lex(source).map(|tokens| {
-        tokens
-            .into_iter()
-            .map(|token| (token.kind, &source[token.start..token.end]))
-            .collect()
-    })
+    use stasis_compiler::frontend::lexer::TokenKind as CompilerTokenKind;
+
+    let tokens = stasis_compiler::frontend::lexer::lex(source)?;
+    let mut normalized = Vec::new();
+    let mut brace_depth = 0usize;
+    let mut pending_enum = false;
+    let mut enum_depth = None;
+    for token in tokens {
+        let text = &source[token.start..token.end];
+        if brace_depth == 0 && token.kind == CompilerTokenKind::Identifier && text == "enum" {
+            pending_enum = true;
+        }
+        if token.kind == CompilerTokenKind::LBrace {
+            brace_depth += 1;
+            if pending_enum {
+                enum_depth = Some(brace_depth);
+                pending_enum = false;
+            }
+        }
+        let enum_comma = token.kind == CompilerTokenKind::Comma
+            && enum_depth.is_some_and(|depth| depth == brace_depth);
+        if !enum_comma {
+            normalized.push((token.kind, text));
+        }
+        if token.kind == CompilerTokenKind::RBrace {
+            if enum_depth == Some(brace_depth) {
+                enum_depth = None;
+            }
+            brace_depth = brace_depth.saturating_sub(1);
+        }
+    }
+    Ok(normalized)
 }
 
 fn significant_tokens(tokens: &[Token]) -> Vec<(TokenKind, &str)> {
@@ -170,6 +198,110 @@ fn significant_tokens(tokens: &[Token]) -> Vec<(TokenKind, &str)> {
         .iter()
         .map(|token| (token.kind, token.text.as_str()))
         .collect()
+}
+
+fn canonicalize_enum_commas(tokens: &[Token]) -> Result<Vec<Token>, String> {
+    let mut insert_after = vec![false; tokens.len()];
+    let mut remove = vec![false; tokens.len()];
+    let mut brace_depth = 0usize;
+    let mut index = 0usize;
+
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if brace_depth == 0 && token.is_word("enum") {
+            let name = next_non_comment_index(tokens, index + 1)
+                .ok_or_else(|| "incomplete enum declaration".to_string())?;
+            if tokens[name].kind != TokenKind::Word {
+                return Err("expected enum name".to_string());
+            }
+            let open = next_non_comment_index(tokens, name + 1)
+                .ok_or_else(|| "enum declaration is missing its body".to_string())?;
+            if !tokens[open].is_symbol("{") {
+                return Err("enum declaration is missing its opening brace".to_string());
+            }
+
+            let mut cursor = next_non_comment_index(tokens, open + 1)
+                .ok_or_else(|| "enum declaration is missing its closing brace".to_string())?;
+            while !tokens[cursor].is_symbol("}") {
+                if tokens[cursor].kind != TokenKind::Word {
+                    return Err("expected enum variant name".to_string());
+                }
+                let mut last_core = cursor;
+                let mut delimiter = next_non_comment_index(tokens, cursor + 1)
+                    .ok_or_else(|| "enum declaration is missing its closing brace".to_string())?;
+                if tokens[delimiter].is_symbol("=") {
+                    delimiter = next_non_comment_index(tokens, delimiter + 1)
+                        .ok_or_else(|| "enum variant is missing its value".to_string())?;
+                    if tokens[delimiter].is_symbol("-") {
+                        delimiter = next_non_comment_index(tokens, delimiter + 1)
+                            .ok_or_else(|| "enum variant is missing its value".to_string())?;
+                    }
+                    if tokens[delimiter].kind != TokenKind::Number {
+                        return Err("enum variant value must be an integer".to_string());
+                    }
+                    last_core = delimiter;
+                    delimiter = next_non_comment_index(tokens, delimiter + 1).ok_or_else(|| {
+                        "enum declaration is missing its closing brace".to_string()
+                    })?;
+                }
+
+                if tokens[delimiter].is_symbol(",") {
+                    if delimiter != last_core + 1 {
+                        remove[delimiter] = true;
+                        insert_after[last_core] = true;
+                    }
+                    cursor = next_non_comment_index(tokens, delimiter + 1).ok_or_else(|| {
+                        "enum declaration is missing its closing brace".to_string()
+                    })?;
+                } else if tokens[delimiter].kind == TokenKind::Word
+                    || tokens[delimiter].is_symbol("}")
+                {
+                    insert_after[last_core] = true;
+                    cursor = delimiter;
+                } else {
+                    return Err(format!(
+                        "unexpected token '{}' after enum variant",
+                        tokens[delimiter].text
+                    ));
+                }
+            }
+            index = cursor + 1;
+            continue;
+        }
+
+        if token.is_symbol("{") {
+            brace_depth += 1;
+        } else if token.is_symbol("}") {
+            brace_depth = brace_depth.saturating_sub(1);
+        }
+        index += 1;
+    }
+
+    let mut canonical =
+        Vec::with_capacity(tokens.len() + insert_after.iter().filter(|add| **add).count());
+    for (index, token) in tokens.iter().enumerate() {
+        if !remove[index] {
+            canonical.push(token.clone());
+        }
+        if insert_after[index] {
+            canonical.push(Token {
+                kind: TokenKind::Symbol,
+                text: ",".to_string(),
+                newline_before: false,
+                blank_before: false,
+            });
+        }
+    }
+    Ok(canonical)
+}
+
+fn next_non_comment_index(tokens: &[Token], start: usize) -> Option<usize> {
+    tokens
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, token)| !token.is_comment())
+        .map(|(index, _)| index)
 }
 
 fn scan(source: &str) -> Result<Vec<Token>, String> {
@@ -600,7 +732,15 @@ fn render(tokens: &[Token]) -> Result<String, String> {
 
         if token.is_symbol(",") {
             writer.write(",");
-            if parens.last().is_some_and(|context| context.wrapped) {
+            if braces.last() == Some(&BraceKind::Enum) && parens.is_empty() && bracket_depth == 0 {
+                enum_member_started = false;
+                if !tokens
+                    .get(index + 1)
+                    .is_some_and(|next| next.is_comment() && !next.newline_before)
+                {
+                    writer.newline();
+                }
+            } else if parens.last().is_some_and(|context| context.wrapped) {
                 writer.newline();
             } else {
                 writer.space();
@@ -817,7 +957,7 @@ mod tests {
     #[test]
     fn formats_declarations_blocks_and_spacing() {
         let source = "struct Player{health :i32;position:Vec2;} enum Screen{Menu Playing} global state :Player; function damage (self:Player,amount:i32):void {if(amount<=0){return;}else{self.health-=amount;}}";
-        let expected = "struct Player {\n    health: i32;\n    position: Vec2;\n}\n\nenum Screen {\n    Menu\n    Playing\n}\n\nglobal state: Player;\n\nfunction damage(self: Player, amount: i32): void {\n    if (amount <= 0) {\n        return;\n    } else {\n        self.health -= amount;\n    }\n}\n";
+        let expected = "struct Player {\n    health: i32;\n    position: Vec2;\n}\n\nenum Screen {\n    Menu,\n    Playing,\n}\n\nglobal state: Player;\n\nfunction damage(self: Player, amount: i32): void {\n    if (amount <= 0) {\n        return;\n    } else {\n        self.health -= amount;\n    }\n}\n";
         assert_eq!(format_source(source).expect("format"), expected);
     }
 
@@ -861,7 +1001,7 @@ mod tests {
     #[test]
     fn formats_annotations_unary_values_and_attached_comments() {
         let source = "function @extern(\"native_tick\")tick(value:i32):i32; enum Phase{Menu// initial\nPlaying} function main():i32{/* first\n * second\n */let value:i32=2*-3;return value;} // entry\n";
-        let expected = "function @extern(\"native_tick\") tick(value: i32): i32;\n\nenum Phase {\n    Menu // initial\n    Playing\n}\n\nfunction main(): i32 {\n    /* first\n * second\n */\n    let value: i32 = 2 * -3;\n    return value;\n} // entry\n";
+        let expected = "function @extern(\"native_tick\") tick(value: i32): i32;\n\nenum Phase {\n    Menu, // initial\n    Playing,\n}\n\nfunction main(): i32 {\n    /* first\n * second\n */\n    let value: i32 = 2 * -3;\n    return value;\n} // entry\n";
         assert_eq!(format_source(source).expect("format"), expected);
         assert_eq!(format_source(expected).expect("reformat"), expected);
     }
@@ -870,6 +1010,15 @@ mod tests {
     fn keeps_commented_imports_in_one_group() {
         let source = "import\"a.stasis\";// first\nimport \"b.stasis\";/* second */\nfunction main():i32{return 0;}";
         let expected = "import \"a.stasis\"; // first\nimport \"b.stasis\"; /* second */\n\nfunction main(): i32 {\n    return 0;\n}\n";
+        assert_eq!(format_source(source).expect("format"), expected);
+        assert_eq!(format_source(expected).expect("reformat"), expected);
+    }
+
+    #[test]
+    fn adds_trailing_enum_commas_before_attached_comments() {
+        let source = "enum Phase{Ready Running=4// active\n,Finished/* done */}";
+        let expected =
+            "enum Phase {\n    Ready,\n    Running = 4, // active\n    Finished, /* done */\n}\n";
         assert_eq!(format_source(source).expect("format"), expected);
         assert_eq!(format_source(expected).expect("reformat"), expected);
     }

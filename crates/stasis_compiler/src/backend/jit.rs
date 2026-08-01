@@ -4746,7 +4746,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "enum BrickType { Basic, Armored, Reflector }\nconst COUNT: i32 = 2;\nstruct Brick { brick_type: BrickType; hp: i32; }\nglobal bricks: Brick[COUNT];\nfunction place(kind: BrickType): i32 { bricks[0].brick_type = kind; return 0; }\nfunction main(): i32 {\n    let ignored: i32 = place(BrickType.Reflector);\n    if (bricks[0].brick_type == BrickType.Reflector) { return 1; }\n    return ignored;\n}\n",
+            "enum BrickType { Basic, Armored, Reflector, }\nconst COUNT: i32 = 2;\nstruct Brick { brick_type: BrickType; hp: i32; }\nglobal bricks: Brick[COUNT];\nfunction place(kind: BrickType): i32 { bricks[0].brick_type = kind; return 0; }\nfunction main(): i32 {\n    let ignored: i32 = place(BrickType.Reflector);\n    if (bricks[0].brick_type == BrickType.Reflector) { return 1; }\n    return ignored;\n}\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -4761,7 +4761,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "enum BrickType { Basic, Armored }\nfunction cost(kind: BrickType): i32 { if (kind == BrickType.Armored) { return 2; } return 1; }\nfunction main(): i32 { let t: BrickType = BrickType.Armored; return cost(t); }\n",
+            "enum BrickType { Basic, Armored, }\nfunction cost(kind: BrickType): i32 { if (kind == BrickType.Armored) { return 2; } return 1; }\nfunction main(): i32 { let t: BrickType = BrickType.Armored; return cost(t); }\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -4776,7 +4776,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "enum UiHorizontal { Left, Center, Right }\nenum UiVertical { Top, Center, Bottom }\nfunction ui_place_x(parent_x: f32, horizontal: UiHorizontal): f32 { return parent_x; }\nfunction main(): i32 { let x: f32 = ui_place_x(0.0, UiVertical.Top); return 0; }\n",
+            "enum UiHorizontal { Left, Center, Right, }\nenum UiVertical { Top, Center, Bottom, }\nfunction ui_place_x(parent_x: f32, horizontal: UiHorizontal): f32 { return parent_x; }\nfunction main(): i32 { let x: f32 = ui_place_x(0.0, UiVertical.Top); return 0; }\n",
         );
         process
             .compile()
@@ -4789,7 +4789,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "enum UiHorizontal { Left, Center, Right }\nfunction ui_place_x(parent_x: f32, horizontal: UiHorizontal): f32 { return parent_x; }\nfunction main(): i32 { let x: f32 = ui_place_x(0.0, 1); return 0; }\n",
+            "enum UiHorizontal { Left, Center, Right, }\nfunction ui_place_x(parent_x: f32, horizontal: UiHorizontal): f32 { return parent_x; }\nfunction main(): i32 { let x: f32 = ui_place_x(0.0, 1); return 0; }\n",
         );
         process
             .compile()

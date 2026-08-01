@@ -136,7 +136,8 @@ The canonical rules are:
 - Put an opening brace on the declaration or control-flow line. Every braced body is multiline,
   including short functions and one-statement branches.
 - Put each struct or block-global field, enum member, and semicolon-terminated statement on its own
-  line. Put `else` on the same line as the preceding closing brace.
+  line. End every enum member with a comma, including the compiler-optional final comma. Put `else`
+  on the same line as the preceding closing brace.
 - Use one space around assignment, comparison, arithmetic, and boolean operators. Do not put spaces
   before `:`, `,`, `;`, member access, indexing, or calls; put one space after `:` and `,`.
 - Keep adjacent imports together and separate other top-level declarations with one blank line.

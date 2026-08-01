@@ -91,13 +91,13 @@ Horizontal and vertical choices use different enums so the compiler rejects swap
 enum UiHorizontal {
     Left,
     Center,
-    Right
+    Right,
 }
 
 enum UiVertical {
     Top,
     Center,
-    Bottom
+    Bottom,
 }
 ```
 

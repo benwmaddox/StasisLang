@@ -793,17 +793,23 @@ fn parse_enum_definition(
             explicit_value = Some(value.saturating_mul(sign));
             next_cursor += 1;
         }
+        if tokens
+            .get(next_cursor)
+            .is_some_and(|token| token.kind == TokenKind::Comma)
+        {
+            next_cursor += 1;
+        } else if !tokens
+            .get(next_cursor)
+            .is_some_and(|token| token.kind == TokenKind::RBrace)
+        {
+            return Err(format!(
+                "enum variant '{variant_name}' must be followed by a comma"
+            ));
+        }
         variants.push(ParsedEnumVariant {
             name: variant_name,
             value: explicit_value,
         });
-        if tokens
-            .get(next_cursor)
-            .copied()
-            .is_some_and(|token| token.kind == TokenKind::Comma)
-        {
-            next_cursor += 1;
-        }
     }
     expect(tokens, next_cursor, TokenKind::RBrace)?;
     next_cursor += 1;
@@ -1522,7 +1528,7 @@ function tick(): i32 {
 
     #[test]
     fn parses_top_level_enums_with_variants() {
-        let source = "enum BrickType { Basic, Armored, Reflector }\n";
+        let source = "enum BrickType { Basic, Armored, Reflector, }\n";
         let parsed = parse_top_level_type_layout(source).expect("parse");
         assert_eq!(parsed.enums.len(), 1);
         assert_eq!(parsed.enums[0].name, "BrickType");
@@ -1542,7 +1548,7 @@ function tick(): i32 {
 
     #[test]
     fn parses_top_level_enum_variant_explicit_values() {
-        let source = "enum Scancode { A = 4, Return = 40, Escape = 41 }\n";
+        let source = "enum Scancode { A = 4, Return = 40, Escape = 41, }\n";
         let parsed = parse_top_level_type_layout(source).expect("parse");
         assert_eq!(parsed.enums.len(), 1);
         assert_eq!(parsed.enums[0].name, "Scancode");
@@ -1553,6 +1559,27 @@ function tick(): i32 {
         assert_eq!(parsed.enums[0].variants[1].value, Some(40));
         assert_eq!(parsed.enums[0].variants[2].name, "Escape");
         assert_eq!(parsed.enums[0].variants[2].value, Some(41));
+    }
+
+    #[test]
+    fn accepts_an_optional_final_enum_comma() {
+        for source in [
+            "enum Phase { Ready, Running }\n",
+            "enum Phase { Ready, Running, }\n",
+        ] {
+            let parsed = parse_top_level_type_layout(source).expect("parse enum");
+            assert_eq!(parsed.enums[0].variants.len(), 2);
+        }
+    }
+
+    #[test]
+    fn rejects_missing_commas_between_enum_variants() {
+        let source = "enum Phase { Ready Running, }\n";
+        let error = parse_top_level_type_layout(source).expect_err("missing enum comma must fail");
+        assert!(
+            error.contains("must be followed by a comma"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
