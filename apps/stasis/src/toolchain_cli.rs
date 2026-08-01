@@ -68,6 +68,31 @@ const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md"
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
+const PROJECT_GIT_ATTRIBUTES: &str = "*.stasis text eol=crlf\n";
+const PROJECT_PRE_COMMIT_HOOK: &str = r#"#!/bin/sh
+set -eu
+
+if ! command -v stasis >/dev/null 2>&1; then
+    echo "Commit blocked: stasis is not available on PATH; install Stasis and run 'stasis format'." >&2
+    exit 1
+fi
+
+echo "Stasis pre-commit: checking canonical source format"
+if ! stasis format --check; then
+    echo "Stasis pre-commit: formatting source before blocking this commit"
+    if ! stasis format; then
+        echo "Commit blocked: 'stasis format' failed." >&2
+        exit 1
+    fi
+    echo "Commit blocked: review and stage the formatting changes, then commit again." >&2
+    exit 1
+fi
+
+if ! git diff --quiet -- ':(glob)**/*.stasis'; then
+    echo "Commit blocked: stage the formatted Stasis changes, then commit again." >&2
+    exit 1
+fi
+"#;
 const COMMANDS: &[&str] = &[
     "new",
     "init",
@@ -139,6 +164,8 @@ enum ToolchainCommand {
     Fmt {
         #[arg(long)]
         check: bool,
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
     },
     /// Parse, analyze, and JIT-compile the project without running it.
     Check,
@@ -628,7 +655,7 @@ fn execute(
     json_output: bool,
 ) -> Result<CommandResult, String> {
     match command {
-        ToolchainCommand::New { name, dir } => create_project(dir.unwrap_or_else(|| PathBuf::from(&name)), name),
+        ToolchainCommand::New { name, dir } => create_new_project(dir.unwrap_or_else(|| PathBuf::from(&name)), name),
         ToolchainCommand::Init { dir, name } => {
             let root = absolute_path(&dir)?;
             let inferred = root
@@ -648,6 +675,13 @@ fn execute(
             "verify is unavailable in toolchain 0.1; no replay verification contract is implemented"
                 .to_string(),
         ),
+        ToolchainCommand::Fmt { check, paths } if !paths.is_empty() => {
+            if workspace_arg.is_some() {
+                Err("--workspace cannot be combined with explicit format paths".to_string())
+            } else {
+                format_explicit_paths(&paths, check)
+            }
+        }
         other => {
             let workspace_path = workspace_arg.as_deref().or(match &other {
                 ToolchainCommand::Tui { entry, .. } => entry.as_deref(),
@@ -655,7 +689,7 @@ fn execute(
             });
             let workspace = load_workspace(workspace_path)?;
             match other {
-                ToolchainCommand::Fmt { check } => format_workspace(&workspace, check),
+                ToolchainCommand::Fmt { check, .. } => format_workspace(&workspace, check),
                 ToolchainCommand::Check => check_workspace(&workspace),
                 ToolchainCommand::Test { path } => {
                     validate_optional_workspace_path(&workspace, "test path", path.as_deref())?;
@@ -772,12 +806,27 @@ fn execute(
     }
 }
 
+fn create_new_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
+    create_project_with_options(path, name, true)
+}
+
 fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
+    create_project_with_options(path, name, false)
+}
+
+fn create_project_with_options(
+    path: PathBuf,
+    name: String,
+    initialize_git: bool,
+) -> Result<CommandResult, String> {
     validate_project_name(&name)?;
+    if initialize_git {
+        require_git()?;
+    }
     let root = absolute_path(&path)?;
     let bundled_stdlib = bundled_stdlib_dir()?;
     let manifest_path = root.join(MANIFEST_NAME);
-    let reserved_paths = [
+    let mut reserved_paths = vec![
         manifest_path.clone(),
         root.join("AGENTS.md"),
         root.join("CLAUDE.md"),
@@ -786,6 +835,10 @@ fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> 
         root.join("tests/main.test.stasis"),
         root.join("stdlib"),
     ];
+    if initialize_git {
+        reserved_paths.push(root.join(".gitattributes"));
+        reserved_paths.push(root.join(".githooks/pre-commit"));
+    }
     for reserved in &reserved_paths {
         if reserved.exists() {
             return Err(format!("refusing to overwrite {}", reserved.display()));
@@ -806,16 +859,86 @@ fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> 
     )?;
     write_new_file(
         &root.join("src/main.stasis"),
-        "import \"../stdlib/stdlib.stasis\";\n\nfunction main(): i32 {\n    return 0;\n}\n",
+        "import \"../stdlib/stdlib.stasis\";\r\n\r\nfunction main(): i32 {\r\n    return 0;\r\n}\r\n",
     )?;
     write_new_file(
         &root.join("tests/main.test.stasis"),
-        "test `new project is ready`(): bool {\n    return 1 == 1;\n}\n",
+        "test `new project is ready`(): bool {\r\n    return 1 == 1;\r\n}\r\n",
     )?;
+    if initialize_git {
+        write_new_file(&root.join(".gitattributes"), PROJECT_GIT_ATTRIBUTES)?;
+        let hook = root.join(".githooks/pre-commit");
+        fs::create_dir_all(hook.parent().expect("hook parent"))
+            .map_err(|error| format!("failed to create {}: {error}", hook.display()))?;
+        write_new_file(&hook, PROJECT_PRE_COMMIT_HOOK)?;
+        make_executable(&hook)?;
+        initialize_git_hooks(&root)?;
+    }
     Ok(CommandResult::success(
         format!("created {} at {}", name, root.display()),
-        json!({"name": name, "root": display_path(&root), "manifest": MANIFEST_NAME}),
+        json!({
+            "name": name,
+            "root": display_path(&root),
+            "manifest": MANIFEST_NAME,
+            "format_hook": initialize_git,
+        }),
     ))
+}
+
+fn require_git() -> Result<(), String> {
+    let output = Command::new("git")
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("stasis new requires Git to install its format hook: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err("stasis new requires Git to install its format hook".to_string())
+    }
+}
+
+fn initialize_git_hooks(root: &Path) -> Result<(), String> {
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "--local", "core.hooksPath", ".githooks"][..],
+    ] {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("failed to run git {}: {error}", args.join(" ")))?;
+        if !output.status.success() {
+            let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(format!(
+                "failed to run git {}{}",
+                args.join(" "),
+                if diagnostic.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {diagnostic}")
+                }
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn make_executable(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)
+            .map_err(|error| format!("failed to make {} executable: {error}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn write_new_file(path: &Path, contents: &str) -> Result<(), String> {
@@ -886,6 +1009,39 @@ fn format_workspace(workspace: &Workspace, check: bool) -> Result<CommandResult,
     validate_workspace_destination(workspace, "test directory", &test_root)?;
     collect_stasis_files(&source_root, &mut files)?;
     collect_stasis_files(&test_root, &mut files)?;
+    format_files(&workspace.root, files, check)
+}
+
+fn format_explicit_paths(paths: &[PathBuf], check: bool) -> Result<CommandResult, String> {
+    let root =
+        env::current_dir().map_err(|error| format!("failed to read current directory: {error}"))?;
+    let mut files = Vec::new();
+    for input in paths {
+        let path = absolute_path(input)?;
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("refusing to format symlink {}", path.display()));
+        }
+        if metadata.is_dir() {
+            collect_stasis_files(&path, &mut files)?;
+        } else if path.extension().and_then(|value| value.to_str()) == Some("stasis") {
+            files.push(path);
+        } else {
+            return Err(format!(
+                "expected a .stasis file or directory: {}",
+                path.display()
+            ));
+        }
+    }
+    format_files(&root, files, check)
+}
+
+fn format_files(
+    root: &Path,
+    mut files: Vec<PathBuf>,
+    check: bool,
+) -> Result<CommandResult, String> {
     files.sort();
     files.dedup();
     struct FormatChange {
@@ -911,7 +1067,7 @@ fn format_workspace(workspace: &Workspace, check: bool) -> Result<CommandResult,
         }
         if original != formatted {
             changes.push(FormatChange {
-                relative: relative_display(&workspace.root, &file),
+                relative: relative_display(root, &file),
                 path: file,
                 original,
                 formatted,
@@ -4193,7 +4349,7 @@ mod tests {
     #[test]
     fn source_formatter_is_deterministic() {
         let source = "function main(): i32 {  \r\n    return 0;\t\r\n}\r\n\r\n";
-        let expected = "function main(): i32 {\n    return 0;\n}\n";
+        let expected = "function main(): i32 {\r\n    return 0;\r\n}\r\n";
         assert_eq!(format_source(source).expect("format"), expected);
         assert_eq!(format_source(expected).expect("format"), expected);
     }

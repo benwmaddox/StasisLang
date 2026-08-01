@@ -80,6 +80,9 @@ rolls every touched file back on failure. Do not use `--no-tests` unless the use
   passing fresh validation or an equivalent focused integration test.
 - Finish with `stasis fmt --check`, `stasis check`, and `stasis test`. Semantic symbol edits already
   preserve untouched formatting; do not run mutating whole-project formatting as routine cleanup.
+- Keep the generated `.githooks/pre-commit` active. `stasis new` configures it automatically; after
+  cloning the project, run `git config --local core.hooksPath .githooks`. The hook formats source
+  when necessary and blocks the first attempt so formatting changes can be reviewed and staged.
 - Inspect the final changed-file list. Restore only unrelated changes created during the task and
   do not accept broad rewrites or empty placeholder files as incidental cleanup.
 
