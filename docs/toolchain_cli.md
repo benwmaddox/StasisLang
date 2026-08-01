@@ -64,13 +64,15 @@ The project `name` may contain internal ASCII spaces, so display names such as `
 valid; leading or trailing spaces are rejected. Manifest paths must be project-relative and cannot
 contain `..`. Generated projects include a
 runnable `main()`, a real `.test.stasis` test, an `AGENTS.md` theory-building and semantic-edit
-guide, and a minimal `CLAUDE.md` that points to `AGENTS.md`.
+guide, a minimal `CLAUDE.md` that points to `AGENTS.md`, and a version-matched
+`PROJECT_ARCHITECTURE.md` with practical input, tick, state, and rendering guidance.
 
 ## Commands and outputs
 
 - `new` / `init`: create the manifest and built-in starter template without network access.
-- `fmt [--check]`: normalize line endings, trailing whitespace, blank EOF lines, and the final
-  newline. The operation is idempotent and never follows symlinks.
+- `fmt [--check]` / `format [--check]`: normalize line endings, trailing whitespace, blank EOF
+  lines, and the final newline. `format` is an alias for `fmt`; both emit `fmt` as the canonical
+  JSON command name. The operation is idempotent and never follows symlinks.
 - `check`: run the shared frontend and Cranelift JIT compilation path without executing `main`.
 - `test [PATH]`: run Stasis tests in one isolated JIT session.
 - `run [--headless]`: JIT-compile and execute no-argument `main(): i32` or `main(): void`; an

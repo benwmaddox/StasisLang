@@ -64,10 +64,13 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
 ];
 const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md");
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
+const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
+const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
 const COMMANDS: &[&str] = &[
     "new",
     "init",
     "fmt",
+    "format",
     "check",
     "test",
     "ai",
@@ -130,6 +133,7 @@ enum ToolchainCommand {
         name: Option<String>,
     },
     /// Format project source files deterministically.
+    #[command(visible_alias = "format")]
     Fmt {
         #[arg(long)]
         check: bool,
@@ -775,6 +779,7 @@ fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> 
         manifest_path.clone(),
         root.join("AGENTS.md"),
         root.join("CLAUDE.md"),
+        root.join(PROJECT_ARCHITECTURE_NAME),
         root.join("src/main.stasis"),
         root.join("tests/main.test.stasis"),
         root.join("stdlib"),
@@ -793,6 +798,10 @@ fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> 
     copy_dir_if_exists(&bundled_stdlib, &root.join("stdlib"))?;
     write_new_file(&root.join("AGENTS.md"), PROJECT_AGENT_GUIDE)?;
     write_new_file(&root.join("CLAUDE.md"), PROJECT_CLAUDE_GUIDE)?;
+    write_new_file(
+        &root.join(PROJECT_ARCHITECTURE_NAME),
+        PROJECT_ARCHITECTURE_GUIDE,
+    )?;
     write_new_file(
         &root.join("src/main.stasis"),
         "import \"../stdlib/stdlib.stasis\";\n\nfunction main(): i32 {\n    return 0;\n}\n",
@@ -4539,6 +4548,24 @@ mod tests {
         assert!(!root.join(MANIFEST_NAME).exists());
         assert_eq!(
             fs::read_to_string(root.join("CLAUDE.md")).expect("read user guide"),
+            "user guidance\n"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn init_preserves_existing_project_architecture_without_partial_writes() {
+        let root = temp_dir("architecture_guide_preflight");
+        fs::create_dir_all(&root).expect("create project directory");
+        fs::write(root.join(PROJECT_ARCHITECTURE_NAME), "user guidance\n")
+            .expect("write project architecture guide");
+
+        let error = create_project(root.clone(), "demo".to_string()).expect_err("reject conflict");
+        assert!(error.contains(PROJECT_ARCHITECTURE_NAME));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        assert_eq!(
+            fs::read_to_string(root.join(PROJECT_ARCHITECTURE_NAME))
+                .expect("read project architecture guide"),
             "user guidance\n"
         );
         remove_temp(&root);

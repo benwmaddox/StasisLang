@@ -59,8 +59,26 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert!(agent_guide.contains("Mapping:"));
     assert!(agent_guide.contains("Rationale:"));
     assert!(agent_guide.contains("Extension:"));
+    assert!(agent_guide.contains("Read `PROJECT_ARCHITECTURE.md`"));
     let claude_guide = fs::read_to_string(project.join("CLAUDE.md")).expect("read Claude guide");
     assert_eq!(claude_guide, "# CLAUDE.md\n\n@AGENTS.md\n");
+    let architecture_guide = fs::read_to_string(project.join("PROJECT_ARCHITECTURE.md"))
+        .expect("read project architecture guide");
+    assert_eq!(
+        architecture_guide,
+        include_str!("../../../docs/project_architecture.md")
+    );
+
+    let formatted = stasis(&["--json", "fmt", "--check"], &project);
+    assert_eq!(formatted.status.code(), Some(0));
+    let formatted_json = json_stdout(&formatted);
+    assert_eq!(formatted_json["command"], "fmt");
+
+    let format_alias = stasis(&["--json", "format", "--check"], &project);
+    assert_eq!(format_alias.status.code(), Some(0));
+    let format_alias_json = json_stdout(&format_alias);
+    assert_eq!(format_alias_json["command"], "fmt");
+    assert_eq!(format_alias_json["result"], formatted_json["result"]);
 
     let version = stasis(&["--json", "--version"], &parent);
     assert_eq!(version.status.code(), Some(0));
@@ -78,6 +96,24 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         .as_str()
         .unwrap_or_default()
         .contains("does not exist"));
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn init_includes_the_project_architecture_guide() {
+    let parent = temp_dir("init_architecture");
+    let project = parent.join("existing");
+    fs::create_dir_all(&project).expect("create existing project directory");
+
+    let initialized = stasis(&["--json", "init", "--name", "existing", "."], &project);
+    assert_eq!(initialized.status.code(), Some(0));
+    assert_eq!(json_stdout(&initialized)["command"], "init");
+    assert_eq!(
+        fs::read_to_string(project.join("PROJECT_ARCHITECTURE.md"))
+            .expect("read project architecture guide"),
+        include_str!("../../../docs/project_architecture.md")
+    );
 
     fs::remove_dir_all(&parent).ok();
 }
