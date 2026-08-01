@@ -4,6 +4,7 @@ use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
+use stasis_compiler::frontend::parser::completion_expected_type;
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
     plan_workshop_semantic_edits, workshop_completion_items, workshop_direct_import_files,
@@ -1421,11 +1422,84 @@ fn completion_query_from_snapshot(
     limit: usize,
     context: &CompletionContext,
 ) -> CompletionQuery {
-    if let Some(items) = overlay_completion_items(source_items, source_files, buffer, context) {
-        index.retain(|item| !completion_item_belongs_to_context(item, context));
+    let mut effective_context = context.clone();
+    if effective_context.expected_type.is_none() {
+        effective_context.expected_type =
+            completion_expected_type(buffer, cursor).unwrap_or_default();
+    }
+    let overlay = if effective_context.owner.is_none() {
+        overlay_document_completion_items(
+            source_items,
+            source_files,
+            buffer,
+            cursor,
+            &mut effective_context,
+        )
+    } else {
+        overlay_completion_items(source_items, source_files, buffer, &effective_context)
+    };
+    if let Some(items) = overlay {
+        index.retain(|item| !completion_item_belongs_to_context(item, &effective_context));
         index.extend(items.into_iter().map(|item| live_completion_item(&item)));
     }
-    index.query_with_context(buffer, cursor, limit, context)
+    index.query_with_context(buffer, cursor, limit, &effective_context)
+}
+
+fn overlay_document_completion_items(
+    source_items: &[WorkshopSourceItem],
+    source_files: &[WorkshopSourceFile],
+    buffer: &str,
+    cursor: usize,
+    context: &mut CompletionContext,
+) -> Option<Vec<WorkshopCompletionItem>> {
+    let file = context.file.as_deref()?;
+    let mut files = source_files.to_vec();
+    let mut cursor = cursor.min(buffer.len());
+    while !buffer.is_char_boundary(cursor) {
+        cursor = cursor.saturating_sub(1);
+    }
+    let source_index = files.iter().position(|source| source.path == file)?;
+    files[source_index].source = buffer.to_string();
+    let owner = workshop_source_items(&files)
+        .ok()?
+        .into_iter()
+        .filter(|item| item.kind == WorkshopSourceItemKind::Function && item.file == file)
+        .filter_map(|item| {
+            let span = item.source_spans.first()?;
+            let start = span.start as usize;
+            let end = span.end as usize;
+            (start <= cursor && cursor <= end).then_some((
+                end.saturating_sub(start),
+                start,
+                end,
+                item,
+            ))
+        })
+        .min_by_key(|(width, _, _, _)| *width);
+    let (_, dirty_start, _, dirty_owner) = owner?;
+    let accepted_owner = source_items
+        .iter()
+        .find(|item| {
+            item.kind == WorkshopSourceItemKind::Function
+                && item.file == file
+                && item.name == dirty_owner.name
+                && item.signature == dirty_owner.signature
+        })
+        .or_else(|| {
+            let mut matches = source_items.iter().filter(|item| {
+                item.kind == WorkshopSourceItemKind::Function
+                    && item.file == file
+                    && item.name == dirty_owner.name
+            });
+            let first = matches.next()?;
+            matches.next().is_none().then_some(first)
+        })?;
+    let accepted_start = accepted_owner.source_spans.first()?.start as usize;
+    let definition = buffer.get(dirty_start..cursor)?;
+    context.owner = Some(accepted_owner.name.clone());
+    context.owner_signature = Some(accepted_owner.signature.clone());
+    context.source_offset = Some(accepted_start.saturating_add(definition.len()));
+    overlay_completion_items(source_items, source_files, definition, context)
 }
 
 fn overlay_completion_items(
@@ -4239,6 +4313,56 @@ mod tests {
                 .count(),
             1
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn dirty_document_overlay_infers_scope_and_completes_new_local() {
+        let (root, config) = project();
+        let (jit, _) = compile(&config);
+        let (_, server) = stasis_runner::live::live_session(8);
+        let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let source = fs::read_to_string(root.join("src/main.stasis"))
+            .expect("source")
+            .replace(
+                "function tick(): i32 { score += 1; return 0; }",
+                "function tick(): i32 {\n    let local_speed: i32 = 2;\n    local_sp\n}",
+            );
+        let cursor = source.rfind("local_sp").expect("completion prefix") + "local_sp".len();
+        let context = CompletionContext {
+            owner: None,
+            file: Some("src/main.stasis".into()),
+            owner_signature: None,
+            source_offset: Some(cursor),
+            expected_type: None,
+        };
+
+        let mut inferred = context.clone();
+        let overlay = overlay_document_completion_items(
+            &workspace.source_items,
+            &workspace.source_files,
+            &source,
+            cursor,
+            &mut inferred,
+        )
+        .expect("document overlay");
+        assert_eq!(inferred.owner.as_deref(), Some("tick"));
+        let local = overlay
+            .iter()
+            .find(|item| item.text == "local_speed")
+            .expect("dirty local completion");
+        let scope = local.scope.as_ref().expect("dirty local scope");
+        assert_eq!(scope.owner, "tick");
+        assert_eq!(scope.owner_signature, inferred.owner_signature);
+        assert!(
+            scope.visible_from <= cursor && cursor <= scope.visible_to,
+            "{scope:?}"
+        );
+
+        let query = workspace.completion_query(&source, cursor, 10, &context);
+
+        assert_eq!(query.items[0].text, "local_speed");
+        assert_eq!(query.replacement_end, cursor);
         fs::remove_dir_all(root).ok();
     }
 
