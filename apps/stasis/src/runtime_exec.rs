@@ -84,14 +84,15 @@ impl RuntimeLauncher {
     }
 
     fn spawn_runtime_process(&self) -> Result<Child, String> {
-        if !cfg!(windows) {
-            return Err("runtime execution path currently supports Windows only".to_string());
-        }
         let stasis_exe = self
             .repo_root
             .join("target")
             .join("debug")
-            .join("stasis.exe");
+            .join(if cfg!(windows) {
+                "stasis.exe"
+            } else {
+                "stasis"
+            });
         if !stasis_exe.exists() {
             return Err(format!(
                 "runtime launcher requires in-process runner binary at {}",

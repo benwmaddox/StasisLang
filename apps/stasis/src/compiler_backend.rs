@@ -2370,6 +2370,12 @@ fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
 }
 
 fn resolve_runtime_graphics_path(repo_root: &Path) -> Option<PathBuf> {
+    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH") {
+        let configured = PathBuf::from(configured);
+        if configured.is_file() {
+            return Some(configured);
+        }
+    }
     if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
         let configured = PathBuf::from(configured);
         if configured.is_file() {

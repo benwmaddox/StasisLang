@@ -2,20 +2,26 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void, CString};
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+#[cfg(unix)]
+use std::ffi::CStr;
 #[cfg(windows)]
-use std::ffi::{c_void, CString, OsStr};
+use std::ffi::OsStr;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
 pub struct Library {
     #[cfg(windows)]
+    handle: *mut c_void,
+    #[cfg(unix)]
     handle: *mut c_void,
 }
 
@@ -135,7 +141,8 @@ fn call_jit_host_void_target(address: usize) {
 
 // Library handles are process-wide OS resources and can be moved between threads.
 unsafe impl Send for Library {}
-// Loading a module and calling exports is thread-safe on Windows; the handle is immutable after load.
+// Loading a module and calling exports is thread-safe on supported desktop platforms; the handle
+// is immutable after load.
 unsafe impl Sync for Library {}
 
 impl Library {
@@ -155,10 +162,30 @@ impl Library {
             return Ok(Self { handle });
         }
 
-        #[cfg(not(windows))]
+        #[cfg(unix)]
+        {
+            let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+                format!(
+                    "dynamic library path contains interior NUL byte: {}",
+                    path.display()
+                )
+            })?;
+            clear_dynamic_loading_error();
+            let handle = unsafe { dlopen(path.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+            if handle.is_null() {
+                return Err(format!(
+                    "failed to load dynamic library {}: {}",
+                    path.to_string_lossy(),
+                    dynamic_loading_error()
+                ));
+            }
+            Ok(Self { handle })
+        }
+
+        #[cfg(not(any(windows, unix)))]
         {
             let _ = path;
-            Err("dynamic loading is only supported on windows in stasis_dynload".to_string())
+            Err("dynamic loading is unsupported on this platform in stasis_dynload".to_string())
         }
     }
 
@@ -174,11 +201,27 @@ impl Library {
             return Ok(address as usize);
         }
 
-        #[cfg(not(windows))]
+        #[cfg(unix)]
+        {
+            let name = CString::new(symbol)
+                .map_err(|_| format!("symbol name contains interior NUL byte: {symbol}"))?;
+            clear_dynamic_loading_error();
+            let address = unsafe { dlsym(self.handle, name.as_ptr()) };
+            let error = dynamic_loading_error_if_present();
+            if let Some(error) = error {
+                return Err(format!("failed to resolve symbol {symbol}: {error}"));
+            }
+            if address.is_null() {
+                return Err(format!("failed to resolve symbol {symbol}: null address"));
+            }
+            Ok(address as usize)
+        }
+
+        #[cfg(not(any(windows, unix)))]
         {
             let _ = symbol;
             Err(
-                "dynamic symbol resolution is only supported on windows in stasis_dynload"
+                "dynamic symbol resolution is unsupported on this platform in stasis_dynload"
                     .to_string(),
             )
         }
@@ -191,6 +234,12 @@ impl Drop for Library {
         {
             if !self.handle.is_null() {
                 let _ = unsafe { FreeLibrary(self.handle) };
+            }
+        }
+        #[cfg(unix)]
+        {
+            if !self.handle.is_null() {
+                let _ = unsafe { dlclose(self.handle) };
             }
         }
     }
@@ -405,10 +454,8 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
 
-#[cfg(windows)]
 const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 1;
 
-#[cfg(windows)]
 fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String> {
     let address = lib
         .symbol_address("stasis_graphics_runtime_abi_version")
@@ -418,8 +465,16 @@ fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String>
                 path.display()
             )
         })?;
-    let version: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
-    let actual = version();
+    #[cfg(windows)]
+    let actual = {
+        let version: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+        version()
+    };
+    #[cfg(not(windows))]
+    let actual = {
+        let version: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+        version()
+    };
     if actual != STASIS_GRAPHICS_RUNTIME_ABI_VERSION {
         return Err(format!(
             "incompatible stasis graphics runtime {}: expected ABI {}, found {}",
@@ -433,82 +488,55 @@ fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String>
 
 pub struct StasisGraphicsApi {
     _lib: Library,
-    #[cfg(windows)]
     stasis_init_window: usize,
-    #[cfg(windows)]
     stasis_host_get_frame: usize,
-    #[cfg(windows)]
     stasis_host_bulk_init: usize,
-    #[cfg(windows)]
     stasis_host_bulk_apply_requests: usize,
-    #[cfg(windows)]
     stasis_host_set_performance_metrics: usize,
-    #[cfg(windows)]
     stasis_gfx_submit_u8: usize,
-    #[cfg(windows)]
     stasis_sleep_ms: usize,
 }
 
 impl StasisGraphicsApi {
     pub fn load_default() -> Result<Self, String> {
-        #[cfg(windows)]
-        {
-            let mut last_error = None;
-            for candidate in runtime_library_candidate_paths() {
-                if !candidate.exists() {
-                    continue;
-                }
-                match Self::load(&candidate) {
-                    Ok(api) => return Ok(api),
-                    Err(error) => last_error = Some(error),
-                }
+        let mut last_error = None;
+        for candidate in runtime_library_candidate_paths() {
+            if !candidate.exists() {
+                continue;
             }
-            Err(last_error.unwrap_or_else(|| "failed to load stasis_graphics runtime library (set STASIS_RUNTIME_DLL_PATH or build runtime)".to_string()))
+            match Self::load(&candidate) {
+                Ok(api) => return Ok(api),
+                Err(error) => last_error = Some(error),
+            }
         }
-
-        #[cfg(not(windows))]
-        {
-            Err(
-                "stasis_graphics runtime loading is only supported on windows in stasis_dynload"
-                    .to_string(),
-            )
-        }
+        Err(last_error.unwrap_or_else(|| {
+            "failed to load stasis_graphics runtime library (set STASIS_RUNTIME_LIBRARY_PATH or build runtime)"
+                .to_string()
+        }))
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
-        #[cfg(windows)]
-        {
-            let lib = Library::load(path)?;
-            verify_graphics_runtime_abi(&lib, path)?;
-            let stasis_init_window = lib.symbol_address("stasis_init_window")?;
-            let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
-            let stasis_host_bulk_init = lib.symbol_address("stasis_host_bulk_init")?;
-            let stasis_host_bulk_apply_requests =
-                lib.symbol_address("stasis_host_bulk_apply_requests")?;
-            let stasis_host_set_performance_metrics =
-                lib.symbol_address("stasis_host_set_performance_metrics")?;
-            let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
-            let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
-            Ok(Self {
-                _lib: lib,
-                stasis_init_window,
-                stasis_host_get_frame,
-                stasis_host_bulk_init,
-                stasis_host_bulk_apply_requests,
-                stasis_host_set_performance_metrics,
-                stasis_gfx_submit_u8,
-                stasis_sleep_ms,
-            })
-        }
-
-        #[cfg(not(windows))]
-        {
-            let _ = path;
-            Err(
-                "stasis_graphics runtime loading is only supported on windows in stasis_dynload"
-                    .to_string(),
-            )
-        }
+        let lib = Library::load(path)?;
+        verify_graphics_runtime_abi(&lib, path)?;
+        let stasis_init_window = lib.symbol_address("stasis_init_window")?;
+        let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
+        let stasis_host_bulk_init = lib.symbol_address("stasis_host_bulk_init")?;
+        let stasis_host_bulk_apply_requests =
+            lib.symbol_address("stasis_host_bulk_apply_requests")?;
+        let stasis_host_set_performance_metrics =
+            lib.symbol_address("stasis_host_set_performance_metrics")?;
+        let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
+        let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
+        Ok(Self {
+            _lib: lib,
+            stasis_init_window,
+            stasis_host_get_frame,
+            stasis_host_bulk_init,
+            stasis_host_bulk_apply_requests,
+            stasis_host_set_performance_metrics,
+            stasis_gfx_submit_u8,
+            stasis_sleep_ms,
+        })
     }
 
     pub fn init_window(&self, width: i32, height: i32, title: &str) -> Result<bool, String> {
@@ -523,13 +551,11 @@ impl StasisGraphicsApi {
         }
         #[cfg(not(windows))]
         {
-            let _ = width;
-            let _ = height;
-            let _ = title;
-            Err(
-                "stasis_graphics init_window is only supported on windows in stasis_dynload"
-                    .to_string(),
-            )
+            let title = CString::new(title)
+                .map_err(|_| "window title contains interior NUL byte".to_string())?;
+            let callback: extern "C" fn(i32, i32, *const c_char) -> i32 =
+                unsafe { std::mem::transmute(self.stasis_init_window) };
+            Ok(callback(width, height, title.as_ptr()) != 0)
         }
     }
 
@@ -543,12 +569,10 @@ impl StasisGraphicsApi {
         }
         #[cfg(not(windows))]
         {
-            let _ = out_i32;
-            let _ = out_f32;
-            Err(
-                "stasis_graphics host_get_frame is only supported on windows in stasis_dynload"
-                    .to_string(),
-            )
+            let callback: extern "C" fn(*mut i32, *mut f32) =
+                unsafe { std::mem::transmute(self.stasis_host_get_frame) };
+            callback(out_i32.as_mut_ptr(), out_f32.as_mut_ptr());
+            Ok(())
         }
     }
 
@@ -562,11 +586,10 @@ impl StasisGraphicsApi {
         }
         #[cfg(not(windows))]
         {
-            let _ = host_req_seq;
-            Err(
-                "stasis_graphics host_bulk_init is only supported on windows in stasis_dynload"
-                    .to_string(),
-            )
+            let callback: extern "C" fn(*const i32) =
+                unsafe { std::mem::transmute(self.stasis_host_bulk_init) };
+            callback(host_req_seq as *const i32);
+            Ok(())
         }
     }
 
@@ -591,11 +614,15 @@ impl StasisGraphicsApi {
         }
         #[cfg(not(windows))]
         {
-            let _ = host_req_seq;
-            let _ = host_req_flags;
-            let _ = host_req_window_w_px;
-            let _ = host_req_window_h_px;
-            Err("stasis_graphics host_bulk_apply_requests is only supported on windows in stasis_dynload".to_string())
+            let callback: extern "C" fn(*const i32, *const i32, *const i32, *const i32) =
+                unsafe { std::mem::transmute(self.stasis_host_bulk_apply_requests) };
+            callback(
+                host_req_seq as *const i32,
+                host_req_flags as *const i32,
+                host_req_window_w_px as *const i32,
+                host_req_window_h_px as *const i32,
+            );
+            Ok(())
         }
     }
 
@@ -613,9 +640,10 @@ impl StasisGraphicsApi {
         }
         #[cfg(not(windows))]
         {
-            let _ = tick_micros;
-            let _ = render_micros;
-            Err("stasis_graphics performance metrics are only supported on windows in stasis_dynload".to_string())
+            let callback: extern "C" fn(u64, u64) =
+                unsafe { std::mem::transmute(self.stasis_host_set_performance_metrics) };
+            callback(tick_micros, render_micros);
+            Ok(())
         }
     }
 
@@ -634,13 +662,10 @@ impl StasisGraphicsApi {
         }
         #[cfg(not(windows))]
         {
-            let _ = cmd_i32;
-            let _ = cmd_f32;
-            let _ = cmd_u8;
-            Err(
-                "stasis_graphics gfx_submit_u8 is only supported on windows in stasis_dynload"
-                    .to_string(),
-            )
+            let callback: extern "C" fn(*const i32, *const f32, *const u8) =
+                unsafe { std::mem::transmute(self.stasis_gfx_submit_u8) };
+            callback(cmd_i32.as_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
+            Ok(())
         }
     }
 
@@ -654,11 +679,9 @@ impl StasisGraphicsApi {
         }
         #[cfg(not(windows))]
         {
-            let _ = ms;
-            Err(
-                "stasis_graphics sleep_ms is only supported on windows in stasis_dynload"
-                    .to_string(),
-            )
+            let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(self.stasis_sleep_ms) };
+            callback(ms);
+            Ok(())
         }
     }
 }
@@ -667,7 +690,6 @@ impl StasisGraphicsApi {
 // stasis_graphics asset API (JIT extern call bridge)
 // ============================================================
 
-#[cfg(windows)]
 struct StasisGraphicsAssetsApi {
     _lib: Library,
     stasis_gfx_load_sprite: usize,
@@ -680,11 +702,12 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_cache_text: usize,
     stasis_gfx_measure_text_cached: usize,
     stasis_gfx_measure_text_cached_height: usize,
+    #[cfg(windows)]
     stasis_storage_load_i32: Option<usize>,
+    #[cfg(windows)]
     stasis_storage_save_i32: Option<usize>,
 }
 
-#[cfg(windows)]
 impl StasisGraphicsAssetsApi {
     fn load_default() -> Result<Self, String> {
         let mut last_error = None;
@@ -709,8 +732,8 @@ impl StasisGraphicsAssetsApi {
             stasis_gfx_load_sprite: lib.symbol_address("stasis_gfx_load_sprite")?,
             stasis_gfx_release_sprite: lib.symbol_address("stasis_gfx_release_sprite")?,
             stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
-            // PNG capture was added after the original asset ABI. Keep older runtime
-            // DLLs usable for all pre-existing calls and report PNG as unsupported.
+            // PNG capture was added after the original asset ABI. Keep older runtimes usable for
+            // all pre-existing calls and report PNG as unsupported.
             stasis_gfx_dump_png: lib.symbol_address("stasis_gfx_dump_png").ok(),
             stasis_gfx_poll_reload: lib.symbol_address("stasis_gfx_poll_reload")?,
             stasis_load_font: lib.symbol_address("stasis_load_font")?,
@@ -719,14 +742,15 @@ impl StasisGraphicsAssetsApi {
             stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
             stasis_gfx_measure_text_cached_height: lib
                 .symbol_address("stasis_gfx_measure_text_cached_height")?,
+            #[cfg(windows)]
             stasis_storage_load_i32: lib.symbol_address("stasis_storage_load_i32").ok(),
+            #[cfg(windows)]
             stasis_storage_save_i32: lib.symbol_address("stasis_storage_save_i32").ok(),
             _lib: lib,
         })
     }
 }
 
-#[cfg(windows)]
 fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, String> {
     static API: OnceLock<Result<StasisGraphicsAssetsApi, String>> = OnceLock::new();
     match API.get_or_init(StasisGraphicsAssetsApi::load_default) {
@@ -737,63 +761,74 @@ fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, Stri
 
 pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
+    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH") {
+        out.push(PathBuf::from(configured));
+    }
+    // Preserve the original variable as a compatibility alias for existing Windows workflows.
     if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
         out.push(PathBuf::from(configured));
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            // Release-friendly default: ship the DLL next to the stasis binary.
-            out.push(exe_dir.join("stasis_graphics.dll"));
+            // Release-friendly default: ship the runtime next to the stasis binary.
+            for file_name in runtime_library_file_names() {
+                out.push(exe_dir.join(file_name));
+            }
 
-            // Dev-friendly default: locate the runtime DLL built under the repo tree by
+            // Dev-friendly default: locate the runtime built under the repo tree by
             // walking a few parents from the executable location.
             for ancestor in exe_dir.ancestors().take(6) {
-                out.push(
-                    ancestor
-                        .join("runtime")
-                        .join("build")
-                        .join("bin")
-                        .join("Release")
-                        .join("stasis_graphics.dll"),
-                );
-                out.push(
-                    ancestor
-                        .join("runtime")
-                        .join("build")
-                        .join("bin")
-                        .join("Debug")
-                        .join("stasis_graphics.dll"),
-                );
+                for file_name in runtime_library_file_names() {
+                    for configuration in [None, Some("Release"), Some("Debug")] {
+                        let mut candidate = ancestor.join("runtime").join("build").join("bin");
+                        if let Some(configuration) = configuration {
+                            candidate.push(configuration);
+                        }
+                        candidate.push(file_name);
+                        out.push(candidate);
+                    }
+                }
             }
         }
     }
 
     // Allow loading from the current working directory too (handy for ad-hoc runs).
-    out.push(PathBuf::from("stasis_graphics.dll"));
+    for file_name in runtime_library_file_names() {
+        out.push(PathBuf::from(file_name));
+    }
 
-    // Dev-friendly fallback: if the runtime DLL exists under this repo checkout, include it.
+    // Dev-friendly fallback: if the runtime exists under this repo checkout, include it.
     // This helps when `CARGO_TARGET_DIR` points outside the workspace (so `current_exe()` ancestry
     // won't include the repo root).
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    let repo_release = repo_root
-        .join("runtime")
-        .join("build")
-        .join("bin")
-        .join("Release")
-        .join("stasis_graphics.dll");
-    if repo_release.exists() {
-        out.push(repo_release);
-    }
-    let repo_debug = repo_root
-        .join("runtime")
-        .join("build")
-        .join("bin")
-        .join("Debug")
-        .join("stasis_graphics.dll");
-    if repo_debug.exists() {
-        out.push(repo_debug);
+    for file_name in runtime_library_file_names() {
+        for configuration in [None, Some("Release"), Some("Debug")] {
+            let mut candidate = repo_root.join("runtime").join("build").join("bin");
+            if let Some(configuration) = configuration {
+                candidate.push(configuration);
+            }
+            candidate.push(file_name);
+            if candidate.exists() {
+                out.push(candidate);
+            }
+        }
     }
     out
+}
+
+#[cfg(windows)]
+fn runtime_library_file_names() -> &'static [&'static str] {
+    &["stasis_graphics.dll"]
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_library_file_names() -> &'static [&'static str] {
+    &["libstasis_graphics.dylib", "stasis_graphics.dylib"]
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn runtime_library_file_names() -> &'static [&'static str] {
+    &["libstasis_graphics.so", "stasis_graphics.so"]
 }
 
 pub fn clear_jit_string_literal_table() {
@@ -2771,7 +2806,6 @@ fn embedded_graphics_host() -> Option<EmbeddedGraphicsHost> {
     EMBEDDED_GRAPHICS_HOST.with(|slot| slot.get())
 }
 
-#[cfg(windows)]
 fn jit_text_arg_to_cstring(value_id: i32) -> Result<CString, String> {
     let bytes = jit_text_arg_bytes(value_id).ok_or_else(|| {
         format!("missing jit text handle for id={value_id} (neither literal nor utf8 buffer)")
@@ -2788,34 +2822,28 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
     if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
         return (host.load_sprite)(&path, max_w, max_h);
     }
-    #[cfg(windows)]
-    {
-        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
-            eprintln!("gfx_load_sprite failed: unknown string handle {path_id}");
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        eprintln!("gfx_load_sprite failed: unknown string handle {path_id}");
+        return 0;
+    };
+    let api = match stasis_graphics_assets_api() {
+        Ok(api) => api,
+        Err(error) => {
+            eprintln!("gfx_load_sprite failed: {error}");
             return 0;
-        };
-        let api = match stasis_graphics_assets_api() {
-            Ok(api) => api,
-            Err(error) => {
-                eprintln!("gfx_load_sprite failed: {error}");
-                return 0;
-            }
-        };
-        let callback: extern "system" fn(*const c_char, i32, i32) -> i32 =
-            unsafe { std::mem::transmute(api.stasis_gfx_load_sprite) };
-        let handle = callback(path.as_ptr(), max_w, max_h);
-        if handle == 0 {
-            eprintln!("gfx_load_sprite failed for {}", path.to_string_lossy());
         }
-        return handle;
-    }
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_load_sprite) };
     #[cfg(not(windows))]
-    {
-        let _ = path_id;
-        let _ = max_w;
-        let _ = max_h;
-        0
+    let callback: extern "C" fn(*const c_char, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_load_sprite) };
+    let handle = callback(path.as_ptr(), max_w, max_h);
+    if handle == 0 {
+        eprintln!("gfx_load_sprite failed for {}", path.to_string_lossy());
     }
+    handle
 }
 
 #[no_mangle]
@@ -2824,19 +2852,16 @@ pub extern "C" fn stasis_jit_gfx_release_sprite(handle: i32) {
         (host.release_sprite)(handle);
         return;
     }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
     #[cfg(windows)]
-    {
-        let Ok(api) = stasis_graphics_assets_api() else {
-            return;
-        };
-        let callback: extern "system" fn(i32) =
-            unsafe { std::mem::transmute(api.stasis_gfx_release_sprite) };
-        callback(handle);
-    }
+    let callback: extern "system" fn(i32) =
+        unsafe { std::mem::transmute(api.stasis_gfx_release_sprite) };
     #[cfg(not(windows))]
-    {
-        let _ = handle;
-    }
+    let callback: extern "C" fn(i32) =
+        unsafe { std::mem::transmute(api.stasis_gfx_release_sprite) };
+    callback(handle);
 }
 
 fn configured_preference_storage_root() -> &'static Mutex<Option<PathBuf>> {
@@ -3008,47 +3033,38 @@ pub extern "C" fn stasis_jit_storage_save_i32(scope_id: i32, key_id: i32, value:
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
     #[cfg(windows)]
-    {
-        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
-            return 0;
-        };
-        let Ok(api) = stasis_graphics_assets_api() else {
-            return 0;
-        };
-        let callback: extern "system" fn(*const c_char) -> i32 =
-            unsafe { std::mem::transmute(api.stasis_gfx_dump_bmp) };
-        return callback(path.as_ptr());
-    }
+    let callback: extern "system" fn(*const c_char) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_dump_bmp) };
     #[cfg(not(windows))]
-    {
-        let _ = path_id;
-        0
-    }
+    let callback: extern "C" fn(*const c_char) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_dump_bmp) };
+    callback(path.as_ptr())
 }
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_dump_png(path_id: i32) -> i32 {
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_gfx_dump_png else {
+        return 0;
+    };
     #[cfg(windows)]
-    {
-        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
-            return 0;
-        };
-        let Ok(api) = stasis_graphics_assets_api() else {
-            return 0;
-        };
-        let Some(address) = api.stasis_gfx_dump_png else {
-            return 0;
-        };
-        let callback: extern "system" fn(*const c_char) -> i32 =
-            unsafe { std::mem::transmute(address) };
-        return callback(path.as_ptr());
-    }
+    let callback: extern "system" fn(*const c_char) -> i32 =
+        unsafe { std::mem::transmute(address) };
     #[cfg(not(windows))]
-    {
-        let _ = path_id;
-        0
-    }
+    let callback: extern "C" fn(*const c_char) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(path.as_ptr())
 }
 
 #[no_mangle]
@@ -3056,24 +3072,19 @@ pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
     if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
         return (host.load_font)(&path, size);
     }
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
     #[cfg(windows)]
-    {
-        let Ok(path) = jit_text_arg_to_cstring(path_id) else {
-            return 0;
-        };
-        let Ok(api) = stasis_graphics_assets_api() else {
-            return 0;
-        };
-        let callback: extern "system" fn(*const c_char, i32) -> i32 =
-            unsafe { std::mem::transmute(api.stasis_load_font) };
-        return callback(path.as_ptr(), size);
-    }
+    let callback: extern "system" fn(*const c_char, i32) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_load_font) };
     #[cfg(not(windows))]
-    {
-        let _ = path_id;
-        let _ = size;
-        0
-    }
+    let callback: extern "C" fn(*const c_char, i32) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_load_font) };
+    callback(path.as_ptr(), size)
 }
 
 #[no_mangle]
@@ -3085,24 +3096,19 @@ pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
             return width;
         }
     }
+    let Ok(text) = jit_text_arg_to_cstring(text_id) else {
+        return 0.0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0.0;
+    };
     #[cfg(windows)]
-    {
-        let Ok(text) = jit_text_arg_to_cstring(text_id) else {
-            return 0.0;
-        };
-        let Ok(api) = stasis_graphics_assets_api() else {
-            return 0.0;
-        };
-        let callback: extern "system" fn(i32, *const c_char) -> f32 =
-            unsafe { std::mem::transmute(api.stasis_measure_text) };
-        return callback(font, text.as_ptr());
-    }
+    let callback: extern "system" fn(i32, *const c_char) -> f32 =
+        unsafe { std::mem::transmute(api.stasis_measure_text) };
     #[cfg(not(windows))]
-    {
-        let _ = font;
-        let _ = text_id;
-        0.0
-    }
+    let callback: extern "C" fn(i32, *const c_char) -> f32 =
+        unsafe { std::mem::transmute(api.stasis_measure_text) };
+    callback(font, text.as_ptr())
 }
 
 #[no_mangle]
@@ -3110,24 +3116,19 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
     if let (Some(host), Some(text)) = (embedded_graphics_host(), jit_text_arg_bytes(text_id)) {
         return (host.cache_text)(font, &text);
     }
+    let Ok(text) = jit_text_arg_to_cstring(text_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
     #[cfg(windows)]
-    {
-        let Ok(text) = jit_text_arg_to_cstring(text_id) else {
-            return 0;
-        };
-        let Ok(api) = stasis_graphics_assets_api() else {
-            return 0;
-        };
-        let callback: extern "system" fn(i32, *const c_char) -> i32 =
-            unsafe { std::mem::transmute(api.stasis_gfx_cache_text) };
-        return callback(font, text.as_ptr());
-    }
+    let callback: extern "system" fn(i32, *const c_char) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_cache_text) };
     #[cfg(not(windows))]
-    {
-        let _ = font;
-        let _ = text_id;
-        0
-    }
+    let callback: extern "C" fn(i32, *const c_char) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_cache_text) };
+    callback(font, text.as_ptr())
 }
 
 #[no_mangle]
@@ -3135,20 +3136,16 @@ pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
     if let Some(host) = embedded_graphics_host() {
         return (host.poll_reload)(handle);
     }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
     #[cfg(windows)]
-    {
-        let Ok(api) = stasis_graphics_assets_api() else {
-            return 0;
-        };
-        let callback: extern "system" fn(i32) -> i32 =
-            unsafe { std::mem::transmute(api.stasis_gfx_poll_reload) };
-        return callback(handle);
-    }
+    let callback: extern "system" fn(i32) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_poll_reload) };
     #[cfg(not(windows))]
-    {
-        let _ = handle;
-        0
-    }
+    let callback: extern "C" fn(i32) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_poll_reload) };
+    callback(handle)
 }
 
 #[no_mangle]
@@ -3156,20 +3153,16 @@ pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
     if let Some(host) = embedded_graphics_host() {
         return (host.measure_text_cached)(run_handle);
     }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0.0;
+    };
     #[cfg(windows)]
-    {
-        let Ok(api) = stasis_graphics_assets_api() else {
-            return 0.0;
-        };
-        let callback: extern "system" fn(i32) -> f32 =
-            unsafe { std::mem::transmute(api.stasis_gfx_measure_text_cached) };
-        return callback(run_handle);
-    }
+    let callback: extern "system" fn(i32) -> f32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_measure_text_cached) };
     #[cfg(not(windows))]
-    {
-        let _ = run_handle;
-        0.0
-    }
+    let callback: extern "C" fn(i32) -> f32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_measure_text_cached) };
+    callback(run_handle)
 }
 
 #[no_mangle]
@@ -3177,20 +3170,16 @@ pub extern "C" fn stasis_jit_gfx_measure_text_cached_height(run_handle: i32) -> 
     if let Some(host) = embedded_graphics_host() {
         return (host.measure_text_cached_height)(run_handle);
     }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0.0;
+    };
     #[cfg(windows)]
-    {
-        let Ok(api) = stasis_graphics_assets_api() else {
-            return 0.0;
-        };
-        let callback: extern "system" fn(i32) -> f32 =
-            unsafe { std::mem::transmute(api.stasis_gfx_measure_text_cached_height) };
-        return callback(run_handle);
-    }
+    let callback: extern "system" fn(i32) -> f32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_measure_text_cached_height) };
     #[cfg(not(windows))]
-    {
-        let _ = run_handle;
-        0.0
-    }
+    let callback: extern "C" fn(i32) -> f32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_measure_text_cached_height) };
+    callback(run_handle)
 }
 
 fn struct_field_path_hash(base_hash: i32, suffix: &str) -> i32 {
@@ -4025,6 +4014,50 @@ extern "system" {
     fn GetProcAddress(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
 
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+const RTLD_LOCAL: i32 = 0;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const RTLD_LOCAL: i32 = 4;
+#[cfg(unix)]
+const RTLD_NOW: i32 = 2;
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+#[link(name = "dl")]
+unsafe extern "C" {
+    fn dlopen(path: *const c_char, flags: i32) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlclose(handle: *mut c_void) -> i32;
+    fn dlerror() -> *const c_char;
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+unsafe extern "C" {
+    fn dlopen(path: *const c_char, flags: i32) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlclose(handle: *mut c_void) -> i32;
+    fn dlerror() -> *const c_char;
+}
+
+#[cfg(unix)]
+fn clear_dynamic_loading_error() {
+    let _ = unsafe { dlerror() };
+}
+
+#[cfg(unix)]
+fn dynamic_loading_error_if_present() -> Option<String> {
+    let error = unsafe { dlerror() };
+    (!error.is_null()).then(|| {
+        unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+#[cfg(unix)]
+fn dynamic_loading_error() -> String {
+    dynamic_loading_error_if_present().unwrap_or_else(|| "unknown dynamic loader error".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4073,6 +4106,23 @@ mod tests {
         let address = library
             .symbol_address("GetTickCount")
             .expect("resolve GetTickCount");
+        assert_ne!(address, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn can_load_linux_libc_and_resolve_export() {
+        let library = Library::load(Path::new("libc.so.6")).expect("load libc");
+        let address = library.symbol_address("malloc").expect("resolve malloc");
+        assert_ne!(address, 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn can_load_macos_libsystem_and_resolve_export() {
+        let library =
+            Library::load(Path::new("/usr/lib/libSystem.B.dylib")).expect("load libSystem");
+        let address = library.symbol_address("malloc").expect("resolve malloc");
         assert_ne!(address, 0);
     }
 

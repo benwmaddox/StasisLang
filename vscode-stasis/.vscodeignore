@@ -2,7 +2,9 @@
 .vscode/**
 node_modules/**
 src/**
+test/**
 dist/*.test.cjs
+dist/e2e-*.cjs
 dist/*.map
 tsconfig.json
 *.vsix
