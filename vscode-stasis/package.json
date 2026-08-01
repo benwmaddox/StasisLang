@@ -188,6 +188,7 @@
     "test": "npm run test:unit",
     "test:unit": "npm run check && esbuild src/protocol.test.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/protocol.test.cjs && node --test dist/protocol.test.cjs",
     "test:e2e": "npm run package && npm run bundle:e2e && node dist/e2e-run.cjs",
+    "prepackage": "node -e \"require('node:fs').mkdirSync('.vsix', { recursive: true })\"",
     "package": "npm run build && vsce package --out .vsix/stasislang.stasis.vsix"
   },
   "devDependencies": {
