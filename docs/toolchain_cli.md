@@ -70,9 +70,9 @@ guide, a minimal `CLAUDE.md` that points to `AGENTS.md`, and a version-matched
 ## Commands and outputs
 
 - `new` / `init`: create the manifest and built-in starter template without network access.
-- `fmt [--check]` / `format [--check]`: normalize line endings, trailing whitespace, blank EOF
-  lines, and the final newline. `format` is an alias for `fmt`; both emit `fmt` as the canonical
-  JSON command name. The operation is idempotent and never follows symlinks.
+- `fmt [--check]` / `format [--check]`: apply the canonical Stasis source layout described below.
+  `format` is an alias for `fmt`; both emit `fmt` as the canonical JSON command name. The operation
+  is idempotent and never follows symlinks.
 - `check`: run the shared frontend and Cranelift JIT compilation path without executing `main`.
 - `test [PATH]`: run Stasis tests in one isolated JIT session.
 - `run [--headless]`: JIT-compile and execute no-argument `main(): i32` or `main(): void`; an
@@ -120,6 +120,53 @@ manifest. When working from a source checkout, pass `--development-build` to `pa
 Add `--json` to receive one stable JSON result object. Usage errors exit 2, command/compile/test
 failures exit 1, and successful commands exit 0 except `run`, which preserves the guest's `i32`
 exit code. Guest program output may precede the final JSON object for `run`.
+
+## Source formatting
+
+`stasis fmt` is intentionally opinionated about layout while preserving program structure. It
+keeps token and comment text, explicit parentheses, declaration order, and import order unchanged.
+Before writing, it verifies that both its lossless token stream and the compiler token stream are
+unchanged. It plans every source and test-file rewrite first; a formatting or verification error
+therefore leaves the workspace untouched. If a later file write fails, it attempts to restore all
+files already written.
+
+The canonical rules are:
+
+- Indent with four spaces. Tabs are never emitted.
+- Put an opening brace on the declaration or control-flow line. Every braced body is multiline,
+  including short functions and one-statement branches.
+- Put each struct or block-global field, enum member, and semicolon-terminated statement on its own
+  line. Put `else` on the same line as the preceding closing brace.
+- Use one space around assignment, comparison, arithmetic, and boolean operators. Do not put spaces
+  before `:`, `,`, `;`, member access, indexing, or calls; put one space after `:` and `,`.
+- Keep adjacent imports together and separate other top-level declarations with one blank line.
+  Preserve at most one intentional blank line inside a body, but omit a blank line immediately
+  before a closing brace.
+- Use LF line endings, remove trailing whitespace and blank lines at end of file, and emit exactly
+  one final newline.
+- Treat 160 columns as a soft limit. When a parenthesized signature, call, or condition would exceed
+  it, put its comma-separated items on indented lines without adding trailing commas. Wrapped
+  boolean conditions may also break before `&&` and `||`. A comment, string, or other indivisible
+  token may exceed 160 columns rather than having its contents changed.
+
+For example:
+
+```stasis
+struct Player {
+    health: i32;
+    active: bool;
+}
+
+function update_player(player: Player, damage: i32): void {
+    if (damage > 0) {
+        player.health -= damage;
+    } else {
+        player.active = false;
+    }
+}
+```
+
+Use `stasis fmt --check` in CI when formatting differences should fail without modifying files.
 
 ## Cache and offline behavior
 

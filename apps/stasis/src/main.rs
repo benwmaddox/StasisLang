@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
 mod toolchain_cli;
+mod toolchain_formatter;
 
 use std::collections::BTreeSet;
 use std::env;

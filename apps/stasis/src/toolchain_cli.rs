@@ -39,6 +39,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::toolchain_formatter::format_source;
+
 mod live_tui;
 
 const MANIFEST_NAME: &str = "stasis.json";
@@ -132,7 +134,7 @@ enum ToolchainCommand {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Format project source files deterministically.
+    /// Apply the canonical Stasis source layout.
     #[command(visible_alias = "format")]
     Fmt {
         #[arg(long)]
@@ -886,21 +888,64 @@ fn format_workspace(workspace: &Workspace, check: bool) -> Result<CommandResult,
     collect_stasis_files(&test_root, &mut files)?;
     files.sort();
     files.dedup();
-    let mut changed = Vec::new();
+    struct FormatChange {
+        path: PathBuf,
+        relative: String,
+        original: String,
+        formatted: String,
+    }
+
+    let mut changes = Vec::new();
     for file in files {
         let original = fs::read_to_string(&file)
             .map_err(|error| format!("failed to read {}: {error}", file.display()))?;
-        let formatted = format_source(&original);
+        let formatted = format_source(&original)
+            .map_err(|error| format!("failed to format {}: {error}", file.display()))?;
+        let reformatted = format_source(&formatted)
+            .map_err(|error| format!("failed to verify {}: {error}", file.display()))?;
+        if formatted != reformatted {
+            return Err(format!(
+                "formatter is not idempotent for {}",
+                file.display()
+            ));
+        }
         if original != formatted {
-            changed.push(relative_display(&workspace.root, &file));
-            if !check {
-                fs::write(&file, formatted)
-                    .map_err(|error| format!("failed to write {}: {error}", file.display()))?;
-            }
+            changes.push(FormatChange {
+                relative: relative_display(&workspace.root, &file),
+                path: file,
+                original,
+                formatted,
+            });
         }
     }
+    let changed = changes
+        .iter()
+        .map(|change| change.relative.clone())
+        .collect::<Vec<_>>();
     if check && !changed.is_empty() {
         return Err(format!("formatting required: {}", changed.join(", ")));
+    }
+    if !check {
+        for (index, change) in changes.iter().enumerate() {
+            if let Err(error) = fs::write(&change.path, &change.formatted) {
+                let mut rollback_errors = Vec::new();
+                for applied in changes[..=index].iter().rev() {
+                    if let Err(rollback_error) = fs::write(&applied.path, &applied.original) {
+                        rollback_errors
+                            .push(format!("{}: {rollback_error}", applied.path.display()));
+                    }
+                }
+                let rollback = if rollback_errors.is_empty() {
+                    "previous writes were rolled back".to_string()
+                } else {
+                    format!("rollback also failed for {}", rollback_errors.join(", "))
+                };
+                return Err(format!(
+                    "failed to write {}: {error}; {rollback}",
+                    change.path.display()
+                ));
+            }
+        }
     }
     Ok(CommandResult::success(
         if changed.is_empty() {
@@ -910,21 +955,6 @@ fn format_workspace(workspace: &Workspace, check: bool) -> Result<CommandResult,
         },
         json!({"changed": changed, "check": check}),
     ))
-}
-
-fn format_source(source: &str) -> String {
-    let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
-    let mut lines: Vec<&str> = normalized.lines().collect();
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines.pop();
-    }
-    let mut output = lines
-        .iter()
-        .map(|line| line.trim_end_matches([' ', '\t']))
-        .collect::<Vec<_>>()
-        .join("\n");
-    output.push('\n');
-    output
 }
 
 fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
@@ -4164,8 +4194,8 @@ mod tests {
     fn source_formatter_is_deterministic() {
         let source = "function main(): i32 {  \r\n    return 0;\t\r\n}\r\n\r\n";
         let expected = "function main(): i32 {\n    return 0;\n}\n";
-        assert_eq!(format_source(source), expected);
-        assert_eq!(format_source(expected), expected);
+        assert_eq!(format_source(source).expect("format"), expected);
+        assert_eq!(format_source(expected).expect("format"), expected);
     }
 
     #[test]

@@ -119,6 +119,51 @@ fn init_includes_the_project_architecture_guide() {
 }
 
 #[test]
+fn format_alias_applies_canonical_layout_and_fmt_check_enforces_it() {
+    let parent = temp_dir("opinionated_format");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    let entry = project.join("src/main.stasis");
+    fs::write(
+        &entry,
+        "struct Player{health:i32;active:bool;}enum Mode{Menu Playing}global player:Player;function update(amount:i32):void{if(amount>0){player.health+=amount;}else{player.health=0;}}function main():i32{update(1);return player.health;}\n",
+    )
+    .expect("write unformatted fixture");
+
+    let before = stasis(&["--json", "fmt", "--check"], &project);
+    assert_eq!(before.status.code(), Some(1));
+    assert!(json_stderr(&before)["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("src/main.stasis"));
+
+    let formatted = stasis(&["--json", "format"], &project);
+    assert_eq!(formatted.status.code(), Some(0));
+    assert_eq!(json_stdout(&formatted)["command"], "fmt");
+    assert_eq!(
+        fs::read_to_string(&entry).expect("read formatted fixture"),
+        "struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu\n    Playing\n}\n\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n"
+    );
+
+    assert_eq!(stasis(&["fmt", "--check"], &project).status.code(), Some(0));
+    let checked = stasis(&["check"], &project);
+    assert_eq!(
+        checked.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
 fn inspect_reports_compiler_state_memory_and_capacity_projection() {
     let parent = temp_dir("memory_report");
     fs::create_dir_all(&parent).expect("create temp parent");
