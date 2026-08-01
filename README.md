@@ -292,6 +292,9 @@ cargo run -p stasis --release -- play `
 
 ## Repository Map and Deeper Reading
 
+- `docs/project_architecture.md` - recommended input, tick, state, and render
+  structure for Stasis projects
+
 - `docs/spec.md` — canonical language semantics
 - `docs/live-compilation-prd.md` — hot-swap product and architecture requirements
 - `docs/toolchain_cli.md` — CLI and workspace contract
