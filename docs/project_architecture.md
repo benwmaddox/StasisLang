@@ -62,8 +62,21 @@ and gives live code replacement one clear layout to preserve.
 const MAX_ACTORS: i32 = 128;
 const MAX_INTENTS: i32 = 8;
 
-enum Screen { Menu, Playing, Paused, Result }
-enum IntentKind { None, Start, Move, UseAction, Pause, Resume }
+enum Screen {
+    Menu,
+    Playing,
+    Paused,
+    Result,
+}
+
+enum IntentKind {
+    None,
+    Start,
+    Move,
+    UseAction,
+    Pause,
+    Resume,
+}
 
 struct Actor {
     active: bool;
@@ -306,8 +319,19 @@ game state, not from a rounded draw position.
 If only one state can be active, use an enum:
 
 ```stasis
-enum Screen { Menu, Playing, Paused, Result }
-enum MatchPhase { Preparing, Active, Won, Lost }
+enum Screen {
+    Menu,
+    Playing,
+    Paused,
+    Result,
+}
+
+enum MatchPhase {
+    Preparing,
+    Active,
+    Won,
+    Lost,
+}
 ```
 
 A collection of `show_menu`, `paused`, `show_result`, and `modal_open` booleans

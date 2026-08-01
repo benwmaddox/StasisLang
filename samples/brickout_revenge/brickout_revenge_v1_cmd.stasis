@@ -82,14 +82,14 @@ const GAME_H: f32 = 624.0;
 enum BrickType {
     Basic,
     Armored,
-    Reflector
+    Reflector,
 }
 
 enum Phase {
     Setup,
     Battle,
     Win,
-    Lose
+    Lose,
 }
 
 // Math

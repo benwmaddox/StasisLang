@@ -2,7 +2,7 @@ import "preview_adapter.stasis";
 
 enum GamePhase {
     Playing,
-    Finished
+    Finished,
 }
 
 struct PhaseSample {

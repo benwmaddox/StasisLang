@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn enum_state_uses_i32_storage_lanes() {
-        let source = "enum Phase { Waiting, Playing }\n\
+        let source = "enum Phase { Waiting, Playing, }\n\
                       struct Enemy { phase: Phase; hp: i32; }\n\
                       struct Game { phase: Phase; enemies: Enemy[2]; }\n\
                       global game: Game;\n\

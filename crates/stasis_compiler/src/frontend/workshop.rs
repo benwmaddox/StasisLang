@@ -4033,7 +4033,7 @@ mod workshop_contract_tests {
             path: "src/main.stasis".to_string(),
             source: r#"
 struct Player { hp: i32; speed: f32; }
-enum Mode { Playing, Paused }
+enum Mode { Playing, Paused, }
 global state { player: Player; }
 function damage(player: Player, amount: i32): i32 { return player.hp - amount; }
 function tick(): i32 {
@@ -4203,7 +4203,7 @@ function tick(): i32 {
         let files = vec![
             WorkshopSourceFile {
                 path: "src/main.stasis".to_string(),
-                source: "import \"unused.stasis\";\nimport \"mixed.stasis\";\nimport \"combat.stasis\";\nenum Phase { Ready = 1 }\nstruct Player { value: i32; }\nglobal State { player: Player; }\nfunction main(): i32 { let value: i32 = 1; State.player.damage(1); return value; }\nfunction parameter(amount: i32): i32 { return amount; }\nfunction shadow(): i32 { let helper: i32 = 3; return helper; }\nfunction imported_call(): i32 { return helper(); }\n"
+                source: "import \"unused.stasis\";\nimport \"mixed.stasis\";\nimport \"combat.stasis\";\nenum Phase { Ready = 1, }\nstruct Player { value: i32; }\nglobal State { player: Player; }\nfunction main(): i32 { let value: i32 = 1; State.player.damage(1); return value; }\nfunction parameter(amount: i32): i32 { return amount; }\nfunction shadow(): i32 { let helper: i32 = 3; return helper; }\nfunction imported_call(): i32 { return helper(); }\n"
                     .to_string(),
             },
             WorkshopSourceFile {

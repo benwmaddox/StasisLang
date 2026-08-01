@@ -3,6 +3,9 @@
 Use the installed `stasis` CLI from the directory containing `stasis.json`. Do not invoke Cargo
 for normal project work.
 
+Read `PROJECT_ARCHITECTURE.md` before structuring game code. Use its input, tick, state, and
+rendering boundaries as the default unless the project documents a concrete reason to differ.
+
 ## Theory-building practice
 
 - Treat programming as building and maintaining an explainable theory of how real-world behavior maps through Stasis source, explicit state, deterministic tick systems, rendering, tests, and the packaged user experience. Code, tests, and documentation are evidence and memory cues; they are not substitutes for understanding.

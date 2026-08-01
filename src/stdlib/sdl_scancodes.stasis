@@ -13,5 +13,5 @@ enum Scancode {
     Right = 79,
     Left = 80,
     Down = 81,
-    Up = 82
+    Up = 82,
 }

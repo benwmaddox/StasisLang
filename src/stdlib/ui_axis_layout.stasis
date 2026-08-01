@@ -3,13 +3,13 @@
 enum UiHorizontal {
     Left,
     Center,
-    Right
+    Right,
 }
 
 enum UiVertical {
     Top,
     Center,
-    Bottom
+    Bottom,
 }
 
 function @inline ui_place_x(

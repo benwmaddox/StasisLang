@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -59,8 +60,26 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert!(agent_guide.contains("Mapping:"));
     assert!(agent_guide.contains("Rationale:"));
     assert!(agent_guide.contains("Extension:"));
+    assert!(agent_guide.contains("Read `PROJECT_ARCHITECTURE.md`"));
     let claude_guide = fs::read_to_string(project.join("CLAUDE.md")).expect("read Claude guide");
     assert_eq!(claude_guide, "# CLAUDE.md\n\n@AGENTS.md\n");
+    let architecture_guide = fs::read_to_string(project.join("PROJECT_ARCHITECTURE.md"))
+        .expect("read project architecture guide");
+    assert_eq!(
+        architecture_guide,
+        include_str!("../../../docs/project_architecture.md")
+    );
+
+    let formatted = stasis(&["--json", "fmt", "--check"], &project);
+    assert_eq!(formatted.status.code(), Some(0));
+    let formatted_json = json_stdout(&formatted);
+    assert_eq!(formatted_json["command"], "fmt");
+
+    let format_alias = stasis(&["--json", "format", "--check"], &project);
+    assert_eq!(format_alias.status.code(), Some(0));
+    let format_alias_json = json_stdout(&format_alias);
+    assert_eq!(format_alias_json["command"], "fmt");
+    assert_eq!(format_alias_json["result"], formatted_json["result"]);
 
     let version = stasis(&["--json", "--version"], &parent);
     assert_eq!(version.status.code(), Some(0));
@@ -79,6 +98,95 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         .unwrap_or_default()
         .contains("does not exist"));
 
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn init_includes_the_project_architecture_guide() {
+    let parent = temp_dir("init_architecture");
+    let project = parent.join("existing");
+    fs::create_dir_all(&project).expect("create existing project directory");
+
+    let initialized = stasis(&["--json", "init", "--name", "existing", "."], &project);
+    assert_eq!(initialized.status.code(), Some(0));
+    assert_eq!(json_stdout(&initialized)["command"], "init");
+    assert_eq!(
+        fs::read_to_string(project.join("PROJECT_ARCHITECTURE.md"))
+            .expect("read project architecture guide"),
+        include_str!("../../../docs/project_architecture.md")
+    );
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn format_alias_applies_canonical_layout_and_fmt_check_enforces_it() {
+    let parent = temp_dir("opinionated_format");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    let entry = project.join("src/main.stasis");
+    fs::write(
+        &entry,
+        "struct Player{health:i32;active:bool;}enum Mode{Menu Playing}global player:Player;function update(amount:i32):void{if(amount>0){player.health+=amount;}else{player.health=0;}}function main():i32{update(1);return player.health;}\n",
+    )
+    .expect("write unformatted fixture");
+
+    let before = stasis(&["--json", "fmt", "--check"], &project);
+    assert_eq!(before.status.code(), Some(1));
+    assert!(json_stderr(&before)["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("src/main.stasis"));
+
+    let formatted = stasis(&["--json", "format"], &project);
+    assert_eq!(formatted.status.code(), Some(0));
+    assert_eq!(json_stdout(&formatted)["command"], "fmt");
+    assert_eq!(
+        fs::read_to_string(&entry).expect("read formatted fixture"),
+        "struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu,\n    Playing,\n}\n\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n"
+    );
+
+    let fixed_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&entry)
+        .expect("open formatted fixture without truncating")
+        .set_times(fs::FileTimes::new().set_modified(fixed_modified))
+        .expect("set fixture modification time");
+    let baseline_modified = fs::metadata(&entry)
+        .expect("read fixture metadata")
+        .modified()
+        .expect("read fixture modification time");
+
+    for command in ["fmt", "format"] {
+        let unchanged = stasis(&["--json", command], &project);
+        assert_eq!(unchanged.status.code(), Some(0));
+        assert_eq!(json_stdout(&unchanged)["result"]["changed"], json!([]));
+        assert_eq!(
+            fs::metadata(&entry)
+                .expect("read unchanged fixture metadata")
+                .modified()
+                .expect("read unchanged fixture modification time"),
+            baseline_modified,
+            "{command} rewrote an unchanged source file"
+        );
+    }
+
+    assert_eq!(stasis(&["fmt", "--check"], &project).status.code(), Some(0));
+    let checked = stasis(&["check"], &project);
+    assert_eq!(
+        checked.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
     fs::remove_dir_all(&parent).ok();
 }
 

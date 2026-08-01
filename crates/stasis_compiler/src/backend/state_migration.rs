@@ -862,7 +862,7 @@ mod tests {
         let enum_declaration = if type_name == "i32" {
             String::new()
         } else {
-            format!("enum {type_name} {{ Waiting, Playing }}\n")
+            format!("enum {type_name} {{ Waiting, Playing, }}\n")
         };
         let initializer = if type_name == "i32" {
             "1".to_string()

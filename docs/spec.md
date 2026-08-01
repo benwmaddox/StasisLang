@@ -558,12 +558,13 @@ Enums are named types that lower to integer values.
 enum State {
     Idle,
     Jump,
-    Run
+    Run,
 }
 ```
 
 Rules:
 - Members default to sequential values from `0`.
+- Members are separated by commas. The final comma is optional.
 - Enum members can be explicitly assigned integer constants.
 - Enum comparisons and assignments must be type-correct.
 - Enum underlying type is `i32`.
