@@ -1,60 +1,68 @@
-# Stasis project architecture
+# A practical structure for Stasis games
 
-This guide proposes a default structure for games and interactive simulations
-written in Stasis. It is a set of suggestions, not a framework requirement. A
-small project can keep the whole shape in one file. A larger project can split
-the same responsibilities into focused files as real ownership seams appear.
-
-The central flow is:
+This is a useful default for a Stasis game. Start with it, keep it simple, and
+split it into more files only when the game grows.
 
 ```text
-host input snapshot
-    -> bounded input model
-    -> typed application intent
-    -> ordered tick logic
-    -> explicit prepared state
-    -> render commands
+host input -> game intent -> tick systems -> game state -> render commands
 ```
 
-Information should move forward through this flow. Rendering does not create
-gameplay facts, and host callbacks do not mutate the world behind the tick
-schedule.
+The important boundaries are straightforward:
 
-## The default lifecycle contract
+- Read host input once per tick and translate it into game actions.
+- During play, change gameplay state only from tick logic.
+- Run gameplay systems in a visible, deliberate order.
+- Make `render()` draw the state that already exists.
+- Keep every queue, array, and per-tick workload bounded.
 
-A Stasis project should make these entry point responsibilities obvious:
+These rules prevent common game bugs: repeated clicks at high simulation speed,
+preview and execution disagreeing, render-dependent behavior, hidden update
+order, and hot reload leaving old cached data behind.
 
-- `main()` initializes persistent state and requests host resources.
-- `tick()` binds one host input snapshot, resolves application intent, and
-  advances zero or more deterministic simulation steps.
-- `render()` reads prepared state and emits render commands.
-- `on_code_swap()` repairs compatible invariants and invalidates derived state
-  whose algorithm may have changed.
+## Start with one obvious game loop
 
-From those entry points, a contributor should be able to answer:
+A contributor should be able to open `main.stasis` and quickly find four entry
+points:
 
-1. What state persists between ticks?
-2. Which fields determine simulation results?
-3. How much input and simulation work can one host tick create?
-4. In what exact order do systems mutate state?
-5. Which values are derived, and where are they rebuilt?
-6. Can rendering run without changing application state?
-7. What must be repaired after a live code swap?
+- `main()` creates the window, loads required assets, and initializes the game.
+- `tick()` reads input and advances the game.
+- `render()` draws the current state.
+- `on_code_swap()` repairs or invalidates state after a live edit.
 
-The goal is not immutable state. Stasis state is deliberately mutable. The goal
-is visible ownership, bounded cost, and predictable mutation order.
+Keep `tick()` short enough to read as the game's update schedule:
 
-## One root state, several kinds of truth
+```stasis
+function tick(): i32 {
+    if (should_quit()) { return 1; }
 
-One global root state is a useful default. It is an inspectable ledger of
-persistent memory and a clear layout boundary for live code replacement. The
-root can still separate fields by authority and lifetime.
+    bind_input();
+    handle_screen_actions();
+
+    let step: i32 = 0;
+    let step_count: i32 = simulation_steps_this_tick();
+    for (step = 0; step < step_count; step = step + 1) {
+        simulation_step();
+    }
+
+    prepare_world_cache();
+    update_effect_timers();
+    return 0;
+}
+```
+
+This shape supports menus, pause, slow motion, fast-forward, replay, and tests
+without creating separate game-rule paths.
+
+## Keep the game in one root state
+
+Use one global root record by default. It makes persistent state easy to inspect
+and gives live code replacement one clear layout to preserve.
 
 ```stasis
 const MAX_ACTORS: i32 = 128;
-const MAX_INTENTS_PER_TICK: i32 = 8;
+const MAX_INTENTS: i32 = 8;
 
-enum AppScreen { Menu, Playing, Paused, Result }
+enum Screen { Menu, Playing, Paused, Result }
 enum IntentKind { None, Start, Move, UseAction, Pause, Resume }
 
 struct Actor {
@@ -64,290 +72,213 @@ struct Actor {
     hp: i32;
 }
 
-struct PlayerIntent {
+struct Intent {
     kind: IntentKind;
     actor_index: i32;
     target_x: i32;
     target_y: i32;
 }
 
-struct SimulationState {
+struct GameWorld {
     actors: Actor[128];
     actor_count: i32;
     tick: i32;
     revision: i32;
 }
 
-struct BoundInput {
-    intents: PlayerIntent[8];
+struct TickInput {
+    intents: Intent[8];
     intent_count: i32;
     overflowed: bool;
 }
 
-struct InteractionState {
-    screen: AppScreen;
+struct UiState {
+    screen: Screen;
     selected_actor: i32;
-}
-
-struct PresentationState {
     effect_ticks: i32;
-    effect_kind: i32;
 }
 
-struct DerivedState {
-    prepared_revision: i32;
+struct WorldCache {
+    world_revision: i32;
     dirty: bool;
     occupancy: i32[256];
-    queue: i32[256];
 }
 
-struct ResourceState {
+struct Resources {
     actor_sprite: Sprite;
     font: i32;
 }
 
 struct AppState {
-    simulation: SimulationState;
-    input: BoundInput;
-    interaction: InteractionState;
-    presentation: PresentationState;
-    derived: DerivedState;
-    resources: ResourceState;
+    world: GameWorld;
+    input: TickInput;
+    ui: UiState;
+    cache: WorldCache;
+    resources: Resources;
 }
 
-global app: AppState;
+global game: AppState;
 ```
 
-These categories remain useful even if a small project keeps their fields flat:
+The groups answer practical questions:
 
-- Simulation state is authoritative. The same initial state and accepted intent
-  stream should reproduce the same results.
-- Bound input is the current host snapshot translated into project concepts. It
-  is cleared and rebound each host tick.
-- Interaction state describes screens, selection, focus, and pending actions. It
-  can change while simulation is paused.
-- Presentation state contains explicit visual or audio effect lifetime that must
-  survive between frames. It must not decide combat or physics.
-- Derived state contains rebuildable indexes, navigation fields, broad-phase
-  data, and scratch buffers.
-- Resource state contains host handles such as sprites, fonts, and audio. A
-  resource handle must not decide a simulation result.
+- `world`: What must be saved or replayed to reproduce the game?
+- `input`: What is the player trying to do during this host tick?
+- `ui`: What screen, selection, or short-lived effect is visible?
+- `cache`: What lookup data can be rebuilt from the world?
+- `resources`: Which host-owned sprite, font, or audio handles are loaded?
 
-Projects with durable progression can add `ProfileState`. Editors may add
-bounded `DocumentState` or `ScratchState`. Add a category when it expresses a
-real lifetime or authority distinction, not merely to shorten a file.
+Small games can keep these fields flat. Add a nested record when it clarifies
+ownership or lifetime, not just to make the root record shorter.
 
-## Bind input once per host tick
+## Translate input into game actions
 
-The host supplies one stable input snapshot for a tick. Bind that snapshot to a
-small project-owned model before gameplay systems use it.
-
-"Bound input" means both:
-
-1. Host keys, pointers, coordinates, and edges are translated into logical
-   project concepts.
-2. The amount of input work one host tick can create has a fixed capacity and an
-   explicit overflow rule.
+Input code should turn keys and pointers into a small list of typed intents. It
+should not move actors, spend currency, or decide whether an action is legal.
 
 ```stasis
-function clear_bound_input(): void {
-    app.input.intent_count = 0;
-    app.input.overflowed = false;
+function clear_input(): void {
+    game.input.intent_count = 0;
+    game.input.overflowed = false;
 }
 
 function push_intent(kind: IntentKind, actor_index: i32,
     target_x: i32, target_y: i32): bool {
-    if (app.input.intent_count >= MAX_INTENTS_PER_TICK) {
-        // Keep the earliest intents and reject later intents deterministically.
-        app.input.overflowed = true;
+    if (game.input.intent_count >= MAX_INTENTS) {
+        // Keep the earliest inputs. Later inputs are rejected predictably.
+        game.input.overflowed = true;
         return false;
     }
 
-    let index: i32 = app.input.intent_count;
-    app.input.intents[index].kind = kind;
-    app.input.intents[index].actor_index = actor_index;
-    app.input.intents[index].target_x = target_x;
-    app.input.intents[index].target_y = target_y;
-    app.input.intent_count = index + 1;
+    let index: i32 = game.input.intent_count;
+    game.input.intents[index].kind = kind;
+    game.input.intents[index].actor_index = actor_index;
+    game.input.intents[index].target_x = target_x;
+    game.input.intents[index].target_y = target_y;
+    game.input.intent_count = index + 1;
     return true;
 }
 
 function bind_input(): void {
-    clear_bound_input();
+    clear_input();
+
     if (input_pointer_count() > 0 && input_pointer_went_up(0)) {
-        let logical_x: i32 = f32_to_i32(input_pointer_x_logical(0));
-        let logical_y: i32 = f32_to_i32(input_pointer_y_logical(0));
-        push_intent(IntentKind.Move, app.interaction.selected_actor,
-            logical_x, logical_y);
+        push_intent(
+            IntentKind.Move,
+            game.ui.selected_actor,
+            f32_to_i32(input_pointer_x_logical(0)),
+            f32_to_i32(input_pointer_y_logical(0))
+        );
     }
 }
 ```
 
-The input boundary may answer "which logical button contains this pointer?" It
-should not answer "is this move legal?" or directly change health, inventory,
-score, or world position. Those are tick logic decisions.
+Bind input once per host tick. If fast-forward runs four simulation steps, the
+same click must not be applied four times.
 
-Use edge input for one-shot intent and held input for continuous intent. Keep
-that distinction visible when the project needs it. Do not allow an OS callback
-to mutate simulation at an arbitrary point in a frame.
+Use edge input for actions such as click, jump, or pause. Use held input for
+continuous actions such as steering. Replays, bots, and tests should feed the
+same intent path as physical controls.
 
-Replay, automation, and tests should feed the same bound input or typed intent
-boundary. They should not call gameplay shortcuts that physical input cannot
-reach.
+## Make simulation order visible
 
-### Host ticks and simulation steps are different
-
-One host tick may advance zero simulation steps while paused, one step at normal
-speed, or several steps at accelerated speed. Bind and resolve input once,
-outside the simulation step loop:
-
-```stasis
-function tick(): i32 {
-    if (should_quit()) { return 1; }
-
-    bind_input();
-    resolve_application_intents();
-
-    let step: i32 = 0;
-    let step_count: i32 = effective_simulation_steps();
-    for (step = 0; step < step_count; step = step + 1) {
-        simulation_step();
-    }
-
-    prepare_derived_state();
-    update_presentation_state();
-    persist_profile_if_needed();
-    return 0;
-}
-```
-
-Putting `bind_input()` inside the speed loop would repeat a single pointer or key
-edge and make controls depend on simulation speed.
-
-Application intent and simulation time are separate. Menu navigation, pause,
-editor tools, and result screens still need input while the simulation tick does
-not advance. Resolve application-level intent before deciding how many
-simulation steps to run.
-
-## Keep tick logic as an explicit schedule
-
-The simulation step is the project's mutation schedule. Keep the top-level
-function short enough that its order can be reviewed without opening every
-system.
+`simulation_step()` is the rules schedule for the game. Its call order is part
+of the design:
 
 ```stasis
 function simulation_step(): void {
-    if (!simulation_can_advance()) { return; }
+    if (game.ui.screen != Screen.Playing) { return; }
 
-    app.simulation.tick = app.simulation.tick + 1;
+    game.world.tick = game.world.tick + 1;
     update_statuses();
-    update_player_actions();
-    update_actors();
+    apply_player_actions();
+    move_actors();
     resolve_collisions();
     update_objectives();
-    finalize_destroyed_entities();
-    app.simulation.revision = app.simulation.revision + 1;
+    remove_destroyed_actors();
+    game.world.revision = game.world.revision + 1;
 }
 ```
 
-Order is behavior. This schedule states that statuses run before movement,
-collisions see new positions, objectives observe resolved collisions, and entity
-destruction is finalized last. Reordering those calls changes the rules even if
-their bodies stay the same.
+Here, collisions see the new positions, objectives see resolved collisions, and
+destroyed actors remain available until the final cleanup pass. Reordering the
+calls changes the rules.
 
-### Organize systems by owned decision
+Prefer systems that own one decision for all relevant entities:
 
-A useful system owns one meaningful transition across all relevant entities:
+- movement changes positions;
+- collision resolves contact;
+- spawning activates and fully initializes entities;
+- objectives decide victory or failure;
+- cleanup retires destroyed entities.
 
-- movement owns position advancement;
-- collision owns contact resolution;
-- spawning owns entity activation and complete initialization;
-- objectives own victory and completion transitions;
-- navigation owns route preparation;
-- presentation timing owns effect lifetime.
+This is usually easier to debug than one large `update_actor()` function that
+hides movement, combat, and cleanup behind per-entity dispatch. Iterate fixed
+arrays in stable index order. If equal choices use the first index, make that a
+documented rule and test it.
 
-Avoid a generic per-entity update that hides movement, combat, spawning, and
-destruction order behind dispatch. Fixed arrays and explicit system passes make
-the rules and maximum work easier to inspect.
+## Separate checking from changing
 
-For small bounded populations, stable integer indices are useful identities.
-Iterate them in stable order. If order affects targeting, collision tie breaks,
-or resource claims, document that order as a rule and test it.
+Names should make side effects easy to spot:
 
-### Separate queries from mutations
+- `can_*`, `is_*`, and `find_*` answer questions without changing the game;
+- `update_*`, `apply_*`, `spawn_*`, and `destroy_*` change game state;
+- `prepare_*` and `rebuild_*` update rebuildable lookup data;
+- `draw_*` only emits render commands.
 
-Function vocabulary should communicate mutation expectations:
+Do not implement a query by changing the real world, reading the result, and
+then trying to restore the old values. That approach becomes fragile as the
+game grows.
 
-- `can_*`, `is_*`, `find_*`, and value-returning rule functions are queries;
-- `update_*` advances one scheduled system;
-- `apply_*`, `commit_*`, `spawn_*`, and `destroy_*` mutate authoritative state;
-- `prepare_*` and `rebuild_*` mutate only named derived state;
-- `draw_*` emits render commands without mutating application state.
-
-A hypothetical query should build its proposed world in bounded scratch. Avoid
-save, mutate, calculate, and restore transactions against authoritative state.
-Rollback lists become incomplete as state grows and are especially dangerous
-when preview, rendering, automation, or AI scoring calls the query.
-
-### Materialize consequential outcomes
-
-When an action is previewed, scored, rejected, replayed, or confirmed later,
-give it typed input and one bounded result:
+When an action needs a preview, AI score, replay record, and final execution,
+calculate it once:
 
 ```text
-PlayerIntent -> query_action -> ActionOutcome -> commit_action
+Intent -> query_action -> ActionOutcome -> apply_action
 ```
 
-`ActionOutcome` should contain ordered targets, costs, movement, effects, and a
-failure reason. Preview reads it. Commit applies it after a final revision check.
-This prevents the view, automation, and execution from each implementing the
-same rule differently.
+`ActionOutcome` should hold the ordered targets, costs, movement, effects, and
+failure reason. Preview draws it; execution applies it. Include the world
+revision so an outcome can be recalculated if the game advances before the
+player confirms it.
 
-If the world can advance while an outcome is visible, store the simulation tick
-or revision that produced it. Rebuild or reject stale outcomes explicitly.
+## Rebuild cached data in one place
 
-### Give derived data one owner
-
-Derived caches should declare their dependency on authoritative state:
+Navigation grids, occupancy maps, spatial indexes, and similar data are useful,
+but they should have one clear rebuild point:
 
 ```stasis
-function mark_derived_dirty(): void {
-    app.derived.dirty = true;
-}
-
-function prepare_derived_state(): void {
-    if (!app.derived.dirty &&
-        app.derived.prepared_revision == app.simulation.revision) { return; }
+function prepare_world_cache(): void {
+    if (!game.cache.dirty &&
+        game.cache.world_revision == game.world.revision) {
+        return;
+    }
 
     rebuild_occupancy();
     rebuild_navigation();
-    app.derived.prepared_revision = app.simulation.revision;
-    app.derived.dirty = false;
+    game.cache.world_revision = game.world.revision;
+    game.cache.dirty = false;
 }
 ```
 
-Authoritative mutations mark or advance the dependency revision. One preparation
-boundary rebuilds the cache. Readers do not lazily repair it.
+World-changing systems mark the data dirty or advance the world revision.
+Readers do not quietly rebuild it for themselves. This keeps expensive work out
+of draw calls and makes stale-cache bugs easier to locate.
 
-## Render prepared state
+## Render the state; do not finish the rules
 
-Rendering reads simulation, interaction, presentation, derived, and resource
-state and emits host render commands. It may calculate local layout or
-interpolation values, but those values do not flow back into gameplay.
+By the time `render()` starts, the visible game should already be decided:
 
 ```stasis
 function render(): i32 {
     begin_frame();
     clear(0.03, 0.04, 0.07, 1.0);
 
-    if (app.interaction.screen == AppScreen.Menu) {
+    if (game.ui.screen == Screen.Menu) {
         draw_menu();
-    } else if (app.interaction.screen == AppScreen.Result) {
-        draw_world();
-        draw_result();
     } else {
         draw_world();
-        draw_interaction();
+        draw_effects();
         draw_hud();
     }
 
@@ -356,115 +287,73 @@ function render(): i32 {
 }
 ```
 
-The render contract is:
+Rendering may calculate local positions and emit commands. It should not:
 
-- do not advance simulation time;
-- do not spend resources or accept actions;
-- do not create targets, collisions, or objective facts;
-- do not rebuild authoritative or derived caches;
-- do not load required resources lazily;
-- do not use physical display size to alter logical gameplay geometry;
-- do not make simulation decisions from sprite dimensions or resource handles.
+- advance time or animation counters;
+- accept actions or spend resources;
+- decide collisions, targets, damage, or victory;
+- rebuild gameplay caches;
+- load required assets on demand;
+- use sprite size or physical display size to change game rules.
 
-Writing the host render command buffers is the intended output of `render()`.
-Changing project state as a side effect of drawing is not.
+Update animation timers in a named tick system. Share logical rectangles between
+layout, hit testing, and drawing so touch targets cannot drift away from their
+buttons. Keep interpolation local to rendering; the next tick continues from
+game state, not from a rounded draw position.
 
-It is fine to derive a draw position from two integer simulation positions and a
-fixed-point progress value. Keep interpolation local. The next tick continues
-from simulation state, not a rendered float.
+## Use enums for screens and modes
 
-Presentation animation should derive from an explicit simulation or
-presentation tick, or advance in a named application-tick system. Avoid mutable
-animation state inside `draw_*` functions.
-
-Layout and hit testing should share named logical rectangles or computed layout
-state. Duplicating coordinates between input and draw code makes controls drift
-away from their touch targets.
-
-## Use enums for state machines
-
-Use enums for mutually exclusive states:
+If only one state can be active, use an enum:
 
 ```stasis
-enum AppScreen { Menu, Playing, Paused, Result }
-enum RunPhase { Preparing, Active, Won, Lost }
-enum InteractionKind { None, Selected, ActionPending }
+enum Screen { Menu, Playing, Paused, Result }
+enum MatchPhase { Preparing, Active, Won, Lost }
 ```
 
-Use independent fields only for facts that may truthfully coexist. A screen,
-pause flag, modal flag, and result flag interpreted by ordered conditionals
-usually form an implicit state machine and should become an enum.
+A collection of `show_menu`, `paused`, `show_result`, and `modal_open` booleans
+usually hides precedence rules in unrelated `if` statements. One enum makes the
+valid states and transitions obvious. Input and rendering should read the same
+screen value.
 
-Dispatch once at application boundaries. Input and render should interpret the
-same screen state instead of maintaining separate precedence rules.
+## Keep live edits safe
 
-## Treat live code swap as an invariant boundary
-
-A compatible edit can change an algorithm without changing persistent layout.
-Derived values produced by the previous code can therefore be structurally valid
-but semantically stale.
+Live code replacement can preserve a record while changing the algorithm that
+created its cached data. Invalidate that data in `on_code_swap()`:
 
 ```stasis
 function on_code_swap(): void {
     update_layout();
-    app.derived.dirty = true;
-    app.derived.prepared_revision = -1;
+    game.cache.dirty = true;
+    game.cache.world_revision = -1;
 }
 ```
 
-Use `on_code_swap()` to:
+Use this hook to repair compatible invariants, refresh layout, and invalidate
+caches. Do not grant items, spawn enemies, simulate missed ticks, or silently
+restart the game. Those are gameplay events, not code-swap repairs.
 
-- recompute layout tied to host display state;
-- invalidate navigation, indexes, or other derived caches;
-- clamp or repair a newly documented invariant when compatible migration needs
-  it.
+## Split files when the game needs it
 
-Do not use it to simulate missed ticks, grant resources, spawn entities, or
-silently restart the run. Live editing is a transaction between code versions,
-not a gameplay event. A layout-incompatible edit should follow the normal reset
-or migration contract instead of disguising the incompatibility.
-
-## Suggested source structure
-
-Stasis imports contribute declarations to one project-wide symbol graph. File
-layout communicates ownership to people and tools; it is not a namespace or an
-access-control mechanism. Use stable naming protocols and a small import facade
-to preserve the intended boundaries.
-
-### Small project
+A small game can stay in one source file:
 
 ```text
-src/
-  main.stasis       lifecycle, state, rules, tick, and render
-tests/
-  game.test.stasis
+src/main.stasis
+tests/game.test.stasis
 ```
 
-Keep a small project together until there is a real ownership seam. File count
-is not architecture.
-
-### Growing project
+For a larger game, split along the same boundaries:
 
 ```text
 src/
-  main.stasis             host lifecycle only
-  project.stasis          stable import facade
-  project/
-    model.stasis          enums, records, constants, and root state
-    input.stasis          host snapshot -> bounded intent
-    rules.stasis          deterministic queries and effective values
-    systems/
-      movement.stasis
-      collision.stasis
-      objectives.stasis
-      progression.stasis
-    view/
-      primitives.stasis
-      world.stasis
-      screens.stasis
-      assets.stasis
-    platform/
-      persistence.stasis
+  main.stasis          lifecycle and update schedule
+  game.stasis          stable import facade
+  game/
+    model.stasis       records, enums, constants, root state
+    input.stasis       host input -> game intent
+    rules.stasis       queries and value calculations
+    systems/           movement, collision, objectives, progression
+    view/              world drawing, screens, HUD, assets
+    platform/          persistence and other host effects
 tests/
   rules.test.stasis
   simulation.test.stasis
@@ -472,98 +361,39 @@ tests/
   render.test.stasis
 ```
 
-`main.stasis` makes the lifecycle visible. `project.stasis` keeps imports stable
-while implementation files move. `model.stasis` declares facts but not update
-order. `systems/` are feature slices that own transitions, not one file per
-struct. `view/` reads prepared state. `platform/` isolates storage or other host
-effects that should not enter deterministic simulation.
+Stasis files share one project symbol graph; folders communicate ownership but
+do not create namespaces. Keep names clear and imports stable. Do not add an ECS,
+event bus, or service container until a real game feature is simpler with it.
 
-Do not build a general ECS, callback graph, service container, or event bus just
-to imitate another engine. Add indirection only when a concrete feature needs a
-bounded policy seam that plain data and explicit dispatch cannot express clearly.
+## Test the boundaries that protect the game
 
-## Data and policy
+Alongside normal rule tests, cover a few architecture-level cases:
 
-Stable tunable specifications belong in fixed records and arrays. JSON or CSV
-binding can provide live authoring while packaged data supplies the same bounded
-schema in builds.
+- The same initial state and intents produce the same result.
+- A click is consumed once even when fast-forward runs several steps.
+- Pause input works without advancing the simulation tick.
+- A rejected action leaves the world unchanged.
+- Preview and execution produce the same ordered outcome.
+- Exact transition ticks and stable tie-breaking order are covered.
+- Calling `render()` leaves `AppState` unchanged.
+- `on_code_swap()` invalidates caches produced by changeable algorithms.
+- Full-capacity loops stay inside their arrays and work budget.
 
-Systems should ask narrow queries for effective values instead of combining
-mode, difficulty, upgrades, and base values independently. Use one documented
-order, for example:
+Framebuffer captures prove that the state is drawn correctly. State tests prove
+that the game rules are correct. Use both for important player-visible behavior.
 
-```text
-base specification
-    -> mode replacement
-    -> additive modifier
-    -> percentage modifier
-    -> clamp
-```
+## Review a change in seven questions
 
-Keep policy identity small and typed. Prefer an enum selected at one boundary to
-many feature booleans checked throughout systems.
+Before merging a game change, answer:
 
-## Architecture contract tests
+1. Which player action or world event starts it?
+2. Where is its persistent state?
+3. What is the maximum work it can create in one tick?
+4. Where does it run in the update schedule?
+5. Does preview, AI, replay, and execution use the same rule result?
+6. Does rendering only display the result?
+7. Which focused test or capture proves it?
 
-Test architectural properties alongside project rules:
-
-- identical initial state and identical bounded input produce identical
-  simulation state;
-- a one-shot input edge is consumed once when several simulation steps run;
-- paused application input can change interaction state without advancing the
-  simulation tick;
-- input overflow follows the documented deterministic policy;
-- rejected intents leave authoritative simulation state unchanged;
-- queries leave authoritative simulation state unchanged;
-- previewed and committed outcomes agree in target order and effects;
-- system boundaries behave correctly at the exact transition tick;
-- stable index and neighbor tie orders have explicit cases;
-- render leaves application state unchanged;
-- required resources fail before interactive rendering instead of producing a
-  partial project;
-- `on_code_swap()` invalidates every derived cache whose implementation may
-  change;
-- maximum-capacity loops stay inside their arrays and work budget.
-
-Deterministic framebuffer captures are useful evidence that input, tick state,
-and rendering describe the same visible result. They complement state tests;
-they do not replace them.
-
-## Common boundary violations
-
-Pause and reconsider the design when code starts to require:
-
-- a render function that calls a mutating legality or cache-building query;
-- input code that directly changes health, score, position, or inventory;
-- wall-clock time in an authoritative simulation rule;
-- a query implemented as save, mutate, calculate, and restore;
-- several booleans whose precedence defines one hidden screen or mode;
-- separate preview, automation, replay, and execution versions of one outcome;
-- resource availability or sprite dimensions deciding simulation behavior;
-- per-frame allocation or unbounded event growth hidden behind a helper;
-- a reset that saves unrelated fields, clears the root, then restores them;
-- a live-swap hook that invents gameplay state instead of repairing invariants.
-
-These are usually signs that intent, state lifetime, scratch, outcome, or system
-ownership has not been made explicit.
-
-## Default review checklist
-
-Before merging a nontrivial Stasis project change, state:
-
-- Mapping: which input or world behavior is represented and where its state
-  lives.
-- Authority: which fields determine the result and which are derived or
-  presentational.
-- Bound: the maximum entities, intents, events, targets, or work for one tick.
-- Order: where the transition appears in the explicit tick schedule.
-- Projection: how rendering communicates the result without creating it.
-- Extension: where one adjacent requirement fits without a fake action,
-  duplicate path, or implicit state machine.
-- Evidence: which focused state test, trace, replay, or capture proves the
-  prediction.
-
-The default can remain in one file or grow into focused slices. The essential
-shape stays the same: bind and bound input once, mutate explicit state through an
-ordered tick, and render prepared state without feeding presentation back into
-simulation.
+The structure can remain in one file or grow into focused systems. The useful
+part stays the same: bind input once, update explicit state in a visible order,
+and render the result without changing the game.
