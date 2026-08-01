@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::backend::emit::{parse_simple_statements_from_block, SimpleStmt};
 use crate::data_flow::{build_function_data_flow_summaries, FunctionDataFlowSummary};
@@ -261,7 +262,7 @@ pub struct Compiler {
     parsed_statement_ids: BTreeSet<FunctionId>,
     statement_cache: HashMap<StatementCacheKey, Vec<SimpleStmt>>,
     analysis_required_roots: Vec<String>,
-    data_flow_summaries: Vec<FunctionDataFlowSummary>,
+    data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
     data_flow_context_fingerprint: u64,
     #[cfg(test)]
     statement_parse_count: usize,
@@ -305,7 +306,16 @@ impl Compiler {
 
     pub fn index_pass(&mut self) -> CompileResult<IndexPassResult> {
         self.last_source_diagnostic = None;
-        if let Err(message) = crate::performance::tick_budget_us(&self.files) {
+        let has_tick_budget_annotation = self
+            .files
+            .iter()
+            .any(|file| file.content.contains("@tick_budget_us"));
+        let tick_budget_result = if has_tick_budget_annotation {
+            crate::performance::tick_budget_us(&self.files)
+        } else {
+            Ok(None)
+        };
+        if let Err(message) = tick_budget_result {
             let file = self
                 .files
                 .iter()
@@ -528,7 +538,7 @@ impl Compiler {
         )
         .map_err(CompileError::Backend)?;
         if let Some(summaries) = summaries {
-            self.data_flow_summaries = summaries;
+            self.data_flow_summaries = summaries.into();
         }
         self.data_flow_context_fingerprint = context_fingerprint;
         Ok(())
@@ -596,6 +606,10 @@ impl Compiler {
 
     pub fn function_data_flow_summaries(&self) -> &[FunctionDataFlowSummary] {
         &self.data_flow_summaries
+    }
+
+    pub(crate) fn data_flow_summaries_shared(&self) -> Arc<[FunctionDataFlowSummary]> {
+        Arc::clone(&self.data_flow_summaries)
     }
 
     pub fn set_analysis_required_roots(&mut self, roots: &[String]) {

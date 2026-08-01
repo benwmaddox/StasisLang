@@ -139,17 +139,22 @@ impl AotProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
         let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
+        let snapshot_revision =
+            crate::backend::program_snapshot::semantic_revision_with_required_roots(
+                files_fingerprint,
+                &self.required_emit_roots,
+            );
         let snapshot_miss = self
             .program_snapshot
             .as_ref()
-            .is_none_or(|snapshot| snapshot.source_revision() != files_fingerprint);
+            .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
         let mut force_reemit_reachable = false;
         if snapshot_miss {
             let next_cache = build_compile_analysis_cache(
                 self.compiler.files(),
                 self.compiler.functions(),
                 &mut analysis_type_table,
-                files_fingerprint,
+                snapshot_revision,
                 resolve_preferred_extern_call_signatures,
             )
             .map_err(crate::compiler::CompileError::Backend)?;
@@ -159,11 +164,11 @@ impl AotProcess {
             }
             self.program_snapshot = Some(
                 ProgramSnapshot::build(
-                    files_fingerprint,
+                    snapshot_revision,
                     self.compiler.files(),
                     self.compiler.functions(),
                     &analysis_type_table,
-                    self.compiler.function_data_flow_summaries(),
+                    self.compiler.data_flow_summaries_shared(),
                     &self.required_emit_roots,
                     next_cache,
                 )

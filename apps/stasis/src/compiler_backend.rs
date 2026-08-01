@@ -1104,34 +1104,6 @@ impl IncrementalCompilerBackend {
         )
     }
 
-    fn compile_aot_engine_bundle_from_process(
-        &mut self,
-        mut process: AotProcess,
-        request_id: u64,
-        include_on_code_swap: bool,
-    ) -> Result<AotEngineBundle, String> {
-        let bundle_output_dir = self
-            .aot_artifact_root
-            .join("engine_bundle")
-            .join(format!("request_{}", request_id));
-        if bundle_output_dir.exists() {
-            std::fs::remove_dir_all(&bundle_output_dir).map_err(|error| {
-                format!(
-                    "failed to clear existing AOT engine bundle directory {}: {error}",
-                    bundle_output_dir.display()
-                )
-            })?;
-        }
-
-        let bundle = process.write_engine_bundle(
-            &Self::engine_entrypoints(include_on_code_swap),
-            &bundle_output_dir,
-        )?;
-        self.last_program_snapshot = process.program_snapshot().cloned();
-        self.last_aot_engine_bundle = Some(bundle.clone());
-        Ok(bundle)
-    }
-
     fn compile_aot_process_from_source_cache(&mut self) -> Result<AotProcess, String> {
         let mut process = AotProcess::with_optimization_profile(
             Self::aot_optimization_profile_from_compile_config(&self.aot_compile_config),
@@ -9385,7 +9357,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
     backend.last_jit_engine_package = None;
     backend.last_aot_engine_bundle = None;
     backend.refresh_cached_sources(&changed_files)?;
-    let candidate = backend.compile_aot_process_from_source_cache()?;
+    let mut candidate = backend.compile_aot_process_from_source_cache()?;
     let function_entries = snapshot_function_entries(
         candidate
             .program_snapshot()
@@ -9398,8 +9370,24 @@ fn run_self_host_aot_cli_with_backend_and_options(
         && function_entries.iter().any(|entry| entry.name == "render");
 
     let mut summary = if use_engine_mode_contracts {
-        let bundle =
-            backend.compile_aot_engine_bundle_from_process(candidate, 1, include_on_code_swap)?;
+        let bundle_output_dir = backend
+            .aot_artifact_root
+            .join("engine_bundle")
+            .join("request_1");
+        if bundle_output_dir.exists() {
+            std::fs::remove_dir_all(&bundle_output_dir).map_err(|error| {
+                format!(
+                    "failed to clear existing AOT engine bundle directory {}: {error}",
+                    bundle_output_dir.display()
+                )
+            })?;
+        }
+        let bundle = candidate.write_engine_bundle(
+            &IncrementalCompilerBackend::engine_entrypoints(include_on_code_swap),
+            &bundle_output_dir,
+        )?;
+        backend.last_program_snapshot = candidate.program_snapshot().cloned();
+        backend.last_aot_engine_bundle = Some(bundle.clone());
         package_engine_bundle_release(
             backend,
             &bundle,

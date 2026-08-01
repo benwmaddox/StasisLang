@@ -4,6 +4,7 @@
 //! they describe a target build, not Stasis program semantics or state layout.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::backend::emit::{
     build_compile_analysis_cache, compute_files_fingerprint,
@@ -86,7 +87,7 @@ pub struct ProgramSnapshot {
     reachable_function_ids: BTreeSet<FunctionId>,
     state_layout: StateLayout,
     layout_digest: [u8; 32],
-    data_flow_summaries: Vec<FunctionDataFlowSummary>,
+    data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
     global_type_ids: BTreeMap<String, u16>,
     collections: Vec<ProgramCollectionMetadata>,
     literal_table: BTreeMap<i32, String>,
@@ -104,7 +105,7 @@ impl ProgramSnapshot {
         files: &[SourceFile],
         functions: &[FunctionMeta],
         types: &TypeTable,
-        data_flow_summaries: &[FunctionDataFlowSummary],
+        data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
         required_emit_roots: &[String],
         analysis: CompileAnalysisCache,
     ) -> Result<Self, String> {
@@ -133,7 +134,7 @@ impl ProgramSnapshot {
             reachable_function_ids: compute_reachable_function_ids(functions, required_emit_roots),
             state_layout,
             layout_digest,
-            data_flow_summaries: data_flow_summaries.to_vec(),
+            data_flow_summaries,
             global_type_ids: analysis.global_path_types.clone(),
             collections,
             literal_table,
@@ -167,6 +168,10 @@ impl ProgramSnapshot {
     }
     pub fn data_flow_summaries(&self) -> &[FunctionDataFlowSummary] {
         &self.data_flow_summaries
+    }
+    #[cfg(test)]
+    pub(crate) fn data_flow_summaries_shared(&self) -> Arc<[FunctionDataFlowSummary]> {
+        Arc::clone(&self.data_flow_summaries)
     }
     pub fn global_type_ids(&self) -> &BTreeMap<String, u16> {
         &self.global_type_ids
@@ -217,6 +222,11 @@ fn collect_program_literals(files: &[SourceFile]) -> Result<BTreeMap<i32, String
     // runtimes see the same immutable table, while lowering decides which entries are referenced.
     let mut literals = BTreeMap::new();
     for file in files {
+        // Most code-only hot edits have no quoted literals. Avoid a second full lexer pass
+        // in that common path while retaining all-source (including unreachable) coverage.
+        if !file.content.as_bytes().contains(&b'"') {
+            continue;
+        }
         for token in lex(&file.content)? {
             if token.kind != TokenKind::StringLiteral {
                 continue;
@@ -261,15 +271,62 @@ pub fn canonical_layout_digest_for_files(
         compiler.files(),
         compiler.functions(),
         &types,
-        compiler.function_data_flow_summaries(),
+        compiler.data_flow_summaries_shared(),
         &[],
         analysis,
     )
     .map(|snapshot| snapshot.layout_digest())
 }
 
+/// Canonical state-layout identity for legacy/tooling callers.  Unlike a full
+/// ProgramSnapshot this intentionally does not resolve call signatures or
+/// extern symbols: function bodies cannot affect state layout.
+pub fn canonical_state_layout_digest_for_files(
+    files: impl IntoIterator<Item = (String, String)>,
+) -> Result<[u8; 32], String> {
+    let files = files
+        .into_iter()
+        .map(|(path, content)| crate::compiler::SourceFile {
+            hash: crate::frontend::indexer::hash_text(&content),
+            path,
+            content,
+            functions: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut types = TypeTable::new();
+    types.ensure_utf8_view_id()?;
+    types.ensure_ascii_view_id()?;
+    let constants = crate::backend::emit::collect_top_level_constant_values(&files, &mut types)?;
+    let globals = crate::backend::emit::collect_global_path_types(&files, &mut types, &constants)?;
+    let collections =
+        crate::backend::emit::collect_foreach_collection_infos(&files, &mut types, &constants)?;
+    let layout = build_state_layout(&globals, &collections, &types);
+    state_layout_digest(&layout)
+}
+
+pub fn semantic_revision_with_required_roots(
+    files_fingerprint: u64,
+    required_roots: &[String],
+) -> u64 {
+    let mut roots = required_roots.to_vec();
+    roots.sort();
+    roots.dedup();
+    let mut revision = files_fingerprint ^ 0x5354_4153_4953_524f;
+    revision = revision.wrapping_mul(1_099_511_628_211) ^ roots.len() as u64;
+    for root in roots {
+        revision = revision.wrapping_mul(1_099_511_628_211);
+        revision ^= root.len() as u64;
+        for byte in root.bytes() {
+            revision ^= u64::from(byte);
+            revision = revision.wrapping_mul(1_099_511_628_211);
+        }
+    }
+    revision
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::backend::aot::AotProcess;
     use crate::backend::jit::JitProcess;
     use std::fs;
@@ -337,6 +394,88 @@ mod tests {
             aot_snapshot.accepted_diagnostics()
         );
         assert!(jit_snapshot.accepted_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn required_roots_refresh_jit_and_aot_snapshots_without_source_edits() {
+        let source = "function main(): i32 { return 1; }\nfunction extra(): i32 { return 2; }\n";
+        let roots = vec!["extra".to_string()];
+        let mut jit = JitProcess::new();
+        let mut aot = AotProcess::new();
+        jit.upsert_file("main.stasis", source);
+        aot.upsert_file("main.stasis", source);
+        jit.compile().expect("baseline JIT");
+        aot.compile().expect("baseline AOT");
+        let baseline_jit_revision = jit
+            .program_snapshot()
+            .expect("JIT snapshot")
+            .source_revision();
+        let baseline_aot_revision = aot
+            .program_snapshot()
+            .expect("AOT snapshot")
+            .source_revision();
+        jit.set_required_emit_roots(&roots);
+        aot.set_required_emit_roots(&roots);
+        jit.compile().expect("rooted JIT");
+        aot.compile().expect("rooted AOT");
+        for snapshot in [
+            jit.program_snapshot().expect("JIT snapshot"),
+            aot.program_snapshot().expect("AOT snapshot"),
+        ] {
+            let extra_id = snapshot
+                .functions()
+                .iter()
+                .find(|function| function.name == "extra")
+                .expect("extra function")
+                .id;
+            assert!(snapshot
+                .functions()
+                .iter()
+                .any(|function| function.name == "extra"));
+            assert!(snapshot.reachable_function_ids().contains(&extra_id));
+            assert!(snapshot.artifact_mappings().contains_key(&extra_id));
+        }
+        assert_ne!(
+            jit.program_snapshot()
+                .expect("JIT snapshot")
+                .source_revision(),
+            baseline_jit_revision
+        );
+        assert_ne!(
+            aot.program_snapshot()
+                .expect("AOT snapshot")
+                .source_revision(),
+            baseline_aot_revision
+        );
+        jit.set_required_emit_roots(&[]);
+        aot.set_required_emit_roots(&[]);
+        jit.compile().expect("unrooted JIT");
+        aot.compile().expect("unrooted AOT");
+        for snapshot in [
+            jit.program_snapshot().expect("JIT snapshot"),
+            aot.program_snapshot().expect("AOT snapshot"),
+        ] {
+            let extra_id = snapshot
+                .functions()
+                .iter()
+                .find(|function| function.name == "extra")
+                .expect("extra function")
+                .id;
+            assert!(!snapshot.artifact_mappings().contains_key(&extra_id));
+        }
+    }
+
+    #[test]
+    fn required_root_revision_is_order_independent_and_boundary_safe() {
+        let files = 42;
+        assert_eq!(
+            semantic_revision_with_required_roots(files, &["b".into(), "a".into(), "a".into()]),
+            semantic_revision_with_required_roots(files, &["a".into(), "b".into()])
+        );
+        assert_ne!(
+            semantic_revision_with_required_roots(files, &["ab".into()]),
+            semantic_revision_with_required_roots(files, &["a".into(), "b".into()])
+        );
     }
 
     #[test]

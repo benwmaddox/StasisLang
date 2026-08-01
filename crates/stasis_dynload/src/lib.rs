@@ -2041,8 +2041,14 @@ fn snapshot_registered_arrays<T: Copy>(
         .expect("registered global array table mutex poisoned")
         .iter()
         .map(|(key, (address, len))| {
-            // Registered array memory remains valid until the in-process runner unregisters it.
-            let values = unsafe { std::slice::from_raw_parts(*address as *const T, *len) }.to_vec();
+            // A zero-length registration deliberately carries no dereferenceable storage;
+            // `from_raw_parts` still requires a non-null pointer even when its length is zero.
+            let values = if *len == 0 {
+                Vec::new()
+            } else {
+                // Registered array memory remains valid until the in-process runner unregisters it.
+                unsafe { std::slice::from_raw_parts(*address as *const T, *len) }.to_vec()
+            };
             RegisteredArraySnapshot {
                 key: *key,
                 address: *address,

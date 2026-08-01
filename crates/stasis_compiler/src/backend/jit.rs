@@ -386,8 +386,8 @@ pub struct JitProcess {
     runtime_symbol_cache: BTreeMap<String, usize>,
     source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
     import_parse_cache: BTreeMap<String, ImportParseCacheEntry>,
-    program_snapshot: Option<ProgramSnapshot>,
-    active_program_snapshot: Option<ProgramSnapshot>,
+    program_snapshot: Option<Arc<ProgramSnapshot>>,
+    active_program_snapshot: Option<Arc<ProgramSnapshot>>,
     generation_metadata: Option<JitGenerationMetadata>,
     accepted_program: Option<AcceptedProgram>,
     accepted_lowering_references: BTreeMap<FunctionKey, FunctionLoweringReferences>,
@@ -529,6 +529,9 @@ impl JitProcess {
         candidate.staged_string_literals = self.staged_string_literals.clone();
         candidate.active_string_literals = self.active_string_literals.clone();
         candidate.required_emit_roots = self.required_emit_roots.clone();
+        candidate
+            .compiler
+            .set_analysis_required_roots(&candidate.required_emit_roots);
         candidate.local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
         candidate
     }
@@ -712,10 +715,15 @@ impl JitProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
         let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
+        let snapshot_revision =
+            crate::backend::program_snapshot::semantic_revision_with_required_roots(
+                files_fingerprint,
+                &self.required_emit_roots,
+            );
         let snapshot_miss = self
             .program_snapshot
             .as_ref()
-            .is_none_or(|snapshot| snapshot.source_revision() != files_fingerprint);
+            .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
         if snapshot_miss {
             let extern_signatures = collect_supported_extern_call_signatures(
                 self.compiler.files(),
@@ -729,23 +737,23 @@ impl JitProcess {
                 self.compiler.files(),
                 self.compiler.functions(),
                 &mut analysis_type_table,
-                files_fingerprint,
+                snapshot_revision,
                 resolved_extern_signatures,
                 extern_symbol_addresses,
             )
             .map_err(crate::compiler::CompileError::Backend)?;
-            self.program_snapshot = Some(
+            self.program_snapshot = Some(Arc::new(
                 ProgramSnapshot::build(
-                    files_fingerprint,
+                    snapshot_revision,
                     self.compiler.files(),
                     self.compiler.functions(),
                     &analysis_type_table,
-                    self.compiler.function_data_flow_summaries(),
+                    self.compiler.data_flow_summaries_shared(),
                     &self.required_emit_roots,
                     next_cache,
                 )
                 .map_err(crate::compiler::CompileError::Backend)?,
-            );
+            ));
         }
         *self.compiler.types_mut() = analysis_type_table.clone();
         let snapshot = self.program_snapshot.clone().ok_or_else(|| {
@@ -1083,6 +1091,7 @@ impl JitProcess {
             .iter()
             .map(|(id, value)| (*id, value.clone()))
             .collect();
+        drop(snapshot);
         let accepted_program = capture_accepted_program(
             self.compiler.functions(),
             self.compiler.files(),
@@ -1091,6 +1100,7 @@ impl JitProcess {
         .map_err(crate::compiler::CompileError::Backend)?;
         self.artifacts = staged_artifacts;
         if let Some(snapshot) = self.program_snapshot.as_mut() {
+            let snapshot = Arc::make_mut(snapshot);
             snapshot.set_artifact_mappings(self.artifacts.iter().map(|artifact| {
                 ProgramArtifactMapping {
                     function_id: artifact.function_id,
@@ -1121,7 +1131,7 @@ impl JitProcess {
     }
 
     pub fn program_snapshot(&self) -> Option<&ProgramSnapshot> {
-        self.program_snapshot.as_ref()
+        self.program_snapshot.as_deref()
     }
 
     pub fn generation_metadata(&self) -> Option<&JitGenerationMetadata> {
@@ -3427,6 +3437,18 @@ mod tests {
             Ok(1),
             "failed candidate must retain the active complete generation"
         );
+    }
+
+    #[test]
+    fn jit_snapshot_shares_compiler_data_flow_owner() {
+        let mut process = JitProcess::new();
+        process.upsert_file("sample.stasis", "function main(): i32 { return 1; }");
+        process.compile().expect("compile fixture");
+        let snapshot = process.program_snapshot().expect("snapshot");
+        assert!(Arc::ptr_eq(
+            &snapshot.data_flow_summaries_shared(),
+            &process.compiler.data_flow_summaries_shared(),
+        ));
     }
 
     #[cfg(windows)]
@@ -6383,6 +6405,40 @@ mod tests {
 
         active.accept_staged_candidate(candidate);
         assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 2);
+    }
+
+    #[test]
+    fn staged_candidate_applies_custom_roots_before_indexing_source_edits() {
+        let mut active = JitProcess::new();
+        active.set_required_emit_roots(&["extra".to_string()]);
+        active.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { return 1; } function extra(): i32 { return 2; }",
+        );
+        active.compile().expect("baseline compile");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { return 1; } function extra(): i32 { return 3; }",
+        );
+        candidate.compile().expect("custom-root candidate compile");
+        let snapshot = candidate.program_snapshot().expect("candidate snapshot");
+        assert!(snapshot
+            .data_flow_summaries()
+            .iter()
+            .any(|summary| summary.function == "extra"));
+        assert!(Arc::ptr_eq(
+            &snapshot.data_flow_summaries_shared(),
+            &candidate.compiler.data_flow_summaries_shared(),
+        ));
+
+        active.accept_staged_candidate(candidate);
+        let snapshot = active.program_snapshot().expect("accepted snapshot");
+        assert!(Arc::ptr_eq(
+            &snapshot.data_flow_summaries_shared(),
+            &active.compiler.data_flow_summaries_shared(),
+        ));
     }
 
     #[cfg(windows)]

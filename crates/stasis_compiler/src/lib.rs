@@ -493,7 +493,7 @@ impl IncrementalCompilerHost {
         for path in &deleted_paths {
             accepted_sources.remove(path);
         }
-        let digest = crate::backend::program_snapshot::canonical_layout_digest_for_files(
+        let digest = crate::backend::program_snapshot::canonical_state_layout_digest_for_files(
             accepted_sources
                 .iter()
                 .map(|(path, source)| (path.clone(), source.clone())),
@@ -2207,7 +2207,7 @@ fn hash_i32(value: &str) -> i32 {
 
 #[cfg(test)]
 fn legacy_layout_hash_from_canonical_digest(source: &str) -> Result<i32, String> {
-    let digest = crate::backend::program_snapshot::canonical_layout_digest_for_files([(
+    let digest = crate::backend::program_snapshot::canonical_state_layout_digest_for_files([(
         "legacy.stasis".to_string(),
         source.to_string(),
     )])?;
