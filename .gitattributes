@@ -1,4 +1,5 @@
 * text=auto
+*.stasis text eol=crlf
 .gitattributes text eol=lf
 *.cs text eol=lf
 *.csproj text eol=lf

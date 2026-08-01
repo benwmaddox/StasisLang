@@ -141,7 +141,7 @@ impl Writer {
 
 pub(crate) fn format_source(source: &str) -> Result<String, String> {
     let tokens = canonicalize_enum_commas(&scan(source)?)?;
-    let formatted = render(&tokens)?;
+    let formatted = windows_line_endings(&render(&tokens)?);
     let formatted_tokens = scan(&formatted)?;
     let original_significant = significant_tokens(&tokens);
     let formatted_significant = significant_tokens(&formatted_tokens);
@@ -154,6 +154,13 @@ pub(crate) fn format_source(source: &str) -> Result<String, String> {
         return Err("formatter changed the compiler token stream".to_string());
     }
     Ok(formatted)
+}
+
+fn windows_line_endings(source: &str) -> String {
+    source
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\r\n")
 }
 
 fn compiler_tokens_without_enum_commas(
@@ -193,10 +200,10 @@ fn compiler_tokens_without_enum_commas(
     Ok(normalized)
 }
 
-fn significant_tokens(tokens: &[Token]) -> Vec<(TokenKind, &str)> {
+fn significant_tokens(tokens: &[Token]) -> Vec<(TokenKind, String)> {
     tokens
         .iter()
-        .map(|token| (token.kind, token.text.as_str()))
+        .map(|token| (token.kind, windows_line_endings(&token.text)))
         .collect()
 }
 
@@ -950,14 +957,15 @@ fn matching_close(tokens: &[Token], open_index: usize, open: &str, close: &str) 
 
 #[cfg(test)]
 mod tests {
-    use super::{format_source, LINE_WIDTH};
+    use super::{format_source, windows_line_endings, LINE_WIDTH};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     #[test]
     fn formats_declarations_blocks_and_spacing() {
         let source = "struct Player{health :i32;position:Vec2;} enum Screen{Menu Playing} global state :Player; function damage (self:Player,amount:i32):void {if(amount<=0){return;}else{self.health-=amount;}}";
-        let expected = "struct Player {\n    health: i32;\n    position: Vec2;\n}\n\nenum Screen {\n    Menu,\n    Playing,\n}\n\nglobal state: Player;\n\nfunction damage(self: Player, amount: i32): void {\n    if (amount <= 0) {\n        return;\n    } else {\n        self.health -= amount;\n    }\n}\n";
+        let expected = windows_line_endings("struct Player {\n    health: i32;\n    position: Vec2;\n}\n\nenum Screen {\n    Menu,\n    Playing,\n}\n\nglobal state: Player;\n\nfunction damage(self: Player, amount: i32): void {\n    if (amount <= 0) {\n        return;\n    } else {\n        self.health -= amount;\n    }\n}\n");
         assert_eq!(format_source(source).expect("format"), expected);
     }
 
@@ -982,9 +990,9 @@ mod tests {
             .join(", ");
         let source = format!("function calculate({names}):i32{{return parameter_0;}}");
         let formatted = format_source(&source).expect("format");
-        assert!(formatted.starts_with("function calculate(\n"));
-        assert!(formatted.contains("    parameter_0: i32,\n"));
-        assert!(formatted.contains("    parameter_17: i32\n): i32 {"));
+        assert!(formatted.starts_with("function calculate(\r\n"));
+        assert!(formatted.contains("    parameter_0: i32,\r\n"));
+        assert!(formatted.contains("    parameter_17: i32\r\n): i32 {"));
         assert!(formatted
             .lines()
             .all(|line| line.chars().count() <= LINE_WIDTH));
@@ -994,33 +1002,81 @@ mod tests {
     #[test]
     fn normalizes_tabs_blank_lines_and_line_endings() {
         let source = "function main(): i32 {\r\n\treturn 0;   \r\n\r\n\r\n}\r\n\r\n";
-        let expected = "function main(): i32 {\n    return 0;\n}\n";
+        let expected = "function main(): i32 {\r\n    return 0;\r\n}\r\n";
         assert_eq!(format_source(source).expect("format"), expected);
     }
 
     #[test]
     fn formats_annotations_unary_values_and_attached_comments() {
         let source = "function @extern(\"native_tick\")tick(value:i32):i32; enum Phase{Menu// initial\nPlaying} function main():i32{/* first\n * second\n */let value:i32=2*-3;return value;} // entry\n";
-        let expected = "function @extern(\"native_tick\") tick(value: i32): i32;\n\nenum Phase {\n    Menu, // initial\n    Playing,\n}\n\nfunction main(): i32 {\n    /* first\n * second\n */\n    let value: i32 = 2 * -3;\n    return value;\n} // entry\n";
+        let expected = windows_line_endings("function @extern(\"native_tick\") tick(value: i32): i32;\n\nenum Phase {\n    Menu, // initial\n    Playing,\n}\n\nfunction main(): i32 {\n    /* first\n * second\n */\n    let value: i32 = 2 * -3;\n    return value;\n} // entry\n");
         assert_eq!(format_source(source).expect("format"), expected);
-        assert_eq!(format_source(expected).expect("reformat"), expected);
+        assert_eq!(format_source(&expected).expect("reformat"), expected);
     }
 
     #[test]
     fn keeps_commented_imports_in_one_group() {
         let source = "import\"a.stasis\";// first\nimport \"b.stasis\";/* second */\nfunction main():i32{return 0;}";
-        let expected = "import \"a.stasis\"; // first\nimport \"b.stasis\"; /* second */\n\nfunction main(): i32 {\n    return 0;\n}\n";
+        let expected = windows_line_endings("import \"a.stasis\"; // first\nimport \"b.stasis\"; /* second */\n\nfunction main(): i32 {\n    return 0;\n}\n");
         assert_eq!(format_source(source).expect("format"), expected);
-        assert_eq!(format_source(expected).expect("reformat"), expected);
+        assert_eq!(format_source(&expected).expect("reformat"), expected);
     }
 
     #[test]
     fn adds_trailing_enum_commas_before_attached_comments() {
         let source = "enum Phase{Ready Running=4// active\n,Finished/* done */}";
-        let expected =
-            "enum Phase {\n    Ready,\n    Running = 4, // active\n    Finished, /* done */\n}\n";
+        let expected = windows_line_endings(
+            "enum Phase {\n    Ready,\n    Running = 4, // active\n    Finished, /* done */\n}\n",
+        );
         assert_eq!(format_source(source).expect("format"), expected);
-        assert_eq!(format_source(expected).expect("reformat"), expected);
+        assert_eq!(format_source(&expected).expect("reformat"), expected);
+    }
+
+    #[test]
+    fn staged_repository_stasis_sources_are_formatted() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let tracked = Command::new("git")
+            .args([
+                "diff",
+                "--cached",
+                "--name-only",
+                "--diff-filter=ACMR",
+                "-z",
+                "--",
+                ":(glob)**/*.stasis",
+            ])
+            .current_dir(&repository)
+            .output()
+            .expect("list staged repository Stasis sources");
+        assert!(tracked.status.success(), "git diff --cached failed");
+        let files = tracked
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| path.ends_with(b".stasis"))
+            .collect::<Vec<_>>();
+        for path in files {
+            let path = std::str::from_utf8(path).expect("UTF-8 repository path");
+            let staged = Command::new("git")
+                .args(["show", &format!(":{path}")])
+                .current_dir(&repository)
+                .output()
+                .unwrap_or_else(|error| panic!("failed to read staged {path}: {error}"));
+            assert!(staged.status.success(), "failed to read staged {path}");
+            let source = String::from_utf8(staged.stdout)
+                .unwrap_or_else(|error| panic!("staged source is not UTF-8 for {path}: {error}"));
+            let source = windows_line_endings(&source);
+            let formatted = format_source(&source)
+                .unwrap_or_else(|error| panic!("failed to format {path}: {error}"));
+            assert_eq!(
+                source, formatted,
+                "staged repository source is not canonically formatted: {path}"
+            );
+            assert_eq!(
+                format_source(&formatted).expect("reformat corpus file"),
+                formatted,
+                "formatter was not idempotent for {path}"
+            );
+        }
     }
 
     #[test]

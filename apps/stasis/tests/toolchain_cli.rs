@@ -15,12 +15,45 @@ fn temp_dir(name: &str) -> PathBuf {
     ))
 }
 
+fn crlf(source: &str) -> String {
+    source.replace('\n', "\r\n")
+}
+
 fn stasis(args: &[&str], cwd: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_stasis"))
         .args(args)
         .current_dir(cwd)
         .output()
         .expect("run stasis CLI")
+}
+
+fn git(args: &[&str], cwd: &Path) -> Output {
+    Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git")
+}
+
+fn git_with_stasis_on_path(args: &[&str], cwd: &Path) -> Output {
+    let stasis_executable = Path::new(env!("CARGO_BIN_EXE_stasis"));
+    let stasis_directory = stasis_executable.parent().expect("stasis binary directory");
+    let path = std::env::join_paths(
+        std::iter::once(stasis_directory.to_path_buf()).chain(
+            std::env::var_os("PATH")
+                .as_deref()
+                .map(std::env::split_paths)
+                .into_iter()
+                .flatten(),
+        ),
+    )
+    .expect("compose test PATH");
+    Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("PATH", path)
+        .output()
+        .expect("run git with stasis on PATH")
 }
 
 fn json_stdout(output: &Output) -> Value {
@@ -69,6 +102,21 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         architecture_guide,
         include_str!("../../../docs/project_architecture.md")
     );
+    assert!(project.join(".git").is_dir());
+    assert_eq!(
+        String::from_utf8_lossy(
+            &git(&["config", "--local", "--get", "core.hooksPath"], &project).stdout
+        )
+        .trim(),
+        ".githooks"
+    );
+    let pre_commit = fs::read_to_string(project.join(".githooks/pre-commit"))
+        .expect("read generated pre-commit hook");
+    assert!(pre_commit.contains("stasis format --check"));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitattributes")).expect("read generated Git attributes"),
+        "*.stasis text eol=crlf\n"
+    );
 
     let formatted = stasis(&["--json", "fmt", "--check"], &project);
     assert_eq!(formatted.status.code(), Some(0));
@@ -102,6 +150,64 @@ fn project_commands_emit_stable_json_from_nested_directories() {
 }
 
 #[test]
+fn new_project_blocks_unformatted_commits() {
+    let parent = temp_dir("format_hook");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert!(git(&["config", "user.name", "Stasis Test"], &project)
+        .status
+        .success());
+    assert!(git(
+        &["config", "user.email", "stasis@example.invalid"],
+        &project
+    )
+    .status
+    .success());
+    assert!(git(&["config", "commit.gpgsign", "false"], &project)
+        .status
+        .success());
+
+    fs::write(
+        project.join("src/main.stasis"),
+        "function main():i32{return 0;}\n",
+    )
+    .expect("write unformatted source");
+    assert!(git(&["add", "-A"], &project).status.success());
+    let blocked = git_with_stasis_on_path(&["commit", "-m", "unformatted"], &project);
+    assert!(!blocked.status.success());
+    assert!(
+        String::from_utf8_lossy(&blocked.stderr).contains("formatting required"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&blocked.stdout),
+        String::from_utf8_lossy(&blocked.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/main.stasis")).expect("read hook-formatted source"),
+        "function main(): i32 {\r\n    return 0;\r\n}\r\n"
+    );
+    let still_blocked = git_with_stasis_on_path(&["commit", "-m", "still unformatted"], &project);
+    assert!(!still_blocked.status.success());
+    assert!(String::from_utf8_lossy(&still_blocked.stderr).contains("stage the formatted"));
+
+    assert!(git(&["add", "-A"], &project).status.success());
+    let committed = git_with_stasis_on_path(&["commit", "-m", "formatted"], &project);
+    assert!(
+        committed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&committed.stdout),
+        String::from_utf8_lossy(&committed.stderr)
+    );
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
 fn init_includes_the_project_architecture_guide() {
     let parent = temp_dir("init_architecture");
     let project = parent.join("existing");
@@ -115,6 +221,8 @@ fn init_includes_the_project_architecture_guide() {
             .expect("read project architecture guide"),
         include_str!("../../../docs/project_architecture.md")
     );
+    assert!(!project.join(".git").exists());
+    assert!(!project.join(".githooks/pre-commit").exists());
 
     fs::remove_dir_all(&parent).ok();
 }
@@ -149,7 +257,7 @@ fn format_alias_applies_canonical_layout_and_fmt_check_enforces_it() {
     assert_eq!(json_stdout(&formatted)["command"], "fmt");
     assert_eq!(
         fs::read_to_string(&entry).expect("read formatted fixture"),
-        "struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu,\n    Playing,\n}\n\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n"
+        crlf("struct Player {\n    health: i32;\n    active: bool;\n}\n\nenum Mode {\n    Menu,\n    Playing,\n}\n\nglobal player: Player;\n\nfunction update(amount: i32): void {\n    if (amount > 0) {\n        player.health += amount;\n    } else {\n        player.health = 0;\n    }\n}\n\nfunction main(): i32 {\n    update(1);\n    return player.health;\n}\n")
     );
 
     let fixed_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -188,6 +296,28 @@ fn format_alias_applies_canonical_layout_and_fmt_check_enforces_it() {
         String::from_utf8_lossy(&checked.stderr)
     );
     fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn format_accepts_explicit_sources_without_a_project_manifest() {
+    let root = temp_dir("explicit_format_paths");
+    fs::create_dir_all(&root).expect("create standalone source directory");
+    let source = root.join("standalone.stasis");
+    fs::write(&source, "function main():i32{return 0;}\n")
+        .expect("write standalone unformatted source");
+
+    let before = stasis(&["format", "--check", "standalone.stasis"], &root);
+    assert_eq!(before.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&before.stderr).contains("formatting required"));
+    assert!(stasis(&["format", "standalone.stasis"], &root)
+        .status
+        .success());
+    assert_eq!(
+        fs::read_to_string(&source).expect("read standalone formatted source"),
+        "function main(): i32 {\r\n    return 0;\r\n}\r\n"
+    );
+
+    fs::remove_dir_all(&root).ok();
 }
 
 #[test]
