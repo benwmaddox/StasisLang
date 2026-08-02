@@ -60,6 +60,14 @@ pub fn run_jit_tests_in_directory_with_session(
     root: &Path,
     session: &mut StasisTestRunSession,
 ) -> Result<StasisTestRunSummary, String> {
+    run_jit_tests_in_directory_with_project_root_and_session(root, root, session)
+}
+
+pub fn run_jit_tests_in_directory_with_project_root_and_session(
+    root: &Path,
+    project_root: &Path,
+    session: &mut StasisTestRunSession,
+) -> Result<StasisTestRunSummary, String> {
     let total_started = Instant::now();
     let discovery_started = Instant::now();
     let mut files = Vec::new();
@@ -111,8 +119,8 @@ pub fn run_jit_tests_in_directory_with_session(
         let entry = session.by_path.entry(file_path.clone()).or_insert_with(|| {
             let mut process = JitProcess::new();
             process
-                .set_project_root(root.to_string_lossy())
-                .expect("test discovery root is an absolute project path");
+                .set_project_root(project_root.to_string_lossy())
+                .expect("test project root is an absolute path");
             CachedTestProcess {
                 source_hash: 0,
                 process,

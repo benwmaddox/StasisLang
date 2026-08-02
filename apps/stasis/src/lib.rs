@@ -16,8 +16,8 @@ pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use events::RunnerEvent;
 pub use live_workspace::LiveRunConfig;
 pub use stasis_test_runner::{
-    run_jit_tests_in_directory, run_jit_tests_in_directory_with_session, StasisTestRunSession,
-    StasisTestRunSummary,
+    run_jit_tests_in_directory, run_jit_tests_in_directory_with_project_root_and_session,
+    run_jit_tests_in_directory_with_session, StasisTestRunSession, StasisTestRunSummary,
 };
 pub use window_config::WindowConfig;
 

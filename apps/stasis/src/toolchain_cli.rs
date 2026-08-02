@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
-    run_jit_tests_in_directory_with_session, run_live_in_process, run_live_in_process_with_data,
-    run_play_in_process_with_window_title, run_self_host_aot_cli_with_options, LiveRunConfig,
-    StasisTestRunSession,
+    run_jit_tests_in_directory_with_project_root_and_session, run_live_in_process,
+    run_live_in_process_with_data, run_play_in_process_with_window_title,
+    run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
@@ -1202,6 +1202,7 @@ fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
+    jit.set_project_root(display_path(&workspace.root))?;
     jit.set_required_emit_roots(&runtime_analysis_roots());
     let mut sources = BTreeMap::new();
     for file in files {
@@ -1234,6 +1235,7 @@ fn compile_workspace_mobile_costs(workspace: &Workspace) -> Result<(u64, u64), S
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut aot = AotProcess::new();
+    aot.set_project_root(display_path(&workspace.root))?;
     aot.set_target(AotTarget::android_arm64_default());
     aot.set_required_emit_roots(&runtime_analysis_roots());
     for file in files {
@@ -1298,6 +1300,7 @@ fn validate_fresh_runtime(
     let source = fs::read_to_string(&entry)
         .map_err(|error| format!("failed to read entry {}: {error}", entry.display()))?;
     let mut jit = JitProcess::new();
+    jit.set_project_root(display_path(&workspace.root))?;
     jit.set_required_emit_roots(&[setup.to_string(), tick.to_string(), render.to_string()]);
     jit.upsert_file(display_path(&entry), source);
     jit.compile()
@@ -1412,7 +1415,11 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
     validate_workspace_destination(workspace, "test directory", &directory)?;
     let mut session = StasisTestRunSession::new();
-    let summary = run_jit_tests_in_directory_with_session(&directory, &mut session)?;
+    let summary = run_jit_tests_in_directory_with_project_root_and_session(
+        &directory,
+        &workspace.root,
+        &mut session,
+    )?;
     let data = json!({
         "files_discovered": summary.files_discovered,
         "files_with_tests": summary.files_with_tests,
@@ -3556,6 +3563,7 @@ fn validate_semantic_files(
 ) -> Result<(), String> {
     let files = workshop_reachable_files(files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
+    jit.set_project_root(display_path(&workspace.root))?;
     jit.set_local_runtime_helper_trampolines(true);
     jit.set_required_emit_roots(&[
         "main".to_string(),
