@@ -1868,6 +1868,18 @@ fn run_play_in_process_inner(
         .canonicalize()
         .unwrap_or_else(|_| watch_file.to_path_buf());
     let root_path_str = root_path.to_string_lossy().to_string();
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let canonical_repository = repository_root
+        .canonicalize()
+        .unwrap_or_else(|_| repository_root.clone());
+    let project_root = if root_path.starts_with(&canonical_repository) {
+        canonical_repository
+    } else {
+        root_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    };
 
     let asset_working_dir = prepare_play_asset_working_dir(&watch_dir_abs)?;
     std::env::set_current_dir(&asset_working_dir).map_err(|error| {
@@ -1947,6 +1959,7 @@ fn run_play_in_process_inner(
     let _ = gfx.init_window(800, 600, &title)?;
 
     let mut jit = JitProcess::new();
+    jit.set_project_root(project_root.to_string_lossy())?;
     let root_source = fs::read_to_string(&root_path)
         .map_err(|error| format!("failed to read {}: {error}", root_path.display()))?;
     jit.upsert_file(root_path_str.clone(), root_source);
@@ -2360,7 +2373,27 @@ fn format_live_main_error(error: String) -> String {
 
 pub fn run_with_real_backend(config: RunnerConfig) -> RunnerSummary {
     let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
-    let backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(prepared_tx);
+    let explicit = config
+        .watch_directory
+        .as_deref()
+        .or(config.inject_file_change.as_deref())
+        .unwrap_or_else(|| Path::new("."));
+    let mut project_root = explicit
+        .canonicalize()
+        .unwrap_or_else(|_| explicit.to_path_buf());
+    if project_root.is_file() {
+        project_root.pop();
+    }
+    if let Some(repository_root) = project_root.ancestors().find(|ancestor| {
+        ancestor.join("Cargo.toml").is_file() && ancestor.join("docs/spec.md").is_file()
+    }) {
+        project_root = repository_root.to_path_buf();
+    }
+    let backend = IncrementalCompilerBackend::new_for_project_with_prepared_jit_swaps(
+        project_root,
+        prepared_tx,
+    )
+    .expect("runner compiler project root must be absolute");
     run_with_backend_and_prepared_swaps(config, backend, Some(prepared_rx))
 }
 
@@ -5226,6 +5259,9 @@ mod tests {
 
         let source_path_text = source_path.to_string_lossy().to_string();
         let mut active = JitProcess::new();
+        active
+            .set_project_root(root.to_string_lossy())
+            .expect("set fixture project root");
         active.upsert_file(source_path_text.clone(), source_v1);
         active.compile().expect("compile v1");
         let active_package = active

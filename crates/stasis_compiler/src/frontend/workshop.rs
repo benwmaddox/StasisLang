@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use crate::compiler::source_workshop_items;
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{parse_top_level_functions, parse_top_level_type_layout};
+use crate::identity::{
+    canonical_source_path, overload_discriminator, CanonicalSourcePath, SymbolId,
+};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -49,6 +52,7 @@ pub struct WorkshopSourceSpan {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkshopSymbol {
+    pub symbol_id: String,
     pub kind: WorkshopSymbolKind,
     pub name: String,
     pub owner: Option<String>,
@@ -362,6 +366,14 @@ fn title_case_words(value: &str) -> String {
 pub fn build_workshop_symbol_tree(
     files: &[WorkshopSourceFile],
 ) -> Result<WorkshopSymbolTree, String> {
+    for file in files {
+        canonical_source_path(None, &file.path).map_err(|error| {
+            format!(
+                "invalid Workshop project-relative path '{}': {error}",
+                file.path
+            )
+        })?;
+    }
     let mut struct_names = BTreeSet::new();
     let mut structs_by_file: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for file in files {
@@ -430,6 +442,7 @@ fn index_file_symbols(
     struct_names: &BTreeSet<String>,
     file_structs: &[String],
 ) -> Result<Vec<PendingSymbol>, String> {
+    let canonical_path = CanonicalSourcePath::project_relative(&file.path)?;
     let mut out = Vec::new();
     let records = source_workshop_items(&file.source)?;
     for parsed_struct in &records.structs {
@@ -438,6 +451,13 @@ fn index_file_symbols(
             group_kind: WorkshopSymbolGroupKind::Struct,
             group_name: parsed_struct.name.clone(),
             symbol: WorkshopSymbol {
+                symbol_id: SymbolId::declaration(
+                    "struct",
+                    &canonical_path,
+                    &parsed_struct.name,
+                    "declaration",
+                )
+                .to_string(),
                 kind: WorkshopSymbolKind::Struct,
                 name: parsed_struct.name.clone(),
                 owner: Some(parsed_struct.name.clone()),
@@ -470,6 +490,18 @@ fn index_file_symbols(
             group_kind,
             group_name,
             symbol: WorkshopSymbol {
+                symbol_id: SymbolId::function(
+                    &canonical_path,
+                    &function.name,
+                    &overload_discriminator(
+                        &function
+                            .params
+                            .iter()
+                            .map(|param| param.type_name.clone())
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+                .to_string(),
                 kind: WorkshopSymbolKind::Function,
                 name: function.name,
                 owner,
@@ -504,6 +536,18 @@ fn index_file_symbols(
             group_kind,
             group_name,
             symbol: WorkshopSymbol {
+                symbol_id: SymbolId::declaration(
+                    match parsed.kind {
+                        WorkshopSymbolKind::Global => "global",
+                        WorkshopSymbolKind::Constant => "constant",
+                        WorkshopSymbolKind::Test => "test",
+                        WorkshopSymbolKind::Struct | WorkshopSymbolKind::Function => unreachable!(),
+                    },
+                    &canonical_path,
+                    &parsed.name,
+                    "declaration",
+                )
+                .to_string(),
                 kind: parsed.kind,
                 name: parsed.name,
                 owner,
@@ -894,6 +938,9 @@ fn token_text<'a>(source: &'a str, token: Token) -> &'a str {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkshopSymbolSelector {
+    /// Canonical v1 SymbolId. Legacy tuple fields are accepted only for schema v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_id: Option<String>,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<WorkshopSourceItemKind>,
@@ -919,6 +966,7 @@ pub enum WorkshopSourceItemKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkshopSourceItem {
+    pub symbol_id: String,
     pub kind: WorkshopSourceItemKind,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1022,7 +1070,7 @@ pub struct WorkshopSemanticEditPlan {
 }
 
 const fn semantic_edit_schema_version() -> u32 {
-    1
+    2
 }
 
 pub fn workshop_symbols(files: &[WorkshopSourceFile]) -> Result<Vec<WorkshopSymbol>, String> {
@@ -1047,6 +1095,7 @@ pub fn workshop_source_items(
     let symbols = workshop_symbols(files)?;
     let mut items = Vec::new();
     for file in files {
+        let canonical_path = CanonicalSourcePath::project_relative(&file.path)?;
         let imports = parse_import_spans(&file.source)?;
         items.push(source_item_from_ranges(
             file,
@@ -1056,6 +1105,10 @@ pub fn workshop_source_items(
             "imports",
             imports,
             false,
+            Some(
+                SymbolId::declaration("tool_group", &canonical_path, "imports", "group")
+                    .to_string(),
+            ),
         )?);
 
         let globals = parse_simple_top_level_symbols(&file.source)?
@@ -1076,6 +1129,10 @@ pub fn workshop_source_items(
             "globals",
             globals,
             true,
+            Some(
+                SymbolId::declaration("tool_group", &canonical_path, "globals", "group")
+                    .to_string(),
+            ),
         )?);
 
         for symbol in symbols.iter().filter(|symbol| symbol.file == file.path) {
@@ -1096,6 +1153,7 @@ pub fn workshop_source_items(
                     kind,
                     WorkshopSourceItemKind::Struct | WorkshopSourceItemKind::Function
                 ),
+                Some(symbol.symbol_id.clone()),
             )?);
         }
     }
@@ -1688,6 +1746,7 @@ fn source_item_from_ranges(
     signature: &str,
     ranges: Vec<Range<usize>>,
     include_comments: bool,
+    symbol_id: Option<String>,
 ) -> Result<WorkshopSourceItem, String> {
     let mut ranges = ranges
         .into_iter()
@@ -1710,6 +1769,8 @@ fn source_item_from_ranges(
         .map(span_from_range)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(WorkshopSourceItem {
+        symbol_id: symbol_id
+            .ok_or_else(|| "source item is missing canonical identity".to_string())?,
         kind,
         name: name.to_string(),
         owner,
@@ -1810,6 +1871,9 @@ pub fn find_workshop_symbols(
     Ok(workshop_source_items(files)?
         .into_iter()
         .filter(|item| {
+            if let Some(symbol_id) = selector.symbol_id.as_deref() {
+                return item.symbol_id == symbol_id;
+            }
             item.name == selector.name
                 && selector.kind.is_none_or(|kind| item.kind == kind)
                 && normalized_file
@@ -1831,12 +1895,20 @@ pub fn plan_workshop_semantic_edits(
     files: &[WorkshopSourceFile],
     batch: &WorkshopSemanticEditBatch,
 ) -> Result<(Vec<WorkshopSourceFile>, WorkshopSemanticEditPlan), String> {
-    if batch.schema_version != semantic_edit_schema_version() {
+    if !matches!(batch.schema_version, 1 | 2) {
         return Err(format!(
             "unsupported semantic edit schema_version {}; expected {}",
             batch.schema_version,
             semantic_edit_schema_version()
         ));
+    }
+    if batch.schema_version == 2
+        && batch
+            .edits
+            .iter()
+            .any(|edit| edit.target.symbol_id.is_none())
+    {
+        return Err("semantic edit schema_version 2 requires target.symbol_id".to_string());
     }
     if batch.edits.is_empty() {
         return Err("semantic edit batch must contain at least one edit".to_string());
@@ -3017,7 +3089,16 @@ fn function_signature_change_reason(
     let before = function_symbols_by_identity(before_tree);
     let after = function_symbols_by_identity(after_tree);
     for (identity, before_symbol) in before {
-        let Some(after_symbol) = after.get(&identity) else {
+        let after_symbol = after.get(&identity).copied().or_else(|| {
+            let mut candidates = after.values().copied().filter(|candidate| {
+                candidate.file == before_symbol.file
+                    && candidate.owner == before_symbol.owner
+                    && candidate.name == before_symbol.name
+            });
+            let candidate = candidates.next()?;
+            candidates.next().is_none().then_some(candidate)
+        });
+        let Some(after_symbol) = after_symbol else {
             continue;
         };
         if before_symbol.signature != after_symbol.signature {
@@ -3092,18 +3173,12 @@ fn function_symbols_by_identity(
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SymbolIdentity {
-    kind: WorkshopSymbolKind,
-    file: String,
-    owner: Option<String>,
-    name: String,
+    canonical: String,
 }
 
 fn symbol_identity(symbol: &WorkshopSymbol) -> SymbolIdentity {
     SymbolIdentity {
-        kind: symbol.kind,
-        file: symbol.file.clone(),
-        owner: symbol.owner.clone(),
-        name: symbol.name.clone(),
+        canonical: symbol.symbol_id.clone(),
     }
 }
 
@@ -3353,6 +3428,15 @@ function player_overlaps_enemy(player: Player, enemy: Enemy): bool { return true
         assert!(player.symbols[0].source.starts_with("struct Player"));
         assert!(player.symbols[1].source.starts_with("function update"));
         assert_eq!(player.symbols[1].owner.as_deref(), Some("Player"));
+        assert_eq!(
+            player.symbols[1].symbol_id,
+            SymbolId::function(
+                &CanonicalSourcePath::project_relative("src/player.stasis").unwrap(),
+                "update",
+                "(Player,InputState)"
+            )
+            .to_string()
+        );
 
         let collision = tree
             .groups
@@ -3374,6 +3458,12 @@ mod ai_tests {
     #[test]
     fn serializes_android_ai_request_with_stasis_style_rules() {
         let symbol = WorkshopSymbol {
+            symbol_id: SymbolId::function(
+                &CanonicalSourcePath::project_relative("src/player.stasis").unwrap(),
+                "jump",
+                "(Player)",
+            )
+            .to_string(),
             kind: WorkshopSymbolKind::Function,
             name: "jump".to_string(),
             owner: Some("Player".to_string()),
@@ -3436,6 +3526,12 @@ mod ai_tests {
     fn rejects_replace_function_edit_with_rust_style_source() {
         let source = "function jump(self: Player): void { return; }\n";
         let symbol = WorkshopSymbol {
+            symbol_id: SymbolId::function(
+                &CanonicalSourcePath::project_relative("src/player.stasis").unwrap(),
+                "jump",
+                "(Player)",
+            )
+            .to_string(),
             kind: WorkshopSymbolKind::Function,
             name: "jump".to_string(),
             owner: Some("Player".to_string()),
@@ -3950,6 +4046,7 @@ mod workshop_contract_tests {
         file: &str,
     ) -> WorkshopSymbolSelector {
         WorkshopSymbolSelector {
+            symbol_id: None,
             name: name.to_string(),
             kind: Some(kind),
             file: Some(file.to_string()),
@@ -3969,6 +4066,55 @@ mod workshop_contract_tests {
             new_source: new_source.map(str::to_string),
             expected_source_hash: None,
         }
+    }
+
+    #[test]
+    fn canonical_symbol_selector_is_lossless_for_overloads_and_schema_v2_requires_it() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/actions.stasis".to_string(),
+            source: "struct Player { value: i32; } struct Enemy { value: i32; } function damage(self: Player, amount: i32): i32 { return amount; } function damage(self: Enemy, amount: i32): i32 { return amount + 1; }".to_string(),
+        }];
+        let overloads = workshop_source_items(&files)
+            .expect("source items")
+            .into_iter()
+            .filter(|item| item.name == "damage")
+            .collect::<Vec<_>>();
+        assert_eq!(overloads.len(), 2);
+        assert_ne!(overloads[0].symbol_id, overloads[1].symbol_id);
+        let serialized = serde_json::to_string(&overloads[0]).expect("serialize source item");
+        assert!(serialized.contains("\"symbol_id\":\"v1|function|src/actions.stasis|damage|"));
+
+        let selected = find_workshop_symbols(
+            &files,
+            &WorkshopSymbolSelector {
+                symbol_id: Some(overloads[1].symbol_id.clone()),
+                name: "stale_display_name".to_string(),
+                kind: None,
+                file: None,
+                owner: None,
+                signature: None,
+            },
+        )
+        .expect("canonical lookup");
+        assert_eq!(selected, vec![overloads[1].clone()]);
+
+        let error = plan_workshop_semantic_edits(
+            &files,
+            &WorkshopSemanticEditBatch {
+                schema_version: 2,
+                edits: vec![semantic_edit(
+                    WorkshopSemanticEditOperation::Delete,
+                    semantic_selector(
+                        "damage",
+                        WorkshopSourceItemKind::Function,
+                        "src/actions.stasis",
+                    ),
+                    None,
+                )],
+            },
+        )
+        .expect_err("schema v2 must reject a lossy selector");
+        assert!(error.contains("requires target.symbol_id"));
     }
 
     #[test]
@@ -4109,6 +4255,7 @@ function tick(): i32 {
             edits: vec![WorkshopSemanticEdit {
                 operation: WorkshopSemanticEditOperation::Update,
                 target: WorkshopSymbolSelector {
+                    symbol_id: None,
                     name: "tick".to_string(),
                     kind: Some(WorkshopSourceItemKind::Function),
                     file: Some("src/main.stasis".to_string()),
@@ -4153,6 +4300,7 @@ function tick(): i32 {
             edits: vec![WorkshopSemanticEdit {
                 operation: WorkshopSemanticEditOperation::Delete,
                 target: WorkshopSymbolSelector {
+                    symbol_id: None,
                     name: "second".to_string(),
                     kind: Some(WorkshopSourceItemKind::Function),
                     file: Some("src/main.stasis".to_string()),
@@ -4184,6 +4332,7 @@ function tick(): i32 {
             edits: vec![WorkshopSemanticEdit {
                 operation: WorkshopSemanticEditOperation::Update,
                 target: WorkshopSymbolSelector {
+                    symbol_id: None,
                     name: "main".to_string(),
                     kind: Some(WorkshopSourceItemKind::Function),
                     file: Some("src/main.stasis".to_string()),
@@ -4256,6 +4405,7 @@ function tick(): i32 {
             edits: vec![WorkshopSemanticEdit {
                 operation: WorkshopSemanticEditOperation::Delete,
                 target: WorkshopSymbolSelector {
+                    symbol_id: None,
                     name: "FIRST".to_string(),
                     kind: Some(WorkshopSourceItemKind::Globals),
                     file: Some("src/main.stasis".to_string()),
@@ -4288,6 +4438,7 @@ function tick(): i32 {
             edits: vec![WorkshopSemanticEdit {
                 operation: WorkshopSemanticEditOperation::Update,
                 target: WorkshopSymbolSelector {
+                    symbol_id: None,
                     name: "main".to_string(),
                     kind: Some(WorkshopSourceItemKind::Function),
                     file: Some("src/main.stasis".to_string()),

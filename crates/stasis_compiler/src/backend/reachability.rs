@@ -34,7 +34,7 @@ pub(crate) fn compute_reachable_function_ids(
         if !reachable.insert(function_id) {
             continue;
         }
-        let Some(function) = functions.get(function_id as usize) else {
+        let Some(function) = functions.iter().find(|function| function.id == function_id) else {
             continue;
         };
         for dependency in &function.dependencies {

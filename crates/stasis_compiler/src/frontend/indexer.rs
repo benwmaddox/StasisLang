@@ -15,6 +15,7 @@ pub struct IndexedFunction {
     pub body_hash: u64,
     pub param_names: Vec<String>,
     pub params: Vec<TypeId>,
+    pub param_type_names: Vec<String>,
     pub return_type: TypeId,
     pub dependency_name_hashes: Vec<u64>,
 }
@@ -48,9 +49,11 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
     for function in parsed {
         let mut params = Vec::with_capacity(function.params.len());
         let mut param_names = Vec::with_capacity(function.params.len());
+        let mut param_type_names = Vec::with_capacity(function.params.len());
         for param in &function.params {
             let type_id = types.resolve_or_intern(&param.type_name)?;
             param_names.push(param.name.clone());
+            param_type_names.push(param.type_name.clone());
             params.push(type_id);
         }
         let return_type = types.resolve_or_intern(&function.return_type_name)?;
@@ -71,6 +74,7 @@ pub fn index_file(source: &str, types: &mut TypeTable) -> Result<Vec<IndexedFunc
             body_hash,
             param_names,
             params,
+            param_type_names,
             return_type,
             dependency_name_hashes,
         });

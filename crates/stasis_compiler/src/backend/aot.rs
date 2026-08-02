@@ -1,11 +1,12 @@
 use crate::backend::emit::*;
-use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramSnapshot};
+use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
 use crate::backend::state_layout::{is_named_scalar_state_path, StateLayout};
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
 };
+use crate::identity::SymbolId;
 use crate::ir::hir::FunctionHIR;
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_codegen::settings;
@@ -24,6 +25,7 @@ use target_lexicon::Triple;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AotArtifact {
     pub function_id: FunctionId,
+    pub symbol_id: SymbolId,
     pub object_index: u32,
     pub body_hash: u64,
     pub symbol_name: String,
@@ -51,12 +53,17 @@ pub struct AotEngineBundle {
     pub output_dir: PathBuf,
     pub manifest_path: PathBuf,
     pub object_paths_by_function: BTreeMap<String, PathBuf>,
+    pub object_paths_by_function_id: BTreeMap<FunctionId, PathBuf>,
     pub optimization_profile: AotOptimizationProfile,
 }
 
 impl AotProcess {
     pub fn new() -> Self {
         Self::with_optimization_profile(AotOptimizationProfile::Speed)
+    }
+
+    pub fn set_project_root(&mut self, root: impl Into<String>) -> Result<(), String> {
+        self.compiler.set_project_root(root)
     }
 
     pub fn with_optimization_profile(optimization_profile: AotOptimizationProfile) -> Self {
@@ -82,7 +89,11 @@ impl AotProcess {
 
     pub fn set_import_base_dir(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();
-        self.import_base_dir = Some(fs::canonicalize(&path).unwrap_or(path));
+        let path = fs::canonicalize(&path).unwrap_or(path);
+        let _ = self
+            .compiler
+            .set_project_root(path.to_string_lossy().to_string());
+        self.import_base_dir = Some(path);
     }
 
     pub fn set_target(&mut self, target: stasis_jit::AotTarget) {
@@ -129,6 +140,8 @@ impl AotProcess {
         self.load_import_graph_sources()
             .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
+        self.validate_host_aliases()
+            .map_err(crate::compiler::CompileError::Backend)?;
         self.compiler
             .types_mut()
             .ensure_utf8_view_id()
@@ -252,6 +265,7 @@ impl AotProcess {
                 artifacts.retain(|artifact| artifact.function_id != meta.id);
                 artifacts.push(AotArtifact {
                     function_id: meta.id,
+                    symbol_id: meta.symbol_id.clone(),
                     object_index,
                     body_hash: meta.body_hash,
                     symbol_name: symbol,
@@ -266,14 +280,17 @@ impl AotProcess {
         compact_active_artifact_storage(artifacts, object_bytes);
         self.next_object_index = u32::try_from(self.object_bytes.len()).unwrap_or(u32::MAX);
         if let Some(snapshot) = self.program_snapshot.as_mut() {
-            snapshot.set_artifact_mappings(self.artifacts.iter().map(|artifact| {
-                ProgramArtifactMapping {
-                    function_id: artifact.function_id,
-                    symbol: artifact.symbol_name.clone(),
-                    target_path: None,
-                    code_pointer: None,
-                }
-            }));
+            snapshot
+                .set_artifact_mappings(self.artifacts.iter().map(|artifact| {
+                    ProgramArtifactMapping {
+                        function_id: artifact.function_id,
+                        symbol_id: artifact.symbol_id.clone(),
+                        symbol: artifact.symbol_name.clone(),
+                        target_path: None,
+                        code_pointer: None,
+                    }
+                }))
+                .map_err(crate::compiler::CompileError::Invariant)?;
         }
         Ok(CompileReport { index, emit })
     }
@@ -301,8 +318,7 @@ impl AotProcess {
             .compiler
             .files()
             .iter()
-            .map(|file| self.resolve_import_source_path(&file.path))
-            .map(|path| normalize_path_for_compiler_key(&path))
+            .map(|file| file.path.clone())
             .collect();
         let mut queue: Vec<String> = self
             .compiler
@@ -323,21 +339,23 @@ impl AotProcess {
             };
             let imports = parse_import_paths(&source);
             for import_path in imports {
-                let resolved =
-                    self.resolve_import_source_path(&resolve_import_path(&path, &import_path));
-                let normalized = normalize_path_for_compiler_key(&resolved);
-                if known_paths.contains(&normalized) {
+                let logical = resolve_import_path(&path, &import_path);
+                let logical_key =
+                    crate::identity::canonical_source_path(None, &logical.to_string_lossy())?;
+                if known_paths.contains(&logical_key) {
                     continue;
                 }
+                let resolved = self.resolve_import_source_path(&logical);
+                let normalized = normalize_path_for_compiler_key(&resolved);
                 let content = std::fs::read_to_string(&resolved).map_err(|error| {
                     format!(
                         "failed to load import '{}' referenced by '{}': {}",
                         import_path, path, error
                     )
                 })?;
-                self.compiler.upsert_file(normalized.clone(), content);
-                known_paths.insert(normalized.clone());
-                queue.push(normalized);
+                self.compiler.upsert_file(normalized, content);
+                known_paths.insert(logical_key.clone());
+                queue.push(logical_key);
             }
         }
 
@@ -376,12 +394,7 @@ impl AotProcess {
         output_executable: &Path,
         link_config: &stasis_jit::AotLinkConfig,
     ) -> Result<PathBuf, String> {
-        let function = self
-            .compiler
-            .functions()
-            .iter()
-            .find(|function| function.name == name)
-            .ok_or_else(|| format!("function '{name}' not found"))?;
+        let function = self.unique_function_by_name(name)?;
         if function.return_type != TYPE_ID_I32 {
             return Err(format!(
                 "function '{name}' is not i32-returning (type id {})",
@@ -479,6 +492,44 @@ impl AotProcess {
             link_config,
         )?;
         Ok(entry_object_path)
+    }
+
+    fn validate_host_aliases(&self) -> Result<(), String> {
+        let required: BTreeSet<&str> = ["main", "tick", "render", "on_code_swap"]
+            .into_iter()
+            .chain(self.required_emit_roots.iter().map(String::as_str))
+            .collect();
+        for name in required {
+            let count = self
+                .compiler
+                .functions()
+                .iter()
+                .filter(|function| function.name == name)
+                .count();
+            if count > 1 {
+                return Err(format!(
+                    "host ABI alias '{name}' requires exactly one canonical identity (found {count})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn unique_function_by_name(&self, name: &str) -> Result<&ProgramFunction, String> {
+        let mut matches = self
+            .program_snapshot
+            .as_ref()
+            .ok_or_else(|| "program has not compiled successfully".to_string())?
+            .functions()
+            .iter()
+            .filter(|function| function.name == name);
+        let function = matches
+            .next()
+            .ok_or_else(|| format!("function '{name}' not found"))?;
+        if matches.next().is_some() {
+            return Err(format!("function alias '{name}' is ambiguous"));
+        }
+        Ok(function)
     }
 
     fn compile_standalone_storage_object(
@@ -715,7 +766,9 @@ impl AotProcess {
         })?;
 
         let mut object_paths_by_function: BTreeMap<String, PathBuf> = BTreeMap::new();
-        let mut manifest_rows: Vec<(String, String, String, u16)> = Vec::new();
+        let mut ambiguous_aliases = BTreeSet::new();
+        let mut object_paths_by_function_id = BTreeMap::new();
+        let mut manifest_rows: Vec<(FunctionId, String, String, String, String, u16)> = Vec::new();
         for artifact in &self.artifacts {
             let function = self
                 .compiler
@@ -750,13 +803,16 @@ impl AotProcess {
                     object_path.display()
                 )
             })?;
-            let object_key = if object_paths_by_function.contains_key(&function.name) {
-                format!("{}#{}", function.name, artifact.function_id)
-            } else {
-                function.name.clone()
-            };
-            object_paths_by_function.insert(object_key, object_path);
+            object_paths_by_function_id.insert(function.id, object_path.clone());
+            if object_paths_by_function.contains_key(&function.name) {
+                object_paths_by_function.remove(&function.name);
+                ambiguous_aliases.insert(function.name.clone());
+            } else if !ambiguous_aliases.contains(&function.name) {
+                object_paths_by_function.insert(function.name.clone(), object_path);
+            }
             manifest_rows.push((
+                function.id,
+                function.symbol_id.to_string(),
                 function.name.clone(),
                 artifact.symbol_name.clone(),
                 object_file_name,
@@ -796,7 +852,7 @@ impl AotProcess {
                         .functions()
                         .iter()
                         .find(|function| function.id == artifact.function_id)?;
-                    let path = object_paths_by_function.get(&function.name)?;
+                    let path = object_paths_by_function_id.get(&function.id)?;
                     Some((artifact.function_id, path.display().to_string()))
                 })
                 .collect();
@@ -806,6 +862,7 @@ impl AotProcess {
             output_dir: output_dir.to_path_buf(),
             manifest_path,
             object_paths_by_function,
+            object_paths_by_function_id,
             optimization_profile: self.optimization_profile,
         })
     }
@@ -814,6 +871,29 @@ impl AotProcess {
         &mut self,
         output_dir: &Path,
     ) -> Result<BTreeMap<String, (String, PathBuf)>, String> {
+        let canonical = self.write_object_files_by_id(output_dir)?;
+        let mut aliases = BTreeMap::new();
+        for function in self.compiler.functions() {
+            let Some(artifact) = canonical.get(&function.id) else {
+                continue;
+            };
+            if aliases
+                .insert(function.name.clone(), artifact.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "AOT name alias '{}' is ambiguous; use canonical FnId",
+                    function.name
+                ));
+            }
+        }
+        Ok(aliases)
+    }
+
+    pub fn write_object_files_by_id(
+        &mut self,
+        output_dir: &Path,
+    ) -> Result<BTreeMap<FunctionId, (String, PathBuf)>, String> {
         fs::create_dir_all(output_dir).map_err(|error| {
             format!(
                 "failed to create AOT object output directory {}: {error}",
@@ -857,10 +937,7 @@ impl AotProcess {
                     object_path.display()
                 )
             })?;
-            out.insert(
-                function.name.clone(),
-                (artifact.symbol_name.clone(), object_path),
-            );
+            out.insert(function.id, (artifact.symbol_name.clone(), object_path));
         }
         if let Some(snapshot) = self.program_snapshot.as_mut() {
             let paths = self
@@ -872,7 +949,7 @@ impl AotProcess {
                         .functions()
                         .iter()
                         .find(|function| function.id == artifact.function_id)?;
-                    let (_, path) = out.get(&function.name)?;
+                    let (_, path) = out.get(&function.id)?;
                     Some((artifact.function_id, path.display().to_string()))
                 })
                 .collect();
@@ -1360,7 +1437,7 @@ fn json_escape(value: &str) -> String {
 fn build_engine_bundle_manifest(
     optimization_profile: AotOptimizationProfile,
     entrypoints: &EngineEntrypoints,
-    rows: &[(String, String, String, u16)],
+    rows: &[(FunctionId, String, String, String, String, u16)],
     string_literals: &BTreeMap<i32, String>,
     collection_max_lengths: &BTreeMap<String, i32>,
 ) -> String {
@@ -1389,10 +1466,14 @@ fn build_engine_bundle_manifest(
     }
     out.push_str("  },\n");
     out.push_str("  \"functions\": [\n");
-    for (index, (name, symbol, object_file, return_type)) in rows.iter().enumerate() {
+    for (index, (function_id, symbol_id, name, symbol, object_file, return_type)) in
+        rows.iter().enumerate()
+    {
         let comma = if index + 1 < rows.len() { "," } else { "" };
         out.push_str(&format!(
-            "    {{\"name\":\"{}\",\"symbol\":\"{}\",\"object\":\"{}\",\"return_type\":{}}}{}\n",
+            "    {{\"function_id\":{},\"symbol_id\":\"{}\",\"name\":\"{}\",\"symbol\":\"{}\",\"object\":\"{}\",\"return_type\":{}}}{}\n",
+            function_id,
+            json_escape(symbol_id),
             json_escape(name),
             json_escape(symbol),
             json_escape(object_file),
@@ -1472,6 +1553,37 @@ mod tests {
         assert_eq!(accepted.artifact_mappings(), snapshot.artifact_mappings());
         assert_eq!(process.artifacts, artifacts);
         assert_eq!(process.object_bytes, object_bytes);
+    }
+
+    #[test]
+    fn duplicate_host_alias_rejects_candidate_and_preserves_active_aot_identity() {
+        let mut process = AotProcess::new();
+        process.upsert_file("src/main.stasis", "function main(): i32 { return 17; }\n");
+        process.compile().expect("compile accepted generation");
+        let accepted_snapshot = process.program_snapshot().expect("snapshot").clone();
+        let accepted_artifacts = process.artifacts().to_vec();
+
+        process.upsert_file(
+            "src/duplicate.stasis",
+            "function main(): i32 { return 99; }\n",
+        );
+        let error = process
+            .compile()
+            .expect_err("duplicate host alias must fail");
+
+        assert!(matches!(
+            error,
+            crate::compiler::CompileError::Backend(message)
+                if message.contains("host ABI alias 'main' requires exactly one canonical identity")
+        ));
+        assert_eq!(
+            process
+                .program_snapshot()
+                .expect("active snapshot")
+                .functions(),
+            accepted_snapshot.functions()
+        );
+        assert_eq!(process.artifacts(), accepted_artifacts);
     }
 
     #[test]
@@ -2316,14 +2428,11 @@ mod tests {
             .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
             .expect("write overload bundle");
         assert_eq!(
-            bundle
-                .object_paths_by_function
-                .keys()
-                .filter(|key| key.starts_with("draw"))
-                .count(),
-            2,
+            bundle.object_paths_by_function_id.len(),
+            process.artifacts().len(),
             "both draw overload objects must remain in the bundle"
         );
+        assert!(!bundle.object_paths_by_function.contains_key("draw"));
 
         let _ = fs::remove_dir_all(&bundle_dir);
     }
@@ -2501,6 +2610,84 @@ mod tests {
             run_linked_i32_noarg_fixture(&aot, "main", "snapshot_parity", &link_config)
         {
             assert_eq!(exit_code, 7);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn symbol_identity_multifile_jit_aot_is_root_relative_stable_and_executable() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let main = include_str!("../../../../tests/symbol_identity_main.stasis");
+        let helper = include_str!("../../../../tests/symbol_identity_helper.stasis");
+
+        let mut jit = JitProcess::new();
+        jit.set_project_root("C:/workspace/game")
+            .expect("set JIT project root");
+        jit.upsert_file("C:/workspace/game/src/main.stasis", main);
+        jit.upsert_file("C:/workspace/game/src/helper.stasis", helper);
+        jit.compile().expect("compile rooted JIT fixture");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(11));
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("src/helper.stasis", helper);
+        aot.upsert_file("src/main.stasis", main);
+        aot.compile().expect("compile relative AOT fixture");
+        let jit_ids = jit
+            .program_snapshot()
+            .expect("JIT snapshot")
+            .functions()
+            .iter()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    function.id,
+                    function.symbol_id.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let aot_ids = aot
+            .program_snapshot()
+            .expect("AOT snapshot")
+            .functions()
+            .iter()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    function.id,
+                    function.symbol_id.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(jit_ids, aot_ids);
+
+        let before_edit = jit_ids;
+        jit.upsert_file(
+            "C:/workspace/game/src/helper.stasis",
+            "function helper(): i32 { return 8; }\n",
+        );
+        jit.compile().expect("compile helper body edit");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(13));
+        let after_edit = jit
+            .program_snapshot()
+            .expect("edited JIT snapshot")
+            .functions()
+            .iter()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    function.id,
+                    function.symbol_id.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(before_edit, after_edit);
+
+        if let Some(exit_code) =
+            run_linked_i32_noarg_fixture(&aot, "main", "symbol_identity", &link_config)
+        {
+            assert_eq!(exit_code, 11);
         }
     }
 

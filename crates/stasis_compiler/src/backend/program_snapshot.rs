@@ -19,11 +19,13 @@ use crate::frontend::{
     lexer::{lex, TokenKind},
     parser::parse_string_literal_text,
 };
+use crate::identity::SymbolId;
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramArtifactMapping {
     pub function_id: FunctionId,
+    pub symbol_id: SymbolId,
     pub symbol: String,
     pub target_path: Option<String>,
     pub code_pointer: Option<u64>,
@@ -36,6 +38,7 @@ pub struct ProgramArtifactMapping {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramFunction {
     pub id: FunctionId,
+    pub symbol_id: SymbolId,
     pub name: String,
     pub name_hash: u64,
     pub file_id: u32,
@@ -54,6 +57,7 @@ impl From<&FunctionMeta> for ProgramFunction {
     fn from(function: &FunctionMeta) -> Self {
         Self {
             id: function.id,
+            symbol_id: function.symbol_id.clone(),
             name: function.name.clone(),
             name_hash: function.name_hash,
             file_id: function.file_id,
@@ -154,6 +158,14 @@ impl ProgramSnapshot {
     pub fn functions(&self) -> &[ProgramFunction] {
         &self.functions
     }
+    pub fn function_by_id(&self, id: FunctionId) -> Option<&ProgramFunction> {
+        self.functions.iter().find(|function| function.id == id)
+    }
+    pub fn function_by_symbol_id(&self, symbol_id: &SymbolId) -> Option<&ProgramFunction> {
+        self.functions
+            .iter()
+            .find(|function| &function.symbol_id == symbol_id)
+    }
     pub fn accepted_diagnostics(&self) -> &[crate::SourceDiagnostic] {
         &self.accepted_diagnostics
     }
@@ -201,11 +213,21 @@ impl ProgramSnapshot {
     pub(crate) fn set_artifact_mappings(
         &mut self,
         mappings: impl IntoIterator<Item = ProgramArtifactMapping>,
-    ) {
-        self.artifact_mappings = mappings
-            .into_iter()
-            .map(|mapping| (mapping.function_id, mapping))
-            .collect();
+    ) -> Result<(), String> {
+        let mut validated = BTreeMap::new();
+        for mapping in mappings {
+            if mapping.symbol_id.fn_id() != mapping.function_id {
+                return Err(format!(
+                    "artifact identity invariant failed: '{}' derives {:08x}, mapping carries {:08x}",
+                    mapping.symbol_id,
+                    mapping.symbol_id.fn_id(),
+                    mapping.function_id
+                ));
+            }
+            validated.insert(mapping.function_id, mapping);
+        }
+        self.artifact_mappings = validated;
+        Ok(())
     }
 
     pub(crate) fn set_artifact_paths(&mut self, paths: &BTreeMap<FunctionId, String>) {
@@ -248,7 +270,24 @@ fn collect_program_literals(files: &[SourceFile]) -> Result<BTreeMap<i32, String
 pub fn canonical_layout_digest_for_files(
     files: impl IntoIterator<Item = (String, String)>,
 ) -> Result<[u8; 32], String> {
+    canonical_layout_digest_with_root(None, files)
+}
+
+pub fn canonical_layout_digest_for_project(
+    project_root: impl Into<String>,
+    files: impl IntoIterator<Item = (String, String)>,
+) -> Result<[u8; 32], String> {
+    canonical_layout_digest_with_root(Some(project_root.into()), files)
+}
+
+fn canonical_layout_digest_with_root(
+    project_root: Option<String>,
+    files: impl IntoIterator<Item = (String, String)>,
+) -> Result<[u8; 32], String> {
     let mut compiler = crate::compiler::Compiler::new();
+    if let Some(project_root) = project_root {
+        compiler.set_project_root(project_root)?;
+    }
     for (path, source) in files {
         compiler.upsert_file(path, source);
     }
@@ -351,8 +390,9 @@ mod tests {
             jit_snapshot.global_type_ids(),
             aot_snapshot.global_type_ids()
         );
-        assert!(jit_snapshot.artifact_mappings().contains_key(&0));
-        assert!(aot_snapshot.artifact_mappings().contains_key(&0));
+        let main_id = jit_snapshot.functions()[0].id;
+        assert!(jit_snapshot.artifact_mappings().contains_key(&main_id));
+        assert!(aot_snapshot.artifact_mappings().contains_key(&main_id));
     }
 
     #[test]
@@ -581,6 +621,29 @@ mod tests {
         }
         assert_eq!(objects.len(), after.artifact_mappings().len());
         let _ = fs::remove_dir_all(output);
+    }
+
+    #[test]
+    fn artifact_mapping_rejects_symbol_id_mismatch_without_partial_publication() {
+        let mut jit = JitProcess::new();
+        jit.upsert_file("main.stasis", SOURCE);
+        jit.compile().expect("compile JIT fixture");
+        let mut snapshot = jit.program_snapshot().expect("snapshot").clone();
+        let accepted = snapshot.artifact_mappings().clone();
+        let mut mismatched = accepted.values().next().expect("main mapping").clone();
+        mismatched.symbol_id = SymbolId::function(
+            &crate::identity::CanonicalSourcePath::project_relative("other.stasis")
+                .expect("canonical fixture path"),
+            "main",
+            "()",
+        );
+
+        let error = snapshot
+            .set_artifact_mappings([mismatched])
+            .expect_err("mismatched identity must fail");
+
+        assert!(error.contains("artifact identity invariant failed"));
+        assert_eq!(snapshot.artifact_mappings(), &accepted);
     }
 
     #[test]

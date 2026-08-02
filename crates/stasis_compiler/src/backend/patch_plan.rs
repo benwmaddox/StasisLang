@@ -2,37 +2,26 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::backend::reachability::compute_reachable_function_ids;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
+use crate::identity::SymbolId;
 
 const LIFECYCLE_ROOTS: [&str; 4] = ["main", "tick", "render", "on_code_swap"];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FunctionKey {
-    pub source_path: String,
+    pub symbol_id: SymbolId,
     pub name: String,
-    pub signature_hash: u64,
 }
 
 impl FunctionKey {
-    pub fn new(source_path: &str, name: impl Into<String>, signature_hash: u64) -> Self {
-        let mut source_path = source_path.replace('\\', "/");
-        if let Some(stripped) = source_path.strip_prefix("//?/") {
-            source_path = stripped.to_string();
-        }
-        if cfg!(windows) {
-            source_path.make_ascii_lowercase();
-        }
+    pub fn from_function(function: &FunctionMeta) -> Self {
         Self {
-            source_path,
-            name: name.into(),
-            signature_hash,
+            symbol_id: function.symbol_id.clone(),
+            name: function.name.clone(),
         }
     }
 
     pub fn display_name(&self) -> String {
-        format!(
-            "{}::{}#{:016x}",
-            self.source_path, self.name, self.signature_hash
-        )
+        self.symbol_id.to_string()
     }
 }
 
@@ -353,16 +342,13 @@ impl CurrentGraph {
     ) -> Result<Self, String> {
         let mut key_by_id = BTreeMap::new();
         for function in functions {
-            let file = files.get(function.file_id as usize).ok_or_else(|| {
+            files.get(function.file_id as usize).ok_or_else(|| {
                 format!(
                     "function '{}' references missing source file",
                     function.name
                 )
             })?;
-            key_by_id.insert(
-                function.id,
-                FunctionKey::new(&file.path, function.name.clone(), function.signature_hash),
-            );
+            key_by_id.insert(function.id, FunctionKey::from_function(function));
         }
         let reachable_ids = compute_reachable_function_ids(functions, required_roots);
         let reachable: BTreeSet<FunctionKey> = reachable_ids
@@ -506,6 +492,16 @@ mod tests {
         compiler
     }
 
+    fn test_key(name: impl Into<String>, discriminator: u64) -> FunctionKey {
+        let name = name.into();
+        let path = crate::identity::CanonicalSourcePath::project_relative("scale.stasis")
+            .expect("canonical fixture path");
+        FunctionKey {
+            symbol_id: SymbolId::function(&path, &name, &format!("test-{discriminator:016x}")),
+            name,
+        }
+    }
+
     fn key_by_name(plan: &[FunctionKey]) -> Vec<String> {
         let mut names: Vec<String> = plan.iter().map(|key| key.name.clone()).collect();
         names.sort();
@@ -628,7 +624,7 @@ mod tests {
     #[test]
     fn iterative_scc_planning_handles_five_thousand_functions() {
         let keys: Vec<FunctionKey> = (0..5000)
-            .map(|index| FunctionKey::new("scale.stasis", format!("fn_{index}"), index as u64))
+            .map(|index| test_key(format!("fn_{index}"), index as u64))
             .collect();
         let functions: BTreeMap<FunctionKey, CurrentFunction> = keys
             .iter()
@@ -657,9 +653,9 @@ mod tests {
     ) -> (CurrentGraph, Vec<FunctionKey>) {
         let function_count = dependencies.len();
         let mut keys: Vec<FunctionKey> = (0..function_count)
-            .map(|index| FunctionKey::new("scale.stasis", format!("fn_{index}"), index as u64))
+            .map(|index| test_key(format!("fn_{index}"), index as u64))
             .collect();
-        keys.push(FunctionKey::new("scale.stasis", "main", u64::MAX));
+        keys.push(test_key("main", u64::MAX));
         let main_index = function_count;
         let mut all_dependencies = dependencies;
         all_dependencies.push(main_dependencies);
@@ -951,7 +947,7 @@ mod tests {
         assert!(plan
             .re_jit
             .iter()
-            .any(|key| key.source_path == "math.stasis"));
+            .any(|key| key.symbol_id.canonical().contains("|math.stasis|")));
     }
 
     #[test]

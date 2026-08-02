@@ -1136,7 +1136,9 @@ name = "stasis_android_bridge"
 version = "0.1.0"
 dependencies = [
  "atomic-write-file",
+ "serde",
  "serde_json",
+ "sha2",
  "stasis_assets",
  "stasis_compiler",
  "stasis_dynload",

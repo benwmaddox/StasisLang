@@ -7028,8 +7028,10 @@ public final class MainActivity extends Activity {
         } else {
             rustItem = rustSourceItem(target.file, semanticKind, semanticName, target.signature);
         }
+        target.canonicalSymbolId = rustItem.optString("symbol_id", "");
         JSONObject result = runRustSemanticEdit(operation, semanticKind, semanticName,
                 target.file, rustItem.optString("owner"), rustItem.optString("signature"),
+                rustItem.optString("symbol_id"),
                 rustItem.optString("source_hash"),
                 newSource, !session.deferBatchCompile);
         session.invalidateProject();
@@ -7057,9 +7059,13 @@ public final class MainActivity extends Activity {
         validateAiReplacementSource(editKind, name, newSource);
         JSONObject rustItem = existing == null ? null : rustSourceItem(file, expectedKind, name,
                 existing == null ? "" : existing.signature);
+        if (existing != null && rustItem != null) {
+            existing.canonicalSymbolId = rustItem.optString("symbol_id", "");
+        }
         JSONObject result = runRustSemanticEdit(existing == null ? "add" : "update",
                 expectedKind, name, file, rustItem == null ? "" : rustItem.optString("owner"),
                 rustItem == null ? "" : rustItem.optString("signature"),
+                rustItem == null ? "" : rustItem.optString("symbol_id"),
                 rustItem == null ? "" : rustItem.optString("source_hash"),
                 newSource, !session.deferBatchCompile);
         session.invalidateProject();
@@ -7103,17 +7109,19 @@ public final class MainActivity extends Activity {
     }
 
     private JSONObject runRustSemanticEdit(String operation, String kind, String name, String file,
-                                             String owner, String signature, String expectedSourceHash,
+                                             String owner, String signature, String symbolId,
+                                             String expectedSourceHash,
                                              String newSource, boolean validate) throws Exception {
         JSONObject target = new JSONObject().put("kind", kind).put("name", name).put("file", file);
         if (owner != null && !owner.isEmpty()) target.put("owner", owner);
         if (signature != null && !signature.isEmpty()) target.put("signature", signature);
+        if (symbolId != null && !symbolId.isEmpty()) target.put("symbol_id", symbolId);
         JSONObject edit = new JSONObject().put("operation", operation).put("target", target);
         if (newSource != null) edit.put("new_source", newSource);
         if (expectedSourceHash != null && !expectedSourceHash.isEmpty()) {
             edit.put("expected_source_hash", expectedSourceHash);
         }
-        JSONObject request = new JSONObject().put("schema_version", 1)
+        JSONObject request = new JSONObject().put("schema_version", 2)
                 .put("edits", new JSONArray().put(edit));
         JSONObject result = new JSONObject(nativeSemanticEdit(
                 projectRootPath(), request.toString(), false, validate, false));
@@ -7415,6 +7423,9 @@ public final class MainActivity extends Activity {
                 .put("owner", symbol.owner)
                 .put("file", symbol.file)
                 .put("signature", symbol.signature);
+        if (!symbol.canonicalSymbolId.isEmpty()) {
+            json.put("symbol_id", symbol.canonicalSymbolId);
+        }
         if ("global".equals(symbol.kind)) {
             json.put("backing_kind", "struct");
             json.put("backing_struct_name", symbol.name);
@@ -9947,6 +9958,43 @@ public final class MainActivity extends Activity {
         return ProjectSnapshot.from(files);
     }
 
+    private ProjectSnapshot enrichCanonicalSymbolIds(ProjectSnapshot project, String sourceRoot) {
+        try {
+            JSONArray items = new JSONObject(nativeSourceItems(sourceRoot))
+                    .optJSONArray("items");
+            if (items == null) return project;
+            for (SymbolSection section : project.sections) {
+                for (SymbolGroup group : section.groups) {
+                    for (SymbolEntry symbol : group.symbols) {
+                        for (int index = 0; index < items.length(); index += 1) {
+                            JSONObject item = items.getJSONObject(index);
+                            JSONArray spans = item.optJSONArray("source_spans");
+                            int[] spanStarts = new int[spans == null ? 0 : spans.length()];
+                            int[] spanEnds = new int[spanStarts.length];
+                            for (int spanIndex = 0; spanIndex < spanStarts.length; spanIndex += 1) {
+                                JSONObject span = spans.getJSONObject(spanIndex);
+                                spanStarts[spanIndex] = span.optInt("start", -1);
+                                spanEnds[spanIndex] = span.optInt("end", -1);
+                            }
+                            if (CanonicalSymbolIdentity.matchesRustItem(
+                                    symbol.kind, symbol.file, symbol.name, symbol.signature,
+                                    symbol.start, symbol.end,
+                                    item.optString("kind"), item.optString("file"),
+                                    item.optString("name"), item.optString("signature"),
+                                    spanStarts, spanEnds)) {
+                                symbol.canonicalSymbolId = item.optString("symbol_id", "");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Rust semantic lookup remains authoritative when a symbol is edited.
+        }
+        return project;
+    }
+
     private WorkshopTemplateCatalog.Template activeWorkshopTemplate() throws IOException {
         String templateId = activeProject == null
                 ? WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID : activeProject.templateId;
@@ -9996,7 +10044,7 @@ public final class MainActivity extends Activity {
         File baselineRoot = activeProjectBaselineRoot();
         List<SourceFile> files = new ArrayList<>();
         collectBaselineStasisFiles(baselineRoot, baselineRoot, files);
-        return ProjectSnapshot.from(files);
+        return enrichCanonicalSymbolIds(ProjectSnapshot.from(files), baselineRoot.getAbsolutePath());
     }
 
     private void collectBaselineStasisFiles(File baselineRoot, File file, List<SourceFile> files) throws IOException {
@@ -10546,7 +10594,7 @@ public final class MainActivity extends Activity {
             // One unreadable project file should not crash the workshop surface.
         }
 
-        return ProjectSnapshot.from(files);
+        return enrichCanonicalSymbolIds(ProjectSnapshot.from(files), projectRootPath());
     }
 
     private AiApiResponse callCodexResponses(String requestJson) throws Exception {
@@ -11362,10 +11410,9 @@ public final class MainActivity extends Activity {
     }
 
     private static boolean sameSymbolIdentity(SymbolEntry left, SymbolEntry right) {
-        return left.kind.equals(right.kind)
-                && left.file.equals(right.file)
-                && left.owner.equals(right.owner)
-                && left.name.equals(right.name);
+        return CanonicalSymbolIdentity.sameIdentity(
+                left.canonicalSymbolId, left.kind, left.file, left.owner, left.name,
+                right.canonicalSymbolId, right.kind, right.file, right.owner, right.name);
     }
     private static List<String> parseStructNames(String source) {
         List<String> names = new ArrayList<>();
@@ -11866,6 +11913,7 @@ public final class MainActivity extends Activity {
         final String file;
         String source;
         final String backingStructSource;
+        String canonicalSymbolId;
         final int start;
         int end;
 
@@ -11884,6 +11932,7 @@ public final class MainActivity extends Activity {
             this.start = start;
             this.end = end;
             this.backingStructSource = backingStructSource;
+            this.canonicalSymbolId = "";
         }
 
         String displayName() {
@@ -11894,7 +11943,8 @@ public final class MainActivity extends Activity {
         }
 
         String identityKey() {
-            return kind + "|" + file + "|" + owner + "|" + name;
+            return CanonicalSymbolIdentity.identityKey(
+                    canonicalSymbolId, kind, file, owner, name);
         }
     }
 }

@@ -1749,7 +1749,22 @@ fn prepare_edit(
     require_semantic_changes(&plan)?;
     check_preparation_canceled(canceled)?;
     let (candidate, package) = compile_candidate(config, &candidate_files, candidate)?;
-    let changed_functions = candidate.symbol_code_ptrs().into_keys().collect();
+    let snapshot = candidate
+        .program_snapshot()
+        .ok_or_else(|| "live edit candidate has no ProgramSnapshot".to_string())?;
+    let metadata = candidate
+        .generation_metadata()
+        .ok_or_else(|| "live edit candidate has no generation metadata".to_string())?;
+    let changed_functions = metadata
+        .emitted_function_ids
+        .iter()
+        .map(|function_id| {
+            snapshot
+                .function_by_id(*function_id)
+                .map(|function| function.symbol_id.to_string())
+                .ok_or_else(|| format!("emitted FnId {function_id:08x} is missing from snapshot"))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let abi_rejection = (plan.reload.expected_reload == ExpectedReload::ResetRequired
         && plan
             .reload
@@ -1902,6 +1917,7 @@ fn compile_candidate(
     mut candidate: JitProcess,
 ) -> Result<(JitProcess, JitEnginePackage), String> {
     let runtime_files = workshop_reachable_files(files, &config.entry)?;
+    candidate.set_project_root(config.project_root.to_string_lossy())?;
     candidate.set_required_emit_roots(&[
         "main".to_string(),
         "tick".to_string(),
@@ -2230,6 +2246,7 @@ fn live_command_completions() -> Vec<CompletionItem> {
 
 fn selector(target: &LiveSymbolTarget) -> Result<WorkshopSymbolSelector, String> {
     Ok(WorkshopSymbolSelector {
+        symbol_id: None,
         name: target.name.clone(),
         kind: target.kind.as_deref().map(parse_kind).transpose()?,
         file: target.file.as_deref().map(normalize_file),
@@ -2625,6 +2642,8 @@ mod tests {
         let files =
             load_workshop_edit_workspace(&config.project_root, &config.entry).expect("files");
         let mut jit = JitProcess::new();
+        jit.set_project_root(config.project_root.to_string_lossy())
+            .expect("set project root");
         jit.set_required_emit_roots(&[
             "main".into(),
             "tick".into(),
@@ -3441,9 +3460,12 @@ mod tests {
         assert_eq!(data["swap"]["layout_changed"], true);
         assert_eq!(data["swap"]["requires_explicit_apply"], true);
         assert_eq!(data["swap"]["migration_scope"]["kind"], "whole_state");
-        assert!(data["swap"]["changed_functions"]
+        let changed_functions = data["swap"]["changed_functions"]
             .as_array()
-            .is_some_and(|functions| !functions.is_empty()));
+            .expect("canonical changed function identities");
+        assert!(changed_functions.iter().all(|identity| identity
+            .as_str()
+            .is_some_and(|identity| identity.starts_with("v1|function|"))));
         assert!(data["swap"]["migration_steps"]
             .as_array()
             .expect("migration steps")

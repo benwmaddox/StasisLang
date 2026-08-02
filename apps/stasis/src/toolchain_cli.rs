@@ -3160,6 +3160,7 @@ fn write_ios_object_config(aot_root: &Path, output: &Path) -> Result<(), String>
 impl SymbolSelectorArgs {
     fn selector(&self) -> WorkshopSymbolSelector {
         WorkshopSymbolSelector {
+            symbol_id: None,
             name: self.name.clone(),
             kind: self.kind.map(Into::into),
             file: self.file.clone(),
@@ -3172,6 +3173,7 @@ impl SymbolSelectorArgs {
 impl RequiredSymbolTargetArgs {
     fn selector(&self) -> WorkshopSymbolSelector {
         WorkshopSymbolSelector {
+            symbol_id: None,
             name: self.name.clone(),
             kind: Some(self.kind.into()),
             file: Some(self.file.clone()),

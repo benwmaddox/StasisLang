@@ -257,7 +257,7 @@ pub(crate) fn build_function_data_flow_summaries(
             .filter(|function| included_function_ids.contains(&function.id))
             .all(|function| {
                 let file = &files[function.file_id as usize];
-                previous_by_id[function.id as usize].is_some_and(|summary| {
+                previous_by_id[function.storage_index as usize].is_some_and(|summary| {
                     summary.internal_signature_hash == function.signature_hash
                         && summary.file == file.path
                         && summary.function == function.name
@@ -266,7 +266,7 @@ pub(crate) fn build_function_data_flow_summaries(
                         && (!changed_function_ids.contains(&function.id)
                             || summary.internal_syntax_fingerprint
                                 == effect_syntax_fingerprint(
-                                    &statements_by_id[function.id as usize],
+                                    &statements_by_id[function.storage_index as usize],
                                 ))
                 })
             })
@@ -310,7 +310,10 @@ pub(crate) fn build_function_data_flow_summaries(
             .iter()
             .filter(|function_id| included_function_ids.contains(function_id))
             .all(|function| {
-                let function = &functions[*function as usize];
+                let Some(function) = functions.iter().find(|candidate| candidate.id == *function)
+                else {
+                    return false;
+                };
                 let file = &files[function.file_id as usize];
                 let signature_hash = format!("{:016x}", function.signature_hash);
                 previous_by_key
@@ -321,9 +324,12 @@ pub(crate) fn build_function_data_flow_summaries(
                     ))
                     .is_some_and(|summary| {
                         summary.direct
-                            == direct_by_id[function.id as usize].to_effects(&function.param_names)
+                            == direct_by_id[function.storage_index as usize]
+                                .to_effects(&function.param_names)
                             && summary.internal_direct_fingerprint
-                                == effect_fingerprint(&direct_by_id[function.id as usize])
+                                == effect_fingerprint(
+                                    &direct_by_id[function.storage_index as usize],
+                                )
                     })
             });
     if !can_reuse_aggregates && reuse_candidate {
@@ -331,7 +337,7 @@ pub(crate) fn build_function_data_flow_summaries(
             if included_function_ids.contains(&function.id)
                 && !changed_function_ids.contains(&function.id)
             {
-                direct_by_id[function.id as usize] =
+                direct_by_id[function.storage_index as usize] =
                     analyze_function_effects(function, statements_by_id, &context)?;
             }
         }
@@ -370,7 +376,7 @@ pub(crate) fn build_function_data_flow_summaries(
         let file = &files[function.file_id as usize];
         let signature_hash = format!("{:016x}", function.signature_hash);
         let aggregate = if let Some(aggregate_by_id) = &aggregate_by_id {
-            aggregate_by_id[function.id as usize].to_effects(&function.param_names)
+            aggregate_by_id[function.storage_index as usize].to_effects(&function.param_names)
         } else {
             previous_by_key[&(
                 file.path.as_str(),
@@ -389,7 +395,7 @@ pub(crate) fn build_function_data_flow_summaries(
                 .direct
                 .clone()
         } else {
-            direct_by_id[function.id as usize].to_effects(&function.param_names)
+            direct_by_id[function.storage_index as usize].to_effects(&function.param_names)
         };
         let internal_direct_fingerprint =
             if can_reuse_aggregates && !changed_function_ids.contains(&function.id) {
@@ -400,10 +406,10 @@ pub(crate) fn build_function_data_flow_summaries(
                 )]
                     .internal_direct_fingerprint
             } else {
-                effect_fingerprint(&direct_by_id[function.id as usize])
+                effect_fingerprint(&direct_by_id[function.storage_index as usize])
             };
         let internal_syntax_fingerprint =
-            effect_syntax_fingerprint(&statements_by_id[function.id as usize]);
+            effect_syntax_fingerprint(&statements_by_id[function.storage_index as usize]);
         out.push(FunctionDataFlowSummary {
             schema_version: FUNCTION_DATA_FLOW_SCHEMA_VERSION,
             function: function.name.clone(),
@@ -415,7 +421,8 @@ pub(crate) fn build_function_data_flow_summaries(
             aggregate,
             internal_direct_fingerprint,
             internal_syntax_fingerprint,
-            internal_function_id: function.id,
+            // Explicitly internal dense storage position; the public compiler identity is FnId.
+            internal_function_id: function.storage_index,
             internal_signature_hash: function.signature_hash,
         });
     }
@@ -434,7 +441,7 @@ fn analyze_function_effects(
     context: &AnalysisContext<'_>,
 ) -> Result<EffectSets, String> {
     let statements = statements_by_id
-        .get(function.id as usize)
+        .get(function.storage_index as usize)
         .ok_or_else(|| format!("function '{}' has no statement artifact", function.name))?;
     let mut effects = EffectSets::default();
     let mut locals = function.param_names.iter().cloned().collect();
@@ -444,7 +451,9 @@ fn analyze_function_effects(
         .cloned()
         .zip(function.params.iter().copied())
         .collect();
-    let view_parameters = context.view_parameters_by_function.get(&function.id);
+    let view_parameters = context
+        .view_parameters_by_function
+        .get(&function.storage_index);
     let aliases = function
         .param_names
         .iter()
@@ -454,7 +463,7 @@ fn analyze_function_effects(
         .collect();
     analyze_statements(
         statements,
-        function.id,
+        function.storage_index,
         &function.name,
         context,
         &mut locals,
@@ -706,8 +715,8 @@ fn build_context<'a>(
                 capacities.insert(index, capacity);
             }
         }
-        view_parameters_by_function.insert(function.id, positions);
-        fixed_parameter_capacities.insert(function.id, capacities);
+        view_parameters_by_function.insert(function.storage_index, positions);
+        fixed_parameter_capacities.insert(function.storage_index, capacities);
     }
     let field_types = structs
         .iter()
@@ -724,7 +733,18 @@ fn build_context<'a>(
             Some((owner, fields))
         })
         .collect();
-    let call_signatures = collect_supported_call_signatures(functions, &resolved_externs, types);
+    let mut call_signatures =
+        collect_supported_call_signatures(functions, &resolved_externs, types);
+    for signatures in call_signatures.values_mut() {
+        for signature in signatures {
+            if let Some(function_id) = signature.function_id {
+                signature.function_id = functions
+                    .iter()
+                    .find(|function| function.id == function_id)
+                    .map(|function| function.storage_index);
+            }
+        }
+    }
     let mut fingerprint_hasher = DefaultHasher::new();
     format!("{structs:?}|{global_types:?}|{constants:?}|{resolved_externs:?}")
         .hash(&mut fingerprint_hasher);
@@ -1914,6 +1934,12 @@ mod tests {
             .join("../../samples/function_data_flow/src/main.stasis");
         let source = std::fs::read_to_string(&sample).expect("read data-flow sample");
         let mut jit = JitProcess::new();
+        jit.set_project_root(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .to_string_lossy(),
+        )
+        .expect("set repository root");
         jit.set_required_emit_roots(&["main".to_string()]);
         jit.upsert_file(sample.to_string_lossy(), source);
         jit.compile().expect("compile data-flow sample");
@@ -1937,6 +1963,12 @@ mod tests {
             .join("../../samples/bounded_performance/src/main.stasis");
         let source = std::fs::read_to_string(&sample).expect("read bounded-cost sample");
         let mut jit = JitProcess::new();
+        jit.set_project_root(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .to_string_lossy(),
+        )
+        .expect("set repository root");
         jit.set_required_emit_roots(&["main".to_string(), "tick".to_string()]);
         jit.upsert_file(sample.to_string_lossy(), source);
         jit.compile().expect("compile bounded-cost sample");

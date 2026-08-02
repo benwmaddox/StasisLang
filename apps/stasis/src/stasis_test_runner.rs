@@ -108,13 +108,16 @@ pub fn run_jit_tests_in_directory_with_session(
         summary.tests_discovered += tests.len();
 
         let source_hash = hash_text(&source);
-        let entry = session
-            .by_path
-            .entry(file_path.clone())
-            .or_insert_with(|| CachedTestProcess {
+        let entry = session.by_path.entry(file_path.clone()).or_insert_with(|| {
+            let mut process = JitProcess::new();
+            process
+                .set_project_root(root.to_string_lossy())
+                .expect("test discovery root is an absolute project path");
+            CachedTestProcess {
                 source_hash: 0,
-                process: JitProcess::new(),
-            });
+                process,
+            }
+        });
         let dependency_changed = entry
             .process
             .refresh_imported_sources_from_disk(&file_path.to_string_lossy());
