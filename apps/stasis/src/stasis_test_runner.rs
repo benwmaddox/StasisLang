@@ -69,8 +69,10 @@ pub fn run_jit_tests_in_directory_with_project_root_and_session(
     project_root: &Path,
     session: &mut StasisTestRunSession,
 ) -> Result<StasisTestRunSummary, String> {
-    let root = canonical_test_path("test directory", root)?;
-    let project_root = canonical_test_path("test project root", project_root)?;
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("failed to read current directory: {error}"))?;
+    let root = canonical_test_path("test directory", root, &current_dir)?;
+    let project_root = canonical_test_path("test project root", project_root, &current_dir)?;
     if !root.starts_with(&project_root) {
         return Err(format!(
             "test directory {} is outside project root {}",
@@ -211,13 +213,11 @@ pub fn run_jit_tests_in_directory_with_project_root_and_session(
     Ok(summary)
 }
 
-fn canonical_test_path(label: &str, path: &Path) -> Result<PathBuf, String> {
+fn canonical_test_path(label: &str, path: &Path, current_dir: &Path) -> Result<PathBuf, String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
-            .map_err(|error| format!("failed to read current directory: {error}"))?
-            .join(path)
+        current_dir.join(path)
     };
     absolute
         .canonicalize()
