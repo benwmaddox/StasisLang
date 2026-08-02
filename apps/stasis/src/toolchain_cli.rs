@@ -3634,7 +3634,7 @@ fn revert_symbol_plan(
     let source = read_workspace_input(workspace, "semantic edit receipt", receipt)?;
     let plan = serde_json::from_str::<WorkshopSemanticEditPlan>(&source)
         .map_err(|error| format!("invalid semantic edit receipt: {error}"))?;
-    if plan.schema_version != 1 {
+    if !matches!(plan.schema_version, 1 | 2) {
         return Err(format!(
             "unsupported semantic edit receipt schema version {}",
             plan.schema_version

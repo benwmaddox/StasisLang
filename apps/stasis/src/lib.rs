@@ -2371,8 +2371,9 @@ fn format_live_main_error(error: String) -> String {
     }
 }
 
-pub fn run_with_real_backend(config: RunnerConfig) -> RunnerSummary {
+pub fn run_with_real_backend(mut config: RunnerConfig) -> RunnerSummary {
     let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+    normalize_real_backend_config_paths(&mut config);
     let explicit = config
         .watch_directory
         .as_deref()
@@ -2395,6 +2396,15 @@ pub fn run_with_real_backend(config: RunnerConfig) -> RunnerSummary {
     )
     .expect("runner compiler project root must be absolute");
     run_with_backend_and_prepared_swaps(config, backend, Some(prepared_rx))
+}
+
+fn normalize_real_backend_config_paths(config: &mut RunnerConfig) {
+    if let Some(path) = config.inject_file_change.as_mut() {
+        *path = normalize_watch_path_for_compare(path);
+    }
+    if let Some(path) = config.watch_directory.as_mut() {
+        *path = normalize_watch_path_for_compare(path);
+    }
 }
 
 fn is_stasis_source_file(path: &Path) -> bool {
@@ -7074,6 +7084,36 @@ mod tests {
 
         let resolved = resolve_initial_source_file(&config).expect("resolved source file");
         assert_eq!(resolved, PathBuf::from("samples/explicit.stasis"));
+    }
+
+    #[test]
+    fn real_backend_normalizes_source_and_root_spelling_together() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_runner_root_{stamp}"));
+        let nested = temp_root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested directory");
+        let source = temp_root.join("engine.stasis");
+        fs::write(&source, "function main(): i32 { return 0; }\n").expect("write source");
+        let mut config = RunnerConfig {
+            inject_file_change: Some(nested.join("..").join("engine.stasis")),
+            watch_directory: Some(nested.join("..")),
+            ..RunnerConfig::default()
+        };
+
+        normalize_real_backend_config_paths(&mut config);
+
+        assert_eq!(
+            config.inject_file_change,
+            Some(source.canonicalize().expect("canonical source"))
+        );
+        assert_eq!(
+            config.watch_directory,
+            Some(temp_root.canonicalize().expect("canonical root"))
+        );
+        fs::remove_dir_all(&temp_root).ok();
     }
 
     #[test]

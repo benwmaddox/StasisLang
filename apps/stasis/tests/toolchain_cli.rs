@@ -1384,7 +1384,7 @@ fn semantic_symbol_cli_supports_inline_crud_and_stale_guards() {
         &fs::read_to_string(project.join(&delete_receipt)).expect("read delete receipt"),
     )
     .expect("parse delete receipt");
-    future_receipt["schema_version"] = Value::from(2);
+    future_receipt["schema_version"] = Value::from(3);
     let future_receipt_path = project.join("future-receipt.json");
     fs::write(
         &future_receipt_path,
@@ -1405,9 +1405,36 @@ fn semantic_symbol_cli_supports_inline_crud_and_stale_guards() {
     assert!(json_stderr(&unsupported)["message"]
         .as_str()
         .unwrap_or_default()
-        .contains("unsupported semantic edit receipt schema version 2"));
+        .contains("unsupported semantic edit receipt schema version 3"));
     assert!(!fs::read_to_string(project.join("src/main.stasis"))
         .expect("source after unsupported receipt")
+        .contains("function helper"));
+
+    let mut legacy_receipt = future_receipt;
+    legacy_receipt["schema_version"] = Value::from(1);
+    fs::write(
+        project.join("legacy-receipt.json"),
+        serde_json::to_string(&legacy_receipt).expect("serialize legacy receipt"),
+    )
+    .expect("write legacy receipt");
+    let legacy_preview = stasis(
+        &[
+            "--json",
+            "symbol",
+            "revert",
+            "--receipt",
+            "legacy-receipt.json",
+            "--dry-run",
+        ],
+        &project,
+    );
+    assert_eq!(legacy_preview.status.code(), Some(0));
+    assert_eq!(
+        json_stdout(&legacy_preview)["result"]["status"],
+        "revert_preview"
+    );
+    assert!(!fs::read_to_string(project.join("src/main.stasis"))
+        .expect("source after legacy preview")
         .contains("function helper"));
 
     let reverted = stasis(

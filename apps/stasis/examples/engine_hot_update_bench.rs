@@ -391,6 +391,7 @@ fn main() -> Result<(), String> {
     );
 
     let mut jit = JitProcess::new();
+    jit.set_project_root(temp_root.to_string_lossy())?;
     let root_path_str = source_path.to_string_lossy().to_string();
     let root_source = fs::read_to_string(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
