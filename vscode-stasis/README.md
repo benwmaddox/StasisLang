@@ -61,7 +61,9 @@ npm run package
 
 `npm run test:e2e` packages the extension, installs that VSIX into a clean VS Code profile, and
 drives formatting, completion, graphical play, pause/step/resume, live values, and framebuffer
-capture. It requires a built `stasis` executable and graphics runtime. Set
+capture. The test decodes the captured PNG and verifies its physical dimensions, clear color, and
+a command-buffer line, so a platform only passes after it produces the expected rendered pixels.
+It requires a built `stasis` executable and graphics runtime. Set
 `STASIS_E2E_EXECUTABLE` and `STASIS_RUNTIME_LIBRARY_PATH` when they are not in their standard
 development locations. Linux runs need a display such as `xvfb-run`; GitHub CI supplies one.
 

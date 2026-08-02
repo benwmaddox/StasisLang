@@ -1,6 +1,7 @@
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { PNG } from "pngjs";
 import * as vscode from "vscode";
 import type { LiveResponse, LiveValue } from "../protocol";
 import type { LiveSessionState } from "../liveSession";
@@ -11,6 +12,63 @@ interface StasisExtensionApi {
   start(): Promise<void>;
   stop(): Promise<void>;
   request(type: string, fields?: Record<string, unknown>): Promise<LiveResponse>;
+}
+
+type Rgba = readonly [number, number, number, number];
+
+function pixelAt(png: PNG, x: number, y: number): Rgba {
+  assert.ok(x >= 0 && x < png.width, `pixel x ${x} is inside the ${png.width}-pixel framebuffer`);
+  assert.ok(y >= 0 && y < png.height, `pixel y ${y} is inside the ${png.height}-pixel framebuffer`);
+  const offset = (y * png.width + x) * 4;
+  return [png.data[offset]!, png.data[offset + 1]!, png.data[offset + 2]!, png.data[offset + 3]!];
+}
+
+function isNear(actual: Rgba, expected: Rgba, tolerance: number): boolean {
+  return actual.every((channel, index) => Math.abs(channel - expected[index]!) <= tolerance);
+}
+
+function assertRenderedFrame(framePath: string): void {
+  const png = PNG.sync.read(fs.readFileSync(framePath));
+  const logicalWidth = 800;
+  const logicalHeight = 600;
+  const scaleX = png.width / logicalWidth;
+  const scaleY = png.height / logicalHeight;
+
+  assert.ok(scaleX >= 1 && scaleY >= 1, `framebuffer is at least ${logicalWidth}x${logicalHeight}`);
+  assert.ok(Math.abs(scaleX - scaleY) < 0.001, "framebuffer preserves the 4:3 logical render size");
+
+  const background: Rgba = [10, 20, 40, 255];
+  for (const [logicalX, logicalY] of [
+    [40, 40],
+    [400, 100],
+    [40, 560],
+    [760, 560],
+  ] as const) {
+    const actual = pixelAt(png, Math.floor(logicalX * scaleX), Math.floor(logicalY * scaleY));
+    assert.ok(
+      isNear(actual, background, 2),
+      `rendered background at (${logicalX}, ${logicalY}) is ${background.join(",")}, received ${actual.join(",")}`,
+    );
+  }
+
+  const line: Rgba = [229, 51, 25, 255];
+  const minX = Math.floor(120 * scaleX);
+  const maxX = Math.ceil(680 * scaleX);
+  const centerY = 300 * scaleY;
+  const minY = Math.max(0, Math.floor(centerY - 2 * scaleY));
+  const maxY = Math.min(png.height - 1, Math.ceil(centerY + 2 * scaleY));
+  let linePixels = 0;
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (isNear(pixelAt(png, x, y), line, 3)) {
+        linePixels += 1;
+      }
+    }
+  }
+  assert.ok(
+    linePixels >= 400 * scaleX,
+    `rendered command-buffer line contains enough expected pixels, found ${linePixels}`,
+  );
 }
 
 async function waitFor(description: string, predicate: () => boolean, timeoutMs = 30_000): Promise<void> {
@@ -171,8 +229,11 @@ export async function run(): Promise<void> {
 
     await api.request("resume");
     await waitFor("resumed live session", () => api.state() === "running");
-    await waitFor("runtime framebuffer capture", () => fs.existsSync(screenshot));
-    assert.ok(fs.statSync(screenshot).size > 100, "the graphical play process produced a PNG framebuffer");
+    await waitFor(
+      "runtime framebuffer capture",
+      () => fs.existsSync(screenshot) && fs.statSync(screenshot).size > 100,
+    );
+    assertRenderedFrame(screenshot);
   } finally {
     await api.stop();
     await waitFor("stopped live session", () => api.state() === "stopped");
