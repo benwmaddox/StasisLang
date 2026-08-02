@@ -16,8 +16,8 @@ pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use events::RunnerEvent;
 pub use live_workspace::LiveRunConfig;
 pub use stasis_test_runner::{
-    run_jit_tests_in_directory, run_jit_tests_in_directory_with_session, StasisTestRunSession,
-    StasisTestRunSummary,
+    run_jit_tests_in_directory, run_jit_tests_in_directory_with_project_root_and_session,
+    run_jit_tests_in_directory_with_session, StasisTestRunSession, StasisTestRunSummary,
 };
 pub use window_config::WindowConfig;
 
@@ -1868,6 +1868,12 @@ fn run_play_in_process_inner(
         .canonicalize()
         .unwrap_or_else(|_| watch_file.to_path_buf());
     let root_path_str = root_path.to_string_lossy().to_string();
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let canonical_repository = repository_root
+        .canonicalize()
+        .unwrap_or_else(|_| repository_root.clone());
+    let project_root =
+        resolve_play_project_root(&root_path, &watch_dir_abs, &canonical_repository)?;
 
     let asset_working_dir = prepare_play_asset_working_dir(&watch_dir_abs)?;
     std::env::set_current_dir(&asset_working_dir).map_err(|error| {
@@ -1947,6 +1953,7 @@ fn run_play_in_process_inner(
     let _ = gfx.init_window(800, 600, &title)?;
 
     let mut jit = JitProcess::new();
+    jit.set_project_root(project_root.to_string_lossy())?;
     let root_source = fs::read_to_string(&root_path)
         .map_err(|error| format!("failed to read {}: {error}", root_path.display()))?;
     jit.upsert_file(root_path_str.clone(), root_source);
@@ -2358,10 +2365,59 @@ fn format_live_main_error(error: String) -> String {
     }
 }
 
-pub fn run_with_real_backend(config: RunnerConfig) -> RunnerSummary {
+pub fn run_with_real_backend(mut config: RunnerConfig) -> RunnerSummary {
     let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
-    let backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(prepared_tx);
+    normalize_real_backend_config_paths(&mut config);
+    let explicit = config
+        .watch_directory
+        .as_deref()
+        .or(config.inject_file_change.as_deref())
+        .unwrap_or_else(|| Path::new("."));
+    let mut project_root = explicit
+        .canonicalize()
+        .unwrap_or_else(|_| explicit.to_path_buf());
+    if project_root.is_file() {
+        project_root.pop();
+    }
+    if let Some(repository_root) = project_root.ancestors().find(|ancestor| {
+        ancestor.join("Cargo.toml").is_file() && ancestor.join("docs/spec.md").is_file()
+    }) {
+        project_root = repository_root.to_path_buf();
+    }
+    let backend = IncrementalCompilerBackend::new_for_project_with_prepared_jit_swaps(
+        project_root,
+        prepared_tx,
+    )
+    .expect("runner compiler project root must be absolute");
     run_with_backend_and_prepared_swaps(config, backend, Some(prepared_rx))
+}
+
+fn resolve_play_project_root(
+    root_path: &Path,
+    watch_dir: &Path,
+    repository_root: &Path,
+) -> Result<PathBuf, String> {
+    if !root_path.starts_with(watch_dir) {
+        return Err(format!(
+            "play entry {} is outside watch directory {}",
+            root_path.display(),
+            watch_dir.display()
+        ));
+    }
+    if root_path.starts_with(repository_root) {
+        Ok(repository_root.to_path_buf())
+    } else {
+        Ok(watch_dir.to_path_buf())
+    }
+}
+
+fn normalize_real_backend_config_paths(config: &mut RunnerConfig) {
+    if let Some(path) = config.inject_file_change.as_mut() {
+        *path = normalize_watch_path_for_compare(path);
+    }
+    if let Some(path) = config.watch_directory.as_mut() {
+        *path = normalize_watch_path_for_compare(path);
+    }
 }
 
 fn is_stasis_source_file(path: &Path) -> bool {
@@ -5226,6 +5282,9 @@ mod tests {
 
         let source_path_text = source_path.to_string_lossy().to_string();
         let mut active = JitProcess::new();
+        active
+            .set_project_root(root.to_string_lossy())
+            .expect("set fixture project root");
         active.upsert_file(source_path_text.clone(), source_v1);
         active.compile().expect("compile v1");
         let active_package = active
@@ -5801,6 +5860,54 @@ mod tests {
             Some(Path::new("override")),
         );
         assert_eq!(resolved, PathBuf::from("override"));
+    }
+
+    #[test]
+    fn standalone_play_root_supports_entry_imports_in_sibling_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = std::env::temp_dir().join(format!("stasis_play_project_{stamp}"));
+        let src = project.join("src");
+        let lib = project.join("lib");
+        fs::create_dir_all(&src).expect("create src");
+        fs::create_dir_all(&lib).expect("create lib");
+        let entry = src.join("main.stasis");
+        fs::write(
+            &entry,
+            "import \"../lib/helper.stasis\";\nfunction main(): i32 { return helper(); }\n",
+        )
+        .expect("write entry");
+        fs::write(
+            lib.join("helper.stasis"),
+            "function helper(): i32 { return 7; }\n",
+        )
+        .expect("write helper");
+        let entry = entry.canonicalize().expect("canonical entry");
+        let watch_dir = project.canonicalize().expect("canonical project");
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical repository");
+
+        let selected =
+            resolve_play_project_root(&entry, &watch_dir, &repository).expect("project root");
+        assert_eq!(selected, watch_dir);
+        let mut jit = JitProcess::new();
+        jit.set_project_root(selected.to_string_lossy())
+            .expect("set project root");
+        jit.upsert_file(
+            entry.to_string_lossy().to_string(),
+            fs::read_to_string(&entry).expect("read entry"),
+        );
+        jit.compile().expect("compile standalone project");
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main").expect("execute main"),
+            7
+        );
+
+        fs::remove_dir_all(&project).ok();
     }
 
     #[test]
@@ -7038,6 +7145,36 @@ mod tests {
 
         let resolved = resolve_initial_source_file(&config).expect("resolved source file");
         assert_eq!(resolved, PathBuf::from("samples/explicit.stasis"));
+    }
+
+    #[test]
+    fn real_backend_normalizes_source_and_root_spelling_together() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_runner_root_{stamp}"));
+        let nested = temp_root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested directory");
+        let source = temp_root.join("engine.stasis");
+        fs::write(&source, "function main(): i32 { return 0; }\n").expect("write source");
+        let mut config = RunnerConfig {
+            inject_file_change: Some(nested.join("..").join("engine.stasis")),
+            watch_directory: Some(nested.join("..")),
+            ..RunnerConfig::default()
+        };
+
+        normalize_real_backend_config_paths(&mut config);
+
+        assert_eq!(
+            config.inject_file_change,
+            Some(source.canonicalize().expect("canonical source"))
+        );
+        assert_eq!(
+            config.watch_directory,
+            Some(temp_root.canonicalize().expect("canonical root"))
+        );
+        fs::remove_dir_all(&temp_root).ok();
     }
 
     #[test]

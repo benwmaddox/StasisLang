@@ -2821,7 +2821,6 @@ mod tests {
         assert!(mobile_runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
         let bindings =
             fs::read_to_string(&summary.bindings_source).expect("read mobile AOT bindings source");
-        assert!(bindings.contains("extern void aot_fn_0(void);"));
         assert!(bindings.contains("int32_t stasis_mobile_main_entry(void)"));
         assert!(bindings.contains("void stasis_aot_bind_runtime_globals(void)"));
         assert!(!bindings.contains("stasis_jit_register_code_ptr"));
@@ -2833,6 +2832,13 @@ mod tests {
                 .expect("read engine manifest"),
         )
         .expect("parse engine manifest");
+        let (main_symbol, main_return_type) =
+            mobile_aot_function_for(&engine_manifest, "main").expect("canonical main mapping");
+        assert_eq!(main_return_type, 1);
+        assert!(bindings.contains(&format!("extern int32_t {main_symbol}(void);")));
+        assert!(bindings.contains(&format!(
+            "stasis_mobile_main_entry(void) {{ return {main_symbol}(); }}"
+        )));
         assert!(engine_manifest["functions"]
             .as_array()
             .expect("functions")
@@ -3151,11 +3157,21 @@ function frame_width(): i32 { return 360; }
         .expect("missing on_code_swap should be accepted for mobile");
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
         let bindings = fs::read_to_string(&summary.bindings_source).expect("read bindings source");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.join("engine_bundle_manifest.json"))
+                .expect("read engine manifest"),
+        )
+        .expect("parse engine manifest");
+        let (main_symbol, main_return_type) =
+            mobile_aot_function_for(&manifest, "main").expect("canonical main mapping");
 
         assert!(header.contains("#define STASIS_AOT_MAIN stasis_mobile_main_entry"));
         assert!(header.contains("#define STASIS_AOT_TICK stasis_mobile_tick_entry"));
         assert!(header.contains("#define STASIS_AOT_RENDER stasis_mobile_render_entry"));
-        assert!(bindings.contains("stasis_mobile_main_entry(void) { return aot_fn_0(); }"));
+        assert_eq!(main_return_type, 1);
+        assert!(bindings.contains(&format!(
+            "stasis_mobile_main_entry(void) {{ return {main_symbol}(); }}"
+        )));
         assert!(!header.contains("STASIS_AOT_ON_CODE_SWAP"));
 
         std::fs::remove_dir_all(&project_dir).ok();

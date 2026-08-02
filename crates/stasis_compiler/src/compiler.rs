@@ -6,9 +6,11 @@ use crate::backend::emit::{parse_simple_statements_from_block, SimpleStmt};
 use crate::data_flow::{build_function_data_flow_summaries, FunctionDataFlowSummary};
 use crate::frontend::indexer::{hash_text, index_file};
 use crate::frontend::types::{TypeId, TypeTable};
+use crate::identity::{overload_discriminator, FnId, SymbolId};
 use crate::ir::hir::{Block, FunctionHIR};
 
-pub type FunctionId = u32;
+pub type FunctionId = FnId;
+pub type FunctionStorageIndex = u32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFile {
@@ -21,6 +23,9 @@ pub struct SourceFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionMeta {
     pub id: FunctionId,
+    pub symbol_id: SymbolId,
+    /// Dense compiler-owned storage position. Never serialize or use as identity.
+    pub storage_index: FunctionStorageIndex,
     pub name: String,
     pub name_hash: u64,
     pub file_id: u32,
@@ -256,6 +261,7 @@ pub struct CompileReport {
 pub struct Compiler {
     files: Vec<SourceFile>,
     functions: Vec<FunctionMeta>,
+    function_index_by_id: HashMap<FunctionId, usize>,
     deps: DependencyGraph,
     types: TypeTable,
     parsed_statements: Vec<Vec<SimpleStmt>>,
@@ -267,6 +273,8 @@ pub struct Compiler {
     #[cfg(test)]
     statement_parse_count: usize,
     last_source_diagnostic: Option<crate::SourceDiagnostic>,
+    project_root: Option<String>,
+    pending_path_error: Option<String>,
 }
 
 impl Compiler {
@@ -276,15 +284,27 @@ impl Compiler {
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
         let path = path.into();
+        let normalized_path =
+            match crate::identity::canonical_source_path(self.project_root.as_deref(), &path) {
+                Ok(path) => path,
+                Err(error) => {
+                    self.pending_path_error = Some(error);
+                    return;
+                }
+            };
         let content = content.into();
         let hash = hash_text(&content);
-        if let Some(existing) = self.files.iter_mut().find(|file| file.path == path) {
+        if let Some(existing) = self
+            .files
+            .iter_mut()
+            .find(|file| file.path == normalized_path)
+        {
             existing.content = content;
             existing.hash = hash;
             return;
         }
         self.files.push(SourceFile {
-            path,
+            path: normalized_path,
             content,
             hash,
             functions: Vec::new(),
@@ -292,7 +312,33 @@ impl Compiler {
     }
 
     pub fn retain_files(&mut self, paths: &BTreeSet<String>) {
-        self.files.retain(|file| paths.contains(&file.path));
+        let normalized: BTreeSet<_> = paths
+            .iter()
+            .filter_map(|path| {
+                crate::identity::canonical_source_path(self.project_root.as_deref(), path).ok()
+            })
+            .collect();
+        self.files.retain(|file| normalized.contains(&file.path));
+    }
+
+    pub fn set_project_root(&mut self, root: impl Into<String>) -> Result<(), String> {
+        let root = root.into().replace('\\', "/");
+        if root.to_ascii_uppercase().starts_with("//?/UNC/") {
+            return Err(format!("UNC project roots are not supported: '{root}'"));
+        }
+        let root = root.strip_prefix("//?/").unwrap_or(&root).to_string();
+        if !root.starts_with('/') && root.as_bytes().get(1) != Some(&b':') {
+            return Err(format!("project root must be absolute: '{root}'"));
+        }
+        if root.starts_with("//") {
+            return Err(format!("UNC project roots are not supported: '{root}'"));
+        }
+        self.project_root = Some(root);
+        Ok(())
+    }
+
+    pub(crate) fn project_root(&self) -> Option<&str> {
+        self.project_root.as_deref()
     }
 
     pub fn compile_with<F>(&mut self, mut emit_function: F) -> CompileResult<CompileReport>
@@ -306,6 +352,9 @@ impl Compiler {
 
     pub fn index_pass(&mut self) -> CompileResult<IndexPassResult> {
         self.last_source_diagnostic = None;
+        if let Some(error) = self.pending_path_error.take() {
+            return Err(CompileError::Frontend(error));
+        }
         let has_tick_budget_annotation = self
             .files
             .iter()
@@ -370,6 +419,7 @@ impl Compiler {
         }
         let previous_hashes = self.capture_previous_hashes();
         self.functions.clear();
+        self.function_index_by_id.clear();
         self.parsed_statements.clear();
         self.parsed_statement_ids.clear();
         self.deps = DependencyGraph;
@@ -395,7 +445,31 @@ impl Compiler {
             };
             self.files[file_id].functions.clear();
             for indexed_function in indexed {
-                let function_id = self.functions.len() as FunctionId;
+                let storage_index = self.functions.len() as FunctionStorageIndex;
+                let source_path = crate::identity::CanonicalSourcePath::project_relative(
+                    &self.files[file_id].path,
+                )
+                .map_err(CompileError::Invariant)?;
+                let symbol_id = SymbolId::function(
+                    &source_path,
+                    &indexed_function.name,
+                    &overload_discriminator(&indexed_function.param_type_names),
+                );
+                let function_id = symbol_id.fn_id();
+                if let Some(existing_index) = self.function_index_by_id.get(&function_id).copied() {
+                    let existing = &self.functions[existing_index];
+                    if existing.symbol_id != symbol_id {
+                        return Err(CompileError::Invariant(format!(
+                            "FnId collision {function_id:08x}: '{}' and '{}'",
+                            existing.symbol_id, symbol_id
+                        )));
+                    }
+                    return Err(CompileError::Frontend(format!(
+                        "duplicate declaration identity '{symbol_id}'"
+                    )));
+                }
+                self.function_index_by_id
+                    .insert(function_id, storage_index as usize);
                 self.files[file_id].functions.push(function_id);
                 let overloads = overload_ids_by_name_hash
                     .entry(indexed_function.name_hash)
@@ -409,9 +483,7 @@ impl Compiler {
                     overloads.push((indexed_function.signature_hash, function_id));
                 }
 
-                let previous = previous_hashes
-                    .get(&(file_id as u32, indexed_function.name_hash))
-                    .copied();
+                let previous = previous_hashes.get(&symbol_id).copied();
                 let signature_changed = previous
                     .is_none_or(|old| old.signature_hash != indexed_function.signature_hash);
                 let body_changed =
@@ -423,6 +495,8 @@ impl Compiler {
                 dependency_hashes_by_function.push(indexed_function.dependency_name_hashes);
                 self.functions.push(FunctionMeta {
                     id: function_id,
+                    symbol_id,
+                    storage_index,
                     name: indexed_function.name,
                     name_hash: indexed_function.name_hash,
                     file_id: file_id as u32,
@@ -444,7 +518,7 @@ impl Compiler {
         for (caller_index, dependency_hashes) in
             dependency_hashes_by_function.into_iter().enumerate()
         {
-            let caller = caller_index as FunctionId;
+            let caller = self.functions[caller_index].id;
             for dependency_hash in dependency_hashes {
                 if let Some(callees) = overload_ids_by_name_hash.get(&dependency_hash) {
                     for (_, callee) in callees {
@@ -456,8 +530,10 @@ impl Compiler {
             }
         }
         for (caller, callee) in unique_edges {
-            self.functions[caller as usize].dependencies.push(callee);
-            self.functions[callee as usize].dependents.push(caller);
+            let caller_index = self.function_index(caller)?;
+            let callee_index = self.function_index(callee)?;
+            self.functions[caller_index].dependencies.push(callee);
+            self.functions[callee_index].dependents.push(caller);
         }
 
         self.parsed_statements = vec![Vec::new(); self.functions.len()];
@@ -493,7 +569,8 @@ impl Compiler {
             if self.parsed_statement_ids.contains(function_id) {
                 continue;
             }
-            let function = &self.functions[*function_id as usize];
+            let function_index = self.function_index(*function_id)?;
+            let function = &self.functions[function_index];
             let file = &self.files[function.file_id as usize];
             let key = StatementCacheKey {
                 path: file.path.clone(),
@@ -522,7 +599,7 @@ impl Compiler {
                     .map_err(CompileError::Backend)?
             };
             next_statement_cache.insert(key, statements.clone());
-            self.parsed_statements[*function_id as usize] = statements;
+            self.parsed_statements[function.storage_index as usize] = statements;
             self.parsed_statement_ids.insert(*function_id);
         }
         self.statement_cache = next_statement_cache;
@@ -570,8 +647,9 @@ impl Compiler {
         let mut emitted_ids: Vec<FunctionId> = Vec::with_capacity(function_ids.len());
         for function_id in function_ids {
             let snapshot = self
-                .functions
-                .get(*function_id as usize)
+                .function_index_by_id
+                .get(function_id)
+                .and_then(|index| self.functions.get(*index))
                 .ok_or_else(|| {
                     CompileError::Invariant(format!("invalid function id {}", function_id))
                 })?
@@ -591,7 +669,8 @@ impl Compiler {
             emitted_functions += 1;
         }
         for function_id in emitted_ids {
-            self.functions[function_id as usize].dirty = false;
+            let index = self.function_index(function_id)?;
+            self.functions[index].dirty = false;
         }
         Ok(EmitPassResult { emitted_functions })
     }
@@ -642,11 +721,11 @@ impl Compiler {
         });
     }
 
-    fn capture_previous_hashes(&self) -> HashMap<(u32, u64), PreviousFunctionHashes> {
+    fn capture_previous_hashes(&self) -> HashMap<SymbolId, PreviousFunctionHashes> {
         let mut out = HashMap::new();
         for function in &self.functions {
             out.insert(
-                (function.file_id, function.name_hash),
+                function.symbol_id.clone(),
                 PreviousFunctionHashes {
                     signature_hash: function.signature_hash,
                     body_hash: function.body_hash,
@@ -662,10 +741,17 @@ impl Compiler {
             queue.push_back(*root);
         }
         while let Some(function_id) = queue.pop_front() {
-            let dependents = self.functions[function_id as usize].dependents.clone();
+            let Some(index) = self.function_index_by_id.get(&function_id).copied() else {
+                continue;
+            };
+            let dependents = self.functions[index].dependents.clone();
             for dependent_id in dependents {
-                if !self.functions[dependent_id as usize].dirty {
-                    self.functions[dependent_id as usize].dirty = true;
+                let Some(dependent_index) = self.function_index_by_id.get(&dependent_id).copied()
+                else {
+                    continue;
+                };
+                if !self.functions[dependent_index].dirty {
+                    self.functions[dependent_index].dirty = true;
                     queue.push_back(dependent_id);
                 }
             }
@@ -685,7 +771,7 @@ impl Compiler {
             .to_string();
         let statements = self
             .parsed_statements
-            .get(function.id as usize)
+            .get(function.storage_index as usize)
             .cloned()
             .ok_or_else(|| {
                 CompileError::Invariant(format!(
@@ -697,6 +783,13 @@ impl Compiler {
             blocks: vec![Block { source: body }],
             statements,
         })
+    }
+
+    fn function_index(&self, id: FunctionId) -> CompileResult<usize> {
+        self.function_index_by_id
+            .get(&id)
+            .copied()
+            .ok_or_else(|| CompileError::Invariant(format!("unknown stable function id {id:08x}")))
     }
 }
 
@@ -992,7 +1085,11 @@ mod tests {
 
         let main = function_by_name(&compiler, "main");
         assert_eq!(main.dependencies.len(), 1);
-        let callee = &compiler.functions()[main.dependencies[0] as usize];
+        let callee = compiler
+            .functions()
+            .iter()
+            .find(|function| function.id == main.dependencies[0])
+            .expect("resolved canonical identity");
         assert_eq!(callee.name, "shared");
         assert_eq!(callee.file_id, 1);
     }
@@ -1010,7 +1107,11 @@ mod tests {
         for _ in 0..2 {
             let _ = compiler.index_pass().expect("index pass");
             let main = function_by_name(&compiler, "main");
-            let callee = &compiler.functions()[main.dependencies[0] as usize];
+            let callee = compiler
+                .functions()
+                .iter()
+                .find(|function| function.id == main.dependencies[0])
+                .expect("resolved canonical identity");
             resolved_file_ids.push(callee.file_id);
         }
 
@@ -1480,6 +1581,114 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
             &source[structs[0].definition_range.start as usize
                 ..structs[0].definition_range.end as usize],
             "struct State { score: i32; }"
+        );
+    }
+
+    #[test]
+    fn canonical_function_identity_survives_body_edits_and_declaration_reordering() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "src/main.stasis",
+            "function helper(): i32 { return 1; } function main(): i32 { return helper(); }",
+        );
+        compiler.index_pass().expect("initial index");
+        let initial: HashMap<_, _> = compiler
+            .functions()
+            .iter()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    (function.symbol_id.clone(), function.id),
+                )
+            })
+            .collect();
+
+        compiler.upsert_file(
+            "src/main.stasis",
+            "function main(): i32 { return helper(); } function inserted(): i32 { return 9; } function helper(): i32 { return 2; }",
+        );
+        compiler.index_pass().expect("edited index");
+        for name in ["helper", "main"] {
+            let current = compiler
+                .functions()
+                .iter()
+                .find(|function| function.name == name)
+                .expect("retained declaration");
+            assert_eq!(&(current.symbol_id.clone(), current.id), &initial[name]);
+        }
+    }
+
+    #[test]
+    fn identity_and_signature_compatibility_are_separate_contracts() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "api.stasis",
+            "function value(input: i32): i32 { return input; }",
+        );
+        compiler.index_pass().expect("initial index");
+        let initial = compiler.functions()[0].clone();
+
+        compiler.upsert_file(
+            "api.stasis",
+            "function value(input: i32): f32 { return to_f32(input); }",
+        );
+        compiler.index_pass().expect("return edit index");
+        let return_edit = compiler.functions()[0].clone();
+        assert_eq!(
+            return_edit.id, initial.id,
+            "return edits retain declaration identity"
+        );
+        assert_ne!(return_edit.signature_hash, initial.signature_hash);
+
+        compiler.upsert_file(
+            "api.stasis",
+            "function value(input: f32): f32 { return input; }",
+        );
+        compiler.index_pass().expect("parameter edit index");
+        assert_ne!(
+            compiler.functions()[0].id,
+            initial.id,
+            "overload-selection edits replace identity"
+        );
+    }
+
+    #[test]
+    fn canonical_ids_distinguish_overloads_receivers_files_and_file_order() {
+        let files = [
+            (
+                "src/a.stasis",
+                "function act(self: Player): i32 { return 1; } function pick(value: i32): i32 { return value; }",
+            ),
+            (
+                "src/b.stasis",
+                "function act(self: Enemy): i32 { return 2; } function pick(value: f32): f32 { return value; }",
+            ),
+        ];
+        let mut left = Compiler::new();
+        for (path, source) in files {
+            left.upsert_file(path, source);
+        }
+        left.index_pass().expect("left index");
+        let mut right = Compiler::new();
+        for (path, source) in files.into_iter().rev() {
+            right.upsert_file(path, source);
+        }
+        right.index_pass().expect("right index");
+        let left_ids: BTreeSet<_> = left
+            .functions()
+            .iter()
+            .map(|function| function.id)
+            .collect();
+        let right_ids: BTreeSet<_> = right
+            .functions()
+            .iter()
+            .map(|function| function.id)
+            .collect();
+        assert_eq!(left_ids, right_ids);
+        assert_eq!(
+            left_ids.len(),
+            4,
+            "no overload, receiver, or file collision"
         );
     }
 }

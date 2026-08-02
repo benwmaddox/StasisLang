@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::{c_char, CStr, CString};
@@ -160,6 +161,8 @@ thread_local! {
     static LAST_FRAME_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     #[cfg(test)]
     static FORCE_NEXT_MANIFEST_COMMIT_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    #[cfg(test)]
+    static ANDROID_ARTIFACT_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,14 +175,22 @@ pub struct AndroidBridgeCompileResult {
     pub compile_micros: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AndroidJitArtifactSummary {
+    symbol_id: String,
+    function_id: u32,
     source_path: String,
     name: String,
     signature_hash: u64,
     slot: u32,
     body_hash: u64,
     executable_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct AndroidJitArtifactManifestV1 {
+    schema_version: u32,
+    artifacts: Vec<AndroidJitArtifactSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,7 +304,8 @@ pub fn run_android_workshop_stasis_tests(
         }
         let mut jit = JitProcess::new();
         jit.set_local_runtime_helper_trampolines(true);
-        jit.upsert_file(path.to_string_lossy().replace('\\', "/"), rewritten);
+        jit.set_project_root(project_root.to_string_lossy().to_string())?;
+        jit.upsert_file(relative_path.clone(), rewritten);
         jit.set_required_emit_roots(
             &tests
                 .iter()
@@ -547,8 +559,6 @@ pub fn compile_android_workshop_project(
         };
         let manifest_path = project_root.join("build/native_compile_manifest.txt");
         let runtime_state_path = project_root.join("build/runtime_state.txt");
-        let manifest =
-            render_android_jit_manifest(project_root, source_fingerprint, reload, &summary);
         if let Some(parent) = manifest_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 format!(
@@ -586,7 +596,53 @@ pub fn compile_android_workshop_project(
                 ));
             }
         }
-        if let Err(primary) = write_android_manifest_atomically(&manifest_path, &manifest) {
+        let artifact_manifest = serde_json::to_string_pretty(&AndroidJitArtifactManifestV1 {
+            schema_version: 1,
+            artifacts: summary.artifacts.clone(),
+        })
+        .map_err(|error| format!("failed serializing Android artifact manifest: {error}"))?;
+        let artifact_hash = hex_sha256(artifact_manifest.as_bytes());
+        let artifact_file_name =
+            format!("native_compile_artifacts.v1.{source_fingerprint:016x}.{artifact_hash}.json");
+        let artifact_manifest_path = project_root.join("build").join(&artifact_file_name);
+        #[cfg(test)]
+        if take_android_artifact_fault(1) {
+            return Err("forced failure before immutable artifact publication".to_string());
+        }
+        if let Err(primary) =
+            write_immutable_android_artifact(&artifact_manifest_path, artifact_manifest.as_bytes())
+        {
+            return Err(restore_after_error(
+                primary,
+                &runtime_state_path,
+                previous_runtime_state.as_deref(),
+            ));
+        }
+        #[cfg(test)]
+        if take_android_artifact_fault(2) {
+            return Err(restore_after_error(
+                "forced failure after immutable artifact publication".to_string(),
+                &runtime_state_path,
+                previous_runtime_state.as_deref(),
+            ));
+        }
+        let manifest = render_android_jit_manifest(
+            project_root,
+            source_fingerprint,
+            reload,
+            &summary,
+            &artifact_file_name,
+            &artifact_hash,
+        );
+        #[cfg(test)]
+        if take_android_artifact_fault(3) {
+            return Err(restore_after_error(
+                "forced failure before authoritative manifest publication".to_string(),
+                &runtime_state_path,
+                previous_runtime_state.as_deref(),
+            ));
+        }
+        if let Err(primary) = write_android_manifest_atomically(&manifest_path, &manifest, true) {
             return Err(restore_after_error(
                 primary,
                 &runtime_state_path,
@@ -613,6 +669,50 @@ pub fn compile_android_workshop_project(
     })
 }
 
+#[cfg(test)]
+fn take_android_artifact_fault(expected: u8) -> bool {
+    ANDROID_ARTIFACT_FAULT.with(|fault| {
+        if fault.get() == expected {
+            fault.set(0);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn write_immutable_android_artifact(path: &Path, contents: &[u8]) -> Result<(), String> {
+    if path.exists() {
+        let existing = fs::read(path).map_err(|error| {
+            format!(
+                "failed reading immutable artifact {}: {error}",
+                path.display()
+            )
+        })?;
+        return if existing == contents {
+            Ok(())
+        } else {
+            Err(format!(
+                "immutable Android artifact collision at {}",
+                path.display()
+            ))
+        };
+    }
+    write_android_manifest_atomically(
+        path,
+        std::str::from_utf8(contents)
+            .map_err(|error| format!("artifact manifest is not UTF-8: {error}"))?,
+        false,
+    )
+}
+
 fn restore_after_error(primary: String, path: &Path, contents: Option<&[u8]>) -> String {
     match restore_optional_file(path, contents) {
         Ok(()) => primary,
@@ -633,8 +733,14 @@ fn restore_optional_file(path: &Path, contents: Option<&[u8]>) -> Result<(), Str
     }
 }
 
-fn write_android_manifest_atomically(path: &Path, manifest: &str) -> Result<(), String> {
+fn write_android_manifest_atomically(
+    path: &Path,
+    manifest: &str,
+    allow_forced_failure: bool,
+) -> Result<(), String> {
     use std::io::Write;
+    #[cfg(not(test))]
+    let _ = allow_forced_failure;
 
     let mut file = atomic_write_file::AtomicWriteFile::open(path).map_err(|error| {
         format!(
@@ -651,7 +757,9 @@ fn write_android_manifest_atomically(path: &Path, manifest: &str) -> Result<(), 
             )
         })?;
     #[cfg(test)]
-    if FORCE_NEXT_MANIFEST_COMMIT_FAILURE.with(|forced| forced.replace(false)) {
+    if allow_forced_failure
+        && FORCE_NEXT_MANIFEST_COMMIT_FAILURE.with(|forced| forced.replace(false))
+    {
         return Err(format!(
             "failed writing Android manifest {}: forced atomic commit failure",
             path.display()
@@ -1318,7 +1426,7 @@ fn build_runtime_session(
     install_embedded_resource_host(project_root)?;
     let mut jit = JitProcess::new();
     jit.set_local_runtime_helper_trampolines(true);
-    configure_runtime_jit(&mut jit, project_root, files);
+    configure_runtime_jit(&mut jit, project_root, files)?;
     if let Err(error) = jit.compile() {
         return Err(jit
             .last_source_diagnostic()
@@ -1390,7 +1498,7 @@ fn recompile_runtime_session(
     // host entries can switch atomically without cross-generation code dependencies.
     let mut candidate = JitProcess::new();
     candidate.set_local_runtime_helper_trampolines(true);
-    configure_runtime_jit(&mut candidate, project_root, files);
+    configure_runtime_jit(&mut candidate, project_root, files)?;
     if let Err(error) = candidate.compile_staged() {
         return Err(candidate
             .last_source_diagnostic()
@@ -1499,7 +1607,12 @@ fn reject_staged_runtime_compile(
     });
 }
 
-fn configure_runtime_jit(jit: &mut JitProcess, project_root: &Path, files: &[WorkshopSourceFile]) {
+fn configure_runtime_jit(
+    jit: &mut JitProcess,
+    project_root: &Path,
+    files: &[WorkshopSourceFile],
+) -> Result<(), String> {
+    jit.set_project_root(project_root.to_string_lossy().to_string())?;
     jit.set_required_emit_roots(&[
         "main".to_string(),
         "tick".to_string(),
@@ -1507,14 +1620,9 @@ fn configure_runtime_jit(jit: &mut JitProcess, project_root: &Path, files: &[Wor
         "on_code_swap".to_string(),
     ]);
     for file in files {
-        let disk_path = project_root.join(&file.path);
-        let compiler_path = disk_path
-            .canonicalize()
-            .unwrap_or(disk_path)
-            .to_string_lossy()
-            .to_string();
-        jit.upsert_file(compiler_path, file.source.clone());
+        jit.upsert_file(file.path.clone(), file.source.clone());
     }
+    Ok(())
 }
 
 fn execute_lifecycle_noarg(jit: &JitProcess, name: &str) -> Result<(), String> {
@@ -1695,18 +1803,44 @@ fn current_android_jit_compile_summary(
         let metadata = jit
             .generation_metadata()
             .ok_or_else(|| "Android JIT compile produced no generation metadata".to_string())?;
+        let snapshot = jit
+            .program_snapshot()
+            .ok_or_else(|| "Android JIT compile produced no ProgramSnapshot".to_string())?;
         let artifacts = jit
             .artifacts()
             .iter()
-            .map(|artifact| AndroidJitArtifactSummary {
-                source_path: artifact.function_key.source_path.clone(),
-                name: artifact.function_key.name.clone(),
-                signature_hash: artifact.function_key.signature_hash,
-                slot: artifact.slot,
-                body_hash: artifact.body_hash,
-                executable_bytes: artifact.executable_bytes,
+            .map(|artifact| {
+                let function = snapshot
+                    .function_by_id(artifact.function_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "Android JIT artifact {} has no canonical function",
+                            artifact.function_id
+                        )
+                    })?;
+                let source_path = snapshot
+                    .files()
+                    .get(function.file_id as usize)
+                    .ok_or_else(|| {
+                        format!(
+                            "Android JIT function '{}' has no source file",
+                            function.symbol_id
+                        )
+                    })?
+                    .path
+                    .clone();
+                Ok(AndroidJitArtifactSummary {
+                    symbol_id: function.symbol_id.to_string(),
+                    function_id: function.id,
+                    source_path,
+                    name: function.name.clone(),
+                    signature_hash: function.signature_hash,
+                    slot: artifact.slot,
+                    body_hash: artifact.body_hash,
+                    executable_bytes: artifact.executable_bytes,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(AndroidJitCompileSummary {
             source_revision: metadata.source_revision,
             layout_hash: metadata.layout_hash,
@@ -1720,13 +1854,15 @@ fn current_android_jit_compile_summary(
 }
 
 fn render_android_jit_manifest(
-    project_root: &Path,
+    _project_root: &Path,
     project_hash: u64,
     reload: WorkshopReload,
     summary: &AndroidJitCompileSummary,
+    artifact_file_name: &str,
+    artifact_hash: &str,
 ) -> String {
     let mut manifest = format!(
-        "status=CompileReady\nbackend=cranelift-jit\nartifact_kind=executable-memory\nreload={reload:?}\nproject_hash={project_hash:016x}\nlayout_hash={:016x}\nsource_revision={}\nfunctions={}\nemitted_functions={}\nreused_functions={}\nexecutable_bytes={}\nerrors=0\nruntime_state=build/runtime_state.txt\n",
+        "status=CompileReady\nbackend=cranelift-jit\nartifact_kind=executable-memory\nartifact_manifest=build/{artifact_file_name}\nartifact_manifest_sha256={artifact_hash}\nreload={reload:?}\nproject_hash={project_hash:016x}\nlayout_hash={:016x}\nsource_revision={}\nfunctions={}\nemitted_functions={}\nreused_functions={}\nexecutable_bytes={}\nerrors=0\nruntime_state=build/runtime_state.txt\n",
         summary.layout_hash,
         summary.source_revision,
         summary.artifacts.len(),
@@ -1736,21 +1872,6 @@ fn render_android_jit_manifest(
     );
     for entrypoint in &summary.entrypoints {
         manifest.push_str(&format!("entrypoint={entrypoint}\n"));
-    }
-    for artifact in &summary.artifacts {
-        let source_path = Path::new(&artifact.source_path)
-            .strip_prefix(project_root)
-            .unwrap_or_else(|_| Path::new(&artifact.source_path))
-            .to_string_lossy()
-            .replace('\\', "/");
-        manifest.push_str(&format!(
-            "function={}|file={source_path}|signature_hash={:016x}|body_hash={:016x}|slot={}|executable_bytes={}\n",
-            artifact.name,
-            artifact.signature_hash,
-            artifact.body_hash,
-            artifact.slot,
-            artifact.executable_bytes,
-        ));
     }
     manifest
 }
@@ -2014,10 +2135,15 @@ fn format_compiler_source_diagnostic(
     diagnostic: &stasis_compiler::SourceDiagnostic,
 ) -> String {
     let path = Path::new(&diagnostic.path);
+    let disk_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    };
     let canonical_root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
-    let source = fs::read_to_string(path).unwrap_or_default();
+    let source = fs::read_to_string(&disk_path).unwrap_or_default();
     let inferred =
         diagnostic.symbol.is_empty() && diagnostic.start == 0 && diagnostic.end == source.len();
     let start = if inferred {
@@ -2037,10 +2163,10 @@ fn format_compiler_source_diagnostic(
     };
     let (line, column) = source_line_column(&source, start);
     let (end_line, end_column) = source_line_column(&source, end);
-    let file = path
+    let file = disk_path
         .strip_prefix(project_root)
-        .or_else(|_| path.strip_prefix(&canonical_root))
-        .unwrap_or(path)
+        .or_else(|_| disk_path.strip_prefix(&canonical_root))
+        .unwrap_or(&disk_path)
         .to_string_lossy()
         .replace('\\', "/");
     format!(
@@ -2829,8 +2955,35 @@ mod tests {
         assert!(manifest.contains("artifact_kind=executable-memory"));
         assert!(manifest.contains("entrypoint=main"));
         assert!(manifest.contains("entrypoint=tick"));
-        assert!(manifest.contains("function=tick|"));
+        let artifact_relative = manifest
+            .lines()
+            .find_map(|line| line.strip_prefix("artifact_manifest="))
+            .expect("artifact manifest path");
+        assert!(artifact_relative.starts_with("build/native_compile_artifacts.v1."));
+        let artifact_hash = manifest
+            .lines()
+            .find_map(|line| line.strip_prefix("artifact_manifest_sha256="))
+            .expect("artifact manifest hash");
         assert!(manifest.contains("executable_bytes="));
+        let artifact_manifest: AndroidJitArtifactManifestV1 = serde_json::from_str(
+            &fs::read_to_string(root.join(artifact_relative)).expect("read artifact manifest"),
+        )
+        .expect("parse artifact manifest");
+        assert_eq!(
+            hex_sha256(&fs::read(root.join(artifact_relative)).expect("artifact bytes")),
+            artifact_hash
+        );
+        assert_eq!(artifact_manifest.schema_version, 1);
+        assert!(artifact_manifest.artifacts.iter().any(|artifact| {
+            artifact.name == "tick" && artifact.symbol_id == "v1|function|src/main.stasis|tick|()"
+        }));
+        assert_eq!(
+            serde_json::from_str::<AndroidJitArtifactManifestV1>(
+                &serde_json::to_string(&artifact_manifest).expect("serialize manifest")
+            )
+            .expect("round trip manifest"),
+            artifact_manifest
+        );
         assert!(!root.join("build/functions").exists());
         RUNTIME_SESSION.with(|session| {
             assert_eq!(
@@ -2896,6 +3049,45 @@ mod tests {
     }
 
     #[test]
+    fn bridge_rejects_duplicate_host_alias_without_replacing_active_generation() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("duplicate_host_alias");
+        let main_path = root.join("src/main.stasis");
+        fs::write(
+            &main_path,
+            "function main(): i32 { return tick(); }\nfunction tick(): i32 { return 7; }\n",
+        )
+        .expect("write accepted source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("compile accepted generation");
+
+        fs::write(
+            root.join("src/duplicate.stasis"),
+            "function tick(): i32 { return 99; }\n",
+        )
+        .expect("write duplicate source");
+        fs::write(
+            &main_path,
+            "import \"duplicate.stasis\";\nfunction main(): i32 { return tick(); }\nfunction tick(): i32 { return 7; }\n",
+        )
+        .expect("import duplicate source");
+
+        let error = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect_err("duplicate host alias must fail");
+        assert!(error.contains("host ABI alias 'tick' requires exactly one canonical identity"));
+        RUNTIME_SESSION.with(|session| {
+            let session = session.borrow();
+            let session = session.as_ref().expect("active runtime preserved");
+            assert!(session.pending_candidate.is_none());
+            assert_eq!(session.jit.execute_i32_noarg_by_name("tick"), Ok(7));
+        });
+
+        fs::remove_dir_all(root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
     fn manifest_write_failure_does_not_stage_runtime_candidate() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
@@ -2947,6 +3139,58 @@ mod tests {
             fs::read(&manifest_path).expect("read preserved manifest"),
             previous_manifest
         );
+
+        fs::remove_dir_all(root).ok();
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn artifact_transaction_faults_preserve_authoritative_manifest_and_referenced_json() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("artifact_transaction_faults");
+        let source = root.join("src/main.stasis");
+        fs::write(
+            &source,
+            "function main(): i32 { return tick(); } function tick(): i32 { return 1; }",
+        )
+        .expect("write initial source");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("initial compile");
+        let manifest_path = root.join("build/native_compile_manifest.txt");
+        let accepted_manifest = fs::read(&manifest_path).expect("accepted manifest");
+        let accepted_text = String::from_utf8(accepted_manifest.clone()).expect("manifest UTF-8");
+        let accepted_artifact = accepted_text
+            .lines()
+            .find_map(|line| line.strip_prefix("artifact_manifest="))
+            .expect("artifact path");
+        let accepted_artifact_bytes =
+            fs::read(root.join(accepted_artifact)).expect("accepted artifact JSON");
+        serde_json::from_slice::<AndroidJitArtifactManifestV1>(&accepted_artifact_bytes)
+            .expect("accepted artifact parses");
+
+        fs::write(
+            &source,
+            "function main(): i32 { return tick(); } function tick(): i32 { return 2; }",
+        )
+        .expect("write changed source");
+        for fault in 1..=3 {
+            ANDROID_ARTIFACT_FAULT.with(|slot| slot.set(fault));
+            compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+                .expect_err("fault must abort publication");
+            assert_eq!(
+                fs::read(&manifest_path).expect("manifest survives"),
+                accepted_manifest
+            );
+            assert_eq!(
+                fs::read(root.join(accepted_artifact)).expect("artifact survives"),
+                accepted_artifact_bytes
+            );
+            serde_json::from_slice::<AndroidJitArtifactManifestV1>(
+                &fs::read(root.join(accepted_artifact)).expect("artifact JSON"),
+            )
+            .expect("authoritative artifact remains valid");
+        }
 
         fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();
@@ -3651,7 +3895,6 @@ mod tests {
         clear_runtime_session_for_test();
     }
     #[test]
-    #[ignore = "host AI prompt regression target; run after AI edits the workshop sample"]
     fn android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
@@ -4284,6 +4527,7 @@ function render(): void {}
             edits: vec![WorkshopSemanticEdit {
                 operation: WorkshopSemanticEditOperation::Update,
                 target: WorkshopSymbolSelector {
+                    symbol_id: None,
                     name: "tick".to_string(),
                     kind: Some(WorkshopSourceItemKind::Function),
                     file: Some("src/main.stasis".to_string()),
@@ -4360,6 +4604,7 @@ function render(): void {}
             edits: vec![WorkshopSemanticEdit {
                 operation: WorkshopSemanticEditOperation::Update,
                 target: WorkshopSymbolSelector {
+                    symbol_id: None,
                     name: "adjust".to_string(),
                     kind: Some(WorkshopSourceItemKind::Function),
                     file: Some("src/main.stasis".to_string()),
@@ -4419,6 +4664,7 @@ function render(): void {}
             edits: vec![WorkshopSemanticEdit {
                 operation: WorkshopSemanticEditOperation::Update,
                 target: WorkshopSymbolSelector {
+                    symbol_id: None,
                     name: "tick".to_string(),
                     kind: Some(WorkshopSourceItemKind::Function),
                     file: Some("src/main.stasis".to_string()),
@@ -4478,6 +4724,7 @@ function render(): void {}
             edits: vec![WorkshopSemanticEdit {
                 operation: WorkshopSemanticEditOperation::Update,
                 target: WorkshopSymbolSelector {
+                    symbol_id: None,
                     name: "tick".to_string(),
                     kind: Some(WorkshopSourceItemKind::Function),
                     file: Some("src/main.stasis".to_string()),

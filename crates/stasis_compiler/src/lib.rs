@@ -5,6 +5,7 @@ pub mod backend;
 pub mod compiler;
 pub mod data_flow;
 pub mod frontend;
+pub mod identity;
 pub mod ir;
 pub mod performance;
 
@@ -2439,9 +2440,11 @@ mod tests {
             (normalize_path_key(&data), data_source.to_string()),
             (normalize_path_key(&main), main_source.to_string()),
         ];
-        let digest =
-            crate::backend::program_snapshot::canonical_layout_digest_for_files(files.clone())
-                .expect("canonical digest");
+        let digest = crate::backend::program_snapshot::canonical_layout_digest_for_project(
+            temp_root.to_string_lossy(),
+            files.clone(),
+        )
+        .expect("canonical digest");
         assert_eq!(
             output.layout_hash,
             i32::from_le_bytes(digest[..4].try_into().expect("prefix"))
@@ -2449,6 +2452,10 @@ mod tests {
 
         let mut jit = crate::backend::jit::JitProcess::new();
         let mut aot = crate::backend::aot::AotProcess::new();
+        jit.set_project_root(temp_root.to_string_lossy())
+            .expect("set JIT project root");
+        aot.set_project_root(temp_root.to_string_lossy())
+            .expect("set AOT project root");
         for (path, source) in files {
             jit.upsert_file(path.clone(), source.clone());
             aot.upsert_file(path, source);

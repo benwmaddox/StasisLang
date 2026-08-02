@@ -5,7 +5,7 @@ use crate::backend::emit::{
 use crate::backend::patch_plan::{
     capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReasonChain,
 };
-use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramSnapshot};
+use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
 use crate::backend::state_layout::{build_state_memory_report, is_named_scalar_state_path};
 use crate::backend::state_query::{
     parse_state_query, BinaryOperator, ScalarExpression, StateQuery, StateValueReference,
@@ -412,6 +412,7 @@ pub struct JitEnginePackage {
     pub render_code_ptr: u64,
     pub on_code_swap_code_ptr: Option<u64>,
     pub symbol_code_ptrs: BTreeMap<String, u64>,
+    pub function_code_ptrs: BTreeMap<FunctionId, u64>,
 }
 
 impl JitEnginePackage {
@@ -514,6 +515,12 @@ impl JitProcess {
             #[cfg(test)]
             None,
         );
+        if let Some(project_root) = self.compiler.project_root() {
+            candidate
+                .compiler
+                .set_project_root(project_root.to_string())
+                .expect("accepted compiler project root remains valid");
+        }
         for file in self.compiler.files() {
             candidate.upsert_file(file.path.clone(), file.content.clone());
         }
@@ -573,6 +580,9 @@ impl JitProcess {
     }
 
     pub fn refresh_imported_sources_from_disk(&mut self, root_source_path: &str) -> bool {
+        let root_source_path =
+            crate::identity::canonical_source_path(self.compiler.project_root(), root_source_path)
+                .unwrap_or_else(|_| root_source_path.to_string());
         let tracked: Vec<(String, u64)> = self
             .compiler
             .files()
@@ -587,15 +597,24 @@ impl JitProcess {
 
         let mut changed = false;
         for (path, known_hash) in tracked {
-            let disk_path = Path::new(&path);
-            let Some(probe) = probe_disk_source(disk_path) else {
+            let relative_path = Path::new(&path);
+            let disk_path = self
+                .compiler
+                .project_root()
+                .map(Path::new)
+                .filter(|_| relative_path.is_relative())
+                .map_or_else(
+                    || relative_path.to_path_buf(),
+                    |root| root.join(relative_path),
+                );
+            let Some(probe) = probe_disk_source(&disk_path) else {
                 continue;
             };
             if self.source_disk_probe_cache.get(&path) == Some(&probe) {
                 continue;
             }
 
-            let Ok(content) = std::fs::read_to_string(disk_path) else {
+            let Ok(content) = std::fs::read_to_string(&disk_path) else {
                 continue;
             };
             let disk_hash = hash_text(&content);
@@ -705,6 +724,8 @@ impl JitProcess {
         self.load_import_graph_sources()
             .map_err(crate::compiler::CompileError::Backend)?;
         let index = self.compiler.index_pass()?;
+        self.validate_host_aliases()
+            .map_err(crate::compiler::CompileError::Backend)?;
         self.compiler
             .types_mut()
             .ensure_utf8_view_id()
@@ -767,21 +788,7 @@ impl JitProcess {
             .compiler
             .functions()
             .iter()
-            .filter_map(|function| {
-                self.compiler
-                    .files()
-                    .get(function.file_id as usize)
-                    .map(|file| {
-                        (
-                            function.id,
-                            FunctionKey::new(
-                                &file.path,
-                                function.name.clone(),
-                                function.signature_hash,
-                            ),
-                        )
-                    })
-            })
+            .map(|function| (function.id, FunctionKey::from_function(function)))
             .collect();
         let mut lowering_references = BTreeMap::new();
         let mut lowering_contracts = BTreeMap::new();
@@ -790,7 +797,8 @@ impl JitProcess {
             let function = self
                 .compiler
                 .functions()
-                .get(*function_id as usize)
+                .iter()
+                .find(|function| function.id == *function_id)
                 .ok_or_else(|| {
                     crate::compiler::CompileError::Invariant(format!(
                         "reachable function id {function_id} is missing"
@@ -1101,14 +1109,17 @@ impl JitProcess {
         self.artifacts = staged_artifacts;
         if let Some(snapshot) = self.program_snapshot.as_mut() {
             let snapshot = Arc::make_mut(snapshot);
-            snapshot.set_artifact_mappings(self.artifacts.iter().map(|artifact| {
-                ProgramArtifactMapping {
-                    function_id: artifact.function_id,
-                    symbol: artifact.function_key.display_name(),
-                    target_path: None,
-                    code_pointer: Some(artifact.code_ptr),
-                }
-            }));
+            snapshot
+                .set_artifact_mappings(self.artifacts.iter().map(|artifact| {
+                    ProgramArtifactMapping {
+                        function_id: artifact.function_id,
+                        symbol_id: artifact.function_key.symbol_id.clone(),
+                        symbol: artifact.function_key.display_name(),
+                        target_path: None,
+                        code_pointer: Some(artifact.code_ptr),
+                    }
+                }))
+                .map_err(crate::compiler::CompileError::Invariant)?;
         }
         if let Some(module) = staged_module {
             self.modules.push(Arc::new(JitArena {
@@ -1185,22 +1196,13 @@ impl JitProcess {
     }
 
     pub fn artifact_slot_for_function_name(&self, name: &str) -> Option<u32> {
-        let function = self
-            .compiler
-            .functions()
-            .iter()
-            .find(|function| function.name == name)?;
+        let function = self.unique_function_by_name(name).ok()?;
         self.artifact_for_function_id(function.id)
             .map(|artifact| artifact.slot)
     }
 
     pub fn execute_i32_noarg_by_name(&self, name: &str) -> Result<i32, String> {
-        let function = self
-            .compiler
-            .functions()
-            .iter()
-            .find(|function| function.name == name)
-            .ok_or_else(|| format!("function '{name}' not found"))?;
+        let function = self.unique_function_by_name(name)?;
         if function.return_type != TYPE_ID_I32 {
             return Err(format!(
                 "function '{name}' is not i32-returning (type id {})",
@@ -1221,12 +1223,7 @@ impl JitProcess {
     }
 
     pub fn execute_void_noarg_by_name(&self, name: &str) -> Result<(), String> {
-        let function = self
-            .compiler
-            .functions()
-            .iter()
-            .find(|function| function.name == name)
-            .ok_or_else(|| format!("function '{name}' not found"))?;
+        let function = self.unique_function_by_name(name)?;
         if function.return_type != TYPE_ID_VOID {
             return Err(format!(
                 "function '{name}' is not void-returning (type id {})",
@@ -1990,15 +1987,75 @@ impl JitProcess {
             .unwrap_or_default()
     }
 
-    pub fn validate_on_code_swap_signature(&self) -> Result<(), String> {
-        let Some(function) = self
+    fn validate_host_aliases(&self) -> Result<(), String> {
+        let mut counts = BTreeMap::new();
+        for function in self
             .compiler
             .functions()
             .iter()
-            .find(|function| function.name == "on_code_swap")
-        else {
+            .filter(|function| self.is_host_export_name(&function.name))
+        {
+            *counts.entry(function.name.as_str()).or_insert(0usize) += 1;
+        }
+        if let Some((name, count)) = counts.into_iter().find(|(_, count)| *count != 1) {
+            return Err(format!(
+                "host ABI alias '{name}' requires exactly one canonical identity (found {count})"
+            ));
+        }
+        Ok(())
+    }
+
+    fn unique_function_by_name(&self, name: &str) -> Result<&ProgramFunction, String> {
+        let mut matches = self
+            .program_snapshot
+            .as_ref()
+            .ok_or_else(|| "program has not compiled successfully".to_string())?
+            .functions()
+            .iter()
+            .filter(|function| function.name == name);
+        let function = matches
+            .next()
+            .ok_or_else(|| format!("function '{name}' not found"))?;
+        if matches.next().is_some() {
+            return Err(format!(
+                "function alias '{name}' is ambiguous across canonical identities"
+            ));
+        }
+        Ok(function)
+    }
+
+    pub fn set_project_root(&mut self, root: impl Into<String>) -> Result<(), String> {
+        self.compiler.set_project_root(root)
+    }
+
+    /// Canonical artifact map. Host-export names are aliases only and must not be
+    /// used as the authoritative key for runtime patch identity.
+    pub fn function_code_ptrs(&self) -> BTreeMap<FunctionId, u64> {
+        self.artifacts
+            .iter()
+            .map(|artifact| (artifact.function_id, artifact.code_ptr))
+            .collect()
+    }
+
+    pub fn validate_on_code_swap_signature(&self) -> Result<(), String> {
+        let matches = self
+            .program_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.functions())
+            .unwrap_or_default()
+            .iter()
+            .filter(|function| function.name == "on_code_swap")
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
             return Ok(());
-        };
+        }
+        if matches.len() != 1 {
+            return Err(format!(
+                "host ABI alias 'on_code_swap' requires exactly one canonical identity (found {})",
+                matches.len()
+            ));
+        }
+        let function = matches[0];
         if function.return_type != TYPE_ID_VOID || !function.params.is_empty() {
             return Err(
                 "invalid on_code_swap signature; expected function on_code_swap(): void"
@@ -2010,14 +2067,10 @@ impl JitProcess {
 
     pub fn execute_optional_on_code_swap(&self) -> Result<(), String> {
         self.validate_on_code_swap_signature()?;
-        let Some(function) = self
-            .compiler
-            .functions()
-            .iter()
-            .find(|function| function.name == "on_code_swap")
-        else {
+        if !self.has_on_code_swap() {
             return Ok(());
-        };
+        }
+        let function = self.unique_function_by_name("on_code_swap")?;
         let artifact = self
             .artifact_for_function_id(function.id)
             .ok_or_else(|| "compiled artifact missing for function 'on_code_swap'".to_string())?;
@@ -2025,10 +2078,12 @@ impl JitProcess {
     }
 
     pub fn has_on_code_swap(&self) -> bool {
-        self.compiler
-            .functions()
-            .iter()
-            .any(|function| function.name == "on_code_swap")
+        self.program_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .functions()
+                .iter()
+                .any(|function| function.name == "on_code_swap")
+        })
     }
 
     pub fn build_engine_package(
@@ -2049,16 +2104,12 @@ impl JitProcess {
             render_code_ptr,
             on_code_swap_code_ptr,
             symbol_code_ptrs: self.symbol_code_ptrs(),
+            function_code_ptrs: self.function_code_ptrs(),
         })
     }
 
     fn code_ptr_for_function_name(&self, name: &str) -> Result<u64, String> {
-        let function = self
-            .compiler
-            .functions()
-            .iter()
-            .find(|function| function.name == name)
-            .ok_or_else(|| format!("required engine entrypoint '{name}' not found"))?;
+        let function = self.unique_host_alias(name)?;
         let artifact = self
             .artifact_for_function_id(function.id)
             .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))?;
@@ -2066,12 +2117,7 @@ impl JitProcess {
     }
 
     fn code_ptr_for_i32_noarg_entrypoint(&self, name: &str) -> Result<u64, String> {
-        let function = self
-            .compiler
-            .functions()
-            .iter()
-            .find(|function| function.name == name)
-            .ok_or_else(|| format!("required engine entrypoint '{name}' not found"))?;
+        let function = self.unique_host_alias(name)?;
         if function.return_type != TYPE_ID_I32 || !function.params.is_empty() {
             return Err(format!(
                 "engine entrypoint signature mismatch for '{name}': expected `function {name}(): i32`; actual return type id {}, parameter count {}",
@@ -2082,6 +2128,23 @@ impl JitProcess {
         self.artifact_for_function_id(function.id)
             .map(|artifact| artifact.code_ptr)
             .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))
+    }
+
+    fn unique_host_alias(&self, name: &str) -> Result<&FunctionMeta, String> {
+        let mut matches = self
+            .compiler
+            .functions()
+            .iter()
+            .filter(|function| function.name == name);
+        let first = matches
+            .next()
+            .ok_or_else(|| format!("required engine entrypoint '{name}' not found"))?;
+        if matches.next().is_some() {
+            return Err(format!(
+                "host ABI alias '{name}' is ambiguous across canonical function identities"
+            ));
+        }
+        Ok(first)
     }
 
     fn rebuild_artifact_index(&mut self) {
@@ -2166,6 +2229,19 @@ impl JitProcess {
             let imports = self.cached_import_paths_for_source(&path, source_hash, &source);
             for import_path in imports {
                 let resolved = resolve_import_path(&path, &import_path);
+                let logical =
+                    crate::identity::canonical_source_path(None, &resolved.to_string_lossy())?;
+                if known_paths.contains(&logical) {
+                    continue;
+                }
+                let resolved = if resolved.is_relative() {
+                    self.compiler
+                        .project_root()
+                        .map(Path::new)
+                        .map_or(resolved.clone(), |root| root.join(&resolved))
+                } else {
+                    resolved
+                };
                 let normalized = normalize_path_for_compiler_key(&resolved);
                 if known_paths.contains(&normalized) {
                     continue;
@@ -2176,9 +2252,9 @@ impl JitProcess {
                         import_path, path, error
                     )
                 })?;
-                self.compiler.upsert_file(normalized.clone(), content);
-                known_paths.insert(normalized.clone());
-                queue.push(normalized);
+                self.compiler.upsert_file(normalized, content);
+                known_paths.insert(logical.clone());
+                queue.push(logical);
             }
         }
 
@@ -3032,7 +3108,16 @@ mod tests {
         let emitted_names: BTreeSet<_> = metadata
             .emitted_function_ids
             .iter()
-            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .map(|id| {
+                process
+                    .compiler
+                    .functions()
+                    .iter()
+                    .find(|function| function.id == *id)
+                    .expect("emitted identity")
+                    .name
+                    .as_str()
+            })
             .collect();
         assert_eq!(
             emitted_names,
@@ -3041,7 +3126,16 @@ mod tests {
         let reused_names: BTreeSet<_> = metadata
             .reused_function_ids
             .iter()
-            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .map(|id| {
+                process
+                    .compiler
+                    .functions()
+                    .iter()
+                    .find(|function| function.id == *id)
+                    .expect("reused identity")
+                    .name
+                    .as_str()
+            })
             .collect();
         assert_eq!(reused_names, BTreeSet::from(["render", "untouched"]));
         for artifact in process.artifacts() {
@@ -3089,7 +3183,16 @@ mod tests {
             .expect("generation metadata")
             .emitted_function_ids
             .iter()
-            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .map(|id| {
+                process
+                    .compiler
+                    .functions()
+                    .iter()
+                    .find(|function| function.id == *id)
+                    .expect("emitted identity")
+                    .name
+                    .as_str()
+            })
             .collect();
         assert_eq!(emitted_names, BTreeSet::from(["main", "read_value"]));
         assert_eq!(
@@ -3128,7 +3231,16 @@ mod tests {
         let emitted_names: BTreeSet<_> = metadata
             .emitted_function_ids
             .iter()
-            .map(|id| process.compiler.functions()[*id as usize].name.as_str())
+            .map(|id| {
+                process
+                    .compiler
+                    .functions()
+                    .iter()
+                    .find(|function| function.id == *id)
+                    .expect("emitted identity")
+                    .name
+                    .as_str()
+            })
             .collect();
         assert_eq!(emitted_names, BTreeSet::from(["main", "render"]));
         for artifact in process.artifacts() {
@@ -3262,6 +3374,9 @@ mod tests {
     fn jit_process_executes_representative_immediate_axis_layout() {
         let mut process = JitProcess::new();
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        process
+            .set_project_root(repository.to_string_lossy())
+            .expect("set repository root");
         process.upsert_file(
             repository
                 .join("samples/immediate_axis_layout/verify_jit.stasis")
@@ -4046,6 +4161,13 @@ mod tests {
     #[test]
     fn jit_process_stdlib_ascii_copy_truncates_to_destination_capacity() {
         let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -4065,6 +4187,13 @@ mod tests {
     #[test]
     fn jit_process_stdlib_ascii_recount_is_bounded_by_capacity() {
         let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -4084,6 +4213,13 @@ mod tests {
     #[test]
     fn jit_process_stdlib_utf8_from_ascii_clamps_to_header_capacity() {
         let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -4103,6 +4239,13 @@ mod tests {
     #[test]
     fn jit_process_stdlib_ascii_set_len_clamps_to_max_length() {
         let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -4122,6 +4265,13 @@ mod tests {
     #[test]
     fn jit_process_stdlib_utf8_set_len_ascii_clamps_to_max_length() {
         let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -4141,6 +4291,13 @@ mod tests {
     #[test]
     fn jit_process_stdlib_utf8_from_ascii_respects_source_capacity_without_terminator() {
         let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
         let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -4258,6 +4415,13 @@ mod tests {
             .expect("read rust_native_tick_input_snapshot.stasis fixture");
 
         let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
         process.upsert_file(fixture_path.to_string_lossy().to_string(), source);
         process.compile().expect("compile");
 
@@ -6335,14 +6499,47 @@ mod tests {
         );
         let error = process.compile().expect_err("expected ambiguous overload");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("ambiguous overload for call target 'damage'"),
+                    message.contains("duplicate declaration identity"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend identity error, got {other:?}"),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn duplicate_host_alias_rejects_candidate_and_preserves_active_jit_identity() {
+        let mut process = JitProcess::new();
+        process.upsert_file("src/main.stasis", "function main(): i32 { return 17; }\n");
+        process.compile().expect("compile accepted generation");
+        let accepted_snapshot = process.program_snapshot().expect("snapshot").clone();
+        let accepted_ptrs = process.function_code_ptrs();
+
+        process.upsert_file(
+            "src/duplicate.stasis",
+            "function main(): i32 { return 99; }\n",
+        );
+        let error = process
+            .compile()
+            .expect_err("duplicate host alias must fail");
+
+        assert!(matches!(
+            error,
+            crate::compiler::CompileError::Backend(message)
+                if message.contains("host ABI alias 'main' requires exactly one canonical identity")
+        ));
+        assert_eq!(
+            process
+                .program_snapshot()
+                .expect("active snapshot")
+                .functions(),
+            accepted_snapshot.functions()
+        );
+        assert_eq!(process.function_code_ptrs(), accepted_ptrs);
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(17));
     }
 
     #[cfg(windows)]

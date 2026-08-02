@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
-    run_jit_tests_in_directory_with_session, run_live_in_process, run_live_in_process_with_data,
-    run_play_in_process_with_window_title, run_self_host_aot_cli_with_options, LiveRunConfig,
-    StasisTestRunSession,
+    run_jit_tests_in_directory_with_project_root_and_session, run_live_in_process,
+    run_live_in_process_with_data, run_play_in_process_with_window_title,
+    run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
@@ -1045,18 +1045,36 @@ fn load_workspace(explicit: Option<&Path>) -> Result<Workspace, String> {
     } else {
         start
     };
-    let root = find_workspace_root(&start_dir).ok_or_else(|| {
+    let discovered_root = find_workspace_root(&start_dir).ok_or_else(|| {
         format!(
             "no {MANIFEST_NAME} found from {}; run 'stasis init' first",
             start_dir.display()
         )
     })?;
+    let root = canonical_workspace_root(&discovered_root)?;
     let bytes = fs::read(root.join(MANIFEST_NAME))
         .map_err(|error| format!("failed to read {MANIFEST_NAME}: {error}"))?;
     let manifest: ProjectManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
     manifest.validate()?;
     Ok(Workspace { root, manifest })
+}
+
+fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve workspace root: {error}"))?;
+    #[cfg(windows)]
+    {
+        let text = canonical.to_string_lossy();
+        if text.starts_with(r"\\?\UNC\") {
+            return Err("workspace root must not use a UNC path".to_string());
+        }
+        if let Some(path) = text.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    Ok(canonical)
 }
 
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
@@ -1202,6 +1220,7 @@ fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
+    jit.set_project_root(display_path(&workspace.root))?;
     jit.set_required_emit_roots(&runtime_analysis_roots());
     let mut sources = BTreeMap::new();
     for file in files {
@@ -1234,6 +1253,7 @@ fn compile_workspace_mobile_costs(workspace: &Workspace) -> Result<(u64, u64), S
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut aot = AotProcess::new();
+    aot.set_project_root(display_path(&workspace.root))?;
     aot.set_target(AotTarget::android_arm64_default());
     aot.set_required_emit_roots(&runtime_analysis_roots());
     for file in files {
@@ -1298,6 +1318,7 @@ fn validate_fresh_runtime(
     let source = fs::read_to_string(&entry)
         .map_err(|error| format!("failed to read entry {}: {error}", entry.display()))?;
     let mut jit = JitProcess::new();
+    jit.set_project_root(display_path(&workspace.root))?;
     jit.set_required_emit_roots(&[setup.to_string(), tick.to_string(), render.to_string()]);
     jit.upsert_file(display_path(&entry), source);
     jit.compile()
@@ -1412,7 +1433,11 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
     validate_workspace_destination(workspace, "test directory", &directory)?;
     let mut session = StasisTestRunSession::new();
-    let summary = run_jit_tests_in_directory_with_session(&directory, &mut session)?;
+    let summary = run_jit_tests_in_directory_with_project_root_and_session(
+        &directory,
+        &workspace.root,
+        &mut session,
+    )?;
     let data = json!({
         "files_discovered": summary.files_discovered,
         "files_with_tests": summary.files_with_tests,
@@ -3160,6 +3185,7 @@ fn write_ios_object_config(aot_root: &Path, output: &Path) -> Result<(), String>
 impl SymbolSelectorArgs {
     fn selector(&self) -> WorkshopSymbolSelector {
         WorkshopSymbolSelector {
+            symbol_id: None,
             name: self.name.clone(),
             kind: self.kind.map(Into::into),
             file: self.file.clone(),
@@ -3172,6 +3198,7 @@ impl SymbolSelectorArgs {
 impl RequiredSymbolTargetArgs {
     fn selector(&self) -> WorkshopSymbolSelector {
         WorkshopSymbolSelector {
+            symbol_id: None,
             name: self.name.clone(),
             kind: Some(self.kind.into()),
             file: Some(self.file.clone()),
@@ -3554,6 +3581,7 @@ fn validate_semantic_files(
 ) -> Result<(), String> {
     let files = workshop_reachable_files(files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
+    jit.set_project_root(display_path(&workspace.root))?;
     jit.set_local_runtime_helper_trampolines(true);
     jit.set_required_emit_roots(&[
         "main".to_string(),
@@ -3606,7 +3634,7 @@ fn revert_symbol_plan(
     let source = read_workspace_input(workspace, "semantic edit receipt", receipt)?;
     let plan = serde_json::from_str::<WorkshopSemanticEditPlan>(&source)
         .map_err(|error| format!("invalid semantic edit receipt: {error}"))?;
-    if plan.schema_version != 1 {
+    if !matches!(plan.schema_version, 1 | 2) {
         return Err(format!(
             "unsupported semantic edit receipt schema version {}",
             plan.schema_version
@@ -4454,6 +4482,39 @@ mod tests {
         fs::create_dir_all(&nested).expect("create nested");
         assert_eq!(find_workspace_root(&nested), Some(root.clone()));
         remove_temp(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_alias_is_resolved_before_compiler_identity_is_created() {
+        use std::os::unix::fs::symlink;
+
+        let real_parent = temp_dir("real_workspace_parent");
+        let real_root = real_parent.join("project");
+        let alias_parent = temp_dir("workspace_alias_parent");
+        let alias_root = alias_parent.join("project_alias");
+        create_project(real_root.clone(), "alias_project".to_string()).expect("create project");
+        fs::create_dir_all(&alias_parent).expect("create alias parent");
+        symlink(&real_root, &alias_root).expect("create workspace alias");
+
+        let workspace = load_workspace(Some(&alias_root)).expect("load workspace through alias");
+        assert_eq!(workspace.root, real_root.canonicalize().expect("real root"));
+        let jit = compile_workspace_jit(&workspace).expect("compile aliased workspace");
+        let main = jit
+            .program_snapshot()
+            .expect("program snapshot")
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function");
+        assert_eq!(
+            main.symbol_id.canonical(),
+            "v1|function|src/main.stasis|main|()"
+        );
+
+        fs::remove_file(&alias_root).expect("remove workspace alias");
+        remove_temp(&alias_parent);
+        remove_temp(&real_parent);
     }
 
     #[test]

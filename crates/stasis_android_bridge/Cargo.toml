@@ -17,4 +17,6 @@ stasis_compiler = { path = "../stasis_compiler" }
 stasis_assets = { path = "../stasis_assets" }
 stasis_dynload = { path = "../stasis_dynload" }
 serde_json.workspace = true
+serde.workspace = true
+sha2.workspace = true
 atomic-write-file.workspace = true

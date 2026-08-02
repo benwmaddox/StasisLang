@@ -794,6 +794,12 @@ mod tests {
             .join("../../samples/state_inspection/src/main.stasis");
         let source = std::fs::read_to_string(&sample).expect("read state inspection sample");
         let mut jit = JitProcess::new();
+        jit.set_project_root(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .to_string_lossy(),
+        )
+        .expect("set repository root");
         jit.set_required_emit_roots(&[
             "main".to_string(),
             "tick".to_string(),
