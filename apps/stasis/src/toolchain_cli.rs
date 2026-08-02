@@ -1045,18 +1045,36 @@ fn load_workspace(explicit: Option<&Path>) -> Result<Workspace, String> {
     } else {
         start
     };
-    let root = find_workspace_root(&start_dir).ok_or_else(|| {
+    let discovered_root = find_workspace_root(&start_dir).ok_or_else(|| {
         format!(
             "no {MANIFEST_NAME} found from {}; run 'stasis init' first",
             start_dir.display()
         )
     })?;
+    let root = canonical_workspace_root(&discovered_root)?;
     let bytes = fs::read(root.join(MANIFEST_NAME))
         .map_err(|error| format!("failed to read {MANIFEST_NAME}: {error}"))?;
     let manifest: ProjectManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
     manifest.validate()?;
     Ok(Workspace { root, manifest })
+}
+
+fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve workspace root: {error}"))?;
+    #[cfg(windows)]
+    {
+        let text = canonical.to_string_lossy();
+        if text.starts_with(r"\\?\UNC\") {
+            return Err("workspace root must not use a UNC path".to_string());
+        }
+        if let Some(path) = text.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    Ok(canonical)
 }
 
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
@@ -4464,6 +4482,39 @@ mod tests {
         fs::create_dir_all(&nested).expect("create nested");
         assert_eq!(find_workspace_root(&nested), Some(root.clone()));
         remove_temp(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_alias_is_resolved_before_compiler_identity_is_created() {
+        use std::os::unix::fs::symlink;
+
+        let real_parent = temp_dir("real_workspace_parent");
+        let real_root = real_parent.join("project");
+        let alias_parent = temp_dir("workspace_alias_parent");
+        let alias_root = alias_parent.join("project_alias");
+        create_project(real_root.clone(), "alias_project".to_string()).expect("create project");
+        fs::create_dir_all(&alias_parent).expect("create alias parent");
+        symlink(&real_root, &alias_root).expect("create workspace alias");
+
+        let workspace = load_workspace(Some(&alias_root)).expect("load workspace through alias");
+        assert_eq!(workspace.root, real_root.canonicalize().expect("real root"));
+        let jit = compile_workspace_jit(&workspace).expect("compile aliased workspace");
+        let main = jit
+            .program_snapshot()
+            .expect("program snapshot")
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function");
+        assert_eq!(
+            main.symbol_id.canonical(),
+            "v1|function|src/main.stasis|main|()"
+        );
+
+        fs::remove_file(&alias_root).expect("remove workspace alias");
+        remove_temp(&alias_parent);
+        remove_temp(&real_parent);
     }
 
     #[test]
