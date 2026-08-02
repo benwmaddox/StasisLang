@@ -30,6 +30,9 @@ Make the next useful change, verify it, and leave the repository in a reviewable
 1. Write a brief testing plan in working notes or commit history, not for human review.
 2. Add or expand automated checks to capture the desired behavior.
 3. Run the checks and confirm they fail for the expected reason before implementation.
+4. Keep Rust tests runnable by default; `tools/validate_repo.sh` rejects `#[ignore]` under product and test source roots. Put checks that require external credentials or installed tools in explicit examples instead.
+
+To smoke-test the installed Codex provider and shared response schema, run `cargo run -p stasis_ai --example codex_provider_smoke` from a signed-in Codex environment.
 
 ## Reviewer Gate Before Implementation
 

@@ -1007,17 +1007,4 @@ mod tests {
         assert!(!usage.to_string().contains("not retained"));
         assert!(!usage.to_string().contains("hidden"));
     }
-
-    #[test]
-    #[ignore = "requires an installed, signed-in Codex CLI"]
-    fn installed_codex_provider_accepts_the_shared_response_schema() {
-        let mut provider = CodexExecProvider::default();
-        let response = provider
-            .respond(
-                r#"{"system":"Return a done response without calling tools.","user_prompt":"Confirm the Stasis AI provider is connected.","tool_specs":[],"transcript":[]}"#,
-                &AtomicBool::new(false),
-            )
-            .expect("signed-in Codex response");
-        assert!(matches!(response, ModelResponse::Done { .. }));
-    }
 }

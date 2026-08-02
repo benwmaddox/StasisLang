@@ -3895,7 +3895,6 @@ mod tests {
         clear_runtime_session_for_test();
     }
     #[test]
-    #[ignore = "host AI prompt regression target; run after AI edits the workshop sample"]
     fn android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();

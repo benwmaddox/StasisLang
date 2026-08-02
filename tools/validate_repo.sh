@@ -15,4 +15,10 @@ python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 python3 -m unittest tools.ci.test_release_provenance
 python3 -m unittest tools.ci.test_verify_render_parity
 python3 tools/ci/verify_render_parity.py
+
+if ignored_tests="$(rg -n -F '#[ignore' apps crates mobile tests -g '*.rs')"; then
+  printf 'Rust tests must run by default; move external smoke checks to examples:\n%s\n' "$ignored_tests" >&2
+  exit 1
+fi
+
 cargo test --workspace --all-targets -- --test-threads=1
