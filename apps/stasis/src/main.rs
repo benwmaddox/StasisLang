@@ -808,11 +808,6 @@ fn try_run_probe_graphics_runtime_subcommand() -> Option<i32> {
         return None;
     }
 
-    if !cfg!(windows) {
-        eprintln!("probe-graphics-runtime is only supported on Windows today");
-        return Some(2);
-    }
-
     let candidates = stasis_dynload::runtime_library_candidate_paths();
     for candidate in &candidates {
         if !candidate.exists() {

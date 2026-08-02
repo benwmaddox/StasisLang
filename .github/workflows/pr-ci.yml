@@ -102,6 +102,100 @@ jobs:
       - name: Bootstrap Compile Smoke (compiler .stasis)
         run: cargo test -p stasis_compiler -- --nocapture
 
+  vscode-extension-e2e:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: VS Code E2E (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-latest
+            runtime_library: libstasis_graphics.so
+          - name: macOS arm64
+            os: macos-15
+            runtime_library: libstasis_graphics.dylib
+    env:
+      CARGO_INCREMENTAL: "0"
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      STASIS_E2E_VSCODE_VERSION: "1.96.0"
+      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/vscode-e2e-runtime/bin/${{ matrix.runtime_library }}
+      STASIS_E2E_EXECUTABLE: ${{ github.workspace }}/target/debug/stasis
+      STASIS_E2E_SCREENSHOT: ${{ github.workspace }}/target/vscode-e2e/frame.png
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: vscode-stasis/package-lock.json
+
+      - name: Install Linux graphics and display dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev libsdl2-image-dev xvfb
+
+      - name: Install macOS graphics dependencies
+        if: runner.os == 'macOS'
+        run: brew install sdl2 sdl2_image pkg-config
+
+      - name: Build native graphics runtime
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            export CMAKE_PREFIX_PATH="$(brew --prefix):${CMAKE_PREFIX_PATH:-}"
+          fi
+          cmake -S runtime -B target/vscode-e2e-runtime \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
+            -DSTASIS_GRAPHICS_SDL_ONLY=ON \
+            -DSTASIS_BUILD_RUNNER=OFF \
+            -DSTASIS_BUILD_SYS=OFF
+          cmake --build target/vscode-e2e-runtime --config Release --target stasis_graphics
+          test -f "$STASIS_RUNTIME_LIBRARY_PATH"
+
+      - name: Build and probe Stasis runtime loading
+        shell: bash
+        run: |
+          cargo test -p stasis_dynload -- --test-threads=1
+          cargo build -p stasis
+          "$STASIS_E2E_EXECUTABLE" probe-graphics-runtime
+
+      - name: Install extension dependencies
+        working-directory: vscode-stasis
+        run: npm ci
+
+      - name: Test installed VSIX in VS Code
+        working-directory: vscode-stasis
+        shell: bash
+        run: |
+          mkdir -p ../target/vscode-e2e
+          set -o pipefail
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            xvfb-run -a npm run test:e2e 2>&1 | tee ../target/vscode-e2e/extension-host.log
+          else
+            npm run test:e2e 2>&1 | tee ../target/vscode-e2e/extension-host.log
+          fi
+
+      - name: Upload VS Code E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-e2e-${{ runner.os }}-${{ runner.arch }}
+          if-no-files-found: warn
+          path: |
+            target/vscode-e2e/frame.png
+            target/vscode-e2e/extension-host.log
+            vscode-stasis/.vsix/stasislang.stasis.vsix
+
   android-package-link:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest

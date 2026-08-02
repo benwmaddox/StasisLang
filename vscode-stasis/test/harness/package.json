@@ -1,0 +1,10 @@
+{
+  "name": "stasis-vscode-e2e-harness",
+  "displayName": "Stasis VS Code E2E Harness",
+  "version": "0.0.0",
+  "private": true,
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "main": "./extension.js"
+}

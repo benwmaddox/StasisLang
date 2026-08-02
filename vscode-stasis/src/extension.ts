@@ -321,6 +321,14 @@ class LiveController implements vscode.Disposable {
     return this.current?.root === root ? this.current : undefined;
   }
 
+  get state(): LiveSessionState {
+    return this.current?.state ?? "stopped";
+  }
+
+  get liveValues(): readonly LiveValue[] {
+    return this.current?.values ?? [];
+  }
+
   requireSession(): LiveSession {
     if (!this.current || this.current.state === "stopped") {
       throw new Error("Start a Stasis play session first.");
@@ -413,7 +421,7 @@ async function showCommandError(action: () => Promise<void>): Promise<void> {
   }
 }
 
-export function activate(context: vscode.ExtensionContext): void {
+export function activate(context: vscode.ExtensionContext): StasisExtensionApi {
   const output = vscode.window.createOutputChannel("Stasis");
   const values = new LiveValuesProvider();
   const controller = new LiveController(values, output);
@@ -463,6 +471,22 @@ export function activate(context: vscode.ExtensionContext): void {
     command("stasis.refreshLiveValues", async () => controller.requireSession().refresh()),
     command("stasis.showOutput", async () => output.show(true)),
   );
+
+  return {
+    state: () => controller.state,
+    values: () => controller.liveValues,
+    start: () => controller.start(),
+    stop: () => controller.stop(),
+    request: (type, fields = {}) => controller.requireSession().request(type, fields),
+  } satisfies StasisExtensionApi;
+}
+
+export interface StasisExtensionApi {
+  state(): LiveSessionState;
+  values(): readonly LiveValue[];
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  request(type: string, fields?: Record<string, unknown>): Promise<LiveResponse>;
 }
 
 export function deactivate(): void {}

@@ -27,8 +27,13 @@
     "languages": [
       {
         "id": "stasis",
-        "aliases": ["Stasis", "stasis"],
-        "extensions": [".stasis"],
+        "aliases": [
+          "Stasis",
+          "stasis"
+        ],
+        "extensions": [
+          ".stasis"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -40,39 +45,116 @@
       }
     ],
     "commands": [
-      { "command": "stasis.startPlaySession", "title": "Stasis: Start Play Session", "icon": "$(play)" },
-      { "command": "stasis.stopPlaySession", "title": "Stasis: Stop Play Session", "icon": "$(debug-stop)" },
-      { "command": "stasis.pausePlaySession", "title": "Stasis: Pause Play Session", "icon": "$(debug-pause)" },
-      { "command": "stasis.resumePlaySession", "title": "Stasis: Resume Play Session", "icon": "$(debug-continue)" },
-      { "command": "stasis.stepPlaySession", "title": "Stasis: Step One Tick", "icon": "$(debug-step-over)" },
-      { "command": "stasis.inspectValue", "title": "Stasis: Inspect Live Value" },
-      { "command": "stasis.addWatch", "title": "Stasis: Add Live Watch", "icon": "$(add)" },
-      { "command": "stasis.removeWatch", "title": "Stasis: Remove Live Watch", "icon": "$(trash)" },
-      { "command": "stasis.refreshLiveValues", "title": "Stasis: Refresh Live Values", "icon": "$(refresh)" },
-      { "command": "stasis.showOutput", "title": "Stasis: Show Output" }
+      {
+        "command": "stasis.startPlaySession",
+        "title": "Stasis: Start Play Session",
+        "icon": "$(play)"
+      },
+      {
+        "command": "stasis.stopPlaySession",
+        "title": "Stasis: Stop Play Session",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "stasis.pausePlaySession",
+        "title": "Stasis: Pause Play Session",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "stasis.resumePlaySession",
+        "title": "Stasis: Resume Play Session",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "stasis.stepPlaySession",
+        "title": "Stasis: Step One Tick",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "stasis.inspectValue",
+        "title": "Stasis: Inspect Live Value"
+      },
+      {
+        "command": "stasis.addWatch",
+        "title": "Stasis: Add Live Watch",
+        "icon": "$(add)"
+      },
+      {
+        "command": "stasis.removeWatch",
+        "title": "Stasis: Remove Live Watch",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "stasis.refreshLiveValues",
+        "title": "Stasis: Refresh Live Values",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "stasis.showOutput",
+        "title": "Stasis: Show Output"
+      }
     ],
     "viewsContainers": {
       "activitybar": [
-        { "id": "stasis", "title": "Stasis", "icon": "media/stasis.svg" }
+        {
+          "id": "stasis",
+          "title": "Stasis",
+          "icon": "media/stasis.svg"
+        }
       ]
     },
     "views": {
       "stasis": [
-        { "id": "stasis.liveValues", "name": "Live Values" }
+        {
+          "id": "stasis.liveValues",
+          "name": "Live Values"
+        }
       ]
     },
     "menus": {
       "view/title": [
-        { "command": "stasis.startPlaySession", "when": "view == stasis.liveValues && !stasis.liveSessionActive", "group": "navigation@1" },
-        { "command": "stasis.stopPlaySession", "when": "view == stasis.liveValues && stasis.liveSessionActive", "group": "navigation@1" },
-        { "command": "stasis.pausePlaySession", "when": "view == stasis.liveValues && stasis.liveSessionRunning", "group": "navigation@2" },
-        { "command": "stasis.resumePlaySession", "when": "view == stasis.liveValues && stasis.liveSessionPaused", "group": "navigation@2" },
-        { "command": "stasis.stepPlaySession", "when": "view == stasis.liveValues && stasis.liveSessionPaused", "group": "navigation@3" },
-        { "command": "stasis.addWatch", "when": "view == stasis.liveValues && stasis.liveSessionActive", "group": "navigation@4" },
-        { "command": "stasis.refreshLiveValues", "when": "view == stasis.liveValues && stasis.liveSessionActive", "group": "navigation@5" }
+        {
+          "command": "stasis.startPlaySession",
+          "when": "view == stasis.liveValues && !stasis.liveSessionActive",
+          "group": "navigation@1"
+        },
+        {
+          "command": "stasis.stopPlaySession",
+          "when": "view == stasis.liveValues && stasis.liveSessionActive",
+          "group": "navigation@1"
+        },
+        {
+          "command": "stasis.pausePlaySession",
+          "when": "view == stasis.liveValues && stasis.liveSessionRunning",
+          "group": "navigation@2"
+        },
+        {
+          "command": "stasis.resumePlaySession",
+          "when": "view == stasis.liveValues && stasis.liveSessionPaused",
+          "group": "navigation@2"
+        },
+        {
+          "command": "stasis.stepPlaySession",
+          "when": "view == stasis.liveValues && stasis.liveSessionPaused",
+          "group": "navigation@3"
+        },
+        {
+          "command": "stasis.addWatch",
+          "when": "view == stasis.liveValues && stasis.liveSessionActive",
+          "group": "navigation@4"
+        },
+        {
+          "command": "stasis.refreshLiveValues",
+          "when": "view == stasis.liveValues && stasis.liveSessionActive",
+          "group": "navigation@5"
+        }
       ],
       "view/item/context": [
-        { "command": "stasis.removeWatch", "when": "view == stasis.liveValues && viewItem == stasisLiveWatch", "group": "inline" }
+        {
+          "command": "stasis.removeWatch",
+          "when": "view == stasis.liveValues && viewItem == stasisLiveWatch",
+          "group": "inline"
+        }
       ]
     },
     "configuration": {
@@ -101,15 +183,22 @@
   "scripts": {
     "build": "npm run check && npm run bundle",
     "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --sourcemap --outfile=dist/extension.js",
+    "bundle:e2e": "esbuild src/e2e/run.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/e2e-run.cjs && esbuild src/e2e/suite.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=dist/e2e-suite.cjs",
     "check": "tsc --noEmit",
-    "test": "npm run check && esbuild src/protocol.test.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/protocol.test.cjs && node --test dist/protocol.test.cjs",
-    "package": "npm run build && vsce package"
+    "test": "npm run test:unit",
+    "test:unit": "npm run check && esbuild src/protocol.test.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/protocol.test.cjs && node --test dist/protocol.test.cjs",
+    "test:e2e": "npm run package && npm run bundle:e2e && node dist/e2e-run.cjs",
+    "prepackage": "node -e \"require('node:fs').mkdirSync('.vsix', { recursive: true })\"",
+    "package": "npm run build && vsce package --out .vsix/stasislang.stasis.vsix"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/pngjs": "^6.0.5",
     "@types/vscode": "^1.96.0",
+    "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.28.1",
+    "pngjs": "^7.0.0",
     "typescript": "^5.7.2"
   }
 }

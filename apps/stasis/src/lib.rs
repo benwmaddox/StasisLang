@@ -1813,10 +1813,6 @@ fn run_play_in_process_inner(
     window_title: Option<&str>,
     live: Option<(stasis_runner::live::LiveSessionServer, LiveRunConfig)>,
 ) -> Result<(), String> {
-    if !cfg!(windows) {
-        return Err("in-process play runner currently supports Windows only".to_string());
-    }
-
     let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
     let launch_dir = std::env::current_dir()
         .map_err(|error| format!("failed to read current directory before play launch: {error}"))?;
@@ -3585,22 +3581,14 @@ fn probe_aot_loadability(path: &Path) -> Result<(), String> {
             path.display()
         ));
     }
-    #[cfg(windows)]
-    {
-        stasis_dynload::Library::load(path)
-            .map(|_| ())
-            .map_err(|error| {
-                format!(
-                    "AOT loadability probe failed for {}: {error}",
-                    path.display()
-                )
-            })
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        Err("AOT loadability probe is currently supported on Windows only".to_string())
-    }
+    stasis_dynload::Library::load(path)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "AOT loadability probe failed for {}: {error}",
+                path.display()
+            )
+        })
 }
 
 fn sleep_for_tick(tick_sleep_micros: u64) {
