@@ -1872,14 +1872,8 @@ fn run_play_in_process_inner(
     let canonical_repository = repository_root
         .canonicalize()
         .unwrap_or_else(|_| repository_root.clone());
-    let project_root = if root_path.starts_with(&canonical_repository) {
-        canonical_repository
-    } else {
-        root_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf()
-    };
+    let project_root =
+        resolve_play_project_root(&root_path, &watch_dir_abs, &canonical_repository)?;
 
     let asset_working_dir = prepare_play_asset_working_dir(&watch_dir_abs)?;
     std::env::set_current_dir(&asset_working_dir).map_err(|error| {
@@ -2396,6 +2390,25 @@ pub fn run_with_real_backend(mut config: RunnerConfig) -> RunnerSummary {
     )
     .expect("runner compiler project root must be absolute");
     run_with_backend_and_prepared_swaps(config, backend, Some(prepared_rx))
+}
+
+fn resolve_play_project_root(
+    root_path: &Path,
+    watch_dir: &Path,
+    repository_root: &Path,
+) -> Result<PathBuf, String> {
+    if !root_path.starts_with(watch_dir) {
+        return Err(format!(
+            "play entry {} is outside watch directory {}",
+            root_path.display(),
+            watch_dir.display()
+        ));
+    }
+    if root_path.starts_with(repository_root) {
+        Ok(repository_root.to_path_buf())
+    } else {
+        Ok(watch_dir.to_path_buf())
+    }
 }
 
 fn normalize_real_backend_config_paths(config: &mut RunnerConfig) {
@@ -5847,6 +5860,54 @@ mod tests {
             Some(Path::new("override")),
         );
         assert_eq!(resolved, PathBuf::from("override"));
+    }
+
+    #[test]
+    fn standalone_play_root_supports_entry_imports_in_sibling_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = std::env::temp_dir().join(format!("stasis_play_project_{stamp}"));
+        let src = project.join("src");
+        let lib = project.join("lib");
+        fs::create_dir_all(&src).expect("create src");
+        fs::create_dir_all(&lib).expect("create lib");
+        let entry = src.join("main.stasis");
+        fs::write(
+            &entry,
+            "import \"../lib/helper.stasis\";\nfunction main(): i32 { return helper(); }\n",
+        )
+        .expect("write entry");
+        fs::write(
+            lib.join("helper.stasis"),
+            "function helper(): i32 { return 7; }\n",
+        )
+        .expect("write helper");
+        let entry = entry.canonicalize().expect("canonical entry");
+        let watch_dir = project.canonicalize().expect("canonical project");
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical repository");
+
+        let selected =
+            resolve_play_project_root(&entry, &watch_dir, &repository).expect("project root");
+        assert_eq!(selected, watch_dir);
+        let mut jit = JitProcess::new();
+        jit.set_project_root(selected.to_string_lossy())
+            .expect("set project root");
+        jit.upsert_file(
+            entry.to_string_lossy().to_string(),
+            fs::read_to_string(&entry).expect("read entry"),
+        );
+        jit.compile().expect("compile standalone project");
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main").expect("execute main"),
+            7
+        );
+
+        fs::remove_dir_all(&project).ok();
     }
 
     #[test]
