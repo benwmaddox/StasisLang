@@ -1917,6 +1917,17 @@ fn format_live_response(response: &LiveResponse) -> String {
         "symbols" => format_live_symbols(data),
         "symbol" => format_live_symbol(data),
         "references" => format_live_references(data),
+        "diagnostics" => format_live_diagnostics(data),
+        "hover" => format_live_hover(data),
+        "definition" => format_live_definition(data),
+        "rename_preview" => format!(
+            "rename {} -> {} ({} validated edit(s))",
+            string_field(data, "old_name", "symbol"),
+            string_field(data, "new_name", "symbol"),
+            data.get("edits")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        ),
         "completion" | "palette" if response.truncated => {
             "completion response exceeded the output bound; narrow the query".to_string()
         }
@@ -1985,6 +1996,65 @@ fn format_live_response(response: &LiveResponse) -> String {
         "changes" => format_live_changes(data),
         kind => kind.to_string(),
     }
+}
+
+fn format_live_diagnostics(data: &Value) -> String {
+    let Some(diagnostics) = data.get("diagnostics").and_then(Value::as_array) else {
+        return "diagnostics unavailable".to_string();
+    };
+    if diagnostics.is_empty() {
+        return "no compiler diagnostics".to_string();
+    }
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{}:{}..{}: {}: {}",
+                string_field(diagnostic, "file", "source"),
+                diagnostic.get("start").and_then(Value::as_u64).unwrap_or(0),
+                diagnostic.get("end").and_then(Value::as_u64).unwrap_or(0),
+                string_field(diagnostic, "severity", "error"),
+                string_field(diagnostic, "message", "compiler diagnostic")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_live_hover(data: &Value) -> String {
+    let Some(hover) = data.get("hover").filter(|hover| !hover.is_null()) else {
+        return "no symbol at offset".to_string();
+    };
+    let symbol = string_field(hover, "symbol", "symbol");
+    let type_name = hover.get("type_name").and_then(Value::as_str);
+    let live_value = hover.get("live_value").and_then(Value::as_str);
+    match (type_name, live_value) {
+        (Some(type_name), Some(value)) => format!("{symbol}: {type_name} = {value}"),
+        (Some(type_name), None) => format!("{symbol}: {type_name}"),
+        (None, Some(value)) => format!("{symbol} = {value}"),
+        (None, None) => symbol.to_string(),
+    }
+}
+
+fn format_live_definition(data: &Value) -> String {
+    let Some(locations) = data.get("locations").and_then(Value::as_array) else {
+        return "definition unavailable".to_string();
+    };
+    if locations.is_empty() {
+        return "definition not found".to_string();
+    }
+    locations
+        .iter()
+        .map(|location| {
+            format!(
+                "{}:{}..{}",
+                string_field(location, "file", "source"),
+                location.get("start").and_then(Value::as_u64).unwrap_or(0),
+                location.get("end").and_then(Value::as_u64).unwrap_or(0)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn string_field<'a>(data: &'a Value, name: &str, fallback: &'a str) -> &'a str {
@@ -4344,6 +4414,54 @@ mod tests {
             }),
         );
         assert_eq!(format_live_response(&response), "player.score: i32 = 12");
+    }
+
+    #[test]
+    fn human_live_output_formats_shared_language_queries() {
+        let diagnostics = LiveResponse::success(8, 42, "diagnostics", json!({"diagnostics": []}));
+        assert_eq!(
+            format_live_response(&diagnostics),
+            "no compiler diagnostics"
+        );
+
+        let hover = LiveResponse::success(
+            9,
+            43,
+            "hover",
+            json!({"hover": {
+                "symbol": "score",
+                "type_name": "i32",
+                "live_value": "12 (tick 43)"
+            }}),
+        );
+        assert_eq!(format_live_response(&hover), "score: i32 = 12 (tick 43)");
+
+        let definition = LiveResponse::success(
+            10,
+            43,
+            "definition",
+            json!({"locations": [{
+                "file": "src/main.stasis",
+                "start": 7,
+                "end": 12
+            }]}),
+        );
+        assert_eq!(format_live_response(&definition), "src/main.stasis:7..12");
+
+        let rename = LiveResponse::success(
+            11,
+            43,
+            "rename_preview",
+            json!({
+                "old_name": "score",
+                "new_name": "points",
+                "edits": [{"file": "src/main.stasis"}, {"file": "src/ui.stasis"}]
+            }),
+        );
+        assert_eq!(
+            format_live_response(&rename),
+            "rename score -> points (2 validated edit(s))"
+        );
     }
 
     #[test]

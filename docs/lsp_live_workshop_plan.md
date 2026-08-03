@@ -220,8 +220,9 @@ Each slice is independently testable and removes the host-specific path it repla
 - [ ] Move launch/attach, pause/step, watches, inspection, and cache ownership fully behind custom
   LSP methods; the current VSIX live-session client is a compatibility bridge that forwards
   revision-tagged observations.
-- [ ] Route the TUI's live observation/details view through the same broker handle while retaining
-  in-process transport and deterministic queues.
+- [x] Route TUI diagnostics, hover/type/live values, definitions, completion, and rename preview
+  through one persistent in-process `LanguageService` and its live-observation broker, retaining
+  deterministic host-owned command queues and presentation.
 - [ ] Move tested edit preview/apply and rollback status behind the broker and retain live JSON
   automation as a versioned adapter.
 
@@ -371,3 +372,18 @@ indexes. Every file that produced the accepted executable must still match, whil
 or editor-only files do not make that executable stale. The packaged indexed-completion and live
 hover tests support this mapping; it predicts that attach/debug handshakes must publish the same
 accepted-input set rather than a generic workspace revision number.
+
+### Persistent TUI language-service implementation
+
+- Good: one persistent in-process service added diagnostics, hover with compatible live values,
+  definition, and rename preview without introducing a TUI parser or a JSON-RPC loopback.
+- Bad: the TUI previously reused shared completion snapshots but recreated the language service
+  for rename and had no shared diagnostics, hover, or definition command surface.
+- Adjustment: host surfaces should own one long-lived language-service handle, synchronize only
+  changed accepted files, and keep transport queues and human presentation outside the service.
+
+Theory gained: language-operation reuse does not require transport reuse. The LSP and TUI can call
+the same revisioned Rust operations and live-observation broker while each retains its natural
+queue and response format. The persistent-service test proves that static identity and runtime
+values compose in-process; this predicts that live edit preview and rollback can share broker
+state without routing TUI commands through JSON-RPC.

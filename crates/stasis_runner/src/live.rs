@@ -101,6 +101,15 @@ pub enum LiveCommand {
         #[serde(default = "default_reference_limit")]
         limit: usize,
     },
+    Diagnostics,
+    Hover {
+        file: String,
+        offset: usize,
+    },
+    Definition {
+        file: String,
+        offset: usize,
+    },
     RenamePreview {
         file: String,
         offset: usize,
@@ -1180,6 +1189,19 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
                 .map(|value| value as usize)
                 .unwrap_or_else(default_reference_limit),
         }),
+        ":diagnostics" | ":problems" => ready(LiveCommand::Diagnostics),
+        ":hover" | ":type" => ready(LiveCommand::Hover {
+            file: required_arg(&args, 1, "file")?.to_string(),
+            offset: required_arg(&args, 2, "byte offset")?
+                .parse::<usize>()
+                .map_err(|error| format!("invalid byte offset: {error}"))?,
+        }),
+        ":definition" | ":def" => ready(LiveCommand::Definition {
+            file: required_arg(&args, 1, "file")?.to_string(),
+            offset: required_arg(&args, 2, "byte offset")?
+                .parse::<usize>()
+                .map_err(|error| format!("invalid byte offset: {error}"))?,
+        }),
         ":rename" => ready(LiveCommand::RenamePreview {
             file: required_arg(&args, 1, "file")?.to_string(),
             offset: required_arg(&args, 2, "byte offset")?
@@ -2108,6 +2130,41 @@ mod tests {
                 new_name: "player_speed".into(),
             }
         );
+
+        let TerminalInput::Request(hover) = terminal
+            .feed_line(":hover src/game.stasis 24")
+            .expect("hover")
+        else {
+            panic!("expected hover request");
+        };
+        assert_eq!(
+            hover.command,
+            LiveCommand::Hover {
+                file: "src/game.stasis".into(),
+                offset: 24,
+            }
+        );
+
+        let TerminalInput::Request(definition) = terminal
+            .feed_line(":definition src/game.stasis 24")
+            .expect("definition")
+        else {
+            panic!("expected definition request");
+        };
+        assert_eq!(
+            definition.command,
+            LiveCommand::Definition {
+                file: "src/game.stasis".into(),
+                offset: 24,
+            }
+        );
+
+        let TerminalInput::Request(diagnostics) =
+            terminal.feed_line(":diagnostics").expect("diagnostics")
+        else {
+            panic!("expected diagnostics request");
+        };
+        assert_eq!(diagnostics.command, LiveCommand::Diagnostics);
 
         let TerminalInput::Request(validation) = terminal
             .feed_line(":validate Render.command1_h eq 144 --frames 2")

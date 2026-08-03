@@ -12,7 +12,9 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_language_service::{
-    LanguageCompletionSnapshot, LanguageNavigationSnapshot, LanguageService,
+    DiagnosticSeverity as LanguageDiagnosticSeverity, LanguageCompletionSnapshot,
+    LanguageNavigationSnapshot, LanguageService, LiveIndexedCollection as LanguageLiveCollection,
+    LiveObservation, LiveObservationBatch,
 };
 use stasis_runner::live::{
     compare_live_validation_values, CompletionContext, CompletionIndex, CompletionItem,
@@ -185,6 +187,8 @@ pub(crate) struct LiveWorkspace {
     validation_snapshot: Option<stasis_dynload::JitRuntimeStateSnapshot>,
     host_entry_revision: u64,
     session_id: String,
+    language_service: LanguageService,
+    language_paths: BTreeSet<String>,
 }
 
 impl Drop for LiveWorkspace {
@@ -214,6 +218,8 @@ impl LiveWorkspace {
             std::process::id(),
             workshop_source_hash(&config.project_root.to_string_lossy())
         );
+        let language_service =
+            LanguageService::new(config.project_root.to_string_lossy().to_string())?;
         let mut workspace = Self {
             server,
             config,
@@ -241,6 +247,8 @@ impl LiveWorkspace {
             host_entry_revision: stasis_dynload::jit_host_entry_targets()
                 .map_or(0, |targets| targets.revision),
             session_id,
+            language_service,
+            language_paths: BTreeSet::new(),
         };
         workspace.refresh_completion(jit)?;
         Ok(workspace)
@@ -643,6 +651,9 @@ impl LiveWorkspace {
                         .references(&symbol, limit)?,
                 }),
             )),
+            LiveCommand::Diagnostics => self.language_diagnostics(),
+            LiveCommand::Hover { file, offset } => self.language_hover(&file, offset, tick, jit),
+            LiveCommand::Definition { file, offset } => self.language_definition(&file, offset),
             LiveCommand::RenamePreview {
                 file,
                 offset,
@@ -893,25 +904,171 @@ impl LiveWorkspace {
         }
     }
 
+    fn sync_language_service(&mut self) {
+        let desired = self
+            .source_files
+            .iter()
+            .map(|file| {
+                (
+                    self.config
+                        .project_root
+                        .join(&file.path)
+                        .to_string_lossy()
+                        .to_string(),
+                    file.source.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let desired_paths = desired.keys().cloned().collect::<BTreeSet<_>>();
+        for path in self.language_paths.difference(&desired_paths) {
+            self.language_service.remove_disk_document(path);
+        }
+        let changed = {
+            let snapshot = self.language_service.snapshot();
+            desired
+                .iter()
+                .filter(|(path, source)| {
+                    snapshot
+                        .document(path)
+                        .is_none_or(|document| document.text.as_ref() != source.as_str())
+                })
+                .map(|(path, source)| (path.clone(), source.clone()))
+                .collect::<Vec<_>>()
+        };
+        for (path, source) in changed {
+            self.language_service.set_disk_document(path, source);
+        }
+        self.language_paths = desired_paths;
+    }
+
+    fn language_diagnostics(&mut self) -> Result<(&'static str, Value), String> {
+        self.sync_language_service();
+        let report = self.language_service.diagnostics();
+        Ok((
+            "diagnostics",
+            json!({
+                "revision": report.revision.get(),
+                "diagnostics": report.diagnostics.into_iter().map(|diagnostic| json!({
+                    "file": diagnostic.path,
+                    "start": diagnostic.range.start,
+                    "end": diagnostic.range.end,
+                    "severity": match diagnostic.severity {
+                        LanguageDiagnosticSeverity::Error => "error",
+                        LanguageDiagnosticSeverity::Warning => "warning",
+                        LanguageDiagnosticSeverity::Information => "information",
+                        LanguageDiagnosticSeverity::Hint => "hint",
+                    },
+                    "source": diagnostic.source,
+                    "message": diagnostic.message,
+                })).collect::<Vec<_>>()
+            }),
+        ))
+    }
+
+    fn language_definition(
+        &mut self,
+        file: &str,
+        offset: usize,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service();
+        let request_path = self.config.project_root.join(file);
+        let locations = self
+            .language_service
+            .definition(&request_path.to_string_lossy(), offset)?;
+        Ok((
+            "definition",
+            json!({
+                "file": file,
+                "offset": offset,
+                "locations": locations.into_iter().map(|location| json!({
+                    "file": location.path,
+                    "start": location.range.start,
+                    "end": location.range.end,
+                })).collect::<Vec<_>>()
+            }),
+        ))
+    }
+
+    fn language_hover(
+        &mut self,
+        file: &str,
+        offset: usize,
+        tick: u64,
+        jit: &JitProcess,
+    ) -> Result<(&'static str, Value), String> {
+        self.sync_language_service();
+        let request_path = self.config.project_root.join(file);
+        let request_path = request_path.to_string_lossy().to_string();
+        let Some(static_hover) = self.language_service.hover(&request_path, offset)? else {
+            return Ok((
+                "hover",
+                json!({"file": file, "offset": offset, "hover": null}),
+            ));
+        };
+        if matches!(
+            static_hover.kind.as_str(),
+            "global" | "field" | "state_path"
+        ) {
+            if let Ok(inspection) = jit.inspect_state_query(&static_hover.symbol) {
+                let identity = self.runtime_identity();
+                self.language_service
+                    .publish_live_observations(LiveObservationBatch {
+                        session_id: identity.session_id,
+                        generation: identity.generation,
+                        source_hashes: identity.source_hashes,
+                        indexed_collections: identity
+                            .indexed_collections
+                            .into_iter()
+                            .map(|collection| LanguageLiveCollection {
+                                path: collection.path,
+                                fields: collection.fields,
+                            })
+                            .collect(),
+                        complete: identity.complete,
+                        observations: vec![LiveObservation {
+                            path: static_hover.symbol.clone(),
+                            type_name: static_hover.type_name.clone(),
+                            value: live_observation_text(&inspection),
+                            tick,
+                        }],
+                    });
+            }
+        }
+        let hover = self
+            .language_service
+            .hover(&request_path, offset)?
+            .unwrap_or(static_hover);
+        Ok((
+            "hover",
+            json!({
+                "file": file,
+                "offset": offset,
+                "hover": {
+                    "start": hover.range.start,
+                    "end": hover.range.end,
+                    "symbol": hover.symbol,
+                    "kind": hover.kind,
+                    "type_name": hover.type_name,
+                    "owner": hover.owner,
+                    "signatures": hover.signatures,
+                    "documentation": hover.documentation,
+                    "live_value": hover.live_value,
+                }
+            }),
+        ))
+    }
+
     fn rename_preview(
-        &self,
+        &mut self,
         file: &str,
         offset: usize,
         new_name: &str,
     ) -> Result<(&'static str, Value), String> {
-        let root = self.config.project_root.to_string_lossy().to_string();
-        let mut service = LanguageService::new(root)?;
-        for source_file in &self.source_files {
-            service.set_disk_document(
-                self.config
-                    .project_root
-                    .join(&source_file.path)
-                    .to_string_lossy(),
-                source_file.source.clone(),
-            );
-        }
+        self.sync_language_service();
         let request_path = self.config.project_root.join(file);
-        let plan = service.rename(&request_path.to_string_lossy(), offset, new_name)?;
+        let plan =
+            self.language_service
+                .rename(&request_path.to_string_lossy(), offset, new_name)?;
         let edits = plan
             .edits
             .iter()
@@ -2205,7 +2362,8 @@ fn help_data() -> Value {
             ":help", ":status", ":pause", ":resume", ":step [ticks]", ":cancel REQUEST_ID", ":quit",
             ":symbols [query] [--file PATH ... --kind KIND --owner OWNER --page N --limit N]",
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
-            ":references SYMBOL [--limit N]", ":rename FILE OFFSET NEW_NAME",
+            ":references SYMBOL [--limit N]", ":diagnostics",
+            ":hover FILE OFFSET", ":definition FILE OFFSET", ":rename FILE OFFSET NEW_NAME",
             ":validate PATH OP VALUE [--frames N]",
             ":edit SYMBOL (interactive TUI)",
             ":ai PROMPT | :ai status | :ai cancel (interactive TUI; installed Codex subscription)",
@@ -2236,6 +2394,9 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":find",
         ":read",
         ":references",
+        ":diagnostics",
+        ":hover",
+        ":definition",
         ":rename",
         ":validate",
         ":edit",
@@ -2352,6 +2513,18 @@ fn inspection_observed_value(inspection: &Value) -> Value {
         .get("value")
         .cloned()
         .unwrap_or_else(|| inspection.clone())
+}
+
+fn live_observation_text(inspection: &Value) -> String {
+    let observed = inspection_observed_value(inspection);
+    let scalar = observed
+        .get("value")
+        .cloned()
+        .unwrap_or_else(|| observed.clone());
+    scalar
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| scalar.to_string())
 }
 
 fn validate_live_runtime(
@@ -3041,6 +3214,79 @@ mod tests {
             fs::read_to_string(&source_path).expect("source after preview"),
             before
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tui_language_queries_share_persistent_service_and_live_hover() {
+        let (root, config) = project();
+        let source = fs::read_to_string(root.join("src/main.stasis")).expect("source");
+        let offset = source.find("score +=").expect("score use") + 2;
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+
+        let diagnostics = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(41, LiveCommand::Diagnostics),
+        );
+        assert!(diagnostics.ok);
+        assert_eq!(
+            diagnostics.data.expect("diagnostics")["diagnostics"],
+            json!([])
+        );
+
+        let hover = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                42,
+                LiveCommand::Hover {
+                    file: "src/main.stasis".into(),
+                    offset,
+                },
+            ),
+        );
+        assert!(hover.ok, "hover response: {hover:?}");
+        let hover = hover.data.expect("hover data")["hover"].clone();
+        assert_eq!(hover["symbol"], "score");
+        assert_eq!(hover["type_name"], "i32");
+        assert!(hover["live_value"]
+            .as_str()
+            .is_some_and(|value| value.contains("tick")));
+
+        let definition = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                43,
+                LiveCommand::Definition {
+                    file: "src/main.stasis".into(),
+                    offset,
+                },
+            ),
+        );
+        assert!(definition.ok, "definition response: {definition:?}");
+        let locations = definition.data.expect("definition data")["locations"]
+            .as_array()
+            .expect("locations")
+            .clone();
+        assert_eq!(locations.len(), 1);
+        let start = locations[0]["start"].as_u64().expect("start") as usize;
+        let end = locations[0]["end"].as_u64().expect("end") as usize;
+        assert_eq!(&source[start..end], "score");
         fs::remove_dir_all(root).ok();
     }
 
