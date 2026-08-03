@@ -23,6 +23,7 @@
 #include <limits.h>
 #include <ctype.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <time.h>
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -113,6 +114,8 @@ STASIS_EXPORT int stasis_graphics_runtime_abi_version(void) {
 }
 
 /* Global state */
+static SDL_SpinLock g_runtime_error_lock;
+static char g_runtime_error[512];
 static SDL_Window* g_window = NULL;
 static SDL_GLContext g_gl_context = NULL;
 static SDL_Renderer* g_renderer = NULL;
@@ -165,6 +168,8 @@ static int g_perf_sample_next = 0;
 static uint64_t g_perf_pending_tick_us = 0;
 static uint64_t g_perf_pending_guest_render_us = 0;
 static uint64_t g_perf_render_started_counter = 0;
+static SDL_atomic_t g_perf_latest_tick_us;
+static SDL_atomic_t g_perf_latest_render_us;
 static int g_perf_font_handle = -1;
 static const char* g_restore_label[] = {
     "   01110 11111 01110 01110 11111 01110   ",
@@ -966,6 +971,46 @@ STASIS_EXPORT void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_
 {
     g_perf_pending_tick_us = tick_us;
     g_perf_pending_guest_render_us = render_us;
+}
+
+STASIS_EXPORT void stasis_host_report_runtime_error(const char* message)
+{
+    if (!message || !*message) return;
+    SDL_AtomicLock(&g_runtime_error_lock);
+    snprintf(g_runtime_error, sizeof(g_runtime_error), "%s", message);
+    SDL_AtomicUnlock(&g_runtime_error_lock);
+}
+
+STASIS_EXPORT int stasis_host_copy_runtime_error(char* output, size_t output_size)
+{
+    if (!output || output_size == 0) return 0;
+    SDL_AtomicLock(&g_runtime_error_lock);
+    int has_error = g_runtime_error[0] != '\0';
+    snprintf(output, output_size, "%s", g_runtime_error);
+    SDL_AtomicUnlock(&g_runtime_error_lock);
+    return has_error;
+}
+
+static void stasis_report_runtime_errorf(const char* format, ...)
+{
+    char message[512];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    stasis_host_report_runtime_error(message);
+}
+
+STASIS_EXPORT void stasis_host_get_latest_performance_metrics(
+    uint32_t* tick_us,
+    uint32_t* render_us)
+{
+    if (tick_us) {
+        *tick_us = (uint32_t)SDL_AtomicGet(&g_perf_latest_tick_us);
+    }
+    if (render_us) {
+        *render_us = (uint32_t)SDL_AtomicGet(&g_perf_latest_render_us);
+    }
 }
 
 typedef int (*stasis_tick_fn)(void);
@@ -3584,6 +3629,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     log_package_provenance();
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
+        stasis_report_runtime_errorf("SDL initialization failed: %s", SDL_GetError());
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 0;
     }
@@ -3592,6 +3638,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     int img_flags = IMG_INIT_PNG;
     int img_inited = IMG_Init(img_flags);
     if ((img_inited & img_flags) != img_flags) {
+        stasis_report_runtime_errorf("Image decoder initialization failed: %s", IMG_GetError());
         SDL_Log("IMG_Init failed (got=0x%x want=0x%x): %s", img_inited, img_flags, IMG_GetError());
         SDL_Quit();
         return 0;
@@ -3671,6 +3718,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     );
 
     if (!g_window) {
+        stasis_report_runtime_errorf("Game window creation failed: %s", SDL_GetError());
         SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
         SDL_Quit();
         return 0;
@@ -3736,6 +3784,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         g_postfx_force_disable = true;
         g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
         if (!g_renderer) {
+            stasis_report_runtime_errorf("Renderer creation failed: %s", SDL_GetError());
             SDL_Log("SDL_CreateRenderer failed: %s", SDL_GetError());
             SDL_DestroyWindow(g_window);
             g_window = NULL;
@@ -4034,6 +4083,16 @@ static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finish
     return ((finished_counter - started_counter) * 1000000u) / frequency;
 }
 
+STASIS_EXPORT uint64_t stasis_host_performance_counter(void) {
+    return SDL_GetPerformanceCounter();
+}
+
+STASIS_EXPORT uint64_t stasis_host_performance_elapsed_us(
+    uint64_t started_counter,
+    uint64_t finished_counter) {
+    return stasis_perf_elapsed_us(started_counter, finished_counter);
+}
+
 static void stasis_perf_finish_render_sample(void) {
     const uint64_t now = SDL_GetPerformanceCounter();
     StasisPerfSample* sample = &g_perf_samples[g_perf_sample_next];
@@ -4041,6 +4100,8 @@ static void stasis_perf_finish_render_sample(void) {
     sample->tick_us = g_perf_pending_tick_us;
     sample->render_us = g_perf_pending_guest_render_us
         + stasis_perf_elapsed_us(g_perf_render_started_counter, now);
+    SDL_AtomicSet(&g_perf_latest_tick_us, (int)sample->tick_us);
+    SDL_AtomicSet(&g_perf_latest_render_us, (int)sample->render_us);
     g_perf_sample_next = (g_perf_sample_next + 1) % STASIS_PERF_SAMPLE_CAPACITY;
     if (g_perf_sample_count < STASIS_PERF_SAMPLE_CAPACITY) {
         g_perf_sample_count++;
@@ -4726,6 +4787,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
 
     char resolved[1024];
     if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+        stasis_report_runtime_errorf("Sprite path could not be resolved: %s", path);
         SDL_Log("gfx_load_sprite: could not resolve %s", path);
         return 0;
     }
@@ -4746,6 +4808,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
         }
         if (cached->needs_reraster &&
             !sprite_build_into_entry_sized(cached, resolved, max_w, max_h)) {
+            stasis_report_runtime_errorf("Sprite failed to reload: %s", path);
             return 0;
         }
         if (cached->ref_count == INT_MAX) return 0;
@@ -4787,6 +4850,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     e->used = 1;
     e->ref_count = 1;
     if (!sprite_build_into_entry_sized(e, resolved, max_w, max_h)) {
+        stasis_report_runtime_errorf("Sprite failed to load: %s", path);
         SDL_Log("gfx_load_sprite: failed path=%s resolved=%s", path, resolved);
         free(e->path);
         memset(e, 0, sizeof(*e));
@@ -5880,6 +5944,7 @@ static int stasis_restore_renderer_resources(void) {
         SpriteEntry* entry = &g_sprites[i];
         if (!entry->used || !entry->path) continue;
         if (!sprite_build_into_entry_sized(entry, entry->path, entry->max_w, entry->max_h)) {
+            stasis_report_runtime_errorf("Renderer restore failed for sprite: %s", entry->path);
             SDL_Log("Stasis renderer restore failed: stage=sprite handle=%d path=%s logical=%dx%d raster=%dx%d backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=texture_rebuild_failed",
                 sprite_handle_for_slot(i), entry->path, entry->max_w, entry->max_h,
                 entry->w, entry->h, g_use_sdl_renderer ? "sdl" : "gl",
@@ -5890,6 +5955,7 @@ static int stasis_restore_renderer_resources(void) {
         }
     }
     if (!sprite_fallback_get()) {
+        stasis_host_report_runtime_error("Renderer restore failed for fallback texture");
         SDL_Log("Stasis renderer restore failed: stage=fallback handle=0 path=<procedural> logical=2x2 raster=2x2 backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=texture_rebuild_failed",
             g_use_sdl_renderer ? "sdl" : "gl",
             g_resource_lifecycle.surface_generation,
@@ -5901,6 +5967,7 @@ static int stasis_restore_renderer_resources(void) {
         StasisFont* font = &g_fonts[i];
         if (!font->active) continue;
         if (!stasis_build_font_atlas(font)) {
+            stasis_host_report_runtime_error("Renderer restore failed for a font atlas");
             SDL_Log("Stasis renderer restore failed: stage=font handle=%d path=<retained-font-bytes> logical=%dx%d raster=%dx%d backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=atlas_rebuild_failed",
                 i + 1, font->font_size, font->font_size, font->raster_size,
                 font->raster_size, g_use_sdl_renderer ? "sdl" : "gl",
@@ -5911,6 +5978,7 @@ static int stasis_restore_renderer_resources(void) {
         }
     }
     if (restored && !stasis_rebuild_text_runs()) {
+        stasis_host_report_runtime_error("Renderer restore failed for cached text");
         SDL_Log("Stasis renderer restore failed: stage=cached_text handle=0 path=<retained-text-runs> logical=0x0 raster=0x0 backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=quad_rebuild_failed",
             g_use_sdl_renderer ? "sdl" : "gl",
             g_resource_lifecycle.surface_generation,
@@ -6084,6 +6152,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
 
     char resolved[1024];
     if (!resolve_asset_path(path, resolved, sizeof(resolved))) {
+        stasis_report_runtime_errorf("Font path could not be resolved: %s", path);
         SDL_Log("stasis_load_font: could not resolve %s", path);
         return 0;
     }
@@ -6105,6 +6174,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     /* Read font file */
     FILE* f = fopen(resolved, "rb");
     if (!f) {
+        stasis_report_runtime_errorf("Font failed to open: %s", path);
         SDL_Log("stasis_load_font: failed to open %s", resolved);
         return 0;
     }
@@ -6128,6 +6198,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     memset(font, 0, sizeof(*font));
     if (!stbtt_InitFont(&font->font_info, ttf_buffer, 0)) {
         free(ttf_buffer);
+        stasis_report_runtime_errorf("Font data is invalid: %s", path);
         SDL_Log("stasis_load_font: stbtt_InitFont failed for %s", resolved);
         return 0;
     }
@@ -6137,6 +6208,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     stbtt_GetFontVMetrics(&font->font_info, &font->ascent, &font->descent, &font->line_gap);
     font->active = true;
     if (!stasis_build_font_atlas(font)) {
+        stasis_report_runtime_errorf("Font atlas creation failed: %s", path);
         font->active = false;
         free(ttf_buffer);
         memset(font, 0, sizeof(*font));

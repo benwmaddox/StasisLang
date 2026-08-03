@@ -47,7 +47,7 @@ builds this same SDL-only target and runs the portable trace contract test.
 
 The Android Workshop menus remain native Android UI. Its embedded game canvas
 cannot use SDL's single Android window without handing the editor activity and
-surface lifecycle to SDL, so Workshop and the bundled Published preview flavor
+surface lifecycle to SDL, so Workshop and the generated release shell
 share one thin `StasisPreviewRenderer` GLES adapter instead. Both flavors use the
 same command interpreter, batching, clipping, rotation, alpha, filtering, and
 fallback behavior; only their texture sources differ. The steady-state draw loop
@@ -60,7 +60,7 @@ follow the generation-based state machine in `renderer_resource_lifecycle.md`.
 Both adapters retain CPU source metadata, reject stale GPU generations, and restore
 through their normal resource providers before accepting the next valid frame.
 
-Published shipping artifacts use `stasis package-mobile` and the SDL runtime.
+Shipping artifacts use `stasis package-mobile` and the SDL runtime.
 The preview adapter is therefore an embedded-editor boundary, not a competing
 shipping renderer. It performs no per-command JNI calls and adds no additional
 full-frame copy. The old desktop GL adapter is available only when CMake is

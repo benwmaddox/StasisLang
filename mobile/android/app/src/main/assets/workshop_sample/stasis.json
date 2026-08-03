@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "name": "pong",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "android": {
+    "application_id": "com.stasislang.pong",
+    "label": "Stasis Pong",
+    "orientation": "sensorLandscape",
+    "version_code": 1,
+    "version_name": "0.1.0"
+  }
+}

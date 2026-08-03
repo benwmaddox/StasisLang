@@ -13,10 +13,23 @@ Official release archives verify their compiler and runtime sources against
 `--development-build`; that output is explicitly labeled non-release. See
 `release_provenance.md` for the manifest and repinning contract.
 
-`stasis.json` supplies the entry source. Use `--entry path/to/main.stasis` to
+`stasis.json` supplies the entry source. Its optional Android object supplies
+`application_id`, `label`, `orientation`, `version_code`, and `version_name`;
+those values become the generated app's package, title, activity orientation,
+and release version. Use `--entry path/to/main.stasis` to
 select another project-relative import root and `--out path` to select a new,
 nonexistent output directory. Packaging is atomic: compiler or file failures do
 not publish a partial app project.
+
+```json
+"android": {
+  "application_id": "com.example.game",
+  "label": "Example Game",
+  "orientation": "sensorLandscape",
+  "version_code": 1,
+  "version_name": "1.0.0"
+}
+```
 
 Each output contains the same pieces:
 
@@ -30,6 +43,9 @@ Each output contains the same pieces:
 The packaged runtime is the same canonical SDL command interpreter used by the
 desktop distribution. The versioned guest buffer and deterministic trace
 contract are documented in `shared_renderer_process.md`.
+
+Potential Android release-shell additions are tracked in
+`android_release_shell_backlog.md`; they must remain generic or opt-in adapters.
 
 The runtime asset root is always the packaged `stasis_game` project root.
 Canonical game paths therefore start with `assets/`. For compatibility with
@@ -70,7 +86,9 @@ multipliers themselves.
 
 The exact metric fields, aspect-fit input transform, safe viewport, cache keys,
 and generation rules are documented in `display_metrics.md` and are shared with
-desktop, Workshop JIT preview, and bundled Published AOT preview.
+desktop, Workshop JIT preview, and the generated release shell. On Android, a
+three-finger tap toggles a rolling tick/render timing overlay in both Workshop
+and the generated release app.
 
 ## iOS arm64
 

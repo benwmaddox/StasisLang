@@ -14,7 +14,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
 $startedAt = [System.Diagnostics.Stopwatch]::StartNew()
 $serial = "emulator-$Port"
 $startedEmulator = $false
-$packages = @("com.stasislang.workshop", "com.stasislang.renderparity")
+$packages = @("com.stasislang.workshop")
 
 $androidHome = if ($env:ANDROID_HOME) {
     $env:ANDROID_HOME
@@ -121,8 +121,21 @@ function Save-Screenshot([string]$Path) {
 
 function Read-SurfaceBounds([string]$Description, [string]$XmlPath) {
     $deviceXml = "/data/local/tmp/stasis-render-window.xml"
-    Invoke-AdbQuiet @("shell", "uiautomator", "dump", $deviceXml)
-    Invoke-AdbQuiet @("pull", $deviceXml, $XmlPath)
+    $pulled = $false
+    for ($attempt = 1; $attempt -le 3 -and -not $pulled; $attempt++) {
+        Remove-Item -LiteralPath $XmlPath -Force -ErrorAction SilentlyContinue
+        Invoke-AdbQuiet @("shell", "rm", "-f", $deviceXml)
+        try {
+            Invoke-AdbQuiet @("shell", "uiautomator", "dump", $deviceXml)
+            Invoke-AdbQuiet @("pull", $deviceXml, $XmlPath)
+            $pulled = (Test-Path -LiteralPath $XmlPath) -and
+                    (Get-Item -LiteralPath $XmlPath).Length -gt 0
+        } catch {
+            if ($attempt -eq 3) { throw }
+            Start-Sleep -Seconds 1
+        }
+    }
+    if (-not $pulled) { throw "Android UI hierarchy was not captured" }
     Invoke-Adb @("shell", "rm", "-f", $deviceXml) | Out-Null
     [xml]$tree = Get-Content -Raw -LiteralPath $XmlPath
     $node = @($tree.SelectNodes("//node")) |
@@ -256,19 +269,11 @@ try {
             "-NoGradleDaemon", "-GradlePath", $gradle
         ) "build-workshop" | Out-Null
         Assert-In-Time "Workshop build"
-        Invoke-BoundedScript (Join-Path $scriptRoot "build_published.ps1") @(
-            "-Install", "-Game", "render_parity", "-AotTarget", "android-x86_64",
-            "-RenderAcceptance", "-NoGradleDaemon", "-GradlePath", $gradle
-        ) "build-published-aot" | Out-Null
-        Assert-In-Time "Published AOT build"
     }
 
     Assert-RenderedVariant "workshop" "com.stasislang.workshop" `
         (Join-Path $scriptRoot "app\build\outputs\apk\workshop\debug\app-workshop-debug.apk") `
         "Interactive Stasis game preview. Touch the game to control it." $true
-    Assert-RenderedVariant "published-aot" "com.stasislang.renderparity" `
-        (Join-Path $scriptRoot "app\build\outputs\apk\published\debug\app-published-debug.apk") `
-        "Published Stasis game surface" $false
     Assert-In-Time "render acceptance"
 
     @{
@@ -277,9 +282,8 @@ try {
         avd = $AvdName
         elapsed_seconds = [math]::Round($startedAt.Elapsed.TotalSeconds, 3)
         workshop = "Workshop JIT"
-        published = "Published android-x86_64 AOT"
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $artifactRoot "summary.json") -Encoding UTF8
-    Write-Output "Android Workshop JIT and Published AOT rendering passed in $([math]::Round($startedAt.Elapsed.TotalSeconds, 1))s"
+    Write-Output "Android Workshop rendering passed in $([math]::Round($startedAt.Elapsed.TotalSeconds, 1))s"
 } catch {
     @{
         status = "failed"

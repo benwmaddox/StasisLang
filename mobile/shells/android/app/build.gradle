@@ -18,8 +18,8 @@ android {
         applicationId '@STASIS_PACKAGE_ID@'
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName '1.0'
+        versionCode @STASIS_ANDROID_VERSION_CODE@
+        versionName '@STASIS_ANDROID_VERSION_NAME@'
         ndk {
             abiFilters 'arm64-v8a'
         }
