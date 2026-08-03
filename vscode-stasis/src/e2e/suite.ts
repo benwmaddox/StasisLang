@@ -445,6 +445,34 @@ export async function run(): Promise<void> {
     assert.equal(after, before + 1, "single-step executes exactly one game tick");
     assert.ok(api.values().some((value) => value.path === "score"), "the Live Values model receives runtime state");
 
+    const editPreview = await api.request("edit", {
+      operation: "update",
+      target: {
+        name: "tick",
+        kind: "function",
+        file: "src/main.stasis",
+      },
+      source: "function tick(): i32 { score += 2; return 0; }",
+      preview: true,
+      run_tests: false,
+    });
+    assert.equal(editPreview.kind, "edit_preview", "semantic edit preview completes through the LSP broker");
+    assert.match(document.getText(), /score \+= 1/, "preview does not mutate the editor source");
+
+    const editApplied = await api.request("apply", { run_tests: false });
+    assert.equal(editApplied.kind, "edit_applied", "the previewed edit applies through the LSP broker");
+    await waitFor("semantic edit file refresh", () => document.getText().includes("score += 2"));
+    await api.request("step", { ticks: 1 });
+    const edited = inspectedI32(await api.request("inspect", { path: "score" }));
+    assert.equal(edited, after + 2, "the broker-applied function executes in the running game");
+
+    const editUndone = await api.request("undo", { run_tests: false });
+    assert.equal(editUndone.kind, "edit_undone", "semantic edit rollback completes through the LSP broker");
+    await waitFor("semantic rollback file refresh", () => document.getText().includes("score += 1"));
+    await api.request("step", { ticks: 1 });
+    const rolledBack = inspectedI32(await api.request("inspect", { path: "score" }));
+    assert.equal(rolledBack, edited + 1, "rollback restores the previous function in the running game");
+
     const source = document.getText();
     const oldTick = "score += 1";
     const oldTickOffset = source.indexOf(oldTick);
@@ -461,7 +489,7 @@ export async function run(): Promise<void> {
     assert.equal(await vscode.workspace.applyEdit(hotEdit), true, "VS Code applies the live source edit");
     assert.equal(await document.save(), true, "VS Code saves the live source edit");
 
-    let current = after;
+    let current = rolledBack;
     let hotSwapObserved = false;
     const hotSwapDeadline = Date.now() + 30_000;
     while (Date.now() < hotSwapDeadline) {

@@ -225,8 +225,9 @@ Each slice is independently testable and removes the host-specific path it repla
 - [x] Route TUI diagnostics, hover/type/live values, definitions, completion, and rename preview
   through one persistent in-process `LanguageService` and its live-observation broker, retaining
   deterministic host-owned command queues and presentation.
-- [ ] Move tested edit preview/apply and rollback status behind the broker and retain live JSON
-  automation as a versioned adapter.
+- [x] Move tested edit preview/apply and rollback status behind the broker and retain live JSON
+  automation as a versioned adapter. The packaged VSIX verifies preview is non-mutating, apply
+  swaps executable behavior and disk source, and undo restores both.
 
 ### Slice 6: code intelligence depth
 
@@ -393,8 +394,9 @@ state without routing TUI commands through JSON-RPC.
 ### LSP-owned Live Workshop process implementation
 
 - Good: the packaged VSIX test exercised launch, pause, indexed completion, inspection, live hover,
-  watches, stepping, hot swap, resume, framebuffer capture, and stop after the extension's direct
-  child-process and JSONL decoder were deleted.
+  watches, stepping, semantic edit preview/apply/undo, ordinary saved-file hot swap, resume,
+  framebuffer capture, and stop after the extension's direct child-process and JSONL decoder were
+  deleted.
 - Bad: the old observation-forwarding bridge duplicated runtime values in TypeScript and made the
   language server a passive cache recipient even though it owned the semantic side of the join.
 - Adjustment: keep long-running custom operations on bounded worker threads, keep runtime protocol
